@@ -1,11 +1,11 @@
 {
-  "$comment": "Plan 170 D10/D11: Videorc's official Golem library. Edited by hand; the desktop catalog (apps/desktop/src/shared/buddy-library.ts), the Rust bundled table and the web catalog (videorc-web lib/buddy/official.ts, tests/fixtures/buddy-official-catalog.json) must equal this file. `description` is what scripts/buddy-official-generate.mjs asks the image model for; the Golem's art is the owner's original, so it has none.",
+  "$comment": "Plan 170 D10/D11: Videorc's official Buddy library. Edited by hand; the desktop catalog (apps/desktop/src/shared/buddy-library.ts), the Rust bundled table and the web catalog (videorc-web lib/buddy/official.ts, tests/fixtures/buddy-official-catalog.json) must equal this file. `description` is what scripts/buddy-official-generate.mjs asks the image model for; the Buddy's art is the owner's original, so it has none.",
   "version": 1,
   "avatars": [
     {
       "slug": "golem",
       "id": "official:golem",
-      "name": "Golem",
+      "name": "Buddy",
       "kind": "Golem",
       "tagline": "The original. Steady as stone.",
       "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",

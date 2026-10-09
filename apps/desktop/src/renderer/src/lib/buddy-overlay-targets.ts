@@ -6,7 +6,7 @@ import type {
 } from '@/lib/backend'
 import { overlayOrientationForCanvas } from '@/lib/overlay-layout'
 
-// Which output canvases the Golem's bubble is rasterized for (plan 164 S-C2;
+// Which output canvases the Buddy's bubble is rasterized for (plan 164 S-C2;
 // the bubble only since plan 168) and the key that dedupes a push. Pure and
 // asset-free, so the Studio can import it eagerly; the rasterizer itself
 // (`buddy-overlay.ts`) stays a lazy chunk.
@@ -19,7 +19,7 @@ export interface BuddyOverlayTargetPlan {
 }
 
 /**
- * Which output canvases get a Golem bubble raster. The primary is the capture
+ * Which output canvases get a Buddy bubble raster. The primary is the capture
  * canvas (the recording's; a stream-only session composites at that size
  * too, see `captionOverlayTargets`). A streaming session also gets the
  * auxiliary leg: the vertical simulcast canvas when one is armed, else the

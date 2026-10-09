@@ -31,9 +31,9 @@ import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 import { cn } from '@/lib/utils'
 import type { BuddyMotionSettings } from '../../../shared/buddy-pet'
 
-/** The Golem on the stage: big, about the zoom dialog's size. */
+/** The Buddy on the stage: big, about the zoom dialog's size. */
 export const BUDDY_TEST_PREVIEW_PX = 320
-/** The bubble keeps its proportions at the Golem's default placement (the bubble sample's rule). */
+/** The bubble keeps its proportions at the Buddy's default placement (the bubble sample's rule). */
 const BUBBLE_RECT = DEFAULT_OVERLAY_LAYOUT.buddy.horizontal
 
 export interface BuddyTestDialogProps {
@@ -52,7 +52,7 @@ interface BubbleRaster {
 }
 
 /**
- * Test your Golem (plan 169 D14, narrowed by the owner on 2026-10-09): the
+ * Test your Buddy (plan 169 D14, narrowed by the owner on 2026-10-09): the
  * living preview big on a neutral stage, a States row that holds each state
  * as the stream shows it (1 to 4), a Reactions row with every reaction the
  * pack has plus Hop, and the comic bubble with a sample line while Talking.

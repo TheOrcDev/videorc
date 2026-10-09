@@ -150,7 +150,7 @@ describe('co-host status chip', () => {
       createElement(CommentsDestinationStatus, { cohostState: cohost, providers })
     )
     expect(listening).toContain('data-testid="cohost-status-chip"')
-    expect(listening).toContain('Golem: listening')
+    expect(listening).toContain('Buddy: listening')
     expect(listening).toContain('data-variant="success"')
 
     const paused = renderToStaticMarkup(
@@ -159,7 +159,7 @@ describe('co-host status chip', () => {
         providers: []
       })
     )
-    expect(paused).toContain('Golem: paused · quota')
+    expect(paused).toContain('Buddy: paused · quota')
     expect(paused).not.toContain('data-variant="success"')
   })
 

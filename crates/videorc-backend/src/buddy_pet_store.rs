@@ -1,4 +1,4 @@
-//! The Golem's pet packs as RPCs (plan 168 S-A3): `cohost.pet.list`,
+//! The Buddy's pet packs as RPCs (plan 168 S-A3): `cohost.pet.list`,
 //! `cohost.pet.import`, `cohost.pet.remove` and `cohost.pet.react`.
 //!
 //! Packs live under the managed buddy roots main hands over as
@@ -18,7 +18,7 @@ use crate::buddy_pet::{self, BuddyPetSummary, PetError, PetRule};
 use crate::protocol::CohostSettingsPatch;
 use crate::state::AppState;
 
-/// The pack was refused: the message is the reason the Golem tab shows.
+/// The pack was refused: the message is the reason the Buddy tab shows.
 pub const COHOST_PET_INVALID: &str = "cohost-pet-invalid";
 /// No pack with that id for this persona.
 pub const COHOST_PET_NOT_FOUND: &str = "cohost-pet-not-found";
@@ -163,13 +163,13 @@ async fn import_in(
     if persona.id != persona_id {
         return Err(PetRpcError::new(
             COHOST_PET_INVALID,
-            "The pack was copied for another Golem. Try the import again.",
+            "The pack was copied for another Buddy. Try the import again.",
         ));
     }
     if roots.is_empty() {
         return Err(PetRpcError::new(
             COHOST_PET_UNAVAILABLE,
-            "Golem storage is not configured in this process.",
+            "Buddy storage is not configured in this process.",
         ));
     }
     let persona_id = persona_id.to_string();
@@ -183,7 +183,7 @@ async fn import_in(
                 state.emit_log(
                     "warn",
                     format!(
-                        "Golem pack refused ({}): {}",
+                        "Buddy pack refused ({}): {}",
                         error.rule.as_str(),
                         error.message
                     ),
@@ -193,7 +193,7 @@ async fn import_in(
     state.emit_log(
         "info",
         format!(
-            "Golem pack imported: {} ({} poses).",
+            "Buddy pack imported: {} ({} poses).",
             summary.name,
             summary.gaze_count as usize + summary.reactions.len()
         ),
@@ -220,7 +220,7 @@ async fn remove_in(
     if roots.is_empty() {
         return Err(PetRpcError::new(
             COHOST_PET_UNAVAILABLE,
-            "Golem storage is not configured in this process.",
+            "Buddy storage is not configured in this process.",
         ));
     }
     // Refuse a bundled or malformed id before touching the persona.
@@ -304,7 +304,7 @@ async fn request_reaction_in(
     if !reactions.iter().any(|id| id == reaction) {
         return Err(PetRpcError::new(
             COHOST_PET_REACTION_UNKNOWN,
-            format!("The Golem's pack has no {reaction} reaction."),
+            format!("The Buddy's pack has no {reaction} reaction."),
         ));
     }
     // Queued like any event reaction (D14): it plays after the one on air.

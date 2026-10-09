@@ -73,13 +73,13 @@ const BuddyOnboarding = lazy(() => import('@/components/buddy-onboarding'))
 type EditTarget = { kind: 'rename' | 'personality' | 'delete'; card: BuddyLibraryCard }
 
 /**
- * My Golems (plan 170 D16): the account library above the look panel.
- * Videorc's official five (free, bundled, work signed out) and the Golems
+ * My Buddies (plan 170 D16): the account library above the look panel.
+ * Videorc's official five (free, bundled, work signed out) and the Buddies
  * made by you on videorc.com or here, newest first, the active one badged.
- * Use makes one the Golem (name, personality, about you and its four
+ * Use makes one the Buddy (name, personality, about you and its four
  * poses); Rename, Edit personality and Delete act on your own; Make it
- * Alive uses it, then opens the Alive creator with it. New Golem opens the
- * four-step onboarding. The first launch with the untouched default Golem
+ * Alive uses it, then opens the Alive creator with it. New Buddy opens the
+ * four-step onboarding. The first launch with the untouched default Buddy
  * leads with a one-line invitation into it. Nothing toasts: the badge and
  * the look are the confirmation.
  */
@@ -87,7 +87,7 @@ export function BuddyLibrarySection({
   client: injectedClient,
   preparePicture
 }: {
-  /** Tests inject the backend; the app shares the Golem tab's client. */
+  /** Tests inject the backend; the app shares the Buddy tab's client. */
   client?: BuddyLookClient | null
   /** Tests inject the onboarding's picture prep. */
   preparePicture?: (file: File) => Promise<BuddyLookPicture>
@@ -101,7 +101,7 @@ export function BuddyLibrarySection({
   const library = state.library
   const view = buddyLibraryView({ library, persona })
 
-  // Opening the Golem tab syncs (window focus syncs from the shell, plan 170
+  // Opening the Buddy tab syncs (window focus syncs from the shell, plan 170
   // D12). A refused automatic sync stays quiet.
   const [quietProblem, setQuietProblem] = useState<BuddyLibraryProblem | null>(null)
   useEffect(() => {
@@ -130,8 +130,8 @@ export function BuddyLibrarySection({
     setEditOpen(true)
   }
 
-  // Make it Alive on a Golem that is not the active one: use it first, then
-  // open the creator once the backend says it is the Golem.
+  // Make it Alive on a Buddy that is not the active one: use it first, then
+  // open the creator once the backend says it is the Buddy.
   const [aliveFor, setAliveFor] = useState<string | null>(null)
   const aliveReady = aliveFor !== null && library?.activeAvatarId === aliveFor && !library.busy
   useEffect(() => {
@@ -364,7 +364,7 @@ function CardGrid({ children }: { children: ReactElement | ReactElement[] }): Re
 }
 
 /**
- * One Golem: its idle pose, name and a short line, then Use (or the
+ * One Buddy: its idle pose, name and a short line, then Use (or the
  * Active badge) and a menu with the rest. A card, because it is an object
  * with a picture (the design skill's rule).
  */
@@ -497,7 +497,7 @@ function BuddyCard({
 
 /**
  * Rename, Edit personality (with About you) and the Delete confirm for one
- * of your own Golems. The target stays set while the dialog fades out.
+ * of your own Buddies. The target stays set while the dialog fades out.
  */
 function EditDialog({
   open,
@@ -550,7 +550,7 @@ function EditDialog({
         </DialogContent>
       ) : target ? (
         <EditForm
-          // A fresh form for every Golem and every open.
+          // A fresh form for every Buddy and every open.
           key={`${target.kind}:${target.card.id}:${String(open)}`}
           context={context}
           personality={personality}

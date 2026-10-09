@@ -1,5 +1,5 @@
 /**
- * The Golem's body motion (plan 168, S-C1): the TypeScript twin of
+ * The Buddy's body motion (plan 168, S-C1): the TypeScript twin of
  * `crates/videorc-backend/src/buddy_motion.rs`, both ports of page-pet's
  * `runtime/motion.js` (MIT, Cristian 2026) without GSAP and without the DOM
  * (D6). The app preview (Phase D) drives this one; the compositor drives the

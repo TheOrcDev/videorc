@@ -7,13 +7,13 @@ import { BUDDY_BUBBLE_LABELS } from '@/lib/buddy-persona-view'
 import { loadBuddyStateImage, renderBuddyOverlayPng } from '@/lib/buddy-overlay'
 import { cn } from '@/lib/utils'
 
-/** The sample canvas: the bubble as it goes on a 1080p stream at the Golem's
+/** The sample canvas: the bubble as it goes on a 1080p stream at the Buddy's
  * default placement. */
 const SAMPLE_CANVAS = { width: 1920, height: 1080 }
 const SAMPLE_RECT = DEFAULT_OVERLAY_LAYOUT.buddy.horizontal
 /**
  * The zoomed sample is drawn on a canvas twice that size (36 px type, a
- * 691 px Golem), never a small bitmap scaled up: shown at about a 1080p
+ * 691 px Buddy), never a small bitmap scaled up: shown at about a 1080p
  * stream's own scale, it stays crisp on a Retina screen.
  */
 const ZOOMED_CANVAS_SCALE = 2

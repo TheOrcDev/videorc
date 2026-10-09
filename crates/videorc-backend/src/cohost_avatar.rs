@@ -1,4 +1,4 @@
-//! The Golem's look (plan 169 Phase B, D8, D9; plan 164 S-A6 before it).
+//! The Buddy's look (plan 169 Phase B, D8, D9; plan 164 S-A6 before it).
 //!
 //! One click makes the whole set: `cohost.avatar.create` sends a description
 //! and/or an inspiration picture to videorc-web's
@@ -69,7 +69,7 @@ pub const COHOST_AVATAR_BUSY: &str = "cohost-avatar-busy";
 pub const COHOST_AVATAR_INVALID: &str = "cohost-avatar-invalid";
 /// A picture to send (the inspiration, or a redo's base) is over 3 MB.
 pub const COHOST_AVATAR_PICTURE_TOO_LARGE: &str = "cohost-avatar-picture-too-large";
-/// No draft with that request id for the active Golem.
+/// No draft with that request id for the active Buddy.
 pub const COHOST_AVATAR_DRAFT_NONE: &str = "cohost-avatar-draft-none";
 /// This process has no buddy root (bare `cargo run`).
 pub const COHOST_AVATAR_ROOT_UNCONFIGURED: &str = "cohost-avatar-root-unconfigured";
@@ -184,7 +184,7 @@ pub enum CohostAvatarJobKind {
     Redo,
 }
 
-/// The job running now, so a Golem tab opened mid-run shows it working.
+/// The job running now, so a Buddy tab opened mid-run shows it working.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostAvatarRunning {
@@ -196,7 +196,7 @@ pub struct CohostAvatarRunning {
 }
 
 /// `cohost.avatar.draft.get` and `cohost.avatar.discard`: the active
-/// Golem's draft and the running job, each absent when there is none.
+/// Buddy's draft and the running job, each absent when there is none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostAvatarDraftStatus {
@@ -272,7 +272,7 @@ impl AvatarShared {
         if slot.is_some() {
             return Err(CohostAvatarRefusal::new(
                 COHOST_AVATAR_BUSY,
-                "Your Golem's look is already being made. Wait for it to finish.",
+                "Your Buddy's look is already being made. Wait for it to finish.",
             ));
         }
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
@@ -346,7 +346,7 @@ impl AvatarEnv {
         self.root.clone().ok_or_else(|| {
             CohostAvatarRefusal::new(
                 COHOST_AVATAR_ROOT_UNCONFIGURED,
-                "The Golem's image folder is not configured.",
+                "The Buddy's image folder is not configured.",
             )
         })
     }
@@ -357,13 +357,13 @@ impl AvatarEnv {
         if !self.premium {
             return Err(CohostAvatarRefusal::new(
                 "premium-required",
-                "Making your Golem's look requires Videorc Premium.",
+                "Making your Buddy's look requires Videorc Premium.",
             ));
         }
         let Some(token) = self.token.clone() else {
             return Err(CohostAvatarRefusal::new(
                 "signed-out",
-                "Sign in to make your Golem's look.",
+                "Sign in to make your Buddy's look.",
             ));
         };
         let Some(api) = self.api.clone() else {
@@ -802,9 +802,9 @@ pub(crate) fn tile_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
         | "cohost-disabled"
         | "ai-gateway-not-configured"
         | "buddy-storage-unconfigured" => COHOST_AVATAR_UNAVAILABLE_HINT.to_string(),
-        "buddy-not-found" => "That Golem is not in your library any more.".to_string(),
-        "unauthorized" => "Sign in again to make your Golem's look.".to_string(),
-        "premium-required" => "Making your Golem's look requires Videorc Premium.".to_string(),
+        "buddy-not-found" => "That Buddy is not in your library any more.".to_string(),
+        "unauthorized" => "Sign in again to make your Buddy's look.".to_string(),
+        "premium-required" => "Making your Buddy's look requires Videorc Premium.".to_string(),
         "ai-user-disabled" => "Cloud AI is turned off for this account.".to_string(),
         "avatar-timeout" | "timeout" => "The model took too long. Try again.".to_string(),
         "network" => "Could not reach Videorc. Check your connection and try again.".to_string(),
@@ -902,7 +902,7 @@ async fn create_in(
     if description.is_none() && inspiration.is_none() {
         return Err(CohostAvatarRefusal::new(
             COHOST_AVATAR_INVALID,
-            "Describe your Golem or add a picture first.",
+            "Describe your Buddy or add a picture first.",
         ));
     }
     let root = env.root()?;
@@ -1009,7 +1009,7 @@ impl SetJob {
         let fail = |error: CohostAvatarErrorDetail| {
             self.state.emit_log(
                 "warn",
-                format!("Golem look failed ({}): {}", error.code, error.message),
+                format!("Buddy look failed ({}): {}", error.code, error.message),
             );
             self.progress(idle, CohostAvatarPhase::Failed, None, Some(error));
         };
@@ -1077,7 +1077,7 @@ impl SetJob {
         self.state.emit_log(
             "info",
             format!(
-                "Golem look drafted: {} of 4 pictures made; nothing changes until it is kept.",
+                "Buddy look drafted: {} of 4 pictures made; nothing changes until it is kept.",
                 ALL_STATES.len() - draft.failed.len()
             ),
         );
@@ -1152,7 +1152,7 @@ impl SetJob {
                 self.state.emit_log(
                     "warn",
                     format!(
-                        "Golem look redo of {} failed ({}): {}",
+                        "Buddy look redo of {} failed ({}): {}",
                         avatar_state.as_str(),
                         error.code,
                         error.message
@@ -1244,7 +1244,7 @@ fn store_set(
                 std::fs::remove_file(&path)
             };
             if let Err(error) = removed {
-                tracing::warn!(%error, "an earlier Golem look draft could not be removed");
+                tracing::warn!(%error, "an earlier Buddy look draft could not be removed");
             }
         }
     }
@@ -1394,7 +1394,7 @@ fn store_redo(
 
 // --- cohost.avatar.keep / discard / draft.get ------------------------------------------------------
 
-/// `cohost.avatar.keep`: the draft becomes the Golem's look. Its pictures
+/// `cohost.avatar.keep`: the draft becomes the Buddy's look. Its pictures
 /// move to `<personaId>/<state>-<tag>.png`; a state the draft does not have
 /// loses its old picture too (it was a different character), so it falls
 /// back to the new idle. The persona's images and `source: generated` are
@@ -1453,7 +1453,7 @@ async fn keep_in(
     if next.id != persona.id {
         return Err(CohostAvatarRefusal::new(
             COHOST_AVATAR_INVALID,
-            "Your Golem changed while its look was kept.",
+            "Your Buddy changed while its look was kept.",
         ));
     }
     let mut images = CohostPersonaImages::default();
@@ -1495,7 +1495,7 @@ async fn keep_in(
     .map_err(|error| {
         CohostAvatarRefusal::new(
             error.code(),
-            format!("The pictures were kept, but your Golem could not be saved: {error}"),
+            format!("The pictures were kept, but your Buddy could not be saved: {error}"),
         )
     })?;
     // The persona wears the new pictures: the earlier ones (an older look,
@@ -1503,7 +1503,7 @@ async fn keep_in(
     let _ = blocking(move || {
         for file in stale {
             if let Err(error) = std::fs::remove_file(&file) {
-                tracing::warn!(%error, "an earlier Golem picture could not be removed");
+                tracing::warn!(%error, "an earlier Buddy picture could not be removed");
             }
         }
         Ok(())
@@ -1511,7 +1511,7 @@ async fn keep_in(
     .await;
     // Plan 168 S-B1: the still pet on stream re-reads the persona's images.
     state.buddy_sprite.invalidate();
-    state.emit_log("info", "Golem look kept.");
+    state.emit_log("info", "Buddy look kept.");
     if let Some(library) = library {
         crate::cohost_library::select_after_keep(state, &library.library_avatar_id);
     }
@@ -1565,7 +1565,7 @@ fn move_draft_into_place(
         })
         .unwrap_or_default();
     if let Err(error) = std::fs::remove_dir_all(&dir) {
-        tracing::warn!(%error, "the kept Golem look draft folder could not be removed");
+        tracing::warn!(%error, "the kept Buddy look draft folder could not be removed");
     }
     remove_drafts_dir_if_empty(root, persona_id);
     Ok((kept, stale))
@@ -1616,11 +1616,11 @@ async fn discard_in(
     if let Some(library) = library {
         crate::cohost_library::delete_after_discard(state, &library.library_avatar_id);
     }
-    state.emit_log("info", "Golem look draft discarded.");
+    state.emit_log("info", "Buddy look draft discarded.");
     draft_status_in(state, env).await
 }
 
-/// `cohost.avatar.draft.get`: the active Golem's draft (a draft left on disk
+/// `cohost.avatar.draft.get`: the active Buddy's draft (a draft left on disk
 /// by an earlier run is offered again) and the job running now.
 pub async fn draft_status(
     state: &AppState,

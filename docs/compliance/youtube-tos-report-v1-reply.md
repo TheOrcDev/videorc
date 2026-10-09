@@ -100,7 +100,7 @@ icon file**, unmodified, with the visible mark **at least 20 px tall**.
 | Stream Manager activity rows                              | 8.3 px glyph laid over the viewer's avatar | Official icon, 20 px, on the far right (not over the avatar) |
 | Stream Manager status bar, chat chips                     | 9.6 px redrawn glyph                       | Official icon, 20 px                                         |
 | Chat status badges                                        | 8.3 px glyph (badge forces 12 px)          | The word "YouTube" (no icon)                                 |
-| Upcoming streams, schedule dialog, Golem tab, menus       | 9.6 px redrawn glyph                       | Official icon, 20 px                                         |
+| Upcoming streams, schedule dialog, Buddy tab, menus       | 9.6 px redrawn glyph                       | Official icon, 20 px                                         |
 | Highlight card shown on the stream                        | Hand-drawn red circle with a play triangle | Official icon, 20 px or more in output pixels, on the right  |
 | Phone remote (LAN) chat rows                              | Letter "Y" on a red tile                   | Official icon, 20 px, on the far right                       |
 

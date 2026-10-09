@@ -1,21 +1,21 @@
-# Golem onboarding and library copy (plan 170 D14)
+# Buddy onboarding and library copy (plan 170 D14)
 
-The one source for every string in the Golem onboarding and library, on
-videorc.com (`lib/golem-onboarding-copy.ts`) and in the app
-(`apps/desktop/src/renderer/src/lib/golem-onboarding-copy.ts`). Both copy
+The one source for every string in the Buddy onboarding and library, on
+videorc.com (`lib/buddy-onboarding-copy.ts`) and in the app
+(`apps/desktop/src/renderer/src/lib/buddy-onboarding-copy.ts`). Both copy
 modules use these strings word for word, and a test on each side pins the
 four step titles. Change a string here first, then in both modules.
 
 `{name}`, `{remaining}`, `{limit}` and `{count}` are filled in at runtime.
 The official characters' names, taglines and personalities live in
-`protocol-fixtures/golem-official-catalog.json`.
+`protocol-fixtures/buddy-official-catalog.json`.
 
 ## Step titles (pinned by tests)
 
 1. Meet your sidekick
 2. Describe it
 3. Give it a personality
-4. Create your Golem
+4. Create your Buddy
 
 Progress label: `Step {n} of 4`. Buttons: `Back`, `Next`, `Skip for now`
 (step 3 only, when Name is filled).
@@ -61,57 +61,57 @@ Progress label: `Step {n} of 4`. Buttons: `Back`, `Next`, `Skip for now`
 
 ## Step 3: Give it a personality
 
-- Name label: "Name"; placeholder "Golem"; help "1 to 24 characters."
+- Name label: "Name"; placeholder "Buddy"; help "1 to 24 characters."
 - Personality label: "Personality"; placeholder "Grumpy but kind. Calls
   viewers pebbles."; chips "Cheerful and loud", "Dry and sarcastic",
   "Calm and wise"; counter `{count}/1200`
 - About you label: "About you (optional)"; placeholder "I stream indie
   games on Tuesdays and Fridays at 8 pm. My shop is at example.com/shop.";
-  help "Your Golem answers viewers' questions from this."; counter
+  help "Your Buddy answers viewers' questions from this."; counter
   `{count}/4000`
 
-## Step 4: Create your Golem
+## Step 4: Create your Buddy
 
 - Summary rows: "Look", "Name", "Personality", "About you"; an empty optional
   row reads "Not set".
 - Allowance: "Uses 4 of your {remaining} images left today."
-- Primary: "Create my Golem"
-- Working: "Drawing your Golem. This takes one to three minutes."
+- Primary: "Create my Buddy"
+- Working: "Drawing your Buddy. This takes one to three minutes."
 - Pose labels: "Idle", "Talk", "Laugh", "Think"
 - Done: "Saved to your library."
-- Actions: "Use as my Golem", "Redo" (talk, laugh and think only), web only
+- Actions: "Use as my Buddy", "Redo" (talk, laugh and think only), web only
   "Open in Videorc" and "Download Videorc"
 - A pose that failed: "This pose did not come out. Redo it."
 
 Gates and errors (step 4 and the library):
 
-- Signed out (web): "Sign in to create your Golem." Action "Sign in"
-- Free account: "Creating your own Golem is part of Videorc Premium."
+- Signed out (web): "Sign in to create your Buddy." Action "Sign in"
+- Free account: "Creating your own Buddy is part of Videorc Premium."
   Actions "See Premium" and "Start from one of ours"
 - Allowance used up: "You've used today's images. You get more tomorrow."
-- Library full: "Your library is full ({limit} Golems). Delete one to make
+- Library full: "Your library is full ({limit} Buddies). Delete one to make
   room."
-- Failed: "Your Golem could not be drawn. Nothing was used from your
+- Failed: "Your Buddy could not be drawn. Nothing was used from your
   allowance. Try again."
-- App, Cloud AI off: "Allow cloud AI to create a Golem." Action "Allow cloud
+- App, Cloud AI off: "Allow cloud AI to create a Buddy." Action "Allow cloud
   AI" (the app's existing consent label)
 
 ## Library
 
-- Section title: "My Golems"
+- Section title: "My Buddies"
 - Groups: "Official", "Made by you"
 - Active badge: "Active"
 - Actions: "Use", "Rename", "Edit personality", "Delete", "Make it Alive",
-  "New Golem"
-- Empty "Made by you": "Golems you create show up here, on videorc.com and in
+  "New Buddy"
+- Empty "Made by you": "Buddies you create show up here, on videorc.com and in
   the app."
 - Rename and Edit personality dialogs: action "Save"
 - A library change that failed without a message from the server: "Something
   went wrong. Try again."
 - Delete confirm: title "Delete {name}?"; body "Its pictures are removed
   from your Videorc account."; actions "Delete" and "Cancel"
-- Signed out (app): "Sign in to see the Golems you made on videorc.com."
-- Chosen elsewhere (app, when sync will not overwrite a Golem made only on
+- Signed out (app): "Sign in to see the Buddies you made on videorc.com."
+- Chosen elsewhere (app, when sync will not overwrite a Buddy made only on
   this computer): "{name} was picked on videorc.com." Action "Use"
-- First-launch invitation (app, default Golem untouched): "Make this Golem
+- First-launch invitation (app, default Buddy untouched): "Make this Buddy
   your own, or pick another." Action "Start"

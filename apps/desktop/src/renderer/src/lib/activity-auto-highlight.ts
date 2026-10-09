@@ -5,7 +5,7 @@ import { commentCanHighlight } from '@/lib/live-chat-view'
 // The Activity auto-show policy (plan 156): one switch makes celebrations pop
 // onto the stream as the existing highlight card. This module is the pure
 // half — what qualifies, what waits, what is too old to still thank — so the
-// engine effect in use-studio stays a thin shell. Manual and Golem cards
+// engine effect in use-studio stays a thin shell. Manual and Buddy cards
 // always win; the engine only consults this module when the slot is idle.
 
 /** Celebrations the switch auto-shows (plan 156, D2). Announcements are the

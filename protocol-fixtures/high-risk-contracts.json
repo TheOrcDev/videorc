@@ -618,7 +618,7 @@
       "removeConfirm": "confirm",
       "persona": {
         "id": "default",
-        "name": "Golem",
+        "name": "Buddy",
         "personality": "",
         "bubbleStyle": "speech",
         "images": {},
@@ -695,7 +695,7 @@
       "reason": "gateway-error",
       "detail": {
         "code": "ai-gateway-error",
-        "message": "The Golem tick failed on every configured model.",
+        "message": "The Buddy tick failed on every configured model.",
         "status": 502
       },
       "questions": [],
@@ -716,7 +716,7 @@
       "reason": "network",
       "detail": {
         "code": "timeout",
-        "message": "Golem did not answer within 12 s.",
+        "message": "Buddy did not answer within 12 s.",
         "status": null
       },
       "questions": [],
@@ -838,7 +838,7 @@
       "listening": {
         "state": "blocked",
         "reasonCode": "listen-monthly-quota-exhausted",
-        "message": "Golem's listening allowance for this month is used up.",
+        "message": "Buddy's listening allowance for this month is used up.",
         "remainingSeconds": 0
       },
       "topic": "Mechanical keyboards",
@@ -1565,7 +1565,7 @@
     },
     "bundledSummary": {
       "packId": "bundled:buddy",
-      "name": "Golem",
+      "name": "Buddy",
       "cellSize": 640,
       "gazeCount": 25,
       "reactions": ["laugh"],
@@ -1796,7 +1796,7 @@
         {
           "id": "official:golem",
           "slug": "golem",
-          "name": "Golem",
+          "name": "Buddy",
           "kind": "Golem",
           "tagline": "The original. Steady as stone.",
           "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone."

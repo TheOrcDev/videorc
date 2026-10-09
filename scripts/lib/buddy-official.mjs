@@ -1,10 +1,10 @@
 // Plan 170 Phase B: the pure parts of `pnpm buddy:official`, which draws
-// Videorc's official Golem characters (protocol-fixtures/buddy-official-catalog.json)
+// Videorc's official Buddy characters (protocol-fixtures/buddy-official-catalog.json)
 // in the house look and exports them for the app and the website.
 //
 // The prompt words are a copy of videorc-web `lib/ai/buddy-look.ts`
 // (BUDDY_LOOK_VERSION 1), so an official character is drawn exactly the way a
-// streamer's own Golem is. Change both together.
+// streamer's own Buddy is. Change both together.
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'

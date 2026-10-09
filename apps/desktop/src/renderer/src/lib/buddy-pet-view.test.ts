@@ -147,11 +147,11 @@ describe('Create availability (D20)', () => {
         gate: {
           allowed: false,
           featureId: 'live-cohost',
-          reason: 'Golem requires Videorc Premium.',
+          reason: 'Buddy requires Videorc Premium.',
           upgradeUrl: 'https://www.videorc.com/premium'
         }
       }).reason
-    ).toBe('Golem requires Videorc Premium.')
+    ).toBe('Buddy requires Videorc Premium.')
     expect(buddyPetCreateAvailability({ ...on, consented: false }).reason).toBe(
       BUDDY_CREATE_CONSENT_OFF
     )

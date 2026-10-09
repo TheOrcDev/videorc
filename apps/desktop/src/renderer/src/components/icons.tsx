@@ -145,8 +145,8 @@ type _RegistryIconProps = _AssertIconProps<
 /**
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
- * from the pre-audit set (see the audit table in the Nucleo plan). The Golem
- * tab's slot is `BuddyIcon`, the Golem emblem, below.
+ * from the pre-audit set (see the audit table in the Nucleo plan). The Buddy
+ * tab's slot is `BuddyIcon`, the Buddy emblem, below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -188,7 +188,7 @@ export {
   X as CloseIcon,
   DotsThree as MoreIcon,
   MagnifyingGlass as SearchIcon,
-  // Opens a small picture larger to look at it (the Golem's bubble sample
+  // Opens a small picture larger to look at it (the Buddy's bubble sample
   // and its preview); never a zoom level control.
   MagnifyingGlassPlus as ZoomInIcon,
   SlidersHorizontal as AdjustIcon,
@@ -258,8 +258,8 @@ export {
   LinkSimple as LinkIcon
 } from '@phosphor-icons/react'
 /**
- * AI, tooling and appearance. Golem (code name `cohost`) has its own mark,
- * the real Golem artwork: `BuddyIcon` below at icon size, `BuddyEmblem` larger.
+ * AI, tooling and appearance. Buddy (code name `cohost`) has its own mark,
+ * the real Buddy artwork: `BuddyIcon` below at icon size, `BuddyEmblem` larger.
  */
 export {
   Brain as BrainIcon,
@@ -371,7 +371,7 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
 )
 
 /**
- * Golem's mark (plans 149 and 164): the owner's stone golem, the full-colour
+ * Buddy's mark (plans 149 and 164): the owner's stone golem, the full-colour
  * artwork in `assets/brand/buddy/`, at icon size. The owner's call: it appears
  * as its actual image everywhere, the sidebar, the Stream Manager, the Studio
  * session row, popovers and menus, never as a redrawn glyph.

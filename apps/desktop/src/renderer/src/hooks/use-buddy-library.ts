@@ -59,7 +59,7 @@ export interface BuddyLibraryController {
   refresh: () => Promise<void>
   /** `cohost.library.sync`; true when the backend accepted it. */
   sync: (reason: BuddyLibrarySyncReason) => Promise<boolean>
-  /** `cohost.library.use`: make a library or official avatar the Golem. */
+  /** `cohost.library.use`: make a library or official avatar the Buddy. */
   use: (avatarId: BuddyLibraryId) => Promise<boolean>
   /** `cohost.library.update`: rename or edit one of the account's own avatars. */
   update: (params: CohostLibraryUpdateParams) => Promise<boolean>
@@ -69,7 +69,7 @@ export interface BuddyLibraryController {
 }
 
 /**
- * The Golem library over the backend (plan 170 D12, D13): `cohost.library.get`,
+ * The Buddy library over the backend (plan 170 D12, D13): `cohost.library.get`,
  * the accept calls and `cohost.library.changed`, which always carries the
  * whole state. The backend owns the library and its cache, so a fresh
  * controller (a remount, a restart) shows it where it was.

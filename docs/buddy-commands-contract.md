@@ -1,18 +1,18 @@
-# Golem voice commands: contract (plan 140)
+# Buddy voice commands: contract (plan 140)
 
 These are the binding shapes for plan 140's slices, which several agents build
 in parallel. Parts D and E cross the web ↔ desktop line; identical copies
-live in both repos at `docs/golem-commands-contract.md`. Parts A–C are
+live in both repos at `docs/buddy-commands-contract.md`. Parts A–C are
 desktop-internal, but every slice builds against them.
 
 All new serialized optional fields use
 `#[serde(default, skip_serializing_if = …)]` in Rust and `optionalSchema` in
 `backend-rpc-contract.ts`. Code, wire and storage names keep `cohost`;
-user-facing copy says "Golem" (it said "Orcle" until plans 164 and 170).
+user-facing copy says "Buddy" (it said "Orcle" until plans 164 and 170).
 Values that were already saved or sent between apps keep the old spelling
 (plan 170 D22): the moderation source `orcle-voice` (the Rust variant
-`GolemVoice` carries a serde rename) and the service-flags `orcle` section.
-The examples speak the wake word "golem"; the hidden Orcle aliases still
+`BuddyVoice` carries a serde rename) and the service-flags `orcle` section.
+The examples speak the wake word "buddy"; the hidden Orcle aliases still
 work until they are removed after 0.9.140.
 
 ## Named session markers (desktop, plan 152)
@@ -49,12 +49,12 @@ retrospective hints and report Moments remain ranges. See
 ## A. Chat moderation (desktop, S4)
 
 Moderation is a chat feature. Manual removal is free; voice-sourced removal is
-Premium (Golem).
+Premium (Buddy).
 
 ### Rust API (`live_chat_moderation.rs`), used by S3
 
 ```rust
-pub enum ModerationSource { Manual, GolemVoice }          // wire: "manual" | "orcle-voice" (serde rename, plan 170 D22)
+pub enum ModerationSource { Manual, BuddyVoice }          // wire: "manual" | "orcle-voice" (serde rename, plan 170 D22)
 pub enum RemoveConfirmMode { Confirm, Countdown }         // wire: "confirm" | "countdown"
 pub struct ModerationRequest {
     pub operation_id: String,      // UUID v4, minted by the caller (idempotency key)
@@ -70,7 +70,7 @@ pub struct ModerationRefusal { pub code: &'static str, pub message: String }
 ```
 
 **Refusal codes:** `not-found`, `not-eligible` (owner message, tombstone,
-notification row), `premium-required` (GolemVoice only), `disabled` (kill
+notification row), `premium-required` (BuddyVoice only), `disabled` (kill
 switch), `rate-limited` (more than 10 a minute), `already-pending`,
 `not-pending`, `invalid-params`.
 
@@ -114,7 +114,7 @@ every change. **Never add it to `LAN_EVENTS`.**
 **Phase rules:**
 
 - `Manual` requests go straight to `executing`.
-- `GolemVoice` requests start in `pending-confirm`:
+- `BuddyVoice` requests start in `pending-confirm`:
   - In `confirm` mode, `confirmBy` is 20 s out. With no answer the operation
     becomes `expired`.
   - In `countdown` mode, `executeAt` is 5 s out. The operation runs then
@@ -149,14 +149,14 @@ A provider's own deletion keeps its provider type (Twitch
 `channel.chat.message_delete`, YouTube/Kick `message-delete`). The matching
 `ModerationOperation` carries the plain `outcome` sentence and `outcomeCode`.
 
-## B. Golem command state and settings (desktop, S3, read by S6)
+## B. Buddy command state and settings (desktop, S3, read by S6)
 
 ### `CohostState.command?`: the latest command (absent when none)
 
 ```json
 {
   "id": "cmd-uuid",
-  "heard": "golem highlight the comment from coders x",
+  "heard": "buddy highlight the comment from coders x",
   "kind": "highlight|clear|remove|confirm|cancel|unknown",
   "status": "done|not-found|ambiguous|confirm|refused|unavailable|cancelled|expired",
   "message": "Highlighted coders_x's comment.",
@@ -187,17 +187,17 @@ Additive notes from S3 (the shapes above are unchanged):
   `expiresAt` is absent and `message` says "Removing coders_x's comment…": show
   no buttons then. A removal card without `operationId` is still opening (a
   few milliseconds); answers wait for it.
-- A highlight of a comment Golem flagged with high severity is a `confirm`
-  card too (`kind: highlight`, no `operationId`): "Golem flagged this
+- A highlight of a comment Buddy flagged with high severity is a `confirm`
+  card too (`kind: highlight`, no `operationId`): "Buddy flagged this
   (harassment). Show it anyway?"
-- `kind: unknown` comes with `status: not-found` and "Golem didn't catch that:
-  '…'" (only after a clearly addressed "Golem"; never while a card is open).
+- `kind: unknown` comes with `status: not-found` and "Buddy didn't catch that:
+  '…'" (only after a clearly addressed "Buddy"; never while a card is open).
 - Choosers and highlight cards expire after 20 s (`expired`); a removal card
   follows its moderation operation (`expired`: "Nothing was removed.").
 
 `CohostState.commandAvailability?` (additive, S3) carries the kill switches of
 part D: `{ "voiceCommands": "on|paused", "remove": "on|paused" }`. It is absent
-while both are on, and present on every state, Golem running or not. The
+while both are on, and present on every state, Buddy running or not. The
 renderer shows "Voice commands are paused by Videorc." and "Removing messages
 is paused by Videorc." from it.
 
@@ -278,7 +278,7 @@ an existing free string, so this is not a new enum value.
   "sessionClientId": "…",
   "consentToProcessChat": true,
   "seq": 12,
-  "utterance": "golem can you show what coders x just asked",
+  "utterance": "buddy can you show what coders x just asked",
   "focusMessageId": "…?",
   "candidates": [{ "id": "m1", "author": "coders_x", "text": "…", "at": "ISO" }]
 }
@@ -311,7 +311,7 @@ an existing free string, so this is not a new enum value.
 Gates run in the same order as the spotlight route: session, body, schema,
 consent, then `decideCohostAccess`. A request fails with:
 
-- 403 `"Golem requires Videorc Premium."` without `liveCohost`;
+- 403 `"Buddy requires Videorc Premium."` without `liveCohost`;
 - 503 `command-disabled` unless `VIDEORC_AI_COHOST_COMMAND_ENABLED` is `true`, or when `VIDEORC_AI_COHOST_COMMAND_DISABLED` is set (the parser ships off);
 - 503 `judge-unconfigured` without a Jev model;
 - 429 when the daily cap `VIDEORC_AI_COHOST_DAILY_COMMAND_LIMIT` (default 300)
@@ -326,5 +326,5 @@ recorded as kind `cohost-command`.
   and Jev is configured.
 - `limits.dailyCommandCalls`.
 
-The desktop calls the parser only when that flag is true, Golem heard the wake
+The desktop calls the parser only when that flag is true, Buddy heard the wake
 word, and the local grammar matched nothing.

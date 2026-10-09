@@ -1,8 +1,8 @@
-// smoke:buddy-pet (plan 168 S-C5): the living Golem on a real recording.
+// smoke:buddy-pet (plan 168 S-C5): the living Buddy on a real recording.
 //
 // The dev app imports a synthetic pet pack (every cell a green silhouette
 // with a unique colour tag, scripts/lib/buddy-pet-fixture.mjs) through the
-// backend's own import, wears it Alive, burns the Golem into the recording and
+// backend's own import, wears it Alive, burns the Buddy into the recording and
 // scripts what the animator reacts to. Then ffmpeg decodes the recorded
 // frames and the tag at the pet's tag spot names the cell on screen:
 //
@@ -52,7 +52,7 @@ const rtmpPort = Number(process.env.VIDEORC_BUDDY_PET_RTMP_PORT ?? 19781)
 const listenerBindMs = 1500
 
 const VIDEO = Object.freeze({ width: 1280, height: 720, fps: 30, bitrateKbps: 4000 })
-/** The Golem on the right, big enough that its tag is ~87 px. */
+/** The Buddy on the right, big enough that its tag is ~87 px. */
 const BUDDY_RECT = Object.freeze({ x: 0.7, y: 0.3, w: 0.2, h: 0.62 })
 /** The card on the left, so a look at it is a look to the viewer's left. */
 const CARD_RECT = Object.freeze({ x: 0.03, y: 0.3, w: 0.34, h: 0.3 })
@@ -89,7 +89,7 @@ try {
   const smoke = launched.connections['preview-motion-ready']
   const health = await request(ws, timeoutMs, 'health.ping', { ffmpegPath })
   if (!health?.ffmpeg?.available) {
-    throw new Error(health?.ffmpeg?.message ?? 'FFmpeg is unavailable for the Golem pet smoke.')
+    throw new Error(health?.ffmpeg?.message ?? 'FFmpeg is unavailable for the Buddy pet smoke.')
   }
 
   // The pack, copied where main copies an imported folder, registered
@@ -117,7 +117,7 @@ try {
   )
   writeFileSync(join(outputDirectory, 'buddy-pet-summary.json'), JSON.stringify(summary, null, 2))
   console.log(
-    `Golem pet smoke PASS: the follow played ${summary.runs[0].followCell}, the card turned the gaze to ${summary.runs[0].leftGazeCell}, the Say line alternated talk-a/talk-b, the body moved ${summary.runs[0].reactionTravelPx} px while reacting at Motion 0.45 (the wave alone ${summary.runs[0].followTravelPx} px) and ${summary.runs[1].reactionTravelPx} px at Motion 0, and the pet slept ${summary.runs[1].sleepAfterReactionSeconds.toFixed(1)} s after the last activity. Evidence: ${outputDirectory}`
+    `Buddy pet smoke PASS: the follow played ${summary.runs[0].followCell}, the card turned the gaze to ${summary.runs[0].leftGazeCell}, the Say line alternated talk-a/talk-b, the body moved ${summary.runs[0].reactionTravelPx} px while reacting at Motion 0.45 (the wave alone ${summary.runs[0].followTravelPx} px) and ${summary.runs[1].reactionTravelPx} px at Motion 0, and the pet slept ${summary.runs[1].sleepAfterReactionSeconds.toFixed(1)} s after the last activity. Evidence: ${outputDirectory}`
   )
 } catch (error) {
   writeFileSync(
@@ -130,7 +130,7 @@ try {
   await launched.stop()
 }
 
-/** The Golem and the card on both outputs, at the smoke's rects. The Studio
+/** The Buddy and the card on both outputs, at the smoke's rects. The Studio
  * renderer pushes its own copy of the layout while it starts (the captions
  * switch seed), which can land after a write made too early, so the layout
  * is written until it reads back the same twice in a row, and again right
@@ -165,7 +165,7 @@ async function ensureOverlayLayout(ws) {
   }
   if (steady < 2) {
     throw new Error(
-      `The overlay layout would not hold the Golem's switches: ${JSON.stringify(last)}`
+      `The overlay layout would not hold the Buddy's switches: ${JSON.stringify(last)}`
     )
   }
 }
@@ -201,7 +201,7 @@ async function runLively(ws, smoke, { settings, packId, frames }) {
   const target = {
     id: 'buddy-pet-stream',
     platform: 'custom',
-    label: 'Local Golem pet stream',
+    label: 'Local Buddy pet stream',
     serverUrl: `rtmp://127.0.0.1:${rtmpPort}/live`,
     streamKey,
     listenUrl: `rtmp://127.0.0.1:${rtmpPort}/live/${streamKey}`,

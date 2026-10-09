@@ -38,7 +38,7 @@ function drawBubbles(): Promise<(string | null)[]> {
 
 /**
  * "How it looks on stream" (plan 170 D14 step 1): a stream-shaped frame
- * (the app's livestream backdrop) with the Golem in its corner. It idles,
+ * (the app's livestream backdrop) with the Buddy in its corner. It idles,
  * a follower arrives, it greets them, answers a viewer and laughs, on a
  * loop, from the four poses and the bubble the stream itself draws. The
  * frame is stream content, so it stays dark in both themes. With reduced
@@ -108,7 +108,7 @@ export function BuddyStreamDemo({
       >
         {BUDDY_ONBOARDING_STEP1.demoChip}
       </Badge>
-      {/* The Golem's slot, bottom right; every pose stands on its baseline. */}
+      {/* The Buddy's slot, bottom right; every pose stands on its baseline. */}
       <div className="absolute right-[4%] bottom-[3%] h-[46%] w-[26%]">
         {(['idle', 'talk', 'laugh', 'think'] as const).map((pose) => (
           <img

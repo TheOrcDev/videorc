@@ -171,7 +171,7 @@ export class BuddyPetPlayer {
     const neutral = options.pack.frames.find(
       (frame) => frame.id === options.pack.neutral && frame.kind === 'gaze'
     )
-    if (!neutral) throw new Error('A Golem pack needs a neutral gaze frame.')
+    if (!neutral) throw new Error('A Buddy pack needs a neutral gaze frame.')
     this.neutralFrame = neutral
     this.gaze = neutral
     this.current = neutral

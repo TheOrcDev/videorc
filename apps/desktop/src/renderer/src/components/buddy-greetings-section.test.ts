@@ -27,7 +27,7 @@ function settings(templates: CohostGreetingTemplate[]): CohostSettings {
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Golem',
+      name: 'Buddy',
       personality: '',
       bubbleStyle: 'speech',
       images: {},

@@ -16,8 +16,8 @@ export interface ClipMarkedToast {
   description?: string
 }
 
-/** Where a saved mark shows up: the stream's report in the Golem tab (plan 119 S3). */
-export const CLIP_MARK_IN_REPORT = "It's in your stream report in Golem."
+/** Where a saved mark shows up: the stream's report in the Buddy tab (plan 119 S3). */
+export const CLIP_MARK_IN_REPORT = "It's in your stream report in Buddy."
 
 /**
  * The toast for a `clip.marked` event: where the mark landed, or why the

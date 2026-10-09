@@ -8964,7 +8964,7 @@ async fn handle_text_message_with_role(
                             tokio::spawn(async move {
                                 refresh_account_entitlements(&entitlement_state).await
                             });
-                            // Golem stopped listening at sign-out; a session
+                            // Buddy stopped listening at sign-out; a session
                             // still running with listening on resumes now.
                             let listen_state = state.clone();
                             tokio::spawn(async move {
@@ -9418,7 +9418,7 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // Plan 164 Phase D: the Stream Manager's answers to the Golem's
+        // Plan 164 Phase D: the Stream Manager's answers to the Buddy's
         // proposed cards, and the Say box. Never routed by the LAN listener.
         "cohost.utterance.approve" => {
             match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
@@ -9462,7 +9462,7 @@ async fn handle_text_message_with_role(
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
         }
-        // --- Golem overlay (plan 164 Phase C) ---
+        // --- Buddy overlay (plan 164 Phase C) ---
         "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
         "buddy.overlay.set" => {
             match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
@@ -9481,7 +9481,7 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // --- Golem pets (plan 168, Phase B) ---
+        // --- Buddy pets (plan 168, Phase B) ---
         "buddy.overlay.clear" => {
             match serde_json::from_value::<buddy_overlay::ClearBuddyOverlayParams>(command.params) {
                 Ok(params) => {
@@ -9499,9 +9499,9 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // --- end Golem pets (plan 168, Phase B) ---
-        // --- end Golem overlay ---
-        // --- Golem look (plan 169 Phase B) ---
+        // --- end Buddy pets (plan 168, Phase B) ---
+        // --- end Buddy overlay ---
+        // --- Buddy look (plan 169 Phase B) ---
         "cohost.avatar.create" => {
             match serde_json::from_value::<cohost_avatar::CohostAvatarCreateParams>(command.params)
             {
@@ -9563,8 +9563,8 @@ async fn handle_text_message_with_role(
             Ok(status) => ServerResponse::ok(command.id, status),
             Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
         },
-        // --- end Golem look (plan 169 Phase B) ---
-        // --- Golem library (plan 170 D12, D13) ---
+        // --- end Buddy look (plan 169 Phase B) ---
+        // --- Buddy library (plan 170 D12, D13) ---
         "cohost.library.get" => {
             if rpc_params_are_empty(&command.params) {
                 ServerResponse::ok(command.id, cohost_library::get(state).await)
@@ -9635,8 +9635,8 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // --- end Golem library (plan 170) ---
-        // --- Golem pets (plan 168, Phase A) ---
+        // --- end Buddy library (plan 170) ---
+        // --- Buddy pets (plan 168, Phase A) ---
         "cohost.pet.list" => match buddy_pet_store::list(state).await {
             Ok(packs) => ServerResponse::ok(command.id, packs),
             Err(error) => ServerResponse::error(command.id, error.code, error.message),
@@ -9676,8 +9676,8 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // --- end Golem pets (plan 168, Phase A) ---
-        // --- Golem pets (plan 168, Phase F) ---
+        // --- end Buddy pets (plan 168, Phase A) ---
+        // --- Buddy pets (plan 168, Phase F) ---
         "cohost.pet.creation.start" => match buddy_pet_create::start(state).await {
             Ok(status) => ServerResponse::ok(command.id, status),
             Err(error) => ServerResponse::error(command.id, error.code, error.message),
@@ -9747,7 +9747,7 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // --- end Golem pets (plan 168, Phase F) ---
+        // --- end Buddy pets (plan 168, Phase F) ---
         "cohost.settings.set" => {
             match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
                 Ok(patch) => match cohost::set_cohost_settings(state, patch).await {
@@ -10797,7 +10797,7 @@ async fn handle_text_message_with_role(
             }
         }
         "session.stop" => {
-            // Golem's listen task drains with this capture (plan 068 review).
+            // Buddy's listen task drains with this capture (plan 068 review).
             live_chat::stop_live_chat_for_capture_end(state).await;
             // Older renderers send no params; the click timestamp is telemetry
             // only, so a malformed payload degrades to "no timestamp".
@@ -12899,14 +12899,14 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Phase 3: compare+hydrate+persist atomically with sign-in/sign-out. A
     // newer refresh generation also wins for the same token/account.
     let transition = state.account_auth_transition.lock().await;
-    // Plan 140 S8: the same read turns Golem's cloud command parser on or
+    // Plan 140 S8: the same read turns Buddy's cloud command parser on or
     // off (applied below, outside this lock). Signed out reads as off; a
     // failed read keeps the last answer.
     let mut command_parser = None;
-    // Plan 164 S-D3: the same read tells the Golem which tick contract the
+    // Plan 164 S-D3: the same read tells the Buddy which tick contract the
     // web speaks (4 adds the persona). Signed out reads as unknown.
     let mut tick_version: Option<Option<u32>> = None;
-    // Plan 170 D9: the same read turns the account Golem library on or off.
+    // Plan 170 D9: the same read turns the account Buddy library on or off.
     let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
@@ -12963,7 +12963,7 @@ async fn refresh_account_entitlements(state: &AppState) {
 }
 
 /// Every `entitlements.updated` goes out through here (plan 140 S1): publish
-/// the effective snapshot, then let Golem react to it. A session running
+/// the effective snapshot, then let Buddy react to it. A session running
 /// without `LiveCohost` stops through its normal stop path, with its report
 /// saved. The stop runs on its own task: two of the three emitters call from a
 /// synchronous closure under `account_auth_transition`, and the stop takes the
@@ -12974,7 +12974,7 @@ fn publish_entitlements_updated(state: &AppState) {
     state.emit_event("entitlements.updated", entitlements::current_entitlements());
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(
-            "Entitlements changed outside the runtime; Golem re-checks on its next start."
+            "Entitlements changed outside the runtime; Buddy re-checks on its next start."
         );
         return;
     };

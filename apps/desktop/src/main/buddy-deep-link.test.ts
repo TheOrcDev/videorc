@@ -64,7 +64,7 @@ describe('runBuddyDeepLink', () => {
     }
   }
 
-  it('opens the Golem tab and syncs at once', async () => {
+  it('opens the Buddy tab and syncs at once', async () => {
     const run = deps([])
     expect(await runBuddyDeepLink({ alive: null }, run.deps)).toBe('synced')
     expect(run.shown).toEqual([false])

@@ -4704,7 +4704,7 @@ pub struct CohostUtteranceParams {
 }
 
 /// `cohost.utterance.say` (plan 164 D7): the streamer's own line for the
-/// Golem, 1 to 200 characters; `state` defaults to `talk`.
+/// Buddy, 1 to 200 characters; `state` defaults to `talk`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostSayParams {
@@ -4735,10 +4735,10 @@ pub struct CohostSettingsPatch {
     /// Replaces the whole list; the engine normalises it (trim, <= 10 x 120).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<String>>,
-    /// Golem hears the microphone while live (plan 068 D2).
+    /// Buddy hears the microphone while live (plan 068 D2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<bool>,
-    /// Voice commands need "Golem" first (plan 140 S3).
+    /// Voice commands need "Buddy" first (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_word_required: Option<bool>,
     /// How a voice removal is confirmed (plan 140 S3).
@@ -4752,7 +4752,7 @@ pub struct CohostSettingsPatch {
     pub auto_chat: Option<crate::cohost::CohostAutoChat>,
 }
 
-/// Why a Golem look picture failed (plan 169), in the web's code and the
+/// Why a Buddy look picture failed (plan 169), in the web's code and the
 /// tile's words.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -4791,7 +4791,7 @@ pub struct CohostCommandParams {
     pub command_id: String,
 }
 
-// --- Golem report (plan 119 S1; mirrored in shared/backend.ts) ---
+// --- Buddy report (plan 119 S1; mirrored in shared/backend.ts) ---
 
 /// The report format this build writes and reads. A stored report with any
 /// other version reads as unavailable, never as an error.
@@ -4818,7 +4818,7 @@ pub struct CohostReportSavedEvent {
     pub session_id: String,
 }
 
-/// What became of a question Golem caught. The latest outcome wins; a
+/// What became of a question Buddy caught. The latest outcome wins; a
 /// restore puts it back to `open`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -4851,7 +4851,7 @@ pub struct CohostReportQuestion {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportQuestions {
-    /// Distinct question ids Golem surfaced.
+    /// Distinct question ids Buddy surfaced.
     #[serde(default)]
     pub total: u64,
     #[serde(default)]
@@ -4948,7 +4948,7 @@ pub struct CohostReportGreetings {
 
 /// One alert kind viewers raised, with the most distinct viewers who said it
 /// Plan 164 D10: one automatic send, written when it lands (or fails), so
-/// the report says what the Golem posted as the streamer and why.
+/// the report says what the Buddy posted as the streamer and why.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportPost {
@@ -4984,7 +4984,7 @@ pub struct CohostReportAlert {
     pub first_seen_at: String,
 }
 
-/// Recaps are never posted by Golem, so posting leaves no count.
+/// Recaps are never posted by Buddy, so posting leaves no count.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportRecap {
@@ -5022,7 +5022,7 @@ pub struct CohostReportCommands {
     /// A removal that failed or ended unknown, or a refused request.
     #[serde(default)]
     pub failed: u64,
-    /// No comment matched, or Golem didn't catch what was said.
+    /// No comment matched, or Buddy didn't catch what was said.
     #[serde(default)]
     pub not_found: u64,
 }
@@ -5045,7 +5045,7 @@ impl CohostReportCommands {
     }
 }
 
-/// What Golem caught in one stream, saved on this computer when the session
+/// What Buddy caught in one stream, saved on this computer when the session
 /// ends and deleted with the recording (plan 119 decision 6). Counts and the
 /// question log; never raw chat or drafts. Every optional field is omitted,
 /// never null; the blocks always ride and default on read.
@@ -5056,7 +5056,7 @@ pub struct CohostSessionReport {
     pub session_id: String,
     pub started_at: String,
     pub ended_at: String,
-    /// Golem sessions folded into this report: turning Golem off and on
+    /// Buddy sessions folded into this report: turning Buddy off and on
     /// mid-stream adds one.
     #[serde(default)]
     pub segments: u32,
@@ -5083,7 +5083,7 @@ pub struct CohostSessionReport {
     /// a report from before voice commands reads and writes unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<CohostReportCommands>,
-    /// Plan 164 D10: what the Golem posted as the streamer, oldest first, at
+    /// Plan 164 D10: what the Buddy posted as the streamer, oldest first, at
     /// most 200. Omitted while empty, so older reports read unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub posts: Vec<CohostReportPost>,
@@ -5097,7 +5097,7 @@ impl CohostSessionReport {
         (report.version == COHOST_SESSION_REPORT_VERSION).then_some(report)
     }
 
-    /// Fold a later report of the same session into this one (Golem turned
+    /// Fold a later report of the same session into this one (Buddy turned
     /// off and on mid-stream, or a replacing start): counts add up, questions
     /// union by id with the later outcome winning, open promises union by
     /// text, and the span covers both.
@@ -5291,7 +5291,7 @@ pub struct CohostReportChat {
 }
 
 /// `cohost.report.get` / `cohost.report.latest`: the saved report (null when
-/// Golem left none), the session's moments (computed on read, never stored)
+/// Buddy left none), the session's moments (computed on read, never stored)
 /// and its chat totals.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -5305,7 +5305,7 @@ pub struct CohostReportPayload {
 }
 
 /// A moment worth a clip: a clip mark or a chat peak, snapped to the
-/// captions. Computed on read for the Golem report, never stored.
+/// captions. Computed on read for the Buddy report, never stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMoment {
@@ -5391,7 +5391,7 @@ pub struct AiCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entitlement_token: Option<String>,
     pub features: AiCapabilitiesFeatures,
-    /// The Golem routes (plan 164): the tick contract the web speaks and
+    /// The Buddy routes (plan 164): the tick contract the web speaks and
     /// whether avatar generation is on. Older servers omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cohost: Option<AiCapabilitiesCohost>,
@@ -5418,7 +5418,7 @@ pub struct AiCapabilitiesCohost {
     /// Older servers omit it: the creator stays off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pet: Option<AiCapabilitiesPet>,
-    /// The account Golem library (plan 170 D9). Older servers omit it: the
+    /// The account Buddy library (plan 170 D9). Older servers omit it: the
     /// library is off and the look falls back to the plan 169 route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buddy_library: Option<AiCapabilitiesBuddyLibrary>,
@@ -5438,7 +5438,7 @@ pub struct AiCapabilitiesBuddyLibrary {
     pub limit: u32,
 }
 
-// --- Golem pets (plan 168, Phase F) ---
+// --- Buddy pets (plan 168, Phase F) ---
 /// `cohost.pet` from `GET /api/ai/capabilities`. Basic accounts get
 /// `{ enabled: false, creationsRemainingThisMonth: 0, monthlyLimit: 0 }`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -5451,7 +5451,7 @@ pub struct AiCapabilitiesPet {
     #[serde(default)]
     pub monthly_limit: u32,
 }
-// --- end Golem pets (plan 168, Phase F) ---
+// --- end Buddy pets (plan 168, Phase F) ---
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -5536,7 +5536,7 @@ pub struct AiCapabilitiesFeatures {
     #[serde(default)]
     pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
-    /// The Golem command route is on and its model configured (plan 140 S8,
+    /// The Buddy command route is on and its model configured (plan 140 S8,
     /// contract part E). Older servers omit it: the parser stays off.
     #[serde(default)]
     pub cohost_command_enabled: bool,
@@ -7014,7 +7014,7 @@ mod tests {
             errored.detail,
             Some(crate::cohost::CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Golem tick failed on every configured model.".to_string(),
+                message: "The Buddy tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -7092,7 +7092,7 @@ mod tests {
             Some(crate::cohost::CohostListening {
                 state: crate::cohost::CohostListeningState::Blocked,
                 reason_code: Some("listen-monthly-quota-exhausted".to_string()),
-                message: Some("Golem's listening allowance for this month is used up.".to_string()),
+                message: Some("Buddy's listening allowance for this month is used up.".to_string()),
                 remaining_seconds: Some(0),
             })
         );
@@ -7312,7 +7312,7 @@ mod tests {
         let mut without = base.clone();
         without.commands = None;
 
-        // Golem off and on mid-stream: the counts add up.
+        // Buddy off and on mid-stream: the counts add up.
         let merged = base.clone().merged_with(base.clone());
         let doubled = merged.commands.unwrap();
         assert_eq!(doubled.highlighted, counted.highlighted * 2);

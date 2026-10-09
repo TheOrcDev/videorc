@@ -1,4 +1,4 @@
-//! The Golem library against a fake videorc-web (plan 170 Phase D): the
+//! The Buddy library against a fake videorc-web (plan 170 Phase D): the
 //! wire shapes, sync (apply, offer, hold while live, signed out), use,
 //! update, delete, the debounced PATCH of local edits, and the capability.
 //! `FakeLibrary` is shared with the look's library-route tests.
@@ -264,7 +264,7 @@ fn handle(
             .take()
             .unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string());
         let at = fake.tick();
-        let mut avatar = FakeAvatar::new(&id, body["name"].as_str().unwrap_or("Golem"), &at);
+        let mut avatar = FakeAvatar::new(&id, body["name"].as_str().unwrap_or("Buddy"), &at);
         avatar.description = body["description"].as_str().unwrap_or("").to_string();
         avatar.personality = body["personality"].as_str().unwrap_or("").to_string();
         avatar.context = body["context"].as_str().unwrap_or("").to_string();
@@ -912,7 +912,7 @@ async fn buddy_library_signed_out_changes_nothing_and_official_still_applies() {
         file_at(&root, &idle),
         official_webp(BuddyOfficialSlug::Orc, CohostAvatarState::Idle)
     );
-    // Back to the Golem: the bundled default, its pictures and source.
+    // Back to the Buddy: the bundled default, its pictures and source.
     use_avatar(&state, use_params("official:golem"))
         .await
         .unwrap();
@@ -1087,7 +1087,7 @@ async fn buddy_library_update_edits_the_account_and_the_buddy_follows() {
     assert_eq!(
         web.count(&format!("PATCH /api/buddy/avatars/{AVATAR}")),
         1,
-        "the Golem following its avatar is not pushed back"
+        "the Buddy following its avatar is not pushed back"
     );
 }
 
@@ -1106,7 +1106,7 @@ async fn buddy_library_delete_removes_it_everywhere_and_unlinks_the_buddy() {
     let after = persona(&state).await;
     assert_eq!(
         after.library_avatar_id, None,
-        "the Golem stays, now local only"
+        "the Buddy stays, now local only"
     );
     assert_eq!(after.images, pictures);
     assert_eq!(get(&state).await.active_avatar_id, None);

@@ -11,7 +11,7 @@ import type { EntitlementUiGate } from './entitlement-ui'
 import { VIDEORC_PREMIUM_URL } from './videorc-web-links'
 import { formatClipMarkClock } from '../../../shared/clip-marks'
 
-// Clean cut in the Golem tab (plan 119 S14, S15, S19): "Stop recording, and
+// Clean cut in the Buddy tab (plan 119 S14, S15, S19): "Stop recording, and
 // the edited version is already there." Everything here is a pure derivation
 // of the job snapshots, the Library rows and the capability block, so the
 // card, the review, the ready toast and their tests cannot disagree.

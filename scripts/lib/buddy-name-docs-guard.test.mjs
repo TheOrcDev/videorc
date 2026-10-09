@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-// Plan 170 (Phase R, step 4): the companion is Golem in the README, the docs
+// Plan 170 (Phase R, step 4): the companion is Buddy in the README, the docs
 // and the agent skills. "Orcle", in any case, may stay only where an entry
 // below says why: a value that is saved or crosses the app/web line (D22),
 // the hidden wake-word aliases until their removal after 0.9.140, or a
@@ -33,7 +33,7 @@ const ALLOWED = [
   },
   {
     file: 'docs/orcle-live.md',
-    text: 'Orcle is now the **Golem**',
+    text: 'Orcle is now the **Buddy**',
     reason: 'the stub plan 164 left so links from past plans still land'
   },
   { file: 'docs/buddy.md', text: '(plan 119 as Orcle,', reason: OLD_NAME },
@@ -44,7 +44,7 @@ const ALLOWED = [
   {
     file: 'docs/buddy.md',
     text: '`videorc.orcleTab`',
-    reason: 'the saved Golem sub-tab key; renaming it forgets the tab (D22)'
+    reason: 'the saved Buddy sub-tab key; renaming it forgets the tab (D22)'
   },
   { file: 'docs/buddy.md', text: 'The old "Orcle" spellings', reason: ALIASES },
   {
@@ -114,7 +114,7 @@ test('the old-name matcher sees every case but not a camelCase seam', () => {
   ])
 })
 
-test('README, docs and skills say Golem, outside the reasoned allow-list (plan 170 D19)', () => {
+test('README, docs and skills say Buddy, outside the reasoned allow-list (plan 170 D19)', () => {
   const files = trackedDocs()
   assert.ok(files.includes('README.md') && files.includes('docs/buddy.md'), files.join(', '))
   const used = new Set()

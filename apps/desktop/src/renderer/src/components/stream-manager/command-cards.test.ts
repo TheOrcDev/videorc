@@ -34,7 +34,7 @@ function command(patch: Partial<CohostCommand> = {}): CohostCommand {
 const flagged = (patch: Partial<CohostCommand> = {}): CohostCommand =>
   command({
     status: 'confirm',
-    message: 'Golem flagged this (harassment). Show it anyway?',
+    message: 'Buddy flagged this (harassment). Show it anyway?',
     candidates: undefined,
     target: candidates[0],
     ...patch
@@ -91,7 +91,7 @@ const byTestId = (name: string): HTMLElement | null =>
   container.querySelector<HTMLElement>(`[data-testid="${name}"]`)
 
 describe('CommandStrip (plan 140, S6 part B)', () => {
-  it('says what Golem heard and did, quietly when nothing happened', async () => {
+  it('says what Buddy heard and did, quietly when nothing happened', async () => {
     await render(command({ status: 'done', message: "Highlighted coders_x's comment." }))
     const strip = slot('command-strip')!
     expect(strip.getAttribute('role')).toBe('status')
@@ -170,7 +170,7 @@ describe('CommandCards: show a flagged comment anyway', () => {
     const onAnswer = vi.fn()
     await render(flagged(), onAnswer)
     const card = byTestId('command-confirm')!
-    expect(card.textContent).toContain('Golem flagged this (harassment). Show it anyway?')
+    expect(card.textContent).toContain('Buddy flagged this (harassment). Show it anyway?')
     expect(card.textContent).toContain('coders_x')
     expect(card.textContent).toContain('“first”')
     await act(async () =>

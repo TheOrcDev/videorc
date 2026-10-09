@@ -36,7 +36,7 @@ extraResources:
     to: background-assets/bundled
     filter:
       - '*.webp'
-  # Plan 168 D3: shipped Golem pet packs (`bundled:<name>` = `<name>/`), the
+  # Plan 168 D3: shipped Buddy pet packs (`bundled:<name>` = `<name>/`), the
   # read-only second VIDEORC_MANAGED_BUDDY_ROOTS entry. Pack files only.
   - from: resources/buddy
     to: buddy-assets/bundled

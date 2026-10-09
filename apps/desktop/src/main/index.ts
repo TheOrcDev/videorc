@@ -1121,7 +1121,7 @@ if (shouldDisableOcclusionThrottling(process.platform, electronBackgroundPolicy)
 // Plan 069 (system audio): on macOS, play renderer audio from the main process
 // instead of Chromium's out-of-process audio service. ScreenCaptureKit cannot
 // attribute that helper's audio to Videorc, so without this Library playback
-// and Golem's voice would leak into recordings with System audio on. Merged,
+// and Buddy's voice would leak into recordings with System audio on. Merged,
 // never overwritten: Chromium honours a single disable-features value.
 const disabledChromiumFeatures = mergeDisabledFeatures(
   app.commandLine.getSwitchValue(DISABLE_FEATURES_SWITCH),
@@ -2933,7 +2933,7 @@ function restoreNotesWindowOnLaunch(): void {
 
 // --- Stream Manager window (code name: comments) ------------------------------
 // The live dashboard in its own OS window (plan 055): chat, activity, stats
-// and Golem, relayed from the main renderer. Plain BrowserWindow with no
+// and Buddy, relayed from the main renderer. Plain BrowserWindow with no
 // native surface. It is NOT capture-protected (owner call, 2026-08-19: only
 // Notes is), so Studio closes it during a recording that would capture it.
 type CommentsWindowPrefs = {
@@ -3102,7 +3102,7 @@ function currentCommentsView(): CommentsViewSnapshot | null {
 }
 
 /**
- * The Golem's own relayed actions (plan 164 S-C4), checked here before they
+ * The Buddy's own relayed actions (plan 164 S-C4), checked here before they
  * reach Studio: null when `value` is not one, an Error when it is one with a
  * bad shape, else the command to relay.
  */
@@ -3123,7 +3123,7 @@ function buddyActionCommand(
       return new Error('Say something between 1 and 200 characters.')
     }
     if (state !== 'talk' && state !== 'laugh' && state !== 'think') {
-      return new Error('Golem say needs a state: talk, laugh or think.')
+      return new Error('Buddy say needs a state: talk, laugh or think.')
     }
     if (sessionId === undefined) {
       return { requestId, kind, text: trimmed, state }
@@ -3149,7 +3149,7 @@ function buddyActionCommand(
   if (kind === 'buddy-react') {
     const { reaction } = value as { reaction?: unknown }
     if (!isBuddyReactionId(reaction) || reaction === BUDDY_REACTION_NONE) {
-      return new Error('Golem react needs a reaction id.')
+      return new Error('Buddy react needs a reaction id.')
     }
     return { requestId, kind, reaction }
   }
@@ -8308,8 +8308,8 @@ function sendOAuthCallback(envelope: OAuthCallbackEnvelope): void {
   sendElectronEvent(mainWindow.webContents, 'oauth:callback-url', envelope)
 }
 
-// --- Golem deep link (plan 170 D18) ----------------------------------------
-// The shell opens the Golem tab (and the creator) on `buddy:deep-link`; main
+// --- Buddy deep link (plan 170 D18) ----------------------------------------
+// The shell opens the Buddy tab (and the creator) on `buddy:deep-link`; main
 // focuses the window and drives the library over its admin channel.
 let pendingBuddyNavigation: BuddyDeepLinkNavigation | null = null
 
@@ -8346,7 +8346,7 @@ function handleBuddyDeepLink(link: BuddyDeepLink): void {
     sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
     log: (message) => logBackend('info', message)
   }).catch((error) => {
-    logBackend('warn', `Golem deep link failed: ${errorMessage(error)}`)
+    logBackend('warn', `Buddy deep link failed: ${errorMessage(error)}`)
   })
 }
 
@@ -9027,7 +9027,7 @@ function startBackendWithRegistryLock(): void {
         : '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
-      // The Golem's avatar images (plan 164 S-A3): uploads land here through
+      // The Buddy's avatar images (plan 164 S-A3): uploads land here through
       // main, generated images through the backend (S-A6). The first root is
       // the write root; the second is the read-only bundled pet root (plan
       // 168 D3).
@@ -11165,7 +11165,7 @@ async function runSmokePreviewMotionCommand(
     return { cohost: latestCohostWindowState }
   }
 
-  // Narrow-width proof (plan 047): real geometry of the header and the Golem
+  // Narrow-width proof (plan 047): real geometry of the header and the Buddy
   // action bar, so the probe can assert nothing overflows or clips.
   if (command === 'comments-window-layout-metrics') {
     const window = commentsWindow
@@ -13539,7 +13539,7 @@ function resolveManagedBackgroundFile(fileName: string): string | null {
   return null
 }
 
-// --- Golem avatar images (plan 164 S-A3) --------------------------------------
+// --- Buddy avatar images (plan 164 S-A3) --------------------------------------
 // `userData/buddy-assets/<personaId>/<state>.<ext>`, served under the `buddy`
 // host by the relative path the persona stores. Exactly one folder and one
 // file; anything else is not found.
@@ -13568,9 +13568,9 @@ function buddyPetRoots(): BuddyPetRoots {
 // Plan 168 S-A3: Import pack… picks a page-pet folder; main sizes and copies
 // its pack files into the persona's `pets/<uuid>/`, then the backend
 // validates and decodes it (`cohost.pet.import`). A refusal removes the copy
-// and reaches the Golem tab as the backend's reason.
+// and reaches the Buddy tab as the backend's reason.
 async function pickBuddyPetFolder(personaId: unknown): Promise<BuddyPetImportResult | null> {
-  if (!isBuddyPersonaId(personaId)) throw new Error('Golem pack import needs a persona id.')
+  if (!isBuddyPersonaId(personaId)) throw new Error('Buddy pack import needs a persona id.')
   const options: Electron.OpenDialogOptions = {
     title: 'Choose a page-pet pack folder',
     buttonLabel: 'Import',
@@ -13590,7 +13590,7 @@ async function pickBuddyPetFolder(personaId: unknown): Promise<BuddyPetImportRes
   if (imported.skippedFiles.length > 0) {
     logBackend(
       'info',
-      `Golem pack import skipped ${imported.skippedFiles.length} file(s) that are not pack files.`
+      `Buddy pack import skipped ${imported.skippedFiles.length} file(s) that are not pack files.`
     )
   }
   return imported
@@ -13602,7 +13602,7 @@ function resolveManagedBuddyFile(relativePath: string): string | null {
     return resolveRegularFileInsideRoot(join(managedBuddyRoot(), parsed.personaId), parsed.file)
   }
   // Plan 170 D12: a cached account library picture,
-  // `library/<avatarId>/<state>-<tag>.png`, shown in My Golems. The file must
+  // `library/<avatarId>/<state>-<tag>.png`, shown in My Buddies. The file must
   // resolve inside the buddy root itself.
   const libraryPose = parseBuddyLibraryPosePath(relativePath)
   if (libraryPose) {
@@ -13887,9 +13887,9 @@ function registerManagedAssetProtocol(): void {
         return new Response('Not found', { status: 404 })
       }
       if (url.host === 'buddy') {
-        // Golem pictures (persona looks, drafts, the library cache) are read
+        // Buddy pictures (persona looks, drafts, the library cache) are read
         // back on a canvas by the living preview, so they allow CORS reads.
-        // Only files inside the managed Golem roots reach this branch.
+        // Only files inside the managed Buddy roots reach this branch.
         return withBuddyCorsHeader(net.fetch(pathToFileURL(resolved).toString()))
       }
       return net.fetch(pathToFileURL(resolved).toString())
@@ -14209,7 +14209,7 @@ async function openOAuthUrl(authUrl: string): Promise<void> {
 protocol.registerSchemesAsPrivileged([
   {
     scheme: MANAGED_ASSET_SCHEME,
-    // `corsEnabled` lets the Golem host answer CORS reads (see the handler):
+    // `corsEnabled` lets the Buddy host answer CORS reads (see the handler):
     // the living preview measures a still picture's pixels on a canvas, which a
     // cross-origin image without CORS taints. Plain <img>/<video> loads are
     // no-cors and unchanged.
@@ -14407,10 +14407,10 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('backgrounds:import-image', () => importBackgroundImage())
   secureIpcHandle('scheduled-streams:import-thumbnail', () => pickScheduledThumbnail())
-  // The Golem's avatar images (plan 164 S-A3): Start over removes the
+  // The Buddy's avatar images (plan 164 S-A3): Start over removes the
   // persona's folder. The look is generated by the backend (plan 169).
   secureIpcHandle('buddy-assets:remove', async (_event, personaId: unknown) => {
-    if (!isBuddyPersonaId(personaId)) throw new Error('Golem removal needs a persona id.')
+    if (!isBuddyPersonaId(personaId)) throw new Error('Buddy removal needs a persona id.')
     await removeBuddyPersona(managedBuddyRoot(), personaId)
   })
   // The overlay raster decodes the persona's own files from bytes (S-C2).
@@ -14692,7 +14692,7 @@ app.whenReady().then(async () => {
     'comments-window:cohost-action',
     (event, value: unknown): Promise<CohostState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can send Golem actions.'))
+        return Promise.reject(new Error('Only the Chat window can send Buddy actions.'))
       }
       const requestId = commentsCommandRequestId(value)
       const relay = (command: CohostActionCommand): Promise<CohostState> =>
@@ -14705,7 +14705,7 @@ app.whenReady().then(async () => {
           )
           return true
         })
-      // The Golem's own actions (plan 164 S-C4) are not chat commands: the
+      // The Buddy's own actions (plan 164 S-C4) are not chat commands: the
       // bubble goes to the overlay and the switch to the overlay layout, so
       // they need no live session. Main checks the shape before relaying.
       const buddy = buddyActionCommand(requestId, value)
@@ -14719,7 +14719,7 @@ app.whenReady().then(async () => {
         !('kind' in value) ||
         !('targetId' in value)
       ) {
-        return Promise.reject(new Error('Golem action requires a session, kind, and target.'))
+        return Promise.reject(new Error('Buddy action requires a session, kind, and target.'))
       }
       const command = value as CohostSessionActionCommand
       if (
@@ -14727,7 +14727,7 @@ app.whenReady().then(async () => {
         typeof command.targetId !== 'string' ||
         !command.targetId.trim()
       ) {
-        return Promise.reject(new Error('Golem action requires a known kind and target id.'))
+        return Promise.reject(new Error('Buddy action requires a known kind and target id.'))
       }
       // Plan 164 D7: the Say box carries its line; nothing else may.
       if (command.kind === 'say-utterance') {
@@ -14736,13 +14736,13 @@ app.whenReady().then(async () => {
           !command.text.trim() ||
           command.text.trim().length > 200
         ) {
-          return Promise.reject(new Error('Golem say requires 1 to 200 characters.'))
+          return Promise.reject(new Error('Buddy say requires 1 to 200 characters.'))
         }
         if (command.state !== undefined && !['talk', 'laugh', 'think'].includes(command.state)) {
-          return Promise.reject(new Error('Golem say requires a known avatar state.'))
+          return Promise.reject(new Error('Buddy say requires a known avatar state.'))
         }
       } else if (command.text !== undefined || command.state !== undefined) {
-        return Promise.reject(new Error('Only Golem say carries text.'))
+        return Promise.reject(new Error('Only Buddy say carries text.'))
       }
       assertLiveCommentsCommandSession(command.sessionId)
       return relay(command)
@@ -14755,14 +14755,14 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.resolve(resolution)
     }
   )
-  // Answers to Golem's voice command cards (plan 140, S6 part B), relayed like
-  // the Golem actions above: the window names the command and its answer,
+  // Answers to Buddy's voice command cards (plan 140, S6 part B), relayed like
+  // the Buddy actions above: the window names the command and its answer,
   // the MAIN renderer makes the cohost.command.* call.
   secureIpcHandle(
     'comments-window:cohost-command',
     (event, value: unknown): Promise<CohostState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can answer Golem.'))
+        return Promise.reject(new Error('Only the Chat window can answer Buddy.'))
       }
       const requestId = commentsCommandRequestId(value)
       const command = value as CohostCommandRelayCommand
@@ -14788,26 +14788,26 @@ app.whenReady().then(async () => {
     'comments-window:cohost-enable',
     (event, value: unknown): Promise<CohostWindowState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can change Golem settings.'))
+        return Promise.reject(new Error('Only the Chat window can change Buddy settings.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (!value || typeof value !== 'object' || !('enabled' in value)) {
-        return Promise.reject(new Error('Golem enable requires an enabled flag.'))
+        return Promise.reject(new Error('Buddy enable requires an enabled flag.'))
       }
       const command = value as CohostEnableCommand
       if (typeof command.enabled !== 'boolean') {
-        return Promise.reject(new Error('Golem enable requires a boolean enabled flag.'))
+        return Promise.reject(new Error('Buddy enable requires a boolean enabled flag.'))
       }
       if (command.grantConsent !== undefined && typeof command.grantConsent !== 'boolean') {
-        return Promise.reject(new Error('Golem consent grant must be a boolean.'))
+        return Promise.reject(new Error('Buddy consent grant must be a boolean.'))
       }
       if (command.listen !== undefined && typeof command.listen !== 'boolean') {
-        return Promise.reject(new Error('Golem listening must be a boolean.'))
+        return Promise.reject(new Error('Buddy listening must be a boolean.'))
       }
       // Plan 164 S-D6: the mode and the three switches, nothing else.
       const autoChat = cohostAutoChatRelayPatch(command.autoChat)
       if (autoChat === false) {
-        return Promise.reject(new Error('Golem chat mode must be off, suggest or auto.'))
+        return Promise.reject(new Error('Buddy chat mode must be off, suggest or auto.'))
       }
       return commentsCommandBroker.request(requestId, () => {
         if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
@@ -15014,7 +15014,7 @@ app.whenReady().then(async () => {
       return startScopeReconnect('twitch')
     }
   )
-  // "Reconnect Twitch to let Golem remove messages" (plan 140, S5). The
+  // "Reconnect Twitch to let Buddy remove messages" (plan 140, S5). The
   // runtime contract already admits only {requestId, platform: twitch | kick};
   // the checks below keep the handler safe on its own.
   secureIpcHandle(

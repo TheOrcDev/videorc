@@ -81,7 +81,7 @@ export interface BuddyPetCreatorController {
   readReference: (reference: BuddyPetReference) => Promise<void>
   /** Make a pilot with the (corrected) notes. */
   makePilot: (notes: BuddyPetIdentityNotes) => Promise<void>
-  /** "Looks like my Golem": make the missing sheets, then build. */
+  /** "Looks like my Buddy": make the missing sheets, then build. */
   makeSheets: () => Promise<void>
   /** Redo one atlas sheet (counts against redos), then build again. */
   redoSheet: (key: BuddyPetSheetKey) => Promise<void>

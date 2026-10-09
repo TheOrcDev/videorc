@@ -91,11 +91,11 @@ const MARGIN_RATIO = 0.25
 const BREATH_FRAME_MS = 66
 
 function errorReason(error: unknown): string {
-  return error instanceof Error ? error.message : 'The Golem pack could not be loaded.'
+  return error instanceof Error ? error.message : 'The Buddy pack could not be loaded.'
 }
 
 /**
- * The living Golem in the app (plan 168 S-D1): a canvas that plays a pet
+ * The living Buddy in the app (plan 168 S-D1): a canvas that plays a pet
  * pack (or the Still flat pack) with page-pet's behaviour
  * (`lib/buddy-pet-player.ts`) and the shared motion model. It loads its
  * frames through main (`readBuddyPetFile`), runs its frame loop only while
@@ -419,7 +419,7 @@ export function BuddyPetPreview({
     playNow(player, pending)
   }, [active])
 
-  const name = label?.trim() || pack?.name || 'Golem'
+  const name = label?.trim() || pack?.name || 'Buddy'
   const status = error ? 'error' : pack ? 'ready' : 'loading'
   const showCanvas = drawn && pack !== null
   return (

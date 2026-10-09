@@ -14,7 +14,7 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const catalog = readCatalog(repoRoot)
 
-test('the official catalog: five characters, the Golem first, every field in the app limits', () => {
+test('the official catalog: five characters, the Buddy first, every field in the app limits', () => {
   assert.deepEqual(
     catalog.map((entry) => entry.slug),
     ['golem', 'orc', 'goblin', 'pirate', 'robot']
@@ -26,7 +26,7 @@ test('the official catalog: five characters, the Golem first, every field in the
     assert.ok(entry.tagline.length > 0)
     assert.equal(/\u2014/.test(JSON.stringify(entry)), false, 'no em-dashes in copy')
   }
-  assert.equal(catalog[0].description, null, "the Golem is the owner's original art")
+  assert.equal(catalog[0].description, null, "the Buddy is the owner's original art")
   assert.equal(catalog.find((entry) => entry.slug === 'orc').name, 'Golmar')
 })
 
@@ -50,7 +50,7 @@ test('a state prompt keeps the character and changes only the face and arms', ()
   assert.throws(() => buildStatePrompt('idle'), /Unknown edit state/)
 })
 
-test('arguments: all means every generated character, never the hand-made Golem', () => {
+test('arguments: all means every generated character, never the hand-made Buddy', () => {
   assert.deepEqual(parseArgs(['--slug', 'all'], catalog).slugs, [
     'orc',
     'goblin',

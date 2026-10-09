@@ -1,4 +1,4 @@
-//! Golem pet packs (plan 168 Phase A, decisions D1 to D4).
+//! Buddy pet packs (plan 168 Phase A, decisions D1 to D4).
 //!
 //! A pet pack is a page-pet manifest v1 folder, unchanged (D1): a
 //! `manifest.json`, the sheets it names, and a Videorc sidecar `buddy.json`
@@ -164,7 +164,7 @@ impl PetRule {
 }
 
 /// Why a pack was refused: the rule it broke and one plain sentence for the
-/// Golem tab to show inline.
+/// Buddy tab to show inline.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct PetError {
@@ -772,7 +772,7 @@ pub fn parse_pack_id(pack_id: &str) -> Result<PackRef, PetError> {
     }
     Err(PetError::new(
         PetRule::PackId,
-        "The pack id is neither a pack of this Golem nor a built-in pack.",
+        "The pack id is neither a pack of this Buddy nor a built-in pack.",
     ))
 }
 
@@ -820,7 +820,7 @@ pub fn pack_dir(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result<Pa
     if !inside {
         return Err(PetError::new(
             PetRule::PackOutsideRoot,
-            "The pack folder is outside Videorc's Golem storage.",
+            "The pack folder is outside Videorc's Buddy storage.",
         ));
     }
     if !canonical.is_dir() {
@@ -1069,7 +1069,7 @@ pub fn load_pack(
     load_pack_dir(&pack_dir(roots, persona_id, pack_id)?, pack_id)
 }
 
-/// One pack as the Golem tab lists it (`cohost.pet.list`, `cohost.pet.import`).
+/// One pack as the Buddy tab lists it (`cohost.pet.list`, `cohost.pet.import`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuddyPetSummary {
@@ -1220,14 +1220,14 @@ pub fn list_packs(roots: &[PathBuf], persona_id: &str) -> (Vec<BuddyPetSummary>,
             }
             match pack_dir(roots, persona_id, &name).and_then(|dir| summarize_dir(&dir, &name)) {
                 Ok(pack) => own.push(pack),
-                Err(error) => skipped.push(format!("Golem pack {name} skipped: {error}")),
+                Err(error) => skipped.push(format!("Buddy pack {name} skipped: {error}")),
             }
         }
     }
     for pack_id in folders {
         match pack_dir(roots, persona_id, &pack_id).and_then(|dir| summarize_dir(&dir, &pack_id)) {
             Ok((_, summary)) => packs.push(summary),
-            Err(error) => skipped.push(format!("Golem pack {pack_id} skipped: {error}")),
+            Err(error) => skipped.push(format!("Buddy pack {pack_id} skipped: {error}")),
         }
     }
     own.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.pack_id.cmp(&b.1.pack_id)));
@@ -1255,7 +1255,7 @@ pub fn remove_pack(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result
 
 // --- Persona wire (plan 168 Wire shape) -----------------------------------------
 
-/// The Golem's avatar kind (D2): `still` renders the persona's state images
+/// The Buddy's avatar kind (D2): `still` renders the persona's state images
 /// (as a flat pack, S-A4), `alive` a pet pack by id. A settings row from
 /// before plan 168 loads as Still.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1284,7 +1284,7 @@ pub fn validate_avatar(avatar: &BuddyAvatar) -> Result<(), String> {
     }
 }
 
-/// What an event makes the Golem react to (D14). Closed: an unknown
+/// What an event makes the Buddy react to (D14). Closed: an unknown
 /// trigger never deserializes. Moderation flags are never a trigger (they
 /// are private and never on air).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1362,7 +1362,7 @@ fn default_breathing() -> bool {
     true
 }
 
-/// How the Golem moves on air (D10, D13, D15), per persona.
+/// How the Buddy moves on air (D10, D13, D15), per persona.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BuddyMotionSettings {
@@ -1437,7 +1437,7 @@ const STILL_IMAGE_MAX_PIXELS: u64 = 20_000_000;
 pub(crate) const BUNDLED_IDLE_WEBP: &[u8] =
     include_bytes!("../../../apps/desktop/src/renderer/src/assets/buddy/default/idle.webp");
 /// The bundled talk, laugh and think images, generated from the idle art
-/// (2026-10-09): what the default Golem shows for those states. A persona
+/// (2026-10-09): what the default Buddy shows for those states. A persona
 /// with its own idle image never borrows them; its missing states fall back
 /// to its own idle, as the renderer does.
 pub(crate) const BUNDLED_TALK_WEBP: &[u8] =
@@ -1447,7 +1447,7 @@ pub(crate) const BUNDLED_LAUGH_WEBP: &[u8] =
 pub(crate) const BUNDLED_THINK_WEBP: &[u8] =
     include_bytes!("../../../apps/desktop/src/renderer/src/assets/buddy/default/think.webp");
 
-/// The bundled image for `state` (the default Golem's).
+/// The bundled image for `state` (the default Buddy's).
 pub(crate) fn bundled_state_webp(state: crate::cohost::CohostAvatarState) -> &'static [u8] {
     use crate::cohost::CohostAvatarState;
     match state {
@@ -1466,7 +1466,7 @@ fn decode_bundled(state: crate::cohost::CohostAvatarState) -> Result<image::Rgba
             PetError::new(
                 PetRule::SheetDecode,
                 format!(
-                    "The default Golem's {} image could not be decoded: {error}",
+                    "The default Buddy's {} image could not be decoded: {error}",
                     state.as_str()
                 ),
             )
@@ -1493,9 +1493,9 @@ pub(crate) fn load_state_image(
             .iter()
             .any(|ext| file.ends_with(ext));
     if folder != persona_id || !file_ok {
-        return Err("is not one of this Golem's images".to_string());
+        return Err("is not one of this Buddy's images".to_string());
     }
-    let root = roots.first().ok_or("has no Golem storage to load from")?;
+    let root = roots.first().ok_or("has no Buddy storage to load from")?;
     let dir = root.join(folder);
     if !crate::resource_authority::canonical_path_is_within(&dir.join(file), &roots[..1]) {
         return Err("is missing".to_string());
@@ -1555,7 +1555,7 @@ fn contain_bottom(image: &image::RgbaImage, cell: u32) -> image::RgbaImage {
     out
 }
 
-/// The still Golem as a flat pack (D2), built in memory from the persona's
+/// The still Buddy as a flat pack (D2), built in memory from the persona's
 /// state images; no file is written. `idle` is the one gaze cell (`[0, 0]`,
 /// the neutral); `talk`, `laugh` and `think` are reactions, each falling
 /// back to the idle cell when the persona has no image for it (or it does
@@ -1581,7 +1581,7 @@ pub fn still_pack(
                     "The {} image {reason}; the {} shows instead.",
                     state.as_str(),
                     if state == CohostAvatarState::Idle {
-                        "default Golem"
+                        "default Buddy"
                     } else {
                         "idle image"
                     }
@@ -1606,7 +1606,7 @@ pub fn still_pack(
             load(CohostAvatarState::Think, images.think.as_deref()),
         ),
     ];
-    // The default Golem (no idle of its own) shows the bundled image for
+    // The default Buddy (no idle of its own) shows the bundled image for
     // every state it has no picture for; a persona with its own idle falls
     // back to that idle instead (the frame rects below), never to ours.
     let own_idle = idle.is_some();
@@ -2212,7 +2212,7 @@ pub(crate) mod tests {
         for bad in [
             "",
             "bundled:",
-            "bundled:Golem",
+            "bundled:Buddy",
             "bundled:../x",
             "{0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a}",
             "0b1e9f0e6c8a4c559a3f3f6d2b1c4e5a",
@@ -2260,10 +2260,10 @@ pub(crate) mod tests {
         assert_eq!(pack.pack_id, STILL_PACK_ID);
         assert_eq!(pack.sidecar.source, PetSource::Still);
         assert!(pack.notes.is_empty(), "{:?}", pack.notes);
-        assert_eq!(pack.manifest.name, "Golem");
+        assert_eq!(pack.manifest.name, "Buddy");
         assert_eq!(pack.manifest.neutral, "idle");
         // One gaze cell and three reactions, each on its own bundled cell:
-        // the default Golem talks, laughs and thinks with its own drawings.
+        // the default Buddy talks, laughs and thinks with its own drawings.
         assert_eq!(pack.manifest.gaze_count(), 1);
         assert_eq!(
             pack.manifest.reaction_ids(),

@@ -1,9 +1,9 @@
 // The Stream Manager window body is a CSS container (`@container/stream-manager`):
 // its layout follows its own width, never JS resize state (plan 055, D1).
 //   Wide    ≥ 1040px: the stats strip, then Chat beside a right pane
-//                     (Activity · Golem).
+//                     (Activity · Buddy).
 //   Medium  640–1039px: a compact strip, then one pane with a segmented
-//                     control (Chat · Activity · Golem).
+//                     control (Chat · Activity · Buddy).
 //   Narrow  < 640px (320 minimum): a one-line summary above the same segments.
 // The viewer count is never hidden while live (owner, plan 047).
 // Class strings stay literal so Tailwind's scanner generates them.

@@ -26,7 +26,7 @@ export interface BuddyMotionSectionProps {
 }
 
 /**
- * Motion (plan 168 S-D2; D10, D13, D15): how much the Golem moves, when it
+ * Motion (plan 168 S-D2; D10, D13, D15): how much the Buddy moves, when it
  * falls asleep, and whether it breathes, on stream and in the preview.
  * Saves `persona.motion` with no success toast; the preview is the
  * confirmation.
@@ -54,7 +54,7 @@ export function BuddyMotionSection({
   }
   return (
     <PanelSection
-      description="How your Golem moves on stream and here. Off keeps its poses and drops the bounce."
+      description="How your Buddy moves on stream and here. Off keeps its poses and drops the bounce."
       title="Motion"
     >
       <FieldGroup variant="grouped">

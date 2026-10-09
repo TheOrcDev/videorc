@@ -98,8 +98,8 @@ interface PrimaryAction {
 }
 
 /**
- * The Golem pet creator (plan 168 S-F5): a sub-view of the Golem tab that
- * turns one picture into an Alive Golem. Reference (the persona's idle image
+ * The Buddy pet creator (plan 168 S-F5): a sub-view of the Buddy tab that
+ * turns one picture into an Alive Buddy. Reference (the persona's idle image
  * or an upload; the identity notes as editable sentences),
  * Pilot (four poses, made again at most three times), Build (eight sheets,
  * one at a time, then the pack built on this computer), Review (every row
@@ -112,7 +112,7 @@ interface PrimaryAction {
  *
  * Plan 169 D11: the look panel's Make it Alive opens it with the kept look
  * as the reference (`persona-idle`, selected at the Reference step, its
- * "Read my Golem" focused) and the look's description shown beside it. The
+ * "Read my Buddy" focused) and the look's description shown beside it. The
  * identity call takes no description, so it is context for the streamer,
  * not sent.
  */
@@ -176,7 +176,7 @@ export function BuddyPetCreator({
   // A row redone from Review keeps Review on screen while it is made and
   // the pack is built again; a failed build shows the Build step instead.
   const [redoKey, setRedoKey] = useState<BuddyPetSheetKey | null>(null)
-  const [name, setName] = useState(() => persona?.name ?? 'Golem')
+  const [name, setName] = useState(() => persona?.name ?? 'Buddy')
 
   const working = state.pending !== null || Boolean(creation?.running)
   const rebuilding =
@@ -236,7 +236,7 @@ export function BuddyPetCreator({
   const primaryRef = useRef(primary)
   primaryRef.current = primary
   // Opened from the look (D11): the kept look is the reference, so its
-  // "Read my Golem" takes the focus once it can run.
+  // "Read my Buddy" takes the focus once it can run.
   const primaryButtonRef = useRef<HTMLButtonElement>(null)
   const focusedFromLook = useRef(false)
   const readyToRead =
@@ -277,9 +277,9 @@ export function BuddyPetCreator({
         <div className="flex items-center gap-3">
           <Button size="sm" type="button" variant="ghost" onClick={onClose}>
             <ArrowLeftIcon data-icon="inline-start" />
-            Golem
+            Buddy
           </Button>
-          <h2 className="text-sm font-semibold text-foreground">Create an Alive Golem</h2>
+          <h2 className="text-sm font-semibold text-foreground">Create an Alive Buddy</h2>
           {gate.allowance ? (
             <span
               className="ml-auto text-xs tabular-nums text-subtle"
@@ -515,15 +515,15 @@ function primaryAction({
       return {
         label:
           state.pending === 'start' || state.pending === 'identity'
-            ? 'Reading your Golem…'
-            : 'Read my Golem',
+            ? 'Reading your Buddy…'
+            : 'Read my Buddy',
         disabled: off || !reference || (!creation && !canStart) || !web,
         run: onRead,
         testId: 'buddy-pet-read'
       }
     case 'pilot':
       return {
-        label: 'Looks like my Golem',
+        label: 'Looks like my Buddy',
         disabled: off || !web,
         run: () => void controller?.makeSheets(),
         testId: 'buddy-pet-accept-pilot'
@@ -765,7 +765,7 @@ function ReferenceStep({
 
   return (
     <PanelSection
-      description="One picture of the whole body, facing you, on a transparent background. Golem reads its colours, materials and proportions from it, and every pose is drawn from it."
+      description="One picture of the whole body, facing you, on a transparent background. Buddy reads its colours, materials and proportions from it, and every pose is drawn from it."
       title="Start from one picture"
     >
       <div className="flex flex-wrap items-start gap-4">
@@ -795,7 +795,7 @@ function ReferenceStep({
             }}
           >
             <ToggleGroupItem className="px-3 text-xs" value="persona">
-              My Golem&apos;s picture
+              My Buddy&apos;s picture
             </ToggleGroupItem>
             <ToggleGroupItem className="px-3 text-xs" value="upload">
               Upload
@@ -804,8 +804,8 @@ function ReferenceStep({
           {source === 'persona' ? (
             <div className="flex flex-col gap-1">
               <p className="text-xs text-muted-foreground">
-                The idle picture from your Golem&apos;s look. To make a new look, use Create my
-                Golem in the Avatar section first.
+                The idle picture from your Buddy&apos;s look. To make a new look, use Create my
+                Buddy in the Avatar section first.
               </p>
               {lookNotes ? (
                 <p
@@ -1017,8 +1017,8 @@ function NotesStep({
           Use another picture
         </Button>
       }
-      description="What Golem read from your picture. Correct anything it got wrong: these words go with every pose it draws."
-      title="What Golem sees"
+      description="What Buddy read from your picture. Correct anything it got wrong: these words go with every pose it draws."
+      title="What Buddy sees"
     >
       <NotesEditor disabled={disabled} draft={draft} error={error} onChange={onChange} />
     </PanelSection>
@@ -1062,7 +1062,7 @@ function PilotStep({
             Make another pilot ({left} left)
           </Button>
         }
-        description="Four poses before the rest: neutral, turned left, turned right and laughing. If this looks like your Golem, every other sheet follows it."
+        description="Four poses before the rest: neutral, turned left, turned right and laughing. If this looks like your Buddy, every other sheet follows it."
         title="Pilot"
       >
         {making ? (
@@ -1086,7 +1086,7 @@ function PilotStep({
       </PanelSection>
       <PanelSection
         description="A new pilot uses these words. They are fixed once the pilot looks right."
-        title="What Golem sees"
+        title="What Buddy sees"
       >
         <NotesEditor disabled={disabled} draft={draft} error={notesError} onChange={onDraft} />
       </PanelSection>
@@ -1286,7 +1286,7 @@ function ReviewStep({
     (creation.running?.job === 'sheet' ? (creation.running.sheet as BuddyPetSheetKey) : null)
   return (
     <PanelSection
-      description="Check every row: each pose looks where its arrow points, and every pose looks like the same Golem. Redo a row that is wrong; it counts against this creation's redos."
+      description="Check every row: each pose looks where its arrow points, and every pose looks like the same Buddy. Redo a row that is wrong; it counts against this creation's redos."
       title="Review"
     >
       <div className="flex flex-wrap items-start gap-6">
@@ -1454,7 +1454,7 @@ function SaveStep({
           Back to review
         </Button>
       }
-      description="Kept on this computer. Your Golem wears it right away; switch back to Still any time."
+      description="Kept on this computer. Your Buddy wears it right away; switch back to Still any time."
       title="Name it"
     >
       <div className="flex flex-col gap-1">

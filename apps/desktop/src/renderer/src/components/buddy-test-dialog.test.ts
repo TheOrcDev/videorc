@@ -221,7 +221,7 @@ function bubble(): HTMLImageElement | null {
   return document.querySelector<HTMLImageElement>('[data-testid="buddy-test-bubble"]')
 }
 
-describe('Test your Golem (plan 169 D14)', () => {
+describe('Test your Buddy (plan 169 D14)', () => {
   it('opens big from the Test button, Idle and alive, on its own non-interactive preview', async () => {
     await render()
     expect(dialog()).toBeNull()
@@ -353,7 +353,7 @@ describe('Test your Golem (plan 169 D14)', () => {
     expect(image.classList.contains('hidden')).toBe(true)
     await press('2')
     expect(image.classList.contains('hidden')).toBe(false)
-    // The bitmap scales by the drawn Golem over its cell on the 4K canvas
+    // The bitmap scales by the drawn Buddy over its cell on the 4K canvas
     // (0.18 x 3840 = 691 px), as the stream draws the two together.
     const cell = Math.round(DEFAULT_OVERLAY_LAYOUT.buddy.horizontal.w * 3840)
     const scale = 320 / cell

@@ -300,10 +300,10 @@ pub(crate) enum WindowsD3d11SceneSourceKind {
     Image,
     CaptionOverlay,
     CommentHighlight,
-    /// The Golem's bubble (plan 168 D16; plan 164 Phase C's avatar raster
+    /// The Buddy's bubble (plan 168 D16; plan 164 Phase C's avatar raster
     /// before): between the pet and the card.
     BuddyOverlay,
-    /// The Golem's pet (plan 168 D7): one atlas cell drawn as a turned quad,
+    /// The Buddy's pet (plan 168 D7): one atlas cell drawn as a turned quad,
     /// clipped (never squashed) at the canvas edge.
     BuddySprite,
     SolidColor([u8; 4]),
@@ -346,7 +346,7 @@ pub(crate) struct WindowsD3d11ChromaKey {
     pub(crate) saturation_floor: f32,
 }
 
-/// The Golem sprite's turn (plan 168 S-B4): `SceneVs` applies the 2x2
+/// The Buddy sprite's turn (plan 168 S-B4): `SceneVs` applies the 2x2
 /// `affine` (CSS order `[a, b, c, d]`, output pixels, y down) to the quad
 /// around `pivot` (normalized output coordinates). Only `BuddySprite`
 /// layers carry one; every other layer's vertices are untouched.
@@ -598,7 +598,7 @@ pub(crate) fn build_windows_d3d11_scene_plan(
     })
 }
 
-/// The Golem sprite (plan 168 D7): the destination stays the unclamped
+/// The Buddy sprite (plan 168 D7): the destination stays the unclamped
 /// normalized square (the rasterizer clips what hangs off the canvas; other
 /// layers are squashed into it by `normalized_rect_to_pixels`), and the
 /// source rect is the atlas cell exactly. `destination` (pixels) is the
@@ -1100,7 +1100,7 @@ mod runtime {
         source_info: [f32; 4],
         solid_color: [f32; 4],
         frame_info: [f32; 4],
-        /// The Golem sprite's 2x2 turn, CSS order (plan 168 S-B4).
+        /// The Buddy sprite's 2x2 turn, CSS order (plan 168 S-B4).
         sprite_affine: [f32; 4],
         /// Sprite pivot x, y (normalized output), enabled (1), reserved.
         sprite_pivot: [f32; 4],
@@ -1988,7 +1988,7 @@ mod runtime {
                 (plan.sequence & 0x00ff_ffff) as f32,
                 0.0,
             ],
-            // Disabled (pivot.z = 0) for every layer but the Golem sprite,
+            // Disabled (pivot.z = 0) for every layer but the Buddy sprite,
             // so their vertices are computed exactly as before.
             sprite_affine: layer
                 .effects

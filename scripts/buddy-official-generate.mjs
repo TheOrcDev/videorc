@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Plan 170 Phase B: draws Videorc's official Golem characters in the house
+// Plan 170 Phase B: draws Videorc's official Buddy characters in the house
 // look through the Vercel AI Gateway and exports them for the app.
 //
 //   pnpm buddy:official --slug all                 # every generated character, all four poses
 //   pnpm buddy:official --slug orc --states laugh  # redo one pose of one character
 //   pnpm buddy:official --slug all --export-only   # re-export the committed masters
 //
-// Options: --anchor <png> (the style anchor; default: the Golem master
+// Options: --anchor <png> (the style anchor; default: the Buddy master
 // trimmed onto a 1024 px transparent canvas, the same as videorc-web
 // lib/ai/buddy-look/style-reference.png), --model <id>.
 //
@@ -14,7 +14,7 @@
 // and is never printed. Masters land in assets/brand/buddy/official/<slug>/
 // (1024 px PNG, outside every bundle); exports in
 // apps/desktop/src/renderer/src/assets/buddy/official/<slug>/ (WebP, scaled
-// so the idle is as tall as the default Golem's). The owner
+// so the idle is as tall as the default Buddy's). The owner
 // reviews every set before it ships. CI never runs this.
 
 import { execFileSync } from 'node:child_process'
@@ -118,7 +118,7 @@ async function editImage({ key, model, prompt, images }) {
 }
 
 /**
- * The character's height inside the default Golem's idle: default/idle.webp
+ * The character's height inside the default Buddy's idle: default/idle.webp
  * is 640 px tall including its 2 % pad on each side, so the buddy is 615 px.
  */
 const IDLE_EXPORT_HEIGHT = 615
@@ -144,7 +144,7 @@ function trimmedHeight(masterPath) {
  * Every pose of a character is scaled by one factor, the one that makes its
  * idle IDLE_EXPORT_HEIGHT tall, so all four stand at the same size (a
  * raised arm may make a pose taller) and every official character matches
- * the default Golem's size on stream.
+ * the default Buddy's size on stream.
  */
 function exportWebp(masterPath, webpPath, workDir, scalePercent) {
   const trimmed = join(workDir, 'export.png')

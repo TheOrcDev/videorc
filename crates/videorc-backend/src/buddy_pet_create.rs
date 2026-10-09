@@ -1,4 +1,4 @@
-//! The Golem pet creator's orchestration (plan 168 S-F4): one creation from
+//! The Buddy pet creator's orchestration (plan 168 S-F4): one creation from
 //! a reference picture to a saved pack.
 //!
 //! A creation is a web build session (`POST /api/ai/cohost/pet/builds`, D20)
@@ -18,7 +18,7 @@
 //! never run on the websocket mutation lane (10 s deadline): each RPC checks
 //! what it can at once, answers with an acceptance, and the outcome arrives
 //! as an event (`cohost.pet.identity.read`, `cohost.pet.sheet.generated`,
-//! `cohost.pet.build.progress`), as the Golem look's RPCs do. One job
+//! `cohost.pet.build.progress`), as the Buddy look's RPCs do. One job
 //! runs at a time per process. `cohost.pet.save` moves the built pack to
 //! `<root>/<personaId>/pets/<packId>/` and switches the persona to Alive;
 //! `cohost.pet.creation.cancel` removes the creation folder, and a job still
@@ -52,9 +52,9 @@ pub const COHOST_PET_BUILD_PROGRESS_EVENT: &str = "cohost.pet.build.progress";
 
 /// The request is malformed or breaks a creator rule (the message says which).
 pub const COHOST_PET_INVALID: &str = "cohost-pet-invalid";
-/// No creation with that build id for the active Golem.
+/// No creation with that build id for the active Buddy.
 pub const COHOST_PET_CREATION_NONE: &str = "cohost-pet-creation-none";
-/// A creation is already in progress for the active Golem.
+/// A creation is already in progress for the active Buddy.
 pub const COHOST_PET_CREATION_ACTIVE: &str = "cohost-pet-creation-active";
 /// Another creator job is running.
 pub const COHOST_PET_BUSY: &str = "cohost-pet-busy";
@@ -727,7 +727,7 @@ impl CreatorEnv {
         self.root.clone().ok_or_else(|| {
             BuddyPetCreatorError::new(
                 COHOST_PET_UNAVAILABLE,
-                "Golem storage is not configured in this process.",
+                "Buddy storage is not configured in this process.",
             )
         })
     }
@@ -738,13 +738,13 @@ impl CreatorEnv {
         if !self.premium {
             return Err(BuddyPetCreatorError::new(
                 "premium-required",
-                "Creating a Golem requires Videorc Premium.",
+                "Creating a Buddy requires Videorc Premium.",
             ));
         }
         let Some(token) = self.token.clone() else {
             return Err(BuddyPetCreatorError::new(
                 "signed-out",
-                "Sign in to create a Golem.",
+                "Sign in to create a Buddy.",
             ));
         };
         let Some(api) = self.api.clone() else {
@@ -872,8 +872,8 @@ fn find_creation(
         let dir = entry.path();
         match read_state(&dir) {
             Ok(state) if state.persona_id == persona_id => found.push((dir, state)),
-            Ok(_) => skipped.push(format!("Golem creation {name} belongs to another Golem.")),
-            Err(error) => skipped.push(format!("Golem creation {name} skipped: {}", error.message)),
+            Ok(_) => skipped.push(format!("Buddy creation {name} belongs to another Buddy.")),
+            Err(error) => skipped.push(format!("Buddy creation {name} skipped: {}", error.message)),
         }
     }
     found
@@ -897,7 +897,7 @@ fn open_creation(
     if state.persona_id != persona_id {
         return Err(BuddyPetCreatorError::new(
             COHOST_PET_CREATION_NONE,
-            "That creation belongs to another Golem.",
+            "That creation belongs to another Buddy.",
         ));
     }
     Ok((dir, state))
@@ -1135,7 +1135,7 @@ fn persona_idle(
             image::ImageFormat::WebP,
         )
         .map(|decoded| decoded.into_rgba8())
-        .map_err(|error| reference_error(format!("The default Golem could not be read: {error}"))),
+        .map_err(|error| reference_error(format!("The default Buddy could not be read: {error}"))),
     }
 }
 
@@ -1241,7 +1241,7 @@ pub(crate) fn pet_web_error(error: &CohostApiError, now: DateTime<Utc>) -> Buddy
                 _ => next_month_start(now),
             };
             format!(
-                "This month's Golem creations are used up. More on {}.",
+                "This month's Buddy creations are used up. More on {}.",
                 reset.format("%B %-d")
             )
         }
@@ -1274,8 +1274,8 @@ pub(crate) fn pet_web_error(error: &CohostApiError, now: DateTime<Utc>) -> Buddy
             "The model sent back a sheet that could not be read. Try again.".to_string()
         }
         "ai-gateway-error" => "The image model failed. Try again.".to_string(),
-        "unauthorized" => "Sign in again to create a Golem.".to_string(),
-        "premium-required" => "Creating a Golem requires Videorc Premium.".to_string(),
+        "unauthorized" => "Sign in again to create a Buddy.".to_string(),
+        "premium-required" => "Creating a Buddy requires Videorc Premium.".to_string(),
         "ai-user-disabled" => "Cloud AI is turned off for this account.".to_string(),
         "network" => "Could not reach Videorc. Check your connection and try again.".to_string(),
         _ => error.detail.message.clone(),
@@ -1407,12 +1407,12 @@ async fn start_in(
     .await?;
     state.emit_log(
         "info",
-        "Golem creation started (nothing counts until the first sheet after the pilot).",
+        "Buddy creation started (nothing counts until the first sheet after the pilot).",
     );
     Ok(status)
 }
 
-/// `cohost.pet.creation.status`: the active Golem's creation, or none.
+/// `cohost.pet.creation.status`: the active Buddy's creation, or none.
 pub async fn status(state: &AppState) -> Result<BuddyPetCreationStatus, BuddyPetCreatorError> {
     status_in(state, CreatorEnv::process()).await
 }
@@ -1480,7 +1480,7 @@ async fn cancel_in(
         }
     })
     .await?;
-    state.emit_log("info", "Golem creation cancelled; its files were removed.");
+    state.emit_log("info", "Buddy creation cancelled; its files were removed.");
     status_in(state, env).await
 }
 
@@ -1541,7 +1541,7 @@ async fn identity_in(
                 task_state.emit_log(
                     "warn",
                     format!(
-                        "Golem creation: reading the reference failed ({}): {}",
+                        "Buddy creation: reading the reference failed ({}): {}",
                         error.code, error.message
                     ),
                 );
@@ -1653,7 +1653,7 @@ async fn run_identity(
 
 /// `cohost.pet.sheet.generate`: one sheet as an edit of the reference with
 /// the notes (accepted at once; the outcome is `cohost.pet.sheet.generated`).
-/// The first atlas sheet accepts the pilot ("Looks like my Golem").
+/// The first atlas sheet accepts the pilot ("Looks like my Buddy").
 pub async fn generate_sheet(
     state: &AppState,
     params: CohostPetSheetGenerateParams,
@@ -1716,7 +1716,7 @@ async fn generate_sheet_in(
     let guard = env
         .shared
         .begin(&params.build_id, BuddyPetCreatorJob::Sheet, Some(key))?;
-    // "Looks like my Golem" is the first atlas sheet: the pilot is accepted
+    // "Looks like my Buddy" is the first atlas sheet: the pilot is accepted
     // before the call, so a restart resumes past it. Corrected notes for a
     // pilot are kept before the call too.
     {
@@ -1772,7 +1772,7 @@ async fn generate_sheet_in(
                 task_state.emit_log(
                     "warn",
                     format!(
-                        "Golem creation: the {key} sheet failed ({}): {}",
+                        "Buddy creation: the {key} sheet failed ({}): {}",
                         error.code, error.message
                     ),
                 );
@@ -1936,7 +1936,7 @@ async fn build_in(
         .begin(&params.build_id, BuddyPetCreatorJob::Build, None)?;
     let name = {
         let name = persona.name.trim();
-        if name.is_empty() { "Golem" } else { name }.to_string()
+        if name.is_empty() { "Buddy" } else { name }.to_string()
     };
     let input = BuildInput {
         name,
@@ -2013,7 +2013,7 @@ async fn build_in(
                 task_state.emit_log(
                     "warn",
                     format!(
-                        "Golem creation: the build was not kept ({}): {}",
+                        "Buddy creation: the build was not kept ({}): {}",
                         error.code, error.message
                     ),
                 );
@@ -2029,7 +2029,7 @@ async fn build_in(
                 }
             }
             (Ok(_), Ok(())) => {
-                task_state.emit_log("info", format!("Golem pack built: {total} poses."));
+                task_state.emit_log("info", format!("Buddy pack built: {total} poses."));
                 BuddyPetBuildProgressEvent {
                     build_id,
                     step: BuddyPetBuildProgressStep::Done,
@@ -2045,7 +2045,7 @@ async fn build_in(
                 task_state.emit_log(
                     "warn",
                     format!(
-                        "Golem pack build failed ({}): {}",
+                        "Buddy pack build failed ({}): {}",
                         failure.code, failure.message
                     ),
                 );
@@ -2187,13 +2187,13 @@ async fn save_in(
     .map_err(|error| {
         BuddyPetCreatorError::new(
             error.code(),
-            format!("The pack was saved, but the Golem could not wear it: {error}"),
+            format!("The pack was saved, but the Buddy could not wear it: {error}"),
         )
     })?;
     state.emit_log(
         "info",
         format!(
-            "Golem pack saved: {} ({} poses).",
+            "Buddy pack saved: {} ({} poses).",
             summary.name,
             summary.gaze_count as usize + summary.reactions.len()
         ),
@@ -2260,7 +2260,7 @@ fn move_pack_into_place(
     std::fs::rename(&pack, &destination)
         .map_err(|error| store_error("Could not move the pack into place", error))?;
     if let Err(error) = std::fs::remove_dir_all(dir) {
-        tracing::warn!(%error, "the finished Golem creation folder could not be removed");
+        tracing::warn!(%error, "the finished Buddy creation folder could not be removed");
     }
     Ok(summary)
 }

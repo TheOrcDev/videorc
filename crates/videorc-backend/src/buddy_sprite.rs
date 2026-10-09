@@ -1,4 +1,4 @@
-//! The Golem's pet on stream (plan 168, Phase B): one textured quad per output
+//! The Buddy's pet on stream (plan 168, Phase B): one textured quad per output
 //! leg, drawn by the CPU, Metal and D3D11 paths from a pre-scaled atlas.
 //!
 //! The backend owns the atlas (D5). The active pack (Alive, `buddy_pet::load_pack`)
@@ -18,7 +18,7 @@
 //!
 //! Per frame each leg asks the slot for a [`BuddyLegFrame`]: the atlas, the
 //! [`BuddySpriteDraw`] its [`BuddySpriteSource`] picked (Phase B: the cell for
-//! the Golem's state at rest; Phase C: the animator) and where the bubble
+//! the Buddy's state at rest; Phase C: the animator) and where the bubble
 //! anchors above the head (D16). Z order (D9): captions, the pet, the bubble,
 //! then the highlight card.
 
@@ -102,7 +102,7 @@ pub fn buddy_cell_px(rect: OverlayRect, canvas_width: u32) -> u32 {
     (rect.w * f64::from(canvas_width.max(1))).round().max(1.0) as u32
 }
 
-/// The square the Golem's cell fills on a canvas, canvas pixels `[x, y, side,
+/// The square the Buddy's cell fills on a canvas, canvas pixels `[x, y, side,
 /// side]`: the side is [`buddy_cell_px`] (at most the canvas's shorter side),
 /// centred on the rect horizontally, resting on the rect's bottom edge when the
 /// rect sits in the lower half of the canvas (else hanging from its top edge),
@@ -128,7 +128,7 @@ pub fn buddy_box(rect: OverlayRect, canvas_width: u32, canvas_height: u32) -> [f
     [left as f32, top as f32, side as f32, side as f32]
 }
 
-/// The Golem's rect for a canvas: the layout's horizontal or vertical rect by
+/// The Buddy's rect for a canvas: the layout's horizontal or vertical rect by
 /// the canvas orientation.
 pub fn buddy_rect_for_canvas(
     layout: &OverlayItemLayout,
@@ -714,7 +714,7 @@ pub(crate) fn build_atlas(
 
 // --- The source (what Phase C replaces) ------------------------------------------------
 
-/// Everything one leg knows when it draws the Golem: Phase C's gaze targets,
+/// Everything one leg knows when it draws the Buddy: Phase C's gaze targets,
 /// the box the cell fills, the clock and the leg's atlas.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)] // The animator reads the clock, leg, box, card and state; not yet the caption bar.
@@ -726,7 +726,7 @@ pub struct BuddySpriteLegContext<'a> {
     pub now_seconds: f64,
     /// The leg canvas, pixels.
     pub canvas: (u32, u32),
-    /// The Golem's placed rect for this canvas orientation (canvas units).
+    /// The Buddy's placed rect for this canvas orientation (canvas units).
     pub buddy_rect: OverlayRect,
     /// The untransformed square the cell fills, canvas pixels `[x, y, w, h]`.
     pub buddy_box: [f32; 4],
@@ -754,7 +754,7 @@ pub trait BuddySpriteSource: Send {
     fn notify(&mut self, _at: Instant, _event: crate::buddy_animator::BuddyAnimatorEvent) {}
 }
 
-/// Phase B's source: the cell for the Golem's state, at rest (identity
+/// Phase B's source: the cell for the Buddy's state, at rest (identity
 /// transform, full opacity). The neutral cell while idle; a still pack's
 /// `talk` / `laugh` / `think` image while a bubble or a pending answer shows
 /// it, as plan 164 drew it. A slot starts with it; `AppState::new` installs
@@ -792,7 +792,7 @@ pub struct BuddySpriteLayer {
     pub draw: BuddySpriteDraw,
 }
 
-/// One leg's Golem for one frame: the pet (none until its atlas exists, or
+/// One leg's Buddy for one frame: the pet (none until its atlas exists, or
 /// when the source draws nothing) and where the bubble anchors.
 #[derive(Debug, Clone)]
 pub struct BuddyLegFrame {
@@ -899,7 +899,7 @@ fn load_source(
                 Ok(pack) => pack,
                 Err(error) => {
                     notes.push(format!(
-                        "The Golem pack {pack_id} could not be loaded ({}); the still Golem shows instead.",
+                        "The Buddy pack {pack_id} could not be loaded ({}); the still Buddy shows instead.",
                         error.message
                     ));
                     crate::buddy_pet::still_pack(persona, roots).map_err(|error| error.message)?
@@ -1062,7 +1062,7 @@ impl SlotInner {
     }
 }
 
-/// The Golem's pet atlases and draws (one per process, on `AppState`).
+/// The Buddy's pet atlases and draws (one per process, on `AppState`).
 #[derive(Clone)]
 pub struct BuddySpriteSlot {
     inner: Arc<SlotInner>,
@@ -1180,7 +1180,7 @@ impl BuddySpriteSlot {
     }
 
     /// Start building atlases for legs a session is about to draw, so the
-    /// first frame has the Golem.
+    /// first frame has the Buddy.
     pub fn prepare(&self, legs: &[(BuddySpriteLeg, (u32, u32))]) {
         let mut state = self.inner.lock();
         let now = Instant::now();
@@ -1220,7 +1220,7 @@ impl BuddySpriteSlot {
         true
     }
 
-    /// The Golem on one leg for this frame. Cheap: one short lock, an `Arc`
+    /// The Buddy on one leg for this frame. Cheap: one short lock, an `Arc`
     /// clone and the source's draw; the pixels are never touched here.
     pub fn leg_frame(&self, request: BuddyLegRequest) -> BuddyLegFrame {
         let mut state = self.inner.lock();
@@ -1281,7 +1281,7 @@ impl BuddySpriteSlot {
             .spawn(move || worker_loop(weak))
         {
             Ok(_) => state.worker_running = true,
-            Err(error) => tracing::error!("Golem sprite worker could not start: {error}"),
+            Err(error) => tracing::error!("Buddy sprite worker could not start: {error}"),
         }
     }
 
@@ -1445,12 +1445,12 @@ fn run_check(
             let generation = state.generation;
             drop(state);
             for note in notes {
-                inner.log("warn", format!("Golem on stream: {note}"));
+                inner.log("warn", format!("Buddy on stream: {note}"));
             }
             inner.log(
                 "info",
                 format!(
-                    "Golem on stream: loaded pack {} ({} cells of {} px).",
+                    "Buddy on stream: loaded pack {} ({} cells of {} px).",
                     meta.pack_id, meta.unique_cells, meta.source_cell_px
                 ),
             );
@@ -1473,7 +1473,7 @@ fn run_check(
             *resident = None;
             inner.log(
                 "error",
-                format!("Golem on stream: the Golem could not be drawn: {reason}"),
+                format!("Buddy on stream: the Buddy could not be drawn: {reason}"),
             );
         }
     }
@@ -1521,7 +1521,7 @@ fn run_build(
                 drop(state);
                 inner.log(
                     "error",
-                    format!("Golem on stream: the Golem could not be drawn: {reason}"),
+                    format!("Buddy on stream: the Buddy could not be drawn: {reason}"),
                 );
                 return;
             }
@@ -1547,7 +1547,7 @@ fn run_build(
             inner.log(
                 "warn",
                 format!(
-                    "Golem on stream: the {} atlas at {requested} px cells would pass the {} MiB budget for all pet atlases; it was built at {cell_px} px.",
+                    "Buddy on stream: the {} atlas at {requested} px cells would pass the {} MiB budget for all pet atlases; it was built at {cell_px} px.",
                     leg.label(),
                     BUDDY_SPRITE_BUDGET_BYTES / (1024 * 1024)
                 ),
@@ -1561,7 +1561,7 @@ fn run_build(
             Err(reason) => inner.log(
                 "error",
                 format!(
-                    "Golem on stream: the {} atlas could not be built: {reason}",
+                    "Buddy on stream: the {} atlas could not be built: {reason}",
                     leg.label()
                 ),
             ),
@@ -1854,7 +1854,7 @@ pub(crate) mod tests {
     #[test]
     fn cell_size_is_the_rect_width_on_the_canvas_and_the_box_sits_on_the_rect() {
         let rect = overlay_snap_rect(
-            OverlayItem::Golem,
+            OverlayItem::Buddy,
             OverlayOrientation::Horizontal,
             OverlaySnap::BottomRight,
         );
@@ -1868,7 +1868,7 @@ pub(crate) mod tests {
         assert_eq!(y + h, bottom as f32);
         // A top rect hangs from its top edge; a huge rect stays on the canvas.
         let top = overlay_snap_rect(
-            OverlayItem::Golem,
+            OverlayItem::Buddy,
             OverlayOrientation::Horizontal,
             OverlaySnap::TopLeft,
         );
@@ -2081,7 +2081,7 @@ pub(crate) mod tests {
     fn the_still_pack_of_the_default_persona_builds_its_four_cells_at_the_rect_size() {
         let pack = crate::buddy_pet::still_pack(&CohostPersona::default(), &[]).unwrap();
         let meta = Arc::new(pack_meta(&pack).unwrap());
-        // idle, talk, laugh and think: the default Golem's four drawings.
+        // idle, talk, laugh and think: the default Buddy's four drawings.
         assert_eq!(meta.unique_cells, 4);
         assert_eq!(meta.neutral, "idle");
         let atlas = build_atlas(&pack, &meta, 346.min(meta.source_cell_px)).unwrap();

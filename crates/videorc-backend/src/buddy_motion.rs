@@ -1,4 +1,4 @@
-//! The Golem's body motion (plan 168, S-C1): a port of page-pet's
+//! The Buddy's body motion (plan 168, S-C1): a port of page-pet's
 //! `runtime/motion.js` (MIT, Cristian 2026) without GSAP (D6).
 //!
 //! One transform owner with five channels, `x, y, angle, skew, squash`, in

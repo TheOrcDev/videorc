@@ -47,7 +47,7 @@ export function sortLibrarySessions(
   return sort === 'oldest' ? sorted : sorted.reverse()
 }
 
-/** A session that went out live has a Golem report to open (plan 119 S3):
+/** A session that went out live has a Buddy report to open (plan 119 S3):
  * stored modes are `stream` and `record+stream`, older rows `streaming`. */
 export function hasBuddyReport(session: Pick<SessionSummary, 'mode'>): boolean {
   return session.mode.includes('stream')

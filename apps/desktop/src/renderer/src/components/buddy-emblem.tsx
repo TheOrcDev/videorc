@@ -5,8 +5,8 @@ import emblem112Url from '@/assets/buddy/buddy-emblem-112.webp'
 import { cn } from '@/lib/utils'
 
 /**
- * Golem's emblem (plans 149 and 164): the owner's stone golem in full colour, shown
- * large in two places, the Golem tab header and the Golem Live consent
+ * Buddy's emblem (plans 149 and 164): the owner's stone golem in full colour, shown
+ * large in two places, the Buddy tab header and the Buddy Live consent
  * dialog. Icon slots show the same image through `BuddyIcon`.
  *
  * Each size ships its 2× file and lets the browser scale it down on 1×
@@ -26,7 +26,7 @@ export function BuddyEmblem({
   className
 }: {
   size?: BuddyEmblemSize
-  /** Empty (decorative) by default: the text beside it names Golem. */
+  /** Empty (decorative) by default: the text beside it names Buddy. */
   alt?: string
   className?: string
 }): ReactElement {

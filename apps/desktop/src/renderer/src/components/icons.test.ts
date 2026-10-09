@@ -104,9 +104,9 @@ describe('semantic icon registry', () => {
     )
   })
 
-  // Plan 149: Golem's icon is the real emblem image, kept inside an <svg> so
+  // Plan 149: Buddy's icon is the real emblem image, kept inside an <svg> so
   // icon slots that size and lay out through `svg` selectors still apply.
-  it('draws Golem as the real emblem image inside an svg, whatever the weight', () => {
+  it('draws Buddy as the real emblem image inside an svg, whatever the weight', () => {
     const markup = (weight?: AppIconProps['weight']): string =>
       renderToStaticMarkup(createElement(BuddyIcon, { size: 16, weight, className: 'buddy' }))
     const html = markup()

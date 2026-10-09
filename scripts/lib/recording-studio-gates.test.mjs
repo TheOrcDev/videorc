@@ -35,7 +35,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'layout/source preview liveness smoke',
       'active-session live layout switch recording smoke',
       'comment highlight stream artifact smoke',
-      'living Golem pet recording artifact smoke',
+      'living Buddy pet recording artifact smoke',
       'detached Comments command relay probe',
       'backend-owned preview scene commit smoke',
       'preview main pump diagnostics smoke',

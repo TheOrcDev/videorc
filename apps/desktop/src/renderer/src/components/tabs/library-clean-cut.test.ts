@@ -183,7 +183,7 @@ function labels(items: HTMLElement[]): string[] {
 }
 
 describe('Library → Clean cut (plan 119 S14)', () => {
-  it('opens the Golem tab on an eligible recording, right after Play and the report', async () => {
+  it('opens the Buddy tab on an eligible recording, right after Play and the report', async () => {
     await render()
     const recording = await openMenu('tutorial')
     expect(labels(recording).slice(0, 2)).toEqual(['Play', 'Clean cut'])
@@ -191,7 +191,7 @@ describe('Library → Clean cut (plan 119 S14)', () => {
     expect(onOpenCleanCut).toHaveBeenCalledExactlyOnceWith('tutorial')
 
     const streamed = await openMenu('stream')
-    expect(labels(streamed).slice(0, 3)).toEqual(['Play', 'Golem report', 'Clean cut'])
+    expect(labels(streamed).slice(0, 3)).toEqual(['Play', 'Buddy report', 'Clean cut'])
     await closeMenu()
   })
 

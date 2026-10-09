@@ -581,7 +581,7 @@ pub struct CompositorArmParams {
 }
 
 /// The per-leg flags of the two layout-driven overlays (plan 164): the
-/// comment-highlight card and the Golem. Captions keep their start-time plan.
+/// comment-highlight card and the Buddy. Captions keep their start-time plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayLegFlags {
     pub highlight_on_primary: bool,
@@ -590,7 +590,7 @@ pub struct OverlayLegFlags {
     pub buddy_on_aux: bool,
 }
 
-/// Plan 164 (S-B3.4, S-C1): swap the highlight and Golem flags of the live
+/// Plan 164 (S-B3.4, S-C1): swap the highlight and Buddy flags of the live
 /// run in place when `overlays.layout.set` lands mid-session. Returns false
 /// when no run is live; the next session reads the stored layout at start.
 pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
@@ -5936,7 +5936,7 @@ struct PreparedGpuSource<'a> {
     /// Camera chroma key; forces `blend` semantics via the shader's computed
     /// alpha, so keyed camera quads set both.
     chroma_key: Option<crate::metal_compositor::GpuChromaKey>,
-    /// A turned quad (the Golem sprite, plan 168 S-B2); see `GpuSource`.
+    /// A turned quad (the Buddy sprite, plan 168 S-B2); see `GpuSource`.
     corners: Option<[[f32; 2]; 4]>,
     sampler: crate::metal_compositor::GpuSourceSampler,
     opacity: f32,
@@ -6102,7 +6102,7 @@ fn push_caption_overlay_gpu_source<'a>(
 }
 
 /// [`push_caption_overlay_gpu_source`] at a layout already decided (the
-/// Golem's bubble above the pet's head, plan 168 D16).
+/// Buddy's bubble above the pet's head, plan 168 D16).
 #[cfg(target_os = "macos")]
 fn push_overlay_gpu_source_at<'a>(
     prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
@@ -6185,7 +6185,7 @@ const _: () = assert!(
         == crate::buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE
 );
 
-/// The Golem on the Metal path (plan 168 S-B2): the pet as one turned,
+/// The Buddy on the Metal path (plan 168 S-B2): the pet as one turned,
 /// linearly sampled quad from its atlas (namespace 7, a key-addressed slot
 /// that never re-uploads when another layer appears), then the bubble
 /// (namespace 8) above its head. Captions draw before, the card after (D9).
@@ -6293,7 +6293,7 @@ fn try_gpu_compose(
 }
 
 /// Editor chrome content namespace (images use 1, captions 2, highlight 3,
-/// capture storage 4 and 5, the Golem's pet 7 and bubble 8). One key per tone: the three 2x2 bitmaps never
+/// capture storage 4 and 5, the Buddy's pet 7 and bubble 8). One key per tone: the three 2x2 bitmaps never
 /// change, so a slot that keeps its tone never re-uploads.
 #[cfg(target_os = "macos")]
 const EDITOR_CHROME_CONTENT_NAMESPACE: u64 = 6;
@@ -7661,7 +7661,7 @@ async fn publish_compositor_frame(
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
-    // Plan 168 S-B1: the pet on each leg that carries the Golem, drawn from
+    // Plan 168 S-B1: the pet on each leg that carries the Buddy, drawn from
     // the sprite slot once per composed frame at `published_at` (both legs
     // share the clock; the atlas is built off this thread).
     let buddy_now = if buddy_overlay_on_primary || buddy_overlay_on_aux {
@@ -8050,12 +8050,12 @@ struct CompositorRenderInputs<'a> {
     /// Comment-highlight card (Comments upgrade S2) — its own slot, composited
     /// after the caption bar; top vs bottom keeps them from overlapping.
     highlight_overlay: Option<&'a crate::captions::CaptionOverlay>,
-    /// The Golem's bubble raster (plan 168 D16; plan 164 Phase C's avatar
+    /// The Buddy's bubble raster (plan 168 D16; plan 164 Phase C's avatar
     /// raster before): composited after the pet and BEFORE the highlight
     /// card, so the card wins an overlap (owner answer 7: the most urgent
     /// thing on screen stays on top).
     buddy_overlay: Option<&'a crate::captions::CaptionOverlay>,
-    /// The Golem's pet on this leg and where its bubble anchors (plan 168
+    /// The Buddy's pet on this leg and where its bubble anchors (plan 168
     /// S-B1): the pet draws after the caption bar, then the bubble (D9).
     /// `None` blits a bubble inside its own rect (tests, no pet frame).
     buddy_leg: Option<&'a crate::buddy_sprite::BuddyLegFrame>,
@@ -8098,7 +8098,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
     }
 }
 
-/// Where the Golem's bubble lands: above the pet's head on a leg that has a
+/// Where the Buddy's bubble lands: above the pet's head on a leg that has a
 /// pet frame (plan 168 D16), else inside its own rect like any overlay. The
 /// tuple of `overlay_layout::overlay_blit_layout`; shared by CPU and Metal.
 fn buddy_bubble_layout(
@@ -8146,7 +8146,7 @@ fn overlay_canvas_rect(
     [left as f32, top as f32, width as f32, height as f32]
 }
 
-/// The Golem on one leg for this frame (plan 168 S-B1): the pet's draw from
+/// The Buddy on one leg for this frame (plan 168 S-B1): the pet's draw from
 /// the sprite slot plus the gaze targets Phase C reads, the highlight card's
 /// and the caption bar's blits on this canvas.
 fn buddy_leg_frame(
@@ -11684,7 +11684,7 @@ mod tests {
         // The same flags again: true, and nothing is sent.
         assert!(update_overlay_flags(&state, flags).await);
         assert!(!loop_config_rx.has_changed().unwrap());
-        // Only the Golem changes: still a swap.
+        // Only the Buddy changes: still a swap.
         assert!(
             update_overlay_flags(
                 &state,
@@ -15044,12 +15044,12 @@ mod tests {
 
     /// Parity fixture (plan 164 S-B3.5, extended by S-C3): a synthetic
     /// 1280x720 test-pattern scene with a 200x100 red highlight at rect
-    /// (0.1, 0.2, 0.25, 0.2) and a 200x100 green Golem at rect
+    /// (0.1, 0.2, 0.25, 0.2) and a 200x100 green Buddy at rect
     /// (0.15, 0.25, 0.25, 0.2), overlapping the card's bottom-right, renders
     /// through CPU and Metal; the two agree on every pixel of the two rects
     /// and their 2 px border (within ±2 per channel against each path's own
     /// clean render), and the card wins the overlap on both paths (owner
-    /// answer 7: the Golem blits under the highlight).
+    /// answer 7: the Buddy blits under the highlight).
     #[cfg(target_os = "macos")]
     #[test]
     fn cpu_and_metal_blit_the_same_overlay_rect() {
@@ -15163,7 +15163,7 @@ mod tests {
         for y in top - 2..bottom + 2 {
             for x in left - 2..right + 2 {
                 let index = y * width + x;
-                // The card is on top of the Golem where they overlap.
+                // The card is on top of the Buddy where they overlap.
                 let expected = if inside(card, x, y) {
                     Some(red_y)
                 } else if inside(avatar, x, y) {
@@ -15198,7 +15198,7 @@ mod tests {
             }
         }
         // Chroma, sampled strictly inside each overlay's exclusive area (half
-        // resolution): the card's left part, the Golem's part below the card.
+        // resolution): the card's left part, the Buddy's part below the card.
         let chroma = |rect: (usize, usize, usize, usize), u: u8, v: u8, name: &str| {
             for uv_y in (rect.1 + 2) / 2..(rect.3 - 2) / 2 {
                 for uv_x in (rect.0 + 2) / 2..(rect.2 - 2) / 2 {
@@ -16855,7 +16855,7 @@ mod tests {
     }
 }
 
-/// Plan 168 Phase B: the Golem's pet through the CPU and Metal paths.
+/// Plan 168 Phase B: the Buddy's pet through the CPU and Metal paths.
 #[cfg(test)]
 mod buddy_sprite_tests {
     use super::*;

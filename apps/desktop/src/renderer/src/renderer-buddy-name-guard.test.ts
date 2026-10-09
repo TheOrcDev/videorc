@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-// Plan 170 (Phase R, step 4): the companion is Golem everywhere. "Orcle", in
+// Plan 170 (Phase R, step 4): the companion is Buddy everywhere. "Orcle", in
 // any case, may appear in the renderer's sources only as one of the values
 // below. Each keeps the old name because it is saved on the user's machine
 // or crosses a process boundary, and an older app reads or writes it (plan
@@ -20,7 +20,7 @@ interface Allowed {
   reason: string
 }
 
-const SAVED_TAB_KEY = 'the saved Golem sub-tab key; renaming it forgets the tab'
+const SAVED_TAB_KEY = 'the saved Buddy sub-tab key; renaming it forgets the tab'
 const SAVED_PROMPT_KEY = 'the saved listen-prompt dismissal; renaming it shows the prompt again'
 const MODERATION_SOURCE =
   'the moderation source on the wire and in saved reports (strict RPC/IPC schemas)'
@@ -108,7 +108,7 @@ function scan(): Scan {
   return { offenders, used }
 }
 
-describe('the companion is Golem in the renderer (plan 170 D19, D22)', () => {
+describe('the companion is Buddy in the renderer (plan 170 D19, D22)', () => {
   const { offenders, used } = scan()
 
   it('finds the old name in every case, but not inside a camelCase seam', () => {

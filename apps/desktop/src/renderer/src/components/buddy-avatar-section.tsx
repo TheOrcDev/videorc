@@ -44,10 +44,10 @@ import type { BuddyMotionSettings } from '../../../shared/buddy-pet'
 
 export type BuddyAvatarView = 'still' | 'alive'
 
-// Test your Golem (plan 169 D14) is its own chunk, loaded on first open.
+// Test your Buddy (plan 169 D14) is its own chunk, loaded on first open.
 const BuddyTestDialog = lazy(() => import('@/components/buddy-test-dialog'))
 
-/** The preview in its zoom dialog: big enough to check the Golem out. */
+/** The preview in its zoom dialog: big enough to check the Buddy out. */
 const ZOOM_PREVIEW_PX = 420
 
 export interface BuddyAvatarSectionProps {
@@ -67,7 +67,7 @@ export interface BuddyAvatarSectionProps {
   stillPanel: ReactNode
   /** Wear a pack (persists `persona.avatar`). */
   onWear: (packId: string) => Promise<void>
-  /** The worn pack is being removed: the Golem goes back to Still, the view stays Alive. */
+  /** The worn pack is being removed: the Buddy goes back to Still, the view stays Alive. */
   onUnwear: () => Promise<void>
   /** Tests inject the folder picker; the app uses `importBuddyPetFolder`. */
   importFolder?: (personaId: string) => Promise<BuddyPetImportResult | null>
@@ -200,7 +200,7 @@ export function BuddyAvatarSection({
             setActionError(null)
             onViewChange(next).catch((failure: unknown) =>
               setActionError(
-                failure instanceof Error ? failure.message : 'Could not save your Golem.'
+                failure instanceof Error ? failure.message : 'Could not save your Buddy.'
               )
             )
           }}
@@ -212,7 +212,7 @@ export function BuddyAvatarSection({
           ))}
         </ToggleGroup>
       }
-      description="How your Golem looks on stream and here. Still is your four images; Alive is a pet pack that looks around and reacts. Importing a pack is free; creating one is part of Premium."
+      description="How your Buddy looks on stream and here. Still is your four images; Alive is a pet pack that looks around and reacts. Importing a pack is free; creating one is part of Premium."
       title="Avatar"
     >
       <div
@@ -455,7 +455,7 @@ function AlivePanel({
       ) : packs.length === 0 ? (
         <Empty className="flex-none gap-3 p-6" data-testid="buddy-alive-empty">
           <EmptyDescription className="text-xs text-subtle">
-            No living Golem yet. Import a page-pet pack, or create one from your Golem.
+            No living Buddy yet. Import a page-pet pack, or create one from your Buddy.
           </EmptyDescription>
           <EmptyContent className="max-w-none flex-row flex-wrap justify-center gap-2">
             {createButton}

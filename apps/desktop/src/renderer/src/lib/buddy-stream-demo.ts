@@ -1,7 +1,7 @@
 import type { CohostAvatarState, OverlayRect } from './backend'
 import { buddyOverlayMetrics } from './buddy-overlay'
 
-// Step 1's live demo (plan 170 D14): the Golem in the corner of a stream,
+// Step 1's live demo (plan 170 D14): the Buddy in the corner of a stream,
 // idle, then a follower arrives and it greets them, answers a question and
 // laughs. Built from the four poses and the stream's own bubble rasterizer,
 // no video file. Pure: the component plays it.

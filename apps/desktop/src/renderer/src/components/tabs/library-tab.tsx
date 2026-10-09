@@ -116,9 +116,9 @@ export function LibraryTab({
   onOpenCleanCut,
   focusSessionId = null
 }: {
-  /** "Golem report": the Golem tab, opened on this session's report. */
+  /** "Buddy report": the Buddy tab, opened on this session's report. */
   onOpenBuddyReport: (sessionId: string) => void
-  /** "Clean cut": the Golem tab's Clean cut, on this recording (plan 119 S14). */
+  /** "Clean cut": the Buddy tab's Clean cut, on this recording (plan 119 S14). */
   onOpenCleanCut: (sessionId: string) => void
   /** Clean cut's "Open in Library": the row to show and focus. */
   focusSessionId?: string | null
@@ -956,11 +956,11 @@ function RowActions({
               // The report is saved when the stream ends (plan 119 S3).
               <DropdownMenuItem disabled={live} onClick={onOpenBuddyReport}>
                 <BuddyIcon />
-                Golem report
+                Buddy report
               </DropdownMenuItem>
             ) : null}
             {isCleanCutEligible(session) ? (
-              // The Golem tab's Clean cut, on this recording (plan 119 S14).
+              // The Buddy tab's Clean cut, on this recording (plan 119 S14).
               <DropdownMenuItem onClick={onOpenCleanCut}>
                 <ClipIcon />
                 Clean cut

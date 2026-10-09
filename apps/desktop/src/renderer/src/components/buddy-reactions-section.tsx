@@ -36,7 +36,7 @@ export interface BuddyReactionsSectionProps {
 }
 
 /**
- * Reactions (plan 168 S-D2, D14): what the Golem does on stream when
+ * Reactions (plan 168 S-D2, D14): what the Buddy does on stream when
  * something happens, one row per trigger. Each row picks one of the active
  * pack's reactions, None, or the default (D14's chain: the first id the
  * pack has, else a motion-only hop), and Try plays it in the preview.
@@ -60,7 +60,7 @@ export function BuddyReactionsSection({
   }
   return (
     <PanelSection
-      description="What your Golem does on stream when something happens. Try plays it here."
+      description="What your Buddy does on stream when something happens. Try plays it here."
       title="Reactions"
     >
       {BUDDY_TRIGGER_SECTIONS.map((section) => (

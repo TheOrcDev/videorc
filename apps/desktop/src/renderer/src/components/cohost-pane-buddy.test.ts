@@ -111,7 +111,7 @@ async function press(input: HTMLInputElement, init: KeyboardEventInit = {}): Pro
   })
 }
 
-describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
+describe('CohostPane: the Buddy header (plan 164 S-C4)', () => {
   it('shows the state image, the name and the switch above the AI rows', async () => {
     await renderPane({ buddy: buddy({ state: 'laugh', bubble: 'Welcome to the horde' }) })
     const image = container.querySelector<HTMLImageElement>('[data-slot="buddy-state-image"]')
@@ -139,7 +139,7 @@ describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
     )
   })
 
-  it('is absent without a Golem, and stays alone when the AI side is off', async () => {
+  it('is absent without a Buddy, and stays alone when the AI side is off', async () => {
     await renderPane()
     expect(container.querySelector('[data-slot="buddy-header"]')).toBeNull()
     await renderPane({ buddy: buddy(), enabled: false })
@@ -151,7 +151,7 @@ describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
       gate: {
         allowed: false,
         featureId: 'live-cohost',
-        reason: 'Golem requires Videorc Premium.',
+        reason: 'Buddy requires Videorc Premium.',
         upgradeUrl: 'https://www.videorc.com/premium'
       }
     })
@@ -198,7 +198,7 @@ describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
   })
 })
 
-describe('CohostPane: the living Golem header (plan 168 S-D3)', () => {
+describe('CohostPane: the living Buddy header (plan 168 S-D3)', () => {
   function chips(): HTMLButtonElement[] {
     return [...container.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-reaction-chip"]')]
   }

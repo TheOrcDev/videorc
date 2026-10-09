@@ -68,7 +68,7 @@ fn windows_d3d11_overlay_layer_geometry(
     )
 }
 
-/// The Golem's bubble above the pet's head (plan 168 D16) as a normalized
+/// The Buddy's bubble above the pet's head (plan 168 D16) as a normalized
 /// transform and crop: the same oracle as the CPU and Metal paths
 /// (`buddy_sprite::buddy_bubble_blit_layout`).
 #[cfg(any(target_os = "windows", test))]
@@ -109,7 +109,7 @@ fn windows_d3d11_bubble_layer_geometry(
     )
 }
 
-/// The pump's Golem clock (plan 168 S-C4): `output_sequence / fps`, the
+/// The pump's Buddy clock (plan 168 S-C4): `output_sequence / fps`, the
 /// pump's own deterministic time, the first animation clock on this path.
 /// Both legs of a tick read the same value, so the animator steps once per
 /// tick and a repeated tick draws exactly what it drew.
@@ -118,7 +118,7 @@ fn windows_d3d11_buddy_clock_seconds(output_sequence: u64, render_fps: u32) -> f
     output_sequence as f64 / f64::from(render_fps.max(1))
 }
 
-/// The Golem's pet as a D3D11 layer (plan 168 S-B4): the untransformed
+/// The Buddy's pet as a D3D11 layer (plan 168 S-B4): the untransformed
 /// square (plus the draw's translation) normalized to the leg's output, the
 /// atlas cell as the crop, and the 2x2 turn about the pivot for `SceneVs`.
 /// The planner keeps the square unclamped so the edge clips, never squashes.
@@ -143,7 +143,7 @@ fn windows_d3d11_buddy_sprite_layer(
         || cell_y + cell_height > atlas.height
     {
         return Err(format!(
-            "Golem sprite revision {} has an undrawable cell",
+            "Buddy sprite revision {} has an undrawable cell",
             atlas.revision
         ));
     }
@@ -727,14 +727,14 @@ mod runtime {
     const CAPTION_AUXILIARY_SOURCE_ID: u64 = 11;
     const HIGHLIGHT_PRIMARY_SOURCE_ID: u64 = 12;
     const HIGHLIGHT_AUXILIARY_SOURCE_ID: u64 = 13;
-    /// The Golem's bubble per target (plan 168 D16).
+    /// The Buddy's bubble per target (plan 168 D16).
     const BUDDY_PRIMARY_SOURCE_ID: u64 = 14;
     const BUDDY_AUXILIARY_SOURCE_ID: u64 = 15;
-    /// The Golem's pet atlas per leg (plan 168 S-B4).
+    /// The Buddy's pet atlas per leg (plan 168 S-B4).
     const BUDDY_SPRITE_PRIMARY_SOURCE_ID: u64 = 16;
     const BUDDY_SPRITE_AUXILIARY_SOURCE_ID: u64 = 17;
     /// Overlay stacking (plan 164 owner answer 7, plan 168 D9): captions,
-    /// then the Golem (pet, then bubble), then the highlight card on top.
+    /// then the Buddy (pet, then bubble), then the highlight card on top.
     /// `build_windows_d3d11_scene_plan` sorts layers by z, so the numbers are
     /// the order.
     const CAPTION_Z_INDEX: i32 = 10;
@@ -904,10 +904,10 @@ mod runtime {
     pub(crate) struct WindowsD3d11OverlayInput {
         pub(crate) captions: CaptionOverlaySlots,
         pub(crate) highlight: CaptionOverlaySlot,
-        /// The Golem's bubble, one raster per target like captions (plan 164;
+        /// The Buddy's bubble, one raster per target like captions (plan 164;
         /// the bubble only since plan 168).
         pub(crate) buddy: CaptionOverlaySlots,
-        /// The Golem's pet atlases and draws (plan 168 S-B4).
+        /// The Buddy's pet atlases and draws (plan 168 S-B4).
         pub(crate) buddy_sprite: crate::buddy_sprite::BuddySpriteSlot,
         pub(crate) caption_on_primary: bool,
         pub(crate) caption_on_auxiliary: bool,
@@ -926,12 +926,12 @@ mod runtime {
         output_dimensions: WindowsD3d11OutputDimensions,
         safe_inset: usize,
         z_index: i32,
-        /// The Golem's bubble: anchored above the pet's head on its leg
+        /// The Buddy's bubble: anchored above the pet's head on its leg
         /// (plan 168 D16) instead of inside its rect.
         bubble_anchor: Option<crate::buddy_sprite::BuddyBubbleAnchor>,
     }
 
-    /// The Golem's pet on one leg for one tick (plan 168 S-B4).
+    /// The Buddy's pet on one leg for one tick (plan 168 S-B4).
     #[derive(Clone)]
     struct WindowsD3d11SpriteFrame {
         source_id: u64,
@@ -1708,7 +1708,7 @@ mod runtime {
         })
     }
 
-    /// The Golem on each leg for this tick (plan 168 S-B4): the pet's draw
+    /// The Buddy on each leg for this tick (plan 168 S-B4): the pet's draw
     /// and the bubble's anchor, from the sprite slot, with the gaze targets
     /// Phase C reads (the card's and the caption bar's blits on the leg).
     /// `now_seconds` is the pump's deterministic clock.
@@ -2251,7 +2251,7 @@ mod runtime {
                 pace_render_tick(frame_started_at, frame_interval);
                 continue;
             }
-            // Plan 168 S-B4 / S-C4: the Golem's pet per leg on the pump's
+            // Plan 168 S-B4 / S-C4: the Buddy's pet per leg on the pump's
             // own deterministic clock; the animator steps once per tick.
             let buddy_legs = current_buddy_legs(
                 &plan,
@@ -2604,7 +2604,7 @@ mod runtime {
         let atlas = &frame.layer.atlas;
         let row_pitch = atlas.width.checked_mul(4).ok_or_else(|| {
             format!(
-                "D3D11 Golem sprite revision {} has an overflowing row pitch",
+                "D3D11 Buddy sprite revision {} has an overflowing row pitch",
                 atlas.revision
             )
         })?;
@@ -3168,9 +3168,9 @@ mod runtime {
         );
     }
 
-    /// Plan 164 S-C3: the Golem rides its own per-target slot between the
+    /// Plan 164 S-C3: the Buddy rides its own per-target slot between the
     /// caption bar and the highlight card on both legs, and a session with no
-    /// auxiliary leg refuses an auxiliary Golem like it refuses auxiliary
+    /// auxiliary leg refuses an auxiliary Buddy like it refuses auxiliary
     /// captions. Mirrored from the CPU/Metal order by reading; this is the
     /// Windows CI gate for it.
     #[cfg(test)]
@@ -3392,7 +3392,7 @@ mod runtime {
         assert_eq!(buddy_primary.overlay.blit_rect(1280, 720), buddy_rect);
         assert_eq!(buddy_primary.safe_inset, 0);
         // The same geometry oracle as the CPU and Metal paths: the parity
-        // fixture's Golem lands at (192, 180).
+        // fixture's Buddy lands at (192, 180).
         let (transform, _) = super::windows_d3d11_overlay_layer_geometry(
             (200, 100),
             (1280, 720),
@@ -3401,7 +3401,7 @@ mod runtime {
         );
         assert_eq!(transform.x, 192.0 / 1280.0);
         assert_eq!(transform.y, 180.0 / 720.0);
-        // The scene plan keeps the stack: z sorts captions, Golem, card.
+        // The scene plan keeps the stack: z sorts captions, Buddy, card.
         let scene = build_scene_plan(
             &plan,
             1,

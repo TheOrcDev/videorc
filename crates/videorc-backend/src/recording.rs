@@ -3652,7 +3652,7 @@ async fn start_session_with_timeline(
         None
     };
     let session_caption_plan = caption_leg_plan(&params);
-    // Plan 164: the highlight card and the Golem follow the streamer's
+    // Plan 164: the highlight card and the Buddy follow the streamer's
     // per-output switches in the backend-owned overlay layout; captions keep
     // `burnTarget` (derived from the same switches by the renderer).
     let overlay_layout = crate::overlay_layout::load_overlay_layout(&state.database);
@@ -3667,7 +3667,7 @@ async fn start_session_with_timeline(
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
-    // The Golem's bubble too (plan 164): the avatar stays (its raster is the
+    // The Buddy's bubble too (plan 164): the avatar stays (its raster is the
     // renderer's, re-pushed for this session's canvases), the words do not.
     let _ = crate::buddy_overlay::clear(&state).await;
     // Burn-in needs the synthetic compositor (encoder-bridge path) and, for a
@@ -4135,7 +4135,7 @@ async fn start_session_with_timeline(
     let overlay_plans =
         crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
     // Plan 168 S-B1: the pet's atlases start building now (off this task),
-    // so the session's first frame already has the Golem.
+    // so the session's first frame already has the Buddy.
     if use_encoder_bridge {
         state.buddy_sprite.prepare(&buddy_sprite_legs(
             overlay_plans.buddy,
@@ -5665,7 +5665,7 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
-        // Golem's listen intent (plan 068): wanted before this capture, it
+        // Buddy's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
         let listen_state = state.clone();
         tokio::spawn(async move {
@@ -20323,7 +20323,7 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
 }
 
 /// Plan 164 (S-B3.4): a layout saved mid-session re-plans the highlight and
-/// Golem legs for the running session and swaps the compositor flags in
+/// Buddy legs for the running session and swaps the compositor flags in
 /// place. Captions keep their start-time plan (their burn target is a session
 /// parameter, pre-armed with its leg); the Windows D3D11 pump keeps its
 /// start-time overlay input, which is said in the log rather than hidden.
@@ -20382,7 +20382,7 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
     use_encoder_bridge && (leg_plan.0 || leg_plan.1)
 }
 
-/// The legs (and their canvases) the Golem's pet draws on in a session
+/// The legs (and their canvases) the Buddy's pet draws on in a session
 /// (plan 168 S-B1), for `BuddySpriteSlot::prepare`.
 fn buddy_sprite_legs(
     plan: crate::overlay_layout::OverlayLegPlan,
@@ -22070,7 +22070,7 @@ pub(crate) async fn observe_platform_stream(
     }
 }
 
-/// Plan 168 D14: a destination failed; the Golem reacts only when the persona
+/// Plan 168 D14: a destination failed; the Buddy reacts only when the persona
 /// chose a reaction for it (owner default: none).
 fn note_buddy_destination_failed(state: &AppState) {
     state

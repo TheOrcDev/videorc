@@ -13,9 +13,9 @@ import type {
 // of the eager renderer bundle.
 
 /**
- * Golem Live's one switch (plan 119): on means Golem reads chat AND hears you,
- * in one save; off only stops Golem joining and leaves listening as it was.
- * The Golem tab and every Comments-window way on write this one patch.
+ * Buddy Live's one switch (plan 119): on means Buddy reads chat AND hears you,
+ * in one save; off only stops Buddy joining and leaves listening as it was.
+ * The Buddy tab and every Comments-window way on write this one patch.
  */
 export function buddyLiveSettingsPatch(on: boolean): CohostSettingsPatch {
   return on ? { enabled: true, listen: true } : { enabled: false }
@@ -31,7 +31,7 @@ export const DEFAULT_COHOST_AUTO_CHAT: CohostAutoChat = {
 
 /**
  * The Stream Manager's mode control and behaviour switches (plan 164 S-D6)
- * change only those fields: the templates and cooldowns the Golem tab holds
+ * change only those fields: the templates and cooldowns the Buddy tab holds
  * ride along unchanged, so the save never drops them.
  */
 export function mergeAutoChatRelayPatch(
@@ -106,20 +106,20 @@ export function cohostErrorToastKey(state: CohostState | null): string | null {
 }
 
 export const COHOST_ERROR_TOAST_MESSAGES: Record<CohostReason, string> = {
-  'premium-required': 'Golem stopped: Videorc Premium is required.',
-  'consent-required': 'Golem stopped: cloud AI consent is off.',
-  'session-expired': 'Golem stopped: your Videorc sign-in expired.',
-  'signed-out': 'Golem stopped: sign in to Videorc to use it.',
-  'quota-exhausted': 'Golem paused: daily AI quota is used up.',
-  'server-unconfigured': 'Golem stopped: Videorc AI is unavailable right now.',
-  network: 'Golem stopped: no connection to Videorc AI.',
-  'gateway-error': 'Golem stopped: Videorc AI returned an error.'
+  'premium-required': 'Buddy stopped: Videorc Premium is required.',
+  'consent-required': 'Buddy stopped: cloud AI consent is off.',
+  'session-expired': 'Buddy stopped: your Videorc sign-in expired.',
+  'signed-out': 'Buddy stopped: sign in to Videorc to use it.',
+  'quota-exhausted': 'Buddy paused: daily AI quota is used up.',
+  'server-unconfigured': 'Buddy stopped: Videorc AI is unavailable right now.',
+  network: 'Buddy stopped: no connection to Videorc AI.',
+  'gateway-error': 'Buddy stopped: Videorc AI returned an error.'
 }
 
 /**
  * Toast copy with the server's words attached:
- * "Golem stopped: Videorc AI returned an error (ai-gateway-error: The
- * Golem tick failed on every configured model)." The HTTP status stays in
+ * "Buddy stopped: Videorc AI returned an error (ai-gateway-error: The
+ * Buddy tick failed on every configured model)." The HTTP status stays in
  * the chip tooltip — a toast is read in a second, not debugged.
  */
 export function cohostErrorToastMessage(
@@ -158,8 +158,8 @@ export function cohostErrorToast(
  * reason and no toast.
  */
 export const COHOST_STOPPED_TOAST_MESSAGES: Partial<Record<CohostReason, string>> = {
-  'premium-required': 'Golem stopped. Premium ended.',
-  'signed-out': 'Golem stopped. You signed out.'
+  'premium-required': 'Buddy stopped. Premium ended.',
+  'signed-out': 'Buddy stopped. You signed out.'
 }
 
 /**

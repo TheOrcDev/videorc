@@ -85,13 +85,13 @@ function errorMessage(error: unknown): string | undefined {
 }
 
 /**
- * The Golem tab's Clean cut tab (plan 119 S14, S19; plan 150 S7), in Settings'
+ * The Buddy tab's Clean cut tab (plan 119 S14, S19; plan 150 S7), in Settings'
  * two columns: Clean cut (the "every recording" switch, the monthly allowance
  * and, when it can't run, the one reason why) beside Recordings (the chosen
  * recording's cut with what to do next). Locked means disabled with one
  * reason: the switch and "Make a clean cut" are off while the reason shows;
  * the picker stays, because cuts already made stay reviewable. Starting needs the same sign-in, Premium and Cloud
- * AI consent as Golem Live; consent is asked here, in a dialog that names
+ * AI consent as Buddy Live; consent is asked here, in a dialog that names
  * the audio upload.
  */
 export function CleanCutCard({
@@ -564,7 +564,7 @@ function StatusActions({
   )
 }
 
-// As Golem Live's line: on is a choice, not a health state, so only
+// As Buddy Live's line: on is a choice, not a health state, so only
 // attention takes a colour.
 const AUTO_TONE: Record<CleanCutAutoStatus['kind'], string> = {
   off: 'tone-neutral',

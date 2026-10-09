@@ -199,7 +199,7 @@ describe('createBuddyLookController (plan 169 D9)', () => {
     const controller = createBuddyLookController(fake.client)
     await controller.refresh()
     fake.requestTyped.mockImplementationOnce(async () => {
-      throw Object.assign(new Error('Your Golem’s look is already being made.'), {
+      throw Object.assign(new Error('Your Buddy’s look is already being made.'), {
         code: 'cohost-avatar-busy'
       })
     })

@@ -89,8 +89,8 @@ function activeTab(slot: 'pane-tabs-narrow' | 'pane-tabs-wide'): string | null {
   return tab?.textContent?.trim().toLowerCase() ?? null
 }
 
-describe('StreamManager: a Golem removal card comes forward (plan 140, S6)', () => {
-  it('brings the Golem pane forward for a new card, then returns to where you were', async () => {
+describe('StreamManager: a Buddy removal card comes forward (plan 140, S6)', () => {
+  it('brings the Buddy pane forward for a new card, then returns to where you were', async () => {
     await render({ moderationOperations: [] })
     expect(activeTab('pane-tabs-narrow')).toBe('chat')
     expect(activeTab('pane-tabs-wide')).toBe('activity')

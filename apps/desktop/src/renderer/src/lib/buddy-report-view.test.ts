@@ -172,13 +172,13 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
   }
 }
 
-describe('Golem report copy (plan 119 S3)', () => {
+describe('Buddy report copy (plan 119 S3)', () => {
   it("says what the report holds in the website's words", () => {
     expect(BUDDY_REPORT_DESCRIPTION).toBe(
-      'Golem saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
+      'Buddy saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
     )
-    expect(BUDDY_REPORT_EMPTY).toBe('The report appears here after your first stream with Golem.')
-    expect(BUDDY_REPORT_TURN_ON).toBe('Turn on Golem to also catch questions.')
+    expect(BUDDY_REPORT_EMPTY).toBe('The report appears here after your first stream with Buddy.')
+    expect(BUDDY_REPORT_TURN_ON).toBe('Turn on Buddy to also catch questions.')
     for (const copy of [
       BUDDY_REPORT_DESCRIPTION,
       BUDDY_REPORT_EMPTY,
@@ -394,7 +394,7 @@ describe('report view', () => {
     expect(named.title).toBe('Friday stream')
   })
 
-  it('keeps moments and chat for a stream Golem missed, and says how to catch questions', () => {
+  it('keeps moments and chat for a stream Buddy missed, and says how to catch questions', () => {
     const view = buddyReportView({
       payload: payload({ report: null }),
       session: SESSION,
@@ -404,8 +404,8 @@ describe('report view', () => {
     if (view.kind !== 'buddy-off') return
     expect(view.title).toBe('Friday stream')
     expect(view.note).toEqual({
-      title: 'Golem was off for this stream.',
-      hint: 'Turn on Golem to also catch questions.'
+      title: 'Buddy was off for this stream.',
+      hint: 'Turn on Buddy to also catch questions.'
     })
     expect(view.stats).toEqual([])
     expect(view.missed).toEqual([])
@@ -424,7 +424,7 @@ describe('report view', () => {
   it('is empty before the first stream', () => {
     expect(buddyReportView({ payload: null, session: null, buddyOn: false })).toEqual({
       kind: 'empty',
-      message: 'The report appears here after your first stream with Golem.'
+      message: 'The report appears here after your first stream with Buddy.'
     })
   })
 
@@ -508,7 +508,7 @@ describe('report view', () => {
         notFound: 0
       })
     ).toBeNull()
-    // The card's view carries it; a stream Golem missed has none.
+    // The card's view carries it; a stream Buddy missed has none.
     const view = buddyReportView({
       payload: payload({ report: report({ commands: counts }) }),
       session: SESSION,

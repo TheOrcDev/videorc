@@ -246,11 +246,11 @@ export interface StreamManagerProps {
    * owned by Electron main; the Studio renderer runs the engine. */
   autoShowActivity?: boolean
   onAutoShowActivityChange?: (on: boolean) => void
-  /** Reconnect Twitch or Kick so Golem can remove messages (plan 140, S5);
+  /** Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5);
    * Electron main starts it. Rows show only while live. */
   onReconnectScopes?: (platform: ScopeReconnectPlatform) => void
   /** The live session's chat removals (plan 140, S6), relayed by Studio:
-   * row chips, and Golem's removal cards in the Golem pane. */
+   * row chips, and Buddy's removal cards in the Buddy pane. */
   moderationOperations?: readonly ModerationOperation[]
   /** "Remove from chat" asked for, before any operation answered. */
   removalRequestIds?: ReadonlySet<string>
@@ -258,9 +258,9 @@ export interface StreamManagerProps {
   removalAnsweringIds?: ReadonlySet<string>
   /** ⋯ Remove from chat on a row, or on a flagged message: a manual removal. */
   onRemoveFromChat?: (message: LiveChatMessage) => void
-  /** Remove or Cancel on a Golem removal card. */
+  /** Remove or Cancel on a Buddy removal card. */
   onAnswerRemoval?: (operation: ModerationOperation, answer: RemovalAnswer) => void
-  /** Answer Golem's open voice command (plan 140, S6 part B): pick from the
+  /** Answer Buddy's open voice command (plan 140, S6 part B): pick from the
    * chooser, or Show / Cancel a flagged highlight. */
   onAnswerCommand?: (commandId: string, answer: CommandAnswer) => void
   /** The command whose answer is on its way. */
@@ -278,10 +278,10 @@ export interface StreamManagerProps {
   cohostNudgeDismissedForever?: boolean
   /** Persisted `cohost.settings.listen` (plan 068); unknown hides its card. */
   cohostListen?: boolean
-  /** The Golem on stream (plan 164 S-C4): the pane's header shows and
+  /** The Buddy on stream (plan 164 S-C4): the pane's header shows and
    * operates it; absent hides the header. */
   cohostBuddy?: CohostWindowBuddy
-  /** A Golem action is on its way through the relay. */
+  /** A Buddy action is on its way through the relay. */
   buddyPending?: boolean
   /** Say something in the bubble (D7): ↵ talks, ⌘↵ laughs. */
   onBuddySay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
@@ -293,11 +293,11 @@ export interface StreamManagerProps {
    * control and behaviour switches; unknown hides them. */
   cohostAutoChat?: CohostAutoChat
   onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
-  /** The Golem's proposed cards (plan 164 S-D2): Send and Dismiss. */
+  /** The Buddy's proposed cards (plan 164 S-D2): Send and Dismiss. */
   onCohostUtteranceApprove?: (utterance: CohostUtterance) => void
   onCohostUtteranceDismiss?: (utterance: CohostUtterance) => void
-  /** Golem Live's one switch (plan 119), from the status popover and the
-   * nudge: on means Golem reads chat and hears you, off only stops it. */
+  /** Buddy Live's one switch (plan 119), from the status popover and the
+   * nudge: on means Buddy reads chat and hears you, off only stops it. */
   onCohostEnable?: (enabled: boolean) => void
   /** Turn listening on from the one-time card (plan 068 D3). */
   onCohostListenOn?: () => void
@@ -395,7 +395,7 @@ export function StreamManager({
   const trafficLightGutter = useTrafficLightGutter()
   const messages = useMemo(() => sortMessagesChronological(snapshot.messages), [snapshot.messages])
   // The message on stream now (plan 095, S2): the backend's live state when
-  // it has one. Chat, Activity and Golem all read this one slot.
+  // it has one. Chat, Activity and Buddy all read this one slot.
   const liveHighlightId =
     highlightState?.phase === 'live' ? (highlightState.messageId ?? null) : highlightedId
   const inHistory = viewMode?.kind === 'history'
@@ -407,7 +407,7 @@ export function StreamManager({
   const [nowMs, setNowMs] = useState(() => Date.now())
   const onAir =
     !inHistory && dashboard?.session.state !== undefined && dashboard.session.state !== 'off-air'
-  // Chat removals (plan 140, S6): each row's newest removal, and Golem's
+  // Chat removals (plan 140, S6): each row's newest removal, and Buddy's
   // cards and their result lines. History never has any.
   const removalOperations = live ? moderationOperations : NO_MODERATION_OPERATIONS
   const removals = useMemo(
@@ -415,7 +415,7 @@ export function StreamManager({
     [removalOperations]
   )
   const removalPane = removalPaneView(removalOperations, nowMs, removalAnsweringIds)
-  // Golem voice commands (plan 140, S6 part B): the strip, the chooser and
+  // Buddy voice commands (plan 140, S6 part B): the strip, the chooser and
   // the "show it anyway?" card, from the latest command. Live only.
   const command = live ? (cohostState?.command ?? null) : null
   const commandStrip = commandStripView(command, nowMs)
@@ -435,7 +435,7 @@ export function StreamManager({
     return () => clearInterval(timer)
   }, [onAir, buddyCardsActive])
 
-  // --- Golem (unchanged behaviour, moved into its own pane: D5) ---
+  // --- Buddy (unchanged behaviour, moved into its own pane: D5) ---
   const cohostSensitivity = useCohostSensitivity()
   const shownCohostState = useMemo(
     () => cohostStateForSensitivity(cohostState, cohostSensitivity),
@@ -639,7 +639,7 @@ export function StreamManager({
     setCohostExpand((value) => value + 1)
   }, [])
 
-  // A new Golem removal card brings the Golem pane forward when it sits behind
+  // A new Buddy removal card brings the Buddy pane forward when it sits behind
   // a tab, without taking focus from the composer. Once the cards and their
   // result lines are gone, the pane the streamer was on comes back, unless
   // they moved on themselves.
@@ -669,7 +669,7 @@ export function StreamManager({
     setRightPane((current) => (current === 'buddy' ? from.right : current))
   }, [buddyCardsActive])
 
-  // ⌘J focuses Golem wherever it sits; ⌘F searches chat. The pane is shown
+  // ⌘J focuses Buddy wherever it sits; ⌘F searches chat. The pane is shown
   // first, so its own focus handling lands on a visible element.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -739,8 +739,8 @@ export function StreamManager({
         )}
         data-slot="buddy-pane-header"
       >
-        <span className="shrink-0 text-xs font-medium">Golem</span>
-        {/* Whether Golem hears you (plan 068); nothing while listening is off. */}
+        <span className="shrink-0 text-xs font-medium">Buddy</span>
+        {/* Whether Buddy hears you (plan 068); nothing while listening is off. */}
         {cohostVisible ? <CohostListeningIndicator listening={cohostState?.listening} /> : null}
         <span className="flex-1" />
         <CohostStatus
@@ -758,7 +758,7 @@ export function StreamManager({
         />
       </div>
       {/* Plan 164 S-D6: the chat mode and the three behaviours. The pane's
-          enable is the mode: Off means the Golem does not join. */}
+          enable is the mode: Off means the Buddy does not join. */}
       {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
         <BuddyChatControls
           autoChat={cohostAutoChat}
@@ -767,7 +767,7 @@ export function StreamManager({
           onChange={onCohostAutoChatChange}
         />
       ) : null}
-      {/* Plan 164 S-D2: what the Golem wants to post as you (Suggest), and
+      {/* Plan 164 S-D2: what the Buddy wants to post as you (Suggest), and
           the last lines it said. */}
       {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
         <BuddyUtteranceCards
@@ -777,8 +777,8 @@ export function StreamManager({
           onDismiss={onCohostUtteranceDismiss}
         />
       ) : null}
-      {/* Plan 140, S6: what Golem heard and did, what waits for an answer
-          (the chooser, "show it anyway?"), then what Golem is about to remove
+      {/* Plan 140, S6: what Buddy heard and did, what waits for an answer
+          (the chooser, "show it anyway?"), then what Buddy is about to remove
           because you asked, and how to stop it. Above the scroll, so none of
           it scrolls away. */}
       <CommandStrip view={commandStrip} />
@@ -801,7 +801,7 @@ export function StreamManager({
         />
       ) : null}
       {/* Plan 140, S5: a quiet row per platform whose account must be
-          reconnected before Golem can remove messages there. Live only. */}
+          reconnected before Buddy can remove messages there. Live only. */}
       {live && onReconnectScopes ? (
         <RemoveMessagesReconnectRows
           platforms={removeMessagesReconnectPlatforms(snapshot.providers)}
@@ -810,7 +810,7 @@ export function StreamManager({
       ) : null}
       {/* The one-time listening card (plan 068 D3), on air or off, above the
           scroll so it never scrolls away. Same gate as the pane itself:
-          Premium, cloud-AI consent, and Golem on. */}
+          Premium, cloud-AI consent, and Buddy on. */}
       {onCohostListenOn ? (
         <CohostListenPrompt
           enabled={cohostEnabled && cohostConsented && cohostGate?.allowed === true}
@@ -879,7 +879,7 @@ export function StreamManager({
         <Empty className="border-0 p-6">
           <EmptyHeader>
             <EmptyDescription>
-              Golem listens to chat during a live stream: questions, flags and the room's mood.
+              Buddy listens to chat during a live stream: questions, flags and the room's mood.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -960,13 +960,13 @@ export function StreamManager({
               </TabsTrigger>
               {cohostPresent ? (
                 <TabsTrigger value="buddy">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={buddyUnseen} />
+                  <PaneLabel dot={cohostTone(cohostState)} label="Buddy" unseen={buddyUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>
           </Tabs>
         </div>
-        {/* At Wide: Chat on the left, Activity · Golem on the right. */}
+        {/* At Wide: Chat on the left, Activity · Buddy on the right. */}
         <div
           className={cn(
             'col-start-2 row-start-1 items-center border-b border-l border-border px-2 py-1.5',
@@ -984,7 +984,7 @@ export function StreamManager({
               </TabsTrigger>
               {cohostPresent ? (
                 <TabsTrigger value="buddy">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={buddyUnseen} />
+                  <PaneLabel dot={cohostTone(cohostState)} label="Buddy" unseen={buddyUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>

@@ -6,7 +6,7 @@ import type {
 } from '@/lib/backend'
 import { BUDDY_DEFAULT_PACK } from '@/lib/buddy-default-pack'
 
-// The Golem's comic bubble (plan 164 Phase C, D17), rasterized per output
+// The Buddy's comic bubble (plan 164 Phase C, D17), rasterized per output
 // canvas like the highlight card (`lib/comment-highlight.ts`). On stream the
 // backend draws the pet itself (plan 168 S-B1) and this module pushes the
 // bubble alone to the `buddy_overlay` slot through `buddy.overlay.set`
@@ -20,7 +20,7 @@ import { BUDDY_DEFAULT_PACK } from '@/lib/buddy-default-pack'
 //
 // Pure layout lives here (unit-tested with a fake measurer and snapshotted
 // paint logs); the OffscreenCanvas painter is a thin shell. This module rides
-// the lazy Golem chunks only (it imports the default pack); the target plan
+// the lazy Buddy chunks only (it imports the default pack); the target plan
 // the Studio needs eagerly lives in `buddy-overlay-targets.ts`.
 
 export const BUDDY_BUBBLE_MAX_LINES = 4
@@ -436,7 +436,7 @@ async function canvasToBase64Png(canvas: OffscreenCanvas): Promise<string> {
 }
 
 /**
- * Render the Golem for one output canvas to a PNG (base64, no data: prefix):
+ * Render the Buddy for one output canvas to a PNG (base64, no data: prefix):
  * the avatar in a square the width of `rect` on that canvas, the bubble
  * above it when `bubble` is set. Null when the host has no 2D canvas.
  */
@@ -549,11 +549,11 @@ export async function loadBuddyStateImage(
     try {
       const bytes = await resolved.readImage(own)
       if (bytes) return await resolved.decode(bytes)
-      resolved.warn?.(`Golem overlay: ${own} has no file; using the default ${state} image.`)
+      resolved.warn?.(`Buddy overlay: ${own} has no file; using the default ${state} image.`)
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       resolved.warn?.(
-        `Golem overlay: ${own} could not be decoded (${reason}); using the default ${state} image.`
+        `Buddy overlay: ${own} could not be decoded (${reason}); using the default ${state} image.`
       )
     }
   }

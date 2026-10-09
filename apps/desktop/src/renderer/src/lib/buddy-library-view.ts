@@ -27,7 +27,7 @@ import {
   type BuddyOfficialSlug
 } from '../../../shared/buddy-library'
 
-// "My Golems" and the four-step onboarding (plan 170 D14 to D16): pure
+// "My Buddies" and the four-step onboarding (plan 170 D14 to D16): pure
 // derivations the section, the sheet and their tests share. Every string a
 // person reads comes from `buddy-onboarding-copy.ts`.
 
@@ -67,7 +67,7 @@ export interface BuddyLibraryView {
 
 /**
  * What the persona wears as a library id before the backend's state arrives:
- * its link, else the untouched default Golem.
+ * its link, else the untouched default Buddy.
  */
 export function buddyPersonaLibraryId(
   persona: Pick<CohostPersona, 'libraryAvatarId' | 'source'> | null
@@ -149,7 +149,7 @@ export function buddyLibraryLimit(
   return capabilities?.cohost?.buddyLibrary?.limit ?? library?.limit ?? BUDDY_LIBRARY_LIMIT
 }
 
-/** No room for another Golem: the web's count when it sent one, else the cached list. */
+/** No room for another Buddy: the web's count when it sent one, else the cached list. */
 export function buddyLibraryIsFull(
   capabilities: Pick<AiCapabilities, 'cohost'> | null,
   library: Pick<BuddyLibraryState, 'limit' | 'mine'> | null
@@ -161,12 +161,12 @@ export function buddyLibraryIsFull(
 
 // --- The first-launch invitation (D16) ---------------------------------------
 
-/** Remembered per machine, like the other one-time Golem cards. */
+/** Remembered per machine, like the other one-time Buddy cards. */
 export const BUDDY_INVITATION_STORAGE_KEY = 'videorc.buddyInvitationDismissed'
 
 /**
- * "Make this Golem your own, or pick another.": only while the persona is
- * the untouched default Golem (the library says `official:golem` and the
+ * "Make this Buddy your own, or pick another.": only while the persona is
+ * the untouched default Buddy (the library says `official:golem` and the
  * persona has no link of its own) and the streamer has not closed it.
  */
 export function buddyInvitationVisible({
@@ -342,10 +342,10 @@ export interface BuddyCreateGate {
 }
 
 /**
- * Why "Create my Golem" cannot run now, or null when it can. The checks run
+ * Why "Create my Buddy" cannot run now, or null when it can. The checks run
  * in the order a streamer can fix them: the account, Premium, Cloud AI
  * consent, room in the library, a web that offers the look, then today's
- * images (a Golem is four).
+ * images (a Buddy is four).
  */
 export function buddyCreateGate({
   signedIn,

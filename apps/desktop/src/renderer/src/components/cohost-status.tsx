@@ -98,7 +98,7 @@ export function CohostStatus({
         <PopoverHeader>
           <PopoverTitle className="flex items-center gap-2 text-sm">
             <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
-            Golem
+            Buddy
           </PopoverTitle>
           <PopoverDescription>
             Groups the questions your chat is repeating and drafts a reply for each. It posts only
@@ -140,11 +140,11 @@ export function CohostStatus({
             ) : null}
           </div>
         ) : (
-          // Golem Live's one switch (plan 119): on means Golem reads chat and
-          // hears you, the same as the Golem tab's switch.
+          // Buddy Live's one switch (plan 119): on means Buddy reads chat and
+          // hears you, the same as the Buddy tab's switch.
           <div className="flex items-center gap-3">
             <Label className="min-w-0 flex-1 text-xs font-normal" htmlFor="cohost-status-enable">
-              Golem joins my streams
+              Buddy joins my streams
             </Label>
             <Switch
               checked={enabled}
@@ -232,8 +232,8 @@ export function CohostPresenceDot({
 }
 
 /**
- * Whether Golem hears the streamer (plan 068): a microphone and a few words
- * beside Golem's status, nothing at all while listening is off. The icon
+ * Whether Buddy hears the streamer (plan 068): a microphone and a few words
+ * beside Buddy's status, nothing at all while listening is off. The icon
  * carries the tone (green on, amber blocked) and the words stay chrome; in a
  * tight header only the icon shows and the words move to the tooltip.
  */

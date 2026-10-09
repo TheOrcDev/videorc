@@ -10,7 +10,7 @@ import {
 import type { StageRect } from './stage-transform'
 
 // Overlay items on the Live Scene canvas (plan 164, D15). The stage draws the
-// highlight card, the caption bar and the Golem as labelled dashed rects that
+// highlight card, the caption bar and the Buddy as labelled dashed rects that
 // drag and resize like sources; a released gesture is ONE
 // `overlays.layout.set` with the clamped rect (never the scene transaction
 // policy). Pure helpers and the commit serializer live here, unit-tested.

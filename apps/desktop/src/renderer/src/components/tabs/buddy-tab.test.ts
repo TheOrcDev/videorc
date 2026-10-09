@@ -46,7 +46,7 @@ vi.mock('@/hooks/use-clean-cut', () => ({
     subscribe: () => () => undefined
   })
 }))
-// My Golems (plan 170) has its own tests; here a marker shows where it sits,
+// My Buddies (plan 170) has its own tests; here a marker shows where it sits,
 // and the tab's tests stay fast under a loaded suite.
 vi.mock('@/components/buddy-library-section', async () => {
   const { createElement } = await import('react')
@@ -89,7 +89,7 @@ const premium = { allowed: true }
 const basic = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Golem requires Videorc Premium.',
+  reason: 'Buddy requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 
@@ -106,7 +106,7 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Golem',
+      name: 'Buddy',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -234,11 +234,11 @@ async function pressTab(id: BuddyTabId): Promise<void> {
   })
 }
 
-describe('Golem tab strip (plan 150)', () => {
+describe('Buddy tab strip (plan 150)', () => {
   it('lists five tabs like Settings and opens on Live', async () => {
     await render()
     expect(stripTabs().map((tab) => tab.textContent)).toEqual([
-      'Golem',
+      'Buddy',
       'Chat',
       'Voice',
       'Reports',
@@ -273,11 +273,11 @@ describe('Golem tab strip (plan 150)', () => {
   })
 })
 
-describe('Golem tab (plan 119 S2)', () => {
+describe('Buddy tab (plan 119 S2)', () => {
   it('leads with the creation screen, then its status and its powers', async () => {
     await render()
     const text = document.body.textContent ?? ''
-    // Plan 170 D16: My Golems leads the first tab, the creation screen under it.
+    // Plan 170 D16: My Buddies leads the first tab, the creation screen under it.
     const library = document.querySelector('[data-testid="buddy-library"]')
     const header = document.querySelector('[data-slot="buddy-header"]')
     expect(library).toBeTruthy()
@@ -288,19 +288,19 @@ describe('Golem tab (plan 119 S2)', () => {
     expect(document.getElementById('buddy-name')).toBeTruthy()
     expect(text).toContain('Joins my streams')
     expect(text).toContain('Alpha')
-    expect(text).toContain('Golem joins my streams')
+    expect(text).toContain('Buddy joins my streams')
     for (const power of BUDDY_LIVE_POWERS) {
       expect(text).toContain(power.title)
       expect(text).toContain(power.description)
     }
     expect(livePointer().textContent).toContain('Turn it on in Stream Manager')
     expect(statusLine().getAttribute('data-status')).toBe('off')
-    // Plan 164 S-D6: the Stream Manager is where the Golem is turned on, so
+    // Plan 164 S-D6: the Stream Manager is where the Buddy is turned on, so
     // the way there is always offered.
     expect(text).toContain('Open Stream Manager')
   })
 
-  it('has no switch of its own any more: the Stream Manager mode turns Golem on', async () => {
+  it('has no switch of its own any more: the Stream Manager mode turns Buddy on', async () => {
     await render()
     livePointer()
     expect(calls.setBuddyLive).not.toHaveBeenCalled()
@@ -312,8 +312,8 @@ describe('Golem tab (plan 119 S2)', () => {
   it('asks for consent in a dialog that names every cloud use, and answers it', async () => {
     await render({ consented: false, consentRequested: true })
     const dialog = document.querySelector('[role="dialog"]')
-    expect(dialog?.textContent).toContain('Turn on Golem Live?')
-    // Plan 149: Golem's emblem leads the dialog, at its large size.
+    expect(dialog?.textContent).toContain('Turn on Buddy Live?')
+    // Plan 149: Buddy's emblem leads the dialog, at its large size.
     const emblem = dialog?.querySelector('[data-slot="buddy-emblem"]')
     expect(emblem?.getAttribute('src')).toContain('buddy-emblem-112')
     expect(emblem?.getAttribute('alt')).toBe('')
@@ -328,7 +328,7 @@ describe('Golem tab (plan 119 S2)', () => {
     expect(calls.setAiConsent).not.toHaveBeenCalled()
   })
 
-  it('shows no consent dialog until Golem Live asks for one', async () => {
+  it('shows no consent dialog until Buddy Live asks for one', async () => {
     await render({ consented: false })
     expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
@@ -336,7 +336,7 @@ describe('Golem tab (plan 119 S2)', () => {
   it('asks a signed-out streamer to sign in', async () => {
     await render({ signedIn: false, gate: basic })
     const unlock = document.querySelector('[data-testid="buddy-live-unlock"]')
-    expect(unlock?.textContent).toContain('Sign in to use Golem Live, part of Videorc Premium.')
+    expect(unlock?.textContent).toContain('Sign in to use Buddy Live, part of Videorc Premium.')
     livePointer()
     await act(async () => button('Sign in').click())
     expect(calls.signIn).toHaveBeenCalledTimes(1)
@@ -345,7 +345,7 @@ describe('Golem tab (plan 119 S2)', () => {
   it('offers Premium to a Basic account', async () => {
     await render({ gate: basic })
     expect(document.querySelector('[data-testid="buddy-live-unlock"]')?.textContent).toContain(
-      'Golem requires Videorc Premium.'
+      'Buddy requires Videorc Premium.'
     )
     livePointer()
     await act(async () => button('View Premium').click())
@@ -378,11 +378,11 @@ describe('Golem tab (plan 119 S2)', () => {
     expect(calls.openCommentsWindow).toHaveBeenCalledTimes(1)
   })
 
-  it('names what needs attention when cloud AI was revoked with Golem on', async () => {
+  it('names what needs attention when cloud AI was revoked with Buddy on', async () => {
     await render({ cohost: settings({ enabled: true }), consented: false })
     expect(statusLine().getAttribute('data-status')).toBe('attention')
     expect(statusLine().textContent).toContain('Needs attention')
-    expect(statusLine().textContent).toContain("Cloud AI is off, so Golem can't read chat")
+    expect(statusLine().textContent).toContain("Cloud AI is off, so Buddy can't read chat")
   })
 })
 
@@ -396,8 +396,8 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(block.querySelector('#buddy-live-switch')).toBeNull()
     expect(block.querySelector('[data-testid="buddy-live-pointer"]')).toBeTruthy()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
-    // The three-column pitch is gone; Live lists what Golem does as rows.
-    expect(document.querySelector('ul[aria-label="What Golem Live does"]')).toBeNull()
+    // The three-column pitch is gone; Live lists what Buddy does as rows.
+    expect(document.querySelector('ul[aria-label="What Buddy Live does"]')).toBeNull()
     expect(document.querySelectorAll('[data-power-tab]')).toHaveLength(BUDDY_LIVE_POWERS.length)
   })
 
@@ -422,7 +422,7 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
 
     await render({ tab: 'chat', gate: basic })
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Golem requires Videorc Premium.'
+      'Buddy requires Videorc Premium.'
     )
     expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
     // Greetings are free (plan 164 D6): editable under the same lock.
@@ -437,19 +437,19 @@ describe('Locked means disabled, with one reason, on every tab (plan 150, D7)', 
   it('gives a signed-out streamer the same sign-in reason on Live, Chat and Voice', async () => {
     await render({ signedIn: false })
     expect(document.querySelector('[data-testid="buddy-live-unlock"]')?.textContent).toContain(
-      'Sign in to use Golem Live'
+      'Sign in to use Buddy Live'
     )
     expect((document.getElementById('cohost-listen') as HTMLButtonElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'chat' })
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Sign in to use Golem Live'
+      'Sign in to use Buddy Live'
     )
     expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'voice' })
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Sign in to use Golem Live'
+      'Sign in to use Buddy Live'
     )
     expect(document.querySelector('[data-testid="buddy-voice-commands-off"]')).toBeNull()
     expect((document.getElementById('buddy-wake-word') as HTMLButtonElement).disabled).toBe(true)
@@ -463,11 +463,11 @@ describe('Reports (plan 119 S3, plan 150)', () => {
     expect(document.getElementById('buddy-live-switch')).toBeNull()
     expect(mocked.reportAsks.at(-1)).toBeNull()
     expect(document.body.textContent).toContain(
-      'The report appears here after your first stream with Golem.'
+      'The report appears here after your first stream with Buddy.'
     )
   })
 
-  it("opens on the session Library's Golem report asked for", async () => {
+  it("opens on the session Library's Buddy report asked for", async () => {
     await render({ reportSessionId: 'stream-7' })
     expect(mocked.reportAsks.at(-1)).toBe('stream-7')
   })
@@ -487,19 +487,19 @@ describe('Cloud AI and the settings tabs (plan 119 S2, plan 150)', () => {
     expect(revoked.getAttribute('data-state')).toBe('unchecked')
     await act(async () => revoked.click())
     expect(calls.setAiConsent).toHaveBeenLastCalledWith(true)
-    // Consent alone never turns Golem on or off.
+    // Consent alone never turns Buddy on or off.
     expect(calls.setBuddyLive).not.toHaveBeenCalled()
   })
 
-  it("holds Golem's settings without a second Enable switch", async () => {
+  it("holds Buddy's settings without a second Enable switch", async () => {
     await render({ cohost: settings({ enabled: true }), tab: 'chat' })
     expect(document.getElementById('cohost-tone')).toBeTruthy()
     expect(document.getElementById('cohost-enabled')).toBeNull()
-    expect(document.body.textContent).not.toContain('Enable Golem')
+    expect(document.body.textContent).not.toContain('Enable Buddy')
   })
 })
 
-describe('Clean cut in the Golem tab (plan 119 S14)', () => {
+describe('Clean cut in the Buddy tab (plan 119 S14)', () => {
   it('is its own tab', async () => {
     await render({ tab: 'clean-cut' })
     expect(document.querySelector('[data-slot="clean-cut"]')).toBeTruthy()
@@ -530,7 +530,7 @@ describe('Clean cut in the Golem tab (plan 119 S14)', () => {
   })
 })
 
-describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
+describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
   const connectPlatformAccount = vi.fn(async () => undefined)
   const authorizeXLive = vi.fn(async () => undefined)
   const accounts = [
@@ -563,28 +563,28 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
     expect(text).toContain('Voice commands')
     expect(text).toContain('What you can say')
     for (const title of ['Highlight', 'Clear', 'Remove', 'Answer']) expect(text).toContain(title)
-    expect(text).toContain('“Golem, highlight the comment from coders X”')
+    expect(text).toContain('“Buddy, highlight the comment from coders X”')
     expect(text).toContain('“This one is toxic. Remove it from our chat.”')
     expect(text).toContain(
-      'The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+      'The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
     )
     expect(text).toContain('20 seconds')
     expect(text).toContain('At most 10 removals a minute.')
     expect(voice.querySelector('[data-testid="buddy-voice-commands-off"]')).toBeNull()
   })
 
-  it('says to turn on Golem Live first while it is off, with a way to Live', async () => {
+  it('says to turn on Buddy Live first while it is off, with a way to Live', async () => {
     await render({ tab: 'voice' })
     const off = section().querySelector('[data-testid="buddy-voice-commands-off"]') as HTMLElement
-    expect(off.textContent).toContain('Turn on Golem Live to use voice commands.')
+    expect(off.textContent).toContain('Turn on Buddy Live to use voice commands.')
     await act(async () => off.querySelector('button')!.click())
     expect(calls.onTabChange).toHaveBeenLastCalledWith('live')
   })
 
-  it('leads with one reason when Golem is locked, and disables the settings (plan 150)', async () => {
+  it('leads with one reason when Buddy is locked, and disables the settings (plan 150)', async () => {
     await render({ tab: 'voice', gate: basic })
     expect(section().querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Golem requires Videorc Premium.'
+      'Buddy requires Videorc Premium.'
     )
     expect(section().querySelector('[data-testid="buddy-voice-commands-off"]')).toBeNull()
     expect((document.getElementById('buddy-wake-word') as HTMLButtonElement).disabled).toBe(true)
@@ -623,20 +623,20 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
     // One line per row: the short status shows, the whole fix is the button's
     // name and tooltip.
     expect(rows[1].textContent).toContain('Needs access')
-    expect(rows[1].textContent).not.toContain('to let Golem remove messages')
+    expect(rows[1].textContent).not.toContain('to let Buddy remove messages')
     const reconnect = rows[1].querySelector('button')!
     expect(reconnect.textContent).toBe('Reconnect')
     expect(reconnect.getAttribute('aria-label')).toBe(
-      'Reconnect Twitch to let Golem remove messages.'
+      'Reconnect Twitch to let Buddy remove messages.'
     )
-    expect(reconnect.title).toBe('Reconnect Twitch to let Golem remove messages.')
+    expect(reconnect.title).toBe('Reconnect Twitch to let Buddy remove messages.')
     const authorize = rows[2].querySelector('button')!
     expect(rows[2].textContent).toContain('Needs access')
     expect(authorize.textContent).toBe('Authorize X Live')
     expect(authorize.getAttribute('aria-label')).toBe(
-      'Authorize X Live to let Golem remove messages.'
+      'Authorize X Live to let Buddy remove messages.'
     )
-    expect(authorize.title).toBe('Authorize X Live to let Golem remove messages.')
+    expect(authorize.title).toBe('Authorize X Live to let Buddy remove messages.')
 
     await act(async () => rows[1].querySelector('button')!.click())
     // A permission reconnect asks for every optional Twitch permission.
@@ -660,7 +660,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
       tab: 'voice'
     })
     const voice = section()
-    expect(voice.textContent).toContain('Commands need “Golem” first')
+    expect(voice.textContent).toContain('Commands need “Buddy” first')
     expect(voice.textContent).toContain('YouTube always asks you to confirm.')
     expect(voice.textContent).toContain('A removal waits 20 seconds for your answer')
     const wake = document.getElementById('buddy-wake-word') as HTMLButtonElement

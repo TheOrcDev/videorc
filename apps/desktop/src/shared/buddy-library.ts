@@ -1,4 +1,4 @@
-// The Golem library (plan 170 D1, D10, D12, D13): one account library shared
+// The Buddy library (plan 170 D1, D10, D12, D13): one account library shared
 // by videorc.com and the app, plus Videorc's official avatars. These are the
 // desktop RPC shapes (`cohost.library.*`, `crates/videorc-backend/src/cohost_library.rs`)
 // and the official catalog, which must equal
@@ -16,7 +16,7 @@ export type BuddyOfficialSlug = (typeof BUDDY_OFFICIAL_SLUGS)[number]
 
 export const BUDDY_OFFICIAL_ID_PREFIX = 'official:'
 export type BuddyOfficialId = `official:${BuddyOfficialSlug}`
-/** The bundled default Golem as a library id: what an untouched default persona wears. */
+/** The bundled default Buddy as a library id: what an untouched default persona wears. */
 export const BUDDY_DEFAULT_OFFICIAL_ID: BuddyOfficialId = 'official:golem'
 
 /** A user avatar's uuid, or `official:<slug>`. */
@@ -45,7 +45,7 @@ export interface BuddyOfficialEntry {
 }
 
 /** A catalog row: the entry plus what the image model was asked for (null
- * for the Golem, whose art is the owner's original). */
+ * for the Buddy, whose art is the owner's original). */
 export interface BuddyOfficialCatalogEntry extends BuddyOfficialEntry {
   description: string | null
 }
@@ -57,7 +57,7 @@ export const BUDDY_OFFICIAL_CATALOG: readonly BuddyOfficialCatalogEntry[] = [
   {
     slug: 'golem',
     id: 'official:golem',
-    name: 'Golem',
+    name: 'Buddy',
     kind: 'Golem',
     tagline: 'The original. Steady as stone.',
     personality:
@@ -153,11 +153,11 @@ export interface BuddyLibraryState {
   /** Newest first; null when signed out or never loaded. */
   mine: BuddyLibraryEntry[] | null
   /** What the persona is linked to (`persona.libraryAvatarId`), or
-   * `official:golem` for the untouched default; null for a Golem made only on
+   * `official:golem` for the untouched default; null for a Buddy made only on
    * this computer. */
   activeAvatarId: BuddyLibraryId | null
   /** The account's choice when it differs and sync would not apply it (a
-   * local-only Golem is never overwritten): the UI offers "Use". */
+   * local-only Buddy is never overwritten): the UI offers "Use". */
   serverActiveAvatarId: BuddyLibraryId | null
   /** The account's library cap (`BUDDY_LIBRARY_LIMIT` unless the web says otherwise). */
   limit: number
@@ -175,7 +175,7 @@ export interface CohostLibrarySyncParams {
   reason: BuddyLibrarySyncReason
 }
 
-/** `cohost.library.use`: make a library or official avatar the Golem. */
+/** `cohost.library.use`: make a library or official avatar the Buddy. */
 export interface CohostLibraryUseParams {
   avatarId: BuddyLibraryId
 }

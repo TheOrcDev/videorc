@@ -77,7 +77,7 @@ describe('buddyLibraryView (plan 170 D16)', () => {
   it('groups the official five and mine, newest first, with the active one marked', () => {
     const view = buddyLibraryView({ library: library(), persona: null })
     expect(view.official.map((card) => card.name)).toEqual([
-      'Golem',
+      'Buddy',
       'Golmar',
       'Nib',
       'Captain Barnacle',
@@ -118,7 +118,7 @@ describe('buddyLibraryView (plan 170 D16)', () => {
     expect(view.official.find((card) => card.active)?.name).toBe('Golmar')
   })
 
-  it('names the Golem picked on videorc.com when sync would not apply it', () => {
+  it('names the Buddy picked on videorc.com when sync would not apply it', () => {
     expect(
       buddyLibraryView({
         library: library({ activeAvatarId: null, serverActiveAvatarId: OLDER }),
@@ -171,7 +171,7 @@ describe('buddyLibraryView (plan 170 D16)', () => {
 })
 
 describe('the first-launch invitation (plan 170 D16)', () => {
-  it('shows only for the untouched default Golem, until dismissed', () => {
+  it('shows only for the untouched default Buddy, until dismissed', () => {
     const base = { library: { activeAvatarId: 'official:golem' }, dismissed: false }
     expect(buddyInvitationVisible({ ...base, persona: { source: 'default' } })).toBe(true)
     expect(
@@ -309,17 +309,17 @@ describe('step 4 gates (plan 170 D15)', () => {
   it('checks in the order a streamer can fix them, each with its line and actions', () => {
     expect(buddyCreateGate({ ...allowed, signedIn: false, gate: free, consented: false })).toEqual({
       kind: 'signed-out',
-      line: 'Sign in to create your Golem.',
+      line: 'Sign in to create your Buddy.',
       actions: ['sign-in']
     })
     expect(buddyCreateGate({ ...allowed, gate: free, consented: false })).toEqual({
       kind: 'premium',
-      line: 'Creating your own Golem is part of Videorc Premium.',
+      line: 'Creating your own Buddy is part of Videorc Premium.',
       actions: ['see-premium', 'start-from-ours']
     })
     expect(buddyCreateGate({ ...allowed, consented: false })).toEqual({
       kind: 'cloud-ai',
-      line: 'Allow cloud AI to create a Golem.',
+      line: 'Allow cloud AI to create a Buddy.',
       actions: ['allow-cloud-ai']
     })
     expect(
@@ -329,14 +329,14 @@ describe('step 4 gates (plan 170 D15)', () => {
       })
     ).toEqual({
       kind: 'full',
-      line: 'Your library is full (30 Golems). Delete one to make room.',
+      line: 'Your library is full (30 Buddies). Delete one to make room.',
       actions: []
     })
     expect(buddyCreateGate({ ...allowed, capabilities: caps(24, undefined, false) })?.kind).toBe(
       'unavailable'
     )
     expect(buddyCreateGate({ ...allowed, capabilities: null })?.kind).toBe('unavailable')
-    // A Golem is four images: three left is not enough.
+    // A Buddy is four images: three left is not enough.
     expect(buddyCreateGate({ ...allowed, capabilities: caps(3) })).toEqual({
       kind: 'allowance',
       line: "You've used today's images. You get more tomorrow.",
@@ -348,13 +348,13 @@ describe('step 4 gates (plan 170 D15)', () => {
   it('says why a create made nothing, in the gate words when the web named one', () => {
     expect(buddyCreateFailureLine(null)).toBeNull()
     expect(buddyCreateFailureLine({ code: 'buddy-library-full' }, 30)).toBe(
-      'Your library is full (30 Golems). Delete one to make room.'
+      'Your library is full (30 Buddies). Delete one to make room.'
     )
     expect(buddyCreateFailureLine({ code: 'quota-exhausted' })).toBe(
       "You've used today's images. You get more tomorrow."
     )
     expect(buddyCreateFailureLine({ code: 'avatar-timeout' })).toBe(
-      'Your Golem could not be drawn. Nothing was used from your allowance. Try again.'
+      'Your Buddy could not be drawn. Nothing was used from your allowance. Try again.'
     )
   })
 })

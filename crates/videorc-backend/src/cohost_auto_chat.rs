@@ -1,4 +1,4 @@
-//! The automatic chat lane (plan 164 Phase D): what the Golem says, and
+//! The automatic chat lane (plan 164 Phase D): what the Buddy says, and
 //! whether it goes to chat now, waits for the streamer's click, or only to
 //! the bubble.
 //!
@@ -48,7 +48,7 @@ impl AutoChatPass {
     }
 }
 
-/// A tick reply the Golem may send on its own (S-D3): the viewer named it.
+/// A tick reply the Buddy may send on its own (S-D3): the viewer named it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AnswerCandidate {
     pub(crate) question_id: String,
@@ -79,7 +79,7 @@ pub(crate) struct AutoChatLane {
     throttle: AutoChatThrottle,
     records: Vec<UtteranceRecord>,
     sends: u64,
-    /// `operationId`s of the Golem's own sends: `cohost_ack` never reads
+    /// `operationId`s of the Buddy's own sends: `cohost_ack` never reads
     /// their delivery as "the streamer replied" (D10).
     own_operations: HashSet<String>,
     last_auto_send_at: Option<Instant>,
@@ -213,7 +213,7 @@ impl AutoChatLane {
             };
             if self.follow_session(&message.session_id) {
                 pass.log.push(format!(
-                    "Golem greetings follow chat session {}.",
+                    "Buddy greetings follow chat session {}.",
                     message.session_id
                 ));
             }
@@ -250,7 +250,7 @@ impl AutoChatLane {
             // sent later (D4). The buckets were taken above.
             if !batches.is_empty() {
                 pass.log
-                    .push("Golem dropped waiting greetings: automatic chat is off.".to_string());
+                    .push("Buddy dropped waiting greetings: automatic chat is off.".to_string());
             }
             return pass;
         }
@@ -305,7 +305,7 @@ impl AutoChatLane {
         );
     }
 
-    /// A tick reply the viewer asked the Golem for by name (S-D3): under the
+    /// A tick reply the viewer asked the Buddy for by name (S-D3): under the
     /// answers switch, the answers cooldown and the destination's limiter.
     pub(crate) fn route_answer(
         &mut self,
@@ -324,21 +324,21 @@ impl AutoChatLane {
             .is_some_and(|last| now.saturating_duration_since(last) < cooldown)
         {
             pass.log.push(format!(
-                "Golem skipped an answer to {}: the answers cooldown is running.",
+                "Buddy skipped an answer to {}: the answers cooldown is running.",
                 candidate.question_id
             ));
             return pass;
         }
         let Some(destination_id) = candidate.destination_id else {
             pass.log.push(format!(
-                "Golem skipped an answer to {}: the question's chat row is unknown.",
+                "Buddy skipped an answer to {}: the question's chat row is unknown.",
                 candidate.question_id
             ));
             return pass;
         };
         if let Err(at) = self.throttle.admit(&destination_id, now) {
             pass.log.push(format!(
-                "Golem skipped an answer to {}: {destination_id} is rate-limited for {} s.",
+                "Buddy skipped an answer to {}: {destination_id} is rate-limited for {} s.",
                 candidate.question_id,
                 at.saturating_duration_since(now).as_secs()
             ));
@@ -552,9 +552,9 @@ pub(crate) enum ApproveRefusal {
 impl ApproveRefusal {
     pub(crate) fn message(self) -> &'static str {
         match self {
-            Self::Unknown => "That Golem card is gone.",
-            Self::NotProposed => "That Golem card was already answered.",
-            Self::Expired => "That Golem card expired.",
+            Self::Unknown => "That Buddy card is gone.",
+            Self::NotProposed => "That Buddy card was already answered.",
+            Self::Expired => "That Buddy card expired.",
         }
     }
 }

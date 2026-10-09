@@ -78,8 +78,8 @@ import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { cn } from '@/lib/utils'
 
 /**
- * The Golem pane in the Stream Manager, which only the detached Comments
- * window mounts. Its header (plan 164 S-C4) operates the Golem on stream:
+ * The Buddy pane in the Stream Manager, which only the detached Comments
+ * window mounts. Its header (plan 164 S-C4) operates the Buddy on stream:
  * the state image, the creature's name, the Show on stream switch and the
  * Say box (↵ talks, ⌘↵ laughs), free for everyone (D6). Under it the pane
  * renders the backend's `cohost.state` and nothing else: it never decides
@@ -164,7 +164,7 @@ export function CohostPane({
    * collapsed-pane question toast against what is actually on screen. */
   onOpenChange?: (open: boolean) => void
   onUpgrade?: (url: string) => void
-  /** The Golem on stream (plan 164 S-C4); null hides the header. */
+  /** The Buddy on stream (plan 164 S-C4); null hides the header. */
   buddy?: CohostWindowBuddy | null
   /** A Say is on its way through the relay. */
   sayPending?: boolean
@@ -307,7 +307,7 @@ export function CohostPane({
     return (
       <>
         {header}
-        <CohostNotice label="Golem">
+        <CohostNotice label="Buddy">
           <span className="min-w-0 flex-1 truncate" title={mode.reason}>
             {mode.reason}
           </span>
@@ -413,7 +413,7 @@ export function CohostPane({
             className="size-4 shrink-0 text-muted-foreground"
             weight="duotone"
           />
-          <span className="shrink-0 text-xs font-medium text-foreground">Golem</span>
+          <span className="shrink-0 text-xs font-medium text-foreground">Buddy</span>
           <span
             className={cn(
               'shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground',
@@ -433,7 +433,7 @@ export function CohostPane({
               ].join('\n') || undefined
             }
           >
-            {flash ?? presence.label.replace(/^Golem\s*(·\s*)?/, '')}
+            {flash ?? presence.label.replace(/^Buddy\s*(·\s*)?/, '')}
           </span>
           {presence.dots ? <CohostTypingDots fast={presence.kind === 'thinking'} /> : null}
           <span className="flex-1" />
@@ -503,7 +503,7 @@ export function CohostPane({
           ) : null}
           <Command
             ref={rootRef}
-            aria-label="Golem questions and flags"
+            aria-label="Buddy questions and flags"
             className="bg-transparent outline-none"
             shouldFilter={false}
             tabIndex={0}
@@ -712,7 +712,7 @@ export function CohostPane({
 }
 
 /**
- * The Golem on stream (plan 164 S-C4, plan 168 S-D3): the living preview at
+ * The Buddy on stream (plan 164 S-C4, plan 168 S-D3): the living preview at
  * 32 px (the pack it wears on stream, following the pointer in this window
  * and holding the frame of the state on air), the name, the bubble while
  * one is up, the Show on stream switch, and the Say box: ↵ says it talking,
@@ -864,8 +864,8 @@ export function BuddyHeader({
 }
 
 /**
- * The one-time "Golem can hear you" card (plan 068 D3) at the top of the
- * Golem pane, for someone who already runs Golem with listening off. Either
+ * The one-time "Buddy can hear you" card (plan 068 D3) at the top of the
+ * Buddy pane, for someone who already runs Buddy with listening off. Either
  * answer is final: Turn on and Not now both persist, so it never comes back.
  * A flush Alert row, not a card on a card; the words say what listening sends
  * before the streamer opts in.
@@ -875,7 +875,7 @@ export function CohostListenPrompt({
   listen,
   onTurnOn
 }: {
-  /** Golem can run here: Premium, cloud-AI consent, and Golem on. */
+  /** Buddy can run here: Premium, cloud-AI consent, and Buddy on. */
   enabled: boolean
   /** Persisted `cohost.settings.listen`; unknown never shows the card. */
   listen: boolean | undefined
@@ -889,9 +889,9 @@ export function CohostListenPrompt({
   }
   return (
     <div className="shrink-0 p-2" data-slot="cohost-listen-prompt">
-      <Alert aria-label="Golem can hear you while you're live" role="group">
+      <Alert aria-label="Buddy can hear you while you're live" role="group">
         <MicrophoneIcon aria-hidden weight="duotone" />
-        <AlertTitle className="text-xs">Golem can hear you while you&apos;re live</AlertTitle>
+        <AlertTitle className="text-xs">Buddy can hear you while you&apos;re live</AlertTitle>
         <AlertDescription className="text-xs">
           Your mic audio goes to Videorc&apos;s cloud speech-to-text to be turned into text. Videorc
           servers don&apos;t keep it. The transcript is saved with your recording on this computer.
@@ -1072,7 +1072,7 @@ function CohostSayHiList({
       <Separator />
       <p
         className="px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-subtle"
-        title="First time in your chat. Say their name and Golem takes them off."
+        title="First time in your chat. Say their name and Buddy takes them off."
       >
         Say hi
       </p>
@@ -1117,7 +1117,7 @@ function CohostSayHiList({
 
 /**
  * A recap for viewers who asked what they missed, or one the streamer
- * drafted. Post to chat pre-fills the composer and nothing else: Golem never
+ * drafted. Post to chat pre-fills the composer and nothing else: Buddy never
  * sends.
  */
 function CohostRecapCard({

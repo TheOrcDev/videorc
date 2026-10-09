@@ -52,7 +52,7 @@ async function render(
         consented,
         gate: allowed
           ? { allowed: true }
-          : { allowed: false, featureId: 'live-cohost', reason: 'Golem requires Videorc Premium.' },
+          : { allowed: false, featureId: 'live-cohost', reason: 'Buddy requires Videorc Premium.' },
         onChange
       })
     )
@@ -83,7 +83,7 @@ function dialogButton(testId: string): HTMLButtonElement {
   return button!
 }
 
-describe('Golem chat mode (plan 164 S-D6)', () => {
+describe('Buddy chat mode (plan 164 S-D6)', () => {
   it('asks for consent the first time, lands in Suggest, and remembers it', async () => {
     await render(autoChat())
     await press(modeButton('suggest'))

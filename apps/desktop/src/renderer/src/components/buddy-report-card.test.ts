@@ -198,8 +198,8 @@ function button(label: string): HTMLButtonElement {
   return match as HTMLButtonElement
 }
 
-describe('Golem report card (plan 119 S3)', () => {
-  it('shows what Golem caught in the last stream', async () => {
+describe('Buddy report card (plan 119 S3)', () => {
+  it('shows what Buddy caught in the last stream', async () => {
     await render()
     // Follows the newest stream that ended (a recording is not a stream).
     expect(mocked.asked.at(-1)).toBe('stream-1')
@@ -267,15 +267,15 @@ describe('Golem report card (plan 119 S3)', () => {
     expect(rows('moments')).toHaveLength(5)
   })
 
-  it('keeps moments and chat for a stream Golem was off for', async () => {
+  it('keeps moments and chat for a stream Buddy was off for', async () => {
     await render({
       buddyOn: false,
       report: { payload: payload({ report: null }), loading: false, error: null }
     })
     expect(card().getAttribute('data-state')).toBe('buddy-off')
     const note = document.querySelector('[data-testid="buddy-report-off"]')?.textContent
-    expect(note).toContain('Golem was off for this stream.')
-    expect(note).toContain('Turn on Golem to also catch questions.')
+    expect(note).toContain('Buddy was off for this stream.')
+    expect(note).toContain('Turn on Buddy to also catch questions.')
     expect(document.querySelector('[data-slot="buddy-report-stats"]')).toBeNull()
     expect(rows('moments')).toHaveLength(3)
     expect(document.querySelector('[data-slot="buddy-report-stream"]')?.textContent).toContain(
@@ -287,7 +287,7 @@ describe('Golem report card (plan 119 S3)', () => {
     await render({ sessions: [], report: { payload: null, loading: false, error: null } })
     expect(mocked.asked.at(-1)).toBeNull()
     expect(card().getAttribute('data-state')).toBe('empty')
-    expect(text()).toContain('The report appears here after your first stream with Golem.')
+    expect(text()).toContain('The report appears here after your first stream with Buddy.')
     expect(document.querySelector('[aria-label="Stream"]')).toBeNull()
   })
 
@@ -391,12 +391,12 @@ describe('Reports tab layout (plan 150 S6)', () => {
     )
   })
 
-  it('names the empty tab before any stream with Golem', async () => {
+  it('names the empty tab before any stream with Buddy', async () => {
     await render({ report: { payload: null, loading: false, error: null }, sessions: [] })
     const empty = document.querySelector('[data-slot="buddy-report-empty"]')
     expect(empty?.textContent).toContain('No stream reports yet')
     expect(empty?.textContent).toContain(
-      'The report appears here after your first stream with Golem.'
+      'The report appears here after your first stream with Buddy.'
     )
   })
 

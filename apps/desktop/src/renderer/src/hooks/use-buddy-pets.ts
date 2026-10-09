@@ -4,7 +4,7 @@ import { BackendClient } from '@/backendClient'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { BuddyPetSummary } from '@/lib/backend'
 
-/** The persona's pet packs as the Golem tab sees them (plan 168 S-D2). */
+/** The persona's pet packs as the Buddy tab sees them (plan 168 S-D2). */
 export interface BuddyPets {
   /** Null until the first list arrives (offline, or still asking). */
   packs: BuddyPetSummary[] | null
@@ -18,7 +18,7 @@ export interface BuddyPets {
 const NOT_CONNECTED = 'Videorc is still connecting. Try again in a moment.'
 
 /**
- * `cohost.pet.list` and `cohost.pet.remove` for the Golem tab. Like the
+ * `cohost.pet.list` and `cohost.pet.remove` for the Buddy tab. Like the
  * avatar generator (`use-buddy-avatar.ts`), the tab opens its own backend
  * client while mounted, so the pack list adds nothing to the shell.
  */
@@ -52,7 +52,7 @@ export function useBuddyPets(): BuddyPets {
       setPacks(await client.requestTyped('cohost.pet.list'))
       setError(null)
     } catch (failure: unknown) {
-      setError(failure instanceof Error ? failure.message : 'Could not list the Golem packs.')
+      setError(failure instanceof Error ? failure.message : 'Could not list the Buddy packs.')
     }
   }, [client])
 

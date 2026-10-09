@@ -19,9 +19,9 @@ import type { BuddyOfficialSlug, BuddyPoseState } from '../../../shared/buddy-li
 
 /**
  * The official characters' bundled poses (plan 170 D10), by slug: the
- * Golem's are the default pack, the others ship under
+ * Buddy's are the default pack, the others ship under
  * `assets/buddy/official/<slug>/`. URLs only (each picture is its own file),
- * but import this module only from lazy chunks (the Golem tab, the
+ * but import this module only from lazy chunks (the Buddy tab, the
  * onboarding), never from the eager shell.
  */
 export const BUDDY_OFFICIAL_ART: Readonly<

@@ -1,7 +1,7 @@
-# Overlays: highlight card, captions and the Golem
+# Overlays: highlight card, captions and the Buddy
 
 Three things are drawn over your picture during a session: the highlighted
-comment card, the caption bar and the Golem (plan 164, Phase B and C). Each
+comment card, the caption bar and the Buddy (plan 164, Phase B and C). Each
 is an **overlay item** with a place per orientation and two switches, **Show
 on stream** and **Show in recording**. Placement has one home, the Live
 Scene canvas; the Stream Manager's corner menu is a shortcut that writes the
@@ -13,12 +13,12 @@ same place.
 | --------- | --------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------------------------- |
 | Highlight | The highlighted comment card ("show on stream" in Stream Manager, voice, auto-show)      | Bottom left corner                | on / on                                                               |
 | Captions  | The live caption bar; its width is the rect, style and size stay in Captions            | Bottom, centred                   | off / off (captions off burn nothing; the switches replace `burnTarget`) |
-| Golem     | Your Golem and its speech bubble ([golem.md](golem.md))                                 | Bottom right corner               | off / off (opt-in)                                                    |
+| Buddy     | Your Buddy and its speech bubble ([buddy.md](buddy.md))                                 | Bottom right corner               | off / off (opt-in)                                                    |
 
 A place is a normalized rect, `x y w h` in canvas units (0 to 1), one for
 the horizontal picture and one for the vertical one. The smallest side a
 rect may have is 0.02. Default sizes: highlight 0.60 × 0.26 horizontal and
-0.78 × 0.20 vertical; captions 0.92 × 0.16 and 0.76 × 0.14; the Golem a
+0.78 × 0.20 vertical; captions 0.92 × 0.16 and 0.76 × 0.14; the Buddy a
 square in pixels, 0.18 wide horizontal and 0.32 wide vertical. Snaps keep a
 4% margin on a landscape canvas and the portrait safe area (8% top, 22%
 bottom, plan 077) on a vertical one.
@@ -60,7 +60,7 @@ live card. The old `highlightAnchor` pref is migrated once, on the first
 launch after the update, into the layout (only when nobody has placed the
 highlight yet), and then deleted.
 
-The Golem pane in Stream Manager has its own **Show on stream** switch; it
+The Buddy pane in Stream Manager has its own **Show on stream** switch; it
 writes the same layout.
 
 ## Which output carries an item
@@ -89,7 +89,7 @@ leg's pixels, so the primary burns if either switch wants it.
 
 A split (a second encode, "Recording" plus "Stream") is forced only by
 captions with a stream-only burn, exactly as plan 077 shipped it
-(`force_same_profile_split`). For the highlight card and the Golem a
+(`force_same_profile_split`). For the highlight card and the Buddy a
 "needs a split" row is logged (`overlay leg plan`, `needs_split`) and then
 resolved by the fallback below: whatever either switch wanted lands on the
 one shared leg. A session that already runs a split (for captions or a
@@ -107,15 +107,15 @@ info) when the session starts. The sentences, word for word:
 | Session                                              | Switches                        | Sentence                                                                                        |
 | ---------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------- |
 | Record + stream, one shared encode                   | stream on, recording off (or the reverse) | "Both the stream and the recording will include highlights: this computer shares one encode for them." |
-| Record + stream, one shared encode                   | same, for the Golem             | "Both the stream and the recording will include the Golem: this computer shares one encode for them." |
-| Record + dual-orientation stream                     | stream on, recording off        | "Recording will include highlights while streaming vertical." (also "... captions ..." and "... the Golem ...") |
-| Record + dual-orientation stream                     | recording on, stream off        | "The horizontal stream will include highlights while streaming vertical." (also "... captions ..." and "... the Golem ...") |
+| Record + stream, one shared encode                   | same, for the Buddy             | "Both the stream and the recording will include the Buddy: this computer shares one encode for them." |
+| Record + dual-orientation stream                     | stream on, recording off        | "Recording will include highlights while streaming vertical." (also "... captions ..." and "... the Buddy ...") |
+| Record + dual-orientation stream                     | recording on, stream off        | "The horizontal stream will include highlights while streaming vertical." (also "... captions ..." and "... the Buddy ...") |
 
 Captions on one shared encode get no sentence: they keep the plan 090
 behaviour (below). A session with a split stream leg needs no sentence.
 
 Sentences are built from the item's mid-sentence label: `highlights`,
-`captions`, `the Golem`. The renderer (`lib/overlay-layout.ts`) and the
+`captions`, `the Buddy`. The renderer (`lib/overlay-layout.ts`) and the
 backend (`overlay_layout.rs`) build them byte for byte the same; a test on
 each side pins them.
 
@@ -125,7 +125,7 @@ When the output check proves a machine cannot run two encodes (the probe's
 effective bridge is `raw-yuv420p`), Go Live re-plans one shared encode for
 the recording and the stream. Then:
 
-- **Highlight and Golem**: burn on both outputs when the switches differ,
+- **Highlight and Buddy**: burn on both outputs when the switches differ,
   with the "shares one encode" sentence above in the Go Live sheet (owner
   answer 4). Go Live is never blocked for them.
 - **Captions**: today's block, unchanged. Captions burned into the stream
@@ -136,7 +136,7 @@ the recording and the stream. Then:
 ## Changing things mid-session
 
 Saving the layout while a session runs (`overlays.layout.set`) re-plans the
-highlight and Golem legs for the running session and swaps the compositor
+highlight and Buddy legs for the running session and swaps the compositor
 flags in place (`compositor::update_overlay_flags`); new rects travel with
 the next push of each overlay, so a drag on the canvas moves a live card.
 Captions keep their start-time plan: their burn target is a session
@@ -160,15 +160,15 @@ verticalRect?}`: the card, rasterized by `lib/comment-highlight.ts` per
   canvas the session burns (`comments.highlight.canvases`).
 - `captions.overlay.set {pngBase64, position, rect?, target, styleRevision}`:
   the bar, rasterized to at most the rect's width in pixels.
-- `golem.overlay.set {target, pngBase64, rect}`: the Golem's bubble only,
-  rasterized by `lib/golem-overlay.ts` to the rect's width (plan 168). The
+- `buddy.overlay.set {target, pngBase64, rect}`: the Buddy's bubble only,
+  rasterized by `lib/buddy-overlay.ts` to the rect's width (plan 168). The
   backend draws the pet itself from a pre-scaled atlas
-  (`golem_sprite.rs`): a square the rect's width, centred on the rect and
+  (`buddy_sprite.rs`): a square the rect's width, centred on the rect and
   resting on its bottom edge (hanging from its top edge in the upper half),
   and anchors the bubble's bottom-centre above the pet's head
-  (`golem_bubble_blit_layout`). Without a pet frame (smokes, tests) the
+  (`buddy_bubble_blit_layout`). Without a pet frame (smokes, tests) the
   bubble blits inside its rect like any overlay; a missing rect falls back
-  to the Golem's bottom-right snap. `golem.overlay.clear {target?}` drops it.
+  to the Buddy's bottom-right snap. `buddy.overlay.clear {target?}` drops it.
 
 One oracle places a bitmap on a canvas for all three render paths:
 `overlay_layout::overlay_blit_layout(overlay_w, overlay_h, canvas_w,
@@ -186,23 +186,23 @@ pixel position. `safe_inset` lets a yielding overlay step inside its rect
   normalized transform and crop. The direct D3D11 recording path (no
   overlays) is never chosen when an overlay burns.
 
-Z order on every path: captions, then the Golem (its pet, then its bubble),
+Z order on every path: captions, then the Buddy (its pet, then its bubble),
 then the highlight card. The pet is one turned, linearly sampled quad per
 leg: a bilinear inverse-affine blit on the CPU, a key-addressed texture
-(namespace 7) with corner vertices on Metal, and a `GolemSprite` layer
+(namespace 7) with corner vertices on Metal, and a `BuddySprite` layer
 turned in `SceneVs` on D3D11 (clipped, never squashed, at the canvas edge);
 `cpu_and_metal_draw_the_same_sprite` pins CPU and Metal parity.
 The card is the most urgent thing on screen, so it wins an overlap (owner
 answer 7). Parity fixtures pin it: `cpu_and_metal_blit_the_same_overlay_rect`
-(the Golem overlapping the card's bottom right, the card wins) and the
-Windows mirror `windows_overlay_frames_stack_the_golem_between_captions_and_the_card`
+(the Buddy overlapping the card's bottom right, the card wins) and the
+Windows mirror `windows_overlay_frames_stack_the_buddy_between_captions_and_the_card`
 (Windows CI).
 
 ## For developers
 
 - Store: `app_settings` row `overlayLayout`, backend-owned
   (`crates/videorc-backend/src/overlay_layout.rs`, `OverlayLayout {highlight,
-captions, golem}` of `OverlayItemLayout {horizontal, vertical,
+captions, buddy}` of `OverlayItemLayout {horizontal, vertical,
 showOnStream, showInRecording}`). An invalid stored layout falls back to the
   defaults with a warning. A sibling row `overlayLayoutMigration` records the
   one-time `highlightAnchor` migration, so the wire shape (strict,
@@ -213,9 +213,9 @@ showOnStream, showInRecording}`). An invalid stored layout falls back to the
   main calls it once and deletes its pref on success). Event
   `overlays.layout` carries the saved layout to every window.
 - Session plumbing: `OverlaySessionShape {record_enabled, stream_enabled,
-aux_leg}` → `overlay_session_plans` (highlight and Golem, D13 fallback
+aux_leg}` → `overlay_session_plans` (highlight and Buddy, D13 fallback
   applied) feeds `highlight_overlay_on_{primary,aux}` and
-  `golem_overlay_on_{primary,aux}` on `CompositorStartParams` / `ArmParams`
+  `buddy_overlay_on_{primary,aux}` on `CompositorStartParams` / `ArmParams`
   / `LoopConfig`; `overlay_layout_needs_split` is logged; `overlay_start_notices`
   is emitted at start and mirrored in the Go Live sheet
   (`overlayStartNotices` in `lib/overlay-layout.ts`, rendered by
@@ -241,5 +241,5 @@ videorc-backend captions` (the plan 090 rejections stay unchanged),
   `pnpm smoke:freeform-editor`, `pnpm probe:preview-lifecycle`. Windows CI
   runs the D3D11 parity fixture.
 - Out of scope, as follow-ups: a post-recording clean or burned copy for the
-  highlight card and the Golem (the ffconcat burn exists for captions only),
+  highlight card and the Buddy (the ffconcat burn exists for captions only),
   and per-orientation source layouts.

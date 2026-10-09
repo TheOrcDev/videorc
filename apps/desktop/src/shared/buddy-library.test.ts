@@ -34,7 +34,7 @@ const catalogFixture = JSON.parse(
 
 const AVATAR = '7c9e6679-7425-40de-944b-e07fc1ee9a51'
 
-describe('the official Golem catalog (plan 170 D10, D11)', () => {
+describe('the official Buddy catalog (plan 170 D10, D11)', () => {
   it('equals protocol-fixtures/buddy-official-catalog.json, field for field', () => {
     expect(BUDDY_OFFICIAL_CATALOG_VERSION).toBe(catalogFixture.version)
     expect(BUDDY_OFFICIAL_CATALOG).toStrictEqual(catalogFixture.avatars)
@@ -50,7 +50,7 @@ describe('the official Golem catalog (plan 170 D10, D11)', () => {
       expect(entry.name.length).toBeLessThanOrEqual(24)
       expect(entry.personality.length).toBeLessThanOrEqual(1200)
     }
-    // The Golem is the owner's original art; the others were described.
+    // The Buddy is the owner's original art; the others were described.
     expect(officialBuddy('golem')?.description).toBeNull()
     expect(officialBuddy('official:orc')?.name).toBe('Golmar')
     expect(officialBuddy('official:dragon')).toBeNull()

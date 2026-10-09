@@ -29,7 +29,7 @@ interface Answer {
 export const BUDDY_REPORT_READ_ERROR = "Couldn't read this report."
 
 /**
- * The Golem tab's stream report (plan 119 S3). Like Upcoming and the 7TV
+ * The Buddy tab's stream report (plan 119 S3). Like Upcoming and the 7TV
  * switch, it opens its own backend client while the tab is mounted, so the
  * report adds nothing to the main window's startup bundle or its provider.
  * `sessionId` null asks `cohost.report.latest`; every `cohost.report.saved`

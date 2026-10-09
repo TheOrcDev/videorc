@@ -85,20 +85,20 @@ describe('workspace navigation', () => {
     expect(WORKSPACE_SHORTCUTS).toHaveLength(reachable.length - noDigit.length)
   })
 
-  // Plan 119: Golem sits right under Studio. Its id is `ai`, the id ⌘9, deep
+  // Plan 119: Buddy sits right under Studio. Its id is `ai`, the id ⌘9, deep
   // links, smokes and data-videorc-tab-trigger use.
-  it('shows Golem under Studio in the stage row, on id ai and ⌘9', () => {
+  it('shows Buddy under Studio in the stage row, on id ai and ⌘9', () => {
     const buddy = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
-    expect(buddy).toEqual({ id: 'ai', label: 'Golem', icon: BuddyIcon, group: 'stage' })
+    expect(buddy).toEqual({ id: 'ai', label: 'Buddy', icon: BuddyIcon, group: 'stage' })
     expect(WORKSPACE_TABS.filter((tab) => tab.group === 'stage').map((tab) => tab.id)).toEqual([
       'studio',
       'ai'
     ])
     expect(shortcutDigitFor('ai')).toBe('9')
-    expect(workspaceTabLabel('ai')).toBe('Golem')
+    expect(workspaceTabLabel('ai')).toBe('Buddy')
   })
 
-  it('cascades the shortcut chips down the sidebar, so Golem (⌘9) arrives second', () => {
+  it('cascades the shortcut chips down the sidebar, so Buddy (⌘9) arrives second', () => {
     const rows: WorkspaceTab[] = [
       'studio',
       'ai',

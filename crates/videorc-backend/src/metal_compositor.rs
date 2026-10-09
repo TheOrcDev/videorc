@@ -68,7 +68,7 @@ struct FragParams {
     float4 chroma_key;
     float4 chroma_key2;
     // (opacity, reserved, reserved, reserved): multiplies the quad's alpha
-    // (plan 168 S-B2, the Golem sprite); 1 for every other quad.
+    // (plan 168 S-B2, the Buddy sprite); 1 for every other quad.
     float4 layer;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
@@ -265,7 +265,7 @@ pub struct GpuSource<'a> {
     /// Chroma key applied in the fragment shader (camera green screen). The
     /// caller must also set `blend` or the computed alpha is ignored.
     pub chroma_key: Option<GpuChromaKey>,
-    /// A turned quad (plan 168 S-B2, the Golem sprite): the source's corners
+    /// A turned quad (plan 168 S-B2, the Buddy sprite): the source's corners
     /// in normalized [0,1] canvas coords, top-left origin, in the order
     /// top-left, top-right, bottom-left, bottom-right of the (cropped)
     /// source. `None` draws the axis-aligned `dest` rect.
@@ -273,7 +273,7 @@ pub struct GpuSource<'a> {
     /// Which sampler this quad reads with.
     pub sampler: GpuSourceSampler,
     /// Multiplies the quad's alpha (needs `blend`); 1 for everything but
-    /// the Golem sprite.
+    /// the Buddy sprite.
     pub opacity: f32,
 }
 
@@ -283,14 +283,14 @@ pub enum GpuSourceSampler {
     /// The compositor's scene sampler: nearest on recording compositors (exact
     /// crop edges at ~1:1), linear on preview compositors.
     Scene,
-    /// Always linear: the Golem sprite, which is scaled, turned and squashed.
+    /// Always linear: the Buddy sprite, which is scaled, turned and squashed.
     Linear,
 }
 
 /// Content namespaces whose texture lives in a key-addressed slot rather than
 /// the per-index cache (plan 168 D8): a layer whose index shifts (a caption
 /// appearing below it) never re-uploads. One slot per namespace.
-/// Namespace 7 is the Golem sprite atlas (`buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE`;
+/// Namespace 7 is the Buddy sprite atlas (`buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE`;
 /// the compositor asserts the two agree at compile time).
 pub const KEYED_TEXTURE_NAMESPACES: [u64; 1] = [7];
 

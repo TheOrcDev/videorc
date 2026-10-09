@@ -148,7 +148,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('Answered from your Golem notes')
+    expect(markup).toContain('Answered from your Buddy notes')
     expect(markup).toContain('On stream')
   })
 })
@@ -344,13 +344,13 @@ describe('CohostPane', () => {
       gate: {
         allowed: false,
         featureId: 'live-cohost',
-        reason: 'Golem requires Videorc Premium.',
+        reason: 'Buddy requires Videorc Premium.',
         upgradeUrl: 'https://www.videorc.com/premium'
       },
       onUpgrade: () => undefined
     })
     expect(markup).toContain('data-slot="cohost-notice"')
-    expect(markup).toContain('Golem requires Videorc Premium.')
+    expect(markup).toContain('Buddy requires Videorc Premium.')
     expect(markup).toContain('View Premium')
     expect(markup).not.toContain('data-testid="cohost-pane"')
   })
@@ -375,12 +375,12 @@ describe('CohostPane', () => {
     for (const label of ['Reply', 'Show on stream', 'Answered', 'Dismiss']) {
       expect(markup).toContain(label)
     }
-    // Plan 140: Golem can remove a comment, but only when asked; plan 164 D4:
+    // Plan 140: Buddy can remove a comment, but only when asked; plan 164 D4:
     // it posts only in the modes you turn on.
     expect(markup).not.toContain('Nothing sends without you.')
     expect(markup).toContain('Posts only in the modes you turn on.')
     expect(markup).toContain(
-      'title="The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to."'
+      'title="The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to."'
     )
   })
 
@@ -422,14 +422,14 @@ describe('CohostPane', () => {
   })
 
   it("names the failed tick in the server's words as the chip tooltip and a secondary line", () => {
-    const detail = 'ai-gateway-error (HTTP 502): The Golem tick failed on every configured model.'
+    const detail = 'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
     const markup = renderPane({
       state: state({
         status: 'error',
         reason: 'gateway-error',
         detail: {
           code: 'ai-gateway-error',
-          message: 'The Golem tick failed on every configured model.',
+          message: 'The Buddy tick failed on every configured model.',
           status: 502
         }
       })
@@ -439,7 +439,7 @@ describe('CohostPane', () => {
     expect(markup).toContain('data-tone="destructive"')
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
-    expect(markup).toContain('once Golem is reading chat again')
+    expect(markup).toContain('once Buddy is reading chat again')
     expect(markup).not.toContain('Reading chat. Questions')
     // Monochrome: only the presence DOT carries the error accent; the label and
     // the detail line stay chrome.
@@ -486,10 +486,10 @@ describe('the one-time listening card (plan 068 D3)', () => {
       createElement(CohostListenPrompt, { enabled, listen, onTurnOn: () => undefined })
     )
 
-  it('asks a Golem user with listening off', () => {
+  it('asks a Buddy user with listening off', () => {
     const markup = renderPrompt(true, false)
     expect(markup).toContain('data-slot="cohost-listen-prompt"')
-    expect(markup).toContain('Golem can hear you while you&#x27;re live')
+    expect(markup).toContain('Buddy can hear you while you&#x27;re live')
     // The consent names the cloud step and what is (not) kept (plan 068 D3).
     expect(markup).toContain('goes to Videorc&#x27;s cloud speech-to-text to be turned into text')
     expect(markup).toContain('Videorc servers don&#x27;t keep it.')
@@ -498,7 +498,7 @@ describe('the one-time listening card (plan 068 D3)', () => {
     expect(markup).toContain('>Not now<')
   })
 
-  it('stays away when listening is on or unknown, or Golem cannot run', () => {
+  it('stays away when listening is on or unknown, or Buddy cannot run', () => {
     expect(renderPrompt(true, true)).toBe('')
     expect(renderPrompt(true, undefined)).toBe('')
     expect(renderPrompt(false, false)).toBe('')

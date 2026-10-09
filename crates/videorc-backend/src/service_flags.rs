@@ -67,7 +67,7 @@ pub enum ServiceFlagsSource {
     Remote { fetched_at: String },
 }
 
-/// The Golem kill switches (plan 140, contract part D): the document's
+/// The Buddy kill switches (plan 140, contract part D): the document's
 /// optional top-level `orcle` object. A missing object or field means enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,7 +101,7 @@ pub struct YouTubeServiceFlags {
     /// An owner-set global pause, UTC. Fed to the breaker while in the future.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_until: Option<DateTime<Utc>>,
-    /// The Golem switches ride the same document and the same refresh. The
+    /// The Buddy switches ride the same document and the same refresh. The
     /// serialized key stays `orcle` (plan 170 D22): the web document and
     /// older apps use it.
     #[serde(default, rename = "orcle")]
@@ -127,7 +127,7 @@ impl Default for YouTubeServiceFlags {
     }
 }
 
-/// Whether Golem voice commands are allowed right now (contract part D).
+/// Whether Buddy voice commands are allowed right now (contract part D).
 /// (`YouTubeQuota::flags` is private to `youtube_quota`; read the copy in
 /// effect through its public accessor.)
 pub fn buddy_voice_commands_enabled(state: &AppState) -> bool {
@@ -189,7 +189,7 @@ impl YouTubeServiceFlags {
         let buddy = match (self.buddy.voice_commands, self.buddy.remove) {
             (true, true) => String::new(),
             (voice_commands, remove) => format!(
-                ", Golem voice commands {}, Golem removals {}",
+                ", Buddy voice commands {}, Buddy removals {}",
                 if voice_commands { "on" } else { "paused" },
                 if remove { "on" } else { "paused" }
             ),
@@ -220,7 +220,7 @@ struct WireDocument {
     buddy: Option<serde_json::Value>,
 }
 
-/// Read one Golem switch: only a JSON boolean counts; anything else keeps the
+/// Read one Buddy switch: only a JSON boolean counts; anything else keeps the
 /// switch on and leaves a note.
 fn buddy_switch(
     object: &serde_json::Map<String, serde_json::Value>,
@@ -253,7 +253,7 @@ fn parse_buddy_flags(
         },
         Some(other) => {
             notes.push(format!(
-                "orcle {other} is not an object; keeping Golem enabled"
+                "orcle {other} is not an object; keeping Buddy enabled"
             ));
             BuddyServiceFlags::default()
         }
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(absent.buddy, BuddyServiceFlags::default());
         assert!(absent.buddy.voice_commands && absent.buddy.remove);
         assert!(absent.is_default_behaviour());
-        assert!(!absent.summary().contains("Golem"));
+        assert!(!absent.summary().contains("Buddy"));
 
         let partial =
             parse_service_flags(r#"{"version":1,"orcle":{"remove":false}}"#, now()).unwrap();
@@ -682,7 +682,7 @@ mod tests {
         assert!(!partial.buddy.remove);
         assert!(!partial.is_default_behaviour());
         assert!(
-            partial.summary().contains("Golem removals paused"),
+            partial.summary().contains("Buddy removals paused"),
             "{}",
             partial.summary()
         );
@@ -694,7 +694,7 @@ mod tests {
         )
         .unwrap();
         assert!(!both.buddy.voice_commands && !both.buddy.remove);
-        assert!(both.summary().contains("Golem voice commands paused"));
+        assert!(both.summary().contains("Buddy voice commands paused"));
 
         // Wrong types keep the switch on, with a note; so does a non-object.
         let wrong = parse_service_flags(

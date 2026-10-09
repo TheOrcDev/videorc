@@ -315,7 +315,7 @@ export function SessionPanel({
 }
 
 /**
- * One co-host line, same derivation as the Stream Manager's Golem pane so the two
+ * One co-host line, same derivation as the Stream Manager's Buddy pane so the two
  * surfaces cannot disagree. Dot + label only: this panel is a fact list, not a
  * working surface, so the typing shimmer stays where the work is read.
  */
@@ -334,12 +334,12 @@ function CohostSessionRow(): ReactElement {
   return (
     <SessionRow
       icon={BuddyIcon}
-      label="Golem"
+      label="Buddy"
       title={view.tooltipLines.join('\n') || undefined}
       value={
         <span className="flex min-w-0 items-center gap-1.5">
           <CohostPresenceDot view={view} />
-          <span className="truncate">{view.label.replace(/^Golem\s*(·\s*)?/, '')}</span>
+          <span className="truncate">{view.label.replace(/^Buddy\s*(·\s*)?/, '')}</span>
         </span>
       }
       onNavigate={() => void openCommentsWindow()}

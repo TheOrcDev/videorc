@@ -156,12 +156,12 @@ export function CommandPalette({
 
         <CommandSeparator />
 
-        {/* Plan 150: every Golem tab is one jump away, like Settings'. */}
-        <CommandGroup heading="Golem">
+        {/* Plan 150: every Buddy tab is one jump away, like Settings'. */}
+        <CommandGroup heading="Buddy">
           {BUDDY_TABS.map((tab) => (
             <CommandItem
               key={tab.id}
-              value={`Golem ${tab.label}`}
+              value={`Buddy ${tab.label}`}
               onSelect={() => run(() => openBuddy(tab.id))}
             >
               <BuddyIcon className="size-4" />

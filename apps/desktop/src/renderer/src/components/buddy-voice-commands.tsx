@@ -44,21 +44,21 @@ const REMOVE_CONFIRM_MODES: readonly RemoveConfirmMode[] = ['confirm', 'countdow
 const PLATFORM_NAME_STAYS = '[&_[data-slot=list-row-title]]:shrink-0'
 
 /**
- * The Golem tab's Voice tab (plan 140 S6, plan 150 S5), in Settings' two
+ * The Buddy tab's Voice tab (plan 140 S6, plan 150 S5), in Settings' two
  * columns. Commands: what you can say, each phrase over what it does, then the
  * two settings (the wake word and how a removal is confirmed). Remove
- * messages: whether each platform lets Golem remove messages (with its one
+ * messages: whether each platform lets Buddy remove messages (with its one
  * fix), its limits as the section's description. Above both, one reason when
- * voice commands can't run: locked (`lead`, from the tab), Golem Live off, or
+ * voice commands can't run: locked (`lead`, from the tab), Buddy Live off, or
  * Videorc's kill switches.
  */
 export function BuddyVoiceCommands({
   lead = null,
   onOpenLive
 }: {
-  /** The tab's locked alert, given only while Golem is locked (plan 150, D7). */
+  /** The tab's locked alert, given only while Buddy is locked (plan 150, D7). */
   lead?: ReactNode
-  /** Opens the Live tab, from the "turn on Golem Live" alert. */
+  /** Opens the Live tab, from the "turn on Buddy Live" alert. */
   onOpenLive?: () => void
 }): ReactElement {
   const {
@@ -181,7 +181,7 @@ export function BuddyVoiceCommands({
               </div>
             </Field>
             <Field>
-              <FieldLabel htmlFor="buddy-remove-confirm">Before Golem removes a comment</FieldLabel>
+              <FieldLabel htmlFor="buddy-remove-confirm">Before Buddy removes a comment</FieldLabel>
               <FieldDescription>
                 {REMOVE_CONFIRM_DESCRIPTIONS[removeConfirm]} {YOUTUBE_ALWAYS_CONFIRMS}
               </FieldDescription>

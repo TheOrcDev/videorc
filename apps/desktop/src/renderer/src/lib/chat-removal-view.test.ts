@@ -20,7 +20,7 @@ import {
 
 const NOW = Date.parse('2026-10-04T12:00:10Z')
 const HIDDEN_TWITCH =
-  'Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Golem remove messages.'
+  'Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages.'
 
 function operation(patch: Partial<ModerationOperation> = {}): ModerationOperation {
   return {
@@ -172,7 +172,7 @@ describe('removeFromChatAvailable: the row menu', () => {
   })
 })
 
-describe('removalCardView: Golem removal cards', () => {
+describe('removalCardView: Buddy removal cards', () => {
   it('confirm first: Remove, then Cancel, and the time left to answer', () => {
     expect(removalCardView(operation({ reason: 'toxic' }), NOW)).toEqual({
       operationId: 'op-1',

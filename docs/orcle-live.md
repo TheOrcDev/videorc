@@ -1,3 +1,3 @@
 # Orcle Live
 
-Orcle is now the **Golem** (plan 164): see [golem.md](golem.md).
+Orcle is now the **Buddy** (plan 164): see [buddy.md](buddy.md).

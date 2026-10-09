@@ -2,8 +2,8 @@ import type { BuddyPetPreviewInfo } from '@/components/buddy-pet-preview'
 import type { OverlayRect } from '@/lib/backend'
 import { BUDDY_HOP_REACTION_ID, BUDDY_PET_TALK_IDS, nearestGazeFrame } from '@/lib/buddy-pet-player'
 
-// The "Test your Golem" dialog (plan 169 D14, narrowed by the owner on
-// 2026-10-09 to the Golem's looks): which frame each state holds, the
+// The "Test your Buddy" dialog (plan 169 D14, narrowed by the owner on
+// 2026-10-09 to the Buddy's looks): which frame each state holds, the
 // reactions it can play, and where the sample bubble sits. Pure, so the
 // dialog's tests and this module's agree on every rule. The dialog is a
 // sandbox: nothing here reaches the backend.
@@ -22,7 +22,7 @@ export function buddyTestStateForKey(key: string): BuddyTestState | null {
   return BUDDY_TEST_STATES.find((state) => state.key === key)?.id ?? null
 }
 
-/** Where a thinking Golem looks without a think drawing: up-left (Rust `THINK_GAZE`). */
+/** Where a thinking Buddy looks without a think drawing: up-left (Rust `THINK_GAZE`). */
 export const BUDDY_THINK_GAZE = [-0.5, -1] as const
 
 /** What the loaded pack offers, as the preview reports it. */
@@ -107,8 +107,8 @@ export interface BuddyTestBubbleBox {
 }
 
 /**
- * D16 in the dialog: the bubble keeps its stream proportions to the Golem
- * (the bitmap scales by the drawn size over the Golem's cell on that canvas,
+ * D16 in the dialog: the bubble keeps its stream proportions to the Buddy
+ * (the bitmap scales by the drawn size over the Buddy's cell on that canvas,
  * `buddy_cell_px`) and its bottom-centre, the tail's tip, sits on the top
  * of the neutral silhouette (`headTop`), centred on the box.
  */

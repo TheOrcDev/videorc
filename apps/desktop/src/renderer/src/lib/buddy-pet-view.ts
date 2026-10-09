@@ -7,7 +7,7 @@ import {
 } from '../../../shared/buddy-pet'
 import { BUDDY_GENERATE_NOT_AVAILABLE } from '@/lib/buddy-persona-view'
 
-// The Golem tab's Avatar, Reactions and Motion sections and the Stream
+// The Buddy tab's Avatar, Reactions and Motion sections and the Stream
 // Manager's reaction chips (plan 168 Phase D): pure copy and derivations the
 // components and their tests share.
 
@@ -17,7 +17,7 @@ export const BUDDY_AVATAR_KIND_LABELS = { still: 'Still', alive: 'Alive' } as co
 /** The `packId` the living preview takes for the Still avatar (the flat pack). */
 export const BUDDY_STILL_PACK_ID = 'still'
 
-/** The preview's drawn size on the Golem tab and in the Stream Manager header. */
+/** The preview's drawn size on the Buddy tab and in the Stream Manager header. */
 export const BUDDY_TAB_PREVIEW_PX = 160
 export const BUDDY_HEADER_PREVIEW_PX = 32
 
@@ -183,8 +183,8 @@ export function buddyPetCapability(
   }
 }
 
-export const BUDDY_CREATE_SIGNED_OUT = 'Sign in to create a living Golem.'
-export const BUDDY_CREATE_CONSENT_OFF = 'Allow cloud AI below to create a living Golem.'
+export const BUDDY_CREATE_SIGNED_OUT = 'Sign in to create a living Buddy.'
+export const BUDDY_CREATE_CONSENT_OFF = 'Allow cloud AI below to create a living Buddy.'
 export const BUDDY_CREATE_USED_UP = 'No creations left this month'
 
 export interface BuddyPetCreateAvailability {

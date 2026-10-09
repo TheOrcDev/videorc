@@ -31,7 +31,7 @@ describe('overlay stage helpers', () => {
     expect(items.map((item) => item.item)).toEqual(['highlight', 'captions', 'buddy'])
     expect(items[2]).toMatchObject({
       stageId: 'overlay:buddy',
-      label: 'Golem',
+      label: 'Buddy',
       badge: 'stream only',
       rect: {
         x: layout.buddy.vertical.x,

@@ -628,7 +628,7 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.cohost.stateV2.listening).toStrictEqual({
       state: 'blocked',
       reasonCode: 'listen-monthly-quota-exhausted',
-      message: "Golem's listening allowance for this month is used up.",
+      message: "Buddy's listening allowance for this month is used up.",
       remainingSeconds: 0
     })
     expect(fixtures.cohost.state).not.toHaveProperty('listening')
@@ -670,12 +670,12 @@ describe('shared high-risk protocol fixture', () => {
     }
     expect(fixtures.cohost.errorState.detail).toStrictEqual({
       code: 'ai-gateway-error',
-      message: 'The Golem tick failed on every configured model.',
+      message: 'The Buddy tick failed on every configured model.',
       status: 502
     })
     expect(fixtures.cohost.timeoutState.detail).toStrictEqual({
       code: 'timeout',
-      message: 'Golem did not answer within 12 s.',
+      message: 'Buddy did not answer within 12 s.',
       status: null
     })
     expect('detail' in fixtures.cohost.legacyState).toBe(false)
@@ -714,13 +714,13 @@ describe('shared high-risk protocol fixture', () => {
       })
     ).toThrow()
     // The shipped defaults: highlight bottom-left on both outputs, captions
-    // off (today's burnTarget default), the Golem bottom-right.
+    // off (today's burnTarget default), the Buddy bottom-right.
     expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
     expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
     expect(fixtures.overlayLayout.defaults.buddy.horizontal.x).toBeCloseTo(0.7975, 6)
   })
 
-  it('keeps the Golem overlay wire shapes strict (plan 164 Phase C)', () => {
+  it('keeps the Buddy overlay wire shapes strict (plan 164 Phase C)', () => {
     const idle = { personaId: 'default', state: 'idle', bubble: null }
     const talking = {
       personaId: 'a1b2c3',
@@ -775,7 +775,7 @@ describe('shared high-risk protocol fixture', () => {
     expect(validateBackendRpcResult('buddy.overlay.clear', info)).toStrictEqual(info)
   })
 
-  it('keeps Golem voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
+  it('keeps Buddy voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
     // The Rust side round-trips the same objects in protocol.rs
     // (`shared_high_risk_contract_fixture_matches_cohost_dtos`).
     expect(
@@ -840,7 +840,7 @@ describe('shared high-risk protocol fixture', () => {
     // the patch (whole objects). Absent images are omitted, never null.
     expect(fixtures.cohost.settings.persona).toStrictEqual({
       id: 'default',
-      name: 'Golem',
+      name: 'Buddy',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -931,7 +931,7 @@ describe('shared high-risk protocol fixture', () => {
     }
   })
 
-  it('keeps the Golem report, its payload and the saved event identical across languages (plan 119 S1)', () => {
+  it('keeps the Buddy report, its payload and the saved event identical across languages (plan 119 S1)', () => {
     expect(
       validateBackendRpcParams('cohost.report.get', fixtures.cohost.reportGetParams)
     ).toStrictEqual(fixtures.cohost.reportGetParams)
@@ -1160,7 +1160,7 @@ describe('shared high-risk protocol fixture', () => {
   })
 })
 
-describe('Golem pets wire (plan 168, Phase A)', () => {
+describe('Buddy pets wire (plan 168, Phase A)', () => {
   const pets = fixtures.buddyPets
 
   it('validates the pet RPCs exactly as the backend round-trips them', () => {
@@ -1215,7 +1215,7 @@ describe('Golem pets wire (plan 168, Phase A)', () => {
     for (const avatar of [
       null,
       { kind: 'alive' },
-      { kind: 'alive', packId: 'bundled:Golem' },
+      { kind: 'alive', packId: 'bundled:Buddy' },
       { kind: 'still', packId: pets.summary.packId },
       { kind: 'animated' }
     ]) {
@@ -1266,7 +1266,7 @@ describe('Golem pets wire (plan 168, Phase A)', () => {
   })
 })
 
-describe('Golem look wire (plan 169, Phase B)', () => {
+describe('Buddy look wire (plan 169, Phase B)', () => {
   const look = fixtures.buddyLook
 
   it('validates the look RPCs and events exactly as the backend round-trips them', () => {
@@ -1334,7 +1334,7 @@ describe('Golem look wire (plan 169, Phase B)', () => {
   })
 })
 
-describe('Golem library wire (plan 170, Phase D)', () => {
+describe('Buddy library wire (plan 170, Phase D)', () => {
   const library = fixtures.buddyLibrary
   const look = fixtures.buddyLook
 
@@ -1466,7 +1466,7 @@ describe('Golem library wire (plan 170, Phase D)', () => {
   })
 })
 
-describe('Golem pet creator wire (plan 168, Phase F)', () => {
+describe('Buddy pet creator wire (plan 168, Phase F)', () => {
   const creator = fixtures.buddyPetCreator
 
   it('validates the creator RPCs and events exactly as the backend round-trips them', () => {

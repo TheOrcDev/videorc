@@ -1147,12 +1147,12 @@ pub struct AppState {
     /// The same card rasterized for the vertical simulcast leg's portrait
     /// canvas. Installed and cleared together with `highlight_overlay`.
     pub simulcast_highlight_overlay: crate::captions::CaptionOverlaySlot,
-    /// The Golem avatar overlay (plan 164 Phase C): one raster per output
+    /// The Buddy avatar overlay (plan 164 Phase C): one raster per output
     /// target, pushed by the renderer through `buddy.overlay.set`.
     pub buddy_overlay: crate::captions::CaptionOverlaySlots,
     /// Which avatar state shows and the bubble that is up (`cohost.buddy.state`).
     pub buddy_overlay_state: crate::buddy_overlay::BuddyOverlayStateSlot,
-    /// The Golem's pet on stream (plan 168 Phase B): pre-scaled atlases per
+    /// The Buddy's pet on stream (plan 168 Phase B): pre-scaled atlases per
     /// leg and the per-frame draw (std mutex: read from the render threads).
     pub buddy_sprite: crate::buddy_sprite::BuddySpriteSlot,
     /// Backend-owned acknowledgement/lifetime for the viewer-facing comment
@@ -1179,10 +1179,10 @@ pub struct AppState {
     /// Clip-that phrase matcher state (plan 068 D6). Std mutex: the caption
     /// task matches and returns.
     pub clip_marks: crate::clip_marks::ClipMarkDetectorSlot,
-    /// Golem voice-command detector and the engine session it serves (plan
+    /// Buddy voice-command detector and the engine session it serves (plan
     /// 140 S2). Std mutex: the caption task observes a final and returns.
     pub cohost_commands: crate::cohost_command::CommandDetectorSlot,
-    /// Plan 170 D12: the account Golem library (its cache, job queue, sync
+    /// Plan 170 D12: the account Buddy library (its cache, job queue, sync
     /// clock and pending edits).
     pub buddy_library: Arc<crate::cohost_library::LibraryShared>,
 }

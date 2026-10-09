@@ -1,4 +1,4 @@
-// The Golem pet creator's wire (plan 168 S-F4), mirrored from
+// The Buddy pet creator's wire (plan 168 S-F4), mirrored from
 // `crates/videorc-backend/src/buddy_pet_create.rs`. A creation is a web build
 // session plus a folder under the managed buddy root
 // (`<personaId>/creations/<buildId>/`): `build-state.json`, the versioned

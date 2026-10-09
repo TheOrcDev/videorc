@@ -109,7 +109,7 @@ describe('reconcileModerationOperation', () => {
       phase: 'hidden-locally',
       outcomeCode: 'missing-scope',
       outcome:
-        'Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Golem remove messages.',
+        'Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages.',
       updatedAt: '2026-10-04T12:00:04Z'
     })
     expect(reconcileModerationOperation(executing, hidden)).toBe(hidden)

@@ -58,7 +58,7 @@ describe('SETTINGS_TABS', () => {
     ])
   })
 
-  it('has no Golem tab: its settings live in the Golem tab (plan 119)', () => {
+  it('has no Buddy tab: its settings live in the Buddy tab (plan 119)', () => {
     // 'orcle' is the old tab id older apps saved (plan 170 D22).
     expect(SETTINGS_TABS.map((tab) => tab.id)).not.toContain('orcle')
     expect(isSettingsTabId('orcle')).toBe(false)
@@ -96,7 +96,7 @@ describe('readLastSettingsTab', () => {
     expect(readLastSettingsTab(storage)).toBe('general')
   })
 
-  it('falls back to General when the remembered tab is the removed Golem tab (plan 119)', () => {
+  it('falls back to General when the remembered tab is the removed Buddy tab (plan 119)', () => {
     const storage = memoryStorage({ [STORAGE_KEYS.settingsTab]: 'orcle' })
     expect(readLastSettingsTab(storage)).toBe('general')
   })

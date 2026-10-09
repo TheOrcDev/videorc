@@ -6,7 +6,7 @@ import { isBuddyLibraryId } from '../shared/buddy-library'
 
 export const BUDDY_DEEP_LINK_HOST = 'buddy'
 
-/** A Golem deep link: optionally the avatar "Make it Alive" was pressed on. */
+/** A Buddy deep link: optionally the avatar "Make it Alive" was pressed on. */
 export interface BuddyDeepLink {
   alive: string | null
 }
@@ -15,7 +15,7 @@ export interface BuddyDeepLink {
  * `videorc://buddy` or `videorc://buddy/library`, with an optional
  * `?alive=<uuid or official:<slug>>`. Anything else (another host, another
  * path, another scheme) is null and stays ignored. An `alive` that is not a
- * library id is dropped; the link still opens the Golem tab.
+ * library id is dropped; the link still opens the Buddy tab.
  */
 export function parseBuddyDeepLink(rawUrl: string, scheme = 'videorc'): BuddyDeepLink | null {
   let url: URL
@@ -40,8 +40,8 @@ interface LibraryProgress {
 }
 
 export interface BuddyDeepLinkDeps {
-  /** Focus the main window and open the Golem tab; `openCreator` also opens
-   * the creator with the Golem's idle as its reference. */
+  /** Focus the main window and open the Buddy tab; `openCreator` also opens
+   * the creator with the Buddy's idle as its reference. */
   showBuddyTab: (openCreator: boolean) => void
   /** A backend call on main's admin channel. */
   request: <T>(method: string, params: Record<string, unknown>) => Promise<T>
@@ -52,9 +52,9 @@ export interface BuddyDeepLinkDeps {
 export type BuddyDeepLinkOutcome = 'synced' | 'opened' | 'failed'
 
 /**
- * Open the Golem tab and sync the library at once (D18). With `alive`, use
+ * Open the Buddy tab and sync the library at once (D18). With `alive`, use
  * that avatar after the sync (the backend runs library jobs in order), wait
- * until the Golem wears it, then open the creator. A failed use (shown in
+ * until the Buddy wears it, then open the creator. A failed use (shown in
  * the library's error) or a slow one never opens the creator.
  */
 export async function runBuddyDeepLink(
@@ -68,14 +68,14 @@ export async function runBuddyDeepLink(
   try {
     await deps.request('cohost.library.sync', { reason: 'deep-link' })
   } catch (error) {
-    deps.log(`Golem deep link: the library sync was refused (${errorText(error)}).`)
+    deps.log(`Buddy deep link: the library sync was refused (${errorText(error)}).`)
   }
   const alive = link.alive
   if (!alive) return 'synced'
   try {
     await deps.request('cohost.library.use', { avatarId: alive })
   } catch (error) {
-    deps.log(`Golem deep link: the avatar could not be used (${errorText(error)}).`)
+    deps.log(`Buddy deep link: the avatar could not be used (${errorText(error)}).`)
     return 'failed'
   }
   let sawUse = false
@@ -94,11 +94,11 @@ export async function runBuddyDeepLink(
       return 'opened'
     }
     if (state.busy === null && sawUse && state.error) {
-      deps.log(`Golem deep link: ${state.error.message}`)
+      deps.log(`Buddy deep link: ${state.error.message}`)
       return 'failed'
     }
   }
-  deps.log('Golem deep link: the avatar took too long to apply; the creator was not opened.')
+  deps.log('Buddy deep link: the avatar took too long to apply; the creator was not opened.')
   return 'failed'
 }
 

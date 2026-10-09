@@ -93,7 +93,7 @@ export interface BuddyPreviewPackRequest {
 const FULL_BOX = [0, 0, 1, 1] as const
 
 function abortError(): Error {
-  const error = new Error('The Golem pack load was cancelled.')
+  const error = new Error('The Buddy pack load was cancelled.')
   error.name = 'AbortError'
   return error
 }
@@ -101,7 +101,7 @@ function abortError(): Error {
 const browserDeps: BuddyPreviewPackDeps = {
   readPackFile: async (personaId, packId, file) => {
     const read = window.videorc?.readBuddyPetFile
-    if (!read) throw new Error('This window cannot read Golem packs.')
+    if (!read) throw new Error('This window cannot read Buddy packs.')
     return read(personaId, packId, file)
   },
   decode: async (bytes) => {
@@ -355,9 +355,9 @@ async function loadStillPack(
         loaded.set(state, await load(url))
       } catch {
         // The backend's still pack falls back the same way: idle to the
-        // default Golem, every other state to idle.
+        // default Buddy, every other state to idle.
         notes.push(
-          `The ${state} image would not load; the ${state === 'idle' ? 'default Golem' : 'idle image'} shows instead.`
+          `The ${state} image would not load; the ${state === 'idle' ? 'default Buddy' : 'idle image'} shows instead.`
         )
         loaded.set(
           state,

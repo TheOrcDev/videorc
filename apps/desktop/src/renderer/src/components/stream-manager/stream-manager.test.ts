@@ -114,12 +114,12 @@ describe('StreamManager highlight slot (plan 095, S2)', () => {
     expect(between(narrowTabs, 'data-slot="pane-on-stream"', '</button>')).toContain('Activity')
     const wideTabs = between(markup, 'data-slot="pane-tabs-wide"', 'data-pane="chat"')
     expect(wideTabs.match(/data-slot="pane-on-stream"/g)).toHaveLength(1)
-    // The Golem question behind another message is not on stream.
+    // The Buddy question behind another message is not on stream.
     const buddy = markup.slice(markup.indexOf('data-pane="buddy"'))
     expect(buddy).not.toMatch(/data-variant="success"[^>]*>On stream</)
   })
 
-  it('lights the Golem badge for the question on stream, without the Activity dot', () => {
+  it('lights the Buddy badge for the question on stream, without the Activity dot', () => {
     const markup = render(live(chat.id))
     const buddy = markup.slice(markup.indexOf('data-pane="buddy"'))
     expect(buddy).toMatch(/data-variant="success"[^>]*>On stream</)
@@ -166,12 +166,12 @@ describe('StreamManager Remove messages reconnect (plan 140, S5)', () => {
       })
     )
 
-  it('puts one quiet row in the Golem pane for each platform missing the permission', () => {
+  it('puts one quiet row in the Buddy pane for each platform missing the permission', () => {
     const markup = renderWith({})
     const buddy = markup.slice(markup.indexOf('data-slot="buddy-pane"'))
     expect(buddy).toContain('data-slot="remove-messages-reconnect"')
-    expect(buddy).toContain('Reconnect Twitch to let Golem remove messages.')
-    expect(markup.match(/to let Golem remove messages/g)).toHaveLength(1)
+    expect(buddy).toContain('Reconnect Twitch to let Buddy remove messages.')
+    expect(markup.match(/to let Buddy remove messages/g)).toHaveLength(1)
     expect(markup).not.toContain('Reconnect YouTube')
     expect(markup).not.toContain('Reconnect Kick')
   })
@@ -230,7 +230,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
       })
     )
 
-  it('puts the open card at the top of the Golem pane, above everything that scrolls', () => {
+  it('puts the open card at the top of the Buddy pane, above everything that scrolls', () => {
     const markup = renderWith({})
     const buddy = markup.slice(markup.indexOf('data-slot="buddy-pane"'))
     const cards = buddy.indexOf('data-slot="removal-cards"')
@@ -238,11 +238,11 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
     expect(cards).toBeLessThan(buddy.indexOf('data-testid="cohost-pane"'))
     expect(buddy).toContain('Remove from chat?')
     expect(buddy).toContain('spam')
-    // Only the Golem pane carries cards.
+    // Only the Buddy pane carries cards.
     expect(markup.match(/data-testid="removal-card"/g)).toHaveLength(1)
   })
 
-  it('puts what Golem heard, then the chooser, above the removal cards (part B)', () => {
+  it('puts what Buddy heard, then the chooser, above the removal cards (part B)', () => {
     const markup = renderWith({
       onAnswerCommand: () => undefined,
       cohostState: {

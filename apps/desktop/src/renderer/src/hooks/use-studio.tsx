@@ -549,7 +549,7 @@ function loadCaptionOverlay() {
   return import('@/lib/caption-overlay')
 }
 
-// The Golem's bubble rasterizer: lazy, never in the eager shell.
+// The Buddy's bubble rasterizer: lazy, never in the eager shell.
 function loadBuddyOverlay() {
   return import('@/lib/buddy-overlay')
 }
@@ -562,7 +562,7 @@ function loadBuddyOverlay() {
 // still commit immediately via the significant-change fast path.
 const TELEMETRY_UI_COMMIT_INTERVAL_MS = 1000
 const SIGNED_IN_ENTITLEMENT_REFRESH_INTERVAL_MS = 5 * 60_000
-/** Window focus syncs the Golem library at most this often (plan 170 D12). */
+/** Window focus syncs the Buddy library at most this often (plan 170 D12). */
 const BUDDY_LIBRARY_FOCUS_SYNC_MS = 60_000
 // Main and the renderer hear the idle status on separate sockets. A short settle
 // keeps the post-capture replay from racing Main into a second deferral.
@@ -1155,25 +1155,25 @@ export type StudioContextValue = {
    * `cohostState` itself lives on the chat context with the chat snapshot. */
   cohostSettings: CohostSettings | null
   /** Overlay layout (plan 164): where the highlight card, captions and the
-   * Golem sit per orientation and which outputs carry them. Backend-owned. */
+   * Buddy sit per orientation and which outputs carry them. Backend-owned. */
   overlayLayout: OverlayLayout
   setOverlayLayout: (layout: OverlayLayout) => Promise<void>
-  /** The Golem on stream (plan 164 Phase C): which state shows and the bubble
+  /** The Buddy on stream (plan 164 Phase C): which state shows and the bubble
    * that is up (`cohost.buddy.state`); null until the backend reported. */
   buddyOverlay: BuddyOverlaySnapshot | null
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
   /**
-   * Golem Live's one switch (plan 119). On without cloud-AI consent only
-   * raises `buddyConsentRequested` (the Golem tab's consent dialog) and writes
+   * Buddy Live's one switch (plan 119). On without cloud-AI consent only
+   * raises `buddyConsentRequested` (the Buddy tab's consent dialog) and writes
    * nothing; on with consent writes `{enabled: true, listen: true}` in one
    * `cohost.settings.set`; off writes `{enabled: false}`.
    */
   setBuddyLive: (on: boolean) => Promise<void>
-  /** The consent dialog Golem Live asked for is waiting for an answer. */
+  /** The consent dialog Buddy Live asked for is waiting for an answer. */
   buddyConsentRequested: boolean
-  /** Accept: grant cloud-AI consent, then the one Golem Live patch. Decline:
+  /** Accept: grant cloud-AI consent, then the one Buddy Live patch. Decline:
    * close the dialog and change nothing. */
   answerBuddyConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
@@ -4199,7 +4199,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void Promise.all([
       client.request<CohostSettings>('cohost.settings.get').catch(() => null),
       client.request<CohostState>('cohost.status').catch(() => null),
-      // An older backend has no Golem overlay (plan 164); the avatar stays off.
+      // An older backend has no Buddy overlay (plan 164); the avatar stays off.
       client.requestTyped('cohost.buddy.status').catch(() => null)
     ]).then(([nextSettings, nextState, nextBuddy]) => {
       if (cancelled) return
@@ -4255,7 +4255,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     cohostGate.allowed,
     cohostState?.status
   ])
-  // The Golem on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
+  // The Buddy on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
   // state and the bubble and draws the pet itself from its atlas; this
   // renderer rasterizes the bubble only, once per output canvas, and pushes
   // each PNG into the `buddy_overlay` slot (the backend anchors it above the
@@ -4317,7 +4317,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       if (epoch === buddyPushEpochRef.current) buddyPushedKeyRef.current = key
     })().catch((error: unknown) => {
-      console.warn(`Golem overlay: ${error instanceof Error ? error.message : String(error)}`)
+      console.warn(`Buddy overlay: ${error instanceof Error ? error.message : String(error)}`)
     })
   }, [client, wsStatus, buddyPersona, buddyOverlay, buddyTargetsKey])
 
@@ -4363,8 +4363,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client]
   )
 
-  // Golem Live's one switch (plan 119 S2). Consent comes first: on without it
-  // only asks (the Golem tab's consent dialog), and nothing is written until
+  // Buddy Live's one switch (plan 119 S2). Consent comes first: on without it
+  // only asks (the Buddy tab's consent dialog), and nothing is written until
   // the streamer accepts. On is one save: chat and listening together.
   const [buddyConsentRequested, setBuddyConsentRequested] = useState(false)
   const setBuddyLive = useCallback(
@@ -4503,7 +4503,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [toggleCommentHighlight]
   )
 
-  // Golem's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
+  // Buddy's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
   // safety gate, one command per decision with an engine-wide generation) and
   // the renderer only executes it. Always-set semantics: an automatic path
   // must never read a repeat as "un-pin" (the H key keeps its toggle). No
@@ -4544,7 +4544,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     executeCohostAutoHighlightRef.current(cohostAutoHighlightMessageId)
   }, [cohostAutoHighlightGeneration, cohostAutoHighlightMessageId])
 
-  // Plan 156: the Activity auto-show engine. Manual and Golem cards always
+  // Plan 156: the Activity auto-show engine. Manual and Buddy cards always
   // win — auto only fires into an idle slot with no apply in flight, never
   // un-pins (always-set semantics), and a backlog or History view never
   // replays: the queue reseeds on session change and on switch-on, so only
@@ -4619,7 +4619,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       consented: aiConsent,
       enabled: cohostEnabled,
       listen: cohostListen,
-      // The Golem on stream (plan 164 S-C4): the pane's header operates it.
+      // The Buddy on stream (plan 164 S-C4): the pane's header operates it.
       ...(buddyPersona
         ? {
             buddy: {
@@ -4660,9 +4660,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void window.videorc?.pushCohostWindowState?.(cohostWindowState)
   }, [cohostWindowState])
 
-  // Golem Live's one switch from the Comments window (plan 119): its presence
+  // Buddy Live's one switch from the Comments window (plan 119): its presence
   // popover, nudge, consent CTA and one-time listening card. On is the same
-  // single `{enabled: true, listen: true}` save as the Golem tab (the window
+  // single `{enabled: true, listen: true}` save as the Buddy tab (the window
   // sends `listen: true` too), off only `{enabled: false}`. The settings and
   // cloud-AI consent are main-renderer owned, so the window asks and gets the
   // resolved window state back; its consent CTA grants consent in the click.
@@ -4701,7 +4701,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostEnableResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not change the Golem setting.'
+            error: error instanceof Error ? error.message : 'Could not change the Buddy setting.'
           })
         })
     })
@@ -4712,10 +4712,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const off = window.videorc?.onCohostActionRequest?.((command: CohostActionCommand) => {
       void (async () => {
         if (!client) throw new Error('Backend socket is not connected.')
-        // The Golem's own actions (plan 164 S-C4): the Say box and the output
+        // The Buddy's own actions (plan 164 S-C4): the Say box and the output
         // switch. The Say box is one utterance (D7): it posts per the chat
         // mode when the window named its live session, and bubbles at once
-        // when the Golem is on some output. The backend owns the bubble.
+        // when the Buddy is on some output. The backend owns the bubble.
         if (command.kind === 'buddy-say') {
           return runCohostAction('cohost.utterance.say', {
             ...(command.sessionId ? { sessionId: command.sessionId } : {}),
@@ -4764,7 +4764,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             authorKey: command.targetId
           })
         }
-        // Plan 164 S-D2 / D7: the Golem's proposed cards and the Say box.
+        // Plan 164 S-D2 / D7: the Buddy's proposed cards and the Say box.
         if (command.kind === 'approve-utterance' || command.kind === 'dismiss-utterance') {
           return runCohostAction(
             command.kind === 'approve-utterance'
@@ -4802,7 +4802,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostActionResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Golem action failed.'
+            error: error instanceof Error ? error.message : 'Buddy action failed.'
           })
         })
     })
@@ -6356,7 +6356,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .catch(() => undefined)
     // Chat removals (plan 140, S6): a lazy chunk keeps the live session's
     // removal ledger, relays the Stream Manager's Remove from chat and card
-    // answers, and mirrors an open Golem card as a toast while the Stream
+    // answers, and mirrors an open Buddy card as a toast while the Stream
     // Manager is closed. Events that arrive first wait for it.
     let moderation: typeof chatModerationRef.current = null
     let stopCohostCommandRelay: (() => void) | null = null
@@ -6364,7 +6364,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void import('@/lib/chat-moderation-relay')
       .then(({ startChatModerationRelay, startCohostCommandRelay }) => {
         if (!generationIsCurrent()) return
-        // Plan 140, S6 part B: the Stream Manager's answers to Golem's cards.
+        // Plan 140, S6 part B: the Stream Manager's answers to Buddy's cards.
         stopCohostCommandRelay = startCohostCommandRelay({
           client: nextClient,
           sessionId: () => liveChatSnapshotRef.current.sessionId,
@@ -7254,7 +7254,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setBuddyOverlay(payload as BuddyOverlaySnapshot)
       }),
       // Plan 170 D12: a library job (use, sync, keep, delete) can change the
-      // Golem in the backend; the persona and notes are read again when it ends.
+      // Buddy in the backend; the persona and notes are read again when it ends.
       nextClient.on('cohost.library.changed', (library) => {
         if (library.busy !== null) return
         void nextClient
@@ -8201,10 +8201,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus
   ])
 
-  // Plan 170 D12: the Golem library follows the account when the window is
-  // focused, at most once a minute (the Golem tab also syncs as it opens; the
+  // Plan 170 D12: the Buddy library follows the account when the window is
+  // focused, at most once a minute (the Buddy tab also syncs as it opens; the
   // backend syncs at launch and never applies a choice while live). A sync the
-  // backend refuses changes nothing; the Golem tab shows the library's state.
+  // backend refuses changes nothing; the Buddy tab shows the library's state.
   const buddyLibrarySyncAtRef = useRef(0)
   const buddyLibrarySignedIn = account?.status === 'signed-in'
   useEffect(() => {

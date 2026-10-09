@@ -17,8 +17,8 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //   assistant-response event -> immediate transcription-only chunk fallback
 //   realtime-unavailable -> chunk upload fallback -> final caption
 //   first audio, then producer silence -> truthful blocked/stalled status
-//   Golem listen-only (plan 068): captions off, cohost.start with listen on ->
-//     chunk uploads say purpose=listen, the transcript record is kept, Golem
+//   Buddy listen-only (plan 068): captions off, cohost.start with listen on ->
+//     chunk uploads say purpose=listen, the transcript record is kept, Buddy
 //     reports listening on, and no captions.* event ever reaches the renderer
 //
 // No production bearer, provider credential, microphone permission, or external network is
@@ -85,7 +85,7 @@ try {
     `Caption contract smoke PASS — realtime partial/final, repeated-completion upsert, ` +
       `assistant-response safety fallback, provider-ready truth, deterministic audio, ` +
       `chunk fallback with post-frame stall detection, ` +
-      `and listen-only Golem transcription without caption emits passed ` +
+      `and listen-only Buddy transcription without caption emits passed ` +
       `(realtime appends=${fake.state.audioAppends}, chunk requests=${fake.state.chunkRequests}, ` +
       `listen chunks=${listenChunks}).`
   )
@@ -311,7 +311,7 @@ async function proveChunkFallback({ backend, observed, fake }) {
   )
 }
 
-// Plan 068 D1/D5: Golem's listen intent runs the same transcription task with
+// Plan 068 D1/D5: Buddy's listen intent runs the same transcription task with
 // presentation off. Captions stay off the whole time, so the renderer must
 // never see a caption event or an active caption status, while the upload
 // says purpose=listen (metered apart on the web) and the transcript record
@@ -326,7 +326,7 @@ async function proveListenOnlySession({ backend, observed, fake }) {
     destinations: [
       { platform: 'twitch', targetId: 'listen-contract', read: 'ready', write: 'ready' }
     ],
-    // No chat arrives during the scenario, so Golem never ticks.
+    // No chat arrives during the scenario, so Buddy never ticks.
     fakes: [{ platform: 'twitch', targetId: 'listen-contract', count: 0, send: 'sent' }]
   })
   const settings = await request(backend, timeoutMs, 'cohost.settings.set', {
@@ -399,12 +399,12 @@ async function proveListenOnlySession({ backend, observed, fake }) {
   }
   if (listening.listening.remainingSeconds !== 3_597) {
     throw new Error(
-      `Golem listening did not carry the service allowance: ${JSON.stringify(listening.listening)}`
+      `Buddy listening did not carry the service allowance: ${JSON.stringify(listening.listening)}`
     )
   }
 
   await request(backend, timeoutMs, 'cohost.stop', {})
-  // The listen-only task ends with Golem: the tap is gone, nothing is queued.
+  // The listen-only task ends with Buddy: the tap is gone, nothing is queued.
   const afterStop = await request(backend, timeoutMs, 'captions.test.inject-audio', {
     durationMs: 100
   }).then(
@@ -413,7 +413,7 @@ async function proveListenOnlySession({ backend, observed, fake }) {
   )
   if (afterStop.ok) {
     throw new Error(
-      `The caption tap outlived Golem's listen intent: ${JSON.stringify(afterStop.value)}`
+      `The caption tap outlived Buddy's listen intent: ${JSON.stringify(afterStop.value)}`
     )
   }
   await request(backend, timeoutMs, 'liveChat.stop', {})
@@ -433,7 +433,7 @@ async function waitForCohost(backend, predicate) {
     if (predicate(latest)) return latest
     await sleep(50)
   }
-  throw new Error(`Timed out waiting for Golem state: ${JSON.stringify(latest)}`)
+  throw new Error(`Timed out waiting for Buddy state: ${JSON.stringify(latest)}`)
 }
 
 function collectCaptionEvents(ws) {

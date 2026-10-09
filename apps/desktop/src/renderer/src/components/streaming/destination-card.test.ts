@@ -318,7 +318,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
     return start === -1 ? '' : visibleText(markup.slice(start, markup.indexOf('</div>', start)))
   }
 
-  it('asks a Twitch account without the moderation scope to reconnect, naming Golem', () => {
+  it('asks a Twitch account without the moderation scope to reconnect, naming Buddy', () => {
     const markup = render({
       target: target('twitch'),
       account: account('twitch', {
@@ -327,7 +327,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
       validation: validation('twitch', 'valid')
     })
     const row = permissions(markup)
-    expect(row).toContain('Reconnect Twitch to let Golem remove messages.')
+    expect(row).toContain('Reconnect Twitch to let Buddy remove messages.')
     expect(row).not.toContain('Follow alerts')
     expect(markup).toMatch(/data-slot="destination-permissions"[\s\S]*?>Reconnect<\/button>/)
     // One row, one button, never the raw scope.
@@ -341,7 +341,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
       account: account('twitch', { scopes: [...TWITCH_SCOPES, ...TWITCH_BITS_POINTS] })
     })
     expect(permissions(markup)).toContain(
-      'Reconnect Twitch to let Golem remove messages. Follow alerts and the sub count need it too.'
+      'Reconnect Twitch to let Buddy remove messages. Follow alerts and the sub count need it too.'
     )
     expect(markup.match(/data-slot="destination-permissions"/g)).toHaveLength(1)
   })
@@ -351,7 +351,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
       target: target('kick'),
       account: account('kick', { scopes: KICK_SCOPES })
     })
-    expect(permissions(markup)).toContain('Reconnect Kick to let Golem remove messages.')
+    expect(permissions(markup)).toContain('Reconnect Kick to let Buddy remove messages.')
     expect(markup).not.toContain(KICK_MODERATION)
     expect(
       render({
@@ -398,11 +398,11 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
       missingPermissionsRow('twitch', { status: 'connected', scopes })
     expect(twitch([...TWITCH_SCOPES, ...TWITCH_BITS_POINTS])).toEqual({
       message:
-        'Reconnect Twitch to let Golem remove messages. Follow alerts and the sub count need it too.',
+        'Reconnect Twitch to let Buddy remove messages. Follow alerts and the sub count need it too.',
       action: 'Reconnect'
     })
     expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE, ...TWITCH_BITS_POINTS])).toEqual({
-      message: 'Reconnect Twitch to let Golem remove messages.',
+      message: 'Reconnect Twitch to let Buddy remove messages.',
       action: 'Reconnect'
     })
     expect(twitch([...TWITCH_SCOPES, TWITCH_MODERATION, ...TWITCH_BITS_POINTS])).toEqual({
@@ -412,12 +412,12 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
     // Plan 162: Power-ups and channel points ride the same single row.
     expect(twitch(TWITCH_SCOPES)).toEqual({
       message:
-        'Reconnect Twitch to let Golem remove messages. Follow alerts, the sub count, Power-ups and channel points need it too.',
+        'Reconnect Twitch to let Buddy remove messages. Follow alerts, the sub count, Power-ups and channel points need it too.',
       action: 'Reconnect'
     })
     expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE])).toEqual({
       message:
-        'Reconnect Twitch to let Golem remove messages. Power-ups and channel points need it too.',
+        'Reconnect Twitch to let Buddy remove messages. Power-ups and channel points need it too.',
       action: 'Reconnect'
     })
     expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE, TWITCH_MODERATION])).toEqual({
@@ -426,7 +426,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
     })
     expect(twitch(TWITCH_ALL_SCOPES)).toBeNull()
     expect(missingPermissionsRow('kick', { status: 'connected', scopes: KICK_SCOPES })).toEqual({
-      message: 'Reconnect Kick to let Golem remove messages.',
+      message: 'Reconnect Kick to let Buddy remove messages.',
       action: 'Reconnect'
     })
     for (const platform of ['youtube', 'x', 'tiktok', 'instagram', 'custom'] as const) {

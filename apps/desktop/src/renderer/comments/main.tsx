@@ -32,7 +32,7 @@ import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { DEFAULT_TWITCH_GIF_MODE, type TwitchGifMode } from '../../shared/chat-gif'
 import type { CommandAnswer } from '@/components/stream-manager/command-cards'
 
-/** A Golem action before main's request id (distributive, one per kind). */
+/** A Buddy action before main's request id (distributive, one per kind). */
 type BuddyActionBody = CohostBuddyActionCommand extends infer Command
   ? Command extends { requestId: string }
     ? Omit<Command, 'requestId'>
@@ -333,7 +333,7 @@ function CommentsWindowApp(): ReactElement {
       )
       .finally(() => flagId(setRemovalRequestIds, message.id, false))
   }
-  // A Golem removal card's Remove or Cancel (Enter or Esc).
+  // A Buddy removal card's Remove or Cancel (Enter or Esc).
   const answerRemoval = (operation: ModerationOperation, answer: RemovalAnswer): void => {
     const sessionId = snapshot.sessionId
     const moderate = window.videorc?.moderateFromCommentsWindow
@@ -410,7 +410,7 @@ function CommentsWindowApp(): ReactElement {
             {
               destinationId: 'cohost-command',
               platform: 'custom',
-              reason: error instanceof Error ? error.message : 'Golem action failed.'
+              reason: error instanceof Error ? error.message : 'Buddy action failed.'
             }
           ])
           return null
@@ -418,7 +418,7 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
-  // The Golem's own actions (plan 164 S-C4): the Say box and the Show on
+  // The Buddy's own actions (plan 164 S-C4): the Say box and the Show on
   // stream switch. Not chat commands, so no session is required; the Say box
   // names the live session when there is one so the line can also be posted
   // per the chat mode (D7). Studio makes the call and the window state push
@@ -431,7 +431,7 @@ function CommentsWindowApp(): ReactElement {
     return send({ requestId: crypto.randomUUID(), ...command } as CohostBuddyActionCommand)
       .then(() => undefined)
       .catch((error) => {
-        toast.error(error instanceof Error ? error.message : 'Golem action failed.', {
+        toast.error(error instanceof Error ? error.message : 'Buddy action failed.', {
           id: 'buddy-action'
         })
       })
@@ -452,7 +452,7 @@ function CommentsWindowApp(): ReactElement {
     void sendBuddyAction({ kind: 'buddy-react', reaction })
   }
 
-  // Answers to Golem's voice command cards (plan 140, S6 part B). The reply
+  // Answers to Buddy's voice command cards (plan 140, S6 part B). The reply
   // merges like an event: the newer command (by `at`) wins.
   const [commandAnsweringId, setCommandAnsweringId] = useState<string | null>(null)
   const answerCommand = (commandId: string, answer: CommandAnswer): void => {
@@ -465,14 +465,14 @@ function CommentsWindowApp(): ReactElement {
         setCohost((current) => ({ ...current, state: applyCohostState(current.state, state) }))
       )
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer Golem.', {
+        toast.error(error instanceof Error ? error.message : 'Could not answer Buddy.', {
           id: `cohost-command:${commandId}`
         })
       )
       .finally(() => setCommandAnsweringId((current) => (current === commandId ? null : current)))
   }
 
-  // Golem Live's one switch (plan 119), relayed: on means Golem reads chat AND
+  // Buddy Live's one switch (plan 119), relayed: on means Buddy reads chat AND
   // hears you (`listen: true`), off only stops it joining. Every way on (the
   // status popover, the nudge, the consent CTA and the listening card) sends
   // the same command; the consent CTA also grants cloud-AI consent in the same
@@ -489,7 +489,7 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => state && setCohost(state))
       .catch((error) =>
         toast.error(
-          error instanceof Error ? error.message : 'Could not change the Golem setting.',
+          error instanceof Error ? error.message : 'Could not change the Buddy setting.',
           {
             id: 'cohost-enable'
           }
@@ -498,10 +498,10 @@ function CommentsWindowApp(): ReactElement {
   }
 
   // Plan 164 S-D6: the pane's mode control and behaviour switches. The
-  // mode is the pane's enable: Suggest or Auto turns the Golem on (the same
+  // mode is the pane's enable: Suggest or Auto turns the Buddy on (the same
   // {enabled, listen} save as the switch), Off turns it off; a behaviour
   // switch keeps `enabled` as it is. The templates and cooldowns live in
-  // the Golem tab and ride along untouched (Studio merges the block).
+  // the Buddy tab and ride along untouched (Studio merges the block).
   const setBuddyAutoChat = (patch: CohostAutoChatRelayPatch): void => {
     const enabled = patch.mode === undefined ? cohost.enabled : patch.mode !== 'off'
     void window.videorc
@@ -514,7 +514,7 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => state && setCohost(state))
       .catch((error) =>
         toast.error(
-          error instanceof Error ? error.message : 'Could not change the Golem chat mode.',
+          error instanceof Error ? error.message : 'Could not change the Buddy chat mode.',
           { id: 'cohost-auto-chat' }
         )
       )
@@ -535,7 +535,7 @@ function CommentsWindowApp(): ReactElement {
     : {
         allowed: false,
         featureId: 'live-cohost',
-        reason: cohost.entitlementReason ?? 'Golem requires Videorc Premium.',
+        reason: cohost.entitlementReason ?? 'Buddy requires Videorc Premium.',
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 

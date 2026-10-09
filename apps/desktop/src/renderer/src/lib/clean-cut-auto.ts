@@ -182,7 +182,7 @@ export function showCleanCutAutoFailed(sessionId: string, reason: string): void 
   toast.warning("Your clean cut didn't start", {
     id: `clean-cut-auto-${sessionId}`,
     description: reason,
-    action: { label: 'Open Golem', onClick: () => openCleanCut({ sessionId }) }
+    action: { label: 'Open Buddy', onClick: () => openCleanCut({ sessionId }) }
   })
 }
 

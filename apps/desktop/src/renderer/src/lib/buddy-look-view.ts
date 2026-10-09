@@ -13,7 +13,7 @@ import {
   BUDDY_GENERATE_SIGNED_OUT
 } from './buddy-persona-view'
 
-// "Your Golem's look" (plan 169 D13): pure derivations the panel and its
+// "Your Buddy's look" (plan 169 D13): pure derivations the panel and its
 // tests share.
 
 /** A new look is four pictures off the daily image cap (D6); a redo is one. */
@@ -25,7 +25,7 @@ export function isBuddyLookRedoState(state: CohostAvatarState): state is CohostA
 }
 
 export interface BuddyLookAvailability {
-  /** Create my Golem (and Try again) work. */
+  /** Create my Buddy (and Try again) work. */
   allowed: boolean
   /** Redo works (one image left is enough). */
   redoAllowed: boolean

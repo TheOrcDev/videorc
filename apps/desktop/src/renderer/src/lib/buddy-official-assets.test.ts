@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 // Plan 170 D10: every official character in the shared catalog ships its
-// four poses with the app (the Golem's are the default pack), so official
+// four poses with the app (the Buddy's are the default pack), so official
 // avatars work offline and signed out. Each file obeys the default pack's
 // rules: a WebP with alpha, under 200 KB, drawn at the same scale.
 
@@ -38,7 +38,7 @@ function webpSize(bytes: Buffer): { width: number; height: number; alpha: boolea
   return { width, height, alpha: (flags & 0x10) !== 0 }
 }
 
-describe('official Golem assets', () => {
+describe('official Buddy assets', () => {
   it('lists the five official characters', () => {
     expect(catalog.avatars.map((entry) => entry.slug)).toEqual([
       'golem',

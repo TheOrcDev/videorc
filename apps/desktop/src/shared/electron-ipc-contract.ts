@@ -476,7 +476,7 @@ const chatAvatarBytesSchema = runtimeSchema<Uint8Array | null>(
   }
 )
 /** One persona image as bytes (plan 164 S-C2): the Studio renderer decodes
- * it for the Golem overlay raster, as the highlight card does with avatars.
+ * it for the Buddy overlay raster, as the highlight card does with avatars.
  * Null when the path names no stored file; never over the 4 MB import cap. */
 const buddyImageBytesSchema = runtimeSchema<Uint8Array | null>(
   `null or image bytes of at most ${BUDDY_IMAGE_MAX_BYTES} bytes`,
@@ -1173,7 +1173,7 @@ const moderationOperationIpcSchema = boundedSemanticValue(
 const relayedModerationOperationsSchema = arraySchema(moderationOperationIpcSchema, {
   maxLength: MAX_RELAYED_MODERATION_OPERATIONS
 })
-// Answers to Golem's voice command cards (plan 140, S6 part B): a command id
+// Answers to Buddy's voice command cards (plan 140, S6 part B): a command id
 // and, for the chooser, an index. Nothing else crosses.
 const cohostCommandIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
 const cohostCommandRelaySchema = unionSchema([
@@ -1323,7 +1323,7 @@ const specificRuntimeInvokeContracts = {
     ]),
     booleanSchema
   ),
-  // Plan 140, S6 part B: one answer to Golem's open voice command.
+  // Plan 140, S6 part B: one answer to Buddy's open voice command.
   'comments-window:cohost-command': invokeContract(tupleSchema([cohostCommandRelaySchema])),
   'comments-window:cohost-command-result-push': invokeContract(
     tupleSchema([
@@ -1600,7 +1600,7 @@ const specificRuntimeEventSchemas = {
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
-  // Plan 170 D18: `videorc://buddy` opens the Golem tab; `openCreator` also
+  // Plan 170 D18: `videorc://buddy` opens the Buddy tab; `openCreator` also
   // opens the creator once the "Make it Alive" avatar is worn.
   'buddy:deep-link': objectSchema({ openCreator: booleanSchema }, { allowUnknown: false }),
   // Whether the command modifier is physically down. Main is the only place

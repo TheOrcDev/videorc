@@ -95,16 +95,16 @@ function initialTab(
 }
 
 /**
- * The Golem tab (plan 150): Videorc's AI tab, right under Studio, built like
+ * The Buddy tab (plan 150): Videorc's AI tab, right under Studio, built like
  * Settings. Five tabs in a segmented strip under the toolbar, each answering
- * one question: Live (is Golem on), Chat (how it replies and moderates),
+ * one question: Live (is Buddy on), Chat (how it replies and moderates),
  * Voice (what you can say), Reports (what happened on your streams) and
  * Clean cut (edit your recordings). The strip never scrolls away: the shell
  * turns the pane body's scroll off, and only the region under the strip
  * scrolls. The selected tab lives in app-shell, so links open a named tab and
- * Golem reopens on the one used last.
+ * Buddy reopens on the one used last.
  *
- * `reportSessionId` is the Library's "Golem report" ask: Reports opens on
+ * `reportSessionId` is the Library's "Buddy report" ask: Reports opens on
  * that session. Without it the report follows the last stream.
  * `cleanCutRequest` is the Library's "Clean cut" (select that recording) or
  * the ready toast's Review (open that cut's review, inside Clean cut).
@@ -172,7 +172,7 @@ export function BuddyTab({
       >
         {/* Settings' strip, verbatim; the toolbar carries only the title. */}
         <div className="shrink-0 border-b border-border px-gutter py-2">
-          <TabsList aria-label="Golem sections">
+          <TabsList aria-label="Buddy sections">
             {BUDDY_TABS.map(({ id, label }) => (
               <TabsTrigger key={id} data-videorc-buddy-tab={id} value={id}>
                 {label}
@@ -191,7 +191,7 @@ export function BuddyTab({
                 and Cloud AI stay at the bottom until Stream Manager takes the
                 switch (S-D6). */}
             {creatorOpen ? <BuddyPetCreator onClose={closeBuddyPetCreator} /> : null}
-            {/* Plan 170: My Golems, the look panel and the onboarding share
+            {/* Plan 170: My Buddies, the look panel and the onboarding share
                 one backend client and one look controller. */}
             <BuddyLookClientProvider>
               <PageStack className={creatorOpen ? 'hidden' : undefined}>
@@ -260,7 +260,7 @@ function CleanCutReviewFallback(): ReactElement {
 }
 
 /**
- * Golem Live's state as the provider holds it, shared by the Live tab and the
+ * Buddy Live's state as the provider holds it, shared by the Live tab and the
  * locked alert every other settings tab leads with (plan 150, D7).
  */
 function useBuddyLive(): ReturnType<typeof buddyLiveView> {
@@ -278,7 +278,7 @@ function useBuddyLive(): ReturnType<typeof buddyLiveView> {
 }
 
 /**
- * Why Golem is locked, with its one action (sign in or Premium). Locked means
+ * Why Buddy is locked, with its one action (sign in or Premium). Locked means
  * disabled with one reason (plan 150, D7): the tab's controls render disabled
  * under it, and nothing live-looking sits beside it.
  */
@@ -315,7 +315,7 @@ function BuddyUnlockAlert({
 
 /**
  * The Chat tab (plan 150): Greetings (plan 164 S-D5, free) and Replies
- * beside Moderation. When Golem is locked, one alert above both columns says
+ * beside Moderation. When Buddy is locked, one alert above both columns says
  * why and every Premium field under it is disabled (D7), the same reason
  * Live shows; the greetings stay editable.
  */
@@ -351,23 +351,23 @@ function BuddyVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
 }
 
 /**
- * The Live tab's left column (plan 150): Golem's emblem beside its status,
- * then why it is locked, the Stream Manager, and whether Golem hears you.
+ * The Live tab's left column (plan 150): Buddy's emblem beside its status,
+ * then why it is locked, the Stream Manager, and whether Buddy hears you.
  * The switch moved to Stream Manager (plan 164 S-D6): the chat mode there
- * is what turns the Golem on, so this column points at it.
+ * is what turns the Buddy on, so this column points at it.
  */
 function BuddyLiveSection(): ReactElement {
   const { cohostSettings, runtimeInfo } = useStudioCore()
   const { openCommentsWindow } = useStudioShell()
   const view = useBuddyLive()
-  const buddyName = cohostSettings?.persona.name ?? 'Golem'
+  const buddyName = cohostSettings?.persona.name ?? 'Buddy'
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
   return (
     <PanelSection
       action={<Badge variant="outline">Alpha</Badge>}
-      description={`Your Golem reads your chat and hears you while you stream. ${BUDDY_POSTS_PROMISE}`}
+      description={`Your Buddy reads your chat and hears you while you stream. ${BUDDY_POSTS_PROMISE}`}
       title="Joins my streams"
     >
       <div className="flex items-center gap-3" data-slot="buddy-live-status-block">
@@ -377,7 +377,7 @@ function BuddyLiveSection(): ReactElement {
             <FieldTitle>{buddyName} joins my streams</FieldTitle>
             <BuddyLiveStatusLine status={view.status} />
             <FieldDescription className="text-xs" data-testid="buddy-live-pointer">
-              Turn it on in Stream Manager: the Golem pane&apos;s chat mode, Suggest or Auto.
+              Turn it on in Stream Manager: the Buddy pane&apos;s chat mode, Suggest or Auto.
             </FieldDescription>
           </FieldContent>
         </Field>
@@ -407,7 +407,7 @@ function BuddyLiveSection(): ReactElement {
 }
 
 /**
- * "What Golem does" (plan 150, D5): the powers as rows, each with a way to the
+ * "What Buddy does" (plan 150, D5): the powers as rows, each with a way to the
  * tab that holds its settings. Navigation, not a pitch.
  */
 function BuddyLivePowers({
@@ -416,8 +416,8 @@ function BuddyLivePowers({
   onSelectTab: (tab: BuddyTabId) => void
 }): ReactElement {
   return (
-    <PanelSection title="What Golem does">
-      <FieldGroup aria-label="What Golem Live does" role="list" variant="grouped">
+    <PanelSection title="What Buddy does">
+      <FieldGroup aria-label="What Buddy Live does" role="list" variant="grouped">
         {BUDDY_LIVE_POWERS.map((power) => {
           const label = BUDDY_TABS.find((entry) => entry.id === power.tab)?.label ?? power.tab
           return (
@@ -490,7 +490,7 @@ function CloudAiSection(): ReactElement {
   const { aiConsent, setAiConsent } = useStudioCore()
   return (
     <PanelSection
-      description="What Golem and Clean cut send to Videorc's cloud, and what is kept."
+      description="What Buddy and Clean cut send to Videorc's cloud, and what is kept."
       title="Cloud AI"
     >
       <FieldGroup variant="grouped">
@@ -514,7 +514,7 @@ function CloudAiSection(): ReactElement {
 }
 
 /**
- * The consent Golem Live asks for when it is turned on without it. Accepting
+ * The consent Buddy Live asks for when it is turned on without it. Accepting
  * grants cloud-AI consent, then makes the one settings save; declining
  * changes nothing. The safe choice has the focus.
  */
@@ -522,7 +522,7 @@ function BuddyConsentDialog(): ReactElement {
   const { buddyConsentRequested, answerBuddyConsent } = useStudioCore()
   const answer = (accepted: boolean): void => {
     void answerBuddyConsent(accepted).catch((error: unknown) =>
-      toast.error('Could not turn on Golem Live', {
+      toast.error('Could not turn on Buddy Live', {
         description: error instanceof Error ? error.message : undefined
       })
     )
@@ -536,14 +536,14 @@ function BuddyConsentDialog(): ReactElement {
     >
       <DialogContent showCloseButton={false}>
         <DialogHeader>
-          {/* Golem's emblem leads, the way the Videorc logo leads
+          {/* Buddy's emblem leads, the way the Videorc logo leads
               permissions onboarding (plan 149). */}
           <div className="flex items-center gap-3">
             <BuddyEmblem size="lg" />
             <div className="flex flex-col gap-1">
-              <DialogTitle>Turn on Golem Live?</DialogTitle>
+              <DialogTitle>Turn on Buddy Live?</DialogTitle>
               <DialogDescription>
-                Golem uses Videorc&apos;s cloud AI while you&apos;re live.
+                Buddy uses Videorc&apos;s cloud AI while you&apos;re live.
               </DialogDescription>
             </div>
           </div>

@@ -37,16 +37,16 @@ const LOOK_PANEL_TILES_COPY: BuddyPoseTilesCopy = {
 }
 
 /**
- * "Your Golem's look" (plan 169 D10 to D13), the Avatar section's Still
+ * "Your Buddy's look" (plan 169 D10 to D13), the Avatar section's Still
  * panel. Since plan 170 a new look is made in the four-step onboarding
- * (New Golem, under My Golems); this panel shows the active look and, while
+ * (New Buddy, under My Buddies); this panel shows the active look and, while
  * a look is being made or waits as a draft (the onboarding closed before
  * deciding), the same four tiles: Redo (R on a focused tile), Keep this
  * look (⌘↵) and Discard. Make it Alive opens the Alive creator with the
  * current look. Nothing toasts: the tiles are the confirmation.
  */
 export interface BuddyLookSectionProps {
-  /** Tests inject the backend; the app shares the Golem tab's client. */
+  /** Tests inject the backend; the app shares the Buddy tab's client. */
   client?: BuddyLookClient | null
 }
 
@@ -88,7 +88,7 @@ export function BuddyLookSection({
     if (!settings) return
     // The provider's copy of the persona follows the backend's.
     await patchCohostSettings({ persona: settings.persona }).catch((error: unknown) =>
-      setSaveError(error instanceof Error ? error.message : 'Could not save your Golem.')
+      setSaveError(error instanceof Error ? error.message : 'Could not save your Buddy.')
     )
   }
   const keepAllowed = Boolean(controller) && view === 'draft' && !busy
@@ -108,7 +108,7 @@ export function BuddyLookSection({
         <Field>
           <FieldLabel>
             {view === 'working'
-              ? 'Making your Golem'
+              ? 'Making your Buddy'
               : view === 'draft'
                 ? 'Your new look'
                 : 'Current look'}
@@ -117,10 +117,10 @@ export function BuddyLookSection({
             {view === 'working'
               ? 'Idle first, then talking, laughing and thinking from it. About a minute.'
               : view === 'draft'
-                ? 'Keep it to make it your Golem. Redo remakes one pose from this idle.'
+                ? 'Keep it to make it your Buddy. Redo remakes one pose from this idle.'
                 : persona.source === 'default'
-                  ? 'The default Golem until you create your own.'
-                  : 'What your Golem wears on stream.'}
+                  ? 'The default Buddy until you create your own.'
+                  : 'What your Buddy wears on stream.'}
           </FieldDescription>
           {view === 'current' ? (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-testid="buddy-look-tiles">

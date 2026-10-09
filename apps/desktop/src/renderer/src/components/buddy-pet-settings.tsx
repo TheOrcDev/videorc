@@ -13,7 +13,7 @@ import { BUDDY_STILL_PACK_ID, buddyFirstPack } from '@/lib/buddy-pet-view'
 import { BUDDY_STILL_REACTION_IDS, type BuddyMotionSettings } from '../../../shared/buddy-pet'
 
 /**
- * The living Golem's settings on the Golem tab (plan 168 S-D2): Avatar with
+ * The living Buddy's settings on the Buddy tab (plan 168 S-D2): Avatar with
  * the preview, then Reactions beside Motion. One owner for what the three
  * share: the pack list, the preview (Try plays in it) and the Motion draft
  * (the preview follows the slider before it is saved).

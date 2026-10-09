@@ -215,7 +215,7 @@ describe('buddy pet pack store (plan 168 S-A2)', () => {
     for (const id of [
       'bundled:',
       'bundled:../x',
-      'bundled:Golem',
+      'bundled:Buddy',
       'buddy',
       PACK.toUpperCase(),
       ''

@@ -1,4 +1,4 @@
-//! Golem pet builder (plan 168, Phase F slices S-F1 to S-F3): turns the
+//! Buddy pet builder (plan 168, Phase F slices S-F1 to S-F3): turns the
 //! generated sheets of one creation into a page-pet pack on disk.
 //!
 //! Inputs are the sheet set of decision D18: five 5 x 1 gaze strips
@@ -1321,7 +1321,7 @@ pub(crate) mod tests {
             .collect();
         Fixture {
             input: BuildInput {
-                name: "Test Golem".to_string(),
+                name: "Test Buddy".to_string(),
                 reference: SourceFile {
                     path: reference_path,
                     sha256: reference_sha,

@@ -21,17 +21,17 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the glyphs sit outside the Nucleo count: six platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; the other three come from Phosphor) and `GolemIcon`, Golem's own mark (the owner's Golem artwork since plan 164; plan 119 added the slot). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
+Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the glyphs sit outside the Nucleo count: six platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; the other three come from Phosphor) and `BuddyIcon`, Buddy's own mark (the owner's Buddy artwork since plan 164; plan 119 added the slot). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
 
-The Golem tab's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
+The Buddy tab's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
 a small picture opened larger to look at it, a meaning no slot had
 (`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is
 the output frame). That makes **92 slots over 88 glyphs**.
 
-Plan 119 retired two slots and added two. `GolemIcon` replaced both
+Plan 119 retired two slots and added two. `BuddyIcon` replaced both
 `PublishIcon` (Sparkle, a glyph `SparkleIcon` keeps) and `CohostIcon` (Robot,
 freed), and the in-app player added `PauseIcon` (Pause).
 
@@ -152,7 +152,7 @@ The 91 slots are the authoritative list — read them straight out of
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.
 
-Seven slots are **not** part of any icon-set migration. `GolemIcon` is
+Seven slots are **not** part of any icon-set migration. `BuddyIcon` is
 Videorc's own mark. `TwitchIcon`, `TiktokIcon`, `InstagramIcon`, `KickIcon`,
 `XPlatformIcon` and `YoutubeIcon` are third-party brand marks with their own
 trademark rules, and the design language keeps app/source marks as the only

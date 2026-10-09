@@ -215,7 +215,7 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await act(async () => kindButton('Alive').click())
     expect(patchCohostSettings).not.toHaveBeenCalled()
     expect(document.querySelector('[data-testid="buddy-alive-empty"]')?.textContent).toContain(
-      'No living Golem yet'
+      'No living Buddy yet'
     )
     expect(button('buddy-pack-create').disabled).toBe(false)
     expect(button('buddy-pack-import')).toBeTruthy()
@@ -232,7 +232,7 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await render({ list: pets([]), consented: false })
     expect(button('buddy-pack-create').disabled).toBe(true)
     expect(button('buddy-create-hint').textContent).toBe(
-      'Allow cloud AI below to create a living Golem.'
+      'Allow cloud AI below to create a living Buddy.'
     )
   })
 

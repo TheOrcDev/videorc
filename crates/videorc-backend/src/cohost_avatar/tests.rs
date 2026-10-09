@@ -1,4 +1,4 @@
-//! The Golem look against a fake videorc-web (plan 169 Phase B): a set
+//! The Buddy look against a fake videorc-web (plan 169 Phase B): a set
 //! lands as a draft and Keep moves it; Discard leaves nothing; Redo replaces
 //! one state; a second create replaces the draft; a failed idle leaves no
 //! draft; a restart finds the draft again; every web error in plain words.
@@ -825,7 +825,7 @@ async fn buddy_look_refuses_before_sending_anything() {
         refused(CohostAvatarCreateParams::default(), env.clone())
             .await
             .message,
-        "Describe your Golem or add a picture first."
+        "Describe your Buddy or add a picture first."
     );
     assert_eq!(
         refused(describe("   "), env.clone()).await.code,
@@ -944,7 +944,7 @@ async fn buddy_look_web_errors_become_the_hints_the_plan_names() {
             StatusCode::FORBIDDEN,
             "premium-required",
             None,
-            "Making your Golem's look requires Videorc Premium.",
+            "Making your Buddy's look requires Videorc Premium.",
         ),
     ];
     for (status, code, retry_after, hint) in cases {
@@ -1201,7 +1201,7 @@ mod library_route {
         })
         .await;
         assert_eq!(web.count(&format!("GET /api/buddy/avatars/{MADE}/idle")), 0);
-        // The Golem itself changes only on Keep.
+        // The Buddy itself changes only on Keep.
         assert_eq!(
             crate::cohost::get_cohost_settings(&state).await.persona,
             CohostPersona::default()

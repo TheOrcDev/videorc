@@ -1,4 +1,4 @@
-// Golem pet packs (plan 168 Phase A, D1 to D4): the page-pet manifest v1
+// Buddy pet packs (plan 168 Phase A, D1 to D4): the page-pet manifest v1
 // contract as the renderer preview and main see it. The backend's
 // `buddy_pet.rs` runs the same rules; `protocol-fixtures/buddy-pet-manifests.json`
 // is run by both, and every failing case names its rule.
@@ -65,7 +65,7 @@ export type BuddyPetRule =
   | 'pack-outside-root'
   | 'pack-io'
 
-/** A refusal: the rule it broke and one plain sentence for the Golem tab. */
+/** A refusal: the rule it broke and one plain sentence for the Buddy tab. */
 export class BuddyPetError extends Error {
   constructor(
     readonly rule: BuddyPetRule,
@@ -410,7 +410,7 @@ export function measureBuddyPetHeadTop(
 
 // --- Store wire (plan 168 S-A3) ------------------------------------------------
 
-/** The Golem's avatar kind (D2): Still renders the persona's state images,
+/** The Buddy's avatar kind (D2): Still renders the persona's state images,
  * Alive a pet pack (a uuid of the persona's own, or `bundled:<name>`). */
 export type BuddyAvatar = { kind: 'still' } | { kind: 'alive'; packId: string }
 
@@ -438,7 +438,7 @@ export interface BuddyPetImportResult {
 
 // --- Persona motion and reactions (plan 168 S-A4, D10, D13, D14, D15) --------
 
-/** What an event makes the Golem react to (D14). Moderation flags never are. */
+/** What an event makes the Buddy react to (D14). Moderation flags never are. */
 export type BuddyTrigger =
   | 'follow'
   | 'subscription'
@@ -486,7 +486,7 @@ export function isBuddyReactionId(value: unknown): value is string {
   return typeof value === 'string' && BUDDY_REACTION_ID.test(value)
 }
 
-/** How the Golem moves on air (D10, D13, D15), per persona. */
+/** How the Buddy moves on air (D10, D13, D15), per persona. */
 export interface BuddyMotionSettings {
   /** 0 to 1; multiplies every transform; 0 keeps frame changes only. */
   intensity: number

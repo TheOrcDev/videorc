@@ -2,7 +2,7 @@ import type { LiveChatMessage, LiveChatProviderState, StreamPlatform } from '@/l
 import { isActivityOnlyEvent } from '@/lib/backend'
 import { commentMentions } from '@/components/comment-row'
 
-// The Stream Manager's chat filters (plan 055, D3): platform, Golem's
+// The Stream Manager's chat filters (plan 055, D3): platform, Buddy's
 // questions, mentions of the streamer, and search. Follows, Power-ups and
 // channel point redemptions are activity and never appear in chat.
 

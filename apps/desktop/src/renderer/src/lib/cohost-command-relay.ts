@@ -1,7 +1,7 @@
 import type { BackendClient } from '@/backendClient'
 import type { CohostCommandRelayCommand, CohostState, VideorcApi } from '@/lib/backend'
 
-// Answers to Golem's voice command cards from the Stream Manager (plan 140,
+// Answers to Buddy's voice command cards from the Stream Manager (plan 140,
 // S6 part B), Studio's half. Loaded with the chat moderation relay, out of
 // the main window's eager bundle. The window names the command and the
 // answer; this makes the `cohost.command.*` call and replies with the state.
@@ -58,7 +58,7 @@ export function startCohostCommandRelay(options: CohostCommandRelayOptions): () 
           error:
             error instanceof Error && error.message.trim()
               ? error.message
-              : 'Could not answer Golem.'
+              : 'Could not answer Buddy.'
         })
       )
       .catch(() => undefined)

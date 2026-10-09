@@ -455,7 +455,7 @@ pub struct CaptionChunkRecord {
     #[serde(skip_serializing)]
     pub provider_item_id: Option<String>,
     /// Captions were presenting when this record landed (plan 068 D1). The
-    /// SRT, which the Golem report's moments read, keeps every record; the cue
+    /// SRT, which the Buddy report's moments read, keeps every record; the cue
     /// render and the burned copy use presented records only.
     #[serde(skip_serializing)]
     pub presented: bool,
@@ -2701,7 +2701,7 @@ pub fn install_caption_overlays(
 }
 
 /// Decode one PNG and install it in one target (or both) with a placement and
-/// no style revision: the Golem overlay slot (plan 164 Phase C) shares the
+/// no style revision: the Buddy overlay slot (plan 164 Phase C) shares the
 /// per-target slot type with captions but never carries a caption style.
 #[cfg(test)]
 pub(crate) fn install_overlay_targets(
@@ -3016,7 +3016,7 @@ pub struct CaptionsCoordinator {
     /// presented. Owns `captions.status`, `captions.update`, overlays, cue
     /// render and burn.
     desired_enabled: bool,
-    /// Golem's listen intent (plan 068 D1): the provider task and tap run
+    /// Buddy's listen intent (plan 068 D1): the provider task and tap run
     /// while either intent is wanted. Listen owns nothing visible in the
     /// captions UI.
     listen_wanted: bool,
@@ -3038,7 +3038,7 @@ pub struct CaptionsCoordinator {
     /// frames can remain in the shared caption receiver across revoke/grant;
     /// they must not acquire the new epoch merely because they drain later.
     listen_started_at: Option<std::time::Instant>,
-    /// Golem speech admission is independent of its Listen setting: explicit
+    /// Buddy speech admission is independent of its Listen setting: explicit
     /// captions also feed consenting voice/spotlight features.
     speech_admitted: bool,
     speech_epoch: u64,
@@ -3425,7 +3425,7 @@ pub(crate) async fn listen_wanted_for_test(state: &AppState) -> bool {
     state.captions.lock().await.listen_wanted
 }
 
-/// A live listen-only provider task on the tap (captions off, Golem's listen
+/// A live listen-only provider task on the tap (captions off, Buddy's listen
 /// intent wanted), for the stop-path tests outside this module.
 #[cfg(test)]
 pub(crate) async fn install_listen_only_test_task(state: &AppState) {
@@ -3581,7 +3581,7 @@ pub(crate) async fn retire_marker_voice(state: &AppState) {
 pub(crate) async fn pause_marker_voice_for_service_flags(state: &AppState) {
     let listening = crate::cohost::CohostListening::blocked(
         "voice-disabled",
-        "Golem voice commands are temporarily unavailable. Turn listening on again after the pause ends.",
+        "Buddy voice commands are temporarily unavailable. Turn listening on again after the pause ends.",
     );
     {
         let mut coordinator = state.captions.lock().await;
@@ -3633,17 +3633,17 @@ pub(crate) async fn configure_marker_voice(
     } else if !crate::cohost::premium_entitled() {
         Some(CohostListening::blocked(
             "premium-required",
-            "Golem voice markers require Videorc Premium.",
+            "Buddy voice markers require Videorc Premium.",
         ))
     } else if crate::account::stored_session_token().is_none() {
         Some(CohostListening::blocked(
             "signed-out",
-            "Sign in to use Golem voice markers.",
+            "Sign in to use Buddy voice markers.",
         ))
     } else if !crate::service_flags::buddy_voice_commands_enabled(state) {
         Some(CohostListening::blocked(
             "voice-disabled",
-            "Golem voice commands are temporarily unavailable.",
+            "Buddy voice commands are temporarily unavailable.",
         ))
     } else {
         None
@@ -3922,7 +3922,7 @@ fn coordinator_presenting(coordinator: &CaptionsCoordinator) -> bool {
         .is_some_and(|present| present.load(Ordering::Acquire))
 }
 
-/// A live task that Golem's listen intent owns and captions do not present.
+/// A live task that Buddy's listen intent owns and captions do not present.
 fn listen_only_task_alive(coordinator: &CaptionsCoordinator) -> bool {
     coordinator.listen_wanted
         && coordinator_task_alive(coordinator)
@@ -4239,7 +4239,7 @@ fn spawn_transcription_task(
     status
 }
 
-/// Start Golem's listen intent for a running Golem session (plan 068 D2).
+/// Start Buddy's listen intent for a running Buddy session (plan 068 D2).
 /// Reuses the caption start gates but never fails or blocks capture, never
 /// raises a caption block, and never publishes a caption status: with no
 /// eligible microphone, bearer or capture it reports a listen block and
@@ -4289,7 +4289,7 @@ async fn start_listen_with_bearer_for_epoch(
         if coordinator.privacy_teardown_in_progress || coordinator.privacy_teardown_failed {
             return CohostListening::blocked(
                 "signing-out",
-                "Golem can't listen while account sign-out cleans up private caption data.",
+                "Buddy can't listen while account sign-out cleans up private caption data.",
             );
         }
     }
@@ -4318,24 +4318,24 @@ async fn start_listen_with_bearer_for_epoch(
         };
     }
     if !capture_active {
-        return CohostListening::blocked("no-capture", "Golem hears you once a session is live.");
+        return CohostListening::blocked("no-capture", "Buddy hears you once a session is live.");
     }
     if !real_input_eligible && !caption_contract_idle_session_enabled() {
         return CohostListening::blocked(
             "no-microphone",
-            "Select a microphone so Golem can hear you.",
+            "Select a microphone so Buddy can hear you.",
         );
     }
     // Credentials are read only once a session could actually listen.
     let Some(bearer) = resolve_bearer() else {
-        return CohostListening::blocked("signed-out", "Sign in so Golem can hear you.");
+        return CohostListening::blocked("signed-out", "Sign in so Buddy can hear you.");
     };
     let client = match VideorcApiClient::new() {
         Ok(client) => client,
         Err(error) => {
             return CohostListening::blocked(
                 "service-unavailable",
-                format!("Golem can't reach the transcription service: {error}"),
+                format!("Buddy can't reach the transcription service: {error}"),
             );
         }
     };
@@ -4352,7 +4352,7 @@ async fn start_listen_with_bearer_for_epoch(
             mark_target,
         },
     );
-    tracing::info!(cohost_session_id, "Golem listen intent started.");
+    tracing::info!(cohost_session_id, "Buddy listen intent started.");
     CohostListening::starting()
 }
 
@@ -4389,10 +4389,10 @@ where
     crate::cohost::publish_listening_for_epoch(state, epoch, listening).await;
 }
 
-/// How Golem's listen intent ends.
+/// How Buddy's listen intent ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListenStop {
-    /// The user stopped Golem, listening or chat: a listen-only task ends at
+    /// The user stopped Buddy, listening or chat: a listen-only task ends at
     /// once and queued audio is never transcribed (a privacy boundary).
     Abort,
     /// The capture is ending and `finish_captions_for_capture` follows (the
@@ -4404,7 +4404,7 @@ pub enum ListenStop {
     DrainIfCapturing,
 }
 
-/// End Golem's listen intent (plan 068 D1). Captions that present keep the
+/// End Buddy's listen intent (plan 068 D1). Captions that present keep the
 /// task; a listen-only task ends at once like an explicit caption opt-out
 /// (queued audio is not transcribed after it). Never publishes a caption
 /// status.
@@ -4456,7 +4456,7 @@ pub async fn stop_captions(state: &AppState) -> CaptionsStatus {
         coordinator.desired_enabled = false;
         coordinator.language = None;
         if keep_listen_task {
-            // Golem still listens (plan 068 D1): presentation goes off, the
+            // Buddy still listens (plan 068 D1): presentation goes off, the
             // task and tap stay. Nothing captions showed survives this click.
             if let Some(present) = coordinator.presentation.as_ref() {
                 present.store(false, Ordering::Release);
@@ -4561,9 +4561,9 @@ pub async fn stop_captions_for_sign_out(
             detector.retire_deferred_recordings();
         }
     }
-    // Golem's copy of what was said goes with the transcript, before the
+    // Buddy's copy of what was said goes with the transcript, before the
     // credentials do: nothing heard under this account can ride the next
-    // tick under another, and Golem stops claiming it listens.
+    // tick under another, and Buddy stops claiming it listens.
     crate::cohost::purge_speech_for_sign_out(state).await;
     // Any SRT writer which crossed the old generation must finish publication
     // or remove its identity-bound staging/output before credentials can be
@@ -4851,7 +4851,7 @@ async fn block_captions_after_control(state: &AppState, reason_code: &str, messa
     }
     // A block is terminal for this runtime. Discard pending PCM just like an
     // explicit opt-out; only a normal capture end may drain final audio. A
-    // task Golem's listen intent still wants keeps running unpresented.
+    // task Buddy's listen intent still wants keeps running unpresented.
     let keep_listen_task = {
         let coordinator = state.captions.lock().await;
         coordinator.listen_wanted && coordinator_task_alive(&coordinator)
@@ -5235,7 +5235,7 @@ impl RealtimeCaptionTimeline {
 
 /// Audio offsets belong to the consent intent at input admission, not to the
 /// intent present when a delayed VAD or transcript event reaches us. Retain a
-/// bounded number of boundaries; older or missing offsets have no Golem owner.
+/// bounded number of boundaries; older or missing offsets have no Buddy owner.
 #[derive(Default)]
 struct RealtimeAudioAdmissions {
     boundaries: std::collections::VecDeque<(f64, AdmittedBuddyAudio)>,
@@ -5533,7 +5533,7 @@ async fn run_caption_session(mut session: CaptionSession) {
     let sequence = session.sequence.clone();
     let mut timeline = CaptionTimeline::new(session.capture_elapsed_seconds);
     let mut audio_heartbeat = CaptionAudioHeartbeat::new(std::time::Instant::now());
-    // Golem's listen intent never uses the realtime socket (plan 068 D5): its
+    // Buddy's listen intent never uses the realtime socket (plan 068 D5): its
     // token route is caption-gated, so a caption quota or the captions switch
     // would end listening. A listen-only task goes straight to the metered
     // chunk path and stays there, even if captions join it later.
@@ -5546,7 +5546,7 @@ async fn run_caption_session(mut session: CaptionSession) {
     let ended_normally = match realtime {
         RealtimeOutcome::Ended => true,
         RealtimeOutcome::ListenOnly => {
-            tracing::info!("Golem listens through chunked transcription.");
+            tracing::info!("Buddy listens through chunked transcription.");
             let mut status = CaptionsStatus::active(
                 CaptionsState::Degraded,
                 CaptionsTransport::Chunked,
@@ -5603,7 +5603,7 @@ async fn run_caption_session(mut session: CaptionSession) {
                 listen_epoch,
                 crate::cohost::CohostListening::blocked(
                     "no-capture",
-                    "Golem hears you while a session is live.",
+                    "Buddy hears you while a session is live.",
                 ),
             );
         }
@@ -6166,7 +6166,7 @@ enum TerminalOutcome {
     /// The provider task ends now.
     EndTask,
     /// One intent ended and the other keeps this task: captions keep
-    /// presenting after a listen block, or Golem keeps listening (metered as
+    /// presenting after a listen block, or Buddy keeps listening (metered as
     /// listen from the next chunk) after a caption block.
     Continue,
 }
@@ -6224,10 +6224,10 @@ fn realtime_terminal_outcome(outcome: TerminalOutcome, message: &str) -> Realtim
 }
 
 /// A terminal provider failure (plan 068 D5). A listen-scoped code ends only
-/// Golem's listen intent: presenting captions continue, a listen-only task
-/// ends quietly. A caption-scoped code while Golem listens ends only
+/// Buddy's listen intent: presenting captions continue, a listen-only task
+/// ends quietly. A caption-scoped code while Buddy listens ends only
 /// presentation: the caption block is published as it always was and the
-/// task keeps transcribing for Golem. Every other terminal failure ends the
+/// task keeps transcribing for Buddy. Every other terminal failure ends the
 /// task, blocks the listen intent when it was wanted, and presents a caption
 /// block only while captions present.
 async fn handle_terminal_failure(
@@ -6260,7 +6260,7 @@ async fn handle_terminal_failure(
             }
             if session.presenting() {
                 tracing::warn!(
-                    "Golem stopped listening ({code}); live captions continue: {message}"
+                    "Buddy stopped listening ({code}); live captions continue: {message}"
                 );
                 return TerminalOutcome::Continue;
             }
@@ -6268,7 +6268,7 @@ async fn handle_terminal_failure(
             TerminalOutcome::EndTask
         }
         TerminalScope::Captions if listen_wanted => {
-            tracing::warn!("Live captions stopped ({code}); Golem keeps listening: {message}");
+            tracing::warn!("Live captions stopped ({code}); Buddy keeps listening: {message}");
             publish_caption_block_keeping_task(session, code, message, transport).await;
             TerminalOutcome::Continue
         }
@@ -6287,7 +6287,7 @@ async fn handle_terminal_failure(
 }
 
 /// Captions stop presenting with their block, while the task and tap stay
-/// for Golem. The flip and the status share the coordinator lock, so a
+/// for Buddy. The flip and the status share the coordinator lock, so a
 /// `captions.stop` racing it orders strictly before or after.
 async fn publish_caption_block_keeping_task(
     session: &CaptionSession,
@@ -6341,7 +6341,7 @@ async fn publish_listening_if_ready(
         return;
     }
     *published_epoch = Some(epoch);
-    // The realtime allowance is the caption one: Golem's stays unknown.
+    // The realtime allowance is the caption one: Buddy's stays unknown.
     session
         .note_listen_ready(Some(epoch), crate::cohost::CohostListening::on(None))
         .await;
@@ -6577,7 +6577,7 @@ async fn handle_realtime_event(
                         );
                     }
                 }
-                // Golem's consent check and append stay under the coordinator
+                // Buddy's consent check and append stay under the coordinator
                 // lock, independently of the recording-owned clip hook.
                 if current_capture && !marker_consumed {
                     crate::cohost::note_transcript_final(
@@ -6883,7 +6883,7 @@ type CaptionChunkUploadResult = (
 type CaptionChunkUploadFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = CaptionChunkUploadResult> + Send>>;
 
-/// Golem's listening state as one chunked task reports it: `on` once the task
+/// Buddy's listening state as one chunked task reports it: `on` once the task
 /// is ready (a successful upload, or a silent chunk skipped after the tap
 /// delivered frames), then the listen allowance from listen-metered answers,
 /// published at most once per `LISTEN_REMAINING_REFRESH`. Pure.
@@ -6894,7 +6894,7 @@ struct ListenReadiness {
     epoch: Option<u64>,
 }
 
-/// How often the listen allowance may change Golem's published state.
+/// How often the listen allowance may change Buddy's published state.
 const LISTEN_REMAINING_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl ListenReadiness {
@@ -7021,7 +7021,7 @@ fn begin_caption_chunk_upload(
 }
 
 /// Keep one chunk's transcript and hand it to captions (while they present)
-/// and to Golem. Presentation is read under the coordinator lock, the lock
+/// and to Buddy. Presentation is read under the coordinator lock, the lock
 /// `captions.stop` flips it under, and the update is emitted there: a caption
 /// turned off while its upload was in flight never shows after the clear.
 async fn commit_chunk_transcript(
@@ -7074,7 +7074,7 @@ async fn commit_chunk_transcript(
             session.state.emit_event("captions.update", update.clone());
         }
         // Recording ownership is independent of current caption presentation
-        // and Golem consent. An old admitted chunk still marks its own file.
+        // and Buddy consent. An old admitted chunk still marks its own file.
         let marker_consumed = first_final
             && note_chunk_marker(session, chunk, text, &response.segments, &coordinator);
         if first_final && !marker_consumed {
@@ -7170,7 +7170,7 @@ async fn run_chunked_caption_session(
                 }
                 tracing::trace!(seq = chunk.seq, "Skipped a silent transcription chunk.");
                 // Quiet is not "still starting": a skipped chunk after real
-                // frames proves the path, so Golem reads as listening.
+                // frames proves the path, so Buddy reads as listening.
                 if let Some(listening) =
                     listen_readiness.silent_chunk_skipped(audio_heartbeat.has_seen_frame())
                 {
@@ -7316,7 +7316,7 @@ async fn run_chunked_caption_session(
                             status.provider_ready = true;
                             status.reason_code = Some("realtime-fallback".to_string());
                             status.message = Some("Captions on with higher delay.".to_string());
-                            // A listen-metered answer carries Golem's allowance,
+                            // A listen-metered answer carries Buddy's allowance,
                             // never the caption one.
                             status.remaining_seconds =
                                 caption_metered.then_some(response.remaining_seconds);
@@ -8071,7 +8071,7 @@ mod tests {
                 })
             };
             let speech = crate::cohost::recent_speech_since(&state, None)
-                .ok_or_else(|| anyhow::anyhow!("Owned Golem speech snapshot was unavailable."))?;
+                .ok_or_else(|| anyhow::anyhow!("Owned Buddy speech snapshot was unavailable."))?;
             let exact_buddy = |text: &str| speech.finals.iter().any(|item| item.text == text);
             let held_cue_presented = state.captions.lock().await.chunks.iter().any(|cue| {
                 cue.text == "fixture retained utterance"
@@ -8091,7 +8091,7 @@ mod tests {
                 backwards_clock_retired: false,
             };
             // Genuine source-clock regression still retires presentation and
-            // Golem. This control uses the same predicate/reset/callback owner,
+            // Buddy. This control uses the same predicate/reset/callback owner,
             // independent of the debug producer's intended continuity.
             let current = RealtimeCaptionTimeline {
                 capture_base_seconds: timeline.capture_base_seconds,
@@ -8143,7 +8143,7 @@ mod tests {
             .await;
             let emitted = drain_events(&mut events);
             let speech = crate::cohost::recent_speech_since(&state, None)
-                .ok_or_else(|| anyhow::anyhow!("Owned Golem speech snapshot was unavailable."))?;
+                .ok_or_else(|| anyhow::anyhow!("Owned Buddy speech snapshot was unavailable."))?;
             result.backwards_clock_retired = capture_epoch > current.capture_epoch
                 && !emitted.iter().any(|event| event.event == "captions.update")
                 && !speech
@@ -8205,7 +8205,7 @@ mod tests {
         assert!(result.before_control && result.after_control && result.backwards_clock_retired);
         assert!(
             result.held_buddy_final,
-            "The consenting same-session Golem owner must receive the exact final held across another fixture batch."
+            "The consenting same-session Buddy owner must receive the exact final held across another fixture batch."
         );
     }
 
@@ -11693,7 +11693,7 @@ mod tests {
             write_caption_artifacts(&state, "listen-only", &recording_path, artifact).await;
         let srt = tokio::fs::read_to_string(recording_path.with_extension("srt"))
             .await
-            .expect("the Golem report's moments need the SRT even when captions never presented");
+            .expect("the Buddy report's moments need the SRT even when captions never presented");
         assert!(srt.contains("buddy heard this"));
         assert_eq!(artifact.presented_chunk_count(), 0);
         assert!(artifact.presented_chunks().is_empty());
@@ -11769,7 +11769,7 @@ mod tests {
 
     /// Finding 1b: with both intents on, a caption quota or the captions
     /// switch ends captions (with the caption block, exactly as before) and
-    /// the same task keeps transcribing for Golem, metered as listen.
+    /// the same task keeps transcribing for Buddy, metered as listen.
     #[tokio::test]
     async fn caption_scoped_failures_never_stop_buddy_listening() {
         let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
@@ -11801,7 +11801,7 @@ mod tests {
             assert_eq!(session.chunk_purpose(), purpose(true));
             {
                 let coordinator = state.captions.lock().await;
-                assert!(coordinator.listen_wanted, "Golem keeps listening ({code})");
+                assert!(coordinator.listen_wanted, "Buddy keeps listening ({code})");
                 let status = coordinator.status.as_ref().expect("caption block");
                 assert_eq!(status.state, CaptionsState::Blocked);
                 assert_eq!(status.reason_code.as_deref(), Some(code));
@@ -11819,7 +11819,7 @@ mod tests {
             );
         }
 
-        // A realtime socket failure while Golem listens falls back to chunks.
+        // A realtime socket failure while Buddy listens falls back to chunks.
         let session = test_caption_session(&state, true);
         state.captions.lock().await.listen_wanted = true;
         let outcome = handle_terminal_failure(
@@ -13098,7 +13098,7 @@ mod tests {
     }
 
     /// Finding 10: captions turned off while an upload was in flight never
-    /// show its final; the record and Golem still get it.
+    /// show its final; the record and Buddy still get it.
     #[tokio::test]
     async fn a_final_after_captions_turned_off_never_shows() {
         let state = test_caption_app_state();
@@ -13269,7 +13269,7 @@ mod tests {
         *state.recording.lock().await = None;
     }
 
-    /// Finding 2: at a capture end Golem's stop only clears the listen
+    /// Finding 2: at a capture end Buddy's stop only clears the listen
     /// intent; the listen-only task lives on until the capture seam drains it.
     /// An explicit stop still aborts at once.
     #[tokio::test]
@@ -13314,7 +13314,7 @@ mod tests {
         finish_captions_for_capture(&state, "caption-artifact-test").await;
         assert!(state.captions.lock().await.task.is_none());
 
-        // An explicit stop (Golem off, listening off) aborts at once.
+        // An explicit stop (Buddy off, listening off) aborts at once.
         install_intent_test_task(&state, false, true).await;
         stop_listen_with(&state, ListenStop::Abort).await;
         assert!(state.captions.lock().await.task.is_none());
@@ -13368,7 +13368,7 @@ mod tests {
         );
     }
 
-    /// Finding 4: sign-out ends Golem's listening in the state too, and a
+    /// Finding 4: sign-out ends Buddy's listening in the state too, and a
     /// listening publish decided before an intent ended never lands after.
     #[tokio::test]
     async fn consent_revocation_keeps_explicit_captions_and_fences_old_listen_publications() {
@@ -13508,7 +13508,7 @@ mod tests {
         let admitted = session.admitted_buddy_audio().await;
         let task_id = state.captions.lock().await.task.as_ref().unwrap().id();
         assert!(admitted.listen_epoch.is_some());
-        // The RPC validates the new authoritative chat while the old Golem
+        // The RPC validates the new authoritative chat while the old Buddy
         // engine and an explicit caption task are still present.
         state
             .live_chat
@@ -13697,7 +13697,7 @@ mod tests {
                 .finals
                 .len(),
             2,
-            "explicit captions feed consenting Golem even with its listen switch off"
+            "explicit captions feed consenting Buddy even with its listen switch off"
         );
         handle_realtime_event(
             &session,
@@ -14240,14 +14240,14 @@ mod tests {
                 .snapshot(std::time::Instant::now())
                 .text
                 .is_empty(),
-            "pre-revocation chunk/realtime finals cannot enter the new Golem generation"
+            "pre-revocation chunk/realtime finals cannot enter the new Buddy generation"
         );
         assert!(
             crate::cohost::recent_speech_since(&state, None)
                 .is_none_or(|speech| speech.finals.is_empty())
         );
         // Recording clip marks use the immutable task target even for speech
-        // retired from Golem, with no current recording slot to fall back to.
+        // retired from Buddy, with no current recording slot to fall back to.
         let mut marks = emitted
             .into_iter()
             .filter(|event| event.event == "clip.marked")
@@ -14279,7 +14279,7 @@ mod tests {
             "a retired reply cannot ready a new listen epoch"
         );
         assert!(drain_events(&mut events).is_empty());
-        // Fresh input after grant reaches the existing Golem session through
+        // Fresh input after grant reaches the existing Buddy session through
         // the same two production callbacks and can confirm listening again.
         buffer.push_samples(vec![3; 4], 0, granted_epoch, &sequence, &mut chunk_timeline);
         commit_chunk_transcript(

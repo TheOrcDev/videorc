@@ -26,7 +26,7 @@ cbuffer DrawConstants : register(b0)
     float4 solidColor;
     // output texel X/Y, deterministic sequence low bits, reserved
     float4 frameInfo;
-    // Golem sprite only (plan 168 S-B4): the 2x2 turn a, b, c, d (CSS order,
+    // Buddy sprite only (plan 168 S-B4): the 2x2 turn a, b, c, d (CSS order,
     // output pixels, y down) and its pivot x, y (normalized output), enabled.
     float4 spriteAffine;
     float4 spritePivot;

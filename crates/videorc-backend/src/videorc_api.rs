@@ -34,7 +34,7 @@ const COHOST_SPOTLIGHT_PATH: &str = "/api/ai/cohost/spotlight";
 /// The server rejects a larger body (checked on content-length bytes) as
 /// `invalid-request`; the engine trims candidates until the JSON fits.
 pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
-/// The Golem command parser (plan 140 S8) answers a wake-word utterance the
+/// The Buddy command parser (plan 140 S8) answers a wake-word utterance the
 /// local grammar could not read. The server's own budget is 2 s; past 2.5 s
 /// the streamer has moved on, so the engine says "didn't catch that".
 pub(crate) const COHOST_COMMAND_TIMEOUT: std::time::Duration =
@@ -55,7 +55,7 @@ const COHOST_COMMAND_AUTHOR_MAX_CHARS: usize = 120;
 const COHOST_COMMAND_TEXT_MAX_CHARS: usize = 500;
 const COHOST_COMMAND_ID_MAX_CHARS: usize = 200;
 const WINDOWS_PILOT_UPDATE_TOKEN_PATH: &str = "/api/desktop/updates/windows-pilot-token";
-// --- Golem pets (plan 168, Phase F) ---
+// --- Buddy pets (plan 168, Phase F) ---
 /// The pet routes (videorc-web PR #75): the client timeouts the web side
 /// names. A build session is a quick row; identity is one vision call; a
 /// sheet is one image edit (the route's own budget is 150 s).
@@ -72,8 +72,8 @@ const COHOST_PET_SHEET_PATH: &str = "/api/ai/cohost/pet/sheet";
 /// to 1536 x 1024 as base64, refused unread above this.
 const COHOST_PET_SMALL_RESPONSE_MAX_BYTES: usize = 256 * 1024;
 pub(crate) const COHOST_PET_SHEET_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
-// --- end Golem pets (plan 168, Phase F) ---
-// --- Golem library (plan 170 D5 to D8) ---
+// --- end Buddy pets (plan 168, Phase F) ---
+// --- Buddy library (plan 170 D5 to D8) ---
 /// Create and redo run the plan 169 generation (the route's `maxDuration` is
 /// 180 s), so the client waits as long as the set route's.
 pub(crate) const BUDDY_LIBRARY_GENERATE_TIMEOUT: std::time::Duration = COHOST_AVATAR_SET_TIMEOUT;
@@ -89,7 +89,7 @@ const BUDDY_LIBRARY_PROFILE_PATH: &str = "/api/buddy/profile";
 const BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// A stored pose is one PNG the generation made (8 MB at most, like a draft's).
 pub(crate) const BUDDY_LIBRARY_POSE_MAX_BYTES: usize = 8 * 1024 * 1024;
-// --- end Golem library (plan 170) ---
+// --- end Buddy library (plan 170) ---
 /// Bounded well inside the provider-mutation RPC envelope: an update check must
 /// never wait on a slow web edge for long.
 pub(crate) const WINDOWS_PILOT_UPDATE_TOKEN_TIMEOUT: std::time::Duration =
@@ -413,7 +413,7 @@ pub struct CohostTickQuestion {
     /// v3: the question is about what the streamer is talking about.
     #[serde(default)]
     pub on_topic: bool,
-    /// v4 (plan 164 S-D3): the viewer named the Golem or used `@<name>`.
+    /// v4 (plan 164 S-D3): the viewer named the Buddy or used `@<name>`.
     #[serde(default)]
     pub addressed: bool,
     /// v4: the mood the drafted reply is said in.
@@ -566,7 +566,7 @@ pub struct CohostSpotlightMatch {
     pub answered: Option<f64>,
 }
 
-// --- Golem look wire types (plan 169 D4, D5) ---
+// --- Buddy look wire types (plan 169 D4, D5) ---
 
 /// `POST /api/ai/cohost/avatar/set`. A create carries a description, an
 /// inspiration picture (base64 PNG, JPEG or WebP, at most 3 MB decoded) or
@@ -640,7 +640,7 @@ pub struct CohostAvatarSetResponse {
         std::collections::BTreeMap<crate::cohost::CohostAvatarState, CohostAvatarSetFailure>,
 }
 
-// --- Golem library wire types (plan 170 D5 to D8; videorc-web lib/buddy/library.ts) ---
+// --- Buddy library wire types (plan 170 D5 to D8; videorc-web lib/buddy/library.ts) ---
 // Named `BuddyLibraryWeb*` so they never meet the persona's `BuddyAvatar`
 // (Still or Alive). The desktop renderer never sees these: the backend turns
 // them into `cohost_library::BuddyLibraryEntry`.
@@ -828,9 +828,9 @@ pub(crate) fn buddy_pose_path_ok(url: &str) -> bool {
         && url.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-// --- end Golem library wire types (plan 170) ---
+// --- end Buddy library wire types (plan 170) ---
 
-// --- Golem pets (plan 168, Phase F) ---
+// --- Buddy pets (plan 168, Phase F) ---
 
 /// `POST /api/ai/cohost/pet/builds`: one creation's server-side session.
 /// Nothing is metered when it opens.
@@ -889,11 +889,11 @@ pub struct CohostPetSheetResponse {
     pub redos_remaining: u32,
 }
 
-// --- end Golem pets (plan 168, Phase F) ---
+// --- end Buddy pets (plan 168, Phase F) ---
 
-// --- Golem command parser wire types (plan 140 S8, contract part E) ---
+// --- Buddy command parser wire types (plan 140 S8, contract part E) ---
 
-/// `POST /api/ai/cohost/command`: what the streamer said after "Golem" that
+/// `POST /api/ai/cohost/command`: what the streamer said after "Buddy" that
 /// the local grammar could not read, plus the chat comments it may mean.
 /// Build it with `CohostCommandRequest::shaped`, which enforces the route's
 /// limits; the client refuses anything else without sending.
@@ -1227,11 +1227,11 @@ impl CohostApiError {
     fn from_transport_within(error: reqwest::Error, timeout: std::time::Duration) -> Self {
         if error.is_timeout() {
             Self::timeout(format!(
-                "Golem did not answer within {} s.",
+                "Buddy did not answer within {} s.",
                 timeout.as_secs()
             ))
         } else {
-            Self::network(format!("Could not reach Golem: {error}"))
+            Self::network(format!("Could not reach Buddy: {error}"))
         }
     }
 }
@@ -1519,7 +1519,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Golem's response: {error}"),
+                    format!("Could not read Buddy's response: {error}"),
                 )
             });
         }
@@ -1562,7 +1562,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Golem's spotlight response: {error}"),
+                    format!("Could not read Buddy's spotlight response: {error}"),
                 )
             });
         }
@@ -1580,7 +1580,7 @@ impl VideorcApiClient {
         ))
     }
 
-    /// One Golem command parse (plan 140 S8). Same auth, client version and
+    /// One Buddy command parse (plan 140 S8). Same auth, client version and
     /// failure mapping as the spotlight; a request out of the route's shape
     /// is refused here, before anything is sent.
     pub async fn post_cohost_command(
@@ -1603,7 +1603,7 @@ impl VideorcApiClient {
                 kind: CohostApiErrorKind::InvalidRequest,
                 detail: CohostErrorDetail::new(
                     "invalid-request",
-                    format!("Golem did not send the command: {problem}."),
+                    format!("Buddy did not send the command: {problem}."),
                     None,
                 ),
             });
@@ -1626,7 +1626,7 @@ impl VideorcApiClient {
                 }
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Golem's command response: {error}"),
+                    format!("Could not read Buddy's command response: {error}"),
                 )
             });
         }
@@ -1644,7 +1644,7 @@ impl VideorcApiClient {
         ))
     }
 
-    /// One Golem look call (plan 169 D4, D5): a whole set, or one state
+    /// One Buddy look call (plan 169 D4, D5): a whole set, or one state
     /// redone from the draft's idle. Bearer JSON, a 190 s timeout, a 40 MB cap
     /// on the body read before it is parsed, and the tick's failure mapping
     /// (code first, then status; `Retry-After` kept for the quota hint).
@@ -1663,7 +1663,7 @@ impl VideorcApiClient {
         .await
     }
 
-    // --- Golem library (plan 170 D5 to D8) ---
+    // --- Buddy library (plan 170 D5 to D8) ---
 
     /// `GET /api/buddy/avatars`: the account's avatars and its choice.
     pub async fn get_buddy_library(
@@ -1829,7 +1829,7 @@ impl VideorcApiClient {
         read_capped_body(response, status, timeout, BUDDY_LIBRARY_POSE_MAX_BYTES).await
     }
 
-    /// One JSON call to a co-host or Golem library route: the bearer, the
+    /// One JSON call to a co-host or Buddy library route: the bearer, the
     /// timeout, a response cap, and the `{ error: { code, message } }`
     /// envelope classified like every co-host failure.
     async fn send_cohost_json<Req: Serialize + ?Sized, Resp: DeserializeOwned>(
@@ -1877,9 +1877,9 @@ impl VideorcApiClient {
         ))
     }
 
-    // --- end Golem library (plan 170) ---
+    // --- end Buddy library (plan 170) ---
 
-    // --- Golem pets (plan 168, Phase F) ---
+    // --- Buddy pets (plan 168, Phase F) ---
 
     /// Open a pet build session (`POST /api/ai/cohost/pet/builds`).
     pub async fn post_cohost_pet_build(
@@ -1928,7 +1928,7 @@ impl VideorcApiClient {
         .await
     }
 
-    /// One bearer JSON call to a Golem route (the pet routes and the look's
+    /// One bearer JSON call to a Buddy route (the pet routes and the look's
     /// set route): the route's own timeout, the body capped before it is
     /// parsed, and the tick's failure mapping (code first, then status;
     /// `Retry-After` kept).
@@ -1960,7 +1960,7 @@ impl VideorcApiClient {
         }
     }
 
-    // --- end Golem pets (plan 168, Phase F) ---
+    // --- end Buddy pets (plan 168, Phase F) ---
 
     /// Fetch safe client-facing AI quota metadata for the signed-in user.
     pub async fn get_ai_quota(&self, bearer_token: &str) -> Result<AiQuotaStatus> {
@@ -2399,7 +2399,7 @@ pub struct CaptionRealtimeToken {
 
 /// Which allowance one transcription chunk is metered against (plan 068 D5).
 /// `Captions` wins while captions present: one upload, one charge. `Listen`
-/// is Golem's own bucket and an old chunk route ignores the field.
+/// is Buddy's own bucket and an old chunk route ignores the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptionChunkPurpose {
     Captions,
@@ -2415,7 +2415,7 @@ impl CaptionChunkPurpose {
     }
 }
 
-/// Terminal codes that end only Golem's listen intent (plan 068 D5): the
+/// Terminal codes that end only Buddy's listen intent (plan 068 D5): the
 /// listen allowance is separate from captions, so a presenting caption
 /// session keeps going when one of these arrives.
 pub fn is_listen_block_code(code: &str) -> bool {
@@ -3067,11 +3067,11 @@ mod tests {
         // answered 502 with this envelope; the desktop must carry both parts.
         assert_eq!(
             parse_error_envelope(
-                r#"{"error":{"code":"ai-gateway-error","message":"The Golem tick failed on every configured model."}}"#
+                r#"{"error":{"code":"ai-gateway-error","message":"The Buddy tick failed on every configured model."}}"#
             ),
             (
                 "ai-gateway-error".to_string(),
-                "The Golem tick failed on every configured model.".to_string()
+                "The Buddy tick failed on every configured model.".to_string()
             )
         );
         assert_eq!(
@@ -3105,21 +3105,21 @@ mod tests {
 
     #[test]
     fn cohost_desktop_side_failures_carry_their_own_detail_codes() {
-        let network = CohostApiError::network("Could not reach Golem: dns");
+        let network = CohostApiError::network("Could not reach Buddy: dns");
         assert_eq!(network.kind, CohostApiErrorKind::Network);
         assert_eq!(network.reason(), CohostReason::Network);
         assert_eq!(network.detail.code, COHOST_DETAIL_CODE_NETWORK);
         assert_eq!(network.detail.status, None);
 
-        let timeout = CohostApiError::timeout("Golem did not answer within 12 s.");
+        let timeout = CohostApiError::timeout("Buddy did not answer within 12 s.");
         assert_eq!(timeout.kind, CohostApiErrorKind::Network);
         assert_eq!(timeout.reason(), CohostReason::Network);
         assert_eq!(timeout.detail.code, COHOST_DETAIL_CODE_TIMEOUT);
         assert_eq!(timeout.detail.status, None);
-        assert_eq!(timeout.message(), "Golem did not answer within 12 s.");
+        assert_eq!(timeout.message(), "Buddy did not answer within 12 s.");
 
         let malformed =
-            CohostApiError::malformed_response(200, "Could not read Golem's response: EOF");
+            CohostApiError::malformed_response(200, "Could not read Buddy's response: EOF");
         assert_eq!(malformed.kind, CohostApiErrorKind::MalformedResponse);
         assert_eq!(malformed.reason(), CohostReason::GatewayError);
         assert_eq!(malformed.detail.code, COHOST_DETAIL_CODE_MALFORMED_RESPONSE);
@@ -3242,7 +3242,7 @@ mod tests {
         assert!(response.usage.is_none());
     }
 
-    // --- Golem command parser (plan 140 S8) ---
+    // --- Buddy command parser (plan 140 S8) ---
 
     fn command_candidate(id: &str, author: &str, text: &str) -> CohostCommandCandidate {
         CohostCommandCandidate {

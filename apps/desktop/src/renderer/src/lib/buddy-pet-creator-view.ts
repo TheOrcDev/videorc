@@ -15,7 +15,7 @@ import {
   type BuddyPetSheetKey
 } from '../../../shared/buddy-pet-creator'
 
-// The Golem pet creator wizard (plan 168 S-F5): pure derivations the wizard
+// The Buddy pet creator wizard (plan 168 S-F5): pure derivations the wizard
 // and its tests share. The backend owns the creation; these only read it.
 
 export type BuddyPetAtlasKey = BuddyPetAtlasSheet['key']
@@ -30,9 +30,9 @@ export const BUDDY_PET_CREATOR_STEPS: readonly { id: BuddyPetCreatorStepId; labe
   { id: 'save', label: 'Save' }
 ]
 
-export const BUDDY_PET_SIGNED_OUT = 'Sign in to create a Golem.'
+export const BUDDY_PET_SIGNED_OUT = 'Sign in to create a Buddy.'
 export const BUDDY_PET_CONSENT_OFF =
-  'Cloud AI is off. Allow it under Cloud AI on the Golem tab to create a Golem.'
+  'Cloud AI is off. Allow it under Cloud AI on the Buddy tab to create a Buddy.'
 export const BUDDY_PET_NOT_AVAILABLE = 'Not available yet'
 export const BUDDY_PET_NONE_LEFT = "This month's creations are used up."
 

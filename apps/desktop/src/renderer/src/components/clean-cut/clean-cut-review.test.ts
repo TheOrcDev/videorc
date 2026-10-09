@@ -452,12 +452,12 @@ describe('Clean cut review (plan 119 S14)', () => {
 
   it('asks before leaving unsaved changes, and discards on request', async () => {
     await render()
-    await act(async () => button('Golem').click())
+    await act(async () => button('Buddy').click())
     expect(onClose).toHaveBeenCalledTimes(1)
 
     onClose.mockClear()
     await act(async () => cut('r2').click())
-    await act(async () => button('Golem').click())
+    await act(async () => button('Buddy').click())
     expect(onClose).not.toHaveBeenCalled()
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
       'Leave without saving?'

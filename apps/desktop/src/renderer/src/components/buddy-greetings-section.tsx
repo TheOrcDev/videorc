@@ -49,7 +49,7 @@ const STATE_LABELS: Record<CohostUtteranceState, string> = {
 }
 
 /**
- * Greetings (plan 164 S-D5, Golem tab → Chat): the messages the Golem posts
+ * Greetings (plan 164 S-D5, Buddy tab → Chat): the messages the Buddy posts
  * as you when chat does something, written by you, no AI. One row per
  * template; Enter or a click opens the inline editor. Free for every
  * account, so it never follows the tab's Premium lock. Saves on blur and on
@@ -81,7 +81,7 @@ export function BuddyGreetingsSection(): ReactElement | null {
 
   return (
     <PanelSection
-      description="What the Golem posts as you when chat does something, in your own words. Free. Greetings go out only in the modes you turn on in Stream Manager, at most six a minute per platform."
+      description="What the Buddy posts as you when chat does something, in your own words. Free. Greetings go out only in the modes you turn on in Stream Manager, at most six a minute per platform."
       title="Greetings"
     >
       {/* A settings row sits in a grouped card like every Settings row (plan

@@ -6,12 +6,12 @@ import { STORAGE_KEYS } from '@/lib/capture'
  * stay `cohost`; saved values keep `orcle` (plan 170 D22), like the
  * remembered tab's storage key.
  */
-export const BUDDY_TAB_LABEL = 'Golem'
+export const BUDDY_TAB_LABEL = 'Buddy'
 
 /**
- * The Golem tab's own tabs (plan 150, renamed in plan 164), in strip order,
- * built like Settings' (plan 064). Each answers one question: who is my Golem
- * and is it on (Golem, formerly Live: the creation screen), how does it reply
+ * The Buddy tab's own tabs (plan 150, renamed in plan 164), in strip order,
+ * built like Settings' (plan 064). Each answers one question: who is my Buddy
+ * and is it on (Buddy, formerly Live: the creation screen), how does it reply
  * and moderate (Chat), what can I say to it (Voice), what happened on my
  * streams (Reports), and edit my recordings (Clean cut). Ids are stable: they
  * are stored as the last-used tab and carried by deep links, so the first tab
@@ -46,7 +46,7 @@ function pageStorage(): Storage | null {
 }
 
 /**
- * The tab Golem opens on: the last one used on this device, else Live. The
+ * The tab Buddy opens on: the last one used on this device, else Live. The
  * choice is a convenience, so storage that is missing, holds an unknown id,
  * or throws falls back instead of breaking the page.
  */
@@ -68,14 +68,14 @@ export function writeLastBuddyTab(
   try {
     storage?.setItem(STORAGE_KEYS.buddyTab, tab)
   } catch {
-    // Not remembering the tab is harmless; Golem opens on Live next time.
+    // Not remembering the tab is harmless; Buddy opens on Live next time.
   }
 }
 
 /**
- * Opens the Golem page on `tab` from outside React (a toast action, a lib).
+ * Opens the Buddy page on `tab` from outside React (a toast action, a lib).
  * The shell handles it on the event every page is opened with from outside
- * React. The workspace id of the Golem page is `ai`.
+ * React. The workspace id of the Buddy page is `ai`.
  */
 export function openBuddyTab(tab: BuddyTabId): void {
   window.dispatchEvent(

@@ -98,7 +98,7 @@ describe('the sample bubble', () => {
   it("keeps the stream's proportions and puts the tail tip on the head top", () => {
     const rect = DEFAULT_OVERLAY_LAYOUT.buddy.horizontal
     const cellPx = Math.round(rect.w * BUDDY_TEST_BUBBLE_CANVAS.width)
-    // A bitmap one cell wide shows as wide as the drawn Golem.
+    // A bitmap one cell wide shows as wide as the drawn Buddy.
     const box = buddyTestBubbleBox({
       raster: { width: cellPx, height: cellPx / 4 },
       rect,

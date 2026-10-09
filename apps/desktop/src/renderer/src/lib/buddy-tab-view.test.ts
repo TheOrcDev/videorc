@@ -29,7 +29,7 @@ const premium: EntitlementUiGate = { allowed: true }
 const basic: EntitlementUiGate = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Golem requires Videorc Premium.',
+  reason: 'Buddy requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 
@@ -60,13 +60,13 @@ function input(overrides: Partial<BuddyLiveViewInput> = {}): BuddyLiveViewInput 
   }
 }
 
-describe('Golem tab copy (plan 119 S2)', () => {
-  it('names what Golem does, each with the tab that holds its settings (plan 150)', () => {
+describe('Buddy tab copy (plan 119 S2)', () => {
+  it('names what Buddy does, each with the tab that holds its settings (plan 150)', () => {
     expect(BUDDY_LIVE_POWERS.map((power) => [power.title, power.tab])).toEqual([
       ['Never miss a question', 'chat'],
       ['Chat stays safe', 'chat'],
       ['The room, handled', 'chat'],
-      ['Talk to Golem', 'voice']
+      ['Talk to Buddy', 'voice']
     ])
   })
 
@@ -87,12 +87,12 @@ describe('Golem tab copy (plan 119 S2)', () => {
 
   it('names every cloud use and what is kept, the one list consent shows', () => {
     expect(CLOUD_AI_USES).toEqual([
-      'Golem reads your live chat.',
-      "Golem hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
-      // Plan 170 D17: created Golems live in the account; the inspiration picture is not kept.
-      "Creating a Golem: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Golems you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
-      "Creating an Alive Golem: your reference picture and its description go to Videorc's cloud AI; the pictures are kept on this computer.",
-      "Golem replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
+      'Buddy reads your live chat.',
+      "Buddy hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
+      // Plan 170 D17: created Buddies live in the account; the inspiration picture is not kept.
+      "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
+      "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI; the pictures are kept on this computer.",
+      "Buddy replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
       "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
     expect(CLOUD_AI_KEEPS).toContain("Videorc servers don't keep your chat or your audio.")
@@ -101,7 +101,7 @@ describe('Golem tab copy (plan 119 S2)', () => {
 })
 
 describe('buddyLiveSettingsPatch', () => {
-  it('turns Golem on with listening in one patch, and off without touching listening', () => {
+  it('turns Buddy on with listening in one patch, and off without touching listening', () => {
     expect(buddyLiveSettingsPatch(true)).toEqual({ enabled: true, listen: true })
     expect(buddyLiveSettingsPatch(false)).toEqual({ enabled: false })
   })
@@ -119,7 +119,7 @@ describe('buddyLiveUnlock', () => {
   it('offers Premium to a signed-in Basic account, with the gate reason', () => {
     expect(buddyLiveUnlock(true, basic)).toEqual({
       action: { kind: 'view-premium', url: 'https://www.videorc.com/premium' },
-      reason: 'Golem requires Videorc Premium.'
+      reason: 'Buddy requires Videorc Premium.'
     })
   })
 
@@ -195,7 +195,7 @@ describe('buddyLiveView', () => {
     expect(paused.status).toMatchObject({
       kind: 'attention',
       label: 'Needs attention',
-      reason: 'Golem paused: daily AI quota is used up.'
+      reason: 'Buddy paused: daily AI quota is used up.'
     })
 
     const failed = buddyLiveView(
@@ -211,17 +211,17 @@ describe('buddyLiveView', () => {
     expect(failed.status).toEqual({
       kind: 'attention',
       label: 'Needs attention',
-      reason: 'Golem stopped: Videorc AI returned an error.',
+      reason: 'Buddy stopped: Videorc AI returned an error.',
       detail: 'ai-gateway-error (HTTP 502): Every model failed.'
     })
 
     expect(
       buddyLiveView(input({ live: true, state: engine({ status: 'error', reason: null }) })).status
         .reason
-    ).toBe('Golem hit an error.')
+    ).toBe('Buddy hit an error.')
   })
 
-  it('needs attention when cloud AI was revoked with Golem still on', () => {
+  it('needs attention when cloud AI was revoked with Buddy still on', () => {
     const view = buddyLiveView(input({ consented: false, live: true, state: engine() }))
     expect(view.status).toMatchObject({ kind: 'attention', reason: BUDDY_CONSENT_OFF_REASON })
     // The switch still shows the stored choice; turning it off stays possible.
@@ -245,7 +245,7 @@ describe('buddyLiveView', () => {
     expect(basicOn.switchDisabled).toBe(false)
     expect(basicOn.status).toMatchObject({
       kind: 'attention',
-      reason: 'Golem requires Videorc Premium.'
+      reason: 'Buddy requires Videorc Premium.'
     })
   })
 
@@ -267,12 +267,12 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     ])
     const phrases = BUDDY_VOICE_COMMANDS.flatMap((command) => command.phrases)
     for (const phrase of [
-      'Golem, highlight the comment from coders X',
-      'Golem, put this one up',
-      'Golem, take it down',
-      'Golem, remove it from the screen',
+      'Buddy, highlight the comment from coders X',
+      'Buddy, put this one up',
+      'Buddy, take it down',
+      'Buddy, remove it from the screen',
       'This one is toxic. Remove it from our chat.',
-      'Golem, delete the comment from coders X',
+      'Buddy, delete the comment from coders X',
       'Yes',
       'Never mind'
     ]) {
@@ -284,12 +284,12 @@ describe('Voice commands (plan 140, S6 part A)', () => {
   it('keeps the promises plain: posts only in your modes, 20 seconds, 10 a minute, free removal', () => {
     // Plan 164 D4 replaced "never acts on its own" with the per-mode promise.
     expect(COHOST_ACTS_ON_ASK_COPY).toBe(
-      'The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+      'The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
     )
     expect(BUDDY_REMOVAL_LIMITS).toContain('20 seconds')
     expect(BUDDY_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')
     expect(BUDDY_REMOVAL_FALLBACK).toBe(
-      'If the platform cannot remove it, Golem hides it in Videorc and tells you viewers may still see it.'
+      'If the platform cannot remove it, Buddy hides it in Videorc and tells you viewers may still see it.'
     )
     expect(BUDDY_VOICE_PREMIUM).toContain('Premium')
     expect(BUDDY_VOICE_PREMIUM).toContain('free for everyone')
@@ -334,12 +334,12 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     ).toEqual([
       ['youtube', true, 'Ready', 'Ready', undefined],
       ['twitch', true, 'Ready', 'Ready', undefined],
-      ['kick', false, 'Needs access', 'Reconnect Kick to let Golem remove messages.', 'Reconnect'],
+      ['kick', false, 'Needs access', 'Reconnect Kick to let Buddy remove messages.', 'Reconnect'],
       [
         'x',
         false,
         'Needs access',
-        'Authorize X Live to let Golem remove messages.',
+        'Authorize X Live to let Buddy remove messages.',
         'Authorize X Live'
       ]
     ])

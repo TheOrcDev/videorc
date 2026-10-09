@@ -109,13 +109,13 @@ function state(overrides: Partial<CohostState> = {}): CohostState {
 /** The 2026-08-23 incident envelope: web answered 502 `ai-gateway-error`. */
 const GATEWAY_502: CohostErrorDetail = {
   code: 'ai-gateway-error',
-  message: 'The Golem tick failed on every configured model.',
+  message: 'The Buddy tick failed on every configured model.',
   status: 502
 }
 
 const TIMEOUT: CohostErrorDetail = {
   code: 'timeout',
-  message: 'Golem did not answer within 12 s.',
+  message: 'Buddy did not answer within 12 s.',
   status: null
 }
 
@@ -195,12 +195,12 @@ describe('cohostChipView', () => {
 
   it('is the only chip that earns the live accent while listening', () => {
     expect(cohostChipView(state({ questions: [question(), question({ id: 'q-2' })] }))).toEqual({
-      label: 'Golem: listening · 2 q',
+      label: 'Buddy: listening · 2 q',
       tone: 'live',
       detail: null
     })
     expect(cohostChipView(state({ questions: [] }))).toEqual({
-      label: 'Golem: listening',
+      label: 'Buddy: listening',
       tone: 'live',
       detail: null
     })
@@ -208,14 +208,14 @@ describe('cohostChipView', () => {
 
   it('names every paused reason in the destination strip vocabulary', () => {
     const cases: Array<[CohostReason, string]> = [
-      ['premium-required', 'Golem: paused · Premium'],
-      ['consent-required', 'Golem: paused · consent'],
-      ['quota-exhausted', 'Golem: paused · quota'],
-      ['session-expired', 'Golem: paused · session expired'],
-      ['signed-out', 'Golem: paused · signed out'],
-      ['server-unconfigured', 'Golem: paused · unavailable'],
-      ['network', 'Golem: paused · offline'],
-      ['gateway-error', 'Golem: paused · AI error']
+      ['premium-required', 'Buddy: paused · Premium'],
+      ['consent-required', 'Buddy: paused · consent'],
+      ['quota-exhausted', 'Buddy: paused · quota'],
+      ['session-expired', 'Buddy: paused · session expired'],
+      ['signed-out', 'Buddy: paused · signed out'],
+      ['server-unconfigured', 'Buddy: paused · unavailable'],
+      ['network', 'Buddy: paused · offline'],
+      ['gateway-error', 'Buddy: paused · AI error']
     ]
     for (const [reason, label] of cases) {
       expect(cohostChipView(state({ status: 'paused', reason }))).toEqual({
@@ -228,17 +228,17 @@ describe('cohostChipView', () => {
 
   it('stays monochrome for off and error', () => {
     expect(cohostChipView(state({ status: 'off', reason: null }))).toEqual({
-      label: 'Golem: off',
+      label: 'Buddy: off',
       tone: 'muted',
       detail: null
     })
     expect(cohostChipView(state({ status: 'error', reason: 'gateway-error' }))).toEqual({
-      label: 'Golem: error · AI error',
+      label: 'Buddy: error · AI error',
       tone: 'muted',
       detail: null
     })
     expect(cohostChipView(state({ status: 'error', reason: null }))).toEqual({
-      label: 'Golem: error',
+      label: 'Buddy: error',
       tone: 'muted',
       detail: null
     })
@@ -248,14 +248,14 @@ describe('cohostChipView', () => {
     expect(
       cohostChipView(state({ status: 'error', reason: 'gateway-error', detail: GATEWAY_502 }))
     ).toEqual({
-      label: 'Golem: error · AI error',
+      label: 'Buddy: error · AI error',
       tone: 'muted',
-      detail: 'ai-gateway-error (HTTP 502): The Golem tick failed on every configured model.'
+      detail: 'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
     })
     // No HTTP status for a desktop-side failure.
     expect(
       cohostChipView(state({ status: 'error', reason: 'network', detail: TIMEOUT }))?.detail
-    ).toBe('timeout: Golem did not answer within 12 s.')
+    ).toBe('timeout: Buddy did not answer within 12 s.')
     // A server-side pause (quota) carries its detail too...
     expect(
       cohostChipView(
@@ -280,7 +280,7 @@ describe('cohostErrorDetailText', () => {
     expect(cohostErrorDetailText(null)).toBeNull()
     expect(cohostErrorDetailText(undefined)).toBeNull()
     expect(cohostErrorDetailText(GATEWAY_502)).toBe(
-      'ai-gateway-error (HTTP 502): The Golem tick failed on every configured model.'
+      'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
     )
     expect(cohostErrorDetailText({ code: 'ai-gateway-error', message: '  ', status: 502 })).toBe(
       'ai-gateway-error (HTTP 502)'
@@ -296,7 +296,7 @@ describe('cohostPaneMode', () => {
   const locked = {
     allowed: false as const,
     featureId: 'live-cohost' as const,
-    reason: 'Golem requires Videorc Premium.',
+    reason: 'Buddy requires Videorc Premium.',
     upgradeUrl: 'https://www.videorc.com/premium'
   }
 
@@ -320,10 +320,10 @@ describe('cohostPaneMode', () => {
     )
   })
 
-  it('points a disabled Golem at the Golem tab, its one home since Settings lost it', () => {
+  it('points a disabled Buddy at the Buddy tab, its one home since Settings lost it', () => {
     const mode = cohostPaneMode({ gate: { allowed: true }, consented: true, enabled: false })
     expect(mode.kind === 'disabled' ? mode.reason : null).toMatch(
-      /^Golem is off\. Turn it on in the Golem tab \((?:⌘|Ctrl\+)9\)\.$/
+      /^Buddy is off\. Turn it on in the Buddy tab \((?:⌘|Ctrl\+)9\)\.$/
     )
   })
 
@@ -445,7 +445,7 @@ describe('cohostErrorToast', () => {
     expect(cohostErrorToast(state(), errored)).toEqual({
       reason: 'gateway-error',
       key: 'gateway-error:',
-      message: 'Golem stopped: Videorc AI returned an error.'
+      message: 'Buddy stopped: Videorc AI returned an error.'
     })
     expect(cohostErrorToast(errored, errored)).toBeNull()
   })
@@ -462,10 +462,10 @@ describe('cohostErrorToast', () => {
       reason: 'gateway-error',
       key: 'gateway-error:ai-gateway-error',
       message:
-        'Golem stopped: Videorc AI returned an error (ai-gateway-error: The Golem tick failed on every configured model).'
+        'Buddy stopped: Videorc AI returned an error (ai-gateway-error: The Buddy tick failed on every configured model).'
     })
     expect(cohostErrorToastMessage('network', TIMEOUT)).toBe(
-      'Golem stopped: no connection to Videorc AI (timeout: Golem did not answer within 12 s).'
+      'Buddy stopped: no connection to Videorc AI (timeout: Buddy did not answer within 12 s).'
     )
     // A code without a message still names itself; no detail keeps the base copy.
     expect(
@@ -474,12 +474,12 @@ describe('cohostErrorToast', () => {
         message: '',
         status: 502
       })
-    ).toBe('Golem stopped: Videorc AI returned an error (ai-gateway-error).')
+    ).toBe('Buddy stopped: Videorc AI returned an error (ai-gateway-error).')
     expect(cohostErrorToastMessage('gateway-error', null)).toBe(
-      'Golem stopped: Videorc AI returned an error.'
+      'Buddy stopped: Videorc AI returned an error.'
     )
     expect(cohostErrorToastMessage('gateway-error', undefined)).toBe(
-      'Golem stopped: Videorc AI returned an error.'
+      'Buddy stopped: Videorc AI returned an error.'
     )
   })
 
@@ -524,13 +524,13 @@ describe('cohostStoppedToast', () => {
   const stoppedForPremium = state({ sessionId: null, status: 'off', reason: 'premium-required' })
 
   it('says one plain line when the backend ends a running session', () => {
-    expect(cohostStoppedToast(state(), stoppedForPremium)).toBe('Golem stopped. Premium ended.')
+    expect(cohostStoppedToast(state(), stoppedForPremium)).toBe('Buddy stopped. Premium ended.')
     expect(
       cohostStoppedToast(
         state({ status: 'paused', reason: 'consent-required' }),
         state({ sessionId: null, status: 'off', reason: 'signed-out' })
       )
-    ).toBe('Golem stopped. You signed out.')
+    ).toBe('Buddy stopped. You signed out.')
     // It is never the error toast: an off state has no error key.
     expect(cohostErrorToast(state(), stoppedForPremium)).toBeNull()
   })
@@ -598,7 +598,7 @@ describe('cohostQuestionToast', () => {
       lastToastAtMs: null,
       nowMs: 1_000
     })
-    expect(raised?.message).toContain('Golem:')
+    expect(raised?.message).toContain('Buddy:')
     expect(raised?.message).toContain('⌘J')
     expect(raised?.atMs).toBe(1_000)
   })
@@ -676,15 +676,15 @@ describe('cohostQuestionToast', () => {
   it('names how many people are asking', () => {
     expect(
       cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }))
-    ).toBe('Golem: 5 people asking: What keyboard is that? · ⌘J')
+    ).toBe('Buddy: 5 people asking: What keyboard is that? · ⌘J')
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
-      'Golem: Ada is asking: What keyboard is that? · ⌘J'
+      'Buddy: Ada is asking: What keyboard is that? · ⌘J'
     )
   })
 
   it('writes the shortcut the way the platform does (Ctrl+J on Windows)', () => {
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), 'Ctrl+J')).toBe(
-      'Golem: Ada is asking: What keyboard is that? · Ctrl+J'
+      'Buddy: Ada is asking: What keyboard is that? · Ctrl+J'
     )
   })
 })
@@ -866,15 +866,15 @@ describe('listening (plan 068)', () => {
     expect(cohostListeningView({ state: 'on' })).toEqual({
       state: 'on',
       label: 'Listening',
-      detail: 'Golem hears your microphone as text.'
+      detail: 'Buddy hears your microphone as text.'
     })
     expect(cohostListeningView({ state: 'on', remainingSeconds: 7_200 })?.detail).toBe(
-      'Golem hears your microphone as text. 2 h of listening left this month.'
+      'Buddy hears your microphone as text. 2 h of listening left this month.'
     )
     expect(cohostListeningView({ state: 'starting' })).toEqual({
       state: 'starting',
       label: 'Starting to listen',
-      detail: 'Golem is starting to hear your microphone.'
+      detail: 'Buddy is starting to hear your microphone.'
     })
   })
 
@@ -898,10 +898,10 @@ describe('listening (plan 068)', () => {
     const blocked = cohostListeningView({
       state: 'blocked',
       reasonCode: 'no-microphone',
-      message: 'Select a microphone so Golem can hear you.'
+      message: 'Select a microphone so Buddy can hear you.'
     })
     expect(blocked?.state).toBe('blocked')
-    expect(blocked?.detail).toBe('Select a microphone so Golem can hear you.')
+    expect(blocked?.detail).toBe('Select a microphone so Buddy can hear you.')
   })
 
   it('reads an unknown or missing reason as a bare Not listening', () => {
@@ -913,7 +913,7 @@ describe('listening (plan 068)', () => {
       'Not listening'
     )
     expect(cohostListeningView({ state: 'blocked' })?.detail).toBe(
-      "Golem can't hear you right now."
+      "Buddy can't hear you right now."
     )
   })
 
@@ -956,7 +956,7 @@ describe('listening (plan 068)', () => {
     ).toBe('10 min of listening left this month.')
   })
 
-  it('offers the one-time card only to a Golem user with listening off', () => {
+  it('offers the one-time card only to a Buddy user with listening off', () => {
     const base = { enabled: true, listen: false, dismissed: false }
     expect(cohostListenPromptVisible(base)).toBe(true)
     expect(cohostListenPromptVisible({ ...base, enabled: false })).toBe(false)
@@ -992,7 +992,7 @@ describe('listening (plan 068)', () => {
 
   it('names the cloud step, the transcript and what is kept in the consent copy', () => {
     expect(COHOST_CONSENT_SENTENCE.startsWith(COHOST_CHAT_CONSENT_SENTENCE)).toBe(true)
-    // Turning Golem on turns listening on (plan 119), so hearing is not an option.
+    // Turning Buddy on turns listening on (plan 119), so hearing is not an option.
     expect(COHOST_CONSENT_SENTENCE).toContain("While you're live it also hears you")
     expect(COHOST_CONSENT_SENTENCE).not.toContain('If you turn on listening')
     for (const sentence of [COHOST_CONSENT_SENTENCE, COHOST_LISTEN_CONSENT_SENTENCE]) {

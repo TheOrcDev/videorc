@@ -1,4 +1,4 @@
-//! Golem voice commands (plan 140 S2): the pure command detector.
+//! Buddy voice commands (plan 140 S2): the pure command detector.
 //!
 //! Transcript finals arrive as text (fixed 3 s listen chunks, or realtime
 //! completions). The detector keeps a rolling ten-second word window across
@@ -21,7 +21,7 @@
 //! removes the message. Answers ("yes", "no", "remove it") count without the
 //! wake word only while a removal card is open, and choices ("the first one")
 //! only while a chooser is open. `Unknown` is rare on purpose: only a clearly
-//! addressed "Golem" followed by a closed sentence that matches nothing. When
+//! addressed "Buddy" followed by a closed sentence that matches nothing. When
 //! unsure, the detector says nothing.
 
 use std::collections::VecDeque;
@@ -51,10 +51,10 @@ const HEARD_MAX_CHARS: usize = 140;
 /// The wake word that always works (plan 164 D2), then the "Orcle" spellings
 /// speech models produce, kept as hidden aliases for one release (remove
 /// after 0.9.140). The weak "oracle"/"orca" entries are gone: a real word
-/// never wakes the Golem. The persona's own name is added per process by
+/// never wakes the Buddy. The persona's own name is added per process by
 /// `set_persona_wake_tokens`.
 const WAKE_WORDS: &[&str] = &["buddy", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal"];
-/// The shortest name word that can wake the Golem.
+/// The shortest name word that can wake the Buddy.
 const NAME_TOKEN_MIN_LETTERS: usize = 3;
 
 /// The persona name's word tokens as the current wake words (plan 164 S-A7).
@@ -86,7 +86,7 @@ fn fold_ascii(ch: char) -> Option<char> {
     folded.is_ascii_alphabetic().then_some(folded)
 }
 
-/// The words of a persona name that wake the Golem (plan 164 D2): split like
+/// The words of a persona name that wake the Buddy (plan 164 D2): split like
 /// chat names (camelCase, separators, digits dropped), lowercased and
 /// ASCII-folded, three letters or more, and never a wake word already.
 /// "Grum the Goblin" gives `["grum", "the", "goblin"]` minus "the" (a stop
@@ -108,7 +108,7 @@ pub fn wake_name_tokens(persona_name: &str) -> Vec<String> {
     tokens
 }
 
-/// Make the persona's name wake the Golem from now on (plan 164 S-A7).
+/// Make the persona's name wake the Buddy from now on (plan 164 S-A7).
 pub fn set_persona_wake_tokens(persona_name: &str) {
     let tokens = wake_name_tokens(persona_name);
     if let Ok(mut current) = PERSONA_WAKE_TOKENS.write() {
@@ -121,12 +121,12 @@ fn is_persona_wake_token(text: &str) -> bool {
         .read()
         .is_ok_and(|tokens| tokens.iter().any(|token| token == text))
 }
-/// Words that introduce an address: "hey Golem", "okay Golem".
+/// Words that introduce an address: "hey Buddy", "okay Buddy".
 const LEAD_INS: &[&str] = &[
     "hey", "ok", "okay", "hi", "yo", "so", "um", "uh", "and", "now", "alright", "oh", "right",
 ];
-/// After the wake word, these mean Golem is the subject of a sentence, not
-/// being addressed: "Golem is great tonight".
+/// After the wake word, these mean Buddy is the subject of a sentence, not
+/// being addressed: "Buddy is great tonight".
 const SUBJECT_CONTINUATIONS: &[&str] = &[
     "is", "isnt", "was", "wasnt", "has", "hasnt", "had", "will", "wont", "would", "wouldnt", "can",
     "cant", "could", "couldnt", "does", "doesnt", "did", "didnt", "just", "also", "really",
@@ -135,7 +135,7 @@ const SUBJECT_CONTINUATIONS: &[&str] = &[
     "stopped", "went", "goes", "likes", "loves", "hates", "and", "or", "but", "too", "as", "for",
     "with", "in",
 ];
-/// Words between "Golem" and the verb that carry no meaning of their own.
+/// Words between "Buddy" and the verb that carry no meaning of their own.
 const FILLERS: &[&str] = &[
     "please", "can", "could", "would", "will", "you", "i", "we", "just", "now", "um", "uh", "hey",
     "so", "and", "then", "also", "maybe", "quickly", "kindly", "go", "ahead", "lets", "let", "us",
@@ -328,7 +328,7 @@ const CONTRACTION_BASES: &[&str] = &[
 /// What the engine is waiting for when a final arrives (S3 wires these).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DetectContext {
-    /// The "Commands need 'Golem' first" setting: structured phrases are off.
+    /// The "Commands need 'Buddy' first" setting: structured phrases are off.
     pub require_wake_word: bool,
     /// A removal card is open, waiting for yes or no.
     pub awaiting_answer: bool,
@@ -345,7 +345,7 @@ pub enum CommandKind {
     Cancel,
     /// A chooser pick, 0 to 2.
     Choose(u8),
-    /// Golem was clearly addressed and understood nothing.
+    /// Buddy was clearly addressed and understood nothing.
     Unknown,
 }
 
@@ -402,7 +402,7 @@ pub struct DetectedCommand {
     pub wake_word: bool,
 }
 
-/// The Golem engine session the detector serves (plan 140 S2): set when a
+/// The Buddy engine session the detector serves (plan 140 S2): set when a
 /// session starts, or hears again after sign-in, and cleared with the
 /// transcript. S3 checks the generation under the engine lock before acting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,7 +415,7 @@ pub struct CommandSession {
 #[derive(Debug, Default)]
 pub struct CommandDetectorState {
     pub detector: CommandDetector,
-    /// `None` while no Golem session hears the streamer: nothing is detected.
+    /// `None` while no Buddy session hears the streamer: nothing is detected.
     pub session: Option<CommandSession>,
     /// What the engine waits for, and the wake-word setting (plan 140 S3).
     /// The engine mirrors it here after every change, so the caption task
@@ -512,7 +512,7 @@ impl CommandDetector {
             end,
         } = detect(&self.words, self.final_index, ctx)?;
         // A command closed by a sentence mark is finished: its words never
-        // start or extend a later command. Without this, "Golem, clear the
+        // start or extend a later command. Without this, "Buddy, clear the
         // highlight." followed by "This one is toxic. Remove it from our
         // chat." read the second sentence as the clear's target and lost the
         // removal. An unclosed command keeps its words, so a name cut by a
@@ -563,7 +563,7 @@ fn split_possessive(core: &str) -> (&str, bool) {
     (core, false)
 }
 
-/// Unicode-aware lowercase words with their punctuation flags: "Golem," →
+/// Unicode-aware lowercase words with their punctuation flags: "Buddy," →
 /// `buddy` with a pause after it; "coders_x" is two words; "don't" is "dont".
 fn tokenize(text: &str, final_index: u64, at: Instant, next_ordinal: &mut u64) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
@@ -806,7 +806,7 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
     if !ctx.awaiting_answer {
         return scan_commands(words, newest, ctx, false);
     }
-    // A new command beats an answer (plan 140 review): "Yes Golem, delete
+    // A new command beats an answer (plan 140 review): "Yes Buddy, delete
     // the comment from bob" is a new removal, never a yes to the open card,
     // wherever in the final the command sits.
     if let Some(detection) = scan_commands(words, newest, ctx, true) {
@@ -870,8 +870,8 @@ fn scan_commands(
             continue;
         }
         // A wake word earlier in the window owns this verb when its own
-        // parse works and reaches it ("Golem, this one is toxic, remove it
-        // from our chat"). A command that ended before this verb ("Golem,
+        // parse works and reaches it ("Buddy, this one is toxic, remove it
+        // from our chat"). A command that ended before this verb ("Buddy,
         // clear the highlight. This one is toxic, remove it") does not.
         if let Some(wake) = nearest_wake_before(words, index)
             && let WakeOutcome::Command(detection) = parse_wake(words, wake, newest, ctx)
@@ -919,9 +919,9 @@ enum WakeOutcome {
     Nothing,
 }
 
-/// Whether the wake word at `wake` addresses Golem: at the start of an
+/// Whether the wake word at `wake` addresses Buddy: at the start of an
 /// utterance or sentence, after a lead-in ("hey"), or followed by a comma,
-/// and not as the subject of a sentence ("Golem is great tonight").
+/// and not as the subject of a sentence ("Buddy is great tonight").
 fn addressed(words: &[Word], wake: usize) -> bool {
     let word = &words[wake];
     if word.possessive {
@@ -943,7 +943,7 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
     if from >= span_end {
         return WakeOutcome::Nothing;
     }
-    // Answers through the wake word: "Golem, yes", "Golem, cancel".
+    // Answers through the wake word: "Buddy, yes", "Buddy, cancel".
     let sentence_end = first_sentence_end(words, from, span_end);
     if let Some(kind) = answer_kind(&words[from..=sentence_end], ctx.awaiting_answer) {
         if words[sentence_end].final_index != newest {
@@ -1015,10 +1015,10 @@ fn parse_structured(words: &[Word], verb: usize, newest: u64) -> Option<Detectio
     })
 }
 
-/// Golem was addressed and nothing matched. Only once the sentence is closed
+/// Buddy was addressed and nothing matched. Only once the sentence is closed
 /// (a sentence mark, or another wake word) and only when it holds a content
-/// word and no verb or reason: "Golem, this one is toxic" is a removal still
-/// being said, "Golem, um" is nothing yet.
+/// word and no verb or reason: "Buddy, this one is toxic" is a removal still
+/// being said, "Buddy, um" is nothing yet.
 fn unknown_detection(
     words: &[Word],
     wake: usize,
@@ -1080,7 +1080,7 @@ fn dedupe_key(parsed: &Parsed) -> String {
 }
 
 /// Parse one command in `words[from..end]`. With the wake word the verb may
-/// come later in the span ("Golem, this one is toxic, remove it"); a
+/// come later in the span ("Buddy, this one is toxic, remove it"); a
 /// structured phrase starts at its verb and must point at a message.
 fn parse_command(words: &[Word], from: usize, end: usize, structured: bool) -> Option<Parsed> {
     let verb = if structured {
@@ -1501,57 +1501,57 @@ mod tests {
         let cases = [
             // Highlight (decision 3).
             (
-                "Golem, highlight the comment from coders X",
+                "Buddy, highlight the comment from coders X",
                 &PLAIN,
                 hit(Highlight, name("coders x"), false, None),
             ),
             (
-                "Golem, show coders X's question",
+                "Buddy, show coders X's question",
                 &PLAIN,
                 hit(Highlight, name("coders x"), true, None),
             ),
             (
-                "Golem, put this one up",
+                "Buddy, put this one up",
                 &PLAIN,
                 hit(Highlight, Deixis, false, None),
             ),
             (
-                "Golem, show the last comment",
+                "Buddy, show the last comment",
                 &PLAIN,
                 hit(Highlight, Last, false, None),
             ),
             (
-                "Golem highlight CodersX",
+                "Buddy highlight CodersX",
                 &PLAIN,
                 hit(Highlight, name("codersx"), false, None),
             ),
             (
-                "Golem, highlight the message from coders_x",
+                "Buddy, highlight the message from coders_x",
                 &PLAIN,
                 hit(Highlight, name("coders x"), false, None),
             ),
             (
-                "Golem, show what coders X asked",
+                "Buddy, show what coders X asked",
                 &PLAIN,
                 hit(Highlight, name("coders x"), true, None),
             ),
             (
-                "Golem, highlight that question",
+                "Buddy, highlight that question",
                 &PLAIN,
                 hit(Highlight, Deixis, true, None),
             ),
             (
-                "Golem, put it on stream",
+                "Buddy, put it on stream",
                 &PLAIN,
                 hit(Highlight, Deixis, false, None),
             ),
             (
-                "Golem, bring up the comment from dark knight 99",
+                "Buddy, bring up the comment from dark knight 99",
                 &PLAIN,
                 hit(Highlight, name("dark knight 99"), false, None),
             ),
             (
-                "Hey Golem, can you show the last question please?",
+                "Hey Buddy, can you show the last question please?",
                 &PLAIN,
                 hit(Highlight, Last, true, None),
             ),
@@ -1571,7 +1571,7 @@ mod tests {
                 hit(Highlight, name("coders x"), false, None),
             ),
             (
-                "Golem, show the question from Gamer_42",
+                "Buddy, show the question from Gamer_42",
                 &PLAIN,
                 hit(Highlight, name("gamer 42"), true, None),
             ),
@@ -1587,56 +1587,56 @@ mod tests {
             ("highlight the comment from coders X", &WAKE_REQUIRED, None),
             // Clear (decision 3): the noun decides.
             (
-                "Golem, take it down",
+                "Buddy, take it down",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Golem, clear the highlight",
+                "Buddy, clear the highlight",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Golem, remove it from the screen",
+                "Buddy, remove it from the screen",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Golem, take that off the stream",
+                "Buddy, take that off the stream",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
-            ("Golem, clear it", &PLAIN, hit(Clear, Deixis, false, None)),
+            ("Buddy, clear it", &PLAIN, hit(Clear, Deixis, false, None)),
             (
-                "Golem, hide the overlay",
+                "Buddy, hide the overlay",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Golem, remove this from the stream",
+                "Buddy, remove this from the stream",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Golem, dismiss the card",
+                "Buddy, dismiss the card",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Golem, take the highlight down",
+                "Buddy, take the highlight down",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             ("remove it from the screen", &PLAIN, None),
-            // A whole-chat clear is refused: Golem did not catch that.
+            // A whole-chat clear is refused: Buddy did not catch that.
             (
-                "Golem, clear the chat",
+                "Buddy, clear the chat",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
             // Remove (decision 3): reasons become the audit reason.
             (
-                "Golem, remove this one, it's toxic",
+                "Buddy, remove this one, it's toxic",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
@@ -1646,7 +1646,7 @@ mod tests {
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
             (
-                "Golem, delete the comment from coders X",
+                "Buddy, delete the comment from coders X",
                 &PLAIN,
                 hit(Remove, name("coders x"), false, None),
             ),
@@ -1661,47 +1661,47 @@ mod tests {
                 hit(Remove, Deixis, false, Some("spam")),
             ),
             (
-                "Golem, get rid of this one",
+                "Buddy, get rid of this one",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Golem, remove the last message from chat",
+                "Buddy, remove the last message from chat",
                 &PLAIN,
                 hit(Remove, Last, false, None),
             ),
             (
-                "Golem, delete coders X's message",
+                "Buddy, delete coders X's message",
                 &PLAIN,
                 hit(Remove, name("coders x"), false, None),
             ),
             (
-                "Golem this one is toxic, remove it from our chat",
+                "Buddy this one is toxic, remove it from our chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
             (
-                "That guy is a scammer. Golem, remove his message.",
+                "That guy is a scammer. Buddy, remove his message.",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("scam")),
             ),
             (
-                "Golem, take it down from chat",
+                "Buddy, take it down from chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Golem, hide it from chat",
+                "Buddy, hide it from chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Golem, remove this one",
+                "Buddy, remove this one",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Golem, that comment is harassment, delete it",
+                "Buddy, that comment is harassment, delete it",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("harassment")),
             ),
@@ -1719,7 +1719,7 @@ mod tests {
             ),
             ("remove it from our chat", &WAKE_REQUIRED, None),
             (
-                "Golem, remove it from our chat",
+                "Buddy, remove it from our chat",
                 &WAKE_REQUIRED,
                 hit(Remove, Deixis, false, None),
             ),
@@ -1786,18 +1786,18 @@ mod tests {
                 hit(Cancel, NoTarget, false, None),
             ),
             (
-                "Golem, yes",
+                "Buddy, yes",
                 &ANSWERING,
                 hit(Confirm, NoTarget, false, None),
             ),
             (
-                "Golem, remove it",
+                "Buddy, remove it",
                 &ANSWERING,
                 hit(Confirm, NoTarget, false, None),
             ),
             // A new command while a card is open is still a command.
             (
-                "Golem, remove the comment from coders X",
+                "Buddy, remove the comment from coders X",
                 &ANSWERING,
                 hit(Remove, name("coders x"), false, None),
             ),
@@ -1805,8 +1805,8 @@ mod tests {
             ("no", &PLAIN, None),
             // With the wake word an answer is always read; S3 ignores it
             // without an open card.
-            ("Golem, cancel", &PLAIN, hit(Cancel, NoTarget, false, None)),
-            ("Golem, stop", &PLAIN, hit(Cancel, NoTarget, false, None)),
+            ("Buddy, cancel", &PLAIN, hit(Cancel, NoTarget, false, None)),
+            ("Buddy, stop", &PLAIN, hit(Cancel, NoTarget, false, None)),
             // Choices count only while a chooser is open.
             (
                 "the first one",
@@ -1826,7 +1826,7 @@ mod tests {
                 hit(Choose(2), NoTarget, false, None),
             ),
             (
-                "Golem, the second one",
+                "Buddy, the second one",
                 &CHOOSING,
                 hit(Choose(1), NoTarget, false, None),
             ),
@@ -1838,7 +1838,7 @@ mod tests {
             ),
             ("the first one", &PLAIN, None),
             ("one more thing before we start", &CHOOSING, None),
-            // Talking about Golem, oracles and orcas. "oracle" and "orca" are
+            // Talking about Buddy, oracles and orcas. "oracle" and "orca" are
             // real words, never wake words (plan 164 D2).
             ("Oracle database is slow", &PLAIN, None),
             ("Oracle, take it down", &PLAIN, None),
@@ -1851,30 +1851,30 @@ mod tests {
                 hit(Remove, Deixis, false, None),
             ),
             ("the oracle said remove it from chat", &WAKE_REQUIRED, None),
-            ("Golem is great tonight", &PLAIN, None),
-            ("I built Golem", &PLAIN, None),
-            ("I built Golem.", &PLAIN, None),
+            ("Buddy is great tonight", &PLAIN, None),
+            ("I built Buddy", &PLAIN, None),
+            ("I built Buddy.", &PLAIN, None),
             ("the orcle integration is done", &PLAIN, None),
             ("orca whales are cool", &PLAIN, None),
-            ("Golem.", &PLAIN, None),
-            ("Golem highlight", &PLAIN, None),
-            ("Golem, can you do a backflip.", &PLAIN, None),
+            ("Buddy.", &PLAIN, None),
+            ("Buddy highlight", &PLAIN, None),
+            ("Buddy, can you do a backflip.", &PLAIN, None),
             // Addressed, closed, and understood nothing.
             (
-                "Golem, you are amazing.",
+                "Buddy, you are amazing.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
             (
-                "Golem, ban him.",
+                "Buddy, ban him.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
             // Non-English: nothing without the wake word; addressed in
-            // another language, Golem says it did not catch that.
+            // another language, Buddy says it did not catch that.
             ("resalta el comentario de coders x", &PLAIN, None),
             (
-                "Golem, resalta el comentario.",
+                "Buddy, resalta el comentario.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
@@ -1907,19 +1907,19 @@ mod tests {
         let bob = name("bob");
         let cases: [(&str, Option<(CommandKind, CommandTarget)>); 6] = [
             (
-                "Yes Golem, delete the comment from bob",
+                "Yes Buddy, delete the comment from bob",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Yeah, Golem, remove bob's comment",
+                "Yeah, Buddy, remove bob's comment",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Golem, remove bob's comment. Golem, yes.",
+                "Buddy, remove bob's comment. Buddy, yes.",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Yes. Golem, highlight the comment from bob.",
+                "Yes. Buddy, highlight the comment from bob.",
                 Some((CommandKind::Highlight, bob.clone())),
             ),
             // A structured removal also wins over the answer around it.
@@ -1929,7 +1929,7 @@ mod tests {
             ),
             // A pure answer is still an answer.
             (
-                "Golem, remove it",
+                "Buddy, remove it",
                 Some((CommandKind::Confirm, CommandTarget::None)),
             ),
         ];
@@ -1961,7 +1961,7 @@ mod tests {
 
     #[test]
     fn heard_and_wake_word_describe_what_was_said() {
-        let command = detect_one("Golem, highlight the comment from coders X!", &PLAIN).unwrap();
+        let command = detect_one("Buddy, highlight the comment from coders X!", &PLAIN).unwrap();
         assert_eq!(command.heard, "buddy highlight the comment from coders x");
         assert!(command.wake_word);
         let command = detect_one("This one is toxic. Remove it from our chat.", &PLAIN).unwrap();
@@ -1973,9 +1973,9 @@ mod tests {
         assert_eq!(command.heard, "orcle take it down");
         assert!(command.wake_word);
         assert!(detect_one("Oracle, take it down", &PLAIN).is_none());
-        let command = detect_one("Golem, you are amazing.", &PLAIN).unwrap();
+        let command = detect_one("Buddy, you are amazing.", &PLAIN).unwrap();
         assert_eq!(command.heard, "you are amazing");
-        let command = detect_one("Golem, yes", &ANSWERING).unwrap();
+        let command = detect_one("Buddy, yes", &ANSWERING).unwrap();
         assert_eq!(command.heard, "buddy yes");
         assert!(command.wake_word);
         let command = detect_one("yes", &ANSWERING).unwrap();
@@ -1987,7 +1987,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Golem, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Buddy, highlight the comment", start, &PLAIN),
             None
         );
         let found = detector
@@ -2024,7 +2024,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         let clear = detector
-            .observe_final("c", 1, "Golem, clear the highlight.", start, &PLAIN)
+            .observe_final("c", 1, "Buddy, clear the highlight.", start, &PLAIN)
             .expect("the clear");
         assert_eq!(clear.kind, CommandKind::Clear);
         let removal = detector
@@ -2045,7 +2045,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         assert!(
             detector
-                .observe_final("c", 1, "Golem, clear the highlight.", start, &PLAIN)
+                .observe_final("c", 1, "Buddy, clear the highlight.", start, &PLAIN)
                 .is_some()
         );
         assert_eq!(
@@ -2065,14 +2065,14 @@ mod tests {
         // One final, two sentences: the latest start wins, and the clear that
         // ended before "remove" does not swallow it.
         let command = detect_one(
-            "Golem, clear the highlight. This one is toxic, remove it from our chat.",
+            "Buddy, clear the highlight. This one is toxic, remove it from our chat.",
             &PLAIN,
         )
         .expect("a command");
         assert_eq!(command.kind, CommandKind::Remove);
         assert_eq!(command.target, CommandTarget::Deixis);
         // The wake word still owns a verb its own command reaches.
-        let owned = detect_one("Golem, this one is toxic, remove it from our chat.", &PLAIN)
+        let owned = detect_one("Buddy, this one is toxic, remove it from our chat.", &PLAIN)
             .expect("a command");
         assert_eq!(owned.kind, CommandKind::Remove);
         assert!(owned.wake_word);
@@ -2109,7 +2109,7 @@ mod tests {
             .observe_final(
                 "c",
                 1,
-                "Golem, highlight the comment from coders",
+                "Buddy, highlight the comment from coders",
                 start,
                 &PLAIN,
             )
@@ -2134,7 +2134,7 @@ mod tests {
                 .observe_final(
                     "c",
                     1,
-                    "Golem, highlight the comment from coders",
+                    "Buddy, highlight the comment from coders",
                     start,
                     &PLAIN
                 )
@@ -2159,13 +2159,13 @@ mod tests {
         let start = Instant::now();
         assert!(
             detector
-                .observe_final("c", 1, "Golem, take it down", start, &PLAIN)
+                .observe_final("c", 1, "Buddy, take it down", start, &PLAIN)
                 .is_some()
         );
         // The same final again (a replayed completion) is ignored.
         assert!(
             detector
-                .observe_final("c", 1, "Golem, take it down", start, &PLAIN)
+                .observe_final("c", 1, "Buddy, take it down", start, &PLAIN)
                 .is_none()
         );
         // The same command within ten seconds is the same request.
@@ -2174,7 +2174,7 @@ mod tests {
                 .observe_final(
                     "c",
                     2,
-                    "Golem, take it down",
+                    "Buddy, take it down",
                     start + Duration::from_secs(5),
                     &PLAIN
                 )
@@ -2186,7 +2186,7 @@ mod tests {
                 .observe_final(
                     "c",
                     3,
-                    "Golem, show the last comment",
+                    "Buddy, show the last comment",
                     start + Duration::from_secs(6),
                     &PLAIN
                 )
@@ -2198,7 +2198,7 @@ mod tests {
                 .observe_final(
                     "c",
                     4,
-                    "Golem, take it down",
+                    "Buddy, take it down",
                     start + Duration::from_secs(11),
                     &PLAIN
                 )
@@ -2211,7 +2211,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Golem, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Buddy, highlight the comment", start, &PLAIN),
             None
         );
         assert_eq!(
@@ -2275,7 +2275,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Golem, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Buddy, highlight the comment", start, &PLAIN),
             None
         );
         detector.clear();
@@ -2294,7 +2294,7 @@ mod tests {
             detector.observe_final(
                 "c",
                 1,
-                "Golem, take it down",
+                "Buddy, take it down",
                 start + Duration::from_secs(4),
                 &PLAIN
             ),
@@ -2307,7 +2307,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         let unknown = detector
-            .observe_final("c", 1, "Golem, you are amazing.", start, &PLAIN)
+            .observe_final("c", 1, "Buddy, you are amazing.", start, &PLAIN)
             .expect("addressed and not understood");
         assert_eq!(unknown.kind, CommandKind::Unknown);
         assert_eq!(unknown.heard, "you are amazing");
@@ -2321,7 +2321,7 @@ mod tests {
             detector.observe_final(
                 "c",
                 3,
-                "Golem, this one",
+                "Buddy, this one",
                 start + Duration::from_secs(6),
                 &PLAIN
             ),
@@ -2333,7 +2333,7 @@ mod tests {
     fn words_normalise_case_punctuation_and_possessives() {
         let mut ordinal = 0;
         let words = tokenize(
-            "Hey Golem, show CodersX's question! It's coders_x.",
+            "Hey Buddy, show CodersX's question! It's coders_x.",
             1,
             Instant::now(),
             &mut ordinal,
@@ -2359,15 +2359,15 @@ mod tests {
     #[test]
     fn reasons_are_canonical_and_nearest_the_verb() {
         let command = detect_one(
-            "That was spam earlier. Anyway this one is hateful, Golem remove it from chat",
+            "That was spam earlier. Anyway this one is hateful, Buddy remove it from chat",
             &PLAIN,
         )
         .unwrap();
         assert_eq!(command.reason.as_deref(), Some("hate"));
-        let command = detect_one("Golem, delete that message, he's a scammer", &PLAIN).unwrap();
+        let command = detect_one("Buddy, delete that message, he's a scammer", &PLAIN).unwrap();
         assert_eq!(command.reason.as_deref(), Some("scam"));
         assert_eq!(
-            detect_one("Golem, take it down", &PLAIN).unwrap().reason,
+            detect_one("Buddy, take it down", &PLAIN).unwrap().reason,
             None
         );
     }
@@ -2383,7 +2383,7 @@ mod tests {
         assert_eq!(wake_name_tokens("Bö Buddy99"), Vec::<String>::new());
         assert_eq!(wake_name_tokens("Bö Vexlar99"), vec!["vexlar".to_string()]);
         assert_eq!(wake_name_tokens("Zoë"), vec!["zoe".to_string()]);
-        assert_eq!(wake_name_tokens("Golem"), Vec::<String>::new());
+        assert_eq!(wake_name_tokens("Buddy"), Vec::<String>::new());
         assert_eq!(wake_name_tokens("Al"), Vec::<String>::new());
         // "buddy" always works; the "Orcle" spellings stay as hidden aliases
         // for one release; the weak real words are gone.
@@ -2399,7 +2399,7 @@ mod tests {
         let highlight =
             |text: &str| detect_one(text, &PLAIN).map(|command| (command.kind, command.wake_word));
         assert_eq!(
-            highlight("Golem, highlight the last comment"),
+            highlight("Buddy, highlight the last comment"),
             Some((CommandKind::Highlight, true))
         );
         // The hidden alias, one release more (plan 164 D2).
@@ -2419,7 +2419,7 @@ mod tests {
         assert_eq!(heard.heard, "zarquon take it down");
         assert!(heard.wake_word);
         // A new name forgets the old one.
-        set_persona_wake_tokens("Golem");
+        set_persona_wake_tokens("Buddy");
         assert_eq!(highlight("Zarquon, highlight the last comment"), None);
     }
 }

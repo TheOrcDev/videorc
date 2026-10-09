@@ -303,7 +303,7 @@ pub struct ViewerAggregator {
 
 impl ViewerAggregator {
     /// The fresh total right now (every platform polled within
-    /// `VIEWER_FRESHNESS`), `None` when no sampler has reported. Golem's
+    /// `VIEWER_FRESHNESS`), `None` when no sampler has reported. Buddy's
     /// promise triggers read it (plan 068 D8).
     pub fn current_total(&self, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
         let freshness =

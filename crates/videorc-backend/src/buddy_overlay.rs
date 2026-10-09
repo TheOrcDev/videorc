@@ -1,4 +1,4 @@
-//! The Golem on stream (plan 164, Phase C): the avatar's state machine and its
+//! The Buddy on stream (plan 164, Phase C): the avatar's state machine and its
 //! comic bubble, and the per-target bubble slot the compositor blits.
 //!
 //! Since plan 168 Phase B the backend draws the pet itself (`buddy_sprite`);
@@ -9,7 +9,7 @@
 //! `cohost.utterance.say`) or automatic (Phase D's greetings, answers and
 //! banter), enters through [`show_bubble`], which is the one way a bubble
 //! appears; [`show_for_utterance`] is the gate in front of it (which statuses
-//! bubble, and nothing while the Golem is on no output). The state travels to
+//! bubble, and nothing while the Buddy is on no output). The state travels to
 //! every window as the `cohost.buddy.state` event.
 //!
 //! Transitions (D18): `idle` → (`think` while an answer is pending, optional)
@@ -35,7 +35,7 @@ use crate::buddy_animator::BuddyAnimatorEvent;
 use crate::overlay_layout::{OverlayItem, OverlayRect, OverlaySnap, load_overlay_layout};
 use crate::state::AppState;
 
-/// Event every renderer receives when the Golem's state or bubble changes.
+/// Event every renderer receives when the Buddy's state or bubble changes.
 pub const BUDDY_STATE_EVENT: &str = "cohost.buddy.state";
 /// A bubble stays at least this long (D17).
 pub const BUDDY_BUBBLE_MIN: Duration = Duration::from_millis(2500);
@@ -236,7 +236,7 @@ pub async fn status(app: &AppState) -> BuddyOverlaySnapshot {
     app.buddy_overlay_state.lock().await.snapshot()
 }
 
-/// Whether the Golem is on any output: `overlayLayout.buddy.showOnStream` or
+/// Whether the Buddy is on any output: `overlayLayout.buddy.showOnStream` or
 /// `showInRecording`. With both off nothing is shown (the compositor flags
 /// are untouched; the bubble and the think are simply skipped, D7).
 pub fn overlay_enabled(app: &AppState) -> bool {
@@ -256,7 +256,7 @@ pub fn utterance_bubbles(utterance: &CohostUtterance) -> bool {
 }
 
 /// Phase D's utterances meet Phase C's bubble here (plan 164 D7/D18): the
-/// bubble shows when [`utterance_bubbles`] says so and the Golem is on some
+/// bubble shows when [`utterance_bubbles`] says so and the Buddy is on some
 /// output. Returns the state as shown, or `None` when nothing was shown.
 pub async fn show_for_utterance(
     app: &AppState,
@@ -271,7 +271,7 @@ pub async fn show_for_utterance(
             app.emit_log(
                 "warn",
                 format!(
-                    "Golem bubble skipped for utterance {}: {error}",
+                    "Buddy bubble skipped for utterance {}: {error}",
                     utterance.id
                 ),
             );
@@ -339,7 +339,7 @@ async fn expire_bubble(app: &AppState, generation: u64) {
 }
 
 /// `idle` → `think` while an answer is pending (D18): the send path calls
-/// this while an answer is on its way to chat, when the Golem is on some
+/// this while an answer is on its way to chat, when the Buddy is on some
 /// output. Emits only on change.
 pub async fn think(app: &AppState) -> BuddyOverlaySnapshot {
     let (snapshot, changed) = {
@@ -390,10 +390,10 @@ pub async fn clear(app: &AppState) -> BuddyOverlaySnapshot {
 
 /// `buddy.overlay.set { target, pngBase64, rect }`: the renderer's raster of
 /// the bubble for one output canvas (plan 168 D16: the bubble only, its tail
-/// tip on the bitmap's bottom-centre). `rect` is the Golem's rect the bubble
+/// tip on the bitmap's bottom-centre). `rect` is the Buddy's rect the bubble
 /// was wrapped for; the compositor anchors the bitmap above the pet's head,
 /// or, where no pet frame exists (tests, older callers), inside `rect` (a push
-/// without one lands on the Golem's default corner).
+/// without one lands on the Buddy's default corner).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetBuddyOverlayParams {
@@ -417,7 +417,7 @@ pub fn buddy_overlay_placement(rect: Option<OverlayRect>) -> OverlayPlacement {
     OverlayPlacement::new(
         rect,
         OverlayFallbackPlacement {
-            item: OverlayItem::Golem,
+            item: OverlayItem::Buddy,
             snap: OverlaySnap::BottomRight,
         },
     )
@@ -450,7 +450,7 @@ pub async fn set_buddy_overlay(
     let prepared =
         tokio::task::spawn_blocking(move || crate::captions::prepare_caption_overlay(&png_base64))
             .await
-            .map_err(|error| anyhow::anyhow!("Golem bubble preparation stopped: {error}"))??;
+            .map_err(|error| anyhow::anyhow!("Buddy bubble preparation stopped: {error}"))??;
     Ok(crate::captions::install_prepared_overlay_targets(
         slots,
         prepared,
@@ -650,7 +650,7 @@ mod tests {
         assert_eq!(
             placement.rect_for_canvas(1920, 1080),
             crate::overlay_layout::overlay_snap_rect(
-                OverlayItem::Golem,
+                OverlayItem::Buddy,
                 crate::overlay_layout::OverlayOrientation::Horizontal,
                 OverlaySnap::BottomRight
             )
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(
             placement.rect_for_canvas(1080, 1920),
             crate::overlay_layout::overlay_snap_rect(
-                OverlayItem::Golem,
+                OverlayItem::Buddy,
                 crate::overlay_layout::OverlayOrientation::Vertical,
                 OverlaySnap::BottomRight
             )
@@ -859,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn both_output_switches_off_means_no_bubble() {
         let (app, mut rx) = test_app();
-        assert!(!overlay_enabled(&app), "the Golem ships off/off");
+        assert!(!overlay_enabled(&app), "the Buddy ships off/off");
         let sent = utterance(
             CohostUtteranceTriggerKind::Answer,
             CohostUtteranceStatus::Sent,
@@ -868,7 +868,7 @@ mod tests {
         assert!(utterance_bubbles(&sent));
         assert_eq!(show_for_utterance(&app, &sent).await, None);
         assert_eq!(status(&app).await.bubble, None);
-        assert!(rx.try_recv().is_err(), "no event with the Golem off");
+        assert!(rx.try_recv().is_err(), "no event with the Buddy off");
         buddy_output_switches(&app, false, true);
         assert!(overlay_enabled(&app));
         assert!(show_for_utterance(&app, &sent).await.is_some());

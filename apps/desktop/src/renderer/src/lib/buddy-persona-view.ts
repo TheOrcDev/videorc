@@ -1,7 +1,7 @@
 import type { CohostAvatarState, CohostBubbleStyle, CohostPersona } from './backend'
 import { BUDDY_MOTION_DEFAULTS } from '../../../shared/buddy-pet'
 
-// The Golem creation screen (plan 164 S-A4): pure derivations the section
+// The Buddy creation screen (plan 164 S-A4): pure derivations the section
 // and its tests share. The look's own derivations live in buddy-look-view.ts
 // (plan 169).
 
@@ -29,7 +29,7 @@ export const BUDDY_PERSONALITY_EXAMPLES: readonly string[] = [
   'Deadpan stone golem'
 ]
 
-export const BUDDY_NAME_REQUIRED = 'The Golem needs a name.'
+export const BUDDY_NAME_REQUIRED = 'The Buddy needs a name.'
 /** The look's hints (plan 164 S-A4, kept by plan 169 D13). */
 export const BUDDY_GENERATE_NOT_AVAILABLE = 'Not available yet'
 export const BUDDY_GENERATE_SIGNED_OUT = 'Sign in to generate images.'
@@ -47,7 +47,7 @@ export function buddyNameToSave(draft: string): string | null {
 export function freshBuddyPersona(id: string): CohostPersona {
   return {
     id,
-    name: 'Golem',
+    name: 'Buddy',
     personality: '',
     bubbleStyle: 'speech',
     images: {},

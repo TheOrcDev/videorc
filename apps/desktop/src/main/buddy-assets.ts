@@ -18,7 +18,7 @@ import type { BuddyPetImportResult, BuddyPetSummary } from '../shared/buddy-pet'
 import { isBuddyCreationFileName } from '../shared/buddy-pet-creator'
 
 /**
- * The Golem's avatar store (plan 164 S-A3, plan 169 D8):
+ * The Buddy's avatar store (plan 164 S-A3, plan 169 D8):
  * `userData/buddy-assets/<personaId>/<state>.<ext>`, the backgrounds pattern.
  * The backend writes the generated look there (a draft first, under
  * `<personaId>/drafts/<requestId>/`); main serves the files through the
@@ -87,7 +87,7 @@ export async function listBuddyPersonas(root: string): Promise<string[]> {
   }
 }
 
-// --- Golem pet packs (plan 168 S-A2, S-A3) -----------------------------------
+// --- Buddy pet packs (plan 168 S-A2, S-A3) -----------------------------------
 
 /** The two buddy roots: where packs are written, and the read-only bundled
  * root shipped as `buddy-assets/bundled` (D3). */

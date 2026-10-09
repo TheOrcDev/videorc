@@ -22,7 +22,7 @@ export const CLEAN_CUT_CONSENT_DESCRIPTION =
 
 /**
  * Cloud AI consent, asked where Clean cut needs it (plan 119 decision 3): the
- * same one flag and the same list of uses as Golem Live, so nothing is
+ * same one flag and the same list of uses as Buddy Live, so nothing is
  * granted that the list does not name. Declining changes nothing; the safe
  * choice has the focus.
  */

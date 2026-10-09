@@ -39,21 +39,21 @@ export {
 // is a pure derivation of the last `cohost.state` event so the pane, the
 // destination chip and the detached Comments window cannot disagree.
 
-/** What Golem does with chat, the half of the consent every Golem user gets. */
-export const COHOST_CHAT_CONSENT_SENTENCE = 'Golem reads live chat with Videorc cloud AI.'
+/** What Buddy does with chat, the half of the consent every Buddy user gets. */
+export const COHOST_CHAT_CONSENT_SENTENCE = 'Buddy reads live chat with Videorc cloud AI.'
 
 /**
- * What Golem sends (plan 060 D11, plan 068 D3). The consent surfaces that stand
+ * What Buddy sends (plan 060 D11, plan 068 D3). The consent surfaces that stand
  * alone (the pane notice, the status popover) repeat it verbatim. Turning
- * Golem on also turns listening on (Golem Live, plan 119), so the sentence
+ * Buddy on also turns listening on (Buddy Live, plan 119), so the sentence
  * names both halves as what happens, not as an option.
  */
 /**
- * Golem acts only when asked (plan 140). The full sentence is the Golem tab's
+ * Buddy acts only when asked (plan 140). The full sentence is the Buddy tab's
  * and the pane hint's tooltip; the pane's action bar shows its first half.
  */
 export const COHOST_ACTS_ON_ASK_COPY =
-  'The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+  'The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
 export const COHOST_ACTS_ON_ASK_HINT = 'Posts only in the modes you turn on.'
 
 /** The flag row's "Remove from chat" key (plan 140, S6): ⌫ alone dismisses. */
@@ -62,7 +62,7 @@ export const COHOST_REMOVE_FLAGGED_KEY = '⇧⌫'
 export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} While you're live it also hears you: your microphone audio goes to Videorc's cloud speech-to-text to be turned into text. Videorc servers don't keep it. The transcript is saved with your recording on this computer.`
 
 /** The listening half, as the description of the listening switch under the
- * Golem tab's Customize. */
+ * Buddy tab's Customize. */
 export const COHOST_LISTEN_CONSENT_SENTENCE =
   "While you're live, your microphone audio goes to Videorc's cloud speech-to-text to be turned into text, even with live captions off. Videorc servers don't keep it. The transcript is saved with your recording on this computer."
 
@@ -113,7 +113,7 @@ export interface CohostChipView {
   tone: 'live' | 'muted'
   /**
    * What the failed tick actually said — "ai-gateway-error (HTTP 502): The
-   * Golem tick failed on every configured model." — for the chip's tooltip
+   * Buddy tick failed on every configured model." — for the chip's tooltip
    * or a secondary line. Null while listening, off, or when the engine paused
    * itself locally (signed out, Basic, consent).
    */
@@ -160,24 +160,24 @@ export function cohostChipView(state: CohostState | null): CohostChipView | null
       : null
   switch (state.status) {
     case 'off':
-      return { label: 'Golem: off', tone: 'muted', detail: null }
+      return { label: 'Buddy: off', tone: 'muted', detail: null }
     case 'listening': {
       const count = state.questions.length
       return {
-        label: count > 0 ? `Golem: listening · ${count} q` : 'Golem: listening',
+        label: count > 0 ? `Buddy: listening · ${count} q` : 'Buddy: listening',
         tone: 'live',
         detail: null
       }
     }
     case 'paused':
       return {
-        label: reason ? `Golem: paused · ${reason}` : 'Golem: paused',
+        label: reason ? `Buddy: paused · ${reason}` : 'Buddy: paused',
         tone: 'muted',
         detail
       }
     case 'error':
       return {
-        label: reason ? `Golem: error · ${reason}` : 'Golem: error',
+        label: reason ? `Buddy: error · ${reason}` : 'Buddy: error',
         tone: 'muted',
         detail
       }
@@ -193,7 +193,7 @@ export type CohostPaneMode =
   | { kind: 'live' }
 
 /**
- * The Golem tab's key in running copy: ⌘9 on macOS, Ctrl+9 elsewhere. Read
+ * The Buddy tab's key in running copy: ⌘9 on macOS, Ctrl+9 elsewhere. Read
  * from the user agent, as the Stream Manager reads its ⌘J, so this pure view
  * module stays free of lib/platform.ts.
  */
@@ -231,7 +231,7 @@ export function cohostPaneMode({
     // The Comments window cannot switch the main window's tab: copy only.
     return {
       kind: 'disabled',
-      reason: `Golem is off. Turn it on in the Golem tab (${BUDDY_TAB_KEY}).`
+      reason: `Buddy is off. Turn it on in the Buddy tab (${BUDDY_TAB_KEY}).`
     }
   }
   return { kind: 'live' }
@@ -393,7 +393,7 @@ const COHOST_FLAG_ACTION_LABELS: Record<CohostFlagAction, string> = {
   ban: 'Suggests ban'
 }
 
-/** A suggestion LABEL only: Golem never moderates on its own, and neither
+/** A suggestion LABEL only: Buddy never moderates on its own, and neither
  * does this chip. Only the streamer's "Remove from chat" removes anything.
  * Null when the server suggested nothing. */
 export function cohostFlagActionLabel(flag: Pick<CohostFlag, 'action'>): string | null {
@@ -552,7 +552,7 @@ export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
 
 const COHOST_QUESTION_TOAST_TEXT_CAP = 64
 
-/** "Golem: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows). */
+/** "Buddy: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows). */
 export function cohostQuestionToastMessage(question: CohostQuestion, shortcut = '⌘J'): string {
   const askers = question.askers.length
   const who =
@@ -562,7 +562,7 @@ export function cohostQuestionToastMessage(question: CohostQuestion, shortcut = 
         ? `${question.askers[0]} is asking`
         : 'a new question'
   const text = trimDraftToCap(question.text, COHOST_QUESTION_TOAST_TEXT_CAP)
-  return text ? `Golem: ${who}: ${text} · ${shortcut}` : `Golem: ${who} · ${shortcut}`
+  return text ? `Buddy: ${who}: ${text} · ${shortcut}` : `Buddy: ${who} · ${shortcut}`
 }
 
 export interface CohostQuestionToast {
@@ -589,7 +589,7 @@ export function cohostQuestionToast({
   paneOpen: boolean
   lastToastAtMs: number | null
   nowMs: number
-  /** The key that focuses Golem, as this platform writes it. */
+  /** The key that focuses Buddy, as this platform writes it. */
   shortcut?: string
 }): CohostQuestionToast | null {
   if (paneOpen) return null
@@ -627,7 +627,7 @@ export function cohostPromiseTriggerLabel(trigger: CohostPromiseTrigger): string
   return null
 }
 
-/** "Golem: you promised: a giveaway at 100 viewers". */
+/** "Buddy: you promised: a giveaway at 100 viewers". */
 export function cohostPromiseReminderMessage(text: string): string {
   const trimmed = trimDraftToCap(text, COHOST_PROMISE_TOAST_TEXT_CAP)
   return trimmed ? `You promised: ${trimmed}` : 'You made a promise on stream.'
@@ -725,7 +725,7 @@ export function cohostNudgeVisible({
 
 // --- Listening (plan 068) ----------------------------------------------------
 
-/** One compact label and one plain sentence for whether Golem hears the
+/** One compact label and one plain sentence for whether Buddy hears the
  * streamer. `off` has no view: an unused feature shows nothing. */
 export interface CohostListeningView {
   state: Exclude<CohostListeningState, 'off'>
@@ -791,11 +791,11 @@ export function cohostListeningView(
       return {
         state: 'starting',
         label: 'Starting to listen',
-        detail: 'Golem is starting to hear your microphone.'
+        detail: 'Buddy is starting to hear your microphone.'
       }
     case 'on': {
       const allowance = cohostListenAllowanceLabel(listening)
-      const heard = 'Golem hears your microphone as text.'
+      const heard = 'Buddy hears your microphone as text.'
       return {
         state: 'on',
         label: 'Listening',
@@ -809,7 +809,7 @@ export function cohostListeningView(
       return {
         state: 'blocked',
         label: reason ? `Not listening: ${reason}` : 'Not listening',
-        detail: listening.message?.trim() || "Golem can't hear you right now."
+        detail: listening.message?.trim() || "Buddy can't hear you right now."
       }
     }
     default:
@@ -826,7 +826,7 @@ export function cohostListeningView(
 export const COHOST_LISTEN_PROMPT_STORAGE_KEY = 'videorc.orcleListenPromptDismissed'
 
 /**
- * The one-time "Golem can hear you" card: only for someone who runs Golem,
+ * The one-time "Buddy can hear you" card: only for someone who runs Buddy,
  * has listening off, and has not answered it. `listen` unknown (a relay that
  * predates the setting) never shows it.
  */

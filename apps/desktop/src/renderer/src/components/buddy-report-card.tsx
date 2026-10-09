@@ -56,10 +56,10 @@ const ASKERS_YIELD =
 const LABEL_STAYS = '[&_[data-slot=list-row-title]]:shrink-0'
 
 /**
- * The Golem tab's Reports tab (plan 119 S3, plan 150 S6): what Golem caught in
+ * The Buddy tab's Reports tab (plan 119 S3, plan 150 S6): what Buddy caught in
  * the stream that ended last, or in any recent stream the picker names.
  * `sessionId` null follows the newest stream, so the next one that ends
- * replaces it on its own; the Library's "Golem report" passes one session.
+ * replaces it on its own; the Library's "Buddy report" passes one session.
  */
 export function BuddyReportCard({
   sessionId,
@@ -202,7 +202,7 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
         <ReportStats stats={view.stats} />
       )}
       <ReportCommands commands={view.commands} />
-      {/* Plan 164 D10: what the Golem posted as you, every line. */}
+      {/* Plan 164 D10: what the Buddy posted as you, every line. */}
       <ReportList
         id="posts"
         items={view.posts}
@@ -375,7 +375,7 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
 
 /**
  * What voice commands did this stream (plan 140, S6): one row, counts only,
- * and only when Golem counted any.
+ * and only when Buddy counted any.
  */
 function ReportCommands({ commands }: { commands: ShownReport['commands'] }): ReactElement | null {
   if (!commands) return null

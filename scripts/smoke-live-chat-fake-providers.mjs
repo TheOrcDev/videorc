@@ -630,7 +630,7 @@ try {
       throw new Error('Finished History accounting changed after local clear and stop.')
     }
 
-    // Plan 164 Phase D: the Golem's greetings post as the streamer through
+    // Plan 164 Phase D: the Buddy's greetings post as the streamer through
     // the same send path. In `auto` with three enabled templates, every
     // fake activity row with a template earns exactly one send on the
     // destination it came from (the throttle spaces them: 5 s apart per
@@ -728,7 +728,7 @@ async function assertBuddyGreetings(ws) {
   await waitFor(
     () => terminalSends(auto.operations, autoSessionId).length >= expectedSends.length,
     Math.max(timeoutMs, 20_000),
-    `the ${expectedSends.length} Golem greetings`
+    `the ${expectedSends.length} Buddy greetings`
   )
   // Give any extra (wrong) send a moment to show up before counting.
   await new Promise((resolveWait) => setTimeout(resolveWait, 1_500))
@@ -740,7 +740,7 @@ async function assertBuddyGreetings(ws) {
   }))
   if (sends.length !== expectedSends.length) {
     throw new Error(
-      `Golem sent ${sends.length} greetings, expected ${expectedSends.length}: ${JSON.stringify(landed)}`
+      `Buddy sent ${sends.length} greetings, expected ${expectedSends.length}: ${JSON.stringify(landed)}`
     )
   }
   for (const expected of expectedSends) {
@@ -749,13 +749,13 @@ async function assertBuddyGreetings(ws) {
     )
     if (!match || match.phases !== 'sent') {
       throw new Error(
-        `Golem greeting missing or not sent: ${JSON.stringify(expected)} in ${JSON.stringify(landed)}`
+        `Buddy greeting missing or not sent: ${JSON.stringify(expected)} in ${JSON.stringify(landed)}`
       )
     }
   }
   // Each greeting went to its own destination only (plan 164 D8).
   if (landed.some((entry) => entry.targetId.includes(','))) {
-    throw new Error(`A Golem greeting fanned out: ${JSON.stringify(landed)}`)
+    throw new Error(`A Buddy greeting fanned out: ${JSON.stringify(landed)}`)
   }
   // The Twitch follow waited for the 5 s gap after the raid (plan 164 D9).
   const twitchOrder = sends
@@ -766,7 +766,7 @@ async function assertBuddyGreetings(ws) {
     twitchOrder[0].text !== 'raider42 brings 234 warriors' ||
     twitchOrder[1].at - twitchOrder[0].at < 4_500
   ) {
-    throw new Error(`Golem greetings on Twitch broke the 5 s gap: ${JSON.stringify(twitchOrder)}`)
+    throw new Error(`Buddy greetings on Twitch broke the 5 s gap: ${JSON.stringify(twitchOrder)}`)
   }
   // The state carries every utterance as sent, and counts the sends.
   const sentState = auto.states.payloads.at(-1)
@@ -776,13 +776,13 @@ async function assertBuddyGreetings(ws) {
     sentState.utterances.filter((utterance) => utterance.status === 'sent').length !==
       expectedSends.length
   ) {
-    throw new Error(`cohost.state did not carry the Golem's sends: ${JSON.stringify(sentState)}`)
+    throw new Error(`cohost.state did not carry the Buddy's sends: ${JSON.stringify(sentState)}`)
   }
   // The report has every post, written as each one landed (plan 164 D10).
   const autoReport = await request(ws, timeoutMs, 'cohost.report.get', { sessionId: autoSessionId })
   const posts = autoReport?.report?.posts ?? []
   if (posts.length !== expectedSends.length || posts.some((post) => post.result !== 'sent')) {
-    throw new Error(`The Golem report lost posts: ${JSON.stringify(autoReport?.report)}`)
+    throw new Error(`The Buddy report lost posts: ${JSON.stringify(autoReport?.report)}`)
   }
   await request(ws, timeoutMs, 'liveChat.stop', {})
 
@@ -796,18 +796,18 @@ async function assertBuddyGreetings(ws) {
       offRows.filter((message) => message.sessionId === offSessionId && message.details).length >=
       13,
     timeoutMs,
-    'the fake activity rows of the Golem-off session'
+    'the fake activity rows of the Buddy-off session'
   )
   await new Promise((resolveWait) => setTimeout(resolveWait, 6_000))
   const offSends = off.operations.payloads.filter(
     (operation) => operation.sessionId === offSessionId
   )
   if (offSends.length !== 0) {
-    throw new Error(`Golem sent with the mode off: ${JSON.stringify(offSends.map((o) => o.text))}`)
+    throw new Error(`Buddy sent with the mode off: ${JSON.stringify(offSends.map((o) => o.text))}`)
   }
   const offState = off.states.payloads.at(-1)
   if (offState && (offState.utterances?.length ?? 0) > 0) {
-    throw new Error(`Golem proposed with the mode off: ${JSON.stringify(offState.utterances)}`)
+    throw new Error(`Buddy proposed with the mode off: ${JSON.stringify(offState.utterances)}`)
   }
   await request(ws, timeoutMs, 'liveChat.stop', {})
   await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: settingsBefore.autoChat })

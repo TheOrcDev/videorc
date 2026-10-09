@@ -7,7 +7,7 @@ import {
 } from '@/lib/clean-cut-auto'
 
 // "Make a clean cut of every recording" is a renderer-local preference (one
-// localStorage flag, off by default), like the Golem sensitivity. The Clean
+// localStorage flag, off by default), like the Buddy sensitivity. The Clean
 // cut card writes it; the auto-run reads the same key when a recording
 // finalizes (lib/clean-cut-auto.ts), so there is no second copy to sync.
 

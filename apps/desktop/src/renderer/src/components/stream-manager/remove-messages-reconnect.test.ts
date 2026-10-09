@@ -48,8 +48,8 @@ describe('RemoveMessagesReconnectRows (plan 140, S5)', () => {
   it('says what a reconnect gives, one quiet row per platform', async () => {
     await render(['twitch', 'kick'])
     expect(rows().map((row) => row.dataset.platform)).toEqual(['twitch', 'kick'])
-    expect(rows()[0].textContent).toContain('Reconnect Twitch to let Golem remove messages.')
-    expect(rows()[1].textContent).toContain('Reconnect Kick to let Golem remove messages.')
+    expect(rows()[0].textContent).toContain('Reconnect Twitch to let Buddy remove messages.')
+    expect(rows()[1].textContent).toContain('Reconnect Kick to let Buddy remove messages.')
     // Quiet: plain outline buttons, no alert and no tinted status.
     expect(container.querySelector('[role="alert"]')).toBeNull()
     expect(container.querySelector('[data-slot="alert"]')).toBeNull()
@@ -71,7 +71,7 @@ describe('RemoveMessagesReconnectRows (plan 140, S5)', () => {
   it('confirms the browser opened in plain words', () => {
     expect(removeMessagesReconnectStarted('twitch')).toEqual({
       title: 'Approve the Twitch permission in your browser',
-      description: 'Golem can remove messages once Twitch confirms.'
+      description: 'Buddy can remove messages once Twitch confirms.'
     })
     expect(removeMessagesReconnectStarted('kick').title).toBe(
       'Approve the Kick permission in your browser'

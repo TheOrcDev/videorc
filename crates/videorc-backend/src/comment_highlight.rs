@@ -294,7 +294,7 @@ fn next_generation(generation: u64) -> u64 {
 }
 
 fn emit_state(state: &AppState, highlight: &CommentHighlightState) {
-    // Plan 168 S-C3: the Golem looks at the card while it shows (the card's
+    // Plan 168 S-C3: the Buddy looks at the card while it shows (the card's
     // rect per leg reaches the animator with every frame).
     state.buddy_sprite.notify(match highlight.phase {
         CommentHighlightPhase::Live => crate::buddy_animator::BuddyAnimatorEvent::HighlightLive {
@@ -1103,7 +1103,7 @@ pub(crate) mod tests {
     }
 
     /// A card live on a stream session through the real `set` path (the
-    /// Golem's animator tests watch the pet look at it, plan 168 S-C3).
+    /// Buddy's animator tests watch the pet look at it, plan 168 S-C3).
     pub(crate) async fn install_live_highlight_for_test(state: &AppState) -> CommentHighlightState {
         state.compositor.lock().await.status.state = CompositorState::Live;
         {

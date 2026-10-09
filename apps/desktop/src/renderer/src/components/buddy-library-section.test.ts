@@ -71,7 +71,7 @@ function settings(persona: Partial<CohostSettings['persona']> = {}): CohostSetti
   return {
     persona: {
       id: 'default',
-      name: 'Golem',
+      name: 'Buddy',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -202,7 +202,7 @@ async function openMenu(id: string): Promise<HTMLElement[]> {
   return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
 }
 
-describe('BuddyLibrarySection: My Golems (plan 170 D16)', () => {
+describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
   it('groups the official five and yours, badges the active one and uses another', async () => {
     const backend = fakeBackend()
     await render(backend.client)
@@ -279,12 +279,12 @@ describe('BuddyLibrarySection: My Golems (plan 170 D16)', () => {
     expect(mocked.signIn).toHaveBeenCalledOnce()
   })
 
-  it('an empty library says where your Golems will show up', async () => {
+  it('an empty library says where your Buddies will show up', async () => {
     await render(fakeBackend(library({ mine: [] })).client)
     expect(byTestId('buddy-library-empty')?.textContent).toBe(BUDDY_LIBRARY_COPY.emptyMine)
   })
 
-  it('offers the Golem picked on videorc.com with Use', async () => {
+  it('offers the Buddy picked on videorc.com with Use', async () => {
     const backend = fakeBackend(library({ activeAvatarId: null, serverActiveAvatarId: PEBBLE }))
     await render(backend.client)
     expect(byTestId('buddy-library-picked-elsewhere')?.textContent).toContain(
@@ -366,7 +366,7 @@ describe('BuddyLibrarySection: My Golems (plan 170 D16)', () => {
     expect(backend.calls('cohost.library.delete')).toEqual([{ avatarId: PEBBLE }])
   })
 
-  it('Make it Alive uses the Golem first, then opens the creator once it is the Golem', async () => {
+  it('Make it Alive uses the Buddy first, then opens the creator once it is the Buddy', async () => {
     const backend = fakeBackend()
     await render(backend.client)
     const items = await openMenu(PEBBLE)
@@ -380,7 +380,7 @@ describe('BuddyLibrarySection: My Golems (plan 170 D16)', () => {
     expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
   })
 
-  it('Make it Alive on the active Golem opens the creator at once', async () => {
+  it('Make it Alive on the active Buddy opens the creator at once', async () => {
     const backend = fakeBackend()
     await render(backend.client)
     const items = await openMenu(GRUM)
@@ -389,7 +389,7 @@ describe('BuddyLibrarySection: My Golems (plan 170 D16)', () => {
     expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
   })
 
-  it('invites the untouched default Golem into the onboarding, until dismissed', async () => {
+  it('invites the untouched default Buddy into the onboarding, until dismissed', async () => {
     const backend = fakeBackend(library({ activeAvatarId: 'official:golem' }))
     await render(backend.client, settings({ source: 'default' }))
     expect(byTestId('buddy-library-invitation')?.textContent).toContain(
@@ -411,7 +411,7 @@ describe('BuddyLibrarySection: My Golems (plan 170 D16)', () => {
     expect(localStorage.getItem(BUDDY_INVITATION_STORAGE_KEY)).toBe('1')
   })
 
-  it('never invites a Golem of your own, or once dismissed on this machine', async () => {
+  it('never invites a Buddy of your own, or once dismissed on this machine', async () => {
     await render(fakeBackend(library({ activeAvatarId: GRUM })).client, settings())
     expect(byTestId('buddy-library-invitation')).toBeNull()
     await act(async () => root.unmount())
@@ -424,7 +424,7 @@ describe('BuddyLibrarySection: My Golems (plan 170 D16)', () => {
     expect(byTestId('buddy-library-invitation')).toBeNull()
   })
 
-  it('New Golem opens the onboarding on step 1', async () => {
+  it('New Buddy opens the onboarding on step 1', async () => {
     await render(fakeBackend().client)
     await click(byTestId('buddy-library-new'))
     const sheet = await vi.waitFor(() => {

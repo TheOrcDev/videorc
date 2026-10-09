@@ -490,7 +490,7 @@ export function CleanCutReview({
       <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-gutter py-1.5">
         <Button size="sm" type="button" variant="ghost" onClick={close}>
           <ArrowLeftIcon data-icon="inline-start" />
-          Golem
+          Buddy
         </Button>
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2 className="truncate text-[13px] font-semibold text-foreground" title={title}>
@@ -766,7 +766,7 @@ function ReviewPlaceholder({
             ? 'Reading the cut list and the transcript.'
             : waiting && load.job
               ? 'The review opens when the cut list is ready.'
-              : 'Make one from the Golem tab.'}
+              : 'Make one from the Buddy tab.'}
         </EmptyDescription>
       </EmptyHeader>
     </Empty>

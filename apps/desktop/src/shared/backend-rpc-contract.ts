@@ -149,7 +149,7 @@ import {
   BUDDY_SLEEP_AFTER_MIN_SECONDS,
   isBuddyReactionId
 } from './buddy-pet'
-// --- Golem pets (plan 168, Phase F) ---
+// --- Buddy pets (plan 168, Phase F) ---
 import type { CohostPetSaved } from './backend'
 import {
   BUDDY_PET_NOTES_ASYMMETRIC_MAX,
@@ -173,8 +173,8 @@ import {
   type BuddyPetSheetGeneratedEvent
 } from './buddy-pet-creator'
 import { isBuddyUserPackId } from './buddy-assets'
-// --- end Golem pets (plan 168, Phase F) ---
-// --- Golem library (plan 170) ---
+// --- end Buddy pets (plan 168, Phase F) ---
+// --- Buddy library (plan 170) ---
 import { parseBuddyLibraryPoseUrl } from './buddy-assets'
 import {
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
@@ -195,7 +195,7 @@ import {
   type BuddyLibraryState,
   type BuddyOfficialId
 } from './buddy-library'
-// --- end Golem library (plan 170) ---
+// --- end Buddy library (plan 170) ---
 import {
   arraySchema,
   boundedJsonValueSchema,
@@ -402,7 +402,7 @@ export interface BackendRpcMethodMap {
     OverlayLayout
   >
   // --- end overlay layout (plan 164) ---
-  // --- Golem look (plan 169 D9) ---
+  // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': BackendRpcDefinition<CohostAvatarCreateParams, CohostAvatarAccepted>
   'cohost.avatar.redo': BackendRpcDefinition<CohostAvatarRedoParams, CohostAvatarAccepted>
   'cohost.avatar.keep': BackendRpcDefinition<CohostAvatarRequestIdParams, CohostSettings>
@@ -411,25 +411,25 @@ export interface BackendRpcMethodMap {
     CohostAvatarDraftStatus
   >
   'cohost.avatar.draft.get': BackendRpcDefinition<undefined, CohostAvatarDraftStatus>
-  // --- end Golem look (plan 169 D9) ---
-  // --- Golem library (plan 170 D12, D13) ---
+  // --- end Buddy look (plan 169 D9) ---
+  // --- Buddy library (plan 170 D12, D13) ---
   'cohost.library.get': BackendRpcDefinition<undefined, BuddyLibraryState>
   'cohost.library.sync': BackendRpcDefinition<CohostLibrarySyncParams, CohostLibraryAccepted>
   'cohost.library.use': BackendRpcDefinition<CohostLibraryUseParams, CohostLibraryAccepted>
   'cohost.library.update': BackendRpcDefinition<CohostLibraryUpdateParams, CohostLibraryAccepted>
   'cohost.library.delete': BackendRpcDefinition<CohostLibraryDeleteParams, CohostLibraryAccepted>
-  // --- end Golem library (plan 170) ---
-  // --- Golem overlay (plan 164) ---
+  // --- end Buddy library (plan 170) ---
+  // --- Buddy overlay (plan 164) ---
   'cohost.buddy.status': BackendRpcDefinition<undefined, BuddyOverlaySnapshot>
   'buddy.overlay.set': BackendRpcDefinition<SetBuddyOverlayParams, OverlayTargetsInfo>
-  // --- end Golem overlay (plan 164) ---
-  // --- Golem pets (plan 168, Phase A) ---
+  // --- end Buddy overlay (plan 164) ---
+  // --- Buddy pets (plan 168, Phase A) ---
   'cohost.pet.list': BackendRpcDefinition<undefined, BuddyPetSummary[]>
   'cohost.pet.import': BackendRpcDefinition<CohostPetImportParams, BuddyPetSummary>
   'cohost.pet.remove': BackendRpcDefinition<CohostPetRemoveParams, CohostPetRemoved>
   'cohost.pet.react': BackendRpcDefinition<CohostPetReactParams, CohostPetReactAccepted>
-  // --- end Golem pets (plan 168, Phase A) ---
-  // --- Golem pets (plan 168, Phase F) ---
+  // --- end Buddy pets (plan 168, Phase A) ---
+  // --- Buddy pets (plan 168, Phase F) ---
   'cohost.pet.creation.start': BackendRpcDefinition<undefined, BuddyPetCreationStatus>
   'cohost.pet.creation.status': BackendRpcDefinition<undefined, BuddyPetCreationStatus>
   'cohost.pet.creation.cancel': BackendRpcDefinition<CohostPetBuildIdParams, BuddyPetCreationStatus>
@@ -440,10 +440,10 @@ export interface BackendRpcMethodMap {
   >
   'cohost.pet.build': BackendRpcDefinition<CohostPetBuildIdParams, BuddyPetCreationAccepted>
   'cohost.pet.save': BackendRpcDefinition<CohostPetSaveParams, CohostPetSaved>
-  // --- end Golem pets (plan 168, Phase F) ---
-  // --- Golem pets (plan 168, Phase B) ---
+  // --- end Buddy pets (plan 168, Phase F) ---
+  // --- Buddy pets (plan 168, Phase B) ---
   'buddy.overlay.clear': BackendRpcDefinition<ClearBuddyOverlayParams, OverlayTargetsInfo>
-  // --- end Golem pets (plan 168, Phase B) ---
+  // --- end Buddy pets (plan 168, Phase B) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
@@ -502,21 +502,21 @@ export interface BackendEventMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
-  // --- Golem look (plan 169 D9) ---
+  // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
   'cohost.avatar.draft': CohostAvatarDraft
-  // --- end Golem look (plan 169 D9) ---
-  // --- Golem library (plan 170 D12) ---
+  // --- end Buddy look (plan 169 D9) ---
+  // --- Buddy library (plan 170 D12) ---
   'cohost.library.changed': BuddyLibraryState
-  // --- end Golem library (plan 170) ---
-  // --- Golem overlay (plan 164) ---
+  // --- end Buddy library (plan 170) ---
+  // --- Buddy overlay (plan 164) ---
   'cohost.buddy.state': BuddyOverlaySnapshot
-  // --- end Golem overlay (plan 164) ---
-  // --- Golem pets (plan 168, Phase F) ---
+  // --- end Buddy overlay (plan 164) ---
+  // --- Buddy pets (plan 168, Phase F) ---
   'cohost.pet.identity.read': BuddyPetIdentityReadEvent
   'cohost.pet.sheet.generated': BuddyPetSheetGeneratedEvent
   'cohost.pet.build.progress': BuddyPetBuildProgressEvent
-  // --- end Golem pets (plan 168, Phase F) ---
+  // --- end Buddy pets (plan 168, Phase F) ---
   'session.marker.voice.status': {
     sessionId: string
     listening: import('./backend').CohostListening
@@ -2310,7 +2310,7 @@ const cohostRulesSchema = arraySchema(stringSchema({ maxLength: 120 }), { maxLen
 // validate the same bounds; image paths and template ids are plain strings
 // the backend checks for shape.
 const cohostPersonaImagePathSchema = stringSchema({ minLength: 1, maxLength: 256 })
-// --- Golem pets (plan 168, Phase A) ---
+// --- Buddy pets (plan 168, Phase A) ---
 // A pack id is a lowercase uuid (the persona's own) or `bundled:<name>`.
 const buddyPackIdSchema = runtimeSchema<string>(
   'a pack id (a uuid or bundled:<name>)',
@@ -2366,7 +2366,7 @@ const buddyReactionTableSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<BuddyReactionTable>
-// --- end Golem pets (plan 168, Phase A) ---
+// --- end Buddy pets (plan 168, Phase A) ---
 const cohostPersonaSchema = objectSchema(
   {
     id: stringSchema({ minLength: 1, maxLength: 128 }),
@@ -2388,7 +2388,7 @@ const cohostPersonaSchema = objectSchema(
     avatar: buddyAvatarSchema,
     motion: buddyMotionSchema,
     reactions: buddyReactionTableSchema,
-    // Plan 170 D12: the library avatar this Golem is (a uuid or
+    // Plan 170 D12: the library avatar this Buddy is (a uuid or
     // `official:<slug>`); absent, never null. Kept a plain bounded string so a
     // saved link never fails the settings load.
     libraryAvatarId: optionalSchema(
@@ -2455,7 +2455,7 @@ const cohostSettingsSchema = objectSchema(
     autoHighlight: booleanSchema,
     voiceHighlight: booleanSchema,
     rules: cohostRulesSchema,
-    // Plan 068: Golem hears the microphone while live.
+    // Plan 068: Buddy hears the microphone while live.
     listen: booleanSchema,
     // Plan 140 S3: voice commands. The backend always sends both.
     wakeWordRequired: booleanSchema,
@@ -2483,7 +2483,7 @@ const cohostSettingsPatchSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
-// --- Golem pets (plan 168, Phase A) ---
+// --- Buddy pets (plan 168, Phase A) ---
 const buddyPetSummarySchema = objectSchema(
   {
     packId: buddyPackIdSchema,
@@ -2512,8 +2512,8 @@ const cohostPetReactionSchema = objectSchema(
   { reaction: stringSchema({ minLength: 1, maxLength: 64 }) },
   { allowUnknown: false }
 )
-// --- end Golem pets (plan 168, Phase A) ---
-// --- Golem pets (plan 168, Phase F) ---
+// --- end Buddy pets (plan 168, Phase A) ---
+// --- Buddy pets (plan 168, Phase F) ---
 // A creation id is the web's build id: a lowercase uuid, a folder name.
 const buddyBuildIdSchema = runtimeSchema<string>('a creation id (a uuid)', (value, path) => {
   if (!isBuddyUserPackId(value)) throw new RuntimeSchemaError(path, 'a creation id (a uuid)')
@@ -2711,7 +2711,7 @@ const buddyPetBuildProgressEventSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<BuddyPetBuildProgressEvent>
-// --- end Golem pets (plan 168, Phase F) ---
+// --- end Buddy pets (plan 168, Phase F) ---
 // --- Overlay layout (plan 164) ---
 const overlayRectSchema = objectSchema(
   {
@@ -2979,7 +2979,7 @@ const clipMarkedEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMarkedEvent>
 
-// Plan 068: whether Golem hears the streamer. Every optional field is omitted
+// Plan 068: whether Buddy hears the streamer. Every optional field is omitted
 // by the backend when absent (never null).
 const cohostListeningSchema = objectSchema(
   {
@@ -3027,7 +3027,7 @@ const cohostCommandSchema = objectSchema(
   { allowUnknown: false }
 )
 const cohostSwitchStateSchema = enumSchema(['on', 'paused'])
-// Plan 164 D7: what the Golem said or proposes; closed shapes, kebab-case
+// Plan 164 D7: what the Buddy said or proposes; closed shapes, kebab-case
 // enums, optional fields absent (never null).
 const cohostUtteranceStateSchema = enumSchema(['talk', 'laugh', 'think'])
 const cohostUtteranceSchema = objectSchema(
@@ -3225,7 +3225,7 @@ const cohostCommandParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CohostCommandParams>
 
-// Plan 119 S1: the Golem report. The blocks always ride; every optional list
+// Plan 119 S1: the Buddy report. The blocks always ride; every optional list
 // is omitted by the backend while empty (never null). `version` is pinned:
 // the backend reads any other stored version as unavailable, so a report on
 // the wire is always this shape.
@@ -3343,7 +3343,7 @@ const cohostReportCommandsSchema = objectSchema(
   },
   { allowUnknown: false }
 )
-// Plan 164 D10: what the Golem posted as the streamer.
+// Plan 164 D10: what the Buddy posted as the streamer.
 const cohostReportPostSchema = objectSchema(
   {
     id: boundedString,
@@ -3418,7 +3418,7 @@ const cohostReportSavedEventSchema = objectSchema(
   { sessionId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostReportSavedEvent>
-// --- Golem library (plan 170 D12, D13) ---
+// --- Buddy library (plan 170 D12, D13) ---
 // A user avatar id is the web's lowercase uuid; a library id is one of those
 // or a known `official:<slug>` (the backend drops slugs it does not know).
 const buddyUserAvatarIdSchema = runtimeSchema<string>(
@@ -3563,8 +3563,8 @@ const cohostLibraryAcceptedSchema = objectSchema(
   { accepted: literalSchema(true) },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostLibraryAccepted>
-// --- end Golem library (plan 170) ---
-// Plan 169 D9: the Golem look, accepted at once and answered by events.
+// --- end Buddy library (plan 170) ---
+// Plan 169 D9: the Buddy look, accepted at once and answered by events.
 const cohostAvatarStateSchema = enumSchema(['idle', 'talk', 'laugh', 'think'])
 const cohostAvatarRequestIdSchema = runtimeSchema<string>(
   'a look request id (a uuid)',
@@ -3671,7 +3671,7 @@ const cohostAvatarDraftStatusSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAvatarDraftStatus>
-// --- Golem overlay (plan 164) ---
+// --- Buddy overlay (plan 164) ---
 const buddyBubbleSchema = objectSchema(
   { text: stringSchema({ minLength: 1, maxLength: 200 }), until: timestamp },
   { allowUnknown: false }
@@ -3707,13 +3707,13 @@ const setBuddyOverlayParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<SetBuddyOverlayParams>
-// --- end Golem overlay (plan 164) ---
-// --- Golem pets (plan 168, Phase B) ---
+// --- end Buddy overlay (plan 164) ---
+// --- Buddy pets (plan 168, Phase B) ---
 const clearBuddyOverlayParamsSchema = objectSchema(
   { target: optionalSchema(enumSchema(['primary', 'auxiliary'])) },
   { allowUnknown: false }
 ) as RuntimeSchema<ClearBuddyOverlayParams>
-// --- end Golem pets (plan 168, Phase B) ---
+// --- end Buddy pets (plan 168, Phase B) ---
 
 const scheduledMutationSchema = objectSchema(
   {
@@ -4208,7 +4208,7 @@ const runtimeContracts = {
     result: overlayLayoutSchema
   },
   // --- end overlay layout (plan 164) ---
-  // --- Golem look (plan 169 D9) ---
+  // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': {
     params: cohostAvatarCreateParamsSchema,
     result: cohostAvatarAcceptedSchema
@@ -4223,8 +4223,8 @@ const runtimeContracts = {
     result: cohostAvatarDraftStatusSchema
   },
   'cohost.avatar.draft.get': { params: undefinedSchema, result: cohostAvatarDraftStatusSchema },
-  // --- end Golem look (plan 169 D9) ---
-  // --- Golem library (plan 170 D12, D13) ---
+  // --- end Buddy look (plan 169 D9) ---
+  // --- Buddy library (plan 170 D12, D13) ---
   'cohost.library.get': { params: undefinedSchema, result: buddyLibraryStateSchema },
   'cohost.library.sync': {
     params: cohostLibrarySyncParamsSchema,
@@ -4242,12 +4242,12 @@ const runtimeContracts = {
     params: cohostLibraryDeleteParamsSchema,
     result: cohostLibraryAcceptedSchema
   },
-  // --- end Golem library (plan 170) ---
-  // --- Golem overlay (plan 164) ---
+  // --- end Buddy library (plan 170) ---
+  // --- Buddy overlay (plan 164) ---
   'cohost.buddy.status': { params: undefinedSchema, result: buddyOverlaySnapshotSchema },
   'buddy.overlay.set': { params: setBuddyOverlayParamsSchema, result: overlayTargetsInfoSchema },
-  // --- end Golem overlay (plan 164) ---
-  // --- Golem pets (plan 168, Phase A) ---
+  // --- end Buddy overlay (plan 164) ---
+  // --- Buddy pets (plan 168, Phase A) ---
   'cohost.pet.list': {
     params: undefinedSchema,
     result: arraySchema(buddyPetSummarySchema, { maxLength: 256 })
@@ -4258,8 +4258,8 @@ const runtimeContracts = {
     params: cohostPetReactionSchema as RuntimeSchema<CohostPetReactParams>,
     result: cohostPetReactionSchema as RuntimeSchema<CohostPetReactAccepted>
   },
-  // --- end Golem pets (plan 168, Phase A) ---
-  // --- Golem pets (plan 168, Phase F) ---
+  // --- end Buddy pets (plan 168, Phase A) ---
+  // --- Buddy pets (plan 168, Phase F) ---
   'cohost.pet.creation.start': { params: undefinedSchema, result: buddyPetCreationStatusSchema },
   'cohost.pet.creation.status': { params: undefinedSchema, result: buddyPetCreationStatusSchema },
   'cohost.pet.creation.cancel': {
@@ -4279,13 +4279,13 @@ const runtimeContracts = {
     result: buddyPetCreationAcceptedSchema
   },
   'cohost.pet.save': { params: cohostPetSaveParamsSchema, result: cohostPetSavedSchema },
-  // --- end Golem pets (plan 168, Phase F) ---
-  // --- Golem pets (plan 168, Phase B) ---
+  // --- end Buddy pets (plan 168, Phase F) ---
+  // --- Buddy pets (plan 168, Phase B) ---
   'buddy.overlay.clear': {
     params: clearBuddyOverlayParamsSchema,
     result: overlayTargetsInfoSchema
   },
-  // --- end Golem pets (plan 168, Phase B) ---
+  // --- end Buddy pets (plan 168, Phase B) ---
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,
@@ -4378,21 +4378,21 @@ const runtimeEventSchemas = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
-  // --- Golem look (plan 169 D9) ---
+  // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,
   'cohost.avatar.draft': cohostAvatarDraftSchema,
-  // --- end Golem look (plan 169 D9) ---
-  // --- Golem library (plan 170 D12) ---
+  // --- end Buddy look (plan 169 D9) ---
+  // --- Buddy library (plan 170 D12) ---
   'cohost.library.changed': buddyLibraryStateSchema,
-  // --- end Golem library (plan 170) ---
-  // --- Golem overlay (plan 164) ---
+  // --- end Buddy library (plan 170) ---
+  // --- Buddy overlay (plan 164) ---
   'cohost.buddy.state': buddyOverlaySnapshotSchema,
-  // --- end Golem overlay (plan 164) ---
-  // --- Golem pets (plan 168, Phase F) ---
+  // --- end Buddy overlay (plan 164) ---
+  // --- Buddy pets (plan 168, Phase F) ---
   'cohost.pet.identity.read': buddyPetIdentityReadEventSchema,
   'cohost.pet.sheet.generated': buddyPetSheetGeneratedEventSchema,
   'cohost.pet.build.progress': buddyPetBuildProgressEventSchema,
-  // --- end Golem pets (plan 168, Phase F) ---
+  // --- end Buddy pets (plan 168, Phase F) ---
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },
     { allowUnknown: false }

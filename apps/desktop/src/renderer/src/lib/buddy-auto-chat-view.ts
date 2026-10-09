@@ -9,13 +9,13 @@ import type {
 import { CHAT_SEND_PLATFORM_MAX_CHARS } from '@/lib/chat-send'
 
 // Automatic chat (plan 164 Phase D): the pure side of the greetings editor
-// (Golem tab → Chat) and the Stream Manager's mode control. The backend
+// (Buddy tab → Chat) and the Stream Manager's mode control. The backend
 // resolves the real greetings (`cohost_greetings.rs`); this mirror only
 // previews and warns, so the editor never disagrees with what goes out.
 
 /** The product promise (plan 164 D4), everywhere the old one was. */
 export const BUDDY_POSTS_PROMISE =
-  'The Golem posts only in the modes you turn on. Everything is off by default.'
+  'The Buddy posts only in the modes you turn on. Everything is off by default.'
 
 export const BUDDY_MODE_LABELS: Record<CohostAutoChatMode, string> = {
   off: 'Off',
@@ -25,14 +25,14 @@ export const BUDDY_MODE_LABELS: Record<CohostAutoChatMode, string> = {
 export const BUDDY_MODES: readonly CohostAutoChatMode[] = ['off', 'suggest', 'auto']
 
 export const BUDDY_MODE_HINTS: Record<CohostAutoChatMode, string> = {
-  off: 'The Golem never posts.',
+  off: 'The Buddy never posts.',
   suggest: 'Each message is a card here; one click sends it.',
   auto: 'Messages go out by themselves, within the limits.'
 }
 
 /** The consent dialog (plan 164 S-D6), word for word. */
 export const BUDDY_CONSENT_SENTENCE =
-  'The Golem posts to your chats as you, on the platforms you stream to, only in the modes you turn on. You can watch every message in Reports.'
+  'The Buddy posts to your chats as you, on the platforms you stream to, only in the modes you turn on. You can watch every message in Reports.'
 export const BUDDY_AUTO_CONFIRM_SENTENCE = 'Automatic messages are sent without asking you first.'
 
 /** Where the window remembers the one-time consent (like the nudge). */

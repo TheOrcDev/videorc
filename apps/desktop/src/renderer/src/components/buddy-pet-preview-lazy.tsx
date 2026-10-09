@@ -4,7 +4,7 @@ import type { BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
 import { cn } from '@/lib/utils'
 
 // The living preview is its own chunk (plan 168 S-D1): canvas, player and
-// motion model load the first time a Golem surface shows it, never with the
+// motion model load the first time a Buddy surface shows it, never with the
 // app shell.
 const BuddyPetPreviewChunk = lazy(() => import('@/components/buddy-pet-preview'))
 

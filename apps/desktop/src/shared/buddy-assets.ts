@@ -1,4 +1,4 @@
-// Pure helpers for the Golem's avatar images (plan 164 S-A3, D20; plan 169
+// Pure helpers for the Buddy's avatar images (plan 164 S-A3, D20; plan 169
 // D8). Shared by the Electron main process (which serves the files) and unit
 // tests: no fs or electron here, just the size cap and the path rules, so the
 // boundary is verified in node.
@@ -78,7 +78,7 @@ export function parseBuddyDraftPath(
   }
 }
 
-// --- Golem library cache (plan 170 D12) ------------------------------------
+// --- Buddy library cache (plan 170 D12) ------------------------------------
 // The account library's pictures are cached under the write root as
 // `library/<avatarId>/<state>-<tag>.png` (the tag is the 8 hex digits of the
 // web URL's `?v=`, so a changed picture gets a new path). Three segments with
@@ -136,7 +136,7 @@ export function parseBuddyLibraryPoseUrl(
   return parseBuddyLibraryPosePath(url.slice(prefix.length))
 }
 
-// --- Golem pet packs (plan 168 S-A2, D3, D4) --------------------------------
+// --- Buddy pet packs (plan 168 S-A2, D3, D4) --------------------------------
 // A pack lives at `<buddyRoot>/<personaId>/pets/<packId>/` with a uuid id; the
 // read-only bundled root (second entry of `VIDEORC_MANAGED_BUDDY_ROOTS`)
 // holds `<name>/` folders addressed as `bundled:<name>`. Only the files below

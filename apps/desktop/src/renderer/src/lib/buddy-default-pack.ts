@@ -11,7 +11,7 @@ import { buddyAssetUrl } from '../../../shared/buddy-assets'
  * in `assets/brand/buddy/`): idle is the original art; talk, laugh and think
  * were generated from it as image edits (AI Gateway,
  * `openai/gpt-image-2.5-sunburst`, 2026-10-09). Import this module only from
- * lazy chunks (the Golem tab, the overlay rasterizer), never from the eager
+ * lazy chunks (the Buddy tab, the overlay rasterizer), never from the eager
  * shell.
  */
 export const BUDDY_DEFAULT_PACK: Readonly<Record<CohostAvatarState, string>> = {

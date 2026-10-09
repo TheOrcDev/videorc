@@ -1,5 +1,5 @@
 //! Overlay layout (plan 164, Phase B): where the comment-highlight card, the
-//! caption bar and the Golem sit on each output orientation, and which outputs
+//! caption bar and the Buddy sit on each output orientation, and which outputs
 //! (stream, recording) carry them.
 //!
 //! Backend-owned, stored under one `app_settings` row (`overlayLayout`) and
@@ -112,14 +112,14 @@ pub struct OverlayLayout {
 pub enum OverlayItem {
     Highlight,
     Captions,
-    Golem,
+    Buddy,
 }
 
 impl OverlayItem {
     pub const ALL: [OverlayItem; 3] = [
         OverlayItem::Highlight,
         OverlayItem::Captions,
-        OverlayItem::Golem,
+        OverlayItem::Buddy,
     ];
 
     /// How the Go Live sheet names the item mid-sentence.
@@ -127,7 +127,7 @@ impl OverlayItem {
         match self {
             OverlayItem::Highlight => "highlights",
             OverlayItem::Captions => "captions",
-            OverlayItem::Golem => "the Golem",
+            OverlayItem::Buddy => "the Buddy",
         }
     }
 }
@@ -185,15 +185,15 @@ impl From<CommentHighlightAnchor> for OverlaySnap {
 /// Default size `(w, h)` of an item on an orientation, in canvas units. The
 /// highlight and caption widths are the rasterizers' width fractions
 /// (`lib/comment-highlight.ts`, `lib/caption-overlay.ts`); their heights bound
-/// a content-driven bitmap. The Golem is a square in pixels.
+/// a content-driven bitmap. The Buddy is a square in pixels.
 pub fn overlay_default_size(item: OverlayItem, orientation: OverlayOrientation) -> (f64, f64) {
     match (item, orientation) {
         (OverlayItem::Highlight, OverlayOrientation::Horizontal) => (0.60, 0.26),
         (OverlayItem::Highlight, OverlayOrientation::Vertical) => (0.78, 0.20),
         (OverlayItem::Captions, OverlayOrientation::Horizontal) => (0.92, 0.16),
         (OverlayItem::Captions, OverlayOrientation::Vertical) => (0.76, 0.14),
-        (OverlayItem::Golem, OverlayOrientation::Horizontal) => (0.18, 0.18 * 16.0 / 9.0),
-        (OverlayItem::Golem, OverlayOrientation::Vertical) => (0.32, 0.32 * 9.0 / 16.0),
+        (OverlayItem::Buddy, OverlayOrientation::Horizontal) => (0.18, 0.18 * 16.0 / 9.0),
+        (OverlayItem::Buddy, OverlayOrientation::Vertical) => (0.32, 0.32 * 9.0 / 16.0),
     }
 }
 
@@ -254,7 +254,7 @@ impl Default for OverlayLayout {
     /// Highlight: the pre-plan-164 default corner (bottom left), on both
     /// outputs. Captions: the bottom bar; their switches mirror the shipped
     /// `burnTarget` default (`off`), so a fresh install burns nothing until
-    /// the streamer turns captions on. Golem: bottom right, on both.
+    /// the streamer turns captions on. Buddy: bottom right, on both.
     fn default() -> Self {
         Self {
             highlight: snapped_item(
@@ -269,7 +269,7 @@ impl Default for OverlayLayout {
                 false,
                 false,
             ),
-            buddy: snapped_item(OverlayItem::Golem, OverlaySnap::BottomRight, false, false),
+            buddy: snapped_item(OverlayItem::Buddy, OverlaySnap::BottomRight, false, false),
         }
     }
 }
@@ -279,7 +279,7 @@ impl OverlayLayout {
         match item {
             OverlayItem::Highlight => &self.highlight,
             OverlayItem::Captions => &self.captions,
-            OverlayItem::Golem => &self.buddy,
+            OverlayItem::Buddy => &self.buddy,
         }
     }
 
@@ -387,7 +387,7 @@ pub fn overlay_blit_layout(
 // --- Leg plan (plan 164, D12) ------------------------------------------------
 
 /// What a session's auxiliary compositor leg carries, as far as overlays are
-/// concerned. One leg plan serves captions, the highlight card and the Golem.
+/// concerned. One leg plan serves captions, the highlight card and the Buddy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayAuxLeg {
     /// One leg: the primary carries every output.
@@ -401,7 +401,7 @@ pub enum OverlayAuxLeg {
 
 /// Per-leg plan for one overlay item. `needs_split` says the two switches
 /// disagree on a shared record+stream leg: honouring both needs a separate
-/// stream leg (captions force it; highlight and Golem fall back to both).
+/// stream leg (captions force it; highlight and Buddy fall back to both).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OverlayLegPlan {
     pub primary: bool,
@@ -514,7 +514,7 @@ impl OverlaySessionPlans {
     pub fn plan(&self, item: OverlayItem) -> Option<OverlayLegPlan> {
         match item {
             OverlayItem::Highlight => Some(self.highlight),
-            OverlayItem::Golem => Some(self.buddy),
+            OverlayItem::Buddy => Some(self.buddy),
             OverlayItem::Captions => None,
         }
     }
@@ -637,7 +637,7 @@ pub const OVERLAY_LAYOUT_EVENT: &str = "overlays.layout";
 /// `overlays.layout.set`: persist the whole layout and tell every window.
 pub async fn set_overlay_layout(state: &AppState, layout: OverlayLayout) -> Result<OverlayLayout> {
     let saved = save_overlay_layout(&state.database, &layout)?;
-    // Plan 168 S-B1: the pet's box and atlas size follow the Golem's rect.
+    // Plan 168 S-B1: the pet's box and atlas size follow the Buddy's rect.
     state.buddy_sprite.set_layout(saved.buddy);
     crate::recording::apply_overlay_layout_to_active_session(state, &saved).await;
     state.emit_event(OVERLAY_LAYOUT_EVENT, saved);
@@ -747,7 +747,7 @@ mod tests {
         );
         assert!(!layout.captions.show_on_stream && !layout.captions.show_in_recording);
         assert_close(layout.captions.vertical.x, 0.12);
-        // Golem: bottom right, square in pixels.
+        // Buddy: bottom right, square in pixels.
         assert_close(
             layout.buddy.horizontal.w * 16.0,
             layout.buddy.horizontal.h * 9.0,
@@ -940,7 +940,7 @@ mod tests {
     fn session_plans_apply_the_shared_leg_fallback_and_flag_split_needs() {
         let mut layout = OverlayLayout::default();
         layout.highlight.show_in_recording = false;
-        // The Golem is opt-in: both switches ship off.
+        // The Buddy is opt-in: both switches ship off.
         assert!(!layout.buddy.show_on_stream && !layout.buddy.show_in_recording);
         layout.buddy.show_on_stream = true;
         layout.buddy.show_in_recording = true;
@@ -988,7 +988,7 @@ mod tests {
         // Stream-only or record-only sessions never need a notice.
         assert!(overlay_start_notices(shape(false, true, OverlayAuxLeg::None), &layout).is_empty());
         assert!(overlay_start_notices(shape(true, false, OverlayAuxLeg::None), &layout).is_empty());
-        // Shared encode: highlight and Golem burn on both; captions keep the block.
+        // Shared encode: highlight and Buddy burn on both; captions keep the block.
         let shared = overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout);
         assert_eq!(
             shared,
@@ -998,8 +998,8 @@ mod tests {
                     notice: "Both the stream and the recording will include highlights: this computer shares one encode for them.".to_string(),
                 },
                 OverlayStartNotice {
-                    item: OverlayItem::Golem,
-                    notice: "Both the stream and the recording will include the Golem: this computer shares one encode for them.".to_string(),
+                    item: OverlayItem::Buddy,
+                    notice: "Both the stream and the recording will include the Buddy: this computer shares one encode for them.".to_string(),
                 },
             ]
         );
@@ -1014,7 +1014,7 @@ mod tests {
             vec![
                 "Recording will include highlights while streaming vertical.",
                 "Recording will include captions while streaming vertical.",
-                "The horizontal stream will include the Golem while streaming vertical.",
+                "The horizontal stream will include the Buddy while streaming vertical.",
             ]
         );
         assert_eq!(

@@ -31,14 +31,14 @@ import { toast } from '@/lib/toast'
 import { BuddyBubbleSample } from '@/components/buddy-bubble-sample'
 
 /**
- * The Golem creation screen (plan 164 S-A4): name it, give it a personality
+ * The Buddy creation screen (plan 164 S-A4): name it, give it a personality
  * and pick its bubble. Everything here is free (D6) and persists through
  * `patchCohostSettings` on blur or change, with no success toasts (the
  * design skill): the screen is the confirmation. Its looks moved to the
- * Avatar section (plan 168 S-D2), where "Your Golem's look" is the Still
+ * Avatar section (plan 168 S-D2), where "Your Buddy's look" is the Still
  * panel (`BuddyLookSection`, plan 169) beside the living preview.
  *
- * Stream Manager operates the Golem (plan 164, owner pick); this screen only
+ * Stream Manager operates the Buddy (plan 164, owner pick); this screen only
  * creates it.
  */
 export function BuddyPersonaSection(): ReactElement | null {
@@ -50,7 +50,7 @@ export function BuddyPersonaSection(): ReactElement | null {
     try {
       await patchCohostSettings({ persona: next })
     } catch (failure: unknown) {
-      const message = failure instanceof Error ? failure.message : 'Could not save your Golem.'
+      const message = failure instanceof Error ? failure.message : 'Could not save your Buddy.'
       setError(message)
       throw failure
     }
@@ -82,7 +82,7 @@ export function BuddyPersonaSection(): ReactElement | null {
   return (
     <PanelSection
       description="Name it, give it a personality and its looks. It answers to its name in chat and in voice; Stream Manager runs it while you're live."
-      title="Your Golem"
+      title="Your Buddy"
     >
       <div className="flex flex-wrap items-start gap-2" data-slot="buddy-header">
         <BuddyNameField persona={persona} onSave={saveQuietly} />
@@ -109,7 +109,7 @@ export function BuddyPersonaSection(): ReactElement | null {
         <Field>
           <FieldLabel htmlFor="buddy-bubble-style">Bubble</FieldLabel>
           <FieldDescription>
-            How your Golem talks on stream: no voice, a comic bubble above it.
+            How your Buddy talks on stream: no voice, a comic bubble above it.
           </FieldDescription>
           <div className="flex flex-wrap items-center gap-4">
             <BuddyBubbleStyleToggle
@@ -172,7 +172,7 @@ export function BuddyPersonaSection(): ReactElement | null {
       <Dialog open={startOverOpen} onOpenChange={setStartOverOpen}>
         <DialogContent showCloseButton={false}>
           <DialogHeader>
-            <DialogTitle>Start over with a new Golem?</DialogTitle>
+            <DialogTitle>Start over with a new Buddy?</DialogTitle>
             <DialogDescription>
               {persona.name}&apos;s name, personality, images and packs are deleted from this
               computer. Your greetings and chat settings stay.
@@ -262,7 +262,7 @@ function BuddyNameField({
         className="text-base font-medium"
         id="buddy-name"
         maxLength={BUDDY_NAME_MAX_CHARS}
-        placeholder="Name your Golem"
+        placeholder="Name your Buddy"
         value={draft}
         onBlur={commit}
         onChange={(event) => {
@@ -306,7 +306,7 @@ function BuddyPersonalityField({
     <Field>
       <FieldLabel htmlFor="buddy-personality">Personality</FieldLabel>
       <FieldDescription>
-        Who your Golem is. Its answers and remarks are written in this voice.
+        Who your Buddy is. Its answers and remarks are written in this voice.
       </FieldDescription>
       <Textarea
         className="min-h-20"

@@ -3279,7 +3279,7 @@ export interface FollowNamesCommand {
 export type ScopeReconnectPlatform = Extract<StreamPlatform, 'twitch' | 'kick'>
 
 /** Stream Manager → main: reconnect Twitch or Kick asking for every optional
- * permission, so Golem can remove messages (plan 140, S5). Main picks the
+ * permission, so Buddy can remove messages (plan 140, S5). Main picks the
  * scopes; the window only names the platform. */
 export interface ScopeReconnectCommand {
   requestId: string
@@ -3329,7 +3329,7 @@ export interface AiCapabilities {
     modes?: string[]
     workflowKind?: string
   }
-  /** The Golem routes (plan 164): the tick contract the web speaks and
+  /** The Buddy routes (plan 164): the tick contract the web speaks and
    * whether avatar generation is on, with today's remaining count. Older
    * servers omit the block: Generate stays off. */
   cohost?: {
@@ -3346,7 +3346,7 @@ export interface AiCapabilities {
       creationsRemainingThisMonth: number
       monthlyLimit: number
     }
-    /** The account Golem library (plan 170 D9): `enabled` when signed in and
+    /** The account Buddy library (plan 170 D9): `enabled` when signed in and
      * the web's library store is configured (creating still follows
      * `avatar.enabled`). Older servers omit it: the library is off. */
     buddyLibrary?: {
@@ -3367,7 +3367,7 @@ export interface AiCapabilities {
     /** Clean cut kill switch off and its provider configured; older servers omit it. */
     cleanCutEnabled?: boolean
     cloudAiEnabled: boolean
-    /** The Golem command parser route is on (plan 140 S8); older servers omit it. */
+    /** The Buddy command parser route is on (plan 140 S8); older servers omit it. */
     cohostCommandEnabled?: boolean
     gatewayConfigured: boolean
     modelTestingEnabled: boolean
@@ -3933,7 +3933,7 @@ export interface ModerationOperationParams {
  * on one message, or an answer to an open removal card. The window never
  * picks the source: Studio sends every `remove` as `manual`, which runs at
  * once (the menu click is the express consent). Voice removals come from the
- * backend's own Golem engine, never through this relay.
+ * backend's own Buddy engine, never through this relay.
  */
 export type CommentsModerationCommand =
   | {
@@ -4045,7 +4045,7 @@ export interface CommentsViewSnapshot {
   /**
    * Live mode only (plan 140, S6): the live session's chat removals, every
    * open one then the newest finished ones, at most 100. Studio publishes it;
-   * the Stream Manager renders the row status and Golem's removal cards.
+   * the Stream Manager renders the row status and Buddy's removal cards.
    */
   moderationOperations?: ModerationOperation[]
   /** History mode only: the finished session's saved stats (plan 055, S9). */
@@ -4321,7 +4321,7 @@ export interface VideorcApi {
   /** "Start over": deletes the persona's managed folder. */
   removeBuddyPersona: (personaId: string) => Promise<void>
   /** The bytes of one stored persona image (`<personaId>/<state>.<ext>`) for
-   * the Golem overlay raster to decode (plan 164 S-C2); null when there is
+   * the Buddy overlay raster to decode (plan 164 S-C2); null when there is
    * no such file. The renderer cannot fetch the managed scheme itself. */
   readBuddyImage: (relativePath: string) => Promise<Uint8Array | null>
   /** One file of a pet pack (plan 168): `manifest.json`, `buddy.json`, a
@@ -4394,7 +4394,7 @@ export interface VideorcApi {
    * socket and opens the browser, so the main window's eager bundle carries
    * none of it. Resolves once the browser opened. */
   showFollowNamesFromCommentsWindow: (command: FollowNamesCommand) => Promise<boolean>
-  /** "Reconnect Twitch to let Golem remove messages" from the Stream Manager
+  /** "Reconnect Twitch to let Buddy remove messages" from the Stream Manager
    * (plan 140, S5): like Show who followed, main starts the reconnect with
    * every optional permission and opens the browser. Resolves once it opened. */
   reconnectScopesFromCommentsWindow: (command: ScopeReconnectCommand) => Promise<boolean>
@@ -4414,8 +4414,8 @@ export interface VideorcApi {
   getCohostWindowState: () => Promise<CohostWindowState>
   onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
   sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
-  /** Answers to Golem's voice command cards (plan 140, S6 part B), relayed
-   * like the other Golem actions: the MAIN renderer makes the call. */
+  /** Answers to Buddy's voice command cards (plan 140, S6 part B), relayed
+   * like the other Buddy actions: the MAIN renderer makes the call. */
   sendCohostCommand: (command: CohostCommandRelayCommand) => Promise<CohostState>
   onCohostCommandRequest: (callback: (command: CohostCommandRelayCommand) => void) => () => void
   pushCohostCommandResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
@@ -4574,7 +4574,7 @@ export interface VideorcApi {
   onShortcutNavigate: (callback: (key: string) => void) => () => void
   /**
    * Plan 170 D18: a `videorc://buddy` link arrived. Main has focused the
-   * window and synced the library; the shell opens the Golem tab, and the
+   * window and synced the library; the shell opens the Buddy tab, and the
    * creator when `openCreator` (Make it Alive, after the avatar is worn).
    */
   onBuddyDeepLink: (callback: (navigation: { openCreator: boolean }) => void) => () => void
@@ -5025,7 +5025,7 @@ export interface CohostSettings {
   /** Streamer notes the model answers from; at most 4000 characters. */
   notes: string
   /**
-   * Golem's picks go on stream by themselves: the server's suggested
+   * Buddy's picks go on stream by themselves: the server's suggested
    * comments and high-priority questions, under the engine's cadence rules
    * (default off).
    */
@@ -5038,12 +5038,12 @@ export interface CohostSettings {
   /** Plain-language chat rules the co-host flags against; ≤ 10 × 120 chars. */
   rules: string[]
   /**
-   * Golem hears the microphone for the whole live stream, as text, even with
+   * Buddy hears the microphone for the whole live stream, as text, even with
    * live captions off (plan 068; default off).
    */
   listen: boolean
   /**
-   * Plan 140: "Commands need 'Golem' first". On, the structured phrases
+   * Plan 140: "Commands need 'Buddy' first". On, the structured phrases
    * ("remove it from our chat") stop working without the wake word
    * (default off).
    */
@@ -5086,15 +5086,15 @@ export interface CohostPersona {
   source: CohostPersonaSource
   /** Still or Alive (plan 168 D2). The backend always sends it. */
   avatar: BuddyAvatar
-  /** How the Golem moves on air (plan 168 D10, D13, D15). */
+  /** How the Buddy moves on air (plan 168 D10, D13, D15). */
   motion: BuddyMotionSettings
   /** Per-trigger reaction overrides (plan 168 D14); `{}` uses D14's defaults. */
   reactions: BuddyReactionTable
   /**
-   * The library avatar this Golem is (plan 170 D12): a user avatar's uuid or
-   * `official:<slug>`. Absent (never null) for a Golem made only on this
+   * The library avatar this Buddy is (plan 170 D12): a user avatar's uuid or
+   * `official:<slug>`. Absent (never null) for a Buddy made only on this
    * computer (an imported pack, a look kept while signed out) and for the
-   * untouched default; sync never overwrites a Golem without it unless it is
+   * untouched default; sync never overwrites a Buddy without it unless it is
    * the untouched default. 1 to 64 characters.
    */
   libraryAvatarId?: BuddyLibraryId
@@ -5168,7 +5168,7 @@ export interface CohostAutoChat {
   banter: CohostCooldownBehaviour
 }
 
-// --- Golem look (plan 169 D8, D9) ---
+// --- Buddy look (plan 169 D8, D9) ---
 
 /** `cohost.avatar.create`: a description, an inspiration picture (base64
  * WebP, JPEG or PNG, at most 3 MB decoded) or both. Accepted at once; the set arrives as
@@ -5245,7 +5245,7 @@ export interface CohostAvatarRunning {
 }
 
 /** `cohost.avatar.draft.get` and `cohost.avatar.discard`: the active
- * Golem's draft (one left on disk is offered again) and the running job. */
+ * Buddy's draft (one left on disk is offered again) and the running job. */
 export interface CohostAvatarDraftStatus {
   draft?: CohostAvatarDraft
   running?: CohostAvatarRunning
@@ -5270,7 +5270,7 @@ export interface CohostSettingsPatch {
 }
 
 // --- Overlay layout (plan 164) ---------------------------------------------
-// Where the highlight card, the caption bar and the Golem sit on each output
+// Where the highlight card, the caption bar and the Buddy sit on each output
 // orientation and which outputs carry them. Backend-owned (`app_settings`
 // key `overlayLayout`), served by `overlays.layout.get/set`. Placement lives
 // on the Live Scene canvas and nowhere else; the Stream Manager corner menu
@@ -5314,8 +5314,8 @@ export interface MigrateHighlightAnchorParams {
 }
 // --- end overlay layout (plan 164) ------------------------------------------
 
-// --- Golem overlay (plan 164) ---------------------------------------------
-// The Golem on stream (Phase C): the backend owns which avatar state shows
+// --- Buddy overlay (plan 164) ---------------------------------------------
+// The Buddy on stream (Phase C): the backend owns which avatar state shows
 // and the bubble that is up; the renderer rasterizes the avatar per output
 // canvas and pushes the PNG through `buddy.overlay.set`.
 
@@ -5340,7 +5340,7 @@ export interface BuddyOverlaySnapshot {
 /** `buddy.overlay.set`: the renderer's raster of the bubble for one output
  * canvas (plan 168 D16: the bubble only, its tail tip on the bitmap's
  * bottom-centre; the backend draws the pet and anchors the bubble above its
- * head). `rect` is the Golem's placed rect for that canvas orientation, the
+ * head). `rect` is the Buddy's placed rect for that canvas orientation, the
  * width the bubble wraps to. Mirrors `captions.overlay.set`. */
 export interface SetBuddyOverlayParams {
   target: OverlayTarget
@@ -5362,9 +5362,9 @@ export interface OverlayTargetsInfo {
   primary: OverlayTargetInfo
   auxiliary: OverlayTargetInfo
 }
-// --- end Golem overlay (plan 164) -----------------------------------------
+// --- end Buddy overlay (plan 164) -----------------------------------------
 
-// --- Golem pets (plan 168, Phase A) ---
+// --- Buddy pets (plan 168, Phase A) ---
 // The persona's pet packs (D1 to D4): page-pet manifest v1 folders under the
 // managed buddy roots. The pack contract and its validators live in
 // `./buddy-pet`; these are the RPC shapes.
@@ -5405,9 +5405,9 @@ export interface CohostPetReactParams {
 export interface CohostPetReactAccepted {
   reaction: string
 }
-// --- end Golem pets (plan 168, Phase A) ---
+// --- end Buddy pets (plan 168, Phase A) ---
 
-// --- Golem library (plan 170 D12, D13) ---
+// --- Buddy library (plan 170 D12, D13) ---
 // The account library and the official avatars: the wire lives in `./buddy-library`.
 export type {
   CohostLibraryAccepted,
@@ -5428,9 +5428,9 @@ export type {
   BuddyOfficialSlug,
   BuddyPoseState
 } from './buddy-library'
-// --- end Golem library (plan 170) ---
+// --- end Buddy library (plan 170) ---
 
-// --- Golem pets (plan 168, Phase F) ---
+// --- Buddy pets (plan 168, Phase F) ---
 // The creator (S-F4): the wire lives in `./buddy-pet-creator`.
 export type {
   CohostPetBuildIdParams,
@@ -5462,16 +5462,16 @@ export interface CohostPetSaved {
   pack: import('./buddy-pet').BuddyPetSummary
   settings: CohostSettings
 }
-// --- end Golem pets (plan 168, Phase F) ---
-// --- Golem pets (plan 168, Phase B) ---
+// --- end Buddy pets (plan 168, Phase F) ---
+// --- Buddy pets (plan 168, Phase B) ---
 /** `buddy.overlay.clear`: the bubble ended; drop its raster from one target,
  * or from both without a target. */
 export interface ClearBuddyOverlayParams {
   target?: OverlayTarget
 }
-// --- end Golem pets (plan 168, Phase B) ---
+// --- end Buddy pets (plan 168, Phase B) ---
 
-/** Whether Golem hears the streamer right now (plan 068). */
+/** Whether Buddy hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'
 
 export interface CohostListening {
@@ -5505,7 +5505,7 @@ export interface CohostQuestion {
 export type CohostPromiseTriggerKind = 'none' | 'viewers' | 'minutes'
 
 /** When a promise reminder fires: at `value` viewers, after `value` minutes,
- * or (`none`) 20 minutes after Golem first heard it. */
+ * or (`none`) 20 minutes after Buddy first heard it. */
 export interface CohostPromiseTrigger {
   kind: CohostPromiseTriggerKind | (string & Record<never, never>)
   value?: number
@@ -5527,7 +5527,7 @@ export interface CohostPromiseReminder {
 }
 
 /** A recap for viewers who asked what they missed, or one the streamer
- * drafted; never posted by Golem. Gone after `expiresAt`. */
+ * drafted; never posted by Buddy. Gone after `expiresAt`. */
 export interface CohostRecap {
   text: string
   at: string
@@ -5654,7 +5654,7 @@ export interface CohostErrorDetail {
   status: number | null
 }
 
-// --- Golem voice commands (plan 140 S3; contract part B) ---
+// --- Buddy voice commands (plan 140 S3; contract part B) ---
 
 /**
  * What a voice command asked for. `confirm` and `cancel` answer the open card,
@@ -5665,10 +5665,10 @@ export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | '
 /**
  * Where the latest voice command stands:
  * - `done`: highlighted, cleared, removed or hidden;
- * - `not-found`: no comment matched, or (kind `unknown`) Golem didn't catch it;
+ * - `not-found`: no comment matched, or (kind `unknown`) Buddy didn't catch it;
  * - `ambiguous`: a chooser is open, `candidates` lists the comments;
  * - `confirm`: a card waits for a yes: a voice removal (`operationId`) or a
- *   highlight of a comment Golem flagged. A removal card without `operationId`
+ *   highlight of a comment Buddy flagged. A removal card without `operationId`
  *   is still opening; one without `expiresAt` was confirmed and is running;
  * - `refused`: chat moderation refused, or the removal failed;
  * - `unavailable`: paused by Videorc, or Premium is required;
@@ -5701,7 +5701,7 @@ export interface CohostCommandTarget {
 export interface CohostCommand {
   /** `cmd-<uuid>`. */
   id: string
-  /** The words that made the command, as Golem heard them. */
+  /** The words that made the command, as Buddy heard them. */
   heard: string
   kind: CohostCommandKind
   status: CohostCommandStatus
@@ -5803,7 +5803,7 @@ export interface CohostState {
    */
   recentlyResolved?: CohostRecentlyResolved[]
   /**
-   * Whether Golem hears the streamer (plan 068); absent without a session or
+   * Whether Buddy hears the streamer (plan 068); absent without a session or
    * from a backend before the field (never null).
    */
   listening?: CohostListening
@@ -5828,7 +5828,7 @@ export interface CohostState {
   /** Plan 140 S3: the voice-command kill switches; absent while both are on. */
   commandAvailability?: CohostCommandAvailability
   /**
-   * Plan 164 D7: what the Golem said or proposes this chat session, oldest
+   * Plan 164 D7: what the Buddy said or proposes this chat session, oldest
    * first, at most 20; absent while empty (never null).
    */
   utterances?: CohostUtterance[]
@@ -5837,7 +5837,7 @@ export interface CohostState {
 }
 
 /**
- * Plan 119 S1: what became of a question Golem caught. The latest outcome
+ * Plan 119 S1: what became of a question Buddy caught. The latest outcome
  * wins; a restore puts it back to `open`; `shown` means still open, but its
  * comment was on stream.
  */
@@ -5862,7 +5862,7 @@ export interface CohostReportQuestion {
 }
 
 export interface CohostReportQuestions {
-  /** Distinct question ids Golem surfaced. */
+  /** Distinct question ids Buddy surfaced. */
   total: number
   markedAnswered: number
   dismissed: number
@@ -5930,7 +5930,7 @@ export interface CohostReportAlert {
   firstSeenAt: string
 }
 
-/** Recaps are never posted by Golem, so posting leaves no count. */
+/** Recaps are never posted by Buddy, so posting leaves no count. */
 export interface CohostReportRecap {
   offered: number
   drafted: number
@@ -5955,12 +5955,12 @@ export interface CohostReportCommands {
   expired: number
   /** A removal that failed or ended unknown, or a refused request. */
   failed: number
-  /** No comment matched, or Golem didn't catch what was said. */
+  /** No comment matched, or Buddy didn't catch what was said. */
   notFound: number
 }
 
 /**
- * What Golem caught in one stream (plan 119 decision 6): counts by outcome,
+ * What Buddy caught in one stream (plan 119 decision 6): counts by outcome,
  * the questions and what became of them, the promises still open. Saved on
  * this computer when the session ends and deleted with the recording.
  * `cohost.report.get` returns it; `cohost.report.saved` announces it. Every
@@ -5971,7 +5971,7 @@ export interface CohostSessionReport {
   sessionId: string
   startedAt: string
   endedAt: string
-  /** Golem sessions folded into this report: off and on mid-stream adds one. */
+  /** Buddy sessions folded into this report: off and on mid-stream adds one. */
   segments: number
   streamTitle?: string
   messagesSeen: number
@@ -5985,7 +5985,7 @@ export interface CohostSessionReport {
   recap: CohostReportRecap
   /** Plan 140 S3: voice commands; absent when none was counted (and in older reports). */
   commands?: CohostReportCommands
-  /** Plan 164 D10: what the Golem posted as you, oldest first, at most 200; absent while empty. */
+  /** Plan 164 D10: what the Buddy posted as you, oldest first, at most 200; absent while empty. */
   posts?: CohostReportPost[]
 }
 
@@ -6016,7 +6016,7 @@ export interface CohostReportChat {
 
 /**
  * `cohost.report.get` / `cohost.report.latest`: the saved report (null when
- * Golem left none), the session's moments (clip marks and chat peaks, computed
+ * Buddy left none), the session's moments (clip marks and chat peaks, computed
  * on read and never stored) and its chat totals.
  */
 export interface CohostReportPayload {
@@ -6109,7 +6109,7 @@ export interface CohostUtteranceParams {
 
 /** `cohost.utterance.say` (plan 164 D7): the streamer's own line, 1 to 200
  * characters. One utterance that both posts (in Auto, to the named live-chat
- * session) and bubbles at once (when the Golem is on some output). Without a
+ * session) and bubbles at once (when the Buddy is on some output). Without a
  * session (recording with no chat, Off, Suggest) it is bubble-only. */
 export interface CohostSayParams {
   /** The live live-chat session; omitted or empty = no session, bubble-only. */
@@ -6119,7 +6119,7 @@ export interface CohostSayParams {
   state?: CohostUtteranceState
 }
 
-/** What made the Golem speak (plan 164 D7). */
+/** What made the Buddy speak (plan 164 D7). */
 export type CohostUtteranceTriggerKind = 'greeting' | 'answer' | 'banter' | 'manual'
 
 export interface CohostUtteranceTrigger {
@@ -6138,7 +6138,7 @@ export interface CohostUtteranceTrigger {
  */
 export type CohostUtteranceStatus = 'proposed' | 'sent' | 'dismissed' | 'bubble-only' | 'failed'
 
-/** One thing the Golem said or wants to say (plan 164 D7). */
+/** One thing the Buddy said or wants to say (plan 164 D7). */
 export interface CohostUtterance {
   id: string
   text: string
@@ -6180,13 +6180,13 @@ export interface CohostWindowState {
    * without it (smokes); the window then shows the controls off.
    */
   autoChat?: CohostAutoChat
-  /** The Golem on stream (plan 164 Phase C): what the pane's header shows
+  /** The Buddy on stream (plan 164 Phase C): what the pane's header shows
    * and operates. Absent from a relay seeded without it (older Studio,
    * smokes); the window then shows no header. */
   buddy?: CohostWindowBuddy
 }
 
-/** The Golem as the Stream Manager operates it (plan 164 S-C4). The window
+/** The Buddy as the Stream Manager operates it (plan 164 S-C4). The window
  * resolves the state image itself (its own file or the bundled pack). */
 export interface CohostWindowBuddy {
   /** Plan 168 S-D3 adds `avatar` and `motion` for the header's living
@@ -6246,7 +6246,7 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
   'say-utterance'
 ]
 
-/** The Golem's own actions from the Stream Manager (plan 164 S-C4): the Say
+/** The Buddy's own actions from the Stream Manager (plan 164 S-C4): the Say
  * box (D7) and the Show on stream switch. Not chat commands, so they need no
  * live session: Studio routes `buddy-say` to `cohost.utterance.say` (one
  * utterance that posts per the chat mode when a live session is named, and
@@ -6275,7 +6275,7 @@ export const COHOST_BUDDY_ACTION_KINDS = [
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */
 /**
- * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Golem's
+ * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Buddy's
  * open voice command, by its id. `choose` picks from the chooser (0 to 2),
  * `confirm` and `cancel` answer the card. Studio makes the matching
  * `cohost.command.*` call; the reply is the state after the answer.

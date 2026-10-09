@@ -33,7 +33,7 @@ function settings(overrides: Partial<CohostSettings['persona']> = {}): CohostSet
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Golem',
+      name: 'Buddy',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -121,7 +121,7 @@ describe('buddyNameToSave (plan 164 S-A4)', () => {
 describe('BuddyPersonaSection', () => {
   it('requires a name to save, and saves a trimmed one on blur', async () => {
     await render()
-    expect(nameInput().value).toBe('Golem')
+    expect(nameInput().value).toBe('Buddy')
     await type(nameInput(), '   ')
     await blur(nameInput())
     expect(patchCohostSettings).not.toHaveBeenCalled()
@@ -195,7 +195,7 @@ describe('BuddyPersonaSection', () => {
     ) as HTMLButtonElement
     await act(async () => startOver.click())
     const dialog = document.querySelector('[role="dialog"]')
-    expect(dialog?.textContent).toContain('Start over with a new Golem?')
+    expect(dialog?.textContent).toContain('Start over with a new Buddy?')
     expect(removeBuddyPersona).not.toHaveBeenCalled()
     const confirm = [...dialog!.querySelectorAll('button')].find(
       (button) => button.textContent?.trim() === 'Start over'
@@ -206,6 +206,6 @@ describe('BuddyPersonaSection', () => {
       patchCohostSettings.mock.calls.at(-1) as unknown as [{ persona: CohostSettings['persona'] }]
     )[0]
     expect(saved.persona.id).not.toBe('p-1')
-    expect(saved.persona).toMatchObject({ name: 'Golem', images: {}, source: 'default' })
+    expect(saved.persona).toMatchObject({ name: 'Buddy', images: {}, source: 'default' })
   })
 })

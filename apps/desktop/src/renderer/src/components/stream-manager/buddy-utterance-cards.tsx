@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils'
 const RECENT_MAX = 4
 
 /**
- * The Golem's proposed cards (plan 164 S-D2, Suggest mode): what it wants to
+ * The Buddy's proposed cards (plan 164 S-D2, Suggest mode): what it wants to
  * post as you, with Send and Dismiss, then the last few lines it said. The
  * newest proposed card takes ↵ (send) and ⌫ (dismiss) while nothing else has
  * the keyboard; every card keeps its buttons.
@@ -74,7 +74,7 @@ export function BuddyUtteranceCards({
           {proposed.map((utterance) => (
             <Alert
               key={utterance.id}
-              aria-label="The Golem wants to post"
+              aria-label="The Buddy wants to post"
               data-testid="buddy-utterance-card"
               data-utterance-id={utterance.id}
               role="group"

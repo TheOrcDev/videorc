@@ -26,14 +26,14 @@ const PORTRAIT_BOTTOM_MARGIN = 0.22
 export const OVERLAY_ITEM_LABELS: Record<OverlayItem, string> = {
   highlight: 'Highlight',
   captions: 'Captions',
-  buddy: 'Golem'
+  buddy: 'Buddy'
 }
 
 /** How a Go Live sentence names the item mid-sentence (mirrors Rust). */
 const OVERLAY_ITEM_SENTENCE_LABELS: Record<OverlayItem, string> = {
   highlight: 'highlights',
   captions: 'captions',
-  buddy: 'the Golem'
+  buddy: 'the Buddy'
 }
 
 export const OVERLAY_SNAPS: readonly OverlaySnap[] = [

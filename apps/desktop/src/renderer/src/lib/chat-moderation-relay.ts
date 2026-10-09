@@ -33,7 +33,7 @@ import {
 // - The relay: the Stream Manager's "Remove from chat" and its card answers
 //   arrive as `comments-window:moderation-request`. A removal always goes to
 //   the backend as `source: 'manual'`, whatever asked.
-// - The toast: an open Golem removal card is mirrored as a plain toast in the
+// - The toast: an open Buddy removal card is mirrored as a plain toast in the
 //   main window while the Stream Manager is closed or hidden, and it leaves
 //   when the operation ends. Nothing here ever removes on its own.
 
@@ -78,7 +78,7 @@ export interface ChatModerationRelay {
   dispose: () => void
 }
 
-// Loaded in the same chunk: answers to Golem's voice command cards.
+// Loaded in the same chunk: answers to Buddy's voice command cards.
 export { startCohostCommandRelay } from '@/lib/cohost-command-relay'
 
 export const REMOVAL_TOAST_ID_PREFIX = 'chat-removal:'

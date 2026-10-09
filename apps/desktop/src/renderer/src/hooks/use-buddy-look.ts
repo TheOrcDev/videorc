@@ -36,7 +36,7 @@ export type BuddyLookPending = 'create' | 'redo' | 'keep' | 'discard'
 export interface BuddyLookState {
   /** The first status has not arrived yet. */
   loading: boolean
-  /** The active Golem's draft (made earlier and still on disk, or just now). */
+  /** The active Buddy's draft (made earlier and still on disk, or just now). */
   draft: CohostAvatarDraft | null
   /** The job running in the backend (this window's, or one picked up). */
   running: CohostAvatarRunning | null
@@ -87,7 +87,7 @@ export interface BuddyLookController {
   getState: () => BuddyLookState
   subscribe: (listener: () => void) => () => void
   refresh: () => Promise<void>
-  /** Make a new set (Create my Golem): the look, and the library avatar's
+  /** Make a new set (Create my Buddy): the look, and the library avatar's
    * name, personality and "About you" (plan 170 D13). Empty fields are left out. */
   create: (input: CohostAvatarCreateParams) => Promise<void>
   /** Make one state of the draft again from its idle. */
@@ -329,7 +329,7 @@ function failedLines(draft: CohostAvatarDraft): Partial<Record<CohostAvatarState
   return lines
 }
 
-/** The client the Golem tab shares (plan 170): undefined outside a provider. */
+/** The client the Buddy tab shares (plan 170): undefined outside a provider. */
 const BuddyLookClientContext = createContext<BackendClient | null | undefined>(undefined)
 
 /** A backend client of its own while `enabled` and connected; null otherwise. */
@@ -357,9 +357,9 @@ function useOwnBuddyLookClient(enabled: boolean): BackendClient | null {
 }
 
 /**
- * One client for every Golem surface under it (the Golem tab: My Golems,
+ * One client for every Buddy surface under it (the Buddy tab: My Buddies,
  * the look panel and the onboarding sheet), so they share one connection
- * and, through `useBuddyLook`, one look controller: a Golem created in the
+ * and, through `useBuddyLook`, one look controller: a Buddy created in the
  * sheet shows as working and then as a draft in the look panel too.
  */
 export function BuddyLookClientProvider({ children }: { children: ReactNode }): ReactElement {

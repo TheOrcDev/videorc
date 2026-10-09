@@ -27,7 +27,7 @@ import {
 import { cn } from '@/lib/utils'
 
 /**
- * The Golem pane's chat mode (plan 164 S-D6): one `Off | Suggest | Auto`
+ * The Buddy pane's chat mode (plan 164 S-D6): one `Off | Suggest | Auto`
  * segmented control and the three behaviour switches. The first time the
  * mode leaves Off the consent dialog says what posting as you means; Auto
  * asks once more, every time. Greetings are free; Answers and Banter need
@@ -95,7 +95,7 @@ export function BuddyChatControls({
         <div className="flex min-w-0 items-center gap-2">
           <span className="shrink-0 text-[11px] font-semibold text-subtle">Chat</span>
           <ToggleGroup
-            aria-label="Golem chat mode"
+            aria-label="Buddy chat mode"
             disabled={disabled}
             size="sm"
             type="single"
@@ -131,7 +131,7 @@ export function BuddyChatControls({
             disabled={disabled || aiReason !== null}
             id="buddy-answers"
             label="Answers"
-            title={aiReason ?? 'A reply when a viewer asks the Golem by name.'}
+            title={aiReason ?? 'A reply when a viewer asks the Buddy by name.'}
             onCheckedChange={(answers) => onChange({ answers })}
           />
           <BuddyBehaviourSwitch
@@ -157,7 +157,7 @@ export function BuddyChatControls({
               <BuddyEmblem size="lg" />
               <div className="flex flex-col gap-1">
                 <DialogTitle>
-                  {step === 'confirm-auto' ? 'Turn on Auto?' : 'Let the Golem post as you?'}
+                  {step === 'confirm-auto' ? 'Turn on Auto?' : 'Let the Buddy post as you?'}
                 </DialogTitle>
                 <DialogDescription data-testid="buddy-chat-consent-sentence">
                   {step === 'confirm-auto' ? BUDDY_AUTO_CONFIRM_SENTENCE : BUDDY_CONSENT_SENTENCE}

@@ -433,7 +433,7 @@ describe('renderer security policy', () => {
     expect(result.slice(0, 400)).toContain('event.sender.id !== mainWindow.webContents.id')
   })
 
-  it('lets only the Chat window answer Golem, checked by sender (plan 140, S6 part B)', () => {
+  it('lets only the Chat window answer Buddy, checked by sender (plan 140, S6 part B)', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:cohost-command')).toBe(true)
     expect(roleCanInvokeChannel('notes', 'comments-window:cohost-command')).toBe(false)
     expect(roleCanInvokeChannel('captions', 'comments-window:cohost-command')).toBe(false)

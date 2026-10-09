@@ -1,4 +1,4 @@
-//! The Golem's animator (plan 168, S-C2): what the pet does on stream, frame
+//! The Buddy's animator (plan 168, S-C2): what the pet does on stream, frame
 //! by frame, per output leg.
 //!
 //! A pure state machine with an injected clock and a seeded random source.
@@ -120,7 +120,7 @@ const LAUGH_ID: &str = "laugh";
 const THINK_ID: &str = "think";
 
 /// Events waiting for the next frame; beyond this the oldest go (only a
-/// long stretch with the Golem on no output piles them up, and by then they
+/// long stretch with the Buddy on no output piles them up, and by then they
 /// are stale).
 const PENDING_MAX: usize = 64;
 /// The frame clock may stall this long and still count as one clock; a
@@ -248,7 +248,7 @@ pub fn process_seed() -> u64 {
 
 // --- The state machine -------------------------------------------------------------------
 
-/// What the Golem is saying.
+/// What the Buddy is saying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Speech {
     Quiet,

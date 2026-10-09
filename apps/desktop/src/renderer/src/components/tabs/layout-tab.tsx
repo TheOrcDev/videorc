@@ -1137,7 +1137,7 @@ function SourceVisibilityField({
 const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
   captions: 'The caption bar. Its width is the rect; style and size stay in Captions.',
-  buddy: 'Your Golem and its speech bubble. Drag it on the stage or snap it to a corner.'
+  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.'
 }
 
 function OverlayItemInspector({

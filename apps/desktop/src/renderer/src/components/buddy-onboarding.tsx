@@ -118,13 +118,13 @@ export interface BuddyOnboardingProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   /** Bumped by every open: the sheet starts again at `initialStep`, or at
-   * step 4 while a Golem is being made or waits as a draft. */
+   * step 4 while a Buddy is being made or waits as a draft. */
   openNonce: number
   initialStep?: BuddyOnboardingStep
-  /** The library (My Golems owns it): "Use this one" and the full gate. */
+  /** The library (My Buddies owns it): "Use this one" and the full gate. */
   library: BuddyLibraryState | null
   libraryController: BuddyLibraryController | null
-  /** Tests inject the backend; the app shares the Golem tab's client. */
+  /** Tests inject the backend; the app shares the Buddy tab's client. */
   client?: BuddyLookClient | null
   /** Tests inject the picture prep; the app downscales and re-encodes. */
   preparePicture?: (file: File) => Promise<BuddyLookPicture>
@@ -136,8 +136,8 @@ export interface BuddyOnboardingProps {
  * five, what it does), describe it (and an optional picture), give it a
  * personality, then create it. Step 4 is plan 169's look flow on the
  * account library: the four poses fill in, Redo remakes talk, laugh or
- * think, and "Use as my Golem" keeps it. A full-height sheet over the Golem
- * tab; what was typed survives closing it until a Golem is used.
+ * think, and "Use as my Buddy" keeps it. A full-height sheet over the Buddy
+ * tab; what was typed survives closing it until a Buddy is used.
  */
 export function BuddyOnboarding({
   open,
@@ -176,7 +176,7 @@ export function BuddyOnboarding({
     setAppliedNonce(openNonce)
     setStep(inProgress ? 4 : initialStep)
   }
-  // A Golem being made or waiting as a draft is step 4's: the sheet goes
+  // A Buddy being made or waiting as a draft is step 4's: the sheet goes
   // there when one shows up (the backend's state arriving, a job picked up).
   const [wasInProgress, setWasInProgress] = useState(inProgress)
   if (inProgress !== wasInProgress) {
@@ -869,7 +869,7 @@ function PersonalityStep({
   )
 }
 
-// --- Step 4: Create your Golem -------------------------------------------------
+// --- Step 4: Create your Buddy -------------------------------------------------
 
 function SummaryRow({
   label,
@@ -1067,7 +1067,7 @@ const GATE_ACTION_LABELS = {
   'sign-in': BUDDY_ONBOARDING_GATES.signIn,
   'see-premium': BUDDY_ONBOARDING_GATES.seePremium,
   'start-from-ours': BUDDY_ONBOARDING_GATES.startFromOurs,
-  // The Cloud AI switch's own label (Golem tab, Cloud AI section).
+  // The Cloud AI switch's own label (Buddy tab, Cloud AI section).
   'allow-cloud-ai': 'Allow cloud AI'
 } as const
 
@@ -1124,7 +1124,7 @@ function GateRow({
 
 /**
  * Cloud AI consent where creating needs it (plan 119 decision 3): the same
- * one flag and the same list of uses as the Golem tab's Cloud AI switch,
+ * one flag and the same list of uses as the Buddy tab's Cloud AI switch,
  * so nothing is granted that the list does not name. The safe choice has
  * the focus.
  */

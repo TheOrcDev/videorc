@@ -24,7 +24,7 @@ const premium: EntitlementUiGate = { allowed: true }
 const basic: EntitlementUiGate = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Golem requires Videorc Premium.',
+  reason: 'Buddy requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 const left = (remainingToday: number): AiCapabilities =>

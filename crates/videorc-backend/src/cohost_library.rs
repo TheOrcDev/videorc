@@ -1,4 +1,4 @@
-//! The Golem library (plan 170 D12, D13): one account library shared by
+//! The Buddy library (plan 170 D12, D13): one account library shared by
 //! videorc.com and the app, plus Videorc's official avatars.
 //!
 //! The renderer reads it with `cohost.library.get` (the cached state, no
@@ -14,14 +14,14 @@
 //!   `videorc-asset://buddy/`. Each idle is cached on sync, the rest on use.
 //! - **Apply** (use, sync, keep): the poses become the persona's still
 //!   pictures (`<personaId>/<state>-<tag>.<ext>`, plan 169), the name and
-//!   personality follow, a non-empty "About you" becomes the Golem's notes,
+//!   personality follow, a non-empty "About you" becomes the Buddy's notes,
 //!   the persona wears Still and links `libraryAvatarId`. Official avatars
-//!   apply from the bundled art (the Golem is the default set), with the
+//!   apply from the bundled art (the Buddy is the default set), with the
 //!   catalog's name and personality and the notes untouched. A failed
 //!   download changes nothing.
 //! - **Sync** (D12): when the account's choice is newer than the stored
 //!   clock and differs from the persona's link, it applies to a linked or
-//!   untouched default Golem; a Golem made only on this computer is never
+//!   untouched default Buddy; a Buddy made only on this computer is never
 //!   overwritten (the choice is offered as `serverActiveAvatarId`); nothing
 //!   applies while a recording or stream runs (it waits for the session to
 //!   end). Local edits of a linked avatar's name, personality or notes are
@@ -126,7 +126,7 @@ impl BuddyOfficialSlug {
 }
 
 /// One catalog row. `description` is what the image model was asked for;
-/// the Golem's art is the owner's original, so it has none.
+/// the Buddy's art is the owner's original, so it has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuddyOfficial {
     pub slug: BuddyOfficialSlug,
@@ -142,7 +142,7 @@ pub struct BuddyOfficial {
 pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
     BuddyOfficial {
         slug: BuddyOfficialSlug::Golem,
-        name: "Golem",
+        name: "Buddy",
         kind: "Golem",
         tagline: "The original. Steady as stone.",
         personality: "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
@@ -302,7 +302,7 @@ pub struct BuddyLibraryState {
     /// Newest first; None when signed out or never loaded.
     pub mine: Option<Vec<BuddyLibraryEntry>>,
     /// What the persona is linked to, or `official:golem` for the untouched
-    /// default; None for a Golem made only on this computer.
+    /// default; None for a Buddy made only on this computer.
     pub active_avatar_id: Option<String>,
     /// The account's choice when it differs and sync would not apply it.
     pub server_active_avatar_id: Option<String>,
@@ -393,7 +393,7 @@ pub fn load_library_sync(database: &Database) -> BuddyLibrarySync {
         Ok(Some(sync)) => sync,
         Ok(None) => BuddyLibrarySync::default(),
         Err(error) => {
-            tracing::warn!("Could not read the Golem library sync clock: {error:#}");
+            tracing::warn!("Could not read the Buddy library sync clock: {error:#}");
             BuddyLibrarySync::default()
         }
     }
@@ -409,7 +409,7 @@ fn store_clock(state: &AppState, profile_updated_at: Option<String>) {
     }
     if let Err(error) = save_library_sync(&state.database, &BuddyLibrarySync { profile_updated_at })
     {
-        tracing::warn!("Could not save the Golem library sync clock: {error:#}");
+        tracing::warn!("Could not save the Buddy library sync clock: {error:#}");
     }
 }
 
@@ -441,7 +441,7 @@ pub fn official_buddy(slug: BuddyOfficialSlug) -> &'static BuddyOfficial {
         .unwrap_or(&BUDDY_OFFICIAL_CATALOG[0])
 }
 
-/// An official avatar's bundled pose: the Golem is the default set (the
+/// An official avatar's bundled pose: the Buddy is the default set (the
 /// stream overlay's `BUNDLED_*`), the others ship in the renderer's
 /// `assets/buddy/official/<slug>/<state>.webp`, so official avatars apply
 /// offline and signed out.
@@ -508,7 +508,7 @@ impl LibraryEnv {
         self.root.clone().ok_or_else(|| {
             CohostAvatarErrorDetail::new(
                 crate::cohost_avatar::COHOST_AVATAR_ROOT_UNCONFIGURED,
-                "The Golem's image folder is not configured.",
+                "The Buddy's image folder is not configured.",
             )
         })
     }
@@ -548,7 +548,7 @@ struct LibraryCache {
     web: Option<Vec<BuddyLibraryWebAvatar>>,
     /// The cached pictures of each, by avatar id.
     poses: BTreeMap<String, BuddyLibraryPoses>,
-    /// The account's choice a local-only Golem was not overwritten with.
+    /// The account's choice a local-only Buddy was not overwritten with.
     offer: Option<String>,
     busy: Option<BuddyLibraryBusy>,
     error: Option<CohostAvatarErrorDetail>,
@@ -629,7 +629,7 @@ impl LibraryShared {
 // --- State -----------------------------------------------------------------------------------
 
 /// The library id the persona wears: its link when this build knows it, the
-/// default Golem for the untouched default, else None (a Golem made only on
+/// default Buddy for the untouched default, else None (a Buddy made only on
 /// this computer, or a link from a newer build).
 pub fn active_avatar_id(persona: &CohostPersona) -> Option<String> {
     match persona.library_avatar_id.as_deref() {
@@ -642,7 +642,7 @@ pub fn active_avatar_id(persona: &CohostPersona) -> Option<String> {
     }
 }
 
-/// The untouched default: the bundled Golem, never linked.
+/// The untouched default: the bundled Buddy, never linked.
 fn untouched_default(persona: &CohostPersona) -> bool {
     persona.library_avatar_id.is_none() && persona.source == CohostPersonaSource::Default
 }
@@ -663,7 +663,7 @@ fn entry_of(
     use crate::cohost::truncate_utf16;
     BuddyLibraryEntry {
         id: avatar.id.clone(),
-        name: library_name(&avatar.name).unwrap_or_else(|| "Golem".to_string()),
+        name: library_name(&avatar.name).unwrap_or_else(|| "Buddy".to_string()),
         description: truncate_utf16(&avatar.description, 600),
         personality: truncate_utf16(&avatar.personality, 1200),
         context: truncate_utf16(&avatar.context, 4000),
@@ -753,11 +753,11 @@ async fn emit_changed(state: &AppState) {
 pub(crate) fn library_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
     let code = error.detail.code.as_str();
     let message = match code {
-        "unauthorized" => "Sign in again to use your Golem library.".to_string(),
+        "unauthorized" => "Sign in again to use your Buddy library.".to_string(),
         "buddy-storage-unconfigured" | "cohost-disabled" | "ai-gateway-not-configured" => {
-            "The Golem library is not available right now.".to_string()
+            "The Buddy library is not available right now.".to_string()
         }
-        "buddy-not-found" => "That Golem is not in your library any more.".to_string(),
+        "buddy-not-found" => "That Buddy is not in your library any more.".to_string(),
         "network" => "Could not reach Videorc. Check your connection and try again.".to_string(),
         "timeout" => "Videorc took too long to answer. Try again.".to_string(),
         _ if error.kind == CohostApiErrorKind::MalformedResponse => {
@@ -771,7 +771,7 @@ pub(crate) fn library_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
 fn signed_out_detail() -> CohostAvatarErrorDetail {
     CohostAvatarErrorDetail::new(
         COHOST_LIBRARY_SIGNED_OUT,
-        "Sign in to use your Golem library.",
+        "Sign in to use your Buddy library.",
     )
 }
 
@@ -810,7 +810,7 @@ where
             if let Err(error) = outcome {
                 state.emit_log(
                     "warn",
-                    format!("Golem library: {} ({})", error.message, error.code),
+                    format!("Buddy library: {} ({})", error.message, error.code),
                 );
                 cache.error = Some(error);
             }
@@ -833,13 +833,13 @@ fn check_library(state: &AppState) -> Result<(), CohostLibraryRefusal> {
     if state.buddy_library.env().token.is_none() {
         return Err(CohostLibraryRefusal::new(
             COHOST_LIBRARY_SIGNED_OUT,
-            "Sign in to use your Golem library.",
+            "Sign in to use your Buddy library.",
         ));
     }
     if state.buddy_library.known_disabled() {
         return Err(CohostLibraryRefusal::new(
             COHOST_LIBRARY_UNAVAILABLE,
-            "The Golem library is not available right now.",
+            "The Buddy library is not available right now.",
         ));
     }
     Ok(())
@@ -968,7 +968,7 @@ async fn decide(
     let stored = load_library_sync(&state.database).profile_updated_at;
     let newer = is_newer(profile_updated_at.as_deref(), stored.as_deref());
     let mut persona = current_persona(state).await;
-    // The linked avatar left the library (deleted elsewhere): the Golem
+    // The linked avatar left the library (deleted elsewhere): the Buddy
     // stays as it is, now only on this computer.
     if let Some(link) = persona.library_avatar_id.clone()
         && user_avatar_id_ok(&link)
@@ -988,20 +988,20 @@ async fn decide(
         return Ok(());
     }
     let Some(choice) = server_active else {
-        // The account has no choice any more; the Golem stays.
+        // The account has no choice any more; the Buddy stays.
         shared.cache().offer = None;
         store_clock(state, profile_updated_at);
         return Ok(());
     };
     if persona.library_avatar_id.is_none() && !untouched_default(&persona) {
-        // Never overwrite a Golem made only on this computer: offer it.
+        // Never overwrite a Buddy made only on this computer: offer it.
         shared.cache().offer = Some(choice);
         return Ok(());
     }
     if session_live(state).await {
         state.emit_log(
             "info",
-            "Your Golem changed on your account; it switches when this session ends.",
+            "Your Buddy changed on your account; it switches when this session ends.",
         );
         shared.cache().pending_apply = Some(PendingApply {
             avatar_id: choice,
@@ -1074,7 +1074,7 @@ async fn apply_pending(
 
 // --- cohost.library.use --------------------------------------------------------------------------
 
-/// `cohost.library.use`: make a library or official avatar the Golem.
+/// `cohost.library.use`: make a library or official avatar the Buddy.
 /// Official avatars work signed out; the account learns the choice when
 /// signed in.
 pub async fn use_avatar(
@@ -1116,7 +1116,7 @@ async fn run_use(state: &AppState, id: &str) -> Result<(), CohostAvatarErrorDeta
     Ok(())
 }
 
-/// `PUT /api/buddy/profile` and its clock. The Golem has already changed
+/// `PUT /api/buddy/profile` and its clock. The Buddy has already changed
 /// here; a failure only means the account did not hear of it.
 async fn select_on_account(
     state: &AppState,
@@ -1134,7 +1134,7 @@ async fn select_on_account(
             Err(CohostAvatarErrorDetail::new_owned(
                 detail.code,
                 format!(
-                    "Your Golem changed here, but your Videorc account could not be told: {}",
+                    "Your Buddy changed here, but your Videorc account could not be told: {}",
                     detail.message
                 ),
             ))
@@ -1233,7 +1233,7 @@ async fn fetch_poses(
             Err(error) => tracing::warn!(
                 state = avatar_state.as_str(),
                 code = %error.code,
-                "a Golem library pose could not be read; the idle stands in"
+                "a Buddy library pose could not be read; the idle stands in"
             ),
         }
     }
@@ -1303,7 +1303,7 @@ async fn cache_pose(
                 Some(pose_url(avatar_id, avatar_state, tag)),
             );
         }
-        Err(error) => tracing::warn!(code = %error.code, "a Golem library picture was not cached"),
+        Err(error) => tracing::warn!(code = %error.code, "a Buddy library picture was not cached"),
     }
 }
 
@@ -1354,7 +1354,7 @@ async fn cache_idles(
         .buffer_unordered(CACHE_CONCURRENCY)
         .for_each(|outcome| {
             if let Err(error) = outcome {
-                tracing::warn!(code = %error.code, "a Golem library idle was not cached");
+                tracing::warn!(code = %error.code, "a Buddy library idle was not cached");
             }
             std::future::ready(())
         })
@@ -1385,7 +1385,7 @@ fn write_look(
 ) -> Result<WrittenLook, CohostAvatarErrorDetail> {
     let folder = root.join(persona_id);
     std::fs::create_dir_all(&folder)
-        .map_err(|error| store_error("Could not create the Golem's folder", error))?;
+        .map_err(|error| store_error("Could not create the Buddy's folder", error))?;
     let tag = fresh_tag();
     let mut images = CohostPersonaImages::default();
     let mut written = Vec::new();
@@ -1457,14 +1457,14 @@ async fn save_applied(
             look.written,
             Err(CohostAvatarErrorDetail::new_owned(
                 error.code().to_string(),
-                format!("Your Golem could not be saved: {error}"),
+                format!("Your Buddy could not be saved: {error}"),
             )),
         ),
     };
     let _ = blocking(move || {
         for file in remove {
             if let Err(error) = std::fs::remove_file(&file) {
-                tracing::warn!(%error, "an earlier Golem picture could not be removed");
+                tracing::warn!(%error, "an earlier Buddy picture could not be removed");
             }
         }
         Ok(())
@@ -1477,7 +1477,7 @@ async fn save_applied(
     outcome
 }
 
-/// An account avatar becomes the Golem: its poses, name, personality, its
+/// An account avatar becomes the Buddy: its poses, name, personality, its
 /// "About you" as the notes (when it has one), Still, and the link.
 async fn apply_account_avatar(
     state: &AppState,
@@ -1513,11 +1513,11 @@ async fn apply_account_avatar(
     let notes = (!avatar.context.trim().is_empty())
         .then(|| crate::cohost::truncate_utf16(&avatar.context, 4000));
     save_applied(state, next, notes, look).await?;
-    state.emit_log("info", format!("Golem is now {}.", avatar.name.trim()));
+    state.emit_log("info", format!("Buddy is now {}.", avatar.name.trim()));
     Ok(())
 }
 
-/// An official avatar becomes the Golem from the bundled art: the Golem is
+/// An official avatar becomes the Buddy from the bundled art: the Buddy is
 /// the default set itself, the others are written as the persona's look. The
 /// notes stay the user's own.
 async fn apply_official(
@@ -1578,7 +1578,7 @@ async fn apply_official(
     next.personality = official.personality.to_string();
     next.library_avatar_id = Some(slug.id());
     save_applied(state, next, None, look).await?;
-    state.emit_log("info", format!("Golem is now {}.", official.name));
+    state.emit_log("info", format!("Buddy is now {}.", official.name));
     Ok(())
 }
 
@@ -1601,7 +1601,7 @@ async fn set_link(state: &AppState, id: Option<String>) -> Result<(), CohostAvat
     .map_err(|error| {
         CohostAvatarErrorDetail::new_owned(
             error.code().to_string(),
-            format!("Your Golem could not be saved: {error}"),
+            format!("Your Buddy could not be saved: {error}"),
         )
     })
 }
@@ -1609,7 +1609,7 @@ async fn set_link(state: &AppState, id: Option<String>) -> Result<(), CohostAvat
 // --- cohost.library.update -----------------------------------------------------------------------
 
 /// `cohost.library.update`: rename or edit one of the account's own avatars.
-/// When it is the Golem, the Golem follows.
+/// When it is the Buddy, the Buddy follows.
 pub async fn update(
     state: &AppState,
     params: CohostLibraryUpdateParams,
@@ -1706,7 +1706,7 @@ async fn run_update(
     .map_err(|error| {
         CohostAvatarErrorDetail::new_owned(
             error.code().to_string(),
-            format!("Your Golem could not be saved: {error}"),
+            format!("Your Buddy could not be saved: {error}"),
         )
     })
 }
@@ -1801,7 +1801,7 @@ pub(crate) fn settings_saved(state: &AppState, previous: &CohostSettings, next: 
 // --- cohost.library.delete -----------------------------------------------------------------------
 
 /// `cohost.library.delete`: one of the account's own avatars. When it is
-/// the Golem, the Golem stays as it is, now only on this computer.
+/// the Buddy, the Buddy stays as it is, now only on this computer.
 pub async fn delete(
     state: &AppState,
     params: CohostLibraryAvatarParams,
@@ -1872,7 +1872,7 @@ async fn forget_avatar(state: &AppState, env: &LibraryEnv, id: &str) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    tracing::warn!(%error, "a Golem library cache folder could not be removed")
+                    tracing::warn!(%error, "a Buddy library cache folder could not be removed")
                 }
             }
             Ok(())
@@ -2126,7 +2126,7 @@ fn prune_cache(root: &Path, keep: &BTreeSet<String>) {
             && entry.file_type().is_ok_and(|kind| kind.is_dir())
             && let Err(error) = std::fs::remove_dir_all(entry.path())
         {
-            tracing::warn!(%error, "a Golem library cache folder could not be removed");
+            tracing::warn!(%error, "a Buddy library cache folder could not be removed");
         }
     }
 }

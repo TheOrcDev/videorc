@@ -1,9 +1,9 @@
 import { useSyncExternalStore } from 'react'
 
 /**
- * Whether the Golem pet creator (plan 168 Phase F) is open: one module-level
- * flag, so the Golem tab's Create button and the creator agree without a
- * provider. The creator mounts where the Golem tab reads it.
+ * Whether the Buddy pet creator (plan 168 Phase F) is open: one module-level
+ * flag, so the Buddy tab's Create button and the creator agree without a
+ * provider. The creator mounts where the Buddy tab reads it.
  *
  * Plan 169 D11: Make it Alive opens it with the kept look as the reference
  * (`persona-idle`) and the look's description as notes for the creator.

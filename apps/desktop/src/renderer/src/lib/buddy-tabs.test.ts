@@ -48,7 +48,7 @@ describe('BUDDY_TABS (plan 150)', () => {
       'clean-cut'
     ])
     expect(BUDDY_TABS.map((tab) => tab.label)).toEqual([
-      'Golem',
+      'Buddy',
       'Chat',
       'Voice',
       'Reports',
@@ -120,7 +120,7 @@ describe('writeLastBuddyTab', () => {
 })
 
 describe('openBuddyTab', () => {
-  it('asks the shell to open Golem on the tab, on the workspace navigation event', () => {
+  it('asks the shell to open Buddy on the tab, on the workspace navigation event', () => {
     const target = new EventTarget()
     const opened: unknown[] = []
     target.addEventListener('videorc:navigate-workspace', (event) =>

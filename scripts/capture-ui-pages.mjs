@@ -48,8 +48,8 @@ if (themeArg) {
     process.exit(1)
   }
 }
-// Pages by tab id. The Golem tab (id `ai`, ⌘9; plan 119) doubles as a probe:
-// it must render the Golem Live switch (its Live tab, the first-run default;
+// Pages by tab id. The Buddy tab (id `ai`, ⌘9; plan 119) doubles as a probe:
+// it must render the Buddy Live switch (its Live tab, the first-run default;
 // plan 150), or the run fails at the end. The profile under the output folder
 // outlives a run and the tab reopens on the sub-tab used last, so the probe
 // selects Live itself.
@@ -67,7 +67,7 @@ const failures = []
 for (const { tab, name = tab, subTab, mustShow } of pages) {
   try {
     if (subTab) {
-      // The Golem tab is a lazy chunk: its first open in the dev app can take
+      // The Buddy tab is a lazy chunk: its first open in the dev app can take
       // longer than open-tab's 8 s wait on a busy machine.
       await cmd('open-tab', { tab })
       const trigger = `[data-videorc-buddy-tab="${subTab}"]`
@@ -99,7 +99,7 @@ for (const id of settingsTabs) {
     console.log(shot.file)
   } catch (e) { console.log(`SKIP settings-${id}: ${e.message}`) }
 }
-// The Golem tab has Settings' strip too (plan 150): shoot each of its tabs.
+// The Buddy tab has Settings' strip too (plan 150): shoot each of its tabs.
 try {
   await cmd('open-tab', { tab: 'ai', waitFor: '[data-videorc-buddy-tab]' })
   const buddyTabs = await cmd('eval-js', {

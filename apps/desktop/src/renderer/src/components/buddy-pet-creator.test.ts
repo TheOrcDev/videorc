@@ -26,7 +26,7 @@ const premium: EntitlementUiGate = { allowed: true }
 const basic: EntitlementUiGate = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Golem requires Videorc Premium.',
+  reason: 'Buddy requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 const petOn = (left: number): AiCapabilities =>
@@ -82,7 +82,7 @@ function settings(): CohostSettings {
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Golem',
+      name: 'Buddy',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -103,7 +103,7 @@ function settings(): CohostSettings {
 /** The built pack's manifest: every review cell on a 5-wide 128 px grid. */
 const MANIFEST = {
   version: 1,
-  name: 'Golem',
+  name: 'Buddy',
   neutral: 'gaze-2-2',
   frames: BUDDY_PET_REVIEW_ROWS.flatMap((row) => row.cells).map((id, index) => ({
     id,
@@ -259,7 +259,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
       await render({ client: backend.client })
       expect(byTestId('buddy-pet-step-reference')?.getAttribute('aria-current')).toBe('step')
       const persona = [...document.querySelectorAll('button')].find(
-        (button) => button.textContent === "My Golem's picture"
+        (button) => button.textContent === "My Buddy's picture"
       )
       expect(persona?.getAttribute('data-state')).toBe('on')
       // No Generate source any more: the look panel makes the character.
@@ -369,11 +369,11 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
     await click(byTestId('buddy-pet-save'))
     expect(backend.requestTyped).toHaveBeenCalledWith(
       'cohost.pet.save',
-      { buildId: BUILD, name: 'Golem' },
+      { buildId: BUILD, name: 'Buddy' },
       expect.anything()
     )
     // The provider takes the persona the backend made Alive; no toast, the
-    // wizard closes onto the Golem tab.
+    // wizard closes onto the Buddy tab.
     expect(patchCohostSettings).toHaveBeenCalledWith({
       persona: expect.objectContaining({ avatar: { kind: 'alive', packId: PACK } })
     })
@@ -408,7 +408,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
     const backend = fakeBackend(reviewCreation())
     await render({ client: backend.client })
     const back = [...document.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Golem'
+      (button) => button.textContent === 'Buddy'
     )
     await click(back ?? null)
     expect(onClose).toHaveBeenCalledTimes(1)

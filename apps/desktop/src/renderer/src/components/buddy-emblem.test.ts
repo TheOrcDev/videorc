@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 
 import { BuddyEmblem } from './buddy-emblem'
 
-// Plans 149 and 164: Golem's emblem ships as two trimmed WebP exports of the
+// Plans 149 and 164: Buddy's emblem ships as two trimmed WebP exports of the
 // master in `assets/brand/buddy/`. Their heights are the 2× files for 32 and 56 px.
 
 const ASSET_DIR = join(__dirname, '..', 'assets', 'buddy')
@@ -21,7 +21,7 @@ function webpSize(bytes: Buffer): { width: number; height: number } {
   return { width: bytes.readUIntLE(24, 3) + 1, height: bytes.readUIntLE(27, 3) + 1 }
 }
 
-describe('the Golem emblem exports', () => {
+describe('the Buddy emblem exports', () => {
   it.each([
     ['buddy-emblem-64.webp', 64],
     ['buddy-emblem-112.webp', 112]
@@ -72,8 +72,8 @@ describe('BuddyEmblem', () => {
   })
 
   it('names itself when given alt text', () => {
-    const html = markup({ alt: 'Golem' })
-    expect(html).toContain('alt="Golem"')
+    const html = markup({ alt: 'Buddy' })
+    expect(html).toContain('alt="Buddy"')
     expect(html).not.toContain('aria-hidden')
   })
 })

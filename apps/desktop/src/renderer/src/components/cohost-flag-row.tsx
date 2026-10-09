@@ -13,7 +13,7 @@ import {
 import { cn } from '@/lib/utils'
 
 /**
- * One flagged message. Golem never acts on it by itself: this row exists so
+ * One flagged message. Buddy never acts on it by itself: this row exists so
  * the streamer can jump to the message and decide, and the pane's action bar
  * offers "Remove from chat" when they do (plan 140, S6). Only `high` severity
  * earns the destructive accent; medium/low stay in the monochrome text tiers.
@@ -58,7 +58,7 @@ export function CohostFlagRow({
         {flag.reason}
       </span>
       {action ? (
-        // A suggestion label, not a control: Golem never moderates on its own.
+        // A suggestion label, not a control: Buddy never moderates on its own.
         <span className="shrink-0 text-[11px] text-subtle" data-slot="cohost-flag-action">
           {action}
         </span>

@@ -53,7 +53,7 @@ const premium: EntitlementUiGate = { allowed: true }
 const free: EntitlementUiGate = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Golem requires Videorc Premium.',
+  reason: 'Buddy requires Videorc Premium.',
   upgradeUrl: 'https://example.test/premium'
 }
 
@@ -70,7 +70,7 @@ function settings(): CohostSettings {
   return {
     persona: {
       id: 'default',
-      name: 'Golem',
+      name: 'Buddy',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -329,7 +329,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(byTestId('buddy-stream-demo-chip')?.className).toContain('opacity-100')
   })
 
-  it('uses an official Golem from the gallery (free) and closes', async () => {
+  it('uses an official Buddy from the gallery (free) and closes', async () => {
     const libraryController = fakeLibraryController()
     await render({ client: fakeBackend().client, libraryController, signedIn: false })
     await click(
@@ -519,7 +519,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     await render({ client: fakeBackend({}, full).client, caps: full })
     await walkToCreate()
     expect(gateOf()).toMatchObject({ kind: 'full', actions: [] })
-    expect(gateOf().text).toContain('Your library is full (30 Golems). Delete one to make room.')
+    expect(gateOf().text).toContain('Your library is full (30 Buddies). Delete one to make room.')
     expect(create().disabled).toBe(true)
 
     await act(async () => root.unmount())
@@ -532,7 +532,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(create().disabled).toBe(true)
   })
 
-  it('opens on step 4 when a Golem is waiting as a draft: Redo, Use as my Golem, Discard', async () => {
+  it('opens on step 4 when a Buddy is waiting as a draft: Redo, Use as my Buddy, Discard', async () => {
     const backend = fakeBackend({ draft: draft(LIBRARY_AVATAR) })
     const libraryController = fakeLibraryController()
     await render({ client: backend.client, libraryController })
