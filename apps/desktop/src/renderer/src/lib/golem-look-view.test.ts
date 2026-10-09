@@ -7,7 +7,6 @@ import {
   GOLEM_LOOK_PICTURE_TOO_LARGE,
   GOLEM_LOOK_PICTURE_TYPE_ERROR,
   GOLEM_LOOK_SEND_MAX_BYTES,
-  golemLookAllowanceCopy,
   golemLookAvailability,
   golemLookDraftImages,
   golemLookFit,
@@ -77,11 +76,6 @@ describe('golemLookAvailability (plan 169 D13)', () => {
     )
     expect(golemLookAvailability({ ...on, capabilities: left(0) }).redoAllowed).toBe(false)
     expect(golemLookAvailability({ ...on, capabilities: left(4) }).allowed).toBe(true)
-  })
-
-  it('counts what is left beside Create', () => {
-    expect(golemLookAllowanceCopy(24)).toBe('24 images left today · uses 4')
-    expect(golemLookAllowanceCopy(1)).toBe('1 image left today · uses 4')
   })
 })
 
