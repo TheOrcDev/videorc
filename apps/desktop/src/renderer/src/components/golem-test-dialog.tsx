@@ -13,7 +13,7 @@ import {
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import type { CohostPersona } from '@/lib/backend'
 import { renderGolemBubblePng } from '@/lib/golem-overlay'
 import { golemReactionLabel } from '@/lib/golem-pet-view'
@@ -68,6 +68,7 @@ export function GolemTestDialog({
   motion
 }: GolemTestDialogProps): ReactElement {
   const previewRef = useRef<GolemPetPreviewHandle>(null)
+  const statesRef = useRef<HTMLDivElement>(null)
   const [info, setInfo] = useState<GolemPetPreviewInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   // `nonce` replays a state picked again (Laughing laughs once more).
@@ -120,6 +121,11 @@ export function GolemTestDialog({
     if (!state) return
     event.preventDefault()
     pick(state)
+    // Focus on the States row follows the pick, so its ring marks the state shown.
+    const states = statesRef.current
+    if (states?.contains(document.activeElement)) {
+      states.querySelector<HTMLElement>(`[data-golem-state="${state}"]`)?.focus()
+    }
   }
 
   const bubbleShown = showBubble && selection.state === 'talk' && pack !== null
@@ -209,38 +215,41 @@ export function GolemTestDialog({
 
         <div className="flex flex-col gap-2">
           <h3 className="text-[11px] font-semibold text-subtle">States</h3>
-          <ToggleGroup
-            aria-label="State"
-            className="w-full"
-            data-testid="golem-test-states"
-            size="lg"
-            spacing={0}
-            type="single"
+          {/* The glass segmented control (design skill: Tabs), without panels. */}
+          <Tabs
             value={selection.state}
-            variant="outline"
             onValueChange={(next) => {
-              // Picking the shown state again replays it.
               const state = GOLEM_TEST_STATES.find((candidate) => candidate.id === next)?.id
-              pick(state ?? selection.state)
+              if (state) pick(state)
             }}
           >
-            {GOLEM_TEST_STATES.map((state) => (
-              <ToggleGroupItem
-                key={state.id}
-                className="flex-1 gap-2"
-                data-golem-state={state.id}
-                value={state.id}
-              >
-                {state.label}
-                <Kbd>{state.key}</Kbd>
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          {plan.note ? (
-            <p className="text-xs text-subtle" data-testid="golem-test-note">
-              {plan.note}
-            </p>
-          ) : null}
+            <TabsList
+              ref={statesRef}
+              aria-label="State"
+              className="w-full"
+              data-testid="golem-test-states"
+            >
+              {GOLEM_TEST_STATES.map((state) => (
+                <TabsTrigger
+                  key={state.id}
+                  className="flex-1 gap-2"
+                  data-golem-state={state.id}
+                  value={state.id}
+                  onMouseDown={() => {
+                    // Picking the shown state again replays it (Laughing laughs again).
+                    if (selection.state === state.id) pick(state.id)
+                  }}
+                >
+                  {state.label}
+                  <Kbd>{state.key}</Kbd>
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+          {/* One line kept for the note, so the dialog never jumps as states change. */}
+          <p className="min-h-4 text-xs text-subtle" data-testid="golem-test-note">
+            {plan.note}
+          </p>
         </div>
 
         <div className="flex flex-col gap-2">

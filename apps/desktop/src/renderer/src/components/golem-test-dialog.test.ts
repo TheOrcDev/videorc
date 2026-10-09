@@ -201,7 +201,14 @@ function stage(): GolemPetPreviewProps {
 }
 
 function stateButton(state: string): HTMLButtonElement {
-  return dialog().querySelector(`[data-golem-state="${state}"][role="radio"]`) as HTMLButtonElement
+  return dialog().querySelector(`[data-golem-state="${state}"][role="tab"]`) as HTMLButtonElement
+}
+
+/** A click on a state: Radix tabs pick on mousedown. */
+async function pickState(state: string): Promise<void> {
+  await act(async () => {
+    stateButton(state).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+  })
 }
 
 async function press(key: string, target: Element = dialog()): Promise<void> {
@@ -229,7 +236,7 @@ describe('Test your Golem (plan 169 D14)', () => {
       pose: null,
       talking: false
     })
-    expect(stateButton('idle').getAttribute('data-state')).toBe('on')
+    expect(stateButton('idle').getAttribute('data-state')).toBe('active')
   })
 
   it('opens on T while the Avatar section has focus', async () => {
@@ -244,22 +251,23 @@ describe('Test your Golem (plan 169 D14)', () => {
   it('holds each Still state: talk bobs, laugh laughs into its hold, think holds', async () => {
     await render()
     await openTest()
-    await act(async () => stateButton('talk').click())
+    await pickState('talk')
     expect(stage()).toMatchObject({ pose: 'talk', talking: true })
     mocked.log.length = 0
-    await act(async () => stateButton('laugh').click())
+    await pickState('laugh')
     expect(stage()).toMatchObject({ pose: 'laugh', talking: false })
     // The hold lands first, then the laugh plays over it.
     expect(mocked.log).toEqual(['pose:laugh', 'react:laugh'])
-    // Picking it again replays the laugh.
-    await act(async () => stateButton('laugh').click())
-    expect(mocked.log.at(-1)).toBe('react:laugh')
-    expect(stateButton('laugh').getAttribute('data-state')).toBe('on')
-    await act(async () => stateButton('think').click())
+    // Picking it again replays the laugh over the same hold.
+    mocked.log.length = 0
+    await pickState('laugh')
+    expect(mocked.log).toEqual(['react:laugh'])
+    expect(stateButton('laugh').getAttribute('data-state')).toBe('active')
+    await pickState('think')
     expect(stage()).toMatchObject({ pose: 'think', talking: false })
-    await act(async () => stateButton('idle').click())
+    await pickState('idle')
     expect(stage()).toMatchObject({ pose: null, talking: false })
-    expect(byTestId('golem-test-note')).toBeNull()
+    expect(byTestId('golem-test-note').textContent).toBe('')
   })
 
   it('picks states with 1 to 4', async () => {
@@ -274,6 +282,11 @@ describe('Test your Golem (plan 169 D14)', () => {
     await press('1')
     expect(stage()).toMatchObject({ pose: null, talking: false })
     expect(byTestId('golem-test-stage').dataset.golemState).toBe('idle')
+    // From the States row, focus follows the pick so its ring marks the state shown.
+    stateButton('idle').focus()
+    await press('3', stateButton('idle'))
+    expect(document.activeElement).toBe(stateButton('laugh'))
+    expect(stateButton('laugh').getAttribute('data-state')).toBe('active')
   })
 
   it("plays an Alive pack's talk frames, looks up-left to think, and says what it lacks", async () => {
@@ -360,7 +373,7 @@ describe('Test your Golem (plan 169 D14)', () => {
       await openTest()
       for (const key of ['1', '2', '3', '4', '2']) await press(key)
       for (const state of ['idle', 'talk', 'laugh', 'think']) {
-        await act(async () => stateButton(state).click())
+        await pickState(state)
       }
       for (const button of dialog().querySelectorAll<HTMLButtonElement>(
         '[data-testid="golem-test-reaction"]'
