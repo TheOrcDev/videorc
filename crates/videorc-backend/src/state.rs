@@ -1266,6 +1266,11 @@ impl AppState {
             crate::overlay_layout::load_overlay_layout(&database).golem,
             Some(events.clone()),
         );
+        // Plan 168 Phase C: the animator draws the pet (gaze, talk, blink,
+        // sleep, reactions, motion) instead of Phase B's static cell.
+        golem_sprite.set_source(Box::new(
+            crate::golem_animator::GolemAnimatorSource::for_persona(&cohost_settings.persona),
+        ));
         Self {
             process_runtime: tokio::runtime::Handle::try_current().ok(),
             process_shutdown_requested: Arc::new(AtomicBool::new(false)),

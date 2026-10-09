@@ -81,7 +81,7 @@ pub enum GolemSpriteLeg {
 impl GolemSpriteLeg {
     pub const ALL: [Self; 2] = [Self::Primary, Self::Auxiliary];
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Self::Primary => 0,
             Self::Auxiliary => 1,
@@ -717,7 +717,7 @@ pub(crate) fn build_atlas(
 /// Everything one leg knows when it draws the Golem: Phase C's gaze targets,
 /// the box the cell fills, the clock and the leg's atlas.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Phase C's animator reads the clock, the leg and the gaze targets.
+#[allow(dead_code)] // The animator reads the clock, leg, box, card and state; not yet the caption bar.
 pub struct GolemSpriteLegContext<'a> {
     pub leg: GolemSpriteLeg,
     /// Seconds on the frame clock. CPU and Metal: one value per composed frame
@@ -747,12 +747,18 @@ pub struct GolemSpriteLegContext<'a> {
 /// `None` draws nothing on that leg.
 pub trait GolemSpriteSource: Send {
     fn draw(&mut self, context: &GolemSpriteLegContext<'_>) -> Option<GolemSpriteDraw>;
+
+    /// Something happened the pet may react to (plan 168 S-C3), at `at`. The
+    /// per-frame call carries no events, so they arrive here, under the
+    /// slot's lock, and wait for the next frame. A static source ignores them.
+    fn notify(&mut self, _at: Instant, _event: crate::golem_animator::GolemAnimatorEvent) {}
 }
 
 /// Phase B's source: the cell for the Golem's state, at rest (identity
 /// transform, full opacity). The neutral cell while idle; a still pack's
 /// `talk` / `laugh` / `think` image while a bubble or a pending answer shows
-/// it, as plan 164 drew it.
+/// it, as plan 164 drew it. A slot starts with it; `AppState::new` installs
+/// the animator (`golem_animator::GolemAnimatorSource`, Phase C) instead.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StaticGolemSpriteSource;
 
@@ -1103,10 +1109,17 @@ impl GolemSpriteSlot {
     }
 
     /// The persona was saved (`cohost.settings.set`): the worker re-checks
-    /// the pack (a changed avatar, pack, or still image rebuilds the atlases).
+    /// the pack (a changed avatar, pack, or still image rebuilds the atlases)
+    /// and the source learns the persona's motion and reactions.
     pub fn set_persona(&self, persona: &CohostPersona) {
         let mut state = self.inner.lock();
         state.persona = persona.clone();
+        state.source.notify(
+            Instant::now(),
+            crate::golem_animator::GolemAnimatorEvent::Settings(
+                crate::golem_animator::GolemAnimatorSettings::from_persona(persona),
+            ),
+        );
         self.bump_epoch(&mut state);
     }
 
@@ -1141,8 +1154,7 @@ impl GolemSpriteSlot {
         self.inner.lock().avatar_state = avatar_state;
     }
 
-    /// Phase C installs the animator here.
-    #[allow(dead_code)] // Phase C replaces the static source.
+    /// `AppState::new` installs the animator here (plan 168 Phase C).
     pub fn set_source(&self, source: Box<dyn GolemSpriteSource>) {
         self.inner.lock().source = source;
     }

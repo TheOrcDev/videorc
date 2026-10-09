@@ -40,6 +40,7 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+mod golem_animator;
 mod golem_motion;
 mod golem_overlay;
 mod golem_pet;

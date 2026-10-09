@@ -27,10 +27,8 @@
 //! definitions (named in [`ease`]); no GSAP code is copied. The pointer drag
 //! and inertia of `motion.js` are not ported (unused on stream).
 //! `apps/desktop/src/shared/golem-motion.ts` is the same model in TypeScript;
-//! `protocol-fixtures/golem-motion.json` pins both to the same samples.
-//! Introduced ahead of the animator (S-C2) and the app preview (Phase D),
-//! hence `allow(dead_code)`.
-#![allow(dead_code)]
+//! `protocol-fixtures/golem-motion.json` pins both to the same samples. The
+//! animator (`golem_animator`, S-C2) drives it on stream.
 
 use std::f64::consts::TAU;
 
@@ -512,6 +510,7 @@ impl GolemMotion {
         self.idle = idle;
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // the TS twin's API; tests read it
     pub fn is_idle(&self) -> bool {
         self.idle
     }
@@ -599,6 +598,7 @@ impl GolemMotion {
     }
 
     /// Nothing is moving: the spring settled, no envelope, breath faded.
+    #[cfg_attr(not(test), allow(dead_code))] // the TS twin's API; tests read it
     pub fn is_resting(&self) -> bool {
         !self.spring_running && self.envelope.is_none() && self.breath_gain == 0.0
     }
