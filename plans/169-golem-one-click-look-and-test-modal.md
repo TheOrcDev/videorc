@@ -208,23 +208,17 @@ phase: 'working' | 'done' | 'failed', path?, error? }` and
 
 **The test modal (D)**
 
-- D14. **Test your Golem** (button in the Avatar section, `T` when focused):
-  a large `Dialog` (glass panel) that works for Still and Alive.
-  - Left: the Golem on a 16:9 mock stream frame (neutral dark gradient with
-    a few placeholder blocks), placed at the persona's real overlay rect for
-    the chosen orientation (Horizontal / Vertical toggle), drawn by the
-    living preview with the comic bubble above it from the bubble
-    rasterizer. A zoom toggle shows it large instead.
-  - Right: **States** (Idle, Talking, Laughing, Thinking: hold that frame),
-    **Reactions** (every reaction the pack has, plus Hop), **Events**
-    (Follow, Sub, Gift, Tip, Raid, Watch streak, Redemption: each plays the
-    persona's mapped reaction and shows the matching greeting template with
-    a sample name, so the user sees exactly what viewers get), **Say** (a
-    line in the bubble, ↵ talks, ⌘↵ laughs), and the bubble style toggle.
-    Motion slider and Sleep now live for the session (not saved).
-  - Nothing here touches the stream or chat; it is a sandbox in the
-    renderer, using the same preview, motion model and rasterizer as the
-    real thing.
+- D14. **Test your Golem** (owner, 2026-10-09: "just to display how the
+  Golem is looking in different states"; no Stream Manager entry). A
+  `Dialog` opened by a **Test** button in the Avatar section (`T` when
+  focused), for Still and Alive:
+  - the Golem big and centred on a neutral backdrop (the living preview);
+  - **States** as the main control: Idle, Talking, Laughing, Thinking
+    (keys 1 to 4), each holding that state;
+  - a compact **Reactions** row: every reaction the pack has, plus Hop;
+  - an optional "Show the bubble" switch that draws the comic bubble with a
+    fixed sample line while Talking.
+  - It is a sandbox: no chat, stream, overlay or settings calls.
 
 ## Phase A: House look + one-call set route (web #75)
 
@@ -279,12 +273,10 @@ reference.
 
 ## Phase D: "Test your Golem" modal (desktop #647)
 
-Per D14: `components/golem-test-dialog.tsx` (lazy chunk), the mock stream
-frame, states, reactions, events with greeting text, Say, bubble style,
-orientation and zoom. The preview gets a `pose(state)` path for holding a
-Still state (it already has `pose`). Tests: each control drives the preview
-handle; events show the persona's greeting for that kind; nothing calls a
-backend chat or stream RPC.
+Per D14: `components/golem-test-dialog.tsx` (lazy chunk) and the Test button.
+Tests: each state button and key holds that state; each reaction plays
+through the preview handle; the bubble switch shows the sample line; nothing
+calls a backend chat, stream, overlay or settings RPC.
 
 ## Phase E: Gates, captures, docs, push
 
@@ -307,8 +299,8 @@ modal in both themes, `docs/golem.md` updated, push to #647 and #75.
 - Per-user style choices (owner answer 1).
 - Moderating user pictures beyond the model provider's own policy.
 
-## Open questions for the owner
+## Owner answers to the plan's questions (2026-10-09)
 
-1. D13: is "Create my Golem" the right button name?
-2. D14: should the test modal also be reachable from the Stream Manager's
-   Golem pane?
+1. "Create my Golem" is the button name.
+2. No Stream Manager entry for the test modal; it only shows how the Golem
+   looks in its states.
