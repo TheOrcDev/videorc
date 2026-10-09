@@ -271,6 +271,30 @@ describe('GolemPersonaSection', () => {
     })
   })
 
+  it('zooms the bubble sample into a dialog that switches the style too', async () => {
+    await render()
+    const zoom = document.querySelector('[data-testid="golem-bubble-zoom"]') as HTMLButtonElement
+    expect(zoom.getAttribute('aria-label')).toBe('Zoom in on the bubble')
+    expect(document.querySelector('[data-testid="golem-bubble-zoom-dialog"]')).toBeNull()
+    await act(async () => zoom.click())
+    const dialog = document.querySelector('[data-testid="golem-bubble-zoom-dialog"]')!
+    expect(dialog.getAttribute('role')).toBe('dialog')
+    const sample = dialog.querySelector('[data-slot="golem-bubble-sample"]')
+    expect(sample?.getAttribute('data-size')).toBe('zoomed')
+    expect(sample?.getAttribute('data-style')).toBe('speech')
+    const thought = [...dialog.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Thought'
+    ) as HTMLButtonElement
+    await act(async () => thought.click())
+    expect(patchCohostSettings).toHaveBeenLastCalledWith({
+      persona: { ...settings().persona, bubbleStyle: 'thought' }
+    })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(document.querySelector('[data-testid="golem-bubble-zoom-dialog"]')).toBeNull()
+  })
+
   it('starts over behind a confirm: removes the folder and writes a fresh persona', async () => {
     await render({
       cohost: settings({ id: 'p-1', name: 'Grum', images: { idle: 'p-1/idle.png' } })

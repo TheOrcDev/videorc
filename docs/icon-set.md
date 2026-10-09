@@ -26,6 +26,11 @@ Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
 
+The Golem tab's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
+a small picture opened larger to look at it, a meaning no slot had
+(`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is
+the output frame). That makes **92 slots over 88 glyphs**.
+
 Plan 119 retired two slots and added two. `OrcleIcon` replaced both
 `PublishIcon` (Sparkle, a glyph `SparkleIcon` keeps) and `CohostIcon` (Robot,
 freed), and the in-app player added `PauseIcon` (Pause).
@@ -59,7 +64,7 @@ lands**:
 
 1. **Count.** 100 is the hard ceiling. `pnpm icons:build` refuses to build a
    larger export rather than leaving the count to whoever last added a glyph.
-   At 87 glyphs the app has ~13 of headroom; the audit's divergences would
+   At 88 glyphs the app has ~12 of headroom; the audit's divergences would
    spend about 3 of it.
 
 2. **Where the SVGs may live.** Videorc's repository is public and AGPL, which
