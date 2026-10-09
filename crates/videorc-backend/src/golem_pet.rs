@@ -1435,13 +1435,13 @@ const STILL_IMAGE_MAX_PIXELS: u64 = 20_000_000;
 /// `assets/golem/default/idle.webp`: what a persona without its own idle
 /// image shows, built into the backend so the still pack never needs the
 /// renderer.
-const BUNDLED_IDLE_WEBP: &[u8] =
+pub(crate) const BUNDLED_IDLE_WEBP: &[u8] =
     include_bytes!("../../../apps/desktop/src/renderer/src/assets/golem/default/idle.webp");
 
 /// One stored state image of the persona, decoded: a `<personaId>/<file>`
 /// under the write root, a regular file inside it, PNG, WebP or JPEG by its
 /// bytes, at most 8 MB and 20 megapixels. The reason is a plain clause.
-fn load_state_image(
+pub(crate) fn load_state_image(
     roots: &[PathBuf],
     persona_id: &str,
     relative: &str,

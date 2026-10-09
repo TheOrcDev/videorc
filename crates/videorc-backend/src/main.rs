@@ -44,9 +44,9 @@ mod golem_motion;
 mod golem_overlay;
 mod golem_pet;
 mod golem_pet_store;
-// Plan 168 Phase F (S-F1 to S-F3): the pet builder. Phase F wires the RPCs.
-#[allow(dead_code)]
+// Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod golem_pet_build;
+mod golem_pet_create;
 mod h264_profile;
 mod host_pressure;
 mod kick;
@@ -5368,6 +5368,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.pet.import"
         | "cohost.pet.remove"
         | "cohost.pet.react"
+        // Plan 168 S-F4: each answers at once; the web calls and the build
+        // run on their own task and report by event.
+        | "cohost.pet.identity"
+        | "cohost.pet.sheet.generate"
+        | "cohost.pet.build"
+        | "cohost.pet.creation.cancel"
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
@@ -5470,6 +5476,16 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
+        // Plan 168 S-F4: a save decodes the built atlas once and moves the pack.
+        "cohost.pet.save" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        // Plan 168 S-F4: opening a build session waits on the web (15 s).
+        "cohost.pet.creation.start" => Some(Mutation {
+            max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
         "account.complete_sign_in"
         | "account.refresh"
         | "account.windows_pilot_update_token"
@@ -5549,6 +5565,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.settings.get"
         | "cohost.golem.status"
         | "cohost.pet.list"
+        | "cohost.pet.creation.status"
         | "cohost.report.get"
         | "cohost.report.latest"
         | "ai.capabilities.get"
@@ -9498,6 +9515,77 @@ async fn handle_text_message_with_role(
             }
         }
         // --- end Golem pets (plan 168, Phase A) ---
+        // --- Golem pets (plan 168, Phase F) ---
+        "cohost.pet.creation.start" => match golem_pet_create::start(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.creation.status" => match golem_pet_create::status(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.creation.cancel" => {
+            match serde_json::from_value::<golem_pet_create::CohostPetBuildIdParams>(command.params)
+            {
+                Ok(params) => match golem_pet_create::cancel(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.identity" => {
+            match serde_json::from_value::<golem_pet_create::CohostPetIdentityParams>(
+                command.params,
+            ) {
+                Ok(params) => match golem_pet_create::identity(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.sheet.generate" => {
+            match serde_json::from_value::<golem_pet_create::CohostPetSheetGenerateParams>(
+                command.params,
+            ) {
+                Ok(params) => match golem_pet_create::generate_sheet(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.build" => {
+            match serde_json::from_value::<golem_pet_create::CohostPetBuildIdParams>(command.params)
+            {
+                Ok(params) => match golem_pet_create::build(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.save" => {
+            match serde_json::from_value::<golem_pet_create::CohostPetSaveParams>(command.params) {
+                Ok(params) => match golem_pet_create::save(state, params).await {
+                    Ok(saved) => ServerResponse::ok(command.id, saved),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Golem pets (plan 168, Phase F) ---
         "cohost.settings.set" => {
             match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
                 Ok(patch) => match cohost::set_cohost_settings(state, patch).await {

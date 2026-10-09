@@ -5448,7 +5448,26 @@ pub struct AiCapabilitiesCohost {
     pub tick: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<AiCapabilitiesAvatar>,
+    /// Pet creation (plan 168, Phase F): on, and this month's creations.
+    /// Older servers omit it: the creator stays off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pet: Option<AiCapabilitiesPet>,
 }
+
+// --- Golem pets (plan 168, Phase F) ---
+/// `cohost.pet` from `GET /api/ai/capabilities`. Basic accounts get
+/// `{ enabled: false, creationsRemainingThisMonth: 0, monthlyLimit: 0 }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesPet {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub creations_remaining_this_month: u32,
+    #[serde(default)]
+    pub monthly_limit: u32,
+}
+// --- end Golem pets (plan 168, Phase F) ---
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

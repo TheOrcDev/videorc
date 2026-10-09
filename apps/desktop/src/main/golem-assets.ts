@@ -22,6 +22,7 @@ import {
   type GolemImageImportResult
 } from '../shared/golem-assets'
 import type { GolemPetImportResult, GolemPetSummary } from '../shared/golem-pet'
+import { isGolemCreationFileName } from '../shared/golem-pet-creator'
 
 /**
  * The Golem's avatar store (plan 164 S-A3): `userData/golem-assets/<personaId>/<state>.<ext>`,
@@ -299,6 +300,40 @@ export async function readGolemPetFile(
     const [resolvedRoot, resolvedFile] = await Promise.all([
       realpath(root),
       realpath(join(folder, ...file.split('/')))
+    ])
+    if (!resolvedFile.startsWith(resolvedRoot + sep)) return null
+    const bytes = await readCapped(resolvedFile, GOLEM_PET_FILE_MAX_BYTES)
+    return bytes.length === 0 ? null : new Uint8Array(bytes)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The bytes of one file of a pet creation (plan 168 S-F5) for the creator
+ * wizard: `<root>/<personaId>/creations/<buildId>/<file>` under the write
+ * root, where `file` is a stored source (`sources/<sheet>-v<n>.png`) or the
+ * build's `pack/mascot.webp` and `pack/manifest.json`. A regular file inside
+ * the root (symlinks resolved), at most 32 MB. Null, never a throw, for
+ * anything else.
+ */
+export async function readGolemCreationFile(
+  root: string,
+  personaId: unknown,
+  buildId: unknown,
+  file: unknown
+): Promise<Uint8Array | null> {
+  if (
+    !isGolemPersonaId(personaId) ||
+    !isGolemUserPackId(buildId) ||
+    !isGolemCreationFileName(file)
+  ) {
+    return null
+  }
+  try {
+    const [resolvedRoot, resolvedFile] = await Promise.all([
+      realpath(root),
+      realpath(join(root, personaId, 'creations', buildId, ...file.split('/')))
     ])
     if (!resolvedFile.startsWith(resolvedRoot + sep)) return null
     const bytes = await readCapped(resolvedFile, GOLEM_PET_FILE_MAX_BYTES)

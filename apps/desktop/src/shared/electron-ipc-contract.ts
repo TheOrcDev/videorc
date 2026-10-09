@@ -104,6 +104,7 @@ export const electronInvokeApiMethods = {
   'golem-assets:read-image': 'readGolemImage',
   'golem-pets:read': 'readGolemPetFile',
   'golem-pets:import-folder': 'importGolemPetFolder',
+  'golem-pets:read-creation': 'readGolemCreationFile',
   'backgrounds:asset-exists': 'backgroundAssetExists',
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
@@ -1441,6 +1442,16 @@ const specificRuntimeInvokeContracts = {
   // Plan 168: persona id, pack id (uuid or `bundled:<name>`), and a file
   // relative to the pack folder; main checks each against the store rules.
   'golem-pets:read': invokeContract(
+    tupleSchema([
+      stringSchema({ minLength: 1, maxLength: 128 }),
+      stringSchema({ minLength: 1, maxLength: 64 }),
+      stringSchema({ minLength: 1, maxLength: 128 })
+    ]),
+    golemPetFileBytesSchema
+  ),
+  // Plan 168 S-F5: persona id, creation id (a uuid) and a creation file
+  // (`sources/<sheet>-v<n>.png`, `pack/mascot.webp`, `pack/manifest.json`).
+  'golem-pets:read-creation': invokeContract(
     tupleSchema([
       stringSchema({ minLength: 1, maxLength: 128 }),
       stringSchema({ minLength: 1, maxLength: 64 }),

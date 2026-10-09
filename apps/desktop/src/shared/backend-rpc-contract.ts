@@ -144,6 +144,31 @@ import {
   GOLEM_SLEEP_AFTER_MIN_SECONDS,
   isGolemReactionId
 } from './golem-pet'
+// --- Golem pets (plan 168, Phase F) ---
+import type { CohostPetSaved } from './backend'
+import {
+  GOLEM_PET_NOTES_ASYMMETRIC_MAX,
+  GOLEM_PET_NOTES_FEATURE_MAX_CHARS,
+  GOLEM_PET_NOTES_ITEM_MAX_CHARS,
+  GOLEM_PET_NOTES_LIST_MAX,
+  GOLEM_PET_NOTES_PROPORTIONS_MAX_CHARS,
+  GOLEM_PET_PACK_NAME_MAX_CHARS,
+  GOLEM_PET_REFERENCE_UPLOAD_MAX_BYTES,
+  GOLEM_PET_SHEET_KEYS,
+  isGolemCreationFileName,
+  type CohostPetBuildIdParams,
+  type CohostPetIdentityParams,
+  type CohostPetSaveParams,
+  type CohostPetSheetGenerateParams,
+  type GolemPetBuildProgressEvent,
+  type GolemPetCreationAccepted,
+  type GolemPetCreationStatus,
+  type GolemPetIdentityNotes,
+  type GolemPetIdentityReadEvent,
+  type GolemPetSheetGeneratedEvent
+} from './golem-pet-creator'
+import { isGolemUserPackId } from './golem-assets'
+// --- end Golem pets (plan 168, Phase F) ---
 import {
   arraySchema,
   boundedJsonValueSchema,
@@ -364,6 +389,18 @@ export interface BackendRpcMethodMap {
   'cohost.pet.remove': BackendRpcDefinition<CohostPetRemoveParams, CohostPetRemoved>
   'cohost.pet.react': BackendRpcDefinition<CohostPetReactParams, CohostPetReactAccepted>
   // --- end Golem pets (plan 168, Phase A) ---
+  // --- Golem pets (plan 168, Phase F) ---
+  'cohost.pet.creation.start': BackendRpcDefinition<undefined, GolemPetCreationStatus>
+  'cohost.pet.creation.status': BackendRpcDefinition<undefined, GolemPetCreationStatus>
+  'cohost.pet.creation.cancel': BackendRpcDefinition<CohostPetBuildIdParams, GolemPetCreationStatus>
+  'cohost.pet.identity': BackendRpcDefinition<CohostPetIdentityParams, GolemPetCreationAccepted>
+  'cohost.pet.sheet.generate': BackendRpcDefinition<
+    CohostPetSheetGenerateParams,
+    GolemPetCreationAccepted
+  >
+  'cohost.pet.build': BackendRpcDefinition<CohostPetBuildIdParams, GolemPetCreationAccepted>
+  'cohost.pet.save': BackendRpcDefinition<CohostPetSaveParams, CohostPetSaved>
+  // --- end Golem pets (plan 168, Phase F) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
@@ -426,6 +463,11 @@ export interface BackendEventMap {
   // --- Golem overlay (plan 164) ---
   'cohost.golem.state': GolemOverlaySnapshot
   // --- end Golem overlay (plan 164) ---
+  // --- Golem pets (plan 168, Phase F) ---
+  'cohost.pet.identity.read': GolemPetIdentityReadEvent
+  'cohost.pet.sheet.generated': GolemPetSheetGeneratedEvent
+  'cohost.pet.build.progress': GolemPetBuildProgressEvent
+  // --- end Golem pets (plan 168, Phase F) ---
   'session.marker.voice.status': {
     sessionId: string
     listening: import('./backend').CohostListening
@@ -2416,6 +2458,205 @@ const cohostPetReactionSchema = objectSchema(
   { allowUnknown: false }
 )
 // --- end Golem pets (plan 168, Phase A) ---
+// --- Golem pets (plan 168, Phase F) ---
+// A creation id is the web's build id: a lowercase uuid, a folder name.
+const golemBuildIdSchema = runtimeSchema<string>('a creation id (a uuid)', (value, path) => {
+  if (!isGolemUserPackId(value)) throw new RuntimeSchemaError(path, 'a creation id (a uuid)')
+  return value
+})
+const golemPetGazeRowSchema = enumSchema(['up2', 'up1', 'level', 'down1', 'down2'])
+const golemPetSheetKeySchema = enumSchema(GOLEM_PET_SHEET_KEYS)
+const golemPetSha256Schema = runtimeSchema<string>('a SHA-256 in hex', (value, path) => {
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a SHA-256 in hex')
+  }
+  return value
+})
+const golemCreationFileSchema = runtimeSchema<string>(
+  'a creation file (sources/<sheet>-v<n>.png)',
+  (value, path) => {
+    if (!isGolemCreationFileName(value)) {
+      throw new RuntimeSchemaError(path, 'a creation file (sources/<sheet>-v<n>.png)')
+    }
+    return value
+  }
+)
+const golemPetVersionSchema = numberSchema({ integer: true, min: 1, max: 9999 })
+const golemPetCountSchema = numberSchema({ integer: true, min: 0, max: 1000 })
+const golemPetNotesItemSchema = stringSchema({
+  minLength: 1,
+  maxLength: GOLEM_PET_NOTES_ITEM_MAX_CHARS
+})
+const golemPetIdentityNotesSchema = objectSchema(
+  {
+    palette: arraySchema(golemPetNotesItemSchema, { maxLength: GOLEM_PET_NOTES_LIST_MAX }),
+    materials: arraySchema(golemPetNotesItemSchema, { maxLength: GOLEM_PET_NOTES_LIST_MAX }),
+    proportions: stringSchema({ minLength: 1, maxLength: GOLEM_PET_NOTES_PROPORTIONS_MAX_CHARS }),
+    asymmetric: arraySchema(
+      objectSchema(
+        {
+          feature: stringSchema({ minLength: 1, maxLength: GOLEM_PET_NOTES_FEATURE_MAX_CHARS }),
+          side: enumSchema(['left', 'right'])
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: GOLEM_PET_NOTES_ASYMMETRIC_MAX }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemPetIdentityNotes>
+const golemPetCreatorErrorSchema = objectSchema(
+  { code: stringSchema({ minLength: 1, maxLength: 128 }), message: boundedString },
+  { allowUnknown: false }
+)
+const golemPetCreationSourceSchema = objectSchema(
+  {
+    sheet: stringSchema({ minLength: 1, maxLength: 40 }),
+    version: golemPetVersionSchema,
+    file: golemCreationFileSchema,
+    sha256: golemPetSha256Schema,
+    opaque: booleanSchema,
+    referenceVersion: optionalSchema(golemPetVersionSchema),
+    createdAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const golemPetBuildFailureSchema = objectSchema(
+  {
+    code: stringSchema({ minLength: 1, maxLength: 128 }),
+    message: boundedString,
+    sheet: optionalSchema(stringSchema({ minLength: 1, maxLength: 40 })),
+    cell: optionalSchema(stringSchema({ minLength: 1, maxLength: 64 }))
+  },
+  { allowUnknown: false }
+)
+const golemPetCreationSchema = objectSchema(
+  {
+    buildId: golemBuildIdSchema,
+    step: enumSchema(['reference', 'pilot', 'build', 'review']),
+    createdAt: timestamp,
+    expiresAt: timestamp,
+    expired: booleanSchema,
+    sheetsAllowed: golemPetCountSchema,
+    redosAllowed: golemPetCountSchema,
+    pilotsAllowed: golemPetCountSchema,
+    sheetsRemaining: golemPetCountSchema,
+    redosRemaining: golemPetCountSchema,
+    pilotsUsed: golemPetCountSchema,
+    reference: optionalSchema(golemPetCreationSourceSchema),
+    notes: optionalSchema(golemPetIdentityNotesSchema),
+    pilot: optionalSchema(golemPetCreationSourceSchema),
+    pilotAccepted: booleanSchema,
+    sheets: arraySchema(golemPetCreationSourceSchema, { maxLength: 8 }),
+    build: optionalSchema(
+      objectSchema(
+        {
+          state: enumSchema(['built', 'failed']),
+          fresh: booleanSchema,
+          finishedAt: timestamp,
+          error: optionalSchema(golemPetBuildFailureSchema)
+        },
+        { allowUnknown: false }
+      )
+    ),
+    running: optionalSchema(
+      objectSchema(
+        {
+          job: enumSchema(['start', 'identity', 'sheet', 'build', 'save']),
+          sheet: optionalSchema(golemPetSheetKeySchema)
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+const golemPetCreationStatusSchema = objectSchema(
+  { creation: nullableSchema(golemPetCreationSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemPetCreationStatus>
+const cohostPetBuildIdParamsSchema = objectSchema(
+  { buildId: golemBuildIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPetBuildIdParams>
+const cohostPetIdentityParamsSchema = objectSchema(
+  {
+    buildId: golemBuildIdSchema,
+    reference: unionSchema([
+      objectSchema({ kind: literalSchema('persona-idle') }, { allowUnknown: false }),
+      objectSchema(
+        {
+          kind: literalSchema('upload'),
+          imageBase64: stringSchema({
+            minLength: 4,
+            maxLength: Math.ceil(GOLEM_PET_REFERENCE_UPLOAD_MAX_BYTES / 3) * 4
+          })
+        },
+        { allowUnknown: false }
+      )
+    ])
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPetIdentityParams>
+const cohostPetSheetGenerateParamsSchema = objectSchema(
+  {
+    buildId: golemBuildIdSchema,
+    kind: enumSchema(['pilot', 'gaze', 'reactions-a', 'reactions-b', 'extras']),
+    row: optionalSchema(golemPetGazeRowSchema),
+    redo: booleanSchema,
+    notes: optionalSchema(golemPetIdentityNotesSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPetSheetGenerateParams>
+const cohostPetSaveParamsSchema = objectSchema(
+  {
+    buildId: golemBuildIdSchema,
+    name: stringSchema({ minLength: 1, maxLength: GOLEM_PET_PACK_NAME_MAX_CHARS })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPetSaveParams>
+const golemPetCreationAcceptedSchema = objectSchema(
+  { buildId: golemBuildIdSchema, sheet: optionalSchema(golemPetSheetKeySchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemPetCreationAccepted>
+const cohostPetSavedSchema = objectSchema(
+  { pack: golemPetSummarySchema, settings: cohostSettingsSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPetSaved>
+const golemPetIdentityReadEventSchema = objectSchema(
+  {
+    buildId: golemBuildIdSchema,
+    notes: optionalSchema(golemPetIdentityNotesSchema),
+    error: optionalSchema(golemPetCreatorErrorSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemPetIdentityReadEvent>
+const golemPetSheetGeneratedEventSchema = objectSchema(
+  {
+    buildId: golemBuildIdSchema,
+    sheet: golemPetSheetKeySchema,
+    version: optionalSchema(golemPetVersionSchema),
+    opaque: booleanSchema,
+    sheetsRemaining: optionalSchema(golemPetCountSchema),
+    redosRemaining: optionalSchema(golemPetCountSchema),
+    error: optionalSchema(golemPetCreatorErrorSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemPetSheetGeneratedEvent>
+const golemPetBuildProgressEventSchema = objectSchema(
+  {
+    buildId: golemBuildIdSchema,
+    step: enumSchema(['reading', 'cutting', 'registering', 'packing', 'writing', 'done', 'failed']),
+    sheet: optionalSchema(stringSchema({ minLength: 1, maxLength: 40 })),
+    cell: optionalSchema(stringSchema({ minLength: 1, maxLength: 64 })),
+    done: golemPetCountSchema,
+    total: golemPetCountSchema,
+    error: optionalSchema(boundedString),
+    code: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemPetBuildProgressEvent>
+// --- end Golem pets (plan 168, Phase F) ---
 // --- Overlay layout (plan 164) ---
 const overlayRectSchema = objectSchema(
   {
@@ -3698,6 +3939,27 @@ const runtimeContracts = {
     result: cohostPetReactionSchema as RuntimeSchema<CohostPetReactAccepted>
   },
   // --- end Golem pets (plan 168, Phase A) ---
+  // --- Golem pets (plan 168, Phase F) ---
+  'cohost.pet.creation.start': { params: undefinedSchema, result: golemPetCreationStatusSchema },
+  'cohost.pet.creation.status': { params: undefinedSchema, result: golemPetCreationStatusSchema },
+  'cohost.pet.creation.cancel': {
+    params: cohostPetBuildIdParamsSchema,
+    result: golemPetCreationStatusSchema
+  },
+  'cohost.pet.identity': {
+    params: cohostPetIdentityParamsSchema,
+    result: golemPetCreationAcceptedSchema
+  },
+  'cohost.pet.sheet.generate': {
+    params: cohostPetSheetGenerateParamsSchema,
+    result: golemPetCreationAcceptedSchema
+  },
+  'cohost.pet.build': {
+    params: cohostPetBuildIdParamsSchema,
+    result: golemPetCreationAcceptedSchema
+  },
+  'cohost.pet.save': { params: cohostPetSaveParamsSchema, result: cohostPetSavedSchema },
+  // --- end Golem pets (plan 168, Phase F) ---
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,
@@ -3794,6 +4056,11 @@ const runtimeEventSchemas = {
   // --- Golem overlay (plan 164) ---
   'cohost.golem.state': golemOverlaySnapshotSchema,
   // --- end Golem overlay (plan 164) ---
+  // --- Golem pets (plan 168, Phase F) ---
+  'cohost.pet.identity.read': golemPetIdentityReadEventSchema,
+  'cohost.pet.sheet.generated': golemPetSheetGeneratedEventSchema,
+  'cohost.pet.build.progress': golemPetBuildProgressEventSchema,
+  // --- end Golem pets (plan 168, Phase F) ---
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },
     { allowUnknown: false }

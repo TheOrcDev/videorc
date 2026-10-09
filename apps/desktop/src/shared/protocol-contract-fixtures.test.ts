@@ -50,6 +50,17 @@ import type {
   CohostPetRemoveParams,
   GolemPetSummary
 } from './backend'
+import type {
+  CohostPetBuildIdParams,
+  CohostPetIdentityParams,
+  CohostPetSaveParams,
+  CohostPetSheetGenerateParams,
+  GolemPetBuildProgressEvent,
+  GolemPetCreationAccepted,
+  GolemPetCreationStatus,
+  GolemPetIdentityReadEvent,
+  GolemPetSheetGeneratedEvent
+} from './golem-pet-creator'
 import { normalizeSessionCommentsListParams } from './backend'
 import {
   validateBackendEventPayload,
@@ -111,6 +122,23 @@ interface HighRiskContractFixtures {
     removeParams: CohostPetRemoveParams
     reactParams: CohostPetReactParams
     reactAccepted: CohostPetReactAccepted
+  }
+  golemPetCreator: {
+    status: GolemPetCreationStatus
+    statusNone: GolemPetCreationStatus
+    identityParams: CohostPetIdentityParams
+    identityUploadParams: CohostPetIdentityParams
+    sheetParams: CohostPetSheetGenerateParams
+    pilotParams: CohostPetSheetGenerateParams
+    buildParams: CohostPetBuildIdParams
+    saveParams: CohostPetSaveParams
+    accepted: GolemPetCreationAccepted
+    identityRead: GolemPetIdentityReadEvent
+    sheetGenerated: GolemPetSheetGeneratedEvent
+    sheetFailed: GolemPetSheetGeneratedEvent
+    buildProgress: GolemPetBuildProgressEvent
+    buildFailed: GolemPetBuildProgressEvent
+    savedPack: GolemPetSummary
   }
   cohost: {
     startParams: CohostStartParams
@@ -1182,5 +1210,108 @@ describe('Golem pets wire (plan 168, Phase A)', () => {
         }
       })
     ).toThrow('cohost.settings.set')
+  })
+})
+
+describe('Golem pet creator wire (plan 168, Phase F)', () => {
+  const creator = fixtures.golemPetCreator
+
+  it('validates the creator RPCs and events exactly as the backend round-trips them', () => {
+    for (const method of ['cohost.pet.creation.start', 'cohost.pet.creation.status'] as const) {
+      expect(validateBackendRpcParams(method, undefined)).toBeUndefined()
+      expect(validateBackendRpcResult(method, creator.status)).toStrictEqual(creator.status)
+      expect(validateBackendRpcResult(method, creator.statusNone)).toStrictEqual(creator.statusNone)
+    }
+    expect(
+      validateBackendRpcParams('cohost.pet.creation.cancel', creator.buildParams)
+    ).toStrictEqual(creator.buildParams)
+    for (const params of [creator.identityParams, creator.identityUploadParams]) {
+      expect(validateBackendRpcParams('cohost.pet.identity', params)).toStrictEqual(params)
+    }
+    for (const params of [creator.sheetParams, creator.pilotParams]) {
+      expect(validateBackendRpcParams('cohost.pet.sheet.generate', params)).toStrictEqual(params)
+    }
+    for (const method of [
+      'cohost.pet.identity',
+      'cohost.pet.sheet.generate',
+      'cohost.pet.build'
+    ] as const) {
+      expect(validateBackendRpcResult(method, creator.accepted)).toStrictEqual(creator.accepted)
+    }
+    expect(validateBackendRpcParams('cohost.pet.build', creator.buildParams)).toStrictEqual(
+      creator.buildParams
+    )
+    expect(validateBackendRpcParams('cohost.pet.save', creator.saveParams)).toStrictEqual(
+      creator.saveParams
+    )
+    const saved = { pack: creator.savedPack, settings: fixtures.cohost.settings }
+    expect(validateBackendRpcResult('cohost.pet.save', saved)).toStrictEqual(saved)
+    expect(
+      validateBackendEventPayload('cohost.pet.identity.read', creator.identityRead)
+    ).toStrictEqual(creator.identityRead)
+    for (const event of [creator.sheetGenerated, creator.sheetFailed]) {
+      expect(validateBackendEventPayload('cohost.pet.sheet.generated', event)).toStrictEqual(event)
+    }
+    for (const event of [creator.buildProgress, creator.buildFailed]) {
+      expect(validateBackendEventPayload('cohost.pet.build.progress', event)).toStrictEqual(event)
+    }
+  })
+
+  it('refuses unknown fields, bad ids, paths and out-of-bounds notes', () => {
+    const { buildId } = creator.buildParams
+    for (const bad of ['../pets', buildId.toUpperCase(), 'bundled:golem', '']) {
+      expect(() => validateBackendRpcParams('cohost.pet.build', { buildId: bad })).toThrow(
+        'cohost.pet.build'
+      )
+    }
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.save', { ...creator.saveParams, packId: buildId })
+    ).toThrow('cohost.pet.save')
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.save', { ...creator.saveParams, name: '' })
+    ).toThrow('cohost.pet.save')
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.identity', {
+        buildId,
+        reference: { kind: 'path', path: '/etc/passwd' }
+      })
+    ).toThrow('cohost.pet.identity')
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.sheet.generate', { ...creator.sheetParams, row: 'up3' })
+    ).toThrow('cohost.pet.sheet.generate')
+    const notes = creator.pilotParams.notes!
+    for (const bad of [
+      { ...notes, palette: ['x'.repeat(61)] },
+      { ...notes, palette: [''] },
+      { ...notes, proportions: '' },
+      { ...notes, asymmetric: [{ feature: 'horn', side: 'up' }] },
+      { ...notes, extra: true }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('cohost.pet.sheet.generate', {
+          ...creator.pilotParams,
+          notes: bad
+        })
+      ).toThrow('cohost.pet.sheet.generate')
+    }
+    const creation = creator.status.creation!
+    for (const file of [
+      '../build-state.json',
+      'sources/../x.png',
+      '/tmp/a.png',
+      'pack/golem.json'
+    ]) {
+      expect(() =>
+        validateBackendRpcResult('cohost.pet.creation.status', {
+          creation: { ...creation, reference: { ...creation.reference!, file } }
+        })
+      ).toThrow('cohost.pet.creation.status')
+    }
+    expect(() =>
+      validateBackendEventPayload('cohost.pet.build.progress', {
+        ...creator.buildProgress,
+        step: 'uploading'
+      })
+    ).toThrow('cohost.pet.build.progress')
   })
 })

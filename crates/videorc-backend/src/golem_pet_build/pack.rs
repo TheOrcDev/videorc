@@ -1,75 +1,33 @@
 //! S-F3, second half: the atlas, the page-pet manifest v1, the Videorc
 //! sidecar and the files on disk, a port of the packing tail of page-pet's
 //! `scripts/build_pack.py` (`--single-atlas`, ids, gaze coordinates,
-//! `neutral`, `pivot`) plus plan 168's `golem.json` (D1, D16).
+//! `neutral`, `pivot`) plus plan 168's `golem.json` (D1, D16). The manifest
+//! and sidecar are the pack contract's own types ([`crate::golem_pet`]), so
+//! what the builder writes is exactly what an import or a load reads.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use image::RgbaImage;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::BuildError;
 use super::register::visible_bounds;
+use crate::golem_pet::{PetFrame, PetFrameKind};
 
 /// Cells per atlas row (page-pet's `--single-atlas` packs five across).
 pub const ATLAS_COLUMNS: u32 = 5;
 /// The one sheet of a created pack.
 pub const ATLAS_FILE: &str = "mascot.webp";
-pub const MANIFEST_FILE: &str = "manifest.json";
-pub const SIDECAR_FILE: &str = "golem.json";
+pub const MANIFEST_FILE: &str = crate::golem_pet::GOLEM_PET_MANIFEST_FILE;
+pub const SIDECAR_FILE: &str = crate::golem_pet::GOLEM_PET_SIDECAR_FILE;
 pub const REPORT_FILE: &str = "build-report.json";
 pub const PROVENANCE_FILE: &str = "provenance.json";
-/// `source` of a sidecar written by the creator (plan 168 wire shape).
-pub const SIDECAR_SOURCE_CREATOR: &str = "videorc-creator";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FrameKind {
-    Gaze,
-    Reaction,
-}
-
-/// page-pet manifest v1 (`runtime/manifest.js`), complete-character packs
-/// only: no `layers`, every frame on one sheet.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PetManifest {
-    pub version: u32,
-    pub name: String,
-    pub neutral: String,
-    pub pivot: [f64; 2],
-    pub frames: Vec<PetFrame>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PetFrame {
-    pub id: String,
-    pub kind: FrameKind,
-    pub sheet: String,
-    /// `[x, y, w, h]`, square.
-    pub rect: [u32; 4],
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gaze: Option<[f64; 2]>,
-}
-
-/// The Videorc sidecar beside the manifest (plan 168 D1, D16).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PetSidecar {
-    pub version: u32,
-    pub source: String,
-    /// Normalised top of the neutral silhouette inside its cell.
-    pub head_top: f64,
-    /// The talk frame ids present, in cycle order.
-    pub talk: Vec<String>,
-    pub created_at: String,
-    pub reference_sha256: String,
-}
 
 /// A registered cell ready for the atlas.
 pub(super) struct AtlasCell<'a> {
     pub id: String,
-    pub kind: FrameKind,
+    pub kind: PetFrameKind,
     pub gaze: Option<[f64; 2]>,
     pub image: &'a RgbaImage,
 }
@@ -116,7 +74,7 @@ pub(super) fn pack_atlas(cells: &[AtlasCell<'_>], size: u32) -> (RgbaImage, Vec<
 pub(super) fn neutral_id(frames: &[PetFrame]) -> Option<String> {
     frames
         .iter()
-        .filter(|frame| frame.kind == FrameKind::Gaze)
+        .filter(|frame| frame.kind == PetFrameKind::Gaze)
         .filter_map(|frame| frame.gaze.map(|g| (frame, g[0] * g[0] + g[1] * g[1])))
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(frame, _)| frame.id.clone())
@@ -197,21 +155,21 @@ mod tests {
         let frames = vec![
             PetFrame {
                 id: "a".into(),
-                kind: FrameKind::Gaze,
+                kind: PetFrameKind::Gaze,
                 sheet: ATLAS_FILE.into(),
                 rect: [0, 0, 1, 1],
                 gaze: Some([-1.0, 0.0]),
             },
             PetFrame {
                 id: "b".into(),
-                kind: FrameKind::Gaze,
+                kind: PetFrameKind::Gaze,
                 sheet: ATLAS_FILE.into(),
                 rect: [1, 0, 1, 1],
                 gaze: Some([0.0, 0.5]),
             },
             PetFrame {
                 id: "c".into(),
-                kind: FrameKind::Reaction,
+                kind: PetFrameKind::Reaction,
                 sheet: ATLAS_FILE.into(),
                 rect: [2, 0, 1, 1],
                 gaze: None,
