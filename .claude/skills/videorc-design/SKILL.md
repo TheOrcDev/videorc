@@ -463,6 +463,9 @@ do not hand-roll it.
 - DON'T ship an audio control with nothing behind it: no pan, solo, monitor
   or player volume until the backend can do it (plan 093).
 - DO call the companion **Buddy** in all copy (or the name the streamer gave
-  it). Code and wire names stay `cohost`; saved values keep `orcle` (plan 170
-  D22), like the moderation source `orcle-voice`. A guard test fails on
-  "Orcle" anywhere in the renderer's sources.
+  it), and **Buddies** for more than one (plan 171). Code and wire names stay
+  `cohost`; saved values keep `orcle` (plan 170 D22), like the moderation
+  source `orcle-voice`. "golem" names only the stone golem creature (plan 171
+  D4): its slug `golem`, its kind "Golem", its art masters and golem example
+  text; its name is Buddy. Guard tests fail on "Orcle" and on "Golem"
+  anywhere else in the renderer's sources and the docs.

@@ -453,7 +453,7 @@ async fn buddy_look_a_second_keep_gets_new_paths_and_drops_the_first_look() {
             round,
             made: ALL_STATES.to_vec(),
         });
-        let (request_id, _, _) = create_and_wait(&state, &env, describe("a buddy")).await;
+        let (request_id, _, _) = create_and_wait(&state, &env, describe("a golem")).await;
         let settings = keep_in(
             &state,
             env.clone(),
@@ -498,7 +498,7 @@ async fn buddy_look_discard_leaves_nothing_behind() {
         made: ALL_STATES.to_vec(),
     });
     let before = get_cohost_settings(&state).await.persona;
-    let (request_id, _, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
+    let (request_id, _, draft) = create_and_wait(&state, &env, describe("a golem")).await;
     assert!(draft.is_some());
     let status = discard_in(
         &state,
@@ -548,7 +548,7 @@ async fn buddy_look_redo_replaces_one_draft_state_from_the_draft_idle() {
             CohostAvatarState::Laugh,
         ],
     });
-    let (request_id, progress, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
+    let (request_id, progress, draft) = create_and_wait(&state, &env, describe("a golem")).await;
     let think = progress
         .iter()
         .find(|step| step.state == CohostAvatarState::Think)
@@ -675,7 +675,7 @@ async fn buddy_look_second_create_replaces_the_draft_and_a_failed_one_keeps_it()
         round: 0,
         made: ALL_STATES.to_vec(),
     });
-    let (first, _, _) = create_and_wait(&state, &env, describe("a buddy")).await;
+    let (first, _, _) = create_and_wait(&state, &env, describe("a golem")).await;
     web.answer(Canned::Set {
         round: 1,
         made: ALL_STATES.to_vec(),
@@ -735,7 +735,7 @@ async fn buddy_look_failed_idle_leaves_no_draft() {
         code: "ai-gateway-error",
         retry_after: None,
     });
-    let (_, progress, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
+    let (_, progress, draft) = create_and_wait(&state, &env, describe("a golem")).await;
     assert!(draft.is_none());
     assert_eq!(
         progress.last().unwrap().error.as_ref().unwrap().message,
@@ -745,7 +745,7 @@ async fn buddy_look_failed_idle_leaves_no_draft() {
         round: 0,
         made: vec![CohostAvatarState::Talk],
     });
-    let (_, progress, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
+    let (_, progress, draft) = create_and_wait(&state, &env, describe("a golem")).await;
     assert!(draft.is_none());
     assert_eq!(
         progress.last().unwrap().error.as_ref().unwrap().message,
@@ -776,7 +776,7 @@ async fn buddy_look_restart_offers_the_draft_on_disk_again() {
             CohostAvatarState::Think,
         ],
     });
-    let (request_id, _, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
+    let (request_id, _, draft) = create_and_wait(&state, &env, describe("a golem")).await;
     let draft = draft.unwrap();
 
     // A new process: fresh job state, a fresh app state, the same disk. A
@@ -860,7 +860,7 @@ async fn buddy_look_refuses_before_sending_anything() {
         ..env.clone()
     };
     assert_eq!(
-        refused(describe("a buddy"), basic).await.code,
+        refused(describe("a golem"), basic).await.code,
         "premium-required"
     );
     let signed_out = AvatarEnv {
@@ -868,7 +868,7 @@ async fn buddy_look_refuses_before_sending_anything() {
         ..env.clone()
     };
     assert_eq!(
-        refused(describe("a buddy"), signed_out).await.code,
+        refused(describe("a golem"), signed_out).await.code,
         "signed-out"
     );
     let rootless = AvatarEnv {
@@ -876,7 +876,7 @@ async fn buddy_look_refuses_before_sending_anything() {
         ..env.clone()
     };
     assert_eq!(
-        refused(describe("a buddy"), rootless).await.code,
+        refused(describe("a golem"), rootless).await.code,
         COHOST_AVATAR_ROOT_UNCONFIGURED
     );
     // One job at a time: a second create while one runs is refused.
@@ -886,7 +886,7 @@ async fn buddy_look_refuses_before_sending_anything() {
         made: ALL_STATES.to_vec(),
     });
     let mut events = state.events.subscribe();
-    create_in(&state, env.clone(), describe("a buddy"))
+    create_in(&state, env.clone(), describe("a golem"))
         .await
         .unwrap();
     let running = draft_status_in(&state, env.clone())
@@ -953,7 +953,7 @@ async fn buddy_look_web_errors_become_the_hints_the_plan_names() {
             code,
             retry_after,
         });
-        let (_, progress, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
+        let (_, progress, draft) = create_and_wait(&state, &env, describe("a golem")).await;
         assert!(draft.is_none(), "{code}");
         let error = progress.last().unwrap().error.clone().unwrap();
         assert_eq!(error.code, code);
@@ -1034,14 +1034,14 @@ fn generated_pictures_are_checked_before_they_are_written() {
 #[test]
 fn set_request_wire_shape_matches_the_route() {
     let create = CohostAvatarSetRequest {
-        description: Some("a buddy".to_string()),
+        description: Some("a golem".to_string()),
         inspiration: Some("AAAA".to_string()),
         redo: None,
         base: None,
     };
     assert_eq!(
         serde_json::to_value(&create).unwrap(),
-        serde_json::json!({ "description": "a buddy", "inspiration": "AAAA" })
+        serde_json::json!({ "description": "a golem", "inspiration": "AAAA" })
     );
     let redo = CohostAvatarSetRequest {
         redo: Some(CohostAvatarState::Laugh),
@@ -1322,15 +1322,15 @@ mod library_route {
         for params in [
             CohostAvatarCreateParams {
                 name: Some("n".repeat(25)),
-                ..describe("a buddy")
+                ..describe("a golem")
             },
             CohostAvatarCreateParams {
                 personality: Some("p".repeat(1201)),
-                ..describe("a buddy")
+                ..describe("a golem")
             },
             CohostAvatarCreateParams {
                 context: Some("c".repeat(4001)),
-                ..describe("a buddy")
+                ..describe("a golem")
             },
         ] {
             let refused = create_in(&state, env.clone(), params).await.unwrap_err();

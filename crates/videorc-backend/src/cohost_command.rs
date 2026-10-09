@@ -48,11 +48,12 @@ const HEARD_MAX_CHARS: usize = 140;
 
 // --- Vocabulary -----------------------------------------------------------------
 
-/// The wake word that always works (plan 164 D2), then the "Orcle" spellings
-/// speech models produce, kept as hidden aliases for one release (remove
-/// after 0.9.140). The weak "oracle"/"orca" entries are gone: a real word
-/// never wakes the Buddy. The persona's own name is added per process by
-/// `set_persona_wake_tokens`.
+/// The wake word that always works (plan 164 D2; "buddy" since plan 171 D5),
+/// then the "Orcle" spellings speech models produce, kept as hidden aliases
+/// for one release (remove after 0.9.140). The weak "oracle"/"orca" entries
+/// are gone. "buddy" is an everyday word, so it only wakes the detector: a
+/// command still needs its phrase after it ("thanks buddy" is talk). The
+/// persona's own name is added per process by `set_persona_wake_tokens`.
 const WAKE_WORDS: &[&str] = &["buddy", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal"];
 /// The shortest name word that can wake the Buddy.
 const NAME_TOKEN_MIN_LETTERS: usize = 3;
@@ -2421,5 +2422,26 @@ mod tests {
         // A new name forgets the old one.
         set_persona_wake_tokens("Buddy");
         assert_eq!(highlight("Zarquon, highlight the last comment"), None);
+    }
+
+    #[test]
+    fn thanks_buddy_without_a_command_phrase_does_nothing() {
+        // Plan 171 D5: "buddy" is an everyday word. It only wakes the
+        // detector; a command still needs its structured phrase after it.
+        for text in ["thanks buddy", "Thanks, buddy.", "thanks buddy!", "Thanks buddy"] {
+            for ctx in [&PLAIN, &ANSWERING, &WAKE_REQUIRED] {
+                assert_eq!(
+                    detect_one(text, ctx).map(|command| command.kind),
+                    None,
+                    "{text}"
+                );
+            }
+        }
+        // The same word before a command phrase still wakes it.
+        assert_eq!(
+            detect_one("Thanks. Buddy, highlight the last comment", &PLAIN)
+                .map(|command| command.kind),
+            Some(CommandKind::Highlight)
+        );
     }
 }

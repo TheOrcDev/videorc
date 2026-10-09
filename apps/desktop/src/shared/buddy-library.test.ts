@@ -50,7 +50,7 @@ describe('the official Buddy catalog (plan 170 D10, D11)', () => {
       expect(entry.name.length).toBeLessThanOrEqual(24)
       expect(entry.personality.length).toBeLessThanOrEqual(1200)
     }
-    // The Buddy is the owner's original art; the others were described.
+    // Buddy the Golem is the owner's original art; the others were described.
     expect(officialBuddy('golem')?.description).toBeNull()
     expect(officialBuddy('official:orc')?.name).toBe('Golmar')
     expect(officialBuddy('official:dragon')).toBeNull()

@@ -230,7 +230,7 @@ describe('the onboarding steps (plan 170 D14)', () => {
     expect(buddyOnboardingCanAdvance(1, input())).toBe(true)
     expect(buddyOnboardingCanAdvance(2, input())).toBe(false)
     expect(buddyOnboardingCanAdvance(2, input({ description: '   ' }))).toBe(false)
-    expect(buddyOnboardingCanAdvance(2, input({ description: 'A mossy buddy' }))).toBe(true)
+    expect(buddyOnboardingCanAdvance(2, input({ description: 'A mossy golem' }))).toBe(true)
     expect(buddyOnboardingCanAdvance(2, input({ hasPicture: true }))).toBe(true)
     expect(buddyOnboardingCanAdvance(2, input({ description: 'x'.repeat(601) }))).toBe(false)
   })
@@ -267,21 +267,21 @@ describe('the onboarding steps (plan 170 D14)', () => {
 
   it('creates with every field, trimmed, leaving out the empty ones', () => {
     const full = input({
-      description: ' A mossy buddy ',
+      description: ' A mossy golem ',
       hasPicture: true,
       name: ' Grum ',
       personality: ' Grumpy but kind. ',
       about: ' I stream on Tuesdays. '
     })
     expect(buddyOnboardingCreateParams(full, 'base64-picture')).toEqual({
-      description: 'A mossy buddy',
+      description: 'A mossy golem',
       inspirationBase64: 'base64-picture',
       name: 'Grum',
       personality: 'Grumpy but kind.',
       context: 'I stream on Tuesdays.'
     })
     expect(buddyOnboardingCreateParams({ ...full, skipDetails: true }, null)).toEqual({
-      description: 'A mossy buddy',
+      description: 'A mossy golem',
       name: 'Grum'
     })
     expect(buddyOnboardingCreateParams(input({ name: 'Grum' }), 'pic')).toEqual({

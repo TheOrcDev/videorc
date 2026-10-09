@@ -126,7 +126,7 @@ impl BuddyOfficialSlug {
 }
 
 /// One catalog row. `description` is what the image model was asked for;
-/// the Buddy's art is the owner's original, so it has none.
+/// Buddy the Golem's art is the owner's original, so it has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuddyOfficial {
     pub slug: BuddyOfficialSlug,

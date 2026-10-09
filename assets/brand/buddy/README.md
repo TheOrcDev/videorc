@@ -42,7 +42,7 @@ cwebp -quiet -q 90 -alpha_q 100 -resize 0 640 /tmp/buddy-trim.png \
 | `default/think.webp`    | 553 × 646 | the same, while it thinks           |
 
 The state masters were exported at the idle image's scale (80.2 %, which
-makes the buddy the same height as in `idle.webp`), after clearing the
+makes the golem the same height as in `idle.webp`), after clearing the
 model's faint background haze (alpha below 6 %):
 
 ```sh
@@ -61,8 +61,8 @@ their format, heights and byte caps.
 
 ## Official characters (plan 170)
 
-Videorc's official Buddy library is the Buddy above plus four characters
-drawn in the same house look: Golmar the Orc, Nib the Goblin, Captain
+Videorc's official Buddy library is the stone golem above (Buddy the Golem)
+plus four characters drawn in the same house look: Golmar the Orc, Nib the Goblin, Captain
 Barnacle the Pirate and Bolt the Robot. Their names, taglines,
 personalities and the descriptions they were drawn from live in
 `protocol-fixtures/buddy-official-catalog.json`; the website and the app
@@ -72,7 +72,7 @@ must match that file.
 (idle, talk, laugh, think), made with `openai/gpt-image-2.5-sunburst`
 through the Vercel AI Gateway on 2026-10-09 by `pnpm buddy:official`
 (`scripts/buddy-official-generate.mjs`): the idle is an image edit of the
-style anchor (the Buddy master trimmed onto a 1024 px transparent canvas,
+style anchor (the golem master trimmed onto a 1024 px transparent canvas,
 "art style only, not the character") with the plan 169 house-look prompt,
 and talk, laugh and think are edits of that idle with the same state
 directions as the default Buddy. The owner reviews every set before it
@@ -87,8 +87,8 @@ The script exports each master to
 `apps/desktop/src/renderer/src/assets/buddy/official/<slug>/<state>.webp`
 like the default states (haze below 6 % alpha cleared, trimmed, 2 % pad,
 `cwebp -q 90 -alpha_q 100`), with one scale per character: the factor that
-makes its idle character 615 px tall, the buddy's height inside the
+makes its idle character 615 px tall, the golem's height inside the
 640 px `default/idle.webp` (before the pad), so every
-official character stands at the Buddy's size and its four poses match. The website serves the same WebP files
-from `public/buddy/official/<slug>/`, and the Buddy's official files there
+official character stands at the golem's size and its four poses match. The website serves the same WebP files
+from `public/buddy/official/<slug>/`, and Buddy the Golem's official files there
 are copies of `default/*.webp`.

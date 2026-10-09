@@ -30,9 +30,11 @@ name, turn on **Commands need “Buddy” first**.
 
 The old name "Orcle" and its close misses (orkle, orcel, orkel, orcl, orcal)
 still wake the Buddy for one release as hidden aliases. Real words never do:
-"Oracle database is slow" and "orca whales" are talk. Anything else after a
-clear "Buddy" (or your Buddy's name) shows "Buddy didn't catch that: '…'" in
-the strip.
+"Oracle database is slow" and "orca whales" are talk. "Buddy" is an everyday
+word, so it only wakes the Buddy: "thanks buddy" on its own does nothing, and a
+command still needs its phrase after the name. Anything else after a clear
+"Buddy" (or your Buddy's name) shows "Buddy didn't catch that: '…'" in the
+strip.
 
 Removing a message can't be undone, so an answer has to be clear. "Yes",
 "Yes, remove it", "Do it", "Go ahead" or "Buddy, yes" confirms when you say it

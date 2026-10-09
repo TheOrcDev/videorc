@@ -45,7 +45,7 @@ export interface BuddyOfficialEntry {
 }
 
 /** A catalog row: the entry plus what the image model was asked for (null
- * for the Buddy, whose art is the owner's original). */
+ * for Buddy the Golem, whose art is the owner's original). */
 export interface BuddyOfficialCatalogEntry extends BuddyOfficialEntry {
   description: string | null
 }

@@ -29,7 +29,7 @@ describe('the Buddy emblem exports', () => {
     const bytes = readFileSync(join(ASSET_DIR, file))
     const size = webpSize(bytes)
     expect(size.height).toBe(height)
-    // The trimmed buddy keeps its aspect (about 1.11 : 1), never squared.
+    // The trimmed golem keeps its aspect (about 1.11 : 1), never squared.
     expect(size.width / size.height).toBeGreaterThan(1.05)
     expect(size.width / size.height).toBeLessThan(1.2)
     expect(bytes.byteLength).toBeLessThanOrEqual(MAX_EXPORT_BYTES)

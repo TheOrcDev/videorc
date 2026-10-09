@@ -28,11 +28,11 @@ describe('openBuddyPetCreator (plan 169 D11)', () => {
     const root = createRoot(container)
     await act(async () => root.render(createElement(Probe, { seen })))
     await act(async () =>
-      openBuddyPetCreator({ reference: 'persona-idle', notes: '  A mossy buddy  ' })
+      openBuddyPetCreator({ reference: 'persona-idle', notes: '  A mossy golem  ' })
     )
     expect(seen.at(-1)).toEqual({
       open: true,
-      options: { reference: 'persona-idle', notes: 'A mossy buddy' }
+      options: { reference: 'persona-idle', notes: 'A mossy golem' }
     })
     await act(async () => closeBuddyPetCreator())
     expect(seen.at(-1)).toEqual({ open: false, options: {} })

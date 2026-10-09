@@ -6,7 +6,7 @@
 //   pnpm buddy:official --slug orc --states laugh  # redo one pose of one character
 //   pnpm buddy:official --slug all --export-only   # re-export the committed masters
 //
-// Options: --anchor <png> (the style anchor; default: the Buddy master
+// Options: --anchor <png> (the style anchor; default: the golem master
 // trimmed onto a 1024 px transparent canvas, the same as videorc-web
 // lib/ai/buddy-look/style-reference.png), --model <id>.
 //
@@ -119,7 +119,7 @@ async function editImage({ key, model, prompt, images }) {
 
 /**
  * The character's height inside the default Buddy's idle: default/idle.webp
- * is 640 px tall including its 2 % pad on each side, so the buddy is 615 px.
+ * is 640 px tall including its 2 % pad on each side, so the golem is 615 px.
  */
 const IDLE_EXPORT_HEIGHT = 615
 

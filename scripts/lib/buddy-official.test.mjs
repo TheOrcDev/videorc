@@ -26,7 +26,7 @@ test('the official catalog: five characters, the Buddy first, every field in the
     assert.ok(entry.tagline.length > 0)
     assert.equal(/\u2014/.test(JSON.stringify(entry)), false, 'no em-dashes in copy')
   }
-  assert.equal(catalog[0].description, null, "the Buddy is the owner's original art")
+  assert.equal(catalog[0].description, null, "Buddy the Golem is the owner's original art")
   assert.equal(catalog.find((entry) => entry.slug === 'orc').name, 'Golmar')
 })
 

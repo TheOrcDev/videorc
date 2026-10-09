@@ -1,16 +1,19 @@
 # Buddy
 
 The Buddy is the companion you create for your streams (plan 119 as Orcle,
-renamed and made yours in plan 164). You name it, give it a personality and
-its looks. It stands on your stream as an avatar with a comic bubble, reads
-your chat, hears you, and, when you turn the modes on, posts to your chats as
-you. There is no voice: the Buddy talks through its bubble.
+renamed and made yours in plan 164, called Golem until plan 171). You name
+it, give it a personality and its looks. It stands on your stream as an
+avatar with a comic bubble, reads your chat, hears you, and, when you turn
+the modes on, posts to your chats as you. There is no voice: the Buddy talks
+through its bubble.
 
 The code, wire and storage name is `cohost`. Everything a user reads says
-Buddy, or the name you gave it, never co-host and no longer Orcle. Saved
-and wire values keep `orcle` (plan 170 D22): the moderation source
-`orcle-voice`, the service-flags `orcle` key and the `videorc.orcleTab`
-storage key.
+Buddy, or the name you gave it, never co-host and no longer Orcle or Golem.
+The stone golem creature keeps its own words (plan 171 D2, D4): its official
+slug and id are `golem` and `official:golem`, its kind is "Golem", and its
+name is Buddy. Saved and wire values keep `orcle` (plan 170 D22): the
+moderation source `orcle-voice`, the service-flags `orcle` key and the
+`videorc.orcleTab` storage key.
 
 ## The promise
 
@@ -70,7 +73,7 @@ environment variable, never hardcoded in the desktop.
 My Buddies sits at the top of the Buddy tab and in your account on
 videorc.com (`/account/buddies`); both show the same library.
 
-- **Official** (free, signed in or not, works offline): the Buddy, Golmar
+- **Official** (free, signed in or not, works offline): Buddy the Golem, Golmar
   the Orc, Nib the Goblin, Captain Barnacle the Pirate and Bolt the Robot.
   Their names, taglines and personalities are
   `protocol-fixtures/buddy-official-catalog.json`; their four poses ship
