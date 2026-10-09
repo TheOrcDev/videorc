@@ -15,6 +15,7 @@
   a rename across about 220 files in two repos (R)
 - **Depends on**: plan 169 (the house look, `POST /api/ai/cohost/avatar/set`,
   the desktop look panel), unmerged in #647 / #75
+- **Status**: EXECUTED 2026-10-09 (see Execution)
 - **Planned at**: desktop `56e18f1e` (`plan-164-golem-b`), web `912b32b4`
   (`plan-164-golem-web`), 2026-10-09
 - **Route**: Orchestrator. R (rename) Implementation fit 8, mechanical
@@ -23,14 +24,55 @@
   fit 9; D (desktop) Implementation + UI fit 9; E orchestrator. Model lane
   `opus` (Fable credits out).
 
-| Phase                                                        | Where   | Status  |
-| ------------------------------------------------------------ | ------- | ------- |
-| R: Orcle becomes Golem everywhere                            | both    | PLANNED |
-| A: The account library and its routes                        | web     | PLANNED |
-| B: The official library (Golem + Orc, Goblin, Pirate, Robot) | both    | PLANNED |
-| C: `/golem`, `/golem/create`, `/account/golems`              | web     | PLANNED |
-| D: The library and the same onboarding in the app            | desktop | PLANNED |
-| E: Gates, captures, privacy, docs, acceptance                | both    | PLANNED |
+| Phase                                                        | Where   | Status                       |
+| ------------------------------------------------------------ | ------- | ---------------------------- |
+| R: Orcle becomes Golem everywhere                            | both    | DONE (web #79, desktop #647) |
+| A: The account library and its routes                        | web     | DONE (#79)                   |
+| B: The official library (Golem + Orc, Goblin, Pirate, Robot) | both    | DONE, owner review owed      |
+| C: `/golem`, `/golem/create`, `/account/golems`              | web     | DONE (#79)                   |
+| D: The library and the same onboarding in the app            | desktop | DONE (#647)                  |
+| E: Gates, captures, privacy, docs, acceptance                | both    | DONE, owner acceptance owed  |
+
+## Execution (2026-10-09)
+
+Executed the same day in desktop #647 (`plan-164-golem-b`) and web #79
+(`plan-170-golem-web`, stacked on #75). What differs from the decisions
+above:
+
+- **Order.** On the desktop, R ran after D (both touch the same files; the
+  rename then covered D's new code too). On the web, R and A ran side by
+  side and C came after both.
+- **The set route stays.** `POST /api/ai/cohost/avatar/set` is a thin
+  wrapper over the shared generation core, and the app falls back to it
+  whenever `cohost.golemLibrary.enabled` is false (signed out, or the web's
+  Golem storage unconfigured). Phase E does not remove it.
+- **Storage env.** `VIDEORC_GOLEM_STORAGE_PROVIDER` (`s3` or
+  `vercel-blob`) must be set in Vercel; unset, it follows the AI object
+  storage provider, and `broker` leaves the library off.
+- **Account deletion is strict.** It deletes every Golem picture first and
+  refuses to delete the account if that fails, because the rows are the
+  only index of the pictures.
+- **Sync triggers.** The renderer owns tab and focus syncs, the backend the
+  launch sync, main the deep link. One `GET /api/golem/avatars` carries the
+  profile, so the app never calls `GET /api/golem/profile`.
+- **Apply.** Every apply sets the Golem to Still (an Alive pack belongs to
+  the earlier character) and replaces the persona's pictures, as plan 169
+  Keep did.
+- **Official exports** are scaled so every idle is the default Golem's
+  height (615 px character, 640 px file), not the default states' 80.2 %.
+- **Found and fixed:** the living preview tainted its canvas on any
+  `videorc-asset://` picture (since plan 168); the scheme now answers CORS
+  reads for the `golem` host.
+- **Copy.** The copy document gained "Save" and the generic library error;
+  the Cloud AI gate says "Allow cloud AI to create a Golem."
+- **The command eval** (`typesafe-ai/jev`, 2026-10-09): before 56 cases,
+  98 % intent, 78 % target recall, 95 % as labelled; after 68 cases (12 new
+  Golem ones), 99 %, 81 %, 96 %; the same three old cases miss in both.
+
+Owed: owner review of the four official characters; merge and deploy web
+#75 then #79 (migrations 0018, 0019) with the storage env; a real create,
+sync and deep-link pass on a signed-in machine; the "Orcle is now Golem"
+line in the next release notes.
 
 ## The owner's ask (2026-10-09)
 

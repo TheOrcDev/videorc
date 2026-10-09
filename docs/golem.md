@@ -39,16 +39,20 @@ and points at Stream Manager; it has no switch of its own any more.
   chat and in voice.
 - **Personality** (up to 1,200 characters), free text. Three example chips
   fill it. The personality rides every cloud tick with the name.
-- **Your Golem's look** (plan 169, the Avatar section's Still panel):
-  describe the Golem, add a picture for inspiration (a pet, a logo, a
-  sketch), or both, and **Create my Golem** (⌘↵, Premium + Cloud AI, 4 of
-  the day's images). The web draws the idle character in the house look and
-  talk, laugh and think as edits of it. The set is a draft until **Keep
-  this look**; **Try again** makes a new character, **Discard** drops it,
-  and **Redo** (R on a focused tile) remakes talk, laugh or think from the
-  draft's idle (1 image). No per-state uploads any more; pictures uploaded
-  before plan 169 stay until a look is kept. **Make it Alive** opens the
-  Alive creator with the kept look as its reference.
+- **A new look** (plan 170): **New Golem** in My Golems (below) opens the
+  four-step onboarding, the same steps as on videorc.com/golem/create:
+  _Meet your sidekick_ (a stream demo, the official five, what it does),
+  _Describe it_ (words, a picture for inspiration such as a pet, a logo or a
+  sketch, or both), _Give it a personality_ (name, personality, About you)
+  and _Create your Golem_ (⌘↵, Premium + Cloud AI, 4 of the day's images).
+  The web draws the idle character in the house look and talk, laugh and
+  think as edits of it (plan 169), and saves the set to your Videorc
+  account. The set is a draft until **Use as my Golem**; **Discard**
+  deletes it from the account, and **Redo** (R on a focused tile) remakes
+  talk, laugh or think from the draft's idle (1 image). Every string comes
+  from `docs/golem-onboarding-copy.md`. The Avatar section's Still panel
+  keeps the current look and **Make it Alive**, which opens the Alive
+  creator with that look as its reference.
 - **Bubble**: speech, thought or shout, with a live sample.
 - **Start over** deletes the persona folder and starts a fresh persona id.
 
@@ -60,6 +64,40 @@ pictures; the last three were generated from the idle art. A persona with
 its own idle never borrows them: its missing states show its own idle. The avatar
 generation cap is the web's (24 a day); the image model is a web
 environment variable, never hardcoded in the desktop.
+
+## My Golems: the library (plan 170)
+
+My Golems sits at the top of the Golem tab and in your account on
+videorc.com (`/account/golems`); both show the same library.
+
+- **Official** (free, signed in or not, works offline): the Golem, Golmar
+  the Orc, Nib the Goblin, Captain Barnacle the Pirate and Bolt the Robot.
+  Their names, taglines and personalities are
+  `protocol-fixtures/golem-official-catalog.json`; their four poses ship
+  with the app (`assets/golem/default/` and `assets/golem/official/`, masters
+  and the generator in `assets/brand/golem/`) and the backend bundles the
+  same files for the stream. **Use** sets the pictures, name and
+  personality and leaves your About you notes alone.
+- **Made by you** (signed in): every Golem you create, here or on the web,
+  up to 30. **Use**, **Rename**, **Edit personality** (with About you),
+  **Delete** and **Make it Alive**. Using one downloads its four poses and
+  sets the name, personality and, when it has one, About you as the Golem's
+  notes. Your edits to a linked Golem's name, personality or notes go back
+  to the account about 2 s after you stop typing.
+- **Sync** (D12): the app reads the account's choice at launch, when My
+  Golems opens, on window focus (at most once a minute) and from the
+  `videorc://golem` link. A choice made on the web applies when the Golem is
+  linked to the library or is still the untouched default; a Golem made only
+  on this computer (an imported pack, a look kept while signed out) is never
+  overwritten, and My Golems offers the web's choice with **Use** instead.
+  Nothing changes while a recording or stream is live: the choice waits for
+  the session to end. Signed out, nothing syncs and the official five still
+  work.
+- **videorc://golem** (D18), from "Open in Videorc" on the web, focuses the
+  app, opens the Golem tab and syncs; `?alive=<id>` then uses that Golem
+  and opens the Alive creator.
+- The first launch with the untouched default Golem shows one line in My
+  Golems: "Make this Golem your own, or pick another." with **Start**.
 
 ## Still and Alive (plan 168)
 
@@ -168,6 +206,8 @@ computer.
 | Feature                                          | Needs                                  |
 | ------------------------------------------------ | -------------------------------------- |
 | Name, personality, uploaded images, bubble style | Nothing                                |
+| The official Golems                              | Nothing                                |
+| Your Golem library across the web and computers  | A Videorc account                      |
 | The Golem on stream and in the recording         | Nothing                                |
 | Greetings (your own templates, no AI)            | Nothing                                |
 | The Say box in Stream Manager                    | Nothing                                |
@@ -421,6 +461,27 @@ autoChat: {mode: 'off'}}`.
   (oldest first, at most 20, omitted while empty) and `autoChatSends`
   (omitted while zero).
 
+The library (plan 170):
+
+- `cohost.library.get` returns the cached `GolemLibraryState`
+  (`apps/desktop/src/shared/golem-library.ts`); `cohost.library.sync
+{reason}`, `.use {avatarId}`, `.update {avatarId, name?, personality?,
+context?}` and `.delete {avatarId}` accept at once and report through the
+  `cohost.library.changed` event (one job at a time, in order). Ids are a
+  user avatar uuid or `official:<slug>`; `persona.libraryAvatarId` links the
+  persona. The backend (`cohost_library.rs`) talks to videorc.com's
+  `/api/golem/*` routes (bearer; contract in videorc-web
+  `docs/golem-library.md`), caches pictures under
+  `golem-assets/library/<uuid>/<state>-<v>.png` and keeps the sync clock in
+  the `golemLibrarySync` settings row. With `cohost.golemLibrary.enabled`
+  false (signed out, or the web's storage unconfigured) the plan 169
+  `/api/ai/cohost/avatar/set` path stays the look's fallback.
+- `golem:deep-link { openCreator }` is the main-to-renderer IPC event for
+  `videorc://golem`.
+- The `videorc-asset` scheme answers CORS reads for the `golem` host, and
+  the living preview loads those pictures with `crossOrigin`, so measuring a
+  still picture's pixels never taints its canvas.
+
 The persona and its images (Phase A):
 
 - `cohostSettings.persona` holds `id` (`"default"` until Start over writes a
@@ -442,12 +503,12 @@ The persona and its images (Phase A):
   for Start over; `golem-assets:read-image` hands persona picture bytes to
   the overlay rasterizer.
 - The look (plan 169, `cohost_avatar.rs`): `cohost.avatar.create
-  {description?, inspirationBase64?}` (the picture at most 3 MB decoded,
+{description?, inspirationBase64?}` (the picture at most 3 MB decoded,
   under Vercel's request cap; the renderer fits it within 1024 px) and
   `cohost.avatar.redo {requestId, state}` answer `{requestId}` at once; the
   backend posts to the web's `/api/ai/cohost/avatar/set` (190 s, 40 MB
   response cap) on its own task and reports `cohost.avatar.progress
-  {requestId, state, phase: working | done | failed, path?, error?}` and
+{requestId, state, phase: working | done | failed, path?, error?}` and
   `cohost.avatar.draft {requestId, images, failed}`. The set lands in
   `<personaId>/drafts/<requestId>/<state>.png` (one draft per persona, replaced
   only by a create that succeeded); `cohost.avatar.keep {requestId}` moves it
