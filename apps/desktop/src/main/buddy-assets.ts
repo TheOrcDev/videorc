@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { lstatSync, renameSync } from 'node:fs'
 import { lstat, mkdir, open, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 
@@ -84,6 +85,57 @@ export async function listBuddyPersonas(root: string): Promise<string[]> {
       .sort()
   } catch {
     return []
+  }
+}
+
+// --- The folder's name before plan 171 ------------------------------------------
+
+/** The userData folder that holds the Buddy's pictures and pet packs. */
+export const BUDDY_ASSETS_FOLDER = 'buddy-assets'
+/** Its name in the dev builds of plans 164 to 170 (never shipped). */
+export const LEGACY_BUDDY_ASSETS_FOLDER = 'golem-assets'
+
+export type LegacyBuddyAssetsMove =
+  | { kind: 'nothing' }
+  | { kind: 'moved' }
+  | { kind: 'both-exist' }
+  | { kind: 'failed'; message: string }
+
+/**
+ * Plan 171 D3: dev builds from before the Buddy rename kept the pictures and
+ * pet packs in `userData/golem-assets/`. Main moves that folder to
+ * `buddy-assets/` once, at start, before the asset protocol or the backend
+ * reads either, and only when `buddy-assets/` does not exist yet: it never
+ * merges or overwrites. A symlink is not followed. A folder that cannot be
+ * moved stays where it is, and the caller logs why.
+ */
+export function moveLegacyBuddyAssets(userData: string): LegacyBuddyAssetsMove {
+  const legacy = join(userData, LEGACY_BUDDY_ASSETS_FOLDER)
+  const current = join(userData, BUDDY_ASSETS_FOLDER)
+  if (!isRealDirectory(legacy)) return { kind: 'nothing' }
+  if (pathExists(current)) return { kind: 'both-exist' }
+  try {
+    renameSync(legacy, current)
+    return { kind: 'moved' }
+  } catch (error) {
+    return { kind: 'failed', message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function isRealDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
   }
 }
 

@@ -26,8 +26,11 @@ import {
   parseBuddyPackPath
 } from '../shared/buddy-assets'
 import {
+  BUDDY_ASSETS_FOLDER,
   importBuddyPetFolder,
+  LEGACY_BUDDY_ASSETS_FOLDER,
   listBuddyPersonas,
+  moveLegacyBuddyAssets,
   readBuddyImage,
   readBuddyPetFile,
   readBuddyCreationFile,
@@ -415,5 +418,49 @@ describe('buddy creation files for the creator wizard (plan 168 S-F5)', () => {
     await writeFile(join(outside, 'secret.png'), ONE_PIXEL_PNG)
     await symlink(join(outside, 'secret.png'), join(sources, 'pilot-v1.png'))
     expect(await readBuddyCreationFile(write, 'p', BUILD, 'sources/pilot-v1.png')).toBeNull()
+  })
+})
+
+describe('the golem-assets folder moves to buddy-assets once (plan 171 D3)', () => {
+  it('moves the old folder with its files when buddy-assets does not exist', async () => {
+    const userData = await root()
+    const legacy = join(userData, LEGACY_BUDDY_ASSETS_FOLDER)
+    await mkdir(join(legacy, 'p'), { recursive: true })
+    await writeFile(join(legacy, 'p', 'idle.png'), ONE_PIXEL_PNG)
+
+    expect(moveLegacyBuddyAssets(userData)).toEqual({ kind: 'moved' })
+    expect(existsSync(legacy)).toBe(false)
+    expect(await readFile(join(userData, BUDDY_ASSETS_FOLDER, 'p', 'idle.png'))).toEqual(
+      ONE_PIXEL_PNG
+    )
+    // A second start finds nothing left to move.
+    expect(moveLegacyBuddyAssets(userData)).toEqual({ kind: 'nothing' })
+  })
+
+  it('never merges into or overwrites an existing buddy-assets', async () => {
+    const userData = await root()
+    await mkdir(join(userData, LEGACY_BUDDY_ASSETS_FOLDER, 'old'), { recursive: true })
+    await mkdir(join(userData, BUDDY_ASSETS_FOLDER, 'new'), { recursive: true })
+
+    expect(moveLegacyBuddyAssets(userData)).toEqual({ kind: 'both-exist' })
+    expect(await readdir(join(userData, LEGACY_BUDDY_ASSETS_FOLDER))).toEqual(['old'])
+    expect(await readdir(join(userData, BUDDY_ASSETS_FOLDER))).toEqual(['new'])
+  })
+
+  it('does nothing without an old folder, or when the old name is a file or a link', async () => {
+    const userData = await root()
+    expect(moveLegacyBuddyAssets(userData)).toEqual({ kind: 'nothing' })
+    await mkdir(join(userData, BUDDY_ASSETS_FOLDER))
+    expect(moveLegacyBuddyAssets(userData)).toEqual({ kind: 'nothing' })
+
+    const withFile = await root()
+    await writeFile(join(withFile, LEGACY_BUDDY_ASSETS_FOLDER), 'not a folder')
+    expect(moveLegacyBuddyAssets(withFile)).toEqual({ kind: 'nothing' })
+
+    const withLink = await root()
+    const elsewhere = await root()
+    await symlink(elsewhere, join(withLink, LEGACY_BUDDY_ASSETS_FOLDER))
+    expect(moveLegacyBuddyAssets(withLink)).toEqual({ kind: 'nothing' })
+    expect(existsSync(join(withLink, BUDDY_ASSETS_FOLDER))).toBe(false)
   })
 })

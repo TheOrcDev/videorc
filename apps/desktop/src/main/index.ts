@@ -1,6 +1,8 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import {
+  BUDDY_ASSETS_FOLDER,
   importBuddyPetFolder,
+  moveLegacyBuddyAssets,
   readBuddyImage,
   readBuddyPetFile,
   readBuddyCreationFile,
@@ -13544,7 +13546,23 @@ function resolveManagedBackgroundFile(fileName: string): string | null {
 // host by the relative path the persona stores. Exactly one folder and one
 // file; anything else is not found.
 function managedBuddyRoot(): string {
-  return join(app.getPath('userData'), 'buddy-assets')
+  return join(app.getPath('userData'), BUDDY_ASSETS_FOLDER)
+}
+
+// Plan 171 D3: dev builds of plans 164 to 170 wrote `golem-assets/`; move it
+// once, before the asset protocol and the backend read the root.
+function moveLegacyBuddyAssetsOnce(): void {
+  const outcome = moveLegacyBuddyAssets(app.getPath('userData'))
+  if (outcome.kind === 'moved') {
+    logBackend('info', 'Moved the Buddy files from golem-assets to buddy-assets (plan 171).')
+  } else if (outcome.kind === 'both-exist') {
+    logBackend(
+      'warn',
+      'Both golem-assets and buddy-assets exist; the old golem-assets folder was left as it is.'
+    )
+  } else if (outcome.kind === 'failed') {
+    logBackend('warn', `The golem-assets folder could not move to buddy-assets: ${outcome.message}`)
+  }
 }
 
 // Plan 168 D3: shipped pet packs (`bundled:<name>`) live in a read-only second
@@ -14288,6 +14306,7 @@ app.whenReady().then(async () => {
   }
 
   installRendererSessionPermissions(session.defaultSession)
+  moveLegacyBuddyAssetsOnce()
 
   registerOAuthCallbackProtocol()
   const initialCallbackUrl = process.argv.find((argument) =>
