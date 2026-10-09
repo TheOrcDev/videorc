@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "source": "videorc-creator",
+  "headTop": 0.25,
+  "talk": [
+    "talk-a",
+    "talk-b"
+  ],
+  "createdAt": "2026-10-09T21:58:13Z",
+  "referenceSha256": "ccbd771ddb9a66e986537428940d699712fe23c2a6077d1b2b37b689d52c88c7"
+}
