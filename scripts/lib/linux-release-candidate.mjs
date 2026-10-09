@@ -12,22 +12,30 @@ import {
   updateFeedSha512FromYml,
   updateFeedVersionFromYml
 } from './linux-alpha-release.mjs'
+import {
+  linuxDistPackageFilename,
+  LINUX_DIST_FORMATS
+} from './linux-dist-package.mjs'
 
 const CANDIDATE_ROOT = 'candidates/linux-alpha'
 const MAX_DOWNLOAD_BYTES = Object.freeze({
   appimage: 2 * 1024 * 1024 * 1024,
+  deb: 2 * 1024 * 1024 * 1024,
   'ffmpeg-license': 2 * 1024 * 1024,
   'ffmpeg-source': 2 * 1024 * 1024,
   manifest: 64 * 1024,
+  rpm: 2 * 1024 * 1024 * 1024,
   sha256: 1024,
   'update-feed': 1024 * 1024
 })
 
 const CONTENT_TYPES = Object.freeze({
   appimage: 'application/vnd.appimage',
+  deb: 'application/vnd.debian.binary-package',
   'ffmpeg-license': 'text/plain; charset=utf-8',
   'ffmpeg-source': 'text/plain; charset=utf-8',
   manifest: 'application/json',
+  rpm: 'application/x-rpm',
   sha256: 'text/plain; charset=utf-8',
   'update-feed': 'text/yaml; charset=utf-8'
 })
@@ -160,7 +168,38 @@ export function linuxCandidateObjectDescriptors(manifest) {
   return descriptors
 }
 
+// Distro package objects (deb/rpm, plan 071) share the immutable candidate
+// prefix but are NOT part of release.json or latest-linux.yml — the manifest
+// and feed remain AppImage-only. The label drives content type + max bytes and
+// the member path comes from the hard-x64 contract so the stored name always
+// matches what the release lane built.
+export function linuxDistPackageObjectDescriptors(manifest, formats = []) {
+  assertPendingLinuxCandidateManifest(manifest)
+  const prefix = linuxCandidatePrefix(manifest)
+  const descriptors = []
+  for (const format of formats) {
+    if (!LINUX_DIST_FORMATS.includes(format)) {
+      throw new LinuxReleaseCandidateError(
+        'unsupported-dist-format',
+        `Distro package format must be one of ${LINUX_DIST_FORMATS.join(', ')}, got ${format}.`
+      )
+    }
+    const filename = linuxDistPackageFilename(manifest.bundleVersion, format)
+    const item = descriptor(format, filename, `${prefix}/${filename}`)
+    assertIsolatedLinuxObjectKey(item.objectKey)
+    if (!item.objectKey.startsWith(`${prefix}/`)) {
+      throw new LinuxReleaseCandidateError(
+        'candidate-prefix-escape',
+        `Candidate object left the Linux Alpha prefix: ${item.objectKey}.`
+      )
+    }
+    descriptors.push(item)
+  }
+  return descriptors
+}
+
 export async function buildLinuxCandidateStoragePlan({
+  distPackagePaths,
   ffmpegLicensePath,
   ffmpegSourcePath,
   manifest,
@@ -174,16 +213,23 @@ export async function buildLinuxCandidateStoragePlan({
   )
   assertFeedMatchesManifest({ feedYml, manifest })
 
+  const distFormats = (distPackagePaths
+    ? LINUX_DIST_FORMATS.filter((format) => distPackagePaths[format])
+    : []
+  )
+  const distDescriptors = linuxDistPackageObjectDescriptors(manifest, distFormats)
+
   const paths = new Map([
     ['appimage', join(releaseDir, manifest.filename)],
     ['sha256', join(releaseDir, `${manifest.filename}.sha256`)],
     ['update-feed', join(releaseDir, LINUX_ALPHA_UPDATE_FEED_NAME)],
     ['manifest', manifestPath],
     ['ffmpeg-license', ffmpegLicensePath],
-    ['ffmpeg-source', ffmpegSourcePath]
+    ['ffmpeg-source', ffmpegSourcePath],
+    ...distFormats.map((format) => [format, distPackagePaths[format]])
   ])
   const artifacts = await Promise.all(
-    linuxCandidateObjectDescriptors(manifest).map(async (item) => {
+    [...linuxCandidateObjectDescriptors(manifest), ...distDescriptors].map(async (item) => {
       const path = resolve(paths.get(item.label))
       const sizeBytes = await requiredSize(path, item.label)
       return { ...item, path, sha256: await sha256File(path), sizeBytes }

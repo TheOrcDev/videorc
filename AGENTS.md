@@ -32,6 +32,8 @@ Use the smallest gate that proves the change, then run the broader gate before h
 - Linux FFmpeg provisioning (Linux x64 only): `pnpm ffmpeg:fetch:linux`
 - Linux in-app encoder bridge, one backend, no host gate (Linux box only): `VIDEORC_LINUX_H264_ENCODER=openh264 VIDEORC_MATRIX_ONLY=1080p30 VIDEORC_MATRIX_PRINT_BRIDGE_DIAGNOSTICS=1 VIDEORC_SMOKE_FFMPEG_PATH=$PWD/vendor/ffmpeg/linux-x64/bin/ffmpeg node scripts/smoke-recording-matrix-app.mjs`
 - Linux L1.5 named-box acceptance (both backends): `pnpm smoke:linux-encoder-acceptance` with the tester env from `docs/linux-dev-loop.md`
+- Linux packaging structural gate: `node --test scripts/lib/linux-dist-package.test.mjs` plus `appstreamcli validate packaging/linux/metainfo/dev.theorcdev.videorc.metainfo.xml` (the 512x512 icon IHDR check runs in the same CI step and is part of the preflight)
+- Linux distro package validation (after `pnpm package:desktop:linux:dist` built deb/rpm): `pnpm validate:linux:dist` (and `makepkg --printsrcinfo` in `packaging/linux/arch/` must stay in sync with `.SRCINFO` after PKGBUILD edits)
 
 CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advisory audit, TS format, TS lint, TS typecheck, desktop unit tests, and Node script tests. Device, preview, recording, and packaging smokes still need a local macOS environment with the right permissions.
 

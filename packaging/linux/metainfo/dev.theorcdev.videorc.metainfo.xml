@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo for Videorc Linux packages (deb/rpm payloads, AUR
+  package). The metadata itself is CC0-1.0; the project code is AGPL-3.0-only.
+  Brand assets (the icon and name) are NOT covered by the code license — see
+  apps/desktop/build-resources/README.md and TRADEMARK.md.
+
+  Bump the <releases> entry on every release (docs/linux-distribution-packaging.md).
+-->
+<component type="desktop-application">
+  <id>dev.theorcdev.videorc</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <name>Videorc</name>
+  <summary>AI-native recording and livestreaming studio for creators</summary>
+  <description>
+    <p>
+      Videorc is an AI-native recording and livestreaming studio for creators:
+      screen and window capture, camera and microphone sources, recording,
+      multi-destination livestreaming, captions, and scene composition, all in
+      one desktop app.
+    </p>
+    <p>
+      Linux packages bundle an LGPL-only FFmpeg build with a VAAPI hardware
+      encoder path and an OpenH264 software fallback. Screen and window capture
+      on Wayland go through the desktop portal.
+    </p>
+  </description>
+  <launchable type="desktop-id">videorc.desktop</launchable>
+  <url type="homepage">https://www.videorc.com</url>
+  <developer id="dev.theorcdev">
+    <name>TheOrcDev</name>
+  </developer>
+  <provides>
+    <binary>videorc</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+  </categories>
+  <keywords>
+    <keyword>recording</keyword>
+    <keyword>livestream</keyword>
+    <keyword>streaming</keyword>
+    <keyword>screen capture</keyword>
+    <keyword>video</keyword>
+  </keywords>
+  <releases>
+    <release version="0.9.120" date="2026-09-28"/>
+  </releases>
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-cartoon">none</content_attribute>
+    <content_attribute id="violence-fantasy">none</content_attribute>
+    <content_attribute id="violence-realistic">none</content_attribute>
+    <content_attribute id="violence-slavery">none</content_attribute>
+    <content_attribute id="sex-nudity">none</content_attribute>
+    <content_attribute id="sex-themes">none</content_attribute>
+    <content_attribute id="sex-homosexuality">none</content_attribute>
+    <content_attribute id="sex-adultery">none</content_attribute>
+    <content_attribute id="sex-appearance">none</content_attribute>
+    <content_attribute id="drugs-alcohol">none</content_attribute>
+    <content_attribute id="drugs-narcotics">none</content_attribute>
+    <content_attribute id="drugs-tobacco">none</content_attribute>
+    <content_attribute id="language-profanity">none</content_attribute>
+    <content_attribute id="language-humor">none</content_attribute>
+    <content_attribute id="language-discrimination">none</content_attribute>
+    <content_attribute id="money-purchasing">none</content_attribute>
+    <content_attribute id="money-gambling">none</content_attribute>
+    <content_attribute id="social-chat">none</content_attribute>
+    <content_attribute id="social-contacts">none</content_attribute>
+    <content_attribute id="social-info">none</content_attribute>
+    <content_attribute id="social-audio">none</content_attribute>
+    <content_attribute id="social-location">none</content_attribute>
+  </content_rating>
+</component>

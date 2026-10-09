@@ -17,7 +17,7 @@ packaging, or release are supported yet.
 | Audio | PipeWire | L2 |
 | Preview | CPU composition and JPEG transport | L5 |
 | H.264 encode | VAAPI hardware, OpenH264 software fallback | L1.5 implemented; hardware proof pending |
-| Packaging | AppImage | L6 |
+| Packaging | AppImage | L6 (deb/rpm config + CI validation done; install acceptance pending) |
 
 The Ubuntu 24.04 row is the packaging and support baseline that L6 must prove
 on. The encoder contract in L1.5 is distribution-independent and is accepted
@@ -83,8 +83,12 @@ GPU hang, so the policy keeps the app from touching a bad node at all:
 | --- | --- | --- | --- | --- |
 | ogre | T2 MacBook Pro, Intel UHD 630 (Coffee Lake) + Radeon Pro 555X, FaceTime HD camera | Omarchy 4.0.4 (Arch family), Hyprland / Wayland, PipeWire + `xdg-desktop-portal-hyprland` | `renderD128` i915, allowed; `renderD129` amdgpu, **quarantined** after the 2026-09-24 host hang | Named physical tester for L1.5 through L5 |
 
-L6 still needs an Ubuntu 24.04 x64 machine for the AppImage and updater
-evidence; ogre does not substitute for it.
+L6 still needs an Ubuntu 24.04 x64 machine for the AppImage/deb packaged
+smoke and updater evidence; ogre does not substitute for it. Plan 071 adds a
+Fedora/RHEL x64 requirement for rpm install/launch acceptance: the rpm build
+and structural validation run on the Ubuntu CI runner, but a named Fedora box
+is the only acceptable host for installing and launching the rpm (see
+`docs/linux-distribution-packaging.md`).
 
 The binary pin lives in `vendor/ffmpeg/linux-pin.json`. Run
 `pnpm ffmpeg:fetch:linux` on Linux x64 to download and stage it. The fetch step
@@ -212,16 +216,26 @@ starts.
 
 ### L6 — AppImage, release lane, and acceptance
 
-- Status (Plan 0008/0009, 2026-09-25): `electron-builder.yml` has a Linux
-  AppImage+dir target; `pnpm package:desktop:linux` +
-  `preflight-linux-package.mjs` stage the release backend and pinned LGPL
-  FFmpeg. `.github/workflows/release-linux-alpha.yml` now builds an unsigned
-  Ubuntu 24.04 x64 AppImage candidate, writes isolated
-  `release.json` / `latest-linux.yml` under `releases/linux-alpha/<releaseId>/`
-  (stored at `candidates/linux-alpha/<releaseId>/<sourceCommit>/`), and uploads
-  only to private candidate prefixes. Public download, website manifests,
-  `promote-linux-alpha.yml`, Ubuntu 24.04 named-box packaged smoke, and the
-  videorc-web download button are still owed.
+- Status (Plan 0008/0009, 2026-09-25; Plan 071 distro packages 2026-09-28):
+  `electron-builder.yml` has Linux targets for `dir`, AppImage, deb, and rpm
+  (rpm config is structural-only until the Fedora box); `pnpm package:desktop:linux`
+  stages the AppImage, `pnpm package:desktop:linux:dist` additionally builds
+  deb/rpm, and `preflight-linux-package.mjs` asserts the release backend,
+  pinned LGPL FFmpeg, and 512x512 icon. `.github/workflows/release-linux-alpha.yml`
+  builds the unsigned Ubuntu 24.04 x64 candidate set (AppImage + deb + rpm),
+  validates each payload (deb/rpm via `pnpm validate:linux:dist`, which checks
+  the naming contract, bundled backend/FFmpeg, payload metainfo, desktop entry,
+  and hicolor icons), writes isolated `release.json` / `latest-linux.yml` under
+  `releases/linux-alpha/<releaseId>/` (stored at
+  `candidates/linux-alpha/<releaseId>/<sourceCommit>/`), uploads only to private
+  candidate prefixes, and stores deb/rpm beside the AppImage in the same
+  immutable prefix without touching the manifest or feed. The checked-in AUR
+  `PKGBUILD` (`packaging/linux/arch/videorc-bin`) is the Arch path — never the
+  electron-builder `pacman` target. `latest-linux.yml` stays AppImage-only:
+  native installs report "updates are managed by your package manager" (plan 071).
+  Public download, website manifests, `promote-linux-alpha.yml`, the Ubuntu
+  24.04 + Fedora named-box packaged smokes, and the videorc-web download button
+  are still owed.
 
 - Build an Ubuntu 24.04 x64 AppImage with the verified LGPL FFmpeg payload.
 - Use an isolated Linux Alpha lane with candidate, pilot, then public
