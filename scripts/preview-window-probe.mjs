@@ -174,6 +174,7 @@ async function main() {
   let state = await waitForSurfaceAtContentRect(
     'open: surface covers the preview window content rect'
   )
+  assertPreviewWindowShadow(state, true, 'open: the floating preview window casts its shadow')
 
   // --- Move: surface follows -----------------------------------------------------
   await smokeCommand('preview-window-set-bounds', { x: 364, y: 246 })
@@ -268,6 +269,11 @@ async function main() {
     JSON.stringify(docked)
   )
   await waitForDockedSurfaceAtSlot('dock: surface covers the Studio slot rect')
+  assertPreviewWindowShadow(
+    await smokeCommand('preview-window-state'),
+    false,
+    'dock: the docked window casts no shadow (no rim over the video edge)'
+  )
 
   // Drawable-resolution regression gate: the surface's Metal drawable must be
   // the slot rect in PHYSICAL pixels (points × the display's scale factor) —
@@ -475,7 +481,10 @@ async function main() {
     'undock: preview window reports floating mode',
     JSON.stringify(floated)
   )
-  await waitForSurfaceAtContentRect('undock: surface returns to the floating window rect')
+  const undocked = await waitForSurfaceAtContentRect(
+    'undock: surface returns to the floating window rect'
+  )
+  assertPreviewWindowShadow(undocked, true, 'undock: the floating window gets its shadow back')
 
   console.log('\n=== Preview window probe summary ===')
   if (failures.length === 0) {
@@ -1369,6 +1378,13 @@ for w in list {
       }
     })
   return lastWindowDump
+}
+
+// macOS draws a window shadow's dark outline and light rim over the window
+// edge: docked, that framed the video in a grey gap (owner report, 2026-10-10).
+function assertPreviewWindowShadow(state, expected, label) {
+  if (process.platform !== 'darwin') return
+  assertProbe(state?.hasShadow === expected, label, JSON.stringify({ hasShadow: state?.hasShadow }))
 }
 
 function assertProbe(condition, label, detail) {

@@ -4378,6 +4378,12 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
 // a click. The docked frame has no interactive DOM of its own (body.docked
 // hides the drag bar), so this is safe for the Studio slot too. Floating mode
 // restores normal mouse handling.
+//
+// A docked window casts NO SHADOW on macOS: AppKit draws the shadow's dark
+// outline and its dark-appearance light rim (1pt, about 19% white) over the
+// window edge, so the docked video read as framed by a grey gap, the slot
+// "background" showing behind the preview (owner report, 2026-10-10).
+// Floating mode gets the shadow back.
 function applyDockedPreviewChrome(window: BrowserWindow): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     window.setParentWindow(mainWindow)
@@ -4386,6 +4392,7 @@ function applyDockedPreviewChrome(window: BrowserWindow): void {
   window.setResizable(false)
   if (isMac) {
     window.setWindowButtonVisibility(false)
+    window.setHasShadow(false)
   }
   window.setAlwaysOnTop(false)
   window.setIgnoreMouseEvents(true)
@@ -4400,6 +4407,7 @@ function removeDockedPreviewChrome(window: BrowserWindow): void {
   window.setResizable(true)
   if (isMac) {
     window.setWindowButtonVisibility(true)
+    window.setHasShadow(true)
   }
   if (previewWindowAlwaysOnTop) {
     window.setAlwaysOnTop(true, 'floating')
@@ -10477,6 +10485,8 @@ async function runSmokePreviewMotionCommand(
     return {
       ...previewWindowState(),
       ...smokeNativeWindowIdentity(previewWindow),
+      // macOS: a docked window must cast no shadow (applyDockedPreviewChrome).
+      hasShadow: previewWindow && !previewWindow.isDestroyed() ? previewWindow.hasShadow() : null,
       surface: {
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
