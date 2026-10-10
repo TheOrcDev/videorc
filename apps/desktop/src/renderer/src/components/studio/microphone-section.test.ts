@@ -88,6 +88,22 @@ describe('Microphone section (plan 092)', () => {
     }
   })
 
+  it('turns the microphone Off in words, and shows the live switch status (S1.9)', () => {
+    const off = render(
+      { kind: 'value', peakDb: -12 },
+      { value: undefined, selectedName: undefined }
+    )
+    expect(off).toContain('>Off</span>')
+    expect(off).not.toContain('>None<')
+    const switching = render(
+      { kind: 'value', peakDb: -12 },
+      { switchStatus: createElement('span', { role: 'status' }, 'Preparing Studio Mic…') }
+    )
+    expect(switching).toContain('Preparing Studio Mic…')
+    expect(switching.indexOf('role="combobox"')).toBeLessThan(switching.indexOf('Preparing'))
+    expect(switching.indexOf('Preparing')).toBeLessThan(switching.indexOf('role="meter"'))
+  })
+
   it('spans the picker with the meter alone: no readout beside it', () => {
     for (const meter of [
       { kind: 'value', peakDb: -12 } as const,

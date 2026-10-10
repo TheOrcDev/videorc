@@ -94,8 +94,8 @@ adapters that live outside the eager bundle:
 - `SoloToggle` and `MonitorToggle`: no monitor bus and no hear-yourself output.
 - `knob`: nothing in Videorc is a trim; faders suit keyboard-first rows.
 - The Mix strip (`MixerMaster`): removed by the owner on 2026-10-02.
-- `audio-device-select`: Base-only Select API; `SourceSelect` stays the one
-  picker.
+- `audio-device-select`: Base-only Select API; `DevicePicker` stays the one
+  picker (plan 174 S1.9).
 - `live-waveform`: adopted by plan 092 for the Sources mic preview, removed by
   plan 093 (2026-10-02). The Sources microphone strip's level meter replaced
   the preview, and nothing else drew a waveform.

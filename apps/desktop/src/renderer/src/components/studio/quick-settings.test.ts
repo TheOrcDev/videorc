@@ -141,8 +141,8 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
     // just be one ... same for camera". No popover wraps a second select.
     const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
     for (const label of ['Screen', 'Camera']) {
-      const trigger = new RegExp(`<button[^>]*role="combobox"[^>]*aria-label="${label}"`)
-      expect(markup).toMatch(trigger)
+      const trigger = new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`).exec(markup)?.[0]
+      expect(trigger).toContain('role="combobox"')
     }
     const rows = markup.split('data-slot="inspector-row"')
     for (const row of rows.slice(1, 3)) {
@@ -152,9 +152,27 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
 
   it('shows Off for no camera, and the saved name for a missing one', () => {
     expect(renderInputs({ screenId: 'screen:2', cameraOff: true })).toContain('title="Off"')
-    expect(
-      renderInputs({ screenId: 'screen:2', cameraId: 'camera:gone', cameraName: 'Cam Link 4K' })
-    ).toContain('title="Cam Link 4K"')
+    const missing = renderInputs({
+      screenId: 'screen:2',
+      cameraId: 'camera:gone',
+      cameraName: 'Cam Link 4K'
+    })
+    expect(missing).toContain('title="Cam Link 4K"')
+    // Plan 174 S1.9: the row says it is gone, in words.
+    expect(missing).toContain('>Not found</span>')
+  })
+
+  it('says why a listed camera cannot run, never the raw status (S1.9)', () => {
+    const locked = { ...camera, status: 'permission-required' as const }
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, [display, locked])
+    expect(markup).toContain('>Needs permission</span>')
+    expect(markup).not.toContain('permission-required')
+  })
+
+  it('says no camera was found instead of Off when none is listed (S1.9)', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraOff: true }, [display])
+    expect(markup).toContain('title="No cameras found"')
+    expect(markup).not.toContain('title="Off"')
   })
 
   it('names the test pattern and a missing screen instead of going blank', () => {

@@ -14,7 +14,7 @@ import {
 import { Field, FieldLabel, FieldDescription } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { KebabMenu } from '@/components/kebab-menu'
-import { SourceSelect } from '@/components/source-select'
+import { DevicePicker } from '@/components/device-picker'
 import { LayoutThumb } from '@/components/studio/scenes-gallery'
 import {
   sceneNameError,
@@ -232,19 +232,22 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
           </DialogHeader>
           {action?.kind === 'repair' && repair ? (
             <div className="flex flex-col gap-4">
-              <SourceSelect
+              <DevicePicker
+                kind="camera"
                 label="Camera"
-                allowNone
+                noneLabel="Off"
                 devices={deviceList.devices.filter((device) => device.kind === 'camera')}
                 value={repair.sources.cameraId}
                 onChange={(cameraId) =>
                   setRepair({ ...repair, sources: { ...repair.sources, cameraId } })
                 }
               />
-              <SourceSelect
+              <DevicePicker
+                kind="capture"
                 label="Screen / window"
                 searchable
-                allowNone
+                groupByKind
+                noneLabel="None"
                 devices={deviceList.devices.filter(
                   (device) => device.kind === 'screen' || device.kind === 'window'
                 )}
