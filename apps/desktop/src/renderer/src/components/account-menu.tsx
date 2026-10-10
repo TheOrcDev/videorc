@@ -28,6 +28,7 @@ import {
 } from '@/lib/account'
 import type { EntitlementTier } from '@/lib/backend'
 import { VIDEORC_WEB_LINKS, openVideorcWebLink } from '@/lib/videorc-web-links'
+import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
 // The Videorc product-account control that replaces the bottom-left "connected"
 // status dot. Signed-out shows "Sign in" and links out to the web; backend
@@ -69,11 +70,11 @@ export function AccountMenu({
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
-    window.addEventListener('videorc:navigate-workspace', close)
+    window.addEventListener(WORKSPACE_NAVIGATE_EVENT, close)
     const offShortcut = window.videorc?.onShortcutNavigate?.(close)
     return () => {
       window.removeEventListener('keydown', onKeyDown, true)
-      window.removeEventListener('videorc:navigate-workspace', close)
+      window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, close)
       offShortcut?.()
     }
   }, [open])

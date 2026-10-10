@@ -1,6 +1,7 @@
 import ScenePresetControls from '@/components/scene-presets'
 import {
   AdjustIcon,
+  AlertIcon,
   ArrowDownIcon,
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -13,10 +14,16 @@ import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
-import { OverlayEdits, overlayStageItems, withOverlayRect } from '@/components/scene/overlay-stage'
+import {
+  OverlayEdits,
+  overlayEditsBlockedReason,
+  overlayStageItems,
+  withOverlayRect
+} from '@/components/scene/overlay-stage'
 import { SceneStage } from '@/components/scene/scene-stage'
 import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Field, FieldContent, FieldLabel, FieldSet } from '@/components/ui/field'
@@ -45,6 +52,7 @@ import {
   layoutPresetOrientation,
   simulcastLegLiveRequest
 } from '@/lib/capture'
+import { freeformEntryOverrides, rememberedFreeform } from '@/lib/freeform-memory'
 import {
   OVERLAY_ITEM_LABELS,
   OVERLAY_SNAPS,
@@ -105,7 +113,9 @@ export function LayoutTab(): ReactElement {
     layoutSwitchPending,
     savedScenePendingId,
     overlayLayout,
-    setOverlayLayout
+    setOverlayLayout,
+    reportError,
+    wsStatus
   } = useStudioCore()
   const [stageBusy, setStageBusy] = useState(false)
   // Overlay items on the canvas (plan 164, D15). One selection on the stage:
@@ -114,9 +124,12 @@ export function LayoutTab(): ReactElement {
   const [, redrawOverlays] = useReducer((value: number) => value + 1, 0)
   const overlayEditsRef = useRef<OverlayEdits | null>(null)
   if (!overlayEditsRef.current)
-    overlayEditsRef.current = new OverlayEdits(setOverlayLayout, redrawOverlays)
+    overlayEditsRef.current = new OverlayEdits(setOverlayLayout, redrawOverlays, reportError)
   const overlayEdits = overlayEditsRef.current
-  overlayEdits.configure(setOverlayLayout)
+  overlayEdits.configure(setOverlayLayout, reportError)
+  // Plan 174, C-6: overlay changes need the backend; without it the controls
+  // are off with one reason, and every failed change is reported.
+  const overlayBlockedReason = overlayEditsBlockedReason(wsStatus)
   useLayoutEffect(() => {
     overlayEdits.observe(overlayLayout)
   }, [overlayEdits, overlayLayout])
@@ -181,7 +194,7 @@ export function LayoutTab(): ReactElement {
     void setOverlayLayout({
       ...overlayLayout,
       [selectedOverlayItem]: { ...overlayLayout[selectedOverlayItem], ...patch }
-    }).catch(() => {})
+    }).catch(reportError)
   }
   const snapSelectedOverlay = (snap: OverlaySnap): void => {
     if (!selectedOverlayItem) return
@@ -192,7 +205,7 @@ export function LayoutTab(): ReactElement {
         overlayOrientation,
         overlaySnapRect(selectedOverlayItem, overlayOrientation, snap)
       )
-    ).catch(() => {})
+    ).catch(reportError)
   }
   const hasCamera = hasSelectedCameraSource(captureConfig.sources)
   const hasScreen = hasSelectedScreenSource(captureConfig.sources)
@@ -216,22 +229,17 @@ export function LayoutTab(): ReactElement {
   // camera is a user-owned bubble: the inset scenes and freeform.
   const showCameraBubbleControls = showOverlayControls || isFreeform
 
-  // Entering freeform seeds the overrides from the committed scene so nothing
-  // visibly moves; the arrangement just becomes user-owned.
+  // Entering freeform restores the arrangement a preset last replaced in this
+  // orientation (plan 174, C-4); a source with no memory is seeded from the
+  // committed scene, so nothing else visibly moves.
   const enterFreeform = (): void => {
     if (!scene) {
       return
     }
-    const sourceTransformOverrides = Object.fromEntries(
-      scene.sources.map((source) => [
-        source.id,
-        {
-          x: source.transform.x,
-          y: source.transform.y,
-          width: source.transform.width,
-          height: source.transform.height
-        }
-      ])
+    const sourceTransformOverrides = freeformEntryOverrides(
+      rememberedFreeform(),
+      layoutPresetOrientation(layout.layoutPreset),
+      scene.sources
     )
     applyCameraPreset({ arrangementMode: 'freeform', sourceTransformOverrides })
   }
@@ -442,7 +450,7 @@ export function LayoutTab(): ReactElement {
                   overlayEdits.draft?.orientation === overlayOrientation
                     ? overlayEdits.draft
                     : null,
-                editable: !preciseEditPending && !sceneSwitchPending,
+                editable: !preciseEditPending && !sceneSwitchPending && !overlayBlockedReason,
                 onSelect: (item) => {
                   setSelectedOverlayItem(item)
                   setSelectedSceneSourceId(null)
@@ -501,6 +509,7 @@ export function LayoutTab(): ReactElement {
           >
             {!selectedSource && selectedOverlayItem && selectedOverlayLayout ? (
               <OverlayItemInspector
+                blockedReason={overlayBlockedReason}
                 item={selectedOverlayItem}
                 layout={selectedOverlayLayout}
                 orientation={overlayOrientation}
@@ -1140,21 +1149,33 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.'
 }
 
-function OverlayItemInspector({
+/** Exported for its test: the overlay controls, off with one reason while
+ * they cannot reach the backend (plan 174, C-6). */
+export function OverlayItemInspector({
   item,
   layout,
   orientation,
+  blockedReason = null,
   onPatch,
   onSnap
 }: {
   item: OverlayItem
   layout: { showOnStream: boolean; showInRecording: boolean }
   orientation: OverlayOrientation
+  /** Why the controls are off; null while a change can be saved. */
+  blockedReason?: string | null
   onPatch: (patch: Partial<{ showOnStream: boolean; showInRecording: boolean }>) => void
   onSnap: (snap: OverlaySnap) => void
 }): ReactElement {
+  const blocked = blockedReason !== null
   return (
     <div className="flex flex-col gap-4" data-videorc-overlay-inspector={item}>
+      {blockedReason ? (
+        <Alert variant="warning">
+          <AlertIcon />
+          <AlertTitle className="font-normal">{blockedReason}</AlertTitle>
+        </Alert>
+      ) : null}
       <p className="text-sm text-muted-foreground">{OVERLAY_ITEM_DESCRIPTIONS[item]}</p>
       <Field orientation="horizontal">
         <FieldContent>
@@ -1162,6 +1183,7 @@ function OverlayItemInspector({
         </FieldContent>
         <Switch
           checked={layout.showOnStream}
+          disabled={blocked}
           id={`overlay-${item}-stream`}
           onCheckedChange={(showOnStream) => onPatch({ showOnStream })}
         />
@@ -1172,6 +1194,7 @@ function OverlayItemInspector({
         </FieldContent>
         <Switch
           checked={layout.showInRecording}
+          disabled={blocked}
           id={`overlay-${item}-recording`}
           onCheckedChange={(showInRecording) => onPatch({ showInRecording })}
         />
@@ -1181,6 +1204,7 @@ function OverlayItemInspector({
         <ToggleGroup
           aria-label="Snap overlay"
           className="w-full flex-wrap"
+          disabled={blocked}
           type="single"
           value=""
           variant="outline"

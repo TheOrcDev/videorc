@@ -14,8 +14,9 @@ import {
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
-import { BUDDY_TAB_LABEL, type BuddyTabId } from '@/lib/buddy-tabs'
-import type { SettingsTabId } from '@/lib/settings-tabs'
+import { BUDDY_TAB_LABEL, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
+import { isSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
+import type { WorkspaceNavigation } from '@/lib/workspace-navigation'
 
 // Studio control pages, grouped under "Studio" in the sidebar: one click away, but
 // they are FULL pages — studio content renders only on the Studio tab (user decision
@@ -130,6 +131,20 @@ export function isStudioPanel(value: unknown): value is StudioPanel {
 
 export function isWorkspaceTab(value: unknown): value is WorkspaceTab {
   return WORKSPACE_TABS.some((tab) => tab.id === value) || isStudioPanel(value)
+}
+
+/**
+ * The page a `videorc:navigate-workspace` event asks for (sent by
+ * `openWorkspaceTab`), or null for a page that does not exist. A sub-tab that
+ * does not exist opens the page on its remembered tab.
+ */
+export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | null {
+  if (!detail || typeof detail !== 'object') return null
+  const { tab, settingsTab, buddyTab, sessionId } = detail as Record<string, unknown>
+  if (tab === 'settings') return isSettingsTabId(settingsTab) ? { tab, settingsTab } : { tab }
+  if (tab === 'ai') return isBuddyTabId(buddyTab) ? { tab, buddyTab } : { tab }
+  if (tab === 'library') return typeof sessionId === 'string' ? { tab, sessionId } : { tab }
+  return isWorkspaceTab(tab) ? { tab } : null
 }
 
 type WorkspaceNavValue = {

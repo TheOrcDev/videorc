@@ -23,6 +23,7 @@ import {
   type SavedScene
 } from '@/lib/scene-presets'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
+import { noteLayoutLeavingFreeform } from '@/lib/freeform-memory'
 import {
   commitSceneTransform,
   transformLayoutIntent,
@@ -46,6 +47,7 @@ import {
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import { toast } from '@/lib/toast'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
 import {
@@ -529,7 +531,6 @@ type PlatformLifecycleSettlement = {
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX = 'prepared-platform:'
 const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
-const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
 const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
 const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
@@ -1159,6 +1160,10 @@ export type StudioContextValue = {
    * Buddy sit per orientation and which outputs carry them. Backend-owned. */
   overlayLayout: OverlayLayout
   setOverlayLayout: (layout: OverlayLayout) => Promise<void>
+  /** Shows a failed action the way every Studio action does: the error toast
+   * (or the Premium prompt) and the diagnostics record. For promises a page
+   * starts itself, so no failure is swallowed (plan 174, C-6). */
+  reportError: (error: unknown) => void
   /** The Buddy on stream (plan 164 Phase C): which state shows and the bubble
    * that is up (`cohost.buddy.state`); null until the backend reported. */
   buddyOverlay: BuddyOverlaySnapshot | null
@@ -2454,13 +2459,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       chatSetupWarnedRef.current.warned.add(warning.id)
       toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat is not connected`, {
         description: warning.message,
-        action: {
-          label: 'Open Livestream',
-          onClick: () =>
-            window.dispatchEvent(
-              new CustomEvent(WORKSPACE_NAVIGATE_EVENT, { detail: { tab: 'streaming' } })
-            )
-        }
+        action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
       })
     }
   }, [liveChatSnapshot, captureConfig.streamEnabled])
@@ -9246,10 +9245,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Choosing a preset scene EXITS freeform (unless the patch says
       // otherwise): the preset's fixed arrangement is what the user asked
       // for, and stale overrides must not leak into a later freeform entry.
-      const arrangementPatch =
+      // The overrides it clears are remembered for the next Freeform
+      // (plan 174, C-4), so one click never loses an arrangement.
+      const leavesArrangement =
         patch.layoutPreset !== undefined && patch.arrangementMode === undefined
-          ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
-          : {}
+      if (leavesArrangement) noteLayoutLeavingFreeform(current.layout)
+      const arrangementPatch = leavesArrangement
+        ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
+        : {}
 
       return requestLayoutTransaction(
         {
@@ -15517,6 +15520,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostSettings,
       overlayLayout,
       setOverlayLayout,
+      reportError,
       buddyOverlay,
       cohostGate,
       cohostActionPending,
@@ -15751,6 +15755,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostSettings,
       overlayLayout,
       setOverlayLayout,
+      reportError,
       buddyOverlay,
       cohostGate,
       cohostActionPending,

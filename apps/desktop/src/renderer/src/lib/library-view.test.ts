@@ -19,7 +19,7 @@ const session = (overrides: Partial<SessionSummary>): SessionSummary =>
     title: 'Weekly Dev Update',
     startedAt: '2026-07-01T10:00:00Z',
     status: 'completed',
-    mode: 'recording',
+    mode: 'record',
     layout: {},
     sources: {},
     healthEvents: [],
@@ -30,16 +30,34 @@ const session = (overrides: Partial<SessionSummary>): SessionSummary =>
   }) as unknown as SessionSummary
 
 describe('filter + search + sort', () => {
+  // The modes the backend writes (`output_mode` in recording.rs), plus an
+  // imported file (plan 174, E-1: the old fixtures used modes it never wrote).
   const sessions = [
-    session({ id: 'a', mode: 'recording', title: 'Weekly Dev Update' }),
-    session({ id: 'b', mode: 'streaming', title: 'Community Q&A' }),
-    session({ id: 'c', mode: 'recording-streaming', title: 'Behind the Build' })
+    session({ id: 'a', mode: 'record', title: 'Weekly Dev Update' }),
+    session({ id: 'b', mode: 'stream', title: 'Community Q&A' }),
+    session({ id: 'c', mode: 'record+stream', title: 'Behind the Build' }),
+    session({ id: 'd', mode: 'imported', title: 'Conference Talk' })
   ]
 
   it('filters by mode family', () => {
-    expect(filterLibrarySessions(sessions, 'recordings', '').map((s) => s.id)).toEqual(['a', 'c'])
+    expect(filterLibrarySessions(sessions, 'recordings', '').map((s) => s.id)).toEqual([
+      'a',
+      'c',
+      'd'
+    ])
     expect(filterLibrarySessions(sessions, 'streams', '').map((s) => s.id)).toEqual(['b', 'c'])
-    expect(filterLibrarySessions(sessions, 'all', '')).toHaveLength(3)
+    expect(filterLibrarySessions(sessions, 'all', '')).toHaveLength(4)
+  })
+
+  it('still files older rows by their old spelling', () => {
+    const older = [
+      session({ id: 'old-recording', mode: 'recording' }),
+      session({ id: 'old-stream', mode: 'streaming' })
+    ]
+    expect(filterLibrarySessions(older, 'recordings', '').map((s) => s.id)).toEqual([
+      'old-recording'
+    ])
+    expect(filterLibrarySessions(older, 'streams', '').map((s) => s.id)).toEqual(['old-stream'])
   })
 
   it('searches titles case-insensitively', () => {

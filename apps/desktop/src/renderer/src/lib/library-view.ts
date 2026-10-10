@@ -1,5 +1,6 @@
 import type { BackendConnection, RecordingStatus, SessionSummary } from '@/lib/backend'
 import { formatBytes, isActiveRecordingState } from '@/lib/format'
+import { sessionModeRecorded, sessionModeStreamed } from '@/lib/session-modes'
 import { sessionIsLive } from '../../../shared/capture-state'
 
 // Library table view logic (Library rewrite L4): filtering, sorting, search,
@@ -15,14 +16,19 @@ export const LIBRARY_FILTERS: { value: LibraryFilter; label: string }[] = [
   { value: 'streams', label: 'Streams' }
 ]
 
-export function matchesLibraryFilter(session: SessionSummary, filter: LibraryFilter): boolean {
+/** Go Live records too: a `record+stream` session is in Recordings and in
+ * Streams. */
+export function matchesLibraryFilter(
+  session: Pick<SessionSummary, 'mode'>,
+  filter: LibraryFilter
+): boolean {
   switch (filter) {
     case 'all':
       return true
     case 'recordings':
-      return session.mode.includes('recording') || session.mode === 'imported'
+      return sessionModeRecorded(session.mode)
     case 'streams':
-      return session.mode.includes('streaming')
+      return sessionModeStreamed(session.mode)
   }
 }
 
@@ -50,7 +56,7 @@ export function sortLibrarySessions(
 /** A session that went out live has a Buddy report to open (plan 119 S3):
  * stored modes are `stream` and `record+stream`, older rows `streaming`. */
 export function hasBuddyReport(session: Pick<SessionSummary, 'mode'>): boolean {
-  return session.mode.includes('stream')
+  return sessionModeStreamed(session.mode)
 }
 
 /** "tee" is the internal ffmpeg fan-out container for record+stream sessions —

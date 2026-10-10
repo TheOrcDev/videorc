@@ -8,6 +8,7 @@ import type {
   SessionSummary
 } from './backend'
 import type { EntitlementUiGate } from './entitlement-ui'
+import { SESSION_MODES } from './session-modes'
 import { VIDEORC_PREMIUM_URL } from './videorc-web-links'
 import { formatClipMarkClock } from '../../../shared/clip-marks'
 
@@ -104,7 +105,10 @@ export const CONDENSED_DEFAULT_TARGET_MINUTES = 15
 /** Recordings the picker offers, newest first. */
 export const CLEAN_CUT_PICKER_LIMIT = 20
 
-const CLEAN_CUT_SOURCE_MODES: ReadonlySet<string> = new Set(['record', 'record+stream'])
+const CLEAN_CUT_SOURCE_MODES: ReadonlySet<string> = new Set([
+  SESSION_MODES.record,
+  SESSION_MODES.recordAndStream
+])
 
 export type CleanCutEligibility = { eligible: true } | { eligible: false; reason: string }
 

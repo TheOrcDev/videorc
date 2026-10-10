@@ -53,8 +53,12 @@ import {
   type BackgroundAssetSlot,
   type BackgroundAssetSlotStatus,
   type BackgroundFit,
-  firstEmptySlotId
+  backgroundImportTarget
 } from '@/lib/background-assets'
+import {
+  BackgroundReplaceDialog,
+  type PendingBackgroundReplace
+} from '@/components/background-replace-dialog'
 import { TakeoverScreensSection } from '@/components/takeover-screens-section'
 import { cn } from '@/lib/utils'
 
@@ -93,6 +97,7 @@ export function AssetsTab(): ReactElement {
   const { registry, setRegistry } = useBackgroundAssets()
   const [removingSlotId, setRemovingSlotId] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
+  const [pendingReplace, setPendingReplace] = useState<PendingBackgroundReplace | null>(null)
   const [renamingSlotId, setRenamingSlotId] = useState<string | null>(null)
 
   // An <img> load failure is only allowed to brand a slot "Missing" when the
@@ -127,11 +132,12 @@ export function AssetsTab(): ReactElement {
       toast.error('Image import is unavailable outside Electron.')
       return
     }
-    const target = explicitSlotId ?? firstEmptySlotId(registry)
-    if (!target) {
-      toast.error('All preset slots are full. Replace one from its ⋯ menu.')
-      return
-    }
+    // Plan 174 (C-2, D14): with every slot in use, which is every fresh
+    // profile, the picked image waits for "Replace which background?".
+    const target = explicitSlotId
+      ? ({ kind: 'slot', slotId: explicitSlotId } as const)
+      : backgroundImportTarget(registry)
+    if (!target) return
 
     try {
       setImporting(true)
@@ -148,13 +154,23 @@ export function AssetsTab(): ReactElement {
         createdAt: now,
         updatedAt: now
       })
-      setRegistry((current) => importIntoSlot(current, target, asset))
+      if (target.kind === 'replace') {
+        setPendingReplace({ asset, preselectedSlotId: target.preselectedSlotId })
+        return
+      }
+      setRegistry((current) => importIntoSlot(current, target.slotId, asset))
       toast.success(`Imported ${asset.name}.`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not import the background.')
     } finally {
       setImporting(false)
     }
+  }
+
+  const replaceWithImport = (slotId: string, asset: BackgroundAsset): void => {
+    setRegistry((current) => importIntoSlot(current, slotId, asset))
+    setPendingReplace(null)
+    toast.success(`Imported ${asset.name}.`)
   }
 
   return (
@@ -285,6 +301,12 @@ export function AssetsTab(): ReactElement {
         </div>
       ) : null}
       <TakeoverScreensSection />
+      <BackgroundReplaceDialog
+        pending={pendingReplace}
+        registry={registry}
+        onCancel={() => setPendingReplace(null)}
+        onReplace={replaceWithImport}
+      />
     </div>
   )
 }

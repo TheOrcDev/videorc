@@ -1,4 +1,5 @@
 import { STORAGE_KEYS } from '@/lib/capture'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 /**
  * The page's name everywhere a user reads it (plan 164, D1): the sidebar
@@ -73,12 +74,10 @@ export function writeLastBuddyTab(
 }
 
 /**
- * Opens the Buddy page on `tab` from outside React (a toast action, a lib).
- * The shell handles it on the event every page is opened with from outside
- * React. The workspace id of the Buddy page is `ai`.
+ * Opens the Buddy page on `tab` from outside React (a toast action, a lib),
+ * through the typed workspace navigation every page is opened with from
+ * outside React. The workspace id of the Buddy page is `ai`.
  */
 export function openBuddyTab(tab: BuddyTabId): void {
-  window.dispatchEvent(
-    new CustomEvent('videorc:navigate-workspace', { detail: { tab: 'ai', buddyTab: tab } })
-  )
+  openWorkspaceTab('ai', tab)
 }

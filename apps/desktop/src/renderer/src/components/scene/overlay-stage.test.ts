@@ -5,6 +5,7 @@ import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 
 import {
   OverlayEdits,
+  overlayEditsBlockedReason,
   overlayItemFromStageId,
   overlayStageId,
   overlayStageItems,
@@ -106,5 +107,59 @@ describe('OverlayEdits', () => {
     await flush()
     expect(commit).toHaveBeenCalledTimes(1)
     expect(edits.draft).toBeNull()
+  })
+})
+
+describe('overlay failures are reported (plan 174, C-6)', () => {
+  it('reports a failed gesture once and drops its draft', async () => {
+    const offline = new Error('Backend socket is not connected.')
+    const commit = vi.fn<(layout: OverlayLayout) => Promise<void>>().mockRejectedValue(offline)
+    const failed = vi.fn()
+    const edits = new OverlayEdits(commit, () => {}, failed)
+    edits.submit(DEFAULT_OVERLAY_LAYOUT, 'captions', 'horizontal', {
+      x: 0.1,
+      y: 0.8,
+      width: 0.8,
+      height: 0.1
+    })
+    await flush()
+    await flush()
+    expect(edits.draft).toBeNull()
+    expect(failed).toHaveBeenCalledTimes(1)
+    expect(failed).toHaveBeenCalledWith(offline)
+  })
+
+  it('stays quiet about a gesture a newer intent already replaced', async () => {
+    let reject: (error: Error) => void = () => {}
+    const commit = vi.fn(
+      () =>
+        new Promise<void>((_resolve, rejectCommit) => {
+          reject = rejectCommit
+        })
+    )
+    const failed = vi.fn()
+    const edits = new OverlayEdits(commit, () => {})
+    edits.configure(commit, failed)
+    edits.submit(DEFAULT_OVERLAY_LAYOUT, 'buddy', 'horizontal', {
+      x: 0.1,
+      y: 0.1,
+      width: 0.2,
+      height: 0.2
+    })
+    await flush()
+    edits.invalidate()
+    reject(new Error('superseded'))
+    await flush()
+    await flush()
+    expect(failed).not.toHaveBeenCalled()
+  })
+
+  it('gives the overlay controls one reason while the backend is away', () => {
+    expect(overlayEditsBlockedReason('connected')).toBeNull()
+    for (const status of ['waiting', 'connecting', 'failed', 'closed'] as const) {
+      expect(overlayEditsBlockedReason(status)).toBe(
+        "Overlays can't change until the backend is connected."
+      )
+    }
   })
 })

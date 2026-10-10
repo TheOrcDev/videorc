@@ -29,6 +29,7 @@ import { missingSelection, sourceSelectPlaceholder } from '@/lib/source-select-s
 import { recordingQuality } from '@/lib/studio-session-view'
 import type { CaptionsStatus, Device } from '@/lib/backend'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
+import { pickRecordingResolution } from '@/lib/output-quality'
 import {
   buildCameraSources,
   buildCaptureSources,
@@ -225,8 +226,10 @@ export function QuickSettings(): ReactElement {
               const match = resolutions.find(
                 (resolution) => resolutionKey(resolution.width, resolution.height) === value
               )
+              // The Output page's picker (plan 174, D-8): the bitrate moves
+              // with the size, so 4K never records at the 1080p rate.
               if (match) {
-                patchVideo({ width: match.width, height: match.height })
+                patchVideo(pickRecordingResolution(captureConfig.video, match.width, match.height))
               }
             }}
           >
