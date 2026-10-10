@@ -5631,7 +5631,7 @@ async fn run_caption_session(mut session: CaptionSession) {
                 &session.session_client_id,
             );
             status.reason_code = Some("realtime-fallback".to_string());
-            status.message = Some("Captions on with higher delay.".to_string());
+            status.message = Some("Captions continue in 3-second chunks.".to_string());
             // Presentation is off: this is the shadow a later captions start
             // adopts, never a caption status the renderer sees now.
             publish_status(&session, status).await;
@@ -5653,7 +5653,7 @@ async fn run_caption_session(mut session: CaptionSession) {
                 &session.session_client_id,
             );
             status.reason_code = Some("realtime-fallback".to_string());
-            status.message = Some(format!("Captions on with higher delay: {reason}"));
+            status.message = Some(format!("Captions continue in 3-second chunks: {reason}"));
             publish_status(&session, status).await;
             run_chunked_caption_session(
                 &mut session,
@@ -7608,7 +7608,7 @@ async fn run_chunked_caption_session(
                             );
                             status.provider_ready = true;
                             status.reason_code = Some("realtime-fallback".to_string());
-                            status.message = Some("Captions on with higher delay.".to_string());
+                            status.message = Some("Captions continue in 3-second chunks.".to_string());
                             // A listen-metered answer carries Orcle's allowance,
                             // never the caption one.
                             status.remaining_seconds =
@@ -12315,7 +12315,7 @@ mod tests {
         // A realtime attempt would have said why it fell back.
         assert_eq!(
             shadow.message.as_deref(),
-            Some("Captions on with higher delay.")
+            Some("Captions continue in 3-second chunks.")
         );
         assert!(state.captions.lock().await.status.is_none());
         assert!(caption_event_names(&drain_events(&mut events)).is_empty());

@@ -86,7 +86,7 @@ function captionsStatusPresentation(
       return {
         value: 'Higher delay',
         tone: 'warn',
-        detail: status.message ?? 'Captions are continuing with a longer delay.'
+        detail: status.message ?? 'Captions are continuing in 3-second chunks.'
       }
     case 'blocked':
       return {
