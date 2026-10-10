@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactEle
 import ReactDOM from 'react-dom/client'
 import { toast } from '@/lib/toast'
 
+import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
 import { AppErrorBoundary } from '@/components/error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
 import { removeMessagesReconnectStarted } from '@/components/stream-manager/remove-messages-reconnect'
@@ -473,17 +474,15 @@ function CommentsWindowApp(): ReactElement {
   }
 
   // Buddy Live's one switch (plan 119), relayed: on means Buddy reads chat AND
-  // hears you (`listen: true`), off only stops it joining. Every way on (the
-  // status popover, the nudge, the consent CTA and the listening card) sends
-  // the same command; the consent CTA also grants cloud-AI consent in the same
-  // click. The settings are main-renderer owned, and the relay reply carries
-  // the truth back so the switch reflects what happened, not what was clicked.
-  const setBuddyLive = (on: boolean, grantConsent = false): void => {
+  // hears you (`listen: true`), off only stops it joining. The status
+  // popover's switch, the nudge and the listening card send it. The settings
+  // are main-renderer owned, and the relay reply carries the truth back so
+  // the switch reflects what happened, not what was clicked.
+  const setBuddyLive = (on: boolean): void => {
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
         enabled: on,
-        grantConsent,
         ...(on ? { listen: true } : {})
       })
       .then((state) => state && setCohost(state))
@@ -497,18 +496,39 @@ function CommentsWindowApp(): ReactElement {
       )
   }
 
+  // Cloud-AI consent (plan 174 S0.2): "Turn on cloud AI…" opens the one
+  // consent dialog, and only its Allow grants consent and turns Buddy on.
+  // Listening is never in that click: Studio writes `listen` only when a
+  // command names it, and the listening card asks for it next.
+  const [buddyConsentAsked, setBuddyConsentAsked] = useState(false)
+  const answerBuddyConsent = (accepted: boolean): void => {
+    setBuddyConsentAsked(false)
+    if (!accepted) return
+    void window.videorc
+      ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled: true, grantConsent: true })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toast.error(error instanceof Error ? error.message : 'Could not turn on Buddy.', {
+          id: 'cohost-enable'
+        })
+      )
+  }
+
   // Plan 164 S-D6: the pane's mode control and behaviour switches. The
-  // mode is the pane's enable: Suggest or Auto turns the Buddy on (the same
-  // {enabled, listen} save as the switch), Off turns it off; a behaviour
-  // switch keeps `enabled` as it is. The templates and cooldowns live in
-  // the Buddy tab and ride along untouched (Studio merges the block).
+  // mode is the pane's enable: Suggest or Auto turns the Buddy on (with
+  // listening, the same as the switch, when it was off), Off turns it off;
+  // a behaviour switch keeps `enabled` as it is and never names listening
+  // (plan 174 S0.2), so Greetings cannot turn the microphone back on. The
+  // templates and cooldowns live in the Buddy tab and ride along untouched
+  // (Studio merges the block).
   const setBuddyAutoChat = (patch: CohostAutoChatRelayPatch): void => {
     const enabled = patch.mode === undefined ? cohost.enabled : patch.mode !== 'off'
+    const turningOn = enabled && !cohost.enabled
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
         enabled,
-        ...(enabled && patch.mode !== undefined ? { listen: true } : {}),
+        ...(turningOn ? { listen: true } : {}),
         autoChat: patch
       })
       .then((state) => state && setCohost(state))
@@ -603,7 +623,7 @@ function CommentsWindowApp(): ReactElement {
             void sendCohostAction('author-greeted')(entry.authorKey)
           }
           onCohostEnable={(enabled) => setBuddyLive(enabled)}
-          onCohostEnableConsent={() => setBuddyLive(true, true)}
+          onCohostEnableConsent={() => setBuddyConsentAsked(true)}
           onCohostListenOn={() => setBuddyLive(true)}
           onCohostNudgeDismiss={() => {
             setCohostNudgeDismissed(true)
@@ -816,6 +836,7 @@ function CommentsWindowApp(): ReactElement {
           }
         />
       </ChatGifModeProvider>
+      <BuddyConsentDialog open={buddyConsentAsked} onAnswer={answerBuddyConsent} />
       {/* sonner needs its own host here because this is a separate React root;
           with no theme provider it follows prefers-color-scheme, like the page. */}
       <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" visibleToasts={3} />

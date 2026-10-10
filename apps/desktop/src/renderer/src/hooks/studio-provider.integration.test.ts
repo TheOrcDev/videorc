@@ -8115,43 +8115,107 @@ describe('real StudioProvider lifecycle', () => {
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
   }, 15_000)
 
-  it('applies the same Buddy Live save to every Comments-window way on', async () => {
+  // Plan 174 S0.2: a Comments-window command saves only what it names. The
+  // relay never adds listening on its own, so consent and the microphone are
+  // never one click.
+  it('saves only what a Comments-window command names: consent without listening', async () => {
     const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
       await mountBuddyLiveProvider('0')
 
-    // The consent CTA: grant consent and turn on in the same click.
+    // The consent dialog's Allow: consent and Buddy on, nothing about the mic.
     await act(async () => {
-      emitApi('onCohostEnableRequest', {
-        requestId: 'enable-1',
-        enabled: true,
-        grantConsent: true,
-        listen: true
-      })
+      emitApi('onCohostEnableRequest', { requestId: 'enable-1', enabled: true, grantConsent: true })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(settingsWrites()).toEqual([{ enabled: true }])
     expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
       requestId: 'enable-1',
       ok: true,
-      value: expect.objectContaining({ consented: true, enabled: true, listen: true })
+      value: expect.objectContaining({ consented: true, enabled: true, listen: false })
     })
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
 
-    // The status popover's switch, off: `enabled` alone.
+    // The listening card, with Buddy already on: `listen` alone.
     await act(async () => {
-      emitApi('onCohostEnableRequest', { requestId: 'enable-2', enabled: false })
+      emitApi('onCohostEnableRequest', { requestId: 'enable-2', enabled: true, listen: true })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
-    expect(settingsWrites().at(-1)).toEqual({ enabled: false })
+    expect(settingsWrites().at(-1)).toEqual({ listen: true })
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
 
-    // An `enabled`-only on (the nudge's old shape) still turns listening on.
+    // The status popover's switch, off: `enabled` alone; listening stays.
     await act(async () => {
-      emitApi('onCohostEnableRequest', { requestId: 'enable-3', enabled: true })
+      emitApi('onCohostEnableRequest', { requestId: 'enable-3', enabled: false })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
+    expect(settingsWrites().at(-1)).toEqual({ enabled: false })
+    expect(latest()!.core.cohostSettings?.listen).toBe(true)
+
+    // The one switch on again (the popover, the nudge): the window names
+    // listening, and the save is the Buddy tab's.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'enable-4', enabled: true, listen: true })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 4)
     expect(settingsWrites().at(-1)).toEqual({ enabled: true, listen: true })
-    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
     expect(latest()!.core.buddyConsentRequested).toBe(false)
+  }, 15_000)
+
+  it('keeps listening off when a Greetings switch rides the relay', async () => {
+    const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
+      await mountBuddyLiveProvider('1')
+
+    // Buddy on without listening (a mode change the window sent no `listen` for).
+    await act(async () => {
+      emitApi('onCohostEnableRequest', {
+        requestId: 'mode-1',
+        enabled: true,
+        autoChat: { mode: 'suggest' }
+      })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
+    expect(settingsWrites().at(-1)).toEqual({
+      enabled: true,
+      autoChat: expect.objectContaining({ mode: 'suggest' })
+    })
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
+
+    // Greetings on: `{autoChat}` alone, the templates and cooldowns kept.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', {
+        requestId: 'greetings-1',
+        enabled: true,
+        autoChat: { greetings: true }
+      })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
+    expect(settingsWrites().at(-1)).toEqual({
+      autoChat: {
+        mode: 'suggest',
+        greetings: { enabled: true, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
+    })
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
+    expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
+      requestId: 'greetings-1',
+      ok: true,
+      value: expect.objectContaining({ enabled: true, listen: false })
+    })
+
+    // A command that changes nothing saves nothing, and still answers.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'same-1', enabled: true })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
+    expect(settingsWrites()).toHaveLength(2)
+    expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
+      requestId: 'same-1',
+      ok: true,
+      value: expect.objectContaining({ enabled: true, listen: false })
+    })
   }, 15_000)
 
   // Stop never starts a cloud job on its own: a streamed, recorded session

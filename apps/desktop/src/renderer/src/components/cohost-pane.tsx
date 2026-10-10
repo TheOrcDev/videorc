@@ -41,6 +41,7 @@ import {
   BUDDY_REACTION_CHIPS,
   BUDDY_STILL_PACK_ID
 } from '@/lib/buddy-pet-view'
+import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
 import { activeCohostSpotlight } from '@/lib/cohost-marks'
@@ -304,19 +305,33 @@ export function CohostPane({
   }
 
   if (mode.kind === 'consent') {
+    // The whole disclosure, wrapping (plan 174 S0.2): the one list of cloud
+    // uses consent covers, and an action that opens the consent dialog.
+    // Nothing is granted by this click.
     return (
       <>
         {header}
-        <CohostNotice label="Buddy">
-          <span className="min-w-0 flex-1 truncate" title={mode.reason}>
-            {mode.reason}
-          </span>
-          {onEnableConsent ? (
-            <Button size="xs" variant="ghost" onClick={onEnableConsent}>
-              Turn on cloud AI
-            </Button>
-          ) : null}
-        </CohostNotice>
+        <div className="shrink-0 p-2" data-slot="cohost-consent">
+          <Alert aria-label="Buddy needs cloud AI" role="group">
+            <BuddyIcon aria-hidden weight="duotone" />
+            <AlertTitle className="text-xs">Buddy needs cloud AI</AlertTitle>
+            <AlertDescription className="text-xs">
+              <ul className="flex list-disc flex-col gap-0.5 pl-4">
+                {CLOUD_AI_USES.map((use) => (
+                  <li key={use}>{use}</li>
+                ))}
+              </ul>
+              <p className="text-subtle">{CLOUD_AI_KEEPS}</p>
+            </AlertDescription>
+            {onEnableConsent ? (
+              <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
+                <Button size="xs" type="button" variant="secondary" onClick={onEnableConsent}>
+                  Turn on cloud AI…
+                </Button>
+              </div>
+            ) : null}
+          </Alert>
+        </div>
       </>
     )
   }

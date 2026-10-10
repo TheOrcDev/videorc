@@ -1,6 +1,7 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { BuddyIcon } from '@/components/icons'
+import { removalKeyAnswer } from '@/components/stream-manager/removal-cards'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -12,34 +13,81 @@ import { cn } from '@/lib/utils'
 /** Recent lines shown under the cards. */
 const RECENT_MAX = 4
 
+/** The cards still waiting on the streamer: proposed and not yet expired. */
+export function openProposedUtterances(
+  utterances: readonly CohostUtterance[],
+  nowMs: number
+): CohostUtterance[] {
+  return utterances.filter(
+    (utterance) =>
+      utterance.status === 'proposed' &&
+      (!utterance.expiresAt || Date.parse(utterance.expiresAt) > nowMs)
+  )
+}
+
+export type UtteranceKeyAnswer = 'send' | 'dismiss'
+
+/**
+ * What a window-level key means for the newest proposed card, or null to
+ * leave it alone (plan 174 S0.2). ↵ sends and ⌫ dismisses, both on the terms
+ * of a removal card's Enter (`removalKeyAnswer`): only while nothing has the
+ * keyboard, so a focused chat row, menu or switch never posts as you; never
+ * with a modifier, a held key or during IME composition; and never once
+ * another handler took the key.
+ */
+export function utteranceKeyAnswer(
+  event: Parameters<typeof removalKeyAnswer>[0],
+  activeElement: Element | null,
+  body: Element | null
+): UtteranceKeyAnswer | null {
+  const answer =
+    event.key === 'Enter'
+      ? 'send'
+      : event.key === 'Backspace' || event.key === 'Delete'
+        ? 'dismiss'
+        : null
+  if (!answer) return null
+  const { defaultPrevented, repeat, isComposing, metaKey, ctrlKey, altKey, shiftKey } = event
+  const asEnter = { key: 'Enter', defaultPrevented, repeat, isComposing, metaKey, ctrlKey, altKey }
+  return removalKeyAnswer({ ...asEnter, shiftKey }, activeElement, body) === 'confirm'
+    ? answer
+    : null
+}
+
 /**
  * The Buddy's proposed cards (plan 164 S-D2, Suggest mode): what it wants to
  * post as you, with Send and Dismiss, then the last few lines it said. The
  * newest proposed card takes ↵ (send) and ⌫ (dismiss) while nothing else has
- * the keyboard; every card keeps its buttons.
+ * the keyboard and the pane is on screen; every card keeps its buttons.
  */
 export function BuddyUtteranceCards({
   utterances,
   pending = false,
+  active = false,
   onApprove,
   onDismiss
 }: {
   utterances: readonly CohostUtterance[]
   pending?: boolean
+  /** The Buddy pane is on screen. The keys answer only then: a card behind
+   * a tab never takes ↵ from whatever the streamer is doing. */
+  active?: boolean
   onApprove: (utterance: CohostUtterance) => void
   onDismiss: (utterance: CohostUtterance) => void
 }): ReactElement | null {
   const [nowMs, setNowMs] = useState(() => Date.now())
-  const proposed = utterances.filter(
-    (utterance) =>
-      utterance.status === 'proposed' &&
-      (!utterance.expiresAt || Date.parse(utterance.expiresAt) > nowMs)
-  )
+  const proposed = openProposedUtterances(utterances, nowMs)
   const recent = utterances
     .filter((utterance) => utterance.status !== 'proposed' && utterance.status !== 'dismissed')
     .slice(-RECENT_MAX)
     .reverse()
   const newest = proposed.at(-1) ?? null
+  const onApproveRef = useRef(onApprove)
+  const onDismissRef = useRef(onDismiss)
+  useEffect(() => {
+    onApproveRef.current = onApprove
+    onDismissRef.current = onDismiss
+  }, [onApprove, onDismiss])
 
   useEffect(() => {
     if (proposed.length === 0) return
@@ -47,23 +95,19 @@ export function BuddyUtteranceCards({
     return () => clearInterval(timer)
   }, [proposed.length])
 
+  // Bubble phase, after the composer, a menu or a focused row had its say.
   useEffect(() => {
-    if (!newest || pending) return
+    if (!newest || pending || !active) return
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
-      const target = event.target as Element | null
-      if (target?.closest('input, textarea, [contenteditable="true"], [role="dialog"]')) return
-      if (event.key === 'Enter') {
-        event.preventDefault()
-        onApprove(newest)
-      } else if (event.key === 'Backspace' || event.key === 'Delete') {
-        event.preventDefault()
-        onDismiss(newest)
-      }
+      const answer = utteranceKeyAnswer(event, document.activeElement, document.body)
+      if (!answer) return
+      event.preventDefault()
+      if (answer === 'send') onApproveRef.current(newest)
+      else onDismissRef.current(newest)
     }
-    window.addEventListener('keydown', onKeyDown, true)
-    return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [newest, onApprove, onDismiss, pending])
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [active, newest, pending])
 
   if (proposed.length === 0 && recent.length === 0) return null
 
@@ -95,6 +139,7 @@ export function BuddyUtteranceCards({
               </AlertDescription>
               <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
                 <Button
+                  data-testid="buddy-utterance-send"
                   disabled={pending}
                   size="xs"
                   type="button"
@@ -105,6 +150,7 @@ export function BuddyUtteranceCards({
                   {utterance === newest ? <Kbd>↵</Kbd> : null}
                 </Button>
                 <Button
+                  data-testid="buddy-utterance-dismiss"
                   disabled={pending}
                   size="xs"
                   type="button"

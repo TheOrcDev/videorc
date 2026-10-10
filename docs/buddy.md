@@ -266,10 +266,14 @@ in Suggest. Choosing Auto adds a second click under the sentence "Automatic
 messages are sent without asking you first." The window remembers the
 consent (`videorc.buddyAutoChatConsent`); Auto asks every time.
 
-Suggest or Auto saves `{enabled: true, listen: true}` with the mode, so the
-Buddy reads your chat and hears you; the Stream Manager grants Cloud AI
-consent in the same click where it is needed. Off saves `{enabled: false}`
-and `mode: off`; your other settings stay as they are.
+Suggest or Auto from Off saves `{enabled: true, listen: true}` with the mode,
+so the Buddy reads your chat and hears you. Off saves `{enabled: false}` and
+`mode: off`; your other settings stay as they are. A behaviour switch
+(Greetings, Answers, Banter) saves `{autoChat}` alone: it never turns the
+Buddy, or its microphone, back on (plan 174 S0.2). Where Cloud AI consent is
+missing, the Buddy pane says what consent covers and "Turn on cloud AI…"
+opens the consent dialog; its Allow grants consent and turns the Buddy on,
+and the listening card then asks about the microphone separately.
 
 The Buddy's chat producer starts with the stream's live chat and stops with
 it. The Buddy tab's status line says where it stands: Off; On, joins your
@@ -457,9 +461,12 @@ cloud use.
 
 Settings and live state:
 
-- `cohost.settings.get` and `cohost.settings.set`; Stream Manager sends
-  `{enabled: true, listen: true, autoChat: {...}}` or `{enabled: false,
-autoChat: {mode: 'off'}}`.
+- `cohost.settings.get` and `cohost.settings.set`; a Stream Manager command
+  saves `cohostEnableRelayPatch` (`lib/cohost-state.ts`): `enabled` only
+  when it changes, `listen: true` only when the command names it with the
+  Buddy on, `autoChat` when it carries one. So a mode change from Off saves
+  `{enabled: true, listen: true, autoChat: {...}}`, a behaviour switch
+  `{autoChat: {...}}`, and Off `{enabled: false, autoChat: {mode: 'off'}}`.
 - The `cohost.state` event carries the live pane, plus `utterances[]`
   (oldest first, at most 20, omitted while empty) and `autoChatSends`
   (omitted while zero).
