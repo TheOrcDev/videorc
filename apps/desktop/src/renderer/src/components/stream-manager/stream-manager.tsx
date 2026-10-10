@@ -18,7 +18,10 @@ import { toast } from '@/lib/toast'
 
 import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
 import { BuddyChatControls } from '@/components/stream-manager/buddy-chat-controls'
-import { BuddyUtteranceCards } from '@/components/stream-manager/buddy-utterance-cards'
+import {
+  BuddyUtteranceCards,
+  openProposedUtterances
+} from '@/components/stream-manager/buddy-utterance-cards'
 import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
 import { ActivityPane } from '@/components/stream-manager/activity-pane'
 import {
@@ -121,6 +124,8 @@ import { latestModerationOperationByMessage } from '../../../../shared/chat-mode
 const BUDDY_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
 
 const NO_MODERATION_OPERATIONS: readonly ModerationOperation[] = []
+const NO_COHOST_UTTERANCES: readonly CohostUtterance[] = []
+const NO_IDS: readonly string[] = []
 
 /** True while the element is laid out and on screen (a hidden pane is not). */
 function usePaneVisible(ref: RefObject<HTMLElement | null>): boolean {
@@ -426,7 +431,18 @@ export function StreamManager({
     command !== null && command.id === commandAnsweringId
   )
   const commandCardId = commandChooser || commandConfirm ? (command?.id ?? '') : ''
-  const buddyCardsActive = removalPane.active || commandStrip !== null || commandCardId !== ''
+  // The Buddy's proposed posts (plan 164 S-D2, Suggest): open while proposed
+  // and not expired, and only live, like the cards themselves.
+  const proposedUtteranceIds = live
+    ? openProposedUtterances(cohostState?.utterances ?? NO_COHOST_UTTERANCES, nowMs).map(
+        (utterance) => utterance.id
+      )
+    : NO_IDS
+  const buddyCardsActive =
+    removalPane.active ||
+    commandStrip !== null ||
+    commandCardId !== '' ||
+    proposedUtteranceIds.length > 0
   useEffect(() => {
     const timer = setInterval(
       () => setNowMs(Date.now()),
@@ -579,12 +595,14 @@ export function StreamManager({
     messages.some(
       (message) => message.id === liveHighlightId && isActivityOnlyEvent(message.eventType)
     )
+  // New questions and the Buddy's proposed posts (plan 174 S0.2) count while
+  // the pane sits behind a tab: a Suggest card is never a surprise.
   const buddyUnseen = useUnseen(
     undefined,
     `${arrivalKey}:${cohostSensitivity}`,
     buddyVisible,
     () => false,
-    shownCohostState?.questions.map((question) => question.id) ?? []
+    [...(shownCohostState?.questions.map((question) => question.id) ?? []), ...proposedUtteranceIds]
   )
 
   const mentionNames = useMemo(
@@ -639,13 +657,14 @@ export function StreamManager({
     setCohostExpand((value) => value + 1)
   }, [])
 
-  // A new Buddy removal card brings the Buddy pane forward when it sits behind
-  // a tab, without taking focus from the composer. Once the cards and their
-  // result lines are gone, the pane the streamer was on comes back, unless
-  // they moved on themselves.
+  // A new Buddy card (a removal, a voice command, or a proposed post) brings
+  // the Buddy pane forward when it sits behind a tab, without taking focus
+  // from the composer. Once the cards and their result lines are gone, the
+  // pane the streamer was on comes back, unless they moved on themselves.
   const buddyCardIds = [
     ...removalPane.cards.map((card) => card.operationId),
-    ...(commandCardId ? [commandCardId] : [])
+    ...(commandCardId ? [commandCardId] : []),
+    ...proposedUtteranceIds
   ].join(' ')
   const seenRemovalCardsRef = useRef<Set<string>>(new Set())
   const revealedFromRef = useRef<{
@@ -768,9 +787,11 @@ export function StreamManager({
         />
       ) : null}
       {/* Plan 164 S-D2: what the Buddy wants to post as you (Suggest), and
-          the last lines it said. */}
+          the last lines it said. Its keys answer only while the pane is on
+          screen (plan 174 S0.2). */}
       {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
         <BuddyUtteranceCards
+          active={buddyVisible}
           pending={cohostActionPending}
           utterances={shownCohostState?.utterances ?? []}
           onApprove={onCohostUtteranceApprove}

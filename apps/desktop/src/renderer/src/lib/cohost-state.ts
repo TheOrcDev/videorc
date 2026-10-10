@@ -1,9 +1,11 @@
 import type {
   CohostAutoChat,
   CohostAutoChatRelayPatch,
+  CohostEnableCommand,
   CohostErrorDetail,
   CohostQuestion,
   CohostReason,
+  CohostSettings,
   CohostSettingsPatch,
   CohostState
 } from './backend'
@@ -15,10 +17,37 @@ import type {
 /**
  * Buddy Live's one switch (plan 119): on means Buddy reads chat AND hears you,
  * in one save; off only stops Buddy joining and leaves listening as it was.
- * The Buddy tab and every Comments-window way on write this one patch.
+ * The Buddy tab's consent dialog writes this one patch; a Stream Manager
+ * command goes through `cohostEnableRelayPatch` instead.
  */
 export function buddyLiveSettingsPatch(on: boolean): CohostSettingsPatch {
   return on ? { enabled: true, listen: true } : { enabled: false }
+}
+
+/**
+ * The save one Stream Manager enable command makes (plan 174 S0.2). The
+ * relay never adds listening on its own:
+ *
+ * - `enabled` is written only when the command changes it, so a behaviour
+ *   switch (Greetings, Answers, Banter) saves `{autoChat}` alone and never
+ *   turns Buddy, or its microphone, back on.
+ * - `listen: true` is written only when the command names it and Buddy is on
+ *   after the save: the one switch turning Buddy on (plan 119), the mode
+ *   control's off to Suggest or Auto, or the listening card while Buddy
+ *   already runs (plan 068 D3). Off leaves listening as it was.
+ *
+ * An empty patch means nothing to save: the caller answers with what it has.
+ */
+export function cohostEnableRelayPatch(
+  current: Pick<CohostSettings, 'enabled'> | null,
+  command: Pick<CohostEnableCommand, 'enabled' | 'listen'>,
+  autoChat: CohostAutoChat | null
+): CohostSettingsPatch {
+  const patch: CohostSettingsPatch = {}
+  if (!current || current.enabled !== command.enabled) patch.enabled = command.enabled
+  if (command.enabled && command.listen === true) patch.listen = true
+  if (autoChat) patch.autoChat = autoChat
+  return patch
 }
 
 /** The stored `autoChat` when none has been loaded yet: everything off. */

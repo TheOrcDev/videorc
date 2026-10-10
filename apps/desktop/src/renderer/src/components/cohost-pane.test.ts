@@ -7,6 +7,7 @@ import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
 import { CohostQuestionRow } from '@/components/cohost-question-row'
 import { Command } from '@/components/ui/command'
 import type { CohostFlag, CohostQuestion, CohostState } from '@/lib/backend'
+import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
@@ -355,9 +356,16 @@ describe('CohostPane', () => {
     expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
-  it('asks for cloud-AI consent instead of quietly doing nothing', () => {
+  it('asks for cloud-AI consent with the whole disclosure and a way to the dialog', () => {
     const markup = renderPane({ consented: false, onEnableConsent: () => undefined })
-    expect(markup).toContain('Turn on cloud AI')
+    expect(markup).toContain('data-slot="cohost-consent"')
+    expect(markup).toContain('Buddy needs cloud AI')
+    // Plan 174 S0.2: every cloud use, wrapping, never a truncated line with
+    // the rest in a tooltip; the action opens the consent dialog.
+    for (const use of CLOUD_AI_USES) expect(markup).toContain(use.replaceAll("'", '&#x27;'))
+    expect(markup).toContain(CLOUD_AI_KEEPS.replaceAll("'", '&#x27;'))
+    expect(markup).not.toContain('truncate')
+    expect(markup).toContain('Turn on cloud AI…')
     expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 

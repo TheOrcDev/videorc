@@ -16,6 +16,7 @@ import { BuddyLibrarySection } from '@/components/buddy-library-section'
 import { BuddyPersonaSection } from '@/components/buddy-persona-section'
 import { BuddyPetCreator } from '@/components/buddy-pet-creator'
 import { BuddyPetSettings } from '@/components/buddy-pet-settings'
+import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
 import { BuddyEmblem } from '@/components/buddy-emblem'
 import { BuddyReportCard } from '@/components/buddy-report-card'
 import { BuddyVoiceCommands } from '@/components/buddy-voice-commands'
@@ -24,14 +25,6 @@ import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
 import {
   Field,
   FieldContent,
@@ -242,7 +235,7 @@ export function BuddyTab({
           </TabsContent>
         </div>
       </Tabs>
-      <BuddyConsentDialog />
+      <BuddyTabConsentDialog />
     </>
   )
 }
@@ -514,11 +507,12 @@ function CloudAiSection(): ReactElement {
 }
 
 /**
- * The consent Buddy Live asks for when it is turned on without it. Accepting
- * grants cloud-AI consent, then makes the one settings save; declining
- * changes nothing. The safe choice has the focus.
+ * The consent Buddy Live asks for when it is turned on without it: the one
+ * dialog the Stream Manager opens too (`components/buddy-consent-dialog.tsx`).
+ * Accepting grants cloud-AI consent, then makes the one settings save;
+ * declining changes nothing.
  */
-function BuddyConsentDialog(): ReactElement {
+function BuddyTabConsentDialog(): ReactElement {
   const { buddyConsentRequested, answerBuddyConsent } = useStudioCore()
   const answer = (accepted: boolean): void => {
     void answerBuddyConsent(accepted).catch((error: unknown) =>
@@ -527,42 +521,5 @@ function BuddyConsentDialog(): ReactElement {
       })
     )
   }
-  return (
-    <Dialog
-      open={buddyConsentRequested}
-      onOpenChange={(open) => {
-        if (!open) answer(false)
-      }}
-    >
-      <DialogContent showCloseButton={false}>
-        <DialogHeader>
-          {/* Buddy's emblem leads, the way the Videorc logo leads
-              permissions onboarding (plan 149). */}
-          <div className="flex items-center gap-3">
-            <BuddyEmblem size="lg" />
-            <div className="flex flex-col gap-1">
-              <DialogTitle>Turn on Buddy Live?</DialogTitle>
-              <DialogDescription>
-                Buddy uses Videorc&apos;s cloud AI while you&apos;re live.
-              </DialogDescription>
-            </div>
-          </div>
-        </DialogHeader>
-        <ul className="flex list-disc flex-col gap-1 pl-4 text-sm text-muted-foreground">
-          {CLOUD_AI_USES.map((use) => (
-            <li key={use}>{use}</li>
-          ))}
-        </ul>
-        <p className="text-xs text-subtle">{CLOUD_AI_KEEPS}</p>
-        <DialogFooter>
-          <Button type="button" variant="ghost" onClick={() => answer(false)}>
-            Not now
-          </Button>
-          <Button type="button" onClick={() => answer(true)}>
-            Allow and turn on
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
+  return <BuddyConsentDialog open={buddyConsentRequested} onAnswer={answer} />
 }

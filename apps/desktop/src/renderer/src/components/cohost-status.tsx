@@ -135,7 +135,7 @@ export function CohostStatus({
                   onEnableConsent()
                 }}
               >
-                Turn on cloud AI
+                Turn on cloud AI…
               </Button>
             ) : null}
           </div>

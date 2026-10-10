@@ -416,6 +416,7 @@ import {
 } from '@/lib/activity-auto-highlight'
 import {
   applyCohostState,
+  cohostEnableRelayPatch,
   cohostErrorToast,
   cohostHighlightMessageId,
   cohostStoppedToast,
@@ -4660,27 +4661,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void window.videorc?.pushCohostWindowState?.(cohostWindowState)
   }, [cohostWindowState])
 
-  // Buddy Live's one switch from the Comments window (plan 119): its presence
-  // popover, nudge, consent CTA and one-time listening card. On is the same
-  // single `{enabled: true, listen: true}` save as the Buddy tab (the window
-  // sends `listen: true` too), off only `{enabled: false}`. The settings and
-  // cloud-AI consent are main-renderer owned, so the window asks and gets the
-  // resolved window state back; its consent CTA grants consent in the click.
+  // Buddy's settings from the Comments window (plan 119): its presence
+  // popover, nudge, consent dialog and one-time listening card, and the chat
+  // mode and behaviour switches (plan 164 S-D6). The settings and cloud-AI
+  // consent are main-renderer owned, so the window asks and gets the resolved
+  // window state back. The save is `cohostEnableRelayPatch` (plan 174 S0.2):
+  // `enabled` only when it changes and `listen: true` only when the command
+  // names it, so a behaviour switch saves `{autoChat}` alone and the consent
+  // dialog's accept grants consent without turning listening on.
   useEffect(() => {
     const off = window.videorc?.onCohostEnableRequest?.((command: CohostEnableCommand) => {
       void (async () => {
         if (command.grantConsent === true) setAiConsent(true)
         if (!client) throw new Error('Backend socket is not connected.')
-        // Plan 164 S-D6: the Stream Manager's mode control and behaviour
-        // switches ride the same save, merged into the stored block so the
-        // templates and cooldowns stay.
+        // The mode control and behaviour switches ride the same save, merged
+        // into the stored block so the templates and cooldowns stay.
         const autoChat = command.autoChat
           ? mergeAutoChatRelayPatch(cohostSettingsRef.current?.autoChat ?? null, command.autoChat)
           : null
-        const next = await client.request<CohostSettings>('cohost.settings.set', {
-          ...buddyLiveSettingsPatch(command.enabled),
-          ...(autoChat ? { autoChat } : {})
-        })
+        const current = cohostSettingsRef.current
+        const patch = cohostEnableRelayPatch(current, command, autoChat)
+        const next =
+          current && Object.keys(patch).length === 0
+            ? current
+            : await client.request<CohostSettings>('cohost.settings.set', patch)
         setCohostSettings(next)
         return {
           ...cohostWindowStateRef.current,
