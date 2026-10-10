@@ -273,7 +273,9 @@ export function VideoSources(): ReactElement {
             : selectedDeviceStatus(deviceList.devices, sources.cameraId),
           preview: previewCameraStatus
         }),
-        facts: cameraFacts(previewCameraStatus),
+        // Facts describe the selected source only (the synthetic screen and a
+        // camera turned Off leave the picker saying None or Off).
+        facts: sources.cameraId ? cameraFacts(previewCameraStatus) : null,
         shortfall: shortfall ? cameraFormatShortfallMessage(shortfall) : null,
         switchStatus: <SourceSwitchStatus kind="camera" />,
         onChange: switchCamera
@@ -308,7 +310,7 @@ export function VideoSources(): ReactElement {
           device: selectedDeviceStatus(deviceList.devices, selectedCaptureId),
           preview: previewScreenStatus
         }),
-        facts: screenFacts(previewScreenStatus),
+        facts: selectedCaptureId ? screenFacts(previewScreenStatus) : null,
         switchStatus: <SourceSwitchStatus kind="capture" />,
         onChange: switchCapture
       }}
