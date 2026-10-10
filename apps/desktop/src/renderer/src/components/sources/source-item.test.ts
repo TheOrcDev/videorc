@@ -61,7 +61,7 @@ describe('SourceItem (plan 173)', () => {
     expect(closed).toMatch(/aria-expanded="false"/)
     expect(closed).not.toContain('rare settings')
     expect(render()).not.toContain('More Microphone settings')
-    expect(render()).not.toContain('data-slot="source-item-more"')
+    expect(render()).not.toContain('data-testid="source-item-more"')
   })
 
   it('renders More when opened, linked to its chevron', () => {

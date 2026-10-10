@@ -159,7 +159,7 @@ export function SourceItem({
         {more ? (
           <CollapsibleContent
             className="flex min-w-0 flex-col gap-3 border-t border-border py-3 pr-3 pl-10.5"
-            data-slot="source-item-more"
+            data-testid="source-item-more"
             id={moreId}
           >
             {more}
