@@ -10,6 +10,7 @@ import {
   mediaErrorCopy,
   mediaTimeHasHours,
   playerKeyAction,
+  playheadValueText,
   sessionMediaRefusalCopy
 } from './session-player-view'
 
@@ -42,6 +43,16 @@ describe('formatMediaTime', () => {
     expect(formatMediaTime(-5_000, false)).toBe('00:00')
     expect(formatMediaTime(Number.NaN, true)).toBe('0:00:00')
     expect(formatMediaTime(Number.POSITIVE_INFINITY, false)).toBe('00:00')
+  })
+})
+
+describe('playheadValueText', () => {
+  it('speaks the playhead as "2:05 of 41:10", never raw milliseconds (plan 174 S0.5)', () => {
+    expect(playheadValueText(125_000, 2_470_000)).toBe('2:05 of 41:10')
+    expect(playheadValueText(0, 2_470_000)).toBe('0:00 of 41:10')
+    // From an hour on, both sides carry hours, as on screen.
+    expect(playheadValueText(125_000, 3_661_000)).toBe('0:02:05 of 1:01:01')
+    expect(playheadValueText(Number.NaN, 0)).toBe('0:00 of 0:00')
   })
 })
 

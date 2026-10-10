@@ -181,7 +181,7 @@ export function BuddyVoiceCommands({
               </div>
             </Field>
             <Field>
-              <FieldLabel htmlFor="buddy-remove-confirm">Before Buddy removes a comment</FieldLabel>
+              <FieldLabel>Before Buddy removes a comment</FieldLabel>
               <FieldDescription>
                 {REMOVE_CONFIRM_DESCRIPTIONS[removeConfirm]} {YOUTUBE_ALWAYS_CONFIRMS}
               </FieldDescription>

@@ -107,7 +107,7 @@ export function BuddyPersonaSection(): ReactElement | null {
         <BuddyPersonalityField persona={persona} onSave={saveQuietly} />
 
         <Field>
-          <FieldLabel htmlFor="buddy-bubble-style">Bubble</FieldLabel>
+          <FieldLabel>Bubble</FieldLabel>
           <FieldDescription>
             How your Buddy talks on stream: no voice, a comic bubble above it.
           </FieldDescription>

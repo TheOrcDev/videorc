@@ -4,6 +4,7 @@ import * as React from 'react'
 import { Select as SelectPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
+import { useFieldControlId } from '@/components/ui/field-context'
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from '@/components/icons'
 function containWheel(event: React.WheelEvent): void {
   event.stopPropagation()
@@ -31,12 +32,15 @@ function SelectTrigger({
   className,
   size = 'default',
   children,
+  id,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Trigger> & {
   size?: 'sm' | 'default'
 }) {
+  const controlId = useFieldControlId(id)
   return (
     <SelectPrimitive.Trigger
+      id={controlId}
       data-slot="select-trigger"
       data-size={size}
       className={cn(

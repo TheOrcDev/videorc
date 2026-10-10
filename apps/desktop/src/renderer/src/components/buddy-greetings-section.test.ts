@@ -72,6 +72,13 @@ function row(kind: string): HTMLElement {
   return element!
 }
 
+/** The row's title button: it opens and closes the editor (plan 174 S0.5). */
+function toggle(kind: string): HTMLButtonElement {
+  const button = row(kind).querySelector<HTMLButtonElement>('[data-slot="list-row-button"]')
+  expect(button).toBeTruthy()
+  return button!
+}
+
 function warnings(): string[] {
   return [...document.querySelectorAll('[data-slot="buddy-greeting-warning"]')].map(
     (note) => note.textContent ?? ''
@@ -106,7 +113,7 @@ describe('Greetings editor (plan 164 S-D5)', () => {
       { id: 't1', kind: 'follow', text: 'Welcome {nam}!', state: 'talk', enabled: true }
     ])
     expect(row('follow').textContent).toContain('Welcome {nam}!')
-    await act(async () => row('follow').click())
+    await act(async () => toggle('follow').click())
     expect(document.querySelector('[data-slot="buddy-greeting-preview"]')?.textContent).toContain(
       'Welcome {nam}!'
     )
@@ -116,13 +123,13 @@ describe('Greetings editor (plan 164 S-D5)', () => {
   it('warns when the text exceeds a cap on an enabled platform (X takes 140)', async () => {
     const text = `Welcome {name}! ${'x'.repeat(150)}`
     await render([{ id: 't1', kind: 'follow', text, state: 'talk', enabled: true }])
-    await act(async () => row('follow').click())
+    await act(async () => toggle('follow').click())
     expect(warnings()).toEqual([`X takes 140 characters; this one is ${20 + 150}.`])
     // Limited to Twitch, the same text is fine.
     await render([
       { id: 't1', kind: 'follow', platform: 'twitch', text, state: 'talk', enabled: true }
     ])
-    await act(async () => row('follow').click())
+    await act(async () => toggle('follow').click())
     expect(warnings()).toEqual([])
   })
 
@@ -130,7 +137,7 @@ describe('Greetings editor (plan 164 S-D5)', () => {
     await render([
       { id: 't1', kind: 'raid', text: '{name} brings {count}', state: 'laugh', enabled: true }
     ])
-    await act(async () => row('raid').click())
+    await act(async () => toggle('raid').click())
     const textarea = document.querySelector('textarea') as HTMLTextAreaElement
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
@@ -148,6 +155,28 @@ describe('Greetings editor (plan 164 S-D5)', () => {
       text: '{name} raids with {count}!',
       state: 'laugh'
     })
+  })
+
+  it('opens from its title button, the switch beside it, never inside it (plan 174 S0.5, G-8)', async () => {
+    await render([
+      { id: 't1', kind: 'follow', text: 'Welcome {nam}!', state: 'talk', enabled: true }
+    ])
+    const button = toggle('follow')
+    const enabled = row('follow').querySelector<HTMLElement>('[role="switch"]')!
+    expect(row('follow').hasAttribute('role')).toBe(false)
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+    expect(enabled.parentElement?.closest('button, [role="button"]')).toBeNull()
+    // The warning is the button's description, not a coloured "!" with a tooltip.
+    const alert = document.getElementById(button.getAttribute('aria-describedby') ?? '')
+    expect(alert?.textContent).toBe('{nam} is not a field and will be posted as written.')
+    expect(alert?.hasAttribute('title')).toBe(false)
+
+    // The switch saves and leaves the editor shut; the title opens it.
+    await act(async () => enabled.click())
+    expect(patchCohostSettings).toHaveBeenCalledTimes(1)
+    expect(toggle('follow').getAttribute('aria-expanded')).toBe('false')
+    await act(async () => toggle('follow').click())
+    expect(toggle('follow').getAttribute('aria-expanded')).toBe('true')
   })
 })
 

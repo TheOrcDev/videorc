@@ -499,6 +499,7 @@ function BackgroundStylePopover({
         <div className="flex flex-col gap-1.5">
           <Label>Fit</Label>
           <ToggleGroup
+            aria-label="Fit"
             className="w-full"
             type="single"
             value={style.fit}

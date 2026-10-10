@@ -3,6 +3,7 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import { Tabs as TabsPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
+import { useFieldLabelledBy } from '@/components/ui/field-context'
 
 function Tabs({
   className,
@@ -38,10 +39,13 @@ const tabsListVariants = cva(
 function TabsList({
   className,
   variant = 'default',
+  'aria-labelledby': ariaLabelledBy,
   ...props
 }: React.ComponentProps<typeof TabsPrimitive.List> & VariantProps<typeof tabsListVariants>) {
+  const labelledBy = useFieldLabelledBy(ariaLabelledBy, props['aria-label'])
   return (
     <TabsPrimitive.List
+      aria-labelledby={labelledBy}
       data-slot="tabs-list"
       data-variant={variant}
       className={cn(tabsListVariants({ variant }), className)}

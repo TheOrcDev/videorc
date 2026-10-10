@@ -9,9 +9,9 @@ import {
   SyncIcon,
   WarningIcon
 } from '@/components/icons'
-import { useEffect, useState, type KeyboardEvent, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 
-import { ListRow } from '@/components/list-row'
+import { ListRow, ListRowButton } from '@/components/list-row'
 import {
   YOUTUBE_STREAM_KEY_LINK_LABEL,
   YOUTUBE_STREAM_KEY_URL,
@@ -244,14 +244,6 @@ export function DestinationCard({
     setUncontrolledExpanded(next)
     onExpandedChange?.(next)
   }
-  const toggleFromKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
-    // Only the row itself: Space on the enable switch must not also toggle.
-    if (event.target !== event.currentTarget) return
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      setExpanded(!expanded)
-    }
-  }
 
   const saveAndClearDraft = (value: string, mode: 'key' | 'full-url'): void => {
     void onSaveManualStreamKey(target.id, value).then((saved) => {
@@ -305,11 +297,17 @@ export function DestinationCard({
     <section className="flex flex-col" data-slot="destination-card" id={`destination-${target.id}`}>
       {/* The reference row anatomy: vivid platform tile · title · account
           context · spring · state meta · enable switch (videorc-design).
-          Clicking the row, or Enter/Space on it, toggles the connection. */}
+          The title is the row's button, stretched over the row: a click
+          anywhere, or Enter/Space on it, toggles the connection. The switch
+          is its sibling, never inside a button (plan 174 S0.5, D-12). */}
       <ListRow
-        className="h-auto min-h-10 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="relative h-auto min-h-10 py-1"
         icon={<PlatformGlyph platform={target.platform} />}
-        title={target.label}
+        title={
+          <ListRowButton aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+            {target.label}
+          </ListRowButton>
+        }
         context={oauthMode ? account?.accountLabel : 'Stream key'}
         meta={
           target.outputOrientation === 'vertical' || badge ? (
@@ -324,21 +322,14 @@ export function DestinationCard({
             </span>
           ) : undefined
         }
-        role="button"
-        tabIndex={0}
-        aria-expanded={expanded}
-        onClick={() => setExpanded(!expanded)}
-        onKeyDown={toggleFromKeyboard}
       >
-        <span onClick={(event) => event.stopPropagation()}>
-          <Switch
-            aria-describedby={enableLockGate ? enableLockId : undefined}
-            aria-label={`Enable ${target.label}`}
-            checked={target.enabled}
-            disabled={enableSwitchDisabled}
-            onCheckedChange={patchEnabled}
-          />
-        </span>
+        <Switch
+          aria-describedby={enableLockGate ? enableLockId : undefined}
+          aria-label={`Enable ${target.label}`}
+          checked={target.enabled}
+          disabled={enableSwitchDisabled}
+          onCheckedChange={patchEnabled}
+        />
         <ChevronDownIcon
           className={cn(
             'size-3.5 shrink-0 text-muted-foreground transition-transform',

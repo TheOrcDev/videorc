@@ -60,15 +60,13 @@ export function BuddyMotionSection({
       <FieldGroup variant="grouped">
         <Field>
           <div className="flex items-center justify-between gap-3">
-            <FieldLabel htmlFor="buddy-motion">Motion</FieldLabel>
+            <FieldLabel>Motion</FieldLabel>
             <span className="text-xs tabular-nums text-muted-foreground">
               {Math.round(intensity * 100)}%
             </span>
           </div>
           <div className="flex flex-col gap-1">
             <Slider
-              aria-label="Motion"
-              id="buddy-motion"
               max={1}
               min={0}
               step={0.05}
