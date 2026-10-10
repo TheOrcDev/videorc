@@ -596,7 +596,14 @@ Verification:
     - The real `enable-synthetic-source` command: `{ enabled: true }`.
   - `pnpm smoke:scene-presets` and `pnpm smoke:layout-source-loop`: blocked by the environment. Both stop at `select-camera-device` with "No camera device available to select", before they reach Sources. This worktree's freshly built backend has no camera grant. The hook they call lives in `use-studio.tsx`, which this PR does not touch.
   - `pnpm smoke:preview-performance`: red on "unfiltered WebSocket wire rate 82.46KiB/s exceeded 80KiB/s". Its default run never opens Sources (the Sources step needs `VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1`). The same gate read ~82 KiB/s on main here during plan 092.
-- `pnpm smoke:recording-studio`: see the PR.
+- `pnpm smoke:recording-studio` (AGENTS.md: this page is the capture-selection UI), from this worktree:
+  - Steps 1–9 **pass**: the desktop recording-studio unit tests, `test:scripts`, the live microphone probe, the five backend suites (live layout, scene, recording, audio, noise cleanup) and the scene-switch pixel artifacts.
+  - Step 10 (`smoke:freeform-editor`) stopped the gate, blocked by the environment: "No camera device available to select" at `select-camera-device`. This worktree's backend has no camera grant, as with the two smokes above it; the gate stops at its first failure, so steps 11–33 did not run.
+  - The closest focused gates, every camera-free smoke that drives the Sources page through `enable-synthetic-source`, all **pass**:
+    - `pnpm smoke:record-latency:gate` (step 16): PASS in enforce mode.
+    - `pnpm smoke:system-audio` (step 33): all six artifact checks PASS.
+    - `pnpm smoke:remote-control`: PASS.
+  - Still owed on a build with camera access: the camera-dependent recording-studio stages (freeform editor, layout-source loop, scene presets, preview scene commit, interaction stress).
 
 Owed to the owner: a packaged by-eye pass with a real camera and
 microphone (the "Live" chips and facts lines, the camera format, System
