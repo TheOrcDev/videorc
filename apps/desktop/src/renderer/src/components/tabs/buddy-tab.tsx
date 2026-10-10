@@ -1,4 +1,4 @@
-import { ChatIcon, ChevronRightIcon, LockIcon } from '@/components/icons'
+import { ChatIcon, ChevronRightIcon } from '@/components/icons'
 import { lazy, Suspense, useState, type ReactElement } from 'react'
 
 import {
@@ -21,8 +21,8 @@ import { BuddyEmblem } from '@/components/buddy-emblem'
 import { BuddyReportCard } from '@/components/buddy-report-card'
 import { BuddyVoiceCommands } from '@/components/buddy-voice-commands'
 import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
+import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
-import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -37,7 +37,6 @@ import { Kbd } from '@/components/ui/kbd'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
-import { useVideorcAccount } from '@/hooks/use-account'
 import { useCleanCut } from '@/hooks/use-clean-cut'
 import { BuddyLookClientProvider } from '@/hooks/use-buddy-look'
 import {
@@ -56,7 +55,6 @@ import {
 import { displayKeyGlyph } from '@/lib/platform'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
-import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { BUDDY_TABS, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
 import { closeBuddyPetCreator, useBuddyPetCreatorOpen } from '@/lib/buddy-pet-creator-nav'
@@ -280,30 +278,9 @@ function BuddyUnlockAlert({
 }: {
   testId?: string
 }): ReactElement | null {
-  const { signIn } = useVideorcAccount()
   const view = useBuddyLive()
   if (!view.unlock) return null
-  const unlockAction = view.unlock.action ?? null
-  return (
-    <Alert data-testid={testId}>
-      <LockIcon />
-      <AlertTitle className="font-normal text-muted-foreground">{view.unlock.reason}</AlertTitle>
-      {unlockAction ? (
-        <AlertAction>
-          <Button
-            size="xs"
-            type="button"
-            variant="outline"
-            onClick={() =>
-              unlockAction.kind === 'sign-in' ? signIn() : openVideorcWebLink(unlockAction.url)
-            }
-          >
-            {unlockAction.kind === 'sign-in' ? 'Sign in' : 'View Premium'}
-          </Button>
-        </AlertAction>
-      ) : null}
-    </Alert>
-  )
+  return <LockAlert action={view.unlock.action} data-testid={testId} reason={view.unlock.reason} />
 }
 
 /**

@@ -229,7 +229,7 @@ export function ShortcutRecorderField({
       {message ? (
         <FieldDescription className="text-right text-xs">{message}</FieldDescription>
       ) : registrationFailed && !armed ? (
-        <FieldError className="text-right text-xs">
+        <FieldError className="justify-end text-right">
           Another app already uses this shortcut. Pick another.
         </FieldError>
       ) : null}

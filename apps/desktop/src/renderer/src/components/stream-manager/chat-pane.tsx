@@ -21,7 +21,7 @@ import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platfo
 import { CohostNudge } from '@/components/cohost-nudge'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
-import { ChatIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
+import { ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -36,7 +36,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import {
   InputGroup,
   InputGroupAddon,
@@ -525,7 +525,7 @@ export function ChatPane({
         <ScrollArea ref={rootRef} className="min-h-0 flex-1 px-2 py-1">
           {shown.length === 0 ? (
             filtering ? (
-              <Empty className="h-full border-0 p-6">
+              <Empty className="h-full">
                 <EmptyHeader>
                   <EmptyDescription>No messages match these filters.</EmptyDescription>
                 </EmptyHeader>
@@ -1010,12 +1010,9 @@ function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): Re
 
 function OffAir({ providers }: { providers: readonly LiveChatProviderState[] }): ReactElement {
   return (
-    <Empty className="h-full border-0 p-6">
+    <Empty className="h-full">
       <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <ChatIcon weight="duotone" />
-        </EmptyMedia>
-        <EmptyTitle className="text-base">No messages yet</EmptyTitle>
+        <EmptyTitle>No messages yet</EmptyTitle>
         <EmptyDescription>
           {liveChatEmptyMessage(
             { providers: [...providers] },

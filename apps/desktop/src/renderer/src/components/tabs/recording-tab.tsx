@@ -4,9 +4,10 @@ import {
   pickRecordingResolution,
   type OutputNumberField
 } from '@/lib/output-quality'
-import { AlertIcon, SpinnerIcon, VideoFileIcon } from '@/components/icons'
+import { VideoFileIcon } from '@/components/icons'
 import { useId, useState, type ReactElement } from 'react'
 
+import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -14,6 +15,7 @@ import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/c
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { Spinner } from '@/components/ui/spinner'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { VideoPreset, VideoSettings } from '@/lib/backend'
@@ -25,7 +27,7 @@ import {
 } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { performanceCheckLine } from '@/lib/performance-check-line'
-import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
+import { unlockActionForGate } from '@/lib/lock-view'
 
 export function RecordingTab(): ReactElement {
   const {
@@ -75,11 +77,7 @@ export function RecordingTab(): ReactElement {
         icon={VideoFileIcon}
         title="Recording quality"
       >
-        {isSessionActive ? (
-          <p className="text-sm text-muted-foreground">
-            Locked while live. Output settings apply to the next session.
-          </p>
-        ) : null}
+        {isSessionActive ? <SessionLockAlert /> : null}
         <FieldGroup>
           <Field>
             <FieldLabel htmlFor="video-preset">Recording preset</FieldLabel>
@@ -112,7 +110,7 @@ export function RecordingTab(): ReactElement {
                   checkLine.tone === 'warning' ? 'text-warning' : 'text-muted-foreground'
                 }`}
               >
-                {checkLine.busy ? <SpinnerIcon className="size-3.5 animate-spin" /> : null}
+                {checkLine.busy ? <Spinner aria-hidden className="size-3.5" /> : null}
                 <span>{checkLine.text}</span>
                 {checkLine.applyPreset ? (
                   <Button
@@ -144,25 +142,13 @@ export function RecordingTab(): ReactElement {
               </div>
             ) : null}
             {profileEntitlementMessage ? (
-              <Alert variant="warning">
-                <AlertIcon />
-                <AlertDescription className="flex flex-wrap items-center gap-2">
-                  <span>{profileEntitlementMessage}</span>
-                  {!profileGate.allowed && profileGate.upgradeUrl ? (
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      onClick={() => openExternalUrl(VIDEORC_PREMIUM_URL)}
-                    >
-                      View Premium
-                    </Button>
-                  ) : null}
-                </AlertDescription>
-              </Alert>
+              <LockAlert
+                action={unlockActionForGate(profileGate)}
+                reason={profileEntitlementMessage}
+              />
             ) : null}
             {compatibilityMessage ? (
               <Alert variant={compatibility.blockingReason ? 'destructive' : 'warning'}>
-                <AlertIcon />
                 <AlertDescription>{compatibilityMessage}</AlertDescription>
               </Alert>
             ) : null}
@@ -213,16 +199,6 @@ export function RecordingTab(): ReactElement {
       </PanelSection>
     </div>
   )
-}
-
-function openExternalUrl(url: string): void {
-  const opener = window.videorc?.openOAuthUrl
-  if (opener) {
-    void opener(url)
-    return
-  }
-
-  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 const OUTPUT_NUMBER_FIELDS: { field: OutputNumberField; label: string }[] = [

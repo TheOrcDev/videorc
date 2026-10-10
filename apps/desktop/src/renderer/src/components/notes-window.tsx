@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
-import { AlertIcon, PinIcon } from '@/components/icons'
+import { PinIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -246,7 +246,6 @@ export function NotesWindow({
       {captureProtected === false ? (
         <div className={cn('shrink-0 border-t border-border p-2', marker)}>
           <Alert className={marker} data-testid="notes-capture-exposed" variant="destructive">
-            <AlertIcon weight="fill" />
             <AlertTitle className="text-xs">These notes can appear in your recording</AlertTitle>
             <AlertDescription className="text-xs">
               Videorc couldn&apos;t hide this window from screen capture. Keep it off the screen you

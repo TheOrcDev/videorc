@@ -1,4 +1,3 @@
-import { AlertIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { revealInFileManagerLabel } from '@/lib/platform'
@@ -25,12 +24,14 @@ export function SessionRuntimeAlert({
   const savedFile = recordingFailed && activitySavesRecording(notice.activity)
 
   return (
+    // Assertive in both tones: it reports a problem with the recording or
+    // stream that is running right now, so a screen reader hears it at once.
     <Alert
       data-testid="session-runtime-notice"
       key={notice.at}
+      role="alert"
       variant={recordingFailed ? 'destructive' : 'warning'}
     >
-      <AlertIcon weight="fill" />
       <AlertTitle>{sessionRuntimeNoticeTitle(notice)}</AlertTitle>
       <AlertDescription className="min-w-0">
         <p className="line-clamp-3" title={notice.message}>

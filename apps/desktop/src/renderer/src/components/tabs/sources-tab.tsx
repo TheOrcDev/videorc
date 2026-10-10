@@ -1,4 +1,4 @@
-import { SyncIcon, WarningIcon } from '@/components/icons'
+import { SyncIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
 import { ConfigGrid, CONFIG_GRID_PAIR, PageHeader } from '@/components/page'
@@ -67,7 +67,6 @@ export function SourcesTab(): ReactElement {
         <div className="flex flex-col gap-2 px-gutter pt-3">
           {warnings.map((warning) => (
             <Alert key={warning} variant="warning">
-              <WarningIcon weight="fill" />
               <AlertTitle>{warning}</AlertTitle>
             </Alert>
           ))}

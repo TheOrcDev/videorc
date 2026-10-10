@@ -1,11 +1,4 @@
-import {
-  AlertIcon,
-  type AppIcon,
-  ChatIcon,
-  ClipIcon,
-  InfoIcon,
-  MicrophoneIcon
-} from '@/components/icons'
+import { AlertIcon, type AppIcon, ChatIcon, ClipIcon, MicrophoneIcon } from '@/components/icons'
 import { useMemo, useState, lazy, Suspense, type ReactElement, type ReactNode } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -124,9 +117,8 @@ export function BuddyReportCard({
         data-state={loading ? 'loading' : view.kind === 'empty' ? 'empty' : view.kind}
       >
         {error ? (
-          <Alert role="status" variant="warning">
-            <AlertIcon />
-            <AlertTitle className="font-normal">{error}</AlertTitle>
+          <Alert variant="warning">
+            <AlertTitle>{error}</AlertTitle>
             <AlertAction>
               <Button size="xs" type="button" variant="outline" onClick={reload}>
                 Try again
@@ -194,7 +186,6 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
       <StreamLine view={view} />
       {view.note ? (
         <Alert data-testid="buddy-report-off" role="note">
-          <InfoIcon />
           <AlertTitle>{view.note.title}</AlertTitle>
           <AlertDescription className="text-xs">{view.note.hint}</AlertDescription>
         </Alert>

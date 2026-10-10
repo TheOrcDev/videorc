@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { OverlayLayout } from '@/lib/backend'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
 import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 
 import {
@@ -157,9 +158,7 @@ describe('overlay failures are reported (plan 174, C-6)', () => {
   it('gives the overlay controls one reason while the backend is away', () => {
     expect(overlayEditsBlockedReason('connected')).toBeNull()
     for (const status of ['waiting', 'connecting', 'failed', 'closed'] as const) {
-      expect(overlayEditsBlockedReason(status)).toBe(
-        "Overlays can't change until the backend is connected."
-      )
+      expect(overlayEditsBlockedReason(status)).toBe(OFFLINE_LOCK_REASON)
     }
   })
 })

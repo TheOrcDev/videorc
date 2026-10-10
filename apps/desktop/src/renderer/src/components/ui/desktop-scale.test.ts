@@ -89,6 +89,19 @@ describe('desktop scale', () => {
     expect(read('command.tsx')).not.toMatch(/\bbg-(popover|card|background)\b/)
   })
 
+  it('keeps the feedback primitives on the desktop scale (plan 174 S1.5)', () => {
+    // Alert: a flush inline row on the row radius, never a card.
+    expect(read('alert.tsx')).toContain('rounded-row px-3 py-2.5')
+    expect(read('alert.tsx')).not.toMatch(/\bshadow|rounded-(lg|xl|panel)/)
+    // Empty: 14 px text, no media tile, no oversized title.
+    const empty = read('empty.tsx')
+    expect(empty).not.toContain('EmptyMedia')
+    expect(empty).not.toMatch(/text-(lg|base)|rounded-|border-dashed/)
+    // Spinner and Progress are the shadcn primitives on the registry glyph.
+    expect(read('spinner.tsx')).toContain("from '@/components/icons'")
+    expect(read('progress.tsx')).toContain('rounded-full')
+  })
+
   it('mounts the tooltip provider with the desktop delay', () => {
     expect(() =>
       renderToStaticMarkup(createElement(TooltipProvider, null, createElement('span')))

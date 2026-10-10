@@ -445,8 +445,8 @@ function AlivePanel({
           Loading your packs…
         </p>
       ) : packs.length === 0 ? (
-        <Empty className="flex-none gap-3 p-6" data-testid="buddy-alive-empty">
-          <EmptyDescription className="text-xs text-subtle">
+        <Empty className="flex-none" data-testid="buddy-alive-empty">
+          <EmptyDescription>
             No living Buddy yet. Import a page-pet pack, or create one from your Buddy.
           </EmptyDescription>
           <EmptyContent className="max-w-none flex-row flex-wrap justify-center gap-2">

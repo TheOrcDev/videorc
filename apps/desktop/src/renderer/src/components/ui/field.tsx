@@ -3,6 +3,7 @@
 import { useMemo } from 'react'
 import { cva, type VariantProps } from 'class-variance-authority'
 
+import { ErrorIcon } from '@/components/icons'
 import { cn } from '@/lib/utils'
 import { FieldIdsContext, useFieldIds, useFieldLabelIds } from '@/components/ui/field-context'
 import { Label } from '@/components/ui/label'
@@ -218,14 +219,22 @@ function FieldError({
     return null
   }
 
+  // Monochrome words with the error glyph in the destructive tone (plan 174
+  // S1.5, J1-5/I-26): colour marks it, the text stays readable in both themes.
   return (
     <div
       role="alert"
       data-slot="field-error"
-      className={cn('text-sm font-normal text-destructive', className)}
+      className={cn('flex items-start gap-1.5 text-xs font-normal text-foreground', className)}
       {...props}
     >
-      {content}
+      <ErrorIcon
+        aria-hidden
+        className="mt-px size-3.5 shrink-0 text-destructive"
+        data-slot="field-error-icon"
+        weight="fill"
+      />
+      <div className="min-w-0">{content}</div>
     </div>
   )
 }

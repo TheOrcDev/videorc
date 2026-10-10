@@ -1,13 +1,4 @@
-import {
-  AlertIcon,
-  ClipIcon,
-  FolderIcon,
-  LibraryIcon,
-  LockIcon,
-  ResetIcon,
-  SpinnerIcon,
-  SuccessIcon
-} from '@/components/icons'
+import { ClipIcon, FolderIcon, LibraryIcon, ResetIcon, SuccessIcon } from '@/components/icons'
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import {
@@ -15,6 +6,7 @@ import {
   type CleanCutConsentAsk
 } from '@/components/clean-cut/clean-cut-consent-dialog'
 import { GroupedList, ListRow } from '@/components/list-row'
+import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -31,7 +23,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useVideorcAccount } from '@/hooks/use-account'
+import { Spinner } from '@/components/ui/spinner'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { setCleanCutAuto, useCleanCutAuto } from '@/hooks/use-clean-cut-auto'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
@@ -62,7 +54,6 @@ import { dayLabel, isActiveRecordingState } from '@/lib/format'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
-import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
 /** Which cut the review opens. */
@@ -107,7 +98,6 @@ export function CleanCutCard({
 }): ReactElement {
   const { sessions, account, entitlements, aiConsent, setAiConsent } = useStudioCore()
   const { recording } = useStudioRecordingState()
-  const { signIn } = useVideorcAccount()
   const auto = useCleanCutAuto()
   const sectionRef = useRef<HTMLDivElement>(null)
   const rows = sessions as readonly CleanCutSession[]
@@ -244,7 +234,6 @@ export function CleanCutCard({
   const review = (target: CleanCutJob): void =>
     onReview({ sessionId: target.sourceSessionId, mode: target.mode, jobId: target.id })
 
-  const unlockAction = unlock?.action ?? null
   const makeLabel = mode === 'condensed' ? 'Make a condensed cut' : 'Make a clean cut'
 
   return (
@@ -274,26 +263,7 @@ export function CleanCutCard({
         </Field>
 
         {unlock ? (
-          <Alert data-testid="clean-cut-unlock">
-            <LockIcon />
-            <AlertTitle className="font-normal text-muted-foreground">{unlock.reason}</AlertTitle>
-            {unlockAction ? (
-              <AlertAction>
-                <Button
-                  size="xs"
-                  type="button"
-                  variant="outline"
-                  onClick={() =>
-                    unlockAction.kind === 'sign-in'
-                      ? signIn()
-                      : openVideorcWebLink(unlockAction.url)
-                  }
-                >
-                  {unlockAction.kind === 'sign-in' ? 'Sign in' : 'View Premium'}
-                </Button>
-              </AlertAction>
-            ) : null}
-          </Alert>
+          <LockAlert action={unlock.action} data-testid="clean-cut-unlock" reason={unlock.reason} />
         ) : null}
       </PanelSection>
       <PanelSection
@@ -372,7 +342,6 @@ export function CleanCutCard({
                 </GroupedList>
               ) : status.kind === 'failed' && job ? (
                 <Alert data-testid="clean-cut-status" data-status="failed" variant="destructive">
-                  <AlertIcon />
                   <AlertTitle>
                     {mode === 'condensed' ? 'The condensed cut failed' : 'The clean cut failed'}
                   </AlertTitle>
@@ -489,7 +458,7 @@ function StatusGlyph({ kind }: { kind: CleanCutStatusKind }): ReactElement {
     kind === 'cutting' ||
     kind === 'checking'
   ) {
-    return <SpinnerIcon aria-hidden className="animate-spin text-muted-foreground" />
+    return <Spinner aria-hidden className="text-muted-foreground" />
   }
   return <ClipIcon aria-hidden className="text-muted-foreground" />
 }

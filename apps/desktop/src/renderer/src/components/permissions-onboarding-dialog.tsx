@@ -1,4 +1,4 @@
-import { ArrowRightIcon, SpinnerIcon } from '@/components/icons'
+import { ArrowRightIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
+import { Spinner } from '@/components/ui/spinner'
 import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
 import { isWindowsPlatform, osSettingsName } from '@/lib/platform'
 import {
@@ -143,7 +144,7 @@ function PermissionRow({
   const actionButton =
     action === 'request-media-access' ? (
       <Button disabled={pending} size="xs" variant="outline" onClick={onAction}>
-        {pending ? <SpinnerIcon className="animate-spin" data-icon="inline-start" /> : null}
+        {pending ? <Spinner data-icon="inline-start" /> : null}
         Enable
       </Button>
     ) : action === 'open-settings' ? (

@@ -1,4 +1,3 @@
-import { InfoIcon } from '@/components/icons'
 import { useState, type ReactElement, type ReactNode } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -111,11 +110,8 @@ export function BuddyVoiceCommands({
         <div className="flex flex-col gap-2 border-b border-border p-gutter">
           {lead}
           {off ? (
-            <Alert data-testid="buddy-voice-commands-off">
-              <InfoIcon />
-              <AlertTitle className="font-normal text-muted-foreground">
-                {BUDDY_VOICE_COMMANDS_OFF}
-              </AlertTitle>
+            <Alert data-testid="buddy-voice-commands-off" variant="quiet">
+              <AlertTitle>{BUDDY_VOICE_COMMANDS_OFF}</AlertTitle>
               {onOpenLive ? (
                 <AlertAction>
                   <Button size="xs" type="button" variant="outline" onClick={onOpenLive}>

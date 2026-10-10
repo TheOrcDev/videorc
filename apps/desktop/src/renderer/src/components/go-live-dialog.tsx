@@ -1,6 +1,7 @@
 import { AlertIcon, CaptionsIcon, LivestreamIcon, SuccessIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
+import { LockAlert } from '@/components/lock-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -34,6 +35,7 @@ import type {
   VideoSettings
 } from '@/lib/backend'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
+import { unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
 import { OVERLAY_ITEM_LABELS, overlayStartNotices } from '@/lib/overlay-layout'
@@ -113,7 +115,6 @@ export function GoLiveConfirmationDialog({
     (target) => target.enabled && target.scheduledEventId
   )
   const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
-  const entitlementUpgradeUrl = entitlementBlocker?.upgradeUrl
   const errorIssues = preflight?.issues.filter((issue) => issue.severity === 'error') ?? []
   const warningIssues = preflight?.issues.filter((issue) => issue.severity === 'warning') ?? []
   const errorCount = errorIssues.length
@@ -279,23 +280,10 @@ export function GoLiveConfirmationDialog({
             <GoLiveSimulcastAdvisory />
 
             {entitlementBlocker ? (
-              <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-warning-foreground dark:text-warning">
-                  <AlertIcon className="size-4" weight="fill" />
-                  {entitlementUpgradeUrl ? 'Premium issue' : 'Streaming entitlement issue'}
-                </div>
-                <p className="text-sm text-muted-foreground">{entitlementBlocker.reason}</p>
-                {entitlementUpgradeUrl ? (
-                  <Button
-                    className="w-fit"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => openExternalUrl(entitlementUpgradeUrl)}
-                  >
-                    View Premium
-                  </Button>
-                ) : null}
-              </div>
+              <LockAlert
+                action={unlockActionForGate(entitlementBlocker)}
+                reason={entitlementBlocker.reason}
+              />
             ) : null}
 
             {errorIssues.length ? (
@@ -439,7 +427,6 @@ export function GoLiveOutputAdvice({
   if (advice?.kind === 'below-floor') {
     return (
       <Alert variant="warning">
-        <AlertIcon weight="fill" />
         <AlertTitle>This computer may not keep up</AlertTitle>
         <AlertDescription>
           Nothing held steady in its performance check, not even {outputLabel(advice.floor)}.
@@ -452,7 +439,6 @@ export function GoLiveOutputAdvice({
   if (advice?.kind === 'step-down') {
     return (
       <Alert>
-        <AlertIcon weight="fill" />
         <AlertTitle>Streaming at {outputLabel(advice.video)}</AlertTitle>
         <AlertDescription>
           This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
@@ -465,7 +451,6 @@ export function GoLiveOutputAdvice({
   if (sharedVideo && recordEnabled) {
     return (
       <Alert>
-        <AlertIcon weight="fill" />
         <AlertTitle>Recording will match the stream</AlertTitle>
         <AlertDescription>
           This computer can&apos;t encode a separate recording while streaming, so both use{' '}

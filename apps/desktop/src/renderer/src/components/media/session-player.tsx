@@ -426,8 +426,8 @@ export function SessionPlayerStatus({
     >
       <Empty className="gap-3 p-0">
         <EmptyHeader className="gap-1">
-          <EmptyTitle className="text-sm text-video-ground-foreground">{copy.title}</EmptyTitle>
-          <EmptyDescription className="text-xs text-video-ground-muted">
+          <EmptyTitle className="text-video-ground-foreground">{copy.title}</EmptyTitle>
+          <EmptyDescription className="text-video-ground-muted">
             {copy.description}
           </EmptyDescription>
         </EmptyHeader>

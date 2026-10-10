@@ -122,8 +122,8 @@ export function BuddyUtteranceCards({
               data-testid="buddy-utterance-card"
               data-utterance-id={utterance.id}
               role="group"
+              icon={BuddyIcon}
             >
-              <BuddyIcon aria-hidden weight="duotone" />
               <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
                 <span className="min-w-0 flex-1 truncate">
                   {BUDDY_UTTERANCE_TRIGGER_LABELS[utterance.trigger.kind]} · posts as you

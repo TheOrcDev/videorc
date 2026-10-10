@@ -27,6 +27,11 @@ vi.mock('@/hooks/use-studio', () => ({
 }))
 const signIn = vi.fn()
 vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => ({ signIn }) }))
+// The lock's Sign in (plan 174 S1.5, LockAlert) starts the same sign-in.
+vi.mock('@/lib/videorc-web-links', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/videorc-web-links')>()),
+  beginVideorcSignIn: () => signIn()
+}))
 
 const MIN = 60_000
 const PREMIUM = {

@@ -14446,9 +14446,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         video
       })
       if (!gate.allowed) {
-        void loadSessionRuntimeRecovery().then((runtime) =>
-          runtime.showPremiumUpgrade('Premium required for this media profile.', gate.reason)
-        )
+        // Quality is free (plan 075): an over-limit profile is a pipeline
+        // ceiling, so only a real Premium gate offers Premium (plan 174 D-13).
+        if (gate.upgradeUrl) {
+          void loadSessionRuntimeRecovery().then((runtime) =>
+            runtime.showPremiumUpgrade('Premium required for this media profile.', gate.reason)
+          )
+        } else {
+          toast.error("This quality isn't available", { description: gate.reason })
+        }
         return
       }
 

@@ -468,7 +468,7 @@ export function ActivityPane({
             ))}
           </ol>
         ) : (
-          <Empty className="border-0 p-6">
+          <Empty>
             <EmptyHeader>
               <EmptyDescription data-testid="activity-empty">
                 {items.length

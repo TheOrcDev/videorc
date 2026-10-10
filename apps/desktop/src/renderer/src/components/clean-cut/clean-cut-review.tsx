@@ -4,8 +4,7 @@ import {
   ClipIcon,
   MicrophoneIcon,
   PinIcon,
-  SaveIcon,
-  SpinnerIcon
+  SaveIcon
 } from '@/components/icons'
 import {
   lazy,
@@ -33,6 +32,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/u
 import { Kbd } from '@/components/ui/kbd'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Spinner } from '@/components/ui/spinner'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { useBuddyReport } from '@/hooks/use-buddy-report'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
@@ -574,7 +574,7 @@ export function CleanCutReview({
             </div>
             {data.transcript ? null : (
               <Alert className="mx-gutter mt-2 w-auto" variant="warning">
-                <AlertTitle className="font-normal">
+                <AlertTitle>
                   The transcript couldn&apos;t be read, so only the cuts show.
                 </AlertTitle>
                 <AlertAction>
@@ -590,12 +590,10 @@ export function CleanCutReview({
               </Alert>
             )}
             {items.length === 0 ? (
-              <Empty className="flex-1 gap-1 p-6">
+              <Empty>
                 <EmptyHeader>
-                  <EmptyTitle className="text-sm">No speech found</EmptyTitle>
-                  <EmptyDescription className="text-xs">
-                    Only the start and the end can be trimmed.
-                  </EmptyDescription>
+                  <EmptyTitle>No speech found</EmptyTitle>
+                  <EmptyDescription>Only the start and the end can be trimmed.</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             ) : (
@@ -626,7 +624,7 @@ export function CleanCutReview({
         data-slot="clean-cut-review-footer"
       >
         <p className="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground">
-          {status.busy ? <SpinnerIcon aria-hidden className="size-3.5 animate-spin" /> : null}
+          {status.busy ? <Spinner aria-hidden className="size-3.5" /> : null}
           <span
             className="truncate"
             data-slot="clean-cut-review-status"
@@ -673,11 +671,7 @@ export function CleanCutReview({
           type="button"
           onClick={() => void save()}
         >
-          {saving ? (
-            <SpinnerIcon className="animate-spin" data-icon="inline-start" />
-          ) : (
-            <SaveIcon data-icon="inline-start" />
-          )}
+          {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
           Save changes
           <Kbd className="ml-0.5">{modKey}S</Kbd>
         </Button>
@@ -720,8 +714,8 @@ function ReviewPlaceholder({
   if (load.kind === 'error') {
     return (
       <div className="flex-1 p-gutter">
-        <Alert role="status" variant="warning">
-          <AlertTitle className="font-normal">{load.message}</AlertTitle>
+        <Alert variant="warning">
+          <AlertTitle>{load.message}</AlertTitle>
           <AlertAction>
             <Button size="xs" type="button" variant="outline" onClick={onRetry}>
               Try again
@@ -733,16 +727,16 @@ function ReviewPlaceholder({
   }
   const waiting = load.kind === 'waiting'
   return (
-    <Empty className="flex-1 gap-1 p-6" data-testid="clean-cut-review-waiting">
+    <Empty data-testid="clean-cut-review-waiting">
       <EmptyHeader>
-        <EmptyTitle className="text-sm">
+        <EmptyTitle>
           {load.kind === 'loading'
             ? 'Loading the cut'
             : waiting && load.job
               ? statusLabel
               : 'No cut yet'}
         </EmptyTitle>
-        <EmptyDescription className="text-xs">
+        <EmptyDescription>
           {load.kind === 'loading'
             ? 'Reading the cut list and the transcript.'
             : waiting && load.job

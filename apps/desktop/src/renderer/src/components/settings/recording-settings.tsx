@@ -206,7 +206,6 @@ export function RecordingSettings(): ReactElement {
         </div>
       ) : health ? (
         <Alert variant="warning">
-          <WarningIcon weight="fill" />
           <AlertTitle>Recording needs FFmpeg</AlertTitle>
           <AlertDescription>
             {import.meta.env.DEV

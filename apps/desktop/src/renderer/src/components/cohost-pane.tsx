@@ -312,8 +312,7 @@ export function CohostPane({
       <>
         {header}
         <div className="shrink-0 p-2" data-slot="cohost-consent">
-          <Alert aria-label="Buddy needs cloud AI" role="group">
-            <BuddyIcon aria-hidden weight="duotone" />
+          <Alert aria-label="Buddy needs cloud AI" role="group" icon={BuddyIcon}>
             <AlertTitle className="text-xs">Buddy needs cloud AI</AlertTitle>
             <AlertDescription className="text-xs">
               <ul className="flex list-disc flex-col gap-0.5 pl-4">
@@ -904,8 +903,7 @@ export function CohostListenPrompt({
   }
   return (
     <div className="shrink-0 p-2" data-slot="cohost-listen-prompt">
-      <Alert aria-label="Buddy can hear you while you're live" role="group">
-        <MicrophoneIcon aria-hidden weight="duotone" />
+      <Alert aria-label="Buddy can hear you while you're live" role="group" icon={MicrophoneIcon}>
         <AlertTitle className="text-xs">Buddy can hear you while you&apos;re live</AlertTitle>
         <AlertDescription className="text-xs">
           Your mic audio goes to Videorc&apos;s cloud speech-to-text to be turned into text. Videorc
@@ -1148,7 +1146,7 @@ function CohostRecapCard({
 }): ReactElement {
   return (
     <div className="shrink-0 p-2" data-slot="cohost-recap">
-      <Alert aria-label="Recap for viewers who just arrived" role="group">
+      <Alert aria-label="Recap for viewers who just arrived" icon={null} role="group">
         <AlertTitle className="text-xs">Recap</AlertTitle>
         <AlertDescription className="text-xs" data-testid="cohost-recap-text">
           {recap.text}

@@ -1,5 +1,4 @@
 import {
-  AlertIcon,
   type AppIcon,
   ChevronRightIcon,
   FrameIcon,
@@ -275,7 +274,6 @@ export function SessionPanel({
           verbatim (the toast can be missed mid-stream; this line cannot). */}
       {!active && startFailure ? (
         <Alert data-testid="session-start-failure" key={startFailure.at} variant="destructive">
-          <AlertIcon weight="fill" />
           <AlertTitle>Could not start.</AlertTitle>
           <AlertDescription className="min-w-0">
             <p className="line-clamp-3" title={startFailure.message}>

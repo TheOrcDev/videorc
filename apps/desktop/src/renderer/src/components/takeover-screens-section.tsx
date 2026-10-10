@@ -2,11 +2,12 @@ import { DeleteIcon, ImageBrokenIcon, ImageIcon, SaveIcon, UploadIcon } from '@/
 import { useEffect, useState, type DragEvent, type ReactElement } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { OfflineAlert, SessionLockAlert } from '@/components/lock-alert'
 import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -47,15 +48,17 @@ export function TakeoverScreensSection(): ReactElement {
             {screenImportPending ? 'Importing' : 'Upload'}
           </Button>
         }
-        description="Full-frame images that cover the output. Flip them on from the Studio session panel. Drag tiles to reorder. Management is locked while a session is live."
+        description="Full-frame images that cover the output. Flip them on from the Studio session panel. Drag tiles to reorder."
         icon={ImageIcon}
         title="Takeover screens"
       >
+        {isSessionActive ? (
+          <SessionLockAlert />
+        ) : wsStatus !== 'connected' ? (
+          <OfflineAlert />
+        ) : null}
         {screens.length === 0 ? (
           <Empty className="py-12">
-            <EmptyMedia variant="icon">
-              <ImageIcon weight="duotone" />
-            </EmptyMedia>
             <EmptyTitle>No takeovers yet</EmptyTitle>
             <EmptyDescription>
               Upload a PNG, JPEG, or WebP image to create the first takeover.

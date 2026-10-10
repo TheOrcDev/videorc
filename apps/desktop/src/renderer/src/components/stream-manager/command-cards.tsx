@@ -167,8 +167,8 @@ function CommandChooser({
       role="group"
       tabIndex={-1}
       onKeyDown={(event) => cardKeyDown(event, onAnswer, { picks: view.candidates.length })}
+      icon={BuddyIcon}
     >
-      <BuddyIcon aria-hidden weight="duotone" />
       <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
         <span className="min-w-0 flex-1 truncate">{view.title}</span>
         {view.timer ? (
@@ -241,8 +241,8 @@ function CommandConfirm({
       onKeyDown={(event) => {
         if (!view.busy) cardKeyDown(event, onAnswer, { confirmable: true })
       }}
+      icon={PreviewIcon}
     >
-      <PreviewIcon aria-hidden />
       <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
         <span className="min-w-0 flex-1 truncate" title={view.title}>
           {view.title}

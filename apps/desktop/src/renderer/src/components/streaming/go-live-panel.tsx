@@ -123,7 +123,6 @@ export function GoLivePanel({
       {compatibilityMessage ? (
         <div className="border-b border-border p-gutter">
           <Alert variant="warning">
-            <AlertIcon weight="fill" />
             <AlertDescription>{compatibilityMessage}</AlertDescription>
           </Alert>
         </div>

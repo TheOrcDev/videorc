@@ -1,5 +1,4 @@
 import {
-  AlertIcon,
   ArrowLeftIcon,
   CheckIcon,
   CloseIcon,
@@ -7,8 +6,7 @@ import {
   ImageIcon,
   InfoIcon,
   LockIcon,
-  SparkleIcon,
-  SpinnerIcon
+  SparkleIcon
 } from '@/components/icons'
 import {
   useRef,
@@ -39,6 +37,7 @@ import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { Spinner } from '@/components/ui/spinner'
 import { useVideorcAccount } from '@/hooks/use-account'
 import type { BuddyLibraryController } from '@/hooks/use-buddy-library'
 import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
@@ -518,7 +517,7 @@ export function BuddyOnboarding({
                 onClick={create}
               >
                 {creating ? (
-                  <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+                  <Spinner data-icon="inline-start" />
                 ) : (
                   <SparkleIcon data-icon="inline-start" />
                 )}
@@ -786,7 +785,7 @@ function DescribeStep({
                 src={picture.url}
               />
             ) : preparing ? (
-              <SpinnerIcon aria-hidden className="size-4 animate-spin text-muted-foreground" />
+              <Spinner aria-hidden className="size-4 text-muted-foreground" />
             ) : (
               <ImageIcon aria-hidden className="size-5 text-subtle" />
             )}
@@ -1052,7 +1051,7 @@ function CreateStep({
           data-testid="buddy-onboarding-working"
           role="status"
         >
-          <SpinnerIcon aria-hidden className="size-4 animate-spin" />
+          <Spinner aria-hidden className="size-4" />
           {BUDDY_ONBOARDING_STEP4.working}
         </p>
       ) : view === 'draft' && look.draft ? (
@@ -1098,8 +1097,7 @@ function CreateStep({
         />
       ) : failure ? (
         <Alert data-testid="buddy-onboarding-failed" variant="destructive">
-          <AlertIcon />
-          <AlertTitle className="font-normal">{failure}</AlertTitle>
+          <AlertTitle>{failure}</AlertTitle>
         </Alert>
       ) : allowance ? (
         <p

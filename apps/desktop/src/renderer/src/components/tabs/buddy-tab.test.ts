@@ -25,6 +25,11 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioShell: () => mocked.shell
 }))
 vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => mocked.account }))
+// The lock's Sign in (plan 174 S1.5, LockAlert) starts the same sign-in.
+vi.mock('@/lib/videorc-web-links', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/videorc-web-links')>()),
+  beginVideorcSignIn: () => calls.signIn()
+}))
 vi.mock('@/hooks/use-buddy-report', () => ({
   useBuddyReport: (sessionId: string | null) => {
     mocked.reportAsks.push(sessionId)
