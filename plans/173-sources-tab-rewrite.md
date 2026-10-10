@@ -536,6 +536,68 @@ the PR is open.
 | S6 | each probe's selector found in the new markup |
 | S7 | build, asset budget, recording-studio smoke, by-eye at three widths × two themes |
 
-## As built
+## As built (2026-10-10, branch `plan-173-sources-rewrite`)
 
-(fill in after execution)
+Slices S0–S5 landed as planned, each its own commit, then two follow-ups.
+Differences from the plan text above, all recorded in place:
+
+- **The file kept its name.** `sources-audio-mixer.tsx` was not renamed:
+  `use-studio-context-partition.test.ts` reads it by path, and
+  `studio-mic-meter.integration.test.ts` imports `SourcesAudioMixer`.
+- **`channel-strip` removed, `Mixer` kept.** The rows replaced the strips,
+  so the vendored `components/ui/channel-strip.tsx` lost its last user. The
+  `Mixer` stays for the meter range and its Cmd+Up/Down move between rows;
+  each row sits in a `[data-slot=channel-strip]` wrapper, the selector the
+  Mixer's keyboard map looks for. `AudioConfigProvider` carries dimmed and
+  disabled to the audiocn controls, as `ChannelStrip` did.
+- **No new Microphone permission alert** (see "Locked states").
+- **The synthetic switch stays visible** in Screen's body, and **Refresh
+  keeps its exact words**, because smokes find both.
+- **The Camera's no-camera item says "Off"** (Studio Inputs' word, plan 080
+  D5); the Microphone's stays "None" for `perf-idle-probe`.
+
+Found by eye in the dev app (`pnpm ui:driver`) and fixed on the branch:
+
+1. **Screen read "Not found" with a connected Display 1 selected.** The
+   preview's `source-missing` (and the camera's `device-missing`) is also
+   its idle state (`idle_status` in `preview_screen.rs`), which is why the
+   old chip ignored it. Only the device list decides "Not found" now, and a
+   regression test pins it.
+2. **Camera permission was said twice:** once as the backend's device-list
+   warning above the grid, once as the Video column's alert with Enable
+   Camera. `uncoveredDeviceWarnings` drops device warnings a column alert
+   already covers, and `videoPermissionState` is one helper the page and
+   the column share.
+3. **Facts showed for a source the picker did not name** (the synthetic
+   screen, a camera turned Off). Facts now need a selected source.
+
+Verification:
+
+- `pnpm typecheck`, `pnpm lint` (one existing warning in `use-studio.tsx`,
+  untouched) and `pnpm format:check`: pass.
+- `pnpm --filter @videorc/desktop test`: 317 files, 3,491 passed, 1 skipped.
+- `pnpm build` and `pnpm check:renderer-assets`, against base `72b47404`
+  built the same way:
+  - Initial eager JS: 1,844,775 → 1,840,960 raw bytes (364,763 → 363,748
+    gzip).
+  - The Sources chunk: 212.57 → 210.93 kB.
+- By eye, dark and light:
+  - 1166 pt: two 479 px columns.
+  - 960 pt (the window's minimum): one column.
+  - 1600 pt: two 696 px columns.
+  - No horizontal overflow; one left edge per column; More opens to Sync and
+    Calibrate (a development build) and to the echo guard and its three
+    facts.
+- Smokes and probes that drive Sources, from this worktree:
+  - `pnpm probe:preview-window`: **pass**. Opening Sources unmounts the dock slot, and the synthetic source is enabled.
+  - The probes' own Sources steps, run in the dev app with `pnpm ui:cmd`, all **pass**:
+    - `perf-idle-probe`'s microphone step: the hidden `Microphone` label's trigger and the first option not named `None`.
+    - `smoke-scene-presets`' Refresh cycle: "Refreshing…" disabled, then "Refresh" enabled.
+    - The real `enable-synthetic-source` command: `{ enabled: true }`.
+  - `pnpm smoke:scene-presets` and `pnpm smoke:layout-source-loop`: blocked by the environment. Both stop at `select-camera-device` with "No camera device available to select", before they reach Sources. This worktree's freshly built backend has no camera grant. The hook they call lives in `use-studio.tsx`, which this PR does not touch.
+  - `pnpm smoke:preview-performance`: red on "unfiltered WebSocket wire rate 82.46KiB/s exceeded 80KiB/s". Its default run never opens Sources (the Sources step needs `VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1`). The same gate read ~82 KiB/s on main here during plan 092.
+- `pnpm smoke:recording-studio`: see the PR.
+
+Owed to the owner: a packaged by-eye pass with a real camera and
+microphone (the "Live" chips and facts lines, the camera format, System
+audio's meter during a recording).
