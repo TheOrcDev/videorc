@@ -266,10 +266,21 @@ describe('BuddyLookSection (plan 169 D13, plan 170 D14)', () => {
     expect(byTestId('buddy-look')?.dataset.view).toBe('current')
   })
 
-  it('discards the draft', async () => {
+  it('deletes the draft behind a question (plan 174 S0.3, G-1)', async () => {
     const backend = fakeBackend({ draft: draft() })
     await render({ client: backend.client })
+    expect(byTestId('buddy-look-discard')?.textContent).toContain('Delete…')
     await click(byTestId('buddy-look-discard'))
+    expect(byTestId('buddy-look-delete-dialog')?.textContent).toContain('Delete the new look?')
+    await click(byTestId('buddy-look-delete-cancel'))
+    expect(backend.requestTyped).not.toHaveBeenCalledWith(
+      'cohost.avatar.discard',
+      expect.anything(),
+      expect.anything()
+    )
+    expect(byTestId('buddy-look')?.dataset.view).toBe('draft')
+    await click(byTestId('buddy-look-discard'))
+    await click(byTestId('buddy-look-delete-confirm'))
     expect(backend.requestTyped).toHaveBeenCalledWith(
       'cohost.avatar.discard',
       { requestId: ID },

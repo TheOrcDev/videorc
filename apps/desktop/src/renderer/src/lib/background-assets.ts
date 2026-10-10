@@ -394,6 +394,24 @@ export function setAssetStyle(
   }
 }
 
+/**
+ * Whether removing a slot's background asks first (plan 174 S0.3, C-12): when
+ * it leaves the scene (the slot is active, or its asset is the scene's
+ * background), or when it is an imported file (pruned on the next load, so
+ * gone for good). Emptying a built-in slot is reversible (Restore default).
+ */
+export function removeSlotNeedsConfirm(
+  registry: BackgroundAssetRegistry,
+  slotId: string,
+  sceneBackgroundAssetId: string | null | undefined
+): boolean {
+  const slot = registry.slots.find((entry) => entry.id === slotId)
+  if (!slot) return false
+  if (registry.activeSlotId === slotId) return true
+  if (slot.assetId !== null && slot.assetId === sceneBackgroundAssetId) return true
+  return slotAsset(slot, registry)?.kind === 'imported'
+}
+
 // Removing a library entry never deletes its managed file or saved-scene references.
 export function removeSlotAsset(
   registry: BackgroundAssetRegistry,

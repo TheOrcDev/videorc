@@ -11453,14 +11453,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
       try {
         setLastError(null)
+        const name = screens.find((screen) => screen.id === screenId)?.name ?? 'takeover'
         const nextScreens = await client.request<StreamScreen[]>('screens.delete', { screenId })
         setScreens(nextScreens)
-        toast.success('Deleted Screen.')
+        // A confirmed delete may say so, and names what went (plan 174 C-1).
+        toast.success(`Deleted “${name}”`)
       } catch (error) {
         reportError(error)
       }
     },
-    [client, isSessionActive, reportError]
+    [client, isSessionActive, reportError, screens]
   )
 
   const reorderScreen = useCallback(

@@ -1,6 +1,7 @@
-import type { ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/comments-header'
 import { providerBadgeTitle } from '@/components/comments-destination-status'
 import { ClipIcon, FrameIcon, MoreIcon, PinIcon, PreviewIcon } from '@/components/icons'
@@ -136,181 +137,201 @@ export function StreamManagerStatusBar({
     highlightAnchor && onHighlightAnchorChange
       ? { anchor: highlightAnchor, onChange: onHighlightAnchorChange }
       : null
+  // Plan 174 S0.3 (H-6): Clear empties chat and Activity for this window and
+  // cannot be undone, so both its homes (the button, the ⋯ menu) ask first.
+  const [confirmingClear, setConfirmingClear] = useState(false)
+  const requestClear = onClear ? () => setConfirmingClear(true) : undefined
   return (
-    // 32 px, not the shared 26: the platform icons are 20 px (YouTube's
-    // minimum, plan 165) and need room above and below inside the border.
-    <StatusBar
-      className="h-8 gap-2"
-      leading={
-        // The clip keeps chips that cannot shrink off the controls at narrow
-        // widths. The padding (cancelled by the negative margin) is the status
-        // dot's 2 px halo and 8 px glow, which paint outside its box: without
-        // it the last dot is cut flat on the right.
-        <span
-          className="-my-1 -mr-2 flex min-w-0 items-center gap-3 overflow-hidden py-1 pr-2"
-          data-slot="chat-states"
-        >
-          {providers.map((provider) => {
-            const label = providerCapabilityLabel(provider)
-            const problem = providerProblem(provider)
-            const title = providerCapabilityTitle(provider, audience)
-            return (
-              <span
-                key={provider.id}
-                aria-label={title.split('\n')[0]}
-                className="flex min-w-0 shrink items-center gap-1.5"
-                data-slot="chat-state"
-                role="img"
-                title={title}
-              >
-                <ChatPlatformIcon decorative platform={provider.platform} />
-                <StatusDot tone={providerTone(provider)} />
-                {problem ? (
-                  <span
-                    className={cn('max-w-[32rem] truncate', ABOVE_NARROW)}
-                    data-slot="chat-state-problem"
-                  >
-                    {problem}
-                  </span>
-                ) : label ? (
-                  <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
-                    {CHAT_PLATFORM_LABELS[provider.platform]} {label}
-                  </span>
-                ) : null}
-              </span>
-            )
-          })}
-        </span>
-      }
-    >
-      <div
-        className={cn('items-center gap-0.5 [-webkit-app-region:no-drag]', 'flex', ABOVE_NARROW)}
-        data-slot="stream-manager-actions"
-      >
-        {onToggleAlwaysOnTop ? (
-          <button
-            aria-label="Keep this window on top"
-            aria-pressed={alwaysOnTop}
-            className={ACTION_CLASS}
-            title="Keep on top"
-            type="button"
-            onClick={onToggleAlwaysOnTop}
+    <>
+      {/* 32 px, not the shared 26: the platform icons are 20 px (YouTube's
+        minimum, plan 165) and need room above and below inside the border. */}
+      <StatusBar
+        className="h-8 gap-2"
+        leading={
+          // The clip keeps chips that cannot shrink off the controls at narrow
+          // widths. The padding (cancelled by the negative margin) is the status
+          // dot's 2 px halo and 8 px glow, which paint outside its box: without
+          // it the last dot is cut flat on the right.
+          <span
+            className="-my-1 -mr-2 flex min-w-0 items-center gap-3 overflow-hidden py-1 pr-2"
+            data-slot="chat-states"
           >
-            <PinIcon aria-hidden weight={alwaysOnTop ? 'fill' : 'regular'} />
-          </button>
-        ) : null}
-        {anchorControl ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                aria-label="Highlight position"
-                className={ACTION_CLASS}
-                title={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
-                type="button"
-              >
-                <FrameIcon aria-hidden />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" side="top">
-              <HighlightAnchorOptions {...anchorControl} />
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null}
-        {onMarkClip ? (
-          <button
-            aria-label="Mark clip"
-            className={ACTION_CLASS}
-            title="Mark this moment for a clip (or say “clip that”)"
-            type="button"
-            onClick={onMarkClip}
-          >
-            <ClipIcon aria-hidden />
-            Mark clip
-          </button>
-        ) : null}
-        {onClear ? (
-          <button
-            aria-label="Clear view"
-            className={ACTION_CLASS}
-            title="Clear view (keeps Library history)"
-            type="button"
-            onClick={onClear}
-          >
-            Clear
-          </button>
-        ) : null}
-        {onOpenPreview ? (
-          <button
-            aria-label="Open Preview"
-            className={ACTION_CLASS}
-            title="Open Preview"
-            type="button"
-            onClick={onOpenPreview}
-          >
-            <PreviewIcon aria-hidden />
-          </button>
-        ) : null}
-      </div>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            aria-label="More Stream Manager actions"
-            className={cn('size-6', NARROW_ONLY)}
-            size="icon-xs"
-            title="More Stream Manager actions"
-            type="button"
-            variant="ghost"
-          >
-            <MoreIcon data-icon="inline-start" weight="bold" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-56" side="top">
-          <DropdownMenuGroup>
-            {anchorControl ? (
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <FrameIcon />
-                  Highlight position
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  <HighlightAnchorOptions {...anchorControl} />
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-            ) : null}
-            {onToggleAlwaysOnTop ? (
-              <DropdownMenuCheckboxItem
-                checked={alwaysOnTop}
-                onCheckedChange={() => onToggleAlwaysOnTop()}
-              >
-                Keep on top
-              </DropdownMenuCheckboxItem>
-            ) : null}
-            {onMarkClip ? (
-              <DropdownMenuItem onSelect={onMarkClip}>
-                <ClipIcon />
-                Mark clip
-              </DropdownMenuItem>
-            ) : null}
-            {onOpenPreview ? (
-              <DropdownMenuItem onSelect={onOpenPreview}>
-                <PreviewIcon />
-                Open Preview
-              </DropdownMenuItem>
-            ) : null}
-          </DropdownMenuGroup>
-          {onClear ? (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={onClear}>
-                <span className="flex flex-col">
-                  <span>Clear view</span>
-                  <span className="text-[11px] text-muted-foreground">Keeps Library history.</span>
+            {providers.map((provider) => {
+              const label = providerCapabilityLabel(provider)
+              const problem = providerProblem(provider)
+              const title = providerCapabilityTitle(provider, audience)
+              return (
+                <span
+                  key={provider.id}
+                  aria-label={title.split('\n')[0]}
+                  className="flex min-w-0 shrink items-center gap-1.5"
+                  data-slot="chat-state"
+                  role="img"
+                  title={title}
+                >
+                  <ChatPlatformIcon decorative platform={provider.platform} />
+                  <StatusDot tone={providerTone(provider)} />
+                  {problem ? (
+                    <span
+                      className={cn('max-w-[32rem] truncate', ABOVE_NARROW)}
+                      data-slot="chat-state-problem"
+                    >
+                      {problem}
+                    </span>
+                  ) : label ? (
+                    <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
+                      {CHAT_PLATFORM_LABELS[provider.platform]} {label}
+                    </span>
+                  ) : null}
                 </span>
-              </DropdownMenuItem>
-            </>
+              )
+            })}
+          </span>
+        }
+      >
+        <div
+          className={cn('items-center gap-0.5 [-webkit-app-region:no-drag]', 'flex', ABOVE_NARROW)}
+          data-slot="stream-manager-actions"
+        >
+          {onToggleAlwaysOnTop ? (
+            <button
+              aria-label="Keep this window on top"
+              aria-pressed={alwaysOnTop}
+              className={ACTION_CLASS}
+              title="Keep on top"
+              type="button"
+              onClick={onToggleAlwaysOnTop}
+            >
+              <PinIcon aria-hidden weight={alwaysOnTop ? 'fill' : 'regular'} />
+            </button>
           ) : null}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </StatusBar>
+          {anchorControl ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  aria-label="Highlight position"
+                  className={ACTION_CLASS}
+                  title={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
+                  type="button"
+                >
+                  <FrameIcon aria-hidden />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" side="top">
+                <HighlightAnchorOptions {...anchorControl} />
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+          {onMarkClip ? (
+            <button
+              aria-label="Mark clip"
+              className={ACTION_CLASS}
+              title="Mark this moment for a clip (or say “clip that”)"
+              type="button"
+              onClick={onMarkClip}
+            >
+              <ClipIcon aria-hidden />
+              Mark clip
+            </button>
+          ) : null}
+          {requestClear ? (
+            <button
+              aria-label="Clear view"
+              className={ACTION_CLASS}
+              title="Clear view (keeps Library history)"
+              type="button"
+              onClick={requestClear}
+            >
+              Clear
+            </button>
+          ) : null}
+          {onOpenPreview ? (
+            <button
+              aria-label="Open Preview"
+              className={ACTION_CLASS}
+              title="Open Preview"
+              type="button"
+              onClick={onOpenPreview}
+            >
+              <PreviewIcon aria-hidden />
+            </button>
+          ) : null}
+        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label="More Stream Manager actions"
+              className={cn('size-6', NARROW_ONLY)}
+              size="icon-xs"
+              title="More Stream Manager actions"
+              type="button"
+              variant="ghost"
+            >
+              <MoreIcon data-icon="inline-start" weight="bold" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56" side="top">
+            <DropdownMenuGroup>
+              {anchorControl ? (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <FrameIcon />
+                    Highlight position
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>
+                    <HighlightAnchorOptions {...anchorControl} />
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              ) : null}
+              {onToggleAlwaysOnTop ? (
+                <DropdownMenuCheckboxItem
+                  checked={alwaysOnTop}
+                  onCheckedChange={() => onToggleAlwaysOnTop()}
+                >
+                  Keep on top
+                </DropdownMenuCheckboxItem>
+              ) : null}
+              {onMarkClip ? (
+                <DropdownMenuItem onSelect={onMarkClip}>
+                  <ClipIcon />
+                  Mark clip
+                </DropdownMenuItem>
+              ) : null}
+              {onOpenPreview ? (
+                <DropdownMenuItem onSelect={onOpenPreview}>
+                  <PreviewIcon />
+                  Open Preview
+                </DropdownMenuItem>
+              ) : null}
+            </DropdownMenuGroup>
+            {requestClear ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={requestClear}>
+                  <span className="flex flex-col">
+                    <span>Clear view</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      Keeps Library history.
+                    </span>
+                  </span>
+                </DropdownMenuItem>
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </StatusBar>
+      <ConfirmDialog
+        confirmLabel="Clear view"
+        description="Chat and Activity in this window are emptied and the messages per minute start over. The Library keeps the history."
+        open={confirmingClear}
+        testId="stream-manager-clear"
+        title="Clear the view?"
+        onCancel={() => setConfirmingClear(false)}
+        onConfirm={() => {
+          setConfirmingClear(false)
+          onClear?.()
+        }}
+      />
+    </>
   )
 }

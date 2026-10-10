@@ -17,6 +17,7 @@ import {
   markSlotMissingIfAssetMatches,
   reconcileRegistry,
   removeSlotAsset,
+  removeSlotNeedsConfirm,
   restoreSlotDefault,
   renameAsset,
   setAssetStyle,
@@ -269,6 +270,27 @@ describe('background asset model', () => {
       expect(slotById(reconciled, 'bg-01').status).toBe('ready')
       expect(slotById(reconciled, 'bg-01').assetId).toBe('builtin-bg-01')
     })
+  })
+})
+
+describe('removeSlotNeedsConfirm (plan 174 S0.3, C-12)', () => {
+  it('asks for the active slot, the scene background, and any imported file', () => {
+    const base = createDefaultRegistry()
+    const imported = withReadySlot(base, 'bg-02', readyAsset('asset-2', 'Mine'))
+    // The active slot leaves the scene.
+    expect(removeSlotNeedsConfirm({ ...imported, activeSlotId: 'bg-02' }, 'bg-02', null)).toBe(true)
+    // The scene's background, even when the slot is not marked active.
+    expect(removeSlotNeedsConfirm(imported, 'bg-02', 'asset-2')).toBe(true)
+    // An imported file that is applied nowhere is still gone for good.
+    expect(removeSlotNeedsConfirm(imported, 'bg-02', null)).toBe(true)
+  })
+
+  it('lets a built-in slot empty without a question, and ignores unknown slots', () => {
+    const base = createDefaultRegistry()
+    const builtInSlot = base.slots.find((slot) => slot.assetId !== null)
+    expect(builtInSlot).toBeTruthy()
+    expect(removeSlotNeedsConfirm(base, builtInSlot!.id, null)).toBe(false)
+    expect(removeSlotNeedsConfirm(base, 'no-such-slot', null)).toBe(false)
   })
 })
 

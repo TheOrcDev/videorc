@@ -12,10 +12,20 @@ const mocked = vi.hoisted(() => ({
   request: vi.fn(),
   seek: vi.fn(),
   close: vi.fn(),
-  player: vi.fn()
+  player: vi.fn(),
+  toast: { message: vi.fn(), dismiss: vi.fn() },
+  // The Undo window, held still: the test runs or undoes it by hand.
+  undoable: { run: null as null | (() => void), undo: vi.fn(), flush: vi.fn() }
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core
+}))
+vi.mock('@/lib/toast', () => ({ toast: mocked.toast }))
+vi.mock('@/lib/undoable-action', () => ({
+  scheduleUndoableAction: (run: () => void) => {
+    mocked.undoable.run = run
+    return { undo: mocked.undoable.undo, flush: mocked.undoable.flush, state: 'pending' }
+  }
 }))
 vi.mock('@/backendClient', () => ({
   BackendClient: class {
@@ -108,13 +118,56 @@ describe('saved marker timeline', () => {
     expect(document.body.textContent).toContain('00:00:12')
     expect(document.querySelector('[data-slot="marker-timeline"]')).toBeTruthy()
     expect(mocked.player).not.toHaveBeenCalled()
+  })
+  // Plan 174 S0.3 (E-8): a marker cannot be made again, so a delete hides it
+  // and runs only once the Undo toast's window passes.
+  it('hides a deleted marker at once and deletes it only after the Undo window', async () => {
+    await mount()
     await act(async () =>
       document.querySelector<HTMLButtonElement>('[aria-label="Delete Shadcn New Library"]')!.click()
     )
+    expect(document.body.textContent).not.toContain('Shadcn New Library')
+    expect(mocked.request).not.toHaveBeenCalledWith('session.marker.delete', expect.anything())
+    expect(mocked.toast.message).toHaveBeenCalledWith(
+      'Marker deleted · Shadcn New Library',
+      expect.objectContaining({ id: 'marker-delete-m1', duration: 5000 })
+    )
+    await act(async () => mocked.undoable.run?.())
     expect(mocked.request).toHaveBeenCalledWith('session.marker.delete', {
       sessionId: 's1',
       markerId: 'm1'
     })
+  })
+  it('brings a deleted marker back on Undo and never deletes it', async () => {
+    await mount()
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('[aria-label="Delete Shadcn New Library"]')!.click()
+    )
+    const options = mocked.toast.message.mock.calls.at(-1)?.[1] as {
+      action: { label: string; onClick: () => void }
+    }
+    expect(options.action.label).toBe('Undo')
+    await act(async () => options.action.onClick())
+    expect(mocked.undoable.undo).toHaveBeenCalledOnce()
+    expect(mocked.toast.dismiss).toHaveBeenCalledWith('marker-delete-m1')
+    expect(mocked.request).toHaveBeenLastCalledWith('session.markers.list', { sessionId: 's1' })
+    expect(mocked.request).not.toHaveBeenCalledWith('session.marker.delete', expect.anything())
+    expect(document.body.textContent).toContain('Shadcn New Library')
+  })
+  it('runs a waiting delete when its client goes away, and drops the Undo', async () => {
+    await mount()
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('[aria-label="Delete Shadcn New Library"]')!.click()
+    )
+    const connected = mocked.core
+    mocked.core = { ...connected, wsStatus: 'closed' }
+    try {
+      await mount()
+      expect(mocked.undoable.flush).toHaveBeenCalledOnce()
+      expect(mocked.toast.dismiss).toHaveBeenCalledWith('marker-delete-m1')
+    } finally {
+      mocked.core = connected
+    }
   })
   it('shows a read failure and retries without claiming an empty timeline', async () => {
     mocked.request.mockRejectedValueOnce(new Error('Storage unavailable'))

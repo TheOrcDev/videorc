@@ -87,6 +87,11 @@ export function revealInFileManagerLabel(
   }
 }
 
+/** The OS's name for where a deleted file goes: a Library delete moves there (plan 174 E-2). */
+export function trashName(platform: string | undefined = detectedPlatform()): string {
+  return appPlatform(platform) === 'win32' ? 'Recycle Bin' : 'Trash'
+}
+
 /** Electron accelerator examples are authored mac-style (`Cmd+Shift+R`). */
 export function displayAccelerator(
   accelerator: string,

@@ -1,15 +1,6 @@
-import { useRef, type ReactElement } from 'react'
+import type { ReactElement } from 'react'
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle
-} from '@/components/ui/alert-dialog'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   END_LIVESTREAM_LABEL,
   END_LIVESTREAM_TITLE,
@@ -35,42 +26,16 @@ export function EndLivestreamDialog({
   onCancel: () => void
   onConfirm: () => void
 }): ReactElement {
-  // Radix closes the dialog on both buttons; only a close that was not the
-  // confirm counts as keeping the stream.
-  const confirmedRef = useRef(false)
   return (
-    <AlertDialog
+    <ConfirmDialog
+      cancelLabel={KEEP_STREAMING_LABEL}
+      confirmLabel={END_LIVESTREAM_LABEL}
+      description={confirmation ? endLivestreamBody(confirmation) : null}
       open={confirmation !== null}
-      onOpenChange={(open) => {
-        if (open) return
-        const confirmed = confirmedRef.current
-        confirmedRef.current = false
-        if (!confirmed) onCancel()
-      }}
-    >
-      <AlertDialogContent data-testid="end-livestream-dialog">
-        <AlertDialogHeader>
-          <AlertDialogTitle>{END_LIVESTREAM_TITLE}</AlertDialogTitle>
-          <AlertDialogDescription>
-            {confirmation ? endLivestreamBody(confirmation) : null}
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel data-testid="end-livestream-keep">
-            {KEEP_STREAMING_LABEL}
-          </AlertDialogCancel>
-          <AlertDialogAction
-            data-testid="end-livestream-confirm"
-            variant="destructive"
-            onClick={() => {
-              confirmedRef.current = true
-              onConfirm()
-            }}
-          >
-            {END_LIVESTREAM_LABEL}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+      testId="end-livestream"
+      title={END_LIVESTREAM_TITLE}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
   )
 }

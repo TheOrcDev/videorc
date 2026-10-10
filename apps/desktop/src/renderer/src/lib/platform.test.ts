@@ -7,7 +7,8 @@ import {
   displayKeyGlyphs,
   isWindowsPlatform,
   osSettingsName,
-  revealInFileManagerLabel
+  revealInFileManagerLabel,
+  trashName
 } from './platform'
 
 describe('appPlatform', () => {
@@ -62,6 +63,14 @@ describe('revealInFileManagerLabel', () => {
     expect(revealInFileManagerLabel('darwin')).toBe('Show in Finder')
     expect(revealInFileManagerLabel('win32')).toBe('Show in Explorer')
     expect(revealInFileManagerLabel('linux')).toBe('Show in folder')
+  })
+})
+
+describe('trashName', () => {
+  it('names where a deleted file goes (plan 174 E-2)', () => {
+    expect(trashName('darwin')).toBe('Trash')
+    expect(trashName('win32')).toBe('Recycle Bin')
+    expect(trashName('linux')).toBe('Trash')
   })
 })
 

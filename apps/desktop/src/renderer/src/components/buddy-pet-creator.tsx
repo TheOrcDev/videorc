@@ -16,14 +16,7 @@ import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
@@ -431,36 +424,22 @@ export function BuddyPetCreator({
         ) : null}
       </div>
 
-      <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>
-        <DialogContent showCloseButton={false}>
-          <DialogHeader>
-            <DialogTitle>Cancel this creation?</DialogTitle>
-            <DialogDescription>
-              Its pictures and any built pack are deleted from this computer. Once a sheet after the
-              pilot was made, it still counts against this month.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button autoFocus type="button" variant="ghost" onClick={() => setCancelOpen(false)}>
-              Keep it
-            </Button>
-            <Button
-              data-testid="buddy-pet-cancel-confirm"
-              type="button"
-              variant="destructive"
-              onClick={() => {
-                setCancelOpen(false)
-                setNaming(false)
-                setRedoKey(null)
-                if (creation) reviewMarksByBuild.delete(creation.buildId)
-                void controller?.cancel()
-              }}
-            >
-              Cancel creation
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        cancelLabel="Keep it"
+        confirmLabel="Cancel creation"
+        description="Its pictures and any built pack are deleted from this computer. Once a sheet after the pilot was made, it still counts against this month."
+        open={cancelOpen}
+        testId="buddy-pet-cancel"
+        title="Cancel this creation?"
+        onCancel={() => setCancelOpen(false)}
+        onConfirm={() => {
+          setCancelOpen(false)
+          setNaming(false)
+          setRedoKey(null)
+          if (creation) reviewMarksByBuild.delete(creation.buildId)
+          void controller?.cancel()
+        }}
+      />
     </div>
   )
 }

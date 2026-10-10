@@ -1,6 +1,7 @@
 import { CopyIcon, DeleteIcon, MobileIcon, WarningIcon } from '@/components/icons'
 import { useState, useSyncExternalStore, type ReactElement } from 'react'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,7 +14,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { RemoteLanPairing } from '@/lib/backend'
+import type { RemoteLanDevice, RemoteLanPairing } from '@/lib/backend'
 import {
   PAIRING_TROUBLE_HINT_AFTER_MS,
   PHONE_REMOTE_OFF_HINT,
@@ -187,6 +188,8 @@ export function PhoneRemoteSection(): ReactElement {
   const now = useNow()
   const [pending, setPending] = useState(false)
   const [pairing, setPairing] = useState<{ value: RemoteLanPairing; since: number } | null>(null)
+  // Plan 174 S0.3 (I-15): removing a phone disconnects it at once, so it asks.
+  const [removing, setRemoving] = useState<RemoteLanDevice | null>(null)
   const status = phone.status
   // A successful scan consumes the ticket: the pushed status drops
   // pairingExpiresAt while our countdown is still running — close the dialog.
@@ -274,7 +277,7 @@ export function PhoneRemoteSection(): ReactElement {
                     disabled={pending}
                     size="icon-sm"
                     variant="ghost"
-                    onClick={() => void run(() => phone.revokeDevice(device.id))}
+                    onClick={() => setRemoving(device)}
                   >
                     <DeleteIcon />
                   </Button>
@@ -291,6 +294,21 @@ export function PhoneRemoteSection(): ReactElement {
       ) : (
         <p className="text-xs text-muted-foreground">{PHONE_REMOTE_OFF_HINT}</p>
       )}
+
+      <ConfirmDialog
+        confirmDisabled={pending}
+        confirmLabel="Remove phone"
+        description="It is disconnected now and needs a new pairing to come back. Your Stream Deck is not affected."
+        open={removing !== null}
+        testId="phone-remove"
+        title={`Remove ${removing?.name ?? 'this phone'}?`}
+        onCancel={() => setRemoving(null)}
+        onConfirm={() => {
+          const device = removing
+          setRemoving(null)
+          if (device) void run(() => phone.revokeDevice(device.id))
+        }}
+      />
 
       {shownPairing ? (
         <PairingDialog

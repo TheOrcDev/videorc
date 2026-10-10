@@ -459,7 +459,7 @@ describe('Clean cut review (plan 119 S14)', () => {
     await act(async () => cut('r2').click())
     await act(async () => button('Buddy').click())
     expect(onClose).not.toHaveBeenCalled()
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain(
       'Leave without saving?'
     )
     await act(async () => button('Discard changes').click())

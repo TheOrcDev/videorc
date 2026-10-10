@@ -3,11 +3,11 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
@@ -169,25 +169,16 @@ export function BuddyPersonaSection(): ReactElement | null {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={startOverOpen} onOpenChange={setStartOverOpen}>
-        <DialogContent showCloseButton={false}>
-          <DialogHeader>
-            <DialogTitle>Start over with a new Buddy?</DialogTitle>
-            <DialogDescription>
-              {persona.name}&apos;s name, personality, images and packs are deleted from this
-              computer. Your greetings and chat settings stay.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button autoFocus type="button" variant="ghost" onClick={() => setStartOverOpen(false)}>
-              Keep {persona.name}
-            </Button>
-            <Button type="button" variant="destructive" onClick={() => void startOver()}>
-              Start over
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        cancelLabel={`Keep ${persona.name}`}
+        confirmLabel="Start over"
+        description={`${persona.name}'s name, personality, images and packs are deleted from this computer. Your greetings and chat settings stay.`}
+        open={startOverOpen}
+        testId="buddy-start-over"
+        title="Start over with a new Buddy?"
+        onCancel={() => setStartOverOpen(false)}
+        onConfirm={() => void startOver()}
+      />
     </PanelSection>
   )
 }

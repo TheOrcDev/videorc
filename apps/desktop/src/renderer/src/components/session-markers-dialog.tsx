@@ -15,7 +15,16 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { DeleteIcon, EditIcon } from '@/components/icons'
 import type { SessionMarker, SessionSummary } from '@/lib/backend'
+import { toast } from '@/lib/toast'
+import { scheduleUndoableAction, type UndoableAction } from '@/lib/undoable-action'
 import { markerLabel, markerTime } from '../../../shared/session-markers'
+
+/** How long a deleted marker can be brought back (plan 174 S0.3, E-8). */
+export const MARKER_DELETE_UNDO_MS = 5000
+
+export function markerDeleteToastId(markerId: string): string {
+  return `marker-delete-${markerId}`
+}
 
 export function SessionMarkersDialog({
   session,
@@ -37,6 +46,8 @@ export function SessionMarkersDialog({
   const [selected, setSelected] = useState<string | null>(null)
   const player = useRef<SessionPlayerHandle>(null)
   const requestGeneration = useRef(0)
+  // Deletes waiting out their Undo window, by marker id.
+  const pendingDeletes = useRef(new Map<string, UndoableAction>())
   const canPlay = Boolean(session.mp4Path || session.outputPath) && session.status !== 'running'
   const load = useCallback(
     async (next: BackendClient, after?: string): Promise<void> => {
@@ -48,7 +59,9 @@ export function SessionMarkersDialog({
           ...(after ? { cursor: after } : {})
         })
         if (generation !== requestGeneration.current) return
-        setMarkers((previous) => (after ? [...previous, ...page.markers] : page.markers))
+        // A marker waiting out its Undo window stays hidden across a refresh.
+        const fresh = page.markers.filter((entry) => !pendingDeletes.current.has(entry.id))
+        setMarkers((previous) => (after ? [...previous, ...fresh] : fresh))
         setCursor(page.nextCursor)
         setError(null)
       } catch (error) {
@@ -62,6 +75,7 @@ export function SessionMarkersDialog({
   )
   useEffect(() => {
     const requests = requestGeneration
+    const deletes = pendingDeletes
     if (!connection || wsStatus !== 'connected') {
       setError('Reconnect Videorc to read markers.')
       setLoading(false)
@@ -93,6 +107,13 @@ export function SessionMarkersDialog({
       ++requests.current
       offCreated()
       offChanged()
+      // The client goes away with the dialog: a delete still waiting for its
+      // Undo runs now, and its Undo toast goes with it.
+      for (const [markerId, action] of deletes.current) {
+        action.flush()
+        toast.dismiss(markerDeleteToastId(markerId))
+      }
+      deletes.current.clear()
       next.close()
       setClient(null)
     }
@@ -101,21 +122,15 @@ export function SessionMarkersDialog({
     setSelected(marker.id)
     player.current?.seekTo(marker.atSeconds * 1000)
   }
-  const mutate = async (action: 'rename' | 'delete', marker: SessionMarker): Promise<void> => {
+  const rename = async (marker: SessionMarker): Promise<void> => {
     if (!client || pending) return
     setPending(true)
     try {
-      if (action === 'rename')
-        await client.requestTyped('session.marker.rename', {
-          sessionId: session.id,
-          markerId: marker.id,
-          label: markerLabel(draft)
-        })
-      else
-        await client.requestTyped('session.marker.delete', {
-          sessionId: session.id,
-          markerId: marker.id
-        })
+      await client.requestTyped('session.marker.rename', {
+        sessionId: session.id,
+        markerId: marker.id,
+        label: markerLabel(draft)
+      })
       setEditing(null)
       await load(client)
     } catch (error) {
@@ -123,6 +138,38 @@ export function SessionMarkersDialog({
     } finally {
       setPending(false)
     }
+  }
+  // Plan 174 S0.3 (E-8): a marker cannot be made again, so a delete hides it
+  // now and runs once the Undo toast's window passes, unless undone first.
+  const remove = (marker: SessionMarker): void => {
+    if (!client || pendingDeletes.current.has(marker.id)) return
+    const backend = client
+    const toastId = markerDeleteToastId(marker.id)
+    setMarkers((previous) => previous.filter((entry) => entry.id !== marker.id))
+    const action = scheduleUndoableAction(() => {
+      pendingDeletes.current.delete(marker.id)
+      void backend
+        .requestTyped('session.marker.delete', { sessionId: session.id, markerId: marker.id })
+        .catch((error: unknown) => {
+          setError(error instanceof Error ? error.message : 'Could not delete marker.')
+          void load(backend)
+        })
+    }, MARKER_DELETE_UNDO_MS)
+    pendingDeletes.current.set(marker.id, action)
+    toast.message(`Marker deleted · ${marker.label ?? 'Untitled marker'}`, {
+      id: toastId,
+      description: markerTime(marker.atSeconds),
+      duration: MARKER_DELETE_UNDO_MS,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          action.undo()
+          pendingDeletes.current.delete(marker.id)
+          toast.dismiss(toastId)
+          void load(backend)
+        }
+      }
+    })
   }
   const durationMs = session.durationMs
   return (
@@ -197,7 +244,7 @@ export function SessionMarkersDialog({
                   variant="ghost"
                   aria-label={`Delete ${marker.label ?? 'marker'}`}
                   disabled={pending}
-                  onClick={() => void mutate('delete', marker)}
+                  onClick={() => remove(marker)}
                 >
                   <DeleteIcon />
                 </Button>
@@ -216,7 +263,7 @@ export function SessionMarkersDialog({
             className="flex gap-2"
             onSubmit={(event) => {
               event.preventDefault()
-              void mutate('rename', editing)
+              void rename(editing)
             }}
           >
             <Input

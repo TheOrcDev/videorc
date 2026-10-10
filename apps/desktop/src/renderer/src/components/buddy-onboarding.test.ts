@@ -598,12 +598,26 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
   })
 
-  it('says nothing about the library for a draft an older web made, and Discard goes back', async () => {
+  it('says nothing about the library for a draft an older web made, and Delete asks, then goes back', async () => {
     const backend = fakeBackend({ draft: draft() })
     await render({ client: backend.client, initialStep: 1 })
     expect(step()).toBe('4')
     expect(byTestId('buddy-onboarding-saved')).toBeNull()
+    // Plan 174 S0.3 (G-1, G-13): Back keeps its slot beside Delete…, and a
+    // delete asks first; Cancel keeps the draft.
+    expect(byTestId('buddy-onboarding-back')).not.toBeNull()
+    expect(byTestId('buddy-onboarding-discard')?.textContent).toContain('Delete…')
     await click(byTestId('buddy-onboarding-discard'))
+    expect(byTestId('buddy-onboarding-delete-dialog')?.textContent).toContain('Delete this Buddy?')
+    await click(byTestId('buddy-onboarding-delete-cancel'))
+    expect(backend.requestTyped).not.toHaveBeenCalledWith(
+      'cohost.avatar.discard',
+      expect.anything(),
+      expect.anything()
+    )
+    expect(byTestId('buddy-onboarding-use')).not.toBeNull()
+    await click(byTestId('buddy-onboarding-discard'))
+    await click(byTestId('buddy-onboarding-delete-confirm'))
     expect(backend.requestTyped).toHaveBeenCalledWith(
       'cohost.avatar.discard',
       { requestId: DRAFT },
@@ -611,5 +625,24 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     )
     expect(byTestId('buddy-onboarding-use')).toBeNull()
     expect(byTestId('buddy-onboarding-create')).not.toBeNull()
+  })
+
+  it('names the draft it would delete after the name typed on step 3', async () => {
+    const backend = fakeBackend({ draft: draft(LIBRARY_AVATAR) })
+    await render({ client: backend.client, libraryController: fakeLibraryController() })
+    // Back lands where the empty input allows (step 2); fill the steps back
+    // up to the draft.
+    await click(byTestId('buddy-onboarding-back'))
+    expect(step()).toBe('2')
+    await type('buddy-onboarding-description', 'A small cheeky goblin')
+    await click(next())
+    expect(step()).toBe('3')
+    await type('buddy-onboarding-name', 'Nibbles')
+    await click(next())
+    expect(step()).toBe('4')
+    await click(byTestId('buddy-onboarding-discard'))
+    const dialog = byTestId('buddy-onboarding-delete-dialog')
+    expect(dialog?.textContent).toContain('Delete Nibbles?')
+    expect(byTestId('buddy-onboarding-delete-confirm')?.textContent).toBe('Delete Nibbles')
   })
 })

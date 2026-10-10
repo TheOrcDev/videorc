@@ -3,6 +3,7 @@ import {
   ArrowLeftIcon,
   CheckIcon,
   CloseIcon,
+  DeleteIcon,
   ImageIcon,
   InfoIcon,
   LockIcon,
@@ -21,6 +22,7 @@ import {
 import { BuddyPoseTiles, type BuddyPoseTilesCopy } from '@/components/buddy-look-tiles'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import { BuddyStreamDemo } from '@/components/buddy-stream-demo'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -81,6 +83,7 @@ import {
   BUDDY_ONBOARDING_STEP_COUNT,
   BUDDY_ONBOARDING_STEP_TITLES,
   BUDDY_LIBRARY_COPY,
+  buddyLibraryDeleteTitle,
   buddyOnboardingCounter,
   buddyOnboardingProgress
 } from '@/lib/buddy-onboarding-copy'
@@ -192,6 +195,13 @@ export function BuddyOnboarding({
   const [pictureError, setPictureError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [consentOpen, setConsentOpen] = useState(false)
+  // Plan 174 S0.3 (G-1): a draft is already saved to the library, so
+  // throwing it away is a delete, and it asks.
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const draftName =
+    buddyOnboardingName(input.name) ??
+    library?.mine?.find((entry) => entry.id === look.draft?.libraryAvatarId)?.name ??
+    null
 
   const patch = (next: Partial<BuddyOnboardingInput>): void =>
     setInput((current) => ({ ...current, ...next }))
@@ -402,7 +412,9 @@ export function BuddyOnboarding({
 
         <DialogFooter className="shrink-0 items-center gap-2 border-t border-border px-5 py-3 sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
-            {step > 1 && !inProgress ? (
+            {/* Back keeps its slot while a draft waits (G-13); only a
+                creation in flight hides it. */}
+            {step > 1 && !creating ? (
               <Button
                 data-testid="buddy-onboarding-back"
                 type="button"
@@ -419,11 +431,25 @@ export function BuddyOnboarding({
                 disabled={!lookController || lookBusy}
                 type="button"
                 variant="ghost"
-                onClick={() => void lookController?.discard()}
+                onClick={() => setDeleteOpen(true)}
               >
-                Discard
+                <DeleteIcon data-icon="inline-start" />
+                Delete…
               </Button>
             ) : null}
+            <ConfirmDialog
+              cancelLabel="Keep it"
+              confirmLabel={draftName ? `Delete ${draftName}` : 'Delete Buddy'}
+              description={BUDDY_LIBRARY_COPY.deleteBody}
+              open={deleteOpen}
+              testId="buddy-onboarding-delete"
+              title={buddyLibraryDeleteTitle(draftName ?? 'this Buddy')}
+              onCancel={() => setDeleteOpen(false)}
+              onConfirm={() => {
+                setDeleteOpen(false)
+                void lookController?.discard()
+              }}
+            />
             {step === 1 ? (
               <span className="text-xs text-subtle">{BUDDY_ONBOARDING_STEP1.premiumNote}</span>
             ) : null}

@@ -55,7 +55,8 @@ describe('EndLivestreamDialog (plan 174 S0.1, D2, D19)', () => {
     )
     // No close button: the two answers are the only way out.
     expect(dialog?.querySelector('button[aria-label="Close"], .sr-only')).toBeNull()
-    expect(document.activeElement).toBe(byTestId('end-livestream-keep'))
+    expect(byTestId('end-livestream-cancel')?.textContent).toBe('Keep streaming')
+    expect(document.activeElement).toBe(byTestId('end-livestream-cancel'))
     expect(onCancel).not.toHaveBeenCalled()
     expect(onConfirm).not.toHaveBeenCalled()
   })
@@ -64,7 +65,7 @@ describe('EndLivestreamDialog (plan 174 S0.1, D2, D19)', () => {
     const onCancel = vi.fn()
     const onConfirm = vi.fn()
     await render(confirmation, { onCancel, onConfirm })
-    await act(async () => byTestId('end-livestream-keep')!.click())
+    await act(async () => byTestId('end-livestream-cancel')!.click())
     expect(onCancel).toHaveBeenCalledTimes(1)
     expect(onConfirm).not.toHaveBeenCalled()
 

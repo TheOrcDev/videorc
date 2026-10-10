@@ -5,14 +5,14 @@ import {
   ArrowLeftIcon,
   ArrowRightIcon,
   ArrowUpIcon,
-  LayoutIcon,
-  ResetIcon
+  LayoutIcon
 } from '@/components/icons'
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
+import { CameraResetButton } from '@/components/scene/camera-reset-button'
 import { OverlayEdits, overlayStageItems, withOverlayRect } from '@/components/scene/overlay-stage'
 import { SceneStage } from '@/components/scene/scene-stage'
 import { SourceTransformFields } from '@/components/scene/source-transform-fields'
@@ -943,42 +943,15 @@ export function LayoutTab(): ReactElement {
                   </>
                 ) : null}
 
-                {/* One committed patch back to the shipped camera defaults —
-                  placement, frame, lens, and chroma key. Never touches the
-                  layout preset or the selected sources (owner request,
-                  2026-08-19). */}
-                <Button
-                  className="mt-2 w-fit"
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => {
-                    const defaults = {
-                      cameraTransformMode: 'preset',
-                      cameraTransform: null,
-                      cameraCorner: 'bottom-right',
-                      cameraSize: 'medium',
-                      cameraShape: 'rectangle',
-                      cameraCornerRadiusPct: 12,
-                      cameraAspect: 'source',
-                      cameraMargin: 32,
-                      cameraFit: 'fill',
-                      cameraMirror: false,
-                      cameraZoom: 100,
-                      cameraOffsetX: 0,
-                      cameraOffsetY: 0,
-                      cameraChromaKeyEnabled: false,
-                      cameraChromaKeyColor: '#00FF00',
-                      cameraChromaKeySimilarityPct: 40,
-                      cameraChromaKeySmoothnessPct: 8,
-                      cameraChromaKeySpillPct: 10
-                    } as const
+                {/* One committed patch back to the shipped camera defaults,
+                  behind a question (plan 174 C-18). Never touches the layout
+                  preset or the selected sources (owner request, 2026-08-19). */}
+                <CameraResetButton
+                  onReset={(defaults) => {
                     patchLayout(defaults)
                     applyLayoutPatch(defaults)
                   }}
-                >
-                  <ResetIcon data-icon="inline-start" />
-                  Reset camera settings
-                </Button>
+                />
 
                 <SourceVisibilityField
                   disabled={isSessionActive || stageBusy}

@@ -1,6 +1,7 @@
 import { DeleteIcon, ImageBrokenIcon, ImageIcon, SaveIcon, UploadIcon } from '@/components/icons'
 import { useEffect, useState, type DragEvent, type ReactElement } from 'react'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
@@ -34,66 +35,82 @@ export function TakeoverScreensSection(): ReactElement {
   const uploadDisabled = managementDisabled || screenImportPending
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
+  // Plan 174 S0.3 (C-1): a delete removes the image file too, so it asks.
+  const [deleting, setDeleting] = useState<StreamScreen | null>(null)
 
   return (
-    <PanelSection
-      action={
-        <Button disabled={uploadDisabled} onClick={() => void importScreenImage()}>
-          <UploadIcon data-icon="inline-start" weight="bold" />
-          {screenImportPending ? 'Importing' : 'Upload'}
-        </Button>
-      }
-      description="Full-frame images that cover the output. Flip them on from the Studio session panel. Drag tiles to reorder. Management is locked while a session is live."
-      icon={ImageIcon}
-      title="Takeover screens"
-    >
-      {screens.length === 0 ? (
-        <Empty className="py-12">
-          <EmptyMedia variant="icon">
-            <ImageIcon weight="duotone" />
-          </EmptyMedia>
-          <EmptyTitle>No takeovers yet</EmptyTitle>
-          <EmptyDescription>
-            Upload a PNG, JPEG, or WebP image to create the first takeover.
-          </EmptyDescription>
-        </Empty>
-      ) : (
-        // Bounded section: the grid scrolls inside the Assets page stack.
-        <ScrollArea className="max-h-[28rem] overflow-y-auto pr-3">
-          <Gallery className="gap-3">
-            {screens.map((screen, index) => (
-              <ScreenTile
-                active={activeScreen?.id === screen.id}
-                disabled={managementDisabled}
-                dragging={draggingId === screen.id}
-                dropTarget={dropIndex === index && draggingId !== screen.id}
-                key={screen.id}
-                screen={screen}
-                onDelete={() => void deleteScreen(screen.id)}
-                onDragEnd={() => {
-                  setDraggingId(null)
-                  setDropIndex(null)
-                }}
-                onDragEnter={() => {
-                  if (draggingId && draggingId !== screen.id) {
-                    setDropIndex(index)
-                  }
-                }}
-                onDragStart={() => setDraggingId(screen.id)}
-                onDrop={() => {
-                  if (draggingId && draggingId !== screen.id) {
-                    void reorderScreen(draggingId, index)
-                  }
-                  setDraggingId(null)
-                  setDropIndex(null)
-                }}
-                onRename={(name) => void renameScreen(screen.id, name)}
-              />
-            ))}
-          </Gallery>
-        </ScrollArea>
-      )}
-    </PanelSection>
+    <>
+      <PanelSection
+        action={
+          <Button disabled={uploadDisabled} onClick={() => void importScreenImage()}>
+            <UploadIcon data-icon="inline-start" weight="bold" />
+            {screenImportPending ? 'Importing' : 'Upload'}
+          </Button>
+        }
+        description="Full-frame images that cover the output. Flip them on from the Studio session panel. Drag tiles to reorder. Management is locked while a session is live."
+        icon={ImageIcon}
+        title="Takeover screens"
+      >
+        {screens.length === 0 ? (
+          <Empty className="py-12">
+            <EmptyMedia variant="icon">
+              <ImageIcon weight="duotone" />
+            </EmptyMedia>
+            <EmptyTitle>No takeovers yet</EmptyTitle>
+            <EmptyDescription>
+              Upload a PNG, JPEG, or WebP image to create the first takeover.
+            </EmptyDescription>
+          </Empty>
+        ) : (
+          // Bounded section: the grid scrolls inside the Assets page stack.
+          <ScrollArea className="max-h-[28rem] overflow-y-auto pr-3">
+            <Gallery className="gap-3">
+              {screens.map((screen, index) => (
+                <ScreenTile
+                  active={activeScreen?.id === screen.id}
+                  disabled={managementDisabled}
+                  dragging={draggingId === screen.id}
+                  dropTarget={dropIndex === index && draggingId !== screen.id}
+                  key={screen.id}
+                  screen={screen}
+                  onDelete={() => setDeleting(screen)}
+                  onDragEnd={() => {
+                    setDraggingId(null)
+                    setDropIndex(null)
+                  }}
+                  onDragEnter={() => {
+                    if (draggingId && draggingId !== screen.id) {
+                      setDropIndex(index)
+                    }
+                  }}
+                  onDragStart={() => setDraggingId(screen.id)}
+                  onDrop={() => {
+                    if (draggingId && draggingId !== screen.id) {
+                      void reorderScreen(draggingId, index)
+                    }
+                    setDraggingId(null)
+                    setDropIndex(null)
+                  }}
+                  onRename={(name) => void renameScreen(screen.id, name)}
+                />
+              ))}
+            </Gallery>
+          </ScrollArea>
+        )}
+      </PanelSection>
+      <ConfirmDialog
+        confirmLabel="Delete takeover"
+        description="Its image file is deleted from this computer."
+        open={deleting !== null}
+        testId="takeover-delete"
+        title={`Delete ${deleting?.name ?? 'takeover'}?`}
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          if (deleting) void deleteScreen(deleting.id)
+          setDeleting(null)
+        }}
+      />
+    </>
   )
 }
 

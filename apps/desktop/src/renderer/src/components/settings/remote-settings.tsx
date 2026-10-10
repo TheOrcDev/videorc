@@ -1,5 +1,6 @@
 import { useState, type ReactElement } from 'react'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PhoneRemoteSection } from '@/components/phone-remote-section'
 import { Button } from '@/components/ui/button'
@@ -14,6 +15,24 @@ import type { RemoteControlStatus } from '@/lib/backend'
  */
 export const REMOTE_CONTROL_OFF_HINT = 'Off. Turn on to pair a Stream Deck or the Videorc remote.'
 
+/** "1 paired phone is" / "3 paired phones are". */
+export function pairedPhonesClause(count: number): string {
+  return count === 1 ? '1 paired phone is' : `${count} paired phones are`
+}
+
+/** The two questions this tab asks (plan 174 S0.3, I-15, I-16). */
+export const REMOTE_CONFIRM_COPY = {
+  regenerate: {
+    title: 'Regenerate the pairing token?',
+    body: 'Every paired client is disconnected and needs the new token to pair again. The Stream Deck plugin pairs again on its own on this Mac.',
+    confirm: 'Regenerate token'
+  },
+  off: {
+    title: 'Turn off remote control?',
+    confirm: 'Turn off remote control'
+  }
+} as const
+
 /** Settings → Remote: a Stream Deck or local remote, and the phone remote. */
 export function RemoteSettings(): ReactElement {
   const { remoteControl } = useStudioCore()
@@ -22,7 +41,13 @@ export function RemoteSettings(): ReactElement {
   // (remote.control.status events) — this tab only renders it and fires
   // actions; the switch settles when the backend confirms.
   const remoteStatus = remoteControl.status
+  const phoneStatus = remoteControl.phone.status
   const [remotePending, setRemotePending] = useState(false)
+  // Plan 174 S0.3 (I-15, I-16): regenerating the token and turning remote
+  // control off while phones are paired both disconnect devices, so they ask.
+  const [confirmingRegenerate, setConfirmingRegenerate] = useState(false)
+  const [confirmingOff, setConfirmingOff] = useState(false)
+  const pairedPhones = phoneStatus?.enabled ? phoneStatus.devices.length : 0
   const runRemoteAction = async (
     action: () => Promise<RemoteControlStatus | null>
   ): Promise<void> => {
@@ -42,9 +67,15 @@ export function RemoteSettings(): ReactElement {
             aria-label="Enable remote control"
             checked={remoteStatus?.enabled ?? false}
             disabled={remotePending}
-            onCheckedChange={(checked) =>
-              void runRemoteAction(checked ? remoteControl.enable : remoteControl.disable)
-            }
+            onCheckedChange={(checked) => {
+              if (checked) {
+                void runRemoteAction(remoteControl.enable)
+              } else if (pairedPhones > 0) {
+                setConfirmingOff(true)
+              } else {
+                void runRemoteAction(remoteControl.disable)
+              }
+            }}
           />
         }
         description="Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this Mac only."
@@ -78,7 +109,7 @@ export function RemoteSettings(): ReactElement {
                   disabled={remotePending}
                   size="sm"
                   variant="outline"
-                  onClick={() => void runRemoteAction(remoteControl.regenerate)}
+                  onClick={() => setConfirmingRegenerate(true)}
                 >
                   Regenerate
                 </Button>
@@ -98,6 +129,33 @@ export function RemoteSettings(): ReactElement {
       </PanelSection>
 
       <PhoneRemoteSection />
+
+      <ConfirmDialog
+        confirmDisabled={remotePending}
+        confirmLabel={REMOTE_CONFIRM_COPY.regenerate.confirm}
+        description={REMOTE_CONFIRM_COPY.regenerate.body}
+        open={confirmingRegenerate}
+        testId="remote-token-regenerate"
+        title={REMOTE_CONFIRM_COPY.regenerate.title}
+        onCancel={() => setConfirmingRegenerate(false)}
+        onConfirm={() => {
+          setConfirmingRegenerate(false)
+          void runRemoteAction(remoteControl.regenerate)
+        }}
+      />
+      <ConfirmDialog
+        confirmDisabled={remotePending}
+        confirmLabel={REMOTE_CONFIRM_COPY.off.confirm}
+        description={`Phone remote turns off with it: ${pairedPhonesClause(pairedPhones)} disconnected, and so is every Stream Deck.`}
+        open={confirmingOff}
+        testId="remote-control-off"
+        title={REMOTE_CONFIRM_COPY.off.title}
+        onCancel={() => setConfirmingOff(false)}
+        onConfirm={() => {
+          setConfirmingOff(false)
+          void runRemoteAction(remoteControl.disable)
+        }}
+      />
     </>
   )
 }
