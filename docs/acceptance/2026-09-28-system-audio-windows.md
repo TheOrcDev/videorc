@@ -153,7 +153,8 @@ Record the machine, build number, output device and commit for every step.
    health event.
 
 10. **OBS import.** Import a scene collection with Desktop Audio enabled: the
-    report says "Desktop audio → System audio (on)" and the switch is On.
+    report's Desktop audio line says "Turns System audio on." and the switch
+    is On.
 
 11. **Iris Xe tester acceptance.** On the Iris Xe tester machine, a 10 minute
     recording and a 10 minute stream with System audio On, a game or video

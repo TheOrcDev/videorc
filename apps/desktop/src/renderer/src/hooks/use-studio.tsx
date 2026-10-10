@@ -23,6 +23,7 @@ import {
   type SavedScene
 } from '@/lib/scene-presets'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
+import { noteLayoutLeavingFreeform } from '@/lib/freeform-memory'
 import {
   commitSceneTransform,
   transformLayoutIntent,
@@ -1158,6 +1159,10 @@ export type StudioContextValue = {
    * Buddy sit per orientation and which outputs carry them. Backend-owned. */
   overlayLayout: OverlayLayout
   setOverlayLayout: (layout: OverlayLayout) => Promise<void>
+  /** Shows a failed action the way every Studio action does: the error toast
+   * (or the Premium prompt) and the diagnostics record. For promises a page
+   * starts itself, so no failure is swallowed (plan 174, C-6). */
+  reportError: (error: unknown) => void
   /** The Buddy on stream (plan 164 Phase C): which state shows and the bubble
    * that is up (`cohost.buddy.state`); null until the backend reported. */
   buddyOverlay: BuddyOverlaySnapshot | null
@@ -9228,10 +9233,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Choosing a preset scene EXITS freeform (unless the patch says
       // otherwise): the preset's fixed arrangement is what the user asked
       // for, and stale overrides must not leak into a later freeform entry.
-      const arrangementPatch =
+      // The overrides it clears are remembered for the next Freeform
+      // (plan 174, C-4), so one click never loses an arrangement.
+      const leavesArrangement =
         patch.layoutPreset !== undefined && patch.arrangementMode === undefined
-          ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
-          : {}
+      if (leavesArrangement) noteLayoutLeavingFreeform(current.layout)
+      const arrangementPatch = leavesArrangement
+        ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
+        : {}
 
       return requestLayoutTransaction(
         {
@@ -15499,6 +15508,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostSettings,
       overlayLayout,
       setOverlayLayout,
+      reportError,
       buddyOverlay,
       cohostGate,
       cohostActionPending,
@@ -15733,6 +15743,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostSettings,
       overlayLayout,
       setOverlayLayout,
+      reportError,
       buddyOverlay,
       cohostGate,
       cohostActionPending,

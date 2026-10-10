@@ -1,5 +1,6 @@
 import type { OverlayItem, OverlayLayout, OverlayOrientation, OverlayRect } from '@/lib/backend'
 import { OVERLAY_ITEMS } from '@/lib/backend'
+import type { WsStatus } from '@/lib/capture'
 import {
   OVERLAY_ITEM_LABELS,
   clampOverlayRect,
@@ -81,19 +82,31 @@ export interface OverlayDraft {
 
 export type OverlayCommit = (layout: OverlayLayout) => Promise<void>
 
+/** How a failed overlay change reaches the streamer (the Studio's reportError). */
+export type OverlayFailure = (error: unknown) => void
+
+/** The one reason the overlay controls are off: they need the backend
+ * (plan 174, C-6). Null while it is connected. */
+export function overlayEditsBlockedReason(wsStatus: WsStatus): string | null {
+  return wsStatus === 'connected' ? null : "Overlays can't change until the backend is connected."
+}
+
 /** Serializes released overlay gestures: exactly one commit per gesture, the
  * released rect shown until the committed layout arrives (or the commit
- * fails, which drops the draft so the canvas shows the truth again). */
+ * fails, which drops the draft so the canvas shows the truth again and reports
+ * the failure: a silent drop let a streamer believe an overlay had moved). */
 export class OverlayEdits {
   draft: OverlayDraft | null = null
   private epoch = 0
   private tail: Promise<void> = Promise.resolve()
   constructor(
     private commit: OverlayCommit,
-    private changed: () => void
+    private changed: () => void,
+    private failed: OverlayFailure = () => {}
   ) {}
-  configure(commit: OverlayCommit): void {
+  configure(commit: OverlayCommit, failed?: OverlayFailure): void {
     this.commit = commit
+    if (failed) this.failed = failed
   }
   /** The committed layout caught up with the draft (or moved on): drop it. */
   observe(layout: OverlayLayout): void {
@@ -131,8 +144,11 @@ export class OverlayEdits {
       if (epoch !== this.epoch) return
       try {
         await commit(withOverlayRect(layout, item, orientation, clamped))
-      } catch {
-        if (epoch === this.epoch) this.invalidate()
+      } catch (error) {
+        // A newer intent superseded this gesture: its failure is not news.
+        if (epoch !== this.epoch) return
+        this.invalidate()
+        this.failed(error)
       }
     })
   }

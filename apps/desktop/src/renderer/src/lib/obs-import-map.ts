@@ -49,7 +49,18 @@ export interface ObsImportPlanResult {
       }
     | { kind: 'oauth-suggest'; platform: 'twitch' | 'other'; serviceLabel: string }
   backgroundAsset?: BackgroundImportResult
+  /** The Assets slot the background goes into; set exactly when the report
+   * promises the background (plan 174, C-7). */
+  backgroundSlotId?: string
   report: ObsImportReportLine[]
+}
+
+/** Where an imported OBS image goes in Assets, resolved before the report is
+ * built so the report says what will happen (`unattendedImportSlot`). */
+export interface ObsBackgroundTarget {
+  slotId: string
+  /** The background the slot holds now, which the import replaces; null for an empty slot. */
+  replaces: string | null
 }
 
 const FALLBACK_CAMERA_NATIVE = { width: 1920, height: 1080 }
@@ -170,14 +181,20 @@ function detectPlatform(
   return 'other'
 }
 
+// Every note is a sentence the streamer reads before applying (plan 174,
+// C-29): what happens, then what to do if it is not right.
 const SKIP_NOTES: Partial<Record<ObsSource['kind'], string>> = {
-  browser: 'Videorc has no browser source',
-  text: 'Videorc has no text overlay source',
-  media: 'Videorc has no media-file source',
-  other: 'no Videorc equivalent'
+  browser: 'Videorc has no browser source.',
+  text: 'Videorc has no text overlay source.',
+  media: 'Videorc has no media-file source.',
+  other: 'Videorc has nothing like it.'
 }
 
-export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanResult {
+export function mapObsSetup(
+  setup: ObsSetup,
+  devices: Device[],
+  backgroundTarget: ObsBackgroundTarget | null = null
+): ObsImportPlanResult {
   const report: ObsImportReportLine[] = []
   const sourcesByName = new Map(setup.sources.map((source) => [source.name, source]))
   const scene =
@@ -210,7 +227,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
     report.push({
       verdict: 'skipped',
       subject: setup.collectionName,
-      note: 'no scene with visible sources found'
+      note: 'No scene with visible sources was found.'
     })
     return result
   }
@@ -229,13 +246,13 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'approximated',
           subject: source.name,
-          note: `display captures cannot be matched exactly; mapped to ${firstScreen.name}; re-pick in Sources if wrong`
+          note: `Captures ${firstScreen.name}. OBS displays can't be matched exactly, so check it in Sources.`
         })
       } else {
         report.push({
           verdict: 'approximated',
           subject: source.name,
-          note: 'pick the display in Sources once screen access is granted'
+          note: 'Pick the display in Sources once Screen Recording is allowed.'
         })
       }
     } else {
@@ -248,13 +265,13 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'imported',
           subject: source.name,
-          note: `window capture → ${window.name}`
+          note: `Captures the ${window.name} window.`
         })
       } else {
         report.push({
           verdict: 'approximated',
           subject: source.name,
-          note: `no open window matches "${hint}" right now; pick it in Sources`
+          note: `No open window matches "${hint}" right now. Pick it in Sources.`
         })
       }
     }
@@ -262,7 +279,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'approximated',
         subject: extra.name,
-        note: 'Videorc scenes hold one screen; kept the topmost'
+        note: 'Videorc scenes hold one screen, so the topmost one is kept.'
       })
     }
   }
@@ -275,12 +292,12 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
     if (camera) {
       result.sources.cameraId = camera.id
       result.sources.cameraName = camera.name
-      report.push({ verdict: 'imported', subject: source.name, note: `camera → ${camera.name}` })
+      report.push({ verdict: 'imported', subject: source.name, note: `Uses ${camera.name}.` })
     } else {
       report.push({
         verdict: 'approximated',
         subject: source.name,
-        note: `no connected camera named "${source.deviceName ?? source.name}"; pick one in Sources`
+        note: `No connected camera is named "${source.deviceName ?? source.name}". Pick one in Sources.`
       })
     }
     const box = cameraBox(item, source, setup.canvasWidth, setup.canvasHeight)
@@ -296,7 +313,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'approximated',
           subject: `${source.name} position`,
-          note: 'camera size estimated from a 1080p feed; nudge it on the Scene stage if off'
+          note: "The camera's size is estimated from a 1080p feed. Adjust it on the Scene stage if it's off."
         })
       }
     }
@@ -304,7 +321,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'approximated',
         subject: extra.name,
-        note: 'Videorc scenes hold one camera; kept the topmost'
+        note: 'Videorc scenes hold one camera, so the topmost one is kept.'
       })
     }
   }
@@ -323,13 +340,13 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'imported',
         subject: micSource.name,
-        note: `microphone → ${microphone.name}`
+        note: `Uses ${microphone.name}.`
       })
     } else {
       report.push({
         verdict: 'approximated',
         subject: micSource.name,
-        note: 'could not match the mic by name; pick it in Sources'
+        note: 'No microphone matches this name. Pick it in Sources.'
       })
     }
     if (typeof micSource.volume === 'number' && micSource.volume !== 1) {
@@ -337,7 +354,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'approximated',
         subject: `${micSource.name} level`,
-        note: `OBS volume mapped to ${result.audio.microphoneGainDb} dB gain`
+        note: `The OBS volume becomes ${result.audio.microphoneGainDb} dB of gain.`
       })
     }
     if (micSource.muted) {
@@ -345,30 +362,45 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'imported',
         subject: `${micSource.name} mute`,
-        note: 'muted, as in OBS'
+        note: 'Muted, as in OBS.'
       })
     }
   }
 
   // --- background image -------------------------------------------------------
+  // The report promises the background only where apply delivers it: an
+  // Assets slot is resolved first, and apply imports it there and makes it
+  // the scene background (plan 174, C-7). The old note promised it while
+  // apply dropped it whenever no slot was empty, which is every profile.
   const imageItems = scene.items.filter(
     (item) => item.visible && sourcesByName.get(item.sourceName)?.kind === 'image'
   )
   if (imageItems.length > 0) {
     const bottom = sourcesByName.get(imageItems[0].sourceName)
-    if (bottom?.managedBackground) {
+    if (bottom?.managedBackground && backgroundTarget) {
       result.backgroundAsset = bottom.managedBackground
+      result.backgroundSlotId = backgroundTarget.slotId
       report.push({
         verdict: 'approximated',
         subject: bottom.name,
-        note: 'image imported as the scene background'
+        note: backgroundTarget.replaces
+          ? `Becomes the scene background, in place of ${backgroundTarget.replaces} in Assets.`
+          : 'Becomes the scene background, in an empty slot in Assets.'
+      })
+    } else if (bottom) {
+      report.push({
+        verdict: 'skipped',
+        subject: bottom.name,
+        note: bottom.managedBackground
+          ? 'Assets has no slot for it. Import it from Assets.'
+          : "The image couldn't be copied. Check that the file still exists and is a PNG, JPEG or WebP."
       })
     }
     for (const item of imageItems.slice(1)) {
       report.push({
         verdict: 'skipped',
         subject: item.sourceName,
-        note: 'Videorc supports one background image per scene'
+        note: 'Videorc uses one background image per scene.'
       })
     }
   }
@@ -391,19 +423,19 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
     const systemAudio = devices.find((device) => device.kind === 'system-audio')
     if (systemAudio?.status === 'available') {
       result.audio.systemAudioEnabled = true
-      report.push({ verdict: 'imported', subject: 'Desktop audio', note: '→ System audio (on)' })
+      report.push({ verdict: 'imported', subject: 'Desktop audio', note: 'Turns System audio on.' })
     } else if (systemAudio?.status === 'permission-required') {
       result.audio.systemAudioEnabled = true
       report.push({
         verdict: 'approximated',
         subject: 'Desktop audio',
-        note: '→ System audio (on) once Screen Recording is allowed'
+        note: 'Turns System audio on, once Screen Recording is allowed.'
       })
     } else {
       report.push({
         verdict: 'skipped',
         subject: 'Desktop audio',
-        note: 'this computer cannot capture system audio yet'
+        note: "This computer can't capture system audio."
       })
     }
   }
@@ -416,7 +448,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
     report.push({
       verdict: 'skipped',
       subject: `Scene "${other.name}"`,
-      note: 'Videorc keeps one active scene; imported the current OBS scene; switch layouts in Studio'
+      note: 'Videorc keeps one active scene, so only the current OBS scene is imported.'
     })
   }
 
@@ -432,8 +464,8 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         verdict: 'imported',
         subject: 'Custom RTMP destination',
         note: setup.service.hasKey
-          ? 'server and stream key imported'
-          : 'server imported (no key found)'
+          ? 'Imports the server and the stream key.'
+          : 'Imports the server. OBS had no stream key.'
       })
     } else {
       const label = setup.service.service ?? 'streaming service'
@@ -451,14 +483,14 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
           verdict: 'imported',
           subject: label,
           note: setup.service.hasKey
-            ? `server and stream key imported to ${platformName} Manual RTMP`
-            : `server imported to ${platformName} Manual RTMP (no key found)`
+            ? `Imports the server and the stream key to ${platformName} Manual RTMP.`
+            : `Imports the server to ${platformName} Manual RTMP. OBS had no stream key.`
         })
       } else if (platform === 'youtube' || platform === 'kick') {
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: `set up ${platformName} Manual RTMP in Livestream; OBS did not include a server URL`
+          note: `OBS had no server URL. Set up ${platformName} Manual RTMP in Livestream.`
         })
       } else {
         result.stream = {
@@ -469,7 +501,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: 'connect the account in Livestream instead; sign-in beats a pasted stream key'
+          note: 'Connect the account in Livestream instead. Signing in is safer than a pasted stream key.'
         })
       }
     }
