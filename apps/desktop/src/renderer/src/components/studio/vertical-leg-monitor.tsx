@@ -8,7 +8,7 @@ import {
   VERTICAL_SCENES
 } from '@/components/studio/scenes-gallery'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
 import {
   layoutPresetNeedsCamera,
@@ -102,39 +102,23 @@ export function VerticalLegMonitor(): ReactElement | null {
 
       <div className="flex items-center justify-between gap-3" data-slot="vertical-leg-follow">
         <div className="flex min-w-0 flex-col gap-0.5">
-          <span className="text-sm font-medium">Follow horizontal scene</span>
+          <label className="text-sm font-medium" htmlFor="vertical-leg-follow">
+            Follow horizontal scene
+          </label>
           <span className="text-xs text-muted-foreground">
             {followed
               ? 'Following now: your horizontal scene has a vertical twin, so that is what streams.'
               : 'Camera only and Screen only switch the vertical stream to the matching scene.'}
           </span>
         </div>
-        <div
-          aria-label="Follow horizontal scene"
-          className="flex shrink-0 items-center overflow-hidden rounded-chip border"
-          role="group"
-        >
-          {[
-            { on: true, label: 'On' },
-            { on: false, label: 'Off' }
-          ].map((option) => (
-            <Button
-              key={option.label}
-              aria-pressed={captureConfig.simulcastFollowsProgram === option.on}
-              className={cn(
-                'h-8 rounded-none px-3',
-                captureConfig.simulcastFollowsProgram === option.on
-                  ? 'bg-accent text-foreground'
-                  : 'text-muted-foreground'
-              )}
-              size="sm"
-              variant="ghost"
-              onClick={() => applySimulcastLeg({ simulcastFollowsProgram: option.on })}
-            >
-              {option.label}
-            </Button>
-          ))}
-        </div>
+        {/* A boolean is a Switch, not an On/Off button pair (plan 174 S1.7, B-29). */}
+        <Switch
+          checked={captureConfig.simulcastFollowsProgram}
+          id="vertical-leg-follow"
+          onCheckedChange={(simulcastFollowsProgram) =>
+            applySimulcastLeg({ simulcastFollowsProgram })
+          }
+        />
       </div>
     </PanelSection>
   )

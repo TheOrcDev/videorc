@@ -14,7 +14,7 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostBubbleStyle, CohostPersona } from '@/lib/backend'
 import {
@@ -196,23 +196,18 @@ function BuddyBubbleStyleToggle({
   onChange: (next: CohostBubbleStyle) => void
 }): ReactElement {
   return (
-    <ToggleGroup
+    <SegmentedControl
       aria-label={ariaLabel}
       className="w-fit"
       id={id}
+      options={BUDDY_BUBBLE_STYLES.map((bubble) => ({
+        value: bubble,
+        label: BUDDY_BUBBLE_LABELS[bubble]
+      }))}
       size="sm"
-      type="single"
       value={value}
-      onValueChange={(next) => {
-        if (next) onChange(next as CohostBubbleStyle)
-      }}
-    >
-      {BUDDY_BUBBLE_STYLES.map((bubble) => (
-        <ToggleGroupItem key={bubble} className="px-3 text-xs" value={bubble}>
-          {BUDDY_BUBBLE_LABELS[bubble]}
-        </ToggleGroupItem>
-      ))}
-    </ToggleGroup>
+      onValueChange={onChange}
+    />
   )
 }
 

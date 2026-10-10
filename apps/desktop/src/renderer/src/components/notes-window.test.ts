@@ -12,7 +12,9 @@ describe('NotesWindow', () => {
     const markup = render()
     expect(markup).toContain('>Notes<')
     expect(markup).toContain('aria-label="Text size"')
-    for (const label of ['S text', 'M text', 'L text']) {
+    // One segmented control (plan 174 S1.7): a radio group, each size named.
+    expect(markup).toContain('role="radiogroup"')
+    for (const label of ['Small text', 'Medium text', 'Large text']) {
       expect(markup).toContain(`aria-label="${label}"`)
     }
     expect(markup).toContain('aria-label="Keep notes in front of all apps"')

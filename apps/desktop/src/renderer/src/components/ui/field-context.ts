@@ -6,8 +6,8 @@ import * as React from 'react'
  * the Field once they mount. The label then points `htmlFor` at the first
  * control a label can name (an input, textarea, select trigger, switch or
  * checkbox), and a control a label element cannot point at (a ToggleGroup, a
- * TabsList, a Slider thumb) takes `aria-labelledby` from the label instead,
- * unless it names itself. Nothing points at an id that is not on the page, and
+ * TabsList, a SegmentedControl, a Slider thumb) takes `aria-labelledby` from
+ * the label instead, unless it names itself. Nothing points at an id that is not on the page, and
  * two controls in one Field never share an id.
  *
  * Its own module, not field.tsx: every input primitive reads it, and none of

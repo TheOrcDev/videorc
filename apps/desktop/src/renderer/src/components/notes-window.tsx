@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import { AlertIcon, PinIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Textarea } from '@/components/ui/textarea'
 import { useTrafficLightGutter } from '@/components/window-frame'
 import type { NotesFontScale, NotesWindowState } from '@/lib/backend'
@@ -31,7 +32,11 @@ const FONT_SIZE_CLASS: Record<NotesFontScale, string> = {
   lg: 'text-[32px] md:text-[32px]'
 }
 
-const FONT_SCALE_LABEL: Record<NotesFontScale, string> = { sm: 'S', md: 'M', lg: 'L' }
+const FONT_SCALE_OPTIONS: SegmentedControlOption<NotesFontScale>[] = [
+  { value: 'sm', label: 'S', 'aria-label': 'Small text' },
+  { value: 'md', label: 'M', 'aria-label': 'Medium text' },
+  { value: 'lg', label: 'L', 'aria-label': 'Large text' }
+]
 
 export function notesWordCount(text: string): number {
   const trimmed = text.trim()
@@ -161,37 +166,22 @@ export function NotesWindow({
       >
         <span className="text-[13px] font-semibold">Notes</span>
         <span className="flex-1" />
-        {/* Plain Buttons, not ToggleGroup: Radix roving focus would split a
-            shared chunk the main window then loads eagerly (asset budget). */}
-        <div
+        {/* SegmentedControl has no Radix, so it splits no shared chunk the main
+            window loads eagerly (asset budget). A pick goes back to writing. */}
+        <SegmentedControl
+          activationMode="manual"
           aria-label="Text size"
-          className="flex items-center rounded-chip border border-border [-webkit-app-region:no-drag]"
-          role="group"
-        >
-          {(['sm', 'md', 'lg'] as const).map((scale) => (
-            <Button
-              key={scale}
-              aria-label={`${FONT_SCALE_LABEL[scale]} text`}
-              aria-pressed={fontScale === scale}
-              className={cn(
-                'h-6 min-w-7 rounded-none px-2 text-[11px] first:rounded-l-chip last:rounded-r-chip',
-                fontScale === scale ? 'bg-accent text-foreground' : 'text-muted-foreground',
-                marker
-              )}
-              size="sm"
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                setFontScale(scale)
-                fontScaleRef.current = scale
-                queueSave()
-                textareaRef.current?.focus()
-              }}
-            >
-              {FONT_SCALE_LABEL[scale]}
-            </Button>
-          ))}
-        </div>
+          className={cn('[-webkit-app-region:no-drag]', marker)}
+          options={FONT_SCALE_OPTIONS}
+          size="sm"
+          value={fontScale}
+          onValueChange={(scale) => {
+            setFontScale(scale)
+            fontScaleRef.current = scale
+            queueSave()
+            textareaRef.current?.focus()
+          }}
+        />
         <Button
           aria-label={pinLabel}
           aria-pressed={alwaysOnTop}

@@ -201,14 +201,12 @@ function stage(): BuddyPetPreviewProps {
 }
 
 function stateButton(state: string): HTMLButtonElement {
-  return dialog().querySelector(`[data-buddy-state="${state}"][role="tab"]`) as HTMLButtonElement
+  return dialog().querySelector(`[data-buddy-state="${state}"][role="radio"]`) as HTMLButtonElement
 }
 
-/** A click on a state: Radix tabs pick on mousedown. */
+/** A click on a state (a click on the shown state replays it). */
 async function pickState(state: string): Promise<void> {
-  await act(async () => {
-    stateButton(state).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-  })
+  await act(async () => stateButton(state).click())
 }
 
 async function press(key: string, target: Element = dialog()): Promise<void> {
@@ -236,7 +234,7 @@ describe('Test your Buddy (plan 169 D14)', () => {
       pose: null,
       talking: false
     })
-    expect(stateButton('idle').getAttribute('data-state')).toBe('active')
+    expect(stateButton('idle').getAttribute('aria-checked')).toBe('true')
   })
 
   it('opens on T while the Avatar section has focus', async () => {
@@ -262,7 +260,7 @@ describe('Test your Buddy (plan 169 D14)', () => {
     mocked.log.length = 0
     await pickState('laugh')
     expect(mocked.log).toEqual(['react:laugh'])
-    expect(stateButton('laugh').getAttribute('data-state')).toBe('active')
+    expect(stateButton('laugh').getAttribute('aria-checked')).toBe('true')
     await pickState('think')
     expect(stage()).toMatchObject({ pose: 'think', talking: false })
     await pickState('idle')
@@ -286,7 +284,7 @@ describe('Test your Buddy (plan 169 D14)', () => {
     stateButton('idle').focus()
     await press('3', stateButton('idle'))
     expect(document.activeElement).toBe(stateButton('laugh'))
-    expect(stateButton('laugh').getAttribute('data-state')).toBe('active')
+    expect(stateButton('laugh').getAttribute('aria-checked')).toBe('true')
   })
 
   it("plays an Alive pack's talk frames, looks up-left to think, and says what it lacks", async () => {

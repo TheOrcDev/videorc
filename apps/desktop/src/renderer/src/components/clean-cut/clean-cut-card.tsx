@@ -28,9 +28,8 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useVideorcAccount } from '@/hooks/use-account'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { setCleanCutAuto, useCleanCutAuto } from '@/hooks/use-clean-cut-auto'
@@ -77,6 +76,15 @@ export interface CleanCutFocus {
   sessionId: string
   nonce: number
 }
+
+const CLEAN_CUT_MODE_OPTIONS: SegmentedControlOption<CleanCutMode>[] = [
+  { value: 'clean', label: 'Clean' },
+  { value: 'condensed', label: 'Condensed' }
+]
+
+const CONDENSED_LENGTH_OPTIONS: SegmentedControlOption[] = CONDENSED_TARGET_MINUTES.map(
+  (minutes) => ({ value: String(minutes), label: `${minutes} min`, className: 'tabular-nums' })
+)
 
 const UNTITLED = 'Untitled recording'
 
@@ -315,35 +323,22 @@ export function CleanCutCard({
                     setPicked(sessionId === recordings[0]?.id ? null : sessionId)
                   }
                 />
-                <Tabs value={mode} onValueChange={(value) => setMode(value as CleanCutMode)}>
-                  <TabsList aria-label="Kind of cut">
-                    <TabsTrigger value="clean">Clean</TabsTrigger>
-                    <TabsTrigger value="condensed">Condensed</TabsTrigger>
-                  </TabsList>
-                </Tabs>
+                <SegmentedControl
+                  aria-label="Kind of cut"
+                  options={CLEAN_CUT_MODE_OPTIONS}
+                  value={mode}
+                  onValueChange={setMode}
+                />
                 {mode === 'condensed' && !condensedBlocked && !status.busy ? (
                   <div className="flex items-center gap-2" data-slot="clean-cut-target">
                     <span className="text-xs text-muted-foreground">Length</span>
-                    <ToggleGroup
+                    <SegmentedControl
                       aria-label="Condensed length"
+                      options={CONDENSED_LENGTH_OPTIONS}
                       size="sm"
-                      spacing={1}
-                      type="single"
                       value={String(targetMinutes)}
-                      onValueChange={(value) => {
-                        if (value) setTargetMinutes(Number(value))
-                      }}
-                    >
-                      {CONDENSED_TARGET_MINUTES.map((minutes) => (
-                        <ToggleGroupItem
-                          key={minutes}
-                          className="h-6 px-2 text-xs tabular-nums"
-                          value={String(minutes)}
-                        >
-                          {minutes} min
-                        </ToggleGroupItem>
-                      ))}
-                    </ToggleGroup>
+                      onValueChange={(value) => setTargetMinutes(Number(value))}
+                    />
                     {job && status.kind !== 'none' && status.kind !== 'cancelled' ? (
                       <Button
                         disabled={cannotStart}

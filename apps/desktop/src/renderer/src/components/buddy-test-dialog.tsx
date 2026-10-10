@@ -11,9 +11,9 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Kbd } from '@/components/ui/kbd'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import type { CohostPersona } from '@/lib/backend'
 import { renderBuddyBubblePng } from '@/lib/buddy-overlay'
 import { buddyReactionLabel } from '@/lib/buddy-pet-view'
@@ -215,37 +215,30 @@ export function BuddyTestDialog({
 
         <div className="flex flex-col gap-2">
           <h3 className="text-[11px] font-semibold text-subtle">States</h3>
-          {/* The glass segmented control (design skill: Tabs), without panels. */}
-          <Tabs
-            value={selection.state}
-            onValueChange={(next) => {
-              const state = BUDDY_TEST_STATES.find((candidate) => candidate.id === next)?.id
-              if (state) pick(state)
-            }}
-          >
-            <TabsList
-              ref={statesRef}
-              aria-label="State"
-              className="w-full"
-              data-testid="buddy-test-states"
-            >
-              {BUDDY_TEST_STATES.map((state) => (
-                <TabsTrigger
-                  key={state.id}
-                  className="flex-1 gap-2"
-                  data-buddy-state={state.id}
-                  value={state.id}
-                  onMouseDown={() => {
-                    // Picking the shown state again replays it (Laughing laughs again).
-                    if (selection.state === state.id) pick(state.id)
-                  }}
-                >
+          {/* One segmented control (plan 174 S1.7): a radio per state. */}
+          <SegmentedControl
+            ref={statesRef}
+            aria-label="State"
+            className="w-full"
+            data-testid="buddy-test-states"
+            options={BUDDY_TEST_STATES.map((state) => ({
+              value: state.id,
+              label: (
+                <>
                   {state.label}
                   <Kbd>{state.key}</Kbd>
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
+                </>
+              ),
+              className: 'gap-2',
+              'data-buddy-state': state.id,
+              onClick: () => {
+                // Picking the shown state again replays it (Laughing laughs again).
+                if (selection.state === state.id) pick(state.id)
+              }
+            }))}
+            value={selection.state}
+            onValueChange={pick}
+          />
           {/* One line kept for the note, so the dialog never jumps as states change. */}
           <p className="min-h-4 text-xs text-subtle" data-testid="buddy-test-note">
             {plan.note}

@@ -33,7 +33,6 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useStudioCore } from '@/hooks/use-studio'
 import type {
   PlatformAccount,
@@ -832,19 +831,14 @@ function MetadataOverride({
       ) : null}
 
       {youtube ? (
-        <Field>
+        // A boolean is a Switch, not a No/Yes pair (plan 174 S1.7).
+        <Field orientation="horizontal">
           <FieldLabel>Made for kids</FieldLabel>
-          <ToggleGroup
-            className="w-full"
+          <Switch
+            checked={Boolean(override.youtubeMadeForKids)}
             disabled={disabled}
-            type="single"
-            value={override.youtubeMadeForKids ? 'yes' : 'no'}
-            variant="outline"
-            onValueChange={(value) => value && onPatch({ youtubeMadeForKids: value === 'yes' })}
-          >
-            <ToggleGroupItem value="no">No</ToggleGroupItem>
-            <ToggleGroupItem value="yes">Yes</ToggleGroupItem>
-          </ToggleGroup>
+            onCheckedChange={(youtubeMadeForKids) => onPatch({ youtubeMadeForKids })}
+          />
         </Field>
       ) : null}
 

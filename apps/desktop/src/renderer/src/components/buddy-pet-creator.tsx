@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import {
   useBuddyPetCreator,
@@ -82,6 +82,11 @@ import {
 const reviewMarksByBuild = new Map<string, BuddyPetReviewMarks>()
 
 type ReferenceSource = 'persona' | 'upload'
+
+const REFERENCE_SOURCE_OPTIONS: SegmentedControlOption<ReferenceSource>[] = [
+  { value: 'persona', label: "My Buddy's picture" },
+  { value: 'upload', label: 'Upload' }
+]
 
 interface PrimaryAction {
   label: string
@@ -762,24 +767,15 @@ function ReferenceStep({
           )}
         </div>
         <div className="flex min-w-60 flex-1 flex-col gap-3">
-          <ToggleGroup
+          <SegmentedControl
             aria-label="Picture"
             className="w-fit"
             disabled={disabled}
+            options={REFERENCE_SOURCE_OPTIONS}
             size="sm"
-            type="single"
             value={source}
-            onValueChange={(next) => {
-              if (next) onSource(next as ReferenceSource)
-            }}
-          >
-            <ToggleGroupItem className="px-3 text-xs" value="persona">
-              My Buddy&apos;s picture
-            </ToggleGroupItem>
-            <ToggleGroupItem className="px-3 text-xs" value="upload">
-              Upload
-            </ToggleGroupItem>
-          </ToggleGroup>
+            onValueChange={onSource}
+          />
           {source === 'persona' ? (
             <div className="flex flex-col gap-1">
               <p className="text-xs text-muted-foreground">

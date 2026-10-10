@@ -172,14 +172,13 @@ function autoSwitch(): HTMLButtonElement {
   return document.getElementById('clean-cut-auto-switch') as HTMLButtonElement
 }
 
+/** Kind of cut is a segmented control (plan 174 S1.7): a radio per kind. */
 async function chooseTab(label: string): Promise<void> {
-  const tab = [...document.querySelectorAll('[role="tab"]')].find(
+  const option = [...document.querySelectorAll('[role="radio"]')].find(
     (candidate) => candidate.textContent === label
   ) as HTMLElement
-  expect(tab, label).toBeTruthy()
-  await act(async () => {
-    tab.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-  })
+  expect(option, label).toBeTruthy()
+  await act(async () => option.click())
 }
 
 beforeEach(() => {

@@ -12,6 +12,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
@@ -170,25 +171,23 @@ export function RecordingTab(): ReactElement {
 
           <Field>
             <FieldLabel>Resolution</FieldLabel>
-            <div className="flex flex-wrap gap-2">
-              {resolutionPresets.map((preset) => (
-                <button
-                  aria-pressed={video.width === preset.width && video.height === preset.height}
-                  className="rounded-row border border-border px-3 py-1.5 text-left text-sm font-medium hover:bg-accent aria-pressed:glass-chip disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={
-                    isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
-                  }
-                  key={preset.label}
-                  type="button"
-                  onClick={() =>
-                    patchVideo(pickRecordingResolution(video, preset.width, preset.height))
-                  }
-                >
-                  <div>{preset.label}</div>
-                  <div className="text-xs font-normal text-muted-foreground">{preset.detail}</div>
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
+              options={resolutionPresets.map((preset) => ({
+                value: preset.label,
+                label: preset.label,
+                'aria-label': `${preset.label} (${preset.detail})`
+              }))}
+              value={
+                resolutionPresets.find(
+                  (preset) => video.width === preset.width && video.height === preset.height
+                )?.label ?? null
+              }
+              onValueChange={(label) => {
+                const preset = resolutionPresets.find((candidate) => candidate.label === label)
+                if (preset) patchVideo(pickRecordingResolution(video, preset.width, preset.height))
+              }}
+            />
           </Field>
 
           <div className="grid grid-cols-2 gap-4">

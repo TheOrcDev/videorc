@@ -8,11 +8,17 @@ import { ChatEmoteSettingsFields } from '@/components/settings/seventv-emotes-fi
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { RuntimeInfo } from '@/lib/backend'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
+
+const THEME_OPTIONS = [
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'system', label: 'System' }
+]
 
 /** Settings → General: how Videorc looks and behaves, and bringing setups across. */
 export function GeneralSettings(): ReactElement {
@@ -29,16 +35,11 @@ export function GeneralSettings(): ReactElement {
         <FieldGroup variant="grouped">
           <Field>
             <FieldLabel>Theme</FieldLabel>
-            <ToggleGroup
-              type="single"
+            <SegmentedControl
+              options={THEME_OPTIONS}
               value={theme ?? 'system'}
-              variant="outline"
-              onValueChange={(value) => value && setTheme(value)}
-            >
-              <ToggleGroupItem value="light">Light</ToggleGroupItem>
-              <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
-              <ToggleGroupItem value="system">System</ToggleGroupItem>
-            </ToggleGroup>
+              onValueChange={setTheme}
+            />
           </Field>
           {runtimeInfo?.commentsWindowEnabled !== false ? (
             <Field>

@@ -12,7 +12,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { RemoteLanDevice, RemoteLanPairing } from '@/lib/backend'
 import {
@@ -134,19 +134,17 @@ function PairingDialog({
               <p className="text-xs text-muted-foreground">
                 This computer is on more than one network. Pick the one your phone is on.
               </p>
-              <ToggleGroup
+              <SegmentedControl
+                aria-label="Network"
+                options={pairing.addresses.map((address) => ({
+                  value: address,
+                  label: address,
+                  className: 'font-mono'
+                }))}
                 size="sm"
-                type="single"
                 value={pairing.address}
-                variant="outline"
-                onValueChange={(address) => address && onAddress(address)}
-              >
-                {pairing.addresses.map((address) => (
-                  <ToggleGroupItem key={address} className="font-mono text-xs" value={address}>
-                    {address}
-                  </ToggleGroupItem>
-                ))}
-              </ToggleGroup>
+                onValueChange={onAddress}
+              />
             </div>
           ) : null}
 
