@@ -1,8 +1,8 @@
-import { CloseIcon } from '@/components/icons'
+import { AlertIcon, CloseIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import {
   InputGroup,
   InputGroupAddon,
@@ -108,11 +108,7 @@ function useCohostSettingsSave(lockedByTab = false): {
 
 /** A save that failed, under the section it belongs to. */
 function SaveError({ error }: { error: string | null }): ReactElement | null {
-  return error ? (
-    <p className="text-xs text-destructive" data-slot="cohost-save-error">
-      {error}
-    </p>
-  ) : null
+  return error ? <FieldError data-testid="cohost-save-error">{error}</FieldError> : null
 }
 
 /**
@@ -260,18 +256,23 @@ export function BuddyRepliesSection({
             onChange={(event) => setNotesDraft(event.target.value)}
           />
           <div className="flex items-center gap-2">
+            {/* Over the limit, the icon carries the tone and the count stays
+                monochrome (plan 174 S1.8). */}
             <span
               className={cn(
-                'text-xs tabular-nums',
-                notesOverLimit ? 'text-destructive' : 'text-subtle'
+                'flex items-center gap-1 text-xs tabular-nums',
+                notesOverLimit ? 'font-medium text-foreground' : 'text-muted-foreground'
               )}
             >
+              {notesOverLimit ? (
+                <AlertIcon aria-hidden className="size-3 text-destructive" weight="fill" />
+              ) : null}
               {notesDraft.length}/{COHOST_NOTES_MAX_CHARS}
             </span>
             {notesDirty ? (
               <span className="text-xs text-muted-foreground">Unsaved. Click away to save.</span>
             ) : null}
-            {notesError ? <span className="text-xs text-destructive">{notesError}</span> : null}
+            {notesError ? <FieldError>{notesError}</FieldError> : null}
           </div>
         </Field>
       </FieldGroup>
@@ -450,7 +451,7 @@ export function BuddyModerationSection({
               </InputGroupButton>
             </InputGroupAddon>
           </InputGroup>
-          <span className="text-xs tabular-nums text-subtle">
+          <span className="text-xs tabular-nums text-muted-foreground">
             {rules.length}/{COHOST_RULES_MAX}
           </span>
         </Field>
@@ -534,7 +535,7 @@ function CohostListenAllowance(): ReactElement | null {
   const allowance = cohostListenAllowanceLabel(cohostState?.listening)
   if (!allowance) return null
   return (
-    <p className="text-xs tabular-nums text-subtle" data-slot="cohost-listen-allowance">
+    <p className="text-xs tabular-nums text-muted-foreground" data-slot="cohost-listen-allowance">
       {allowance}
     </p>
   )

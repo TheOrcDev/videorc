@@ -179,8 +179,8 @@ function UpdateControl({
     case 'error':
       return (
         <div className="flex flex-col gap-2">
-          <div className="flex items-start gap-1.5 text-xs text-warning-foreground dark:text-warning">
-            <WarningIcon className="size-3.5 shrink-0" weight="fill" />
+          <div className="flex items-start gap-1.5 text-xs text-foreground">
+            <WarningIcon className="mt-px size-3.5 shrink-0 text-warning" weight="fill" />
             <span>Couldn’t check for updates: {status.message}</span>
           </div>
           <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>

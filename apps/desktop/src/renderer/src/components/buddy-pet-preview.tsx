@@ -9,7 +9,7 @@ import {
 } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { useReducedMotion } from '@/hooks/use-reduced-motion'
+import { smoothScrollBehavior, useReducedMotion } from '@/hooks/use-reduced-motion'
 import type { CohostPersona } from '@/lib/backend'
 import { BUDDY_PREVIEW_TICK_MS, BuddyPetPlayer } from '@/lib/buddy-pet-player'
 import {
@@ -401,7 +401,7 @@ export function BuddyPetPreview({
           // Off screen (a Try button far below it): bring the pet into view
           // and play the reaction as soon as it is visible again.
           pendingReactionRef.current = reaction
-          wrapperRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+          wrapperRef.current?.scrollIntoView({ block: 'nearest', behavior: smoothScrollBehavior() })
           return true
         }
         return playNow(player, reaction)

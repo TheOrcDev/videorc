@@ -4,7 +4,7 @@ import {
   pickRecordingResolution,
   type OutputNumberField
 } from '@/lib/output-quality'
-import { AlertIcon, SpinnerIcon, VideoFileIcon } from '@/components/icons'
+import { AlertIcon, SpinnerIcon, VideoFileIcon, WarningIcon } from '@/components/icons'
 import { useId, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -109,10 +109,18 @@ export function RecordingTab(): ReactElement {
               <div
                 aria-live="polite"
                 className={`flex flex-wrap items-center gap-2 text-xs ${
-                  checkLine.tone === 'warning' ? 'text-warning' : 'text-muted-foreground'
+                  checkLine.tone === 'warning' ? 'text-foreground' : 'text-muted-foreground'
                 }`}
               >
                 {checkLine.busy ? <SpinnerIcon className="size-3.5 animate-spin" /> : null}
+                {/* The tone rides on the icon; the words stay monochrome (plan 174 S1.8). */}
+                {checkLine.tone === 'warning' && !checkLine.busy ? (
+                  <WarningIcon
+                    aria-hidden
+                    className="size-3.5 shrink-0 text-warning"
+                    weight="fill"
+                  />
+                ) : null}
                 <span>{checkLine.text}</span>
                 {checkLine.applyPreset ? (
                   <Button

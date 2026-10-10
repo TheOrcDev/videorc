@@ -52,6 +52,7 @@ import type {
 } from '@/lib/backend'
 import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
+import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 
 /**
  * Livestream (plan 174 S1.6b, A-14): Setup and Upcoming in a strip pinned
@@ -189,7 +190,7 @@ function StreamingSetup(): ReactElement {
     requestAnimationFrame(() =>
       document
         .getElementById(`destination-${targetId}`)
-        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        ?.scrollIntoView({ behavior: smoothScrollBehavior(), block: 'nearest' })
     )
   }
 

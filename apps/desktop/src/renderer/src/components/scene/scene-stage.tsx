@@ -1023,7 +1023,7 @@ export function SceneStage({
         className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 p-2"
         data-videorc-stage-footer
       >
-        <div className="flex min-h-7 min-w-0 flex-1 items-center pl-1 text-xs text-subtle">
+        <div className="flex min-h-7 min-w-0 flex-1 items-center pl-1 text-xs text-muted-foreground">
           {liveHint ? (
             <span className="truncate" data-videorc-stage-live-hint title={liveHint}>
               {liveHint}

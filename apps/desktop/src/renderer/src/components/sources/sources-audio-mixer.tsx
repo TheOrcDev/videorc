@@ -737,7 +737,7 @@ export function SystemAudioSettings({
             {meterHasNoReading(meter) ? (
               // Plan 173: no dead meter. The level only exists while a session
               // mixes System audio, so outside one the row says when it moves.
-              <p className="text-xs text-subtle" data-videorc-system-audio-idle="">
+              <p className="text-xs text-muted-foreground" data-videorc-system-audio-idle="">
                 Level shows while recording or live.
               </p>
             ) : (

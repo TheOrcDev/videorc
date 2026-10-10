@@ -109,13 +109,13 @@ export function RecordingSettings(): ReactElement {
               Blank uses the default: ~/Movies/Videorc/Recordings.
             </p>
           ) : directoryFacts && !directoryFacts.exists ? (
-            <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
-              <WarningIcon className="size-3.5 shrink-0" weight="fill" />
+            <div className="flex flex-wrap items-center gap-2 text-xs text-foreground">
+              <WarningIcon className="size-3.5 shrink-0 text-warning" weight="fill" />
               <span>This folder authorization expired. Choose it again.</span>
             </div>
           ) : directoryFacts && !directoryFacts.writable ? (
-            <p className="flex items-center gap-1.5 text-xs text-warning">
-              <WarningIcon className="size-3.5 shrink-0" weight="fill" />
+            <p className="flex items-center gap-1.5 text-xs text-foreground">
+              <WarningIcon className="size-3.5 shrink-0 text-warning" weight="fill" />
               This folder is not writable. Recordings will fail to save here.
             </p>
           ) : directoryFacts ? (

@@ -4,6 +4,7 @@ import { useState, type ReactElement } from 'react'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
+import { FieldError } from '@/components/ui/field'
 import {
   Select,
   SelectContent,
@@ -130,11 +131,7 @@ export function BuddyReactionsSection({
           })}
         </GroupedList>
       ))}
-      {error ? (
-        <p className="text-xs text-destructive" data-testid="buddy-reactions-error">
-          {error}
-        </p>
-      ) : null}
+      {error ? <FieldError data-testid="buddy-reactions-error">{error}</FieldError> : null}
     </PanelSection>
   )
 }

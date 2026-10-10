@@ -77,6 +77,7 @@ import {
 } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { cn } from '@/lib/utils'
+import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 
 /**
  * The Buddy pane in the Stream Manager, which only the detached Comments
@@ -262,7 +263,7 @@ export function CohostPane({
   useEffect(() => {
     if (expandSignal <= 0) return
     setOpen(true)
-    paneRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    paneRef.current?.scrollIntoView({ block: 'nearest', behavior: smoothScrollBehavior() })
     // Focus lands on the row list once the collapsible content is mounted.
     const frame = requestAnimationFrame(() => rootRef.current?.focus())
     return () => cancelAnimationFrame(frame)
@@ -321,7 +322,7 @@ export function CohostPane({
                   <li key={use}>{use}</li>
                 ))}
               </ul>
-              <p className="text-subtle">{CLOUD_AI_KEEPS}</p>
+              <p className="text-muted-foreground">{CLOUD_AI_KEEPS}</p>
             </AlertDescription>
             {onEnableConsent ? (
               <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
@@ -429,14 +430,10 @@ export function CohostPane({
             weight="duotone"
           />
           <span className="shrink-0 text-xs font-medium text-foreground">Buddy</span>
-          <span
-            className={cn(
-              'shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground',
-              PANE_NARROW_HIDDEN
-            )}
-          >
+          {/* One tag, at the tag size (plan 174 S1.8, F-14: no 10 px text). */}
+          <Badge className={cn('shrink-0', PANE_NARROW_HIDDEN)} variant="outline">
             alpha
-          </span>
+          </Badge>
           <CohostPresenceDot view={presence} />
           <span
             className="min-w-0 truncate text-[11px] text-muted-foreground"
@@ -509,7 +506,7 @@ export function CohostPane({
             // The failed tick in the server's own words, so "AI error" is never
             // the whole story. Monochrome; the dot already carries the state.
             <p
-              className="truncate px-2.5 py-1 text-[11px] text-subtle"
+              className="truncate px-2.5 py-1 text-[11px] text-muted-foreground"
               data-slot="cohost-error-detail"
               title={errorDetail}
             >
@@ -627,7 +624,7 @@ export function CohostPane({
               >
                 <span
                   className={cn(
-                    'min-w-0 flex-1 truncate text-[11px] text-subtle',
+                    'min-w-0 flex-1 truncate text-[11px] text-muted-foreground',
                     PANE_NARROW_HIDDEN
                   )}
                   data-slot="cohost-acts-on-ask"
@@ -1225,10 +1222,7 @@ function CohostNotice({ label, children }: { label: string; children: ReactNode 
     >
       <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
       <Badge className="shrink-0" variant="outline">
-        {label}
-        <span className="ml-1 shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
-          alpha
-        </span>
+        {label} alpha
       </Badge>
       {children}
     </div>

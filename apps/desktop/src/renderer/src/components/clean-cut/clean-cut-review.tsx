@@ -568,7 +568,7 @@ export function CleanCutReview({
           <div className="flex min-h-0 flex-1 flex-col">
             <PaneStrip className="flex flex-col gap-1.5">
               <KindChips chips={chips} onToggle={toggleGroup} />
-              <p className="text-[11px] text-subtle">
+              <p className="text-[11px] text-muted-foreground">
                 ↑ ↓ move between cuts · Enter keeps or cuts one · Space plays · click a word to jump
                 there
               </p>

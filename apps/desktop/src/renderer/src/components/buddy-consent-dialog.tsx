@@ -52,7 +52,7 @@ export function BuddyConsentDialog({
             <li key={use}>{use}</li>
           ))}
         </ul>
-        <p className="text-xs text-subtle">{CLOUD_AI_KEEPS}</p>
+        <p className="text-xs text-muted-foreground">{CLOUD_AI_KEEPS}</p>
         <DialogFooter>
           <Button type="button" variant="ghost" onClick={() => onAnswer(false)}>
             Not now

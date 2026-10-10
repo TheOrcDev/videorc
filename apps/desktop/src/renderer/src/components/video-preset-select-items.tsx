@@ -1,4 +1,4 @@
-import { LockIcon } from '@/components/icons'
+import { LockIcon, WarningIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 import { Fragment } from 'react'
 
@@ -92,12 +92,16 @@ function VideoPresetSelectItem({
 
   return (
     <SelectItem
-      className={option.tone === 'warning' ? 'text-warning' : undefined}
       disabled={!gate.allowed}
       title={gate.allowed ? undefined : gate.reason}
       value={option.value}
     >
       {option.label}
+      {/* An experimental or legacy preset: the icon carries the tone, the
+          name stays monochrome (plan 174 S1.8, C-19). */}
+      {option.tone === 'warning' ? (
+        <WarningIcon aria-hidden className="size-3.5 text-warning" weight="fill" />
+      ) : null}
       {!gate.allowed ? (
         <span className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground">
           <LockIcon className="size-3" weight="fill" />

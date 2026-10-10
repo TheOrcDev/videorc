@@ -207,7 +207,7 @@ function CohostMarks({
         >
           <span className="truncate">{cohostFlagChipLabel(flag)}</span>
         </Badge>
-        {action ? <span className="shrink-0 text-[10px] text-subtle">{action}</span> : null}
+        {action ? <span className="shrink-0 text-[11px] text-subtle">{action}</span> : null}
       </span>
     )
   }
@@ -699,7 +699,7 @@ function CommentContent({
             // a clock on every row is noise mid-stream (plan 057, D3).
             <time
               className={cn(
-                'ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground',
+                'ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground',
                 timestamps === 'hover' &&
                   'opacity-0 group-focus-within/comment:opacity-100 group-hover/comment:opacity-100'
               )}

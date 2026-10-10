@@ -25,11 +25,11 @@ export type NotesSaveStatus =
   | 'Pin unavailable'
   | 'Pin failed'
 
-// The md: twins beat the shadcn Textarea's own md:text-sm.
+// The Textarea is plain text-sm (plan 174 S1.8, J1-10), so one size wins.
 const FONT_SIZE_CLASS: Record<NotesFontScale, string> = {
-  sm: 'text-[18px] md:text-[18px]',
-  md: 'text-[24px] md:text-[24px]',
-  lg: 'text-[32px] md:text-[32px]'
+  sm: 'text-[18px]',
+  md: 'text-[24px]',
+  lg: 'text-[32px]'
 }
 
 const FONT_SCALE_LABEL: Record<NotesFontScale, string> = { sm: 'S', md: 'M', lg: 'L' }
@@ -196,8 +196,7 @@ export function NotesWindow({
           FONT_SIZE_CLASS[fontScale],
           // After the size: tailwind-merge lets a later font size drop line-height.
           'leading-[1.45]',
-          smokeMarker &&
-            'bg-[#ff0000] text-[64px] leading-[1.05] font-black text-white uppercase md:text-[64px]'
+          smokeMarker && 'bg-[#ff0000] text-[64px] leading-[1.05] font-black text-white uppercase'
         )}
         maxLength={maxLength}
         placeholder="Notes for this recording…"
@@ -233,7 +232,7 @@ export function NotesWindow({
       ) : null}
       <footer
         className={cn(
-          'flex h-6 shrink-0 items-center gap-3 border-t border-border px-3 text-[11px] text-subtle select-none',
+          'flex h-6 shrink-0 items-center gap-3 border-t border-border px-3 text-[11px] text-muted-foreground select-none',
           marker
         )}
       >

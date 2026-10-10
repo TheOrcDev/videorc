@@ -14,6 +14,7 @@ import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { FieldError } from '@/components/ui/field'
 import type { CohostPersona } from '@/lib/backend'
 import { renderBuddyBubblePng } from '@/lib/buddy-overlay'
 import { buddyReactionLabel } from '@/lib/buddy-pet-view'
@@ -200,12 +201,12 @@ export function BuddyTestDialog({
             ) : null}
           </div>
           {error ? (
-            <p
-              className="absolute inset-x-4 bottom-2 text-center text-xs text-destructive"
+            <FieldError
+              className="absolute inset-x-4 bottom-2 text-center"
               data-testid="buddy-test-error"
             >
               {error}
-            </p>
+            </FieldError>
           ) : null}
         </div>
 
@@ -243,7 +244,7 @@ export function BuddyTestDialog({
             </TabsList>
           </Tabs>
           {/* One line kept for the note, so the dialog never jumps as states change. */}
-          <p className="min-h-4 text-xs text-subtle" data-testid="buddy-test-note">
+          <p className="min-h-4 text-xs text-muted-foreground" data-testid="buddy-test-note">
             {plan.note}
           </p>
         </div>

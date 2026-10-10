@@ -5,7 +5,7 @@ import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { GroupedList, ListRow, ListRowButton } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Kbd } from '@/components/ui/kbd'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
@@ -143,15 +143,11 @@ export function BuddyGreetingsSection(): ReactElement | null {
       )}
       <div className="flex flex-wrap items-center gap-2">
         <AddGreeting disabled={full} onAdd={(kind) => add(newGreetingTemplate(kind))} />
-        <span className="text-xs tabular-nums text-subtle">
+        <span className="text-xs tabular-nums text-muted-foreground">
           {templates.length}/{BUDDY_TEMPLATES_MAX}
         </span>
       </div>
-      {error ? (
-        <p className="text-xs text-destructive" data-slot="cohost-save-error">
-          {error}
-        </p>
-      ) : null}
+      {error ? <FieldError data-testid="cohost-save-error">{error}</FieldError> : null}
     </PanelSection>
   )
 }
@@ -318,7 +314,7 @@ function GreetingEditor({
         onChange={(event) => setDraft(event.target.value)}
       />
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs tabular-nums text-subtle">
+        <span className="text-xs tabular-nums text-muted-foreground">
           {draft.length}/{BUDDY_TEMPLATE_TEXT_MAX_CHARS}
         </span>
         <ToggleGroup
@@ -416,7 +412,7 @@ function GreetingEditor({
       {draftWarnings.map((warning) => (
         <p
           key={warning}
-          className={cn('text-xs text-subtle')}
+          className={cn('text-xs text-muted-foreground')}
           data-slot="buddy-greeting-warning"
           role="note"
         >

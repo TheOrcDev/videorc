@@ -31,7 +31,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
@@ -342,9 +342,7 @@ export function BuddyLibrarySection({
         </LibraryGroup>
 
         {(problem ?? view.error) ? (
-          <p className="text-xs text-destructive" data-testid="buddy-library-error">
-            {problem ?? view.error}
-          </p>
+          <FieldError data-testid="buddy-library-error">{problem ?? view.error}</FieldError>
         ) : null}
       </div>
 
@@ -703,7 +701,7 @@ function EditForm({
                 value={personality}
                 onChange={(event) => setPersonality(event.target.value)}
               />
-              <span className="self-end text-xs text-subtle tabular-nums">
+              <span className="self-end text-xs text-muted-foreground tabular-nums">
                 {buddyOnboardingCounter(
                   buddyTextLength(personality),
                   BUDDY_LIBRARY_PERSONALITY_MAX_CHARS
@@ -725,7 +723,7 @@ function EditForm({
                 <FieldDescription className="text-xs">
                   {BUDDY_ONBOARDING_STEP3.aboutHelp}
                 </FieldDescription>
-                <span className="ml-auto text-xs text-subtle tabular-nums">
+                <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                   {buddyOnboardingCounter(
                     buddyTextLength(context),
                     BUDDY_LIBRARY_CONTEXT_MAX_CHARS

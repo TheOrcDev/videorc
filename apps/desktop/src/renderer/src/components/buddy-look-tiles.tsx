@@ -183,7 +183,7 @@ export function BuddyPoseTile({
         </p>
       ) : null}
       {error ? (
-        <p className="text-xs text-subtle" data-testid="buddy-look-tile-error">
+        <p className="text-xs text-muted-foreground" data-testid="buddy-look-tile-error">
           {error}
         </p>
       ) : null}

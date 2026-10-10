@@ -280,8 +280,8 @@ export function GoLiveConfirmationDialog({
 
             {entitlementBlocker ? (
               <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-warning-foreground dark:text-warning">
-                  <AlertIcon className="size-4" weight="fill" />
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <AlertIcon className="size-4 text-warning" weight="fill" />
                   {entitlementUpgradeUrl ? 'Premium issue' : 'Streaming entitlement issue'}
                 </div>
                 <p className="text-sm text-muted-foreground">{entitlementBlocker.reason}</p>
@@ -300,8 +300,8 @@ export function GoLiveConfirmationDialog({
 
             {errorIssues.length ? (
               <div className="flex flex-col gap-2 rounded-row border border-destructive/25 bg-destructive/5 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-destructive">
-                  <AlertIcon className="size-4" weight="fill" />
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <AlertIcon className="size-4 text-destructive" weight="fill" />
                   Resolve before going live
                 </div>
                 <ul className="grid gap-1.5 text-sm text-muted-foreground">
@@ -339,7 +339,10 @@ export function GoLiveConfirmationDialog({
             />
 
             {overlayNotices.length ? (
-              <ul className="grid gap-1 text-xs text-subtle" data-videorc-go-live-overlay-notices>
+              <ul
+                className="grid gap-1 text-xs text-muted-foreground"
+                data-videorc-go-live-overlay-notices
+              >
                 {overlayNotices.map((notice) => (
                   <li key={notice.item} data-videorc-go-live-overlay-notice={notice.item}>
                     <span className="font-medium text-foreground">

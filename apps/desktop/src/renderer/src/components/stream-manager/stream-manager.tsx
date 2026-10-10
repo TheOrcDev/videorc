@@ -209,11 +209,7 @@ function PaneLabel({
       ) : null}
       {label}
       {unseen.count > 0 || unseen.incomplete ? (
-        <Badge
-          className="h-4 px-1.5 text-[10px] tabular-nums"
-          data-testid="pane-unseen"
-          variant="outline"
-        >
+        <Badge className="h-4 px-1.5 tabular-nums" data-testid="pane-unseen" variant="outline">
           {unseen.incomplete ? 'New' : unseen.count > 99 ? '99+' : unseen.count}
         </Badge>
       ) : null}
