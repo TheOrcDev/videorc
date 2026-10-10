@@ -5748,11 +5748,15 @@ impl ActiveStreamingLease {
     }
 }
 
-/// Every lease the streaming task holds. Settling them is the task's last
-/// act whatever ended it, so a reserved lease is never left counting in full
-/// because of an early return.
-#[derive(Default)]
+/// Every lease the streaming task holds. Settling is drop-safe: an explicit
+/// stop aborts the task (a privacy boundary, see `finish_taken_caption_task`),
+/// so whatever ends the task, normal return or abort, `Drop` settles the
+/// active lease with what it consumed and any spare or in-flight handover
+/// lease with zero. A reserved lease is never left counting in full.
 struct StreamingLeases {
+    client: VideorcApiClient,
+    bearer: String,
+    session_client_id: String,
     active: Option<ActiveStreamingLease>,
     /// A token minted ahead of a lease handover, not yet connected.
     spare: Option<crate::videorc_api::CaptionRealtimeToken>,
@@ -5761,26 +5765,58 @@ struct StreamingLeases {
 }
 
 impl StreamingLeases {
-    fn settle_active(&mut self, session: &CaptionSession) {
-        if let Some(lease) = self.active.take() {
-            spawn_lease_settlement(session, lease.id.clone(), lease.settlement_seconds());
+    fn new(session: &CaptionSession) -> Self {
+        Self {
+            client: session.client.clone(),
+            bearer: session.bearer.clone(),
+            session_client_id: session.session_client_id.clone(),
+            active: None,
+            spare: None,
+            pending: None,
         }
     }
 
-    /// Settle everything: the active lease with what it consumed, and any
-    /// spare or in-flight handover lease with zero.
-    fn release(&mut self, session: &CaptionSession) {
-        self.settle_active(session);
+    fn settle_active(&mut self) {
+        if let Some(lease) = self.active.take() {
+            let seconds = lease.settlement_seconds();
+            self.spawn_settlement(lease.id, seconds);
+        }
+    }
+
+    fn spawn_settlement(&self, lease_id: String, seconds: f64) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("Caption lease settlement skipped: no runtime.");
+            return;
+        };
+        let client = self.client.clone();
+        let bearer = self.bearer.clone();
+        let session_client_id = self.session_client_id.clone();
+        runtime.spawn(async move {
+            if let Err(error) = client
+                .settle_caption_lease(&bearer, &session_client_id, &lease_id, seconds)
+                .await
+            {
+                tracing::warn!("Caption lease settlement failed: {error}");
+            }
+        });
+    }
+
+    fn release(&mut self) {
+        self.settle_active();
         if let Some(spare) = self.spare.take()
             && let Some(id) = spare.lease_id
         {
-            spawn_lease_settlement(session, id, 0.0);
+            self.spawn_settlement(id, 0.0);
         }
         if let Some(pending) = self.pending.take() {
-            let client = session.client.clone();
-            let bearer = session.bearer.clone();
-            let session_client_id = session.session_client_id.clone();
-            tokio::spawn(async move {
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                pending.abort();
+                return;
+            };
+            let client = self.client.clone();
+            let bearer = self.bearer.clone();
+            let session_client_id = self.session_client_id.clone();
+            runtime.spawn(async move {
                 if let Ok(Ok(token)) = pending.await
                     && let Some(id) = token.lease_id
                     && let Err(error) = client
@@ -5794,18 +5830,10 @@ impl StreamingLeases {
     }
 }
 
-fn spawn_lease_settlement(session: &CaptionSession, lease_id: String, seconds: f64) {
-    let client = session.client.clone();
-    let bearer = session.bearer.clone();
-    let session_client_id = session.session_client_id.clone();
-    tokio::spawn(async move {
-        if let Err(error) = client
-            .settle_caption_lease(&bearer, &session_client_id, &lease_id, seconds)
-            .await
-        {
-            tracing::warn!("Caption lease settlement failed: {error}");
-        }
-    });
+impl Drop for StreamingLeases {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// How long one socket streams before handing over to the next lease: 30 s
@@ -5837,12 +5865,9 @@ async fn run_realtime_caption_session(
     timeline: &mut CaptionTimeline,
     audio_heartbeat: &mut CaptionAudioHeartbeat,
 ) -> RealtimeOutcome {
-    let mut leases = StreamingLeases::default();
-    let outcome =
-        run_streaming_caption_sockets(session, sequence, timeline, audio_heartbeat, &mut leases)
-            .await;
-    leases.release(session);
-    outcome
+    // Dropped (and so settled) on return or when a stop aborts the task.
+    let mut leases = StreamingLeases::new(session);
+    run_streaming_caption_sockets(session, sequence, timeline, audio_heartbeat, &mut leases).await
 }
 
 async fn run_streaming_caption_sockets(
@@ -5930,7 +5955,7 @@ async fn run_streaming_caption_sockets(
                 "the caption service offered the retired realtime voice transport".to_string(),
             );
         }
-        leases.settle_active(session);
+        leases.settle_active();
         leases.active = ActiveStreamingLease::from_token(&token);
         let input_rate = token.input_rate();
         if !token.input_is_pcm() || !matches!(input_rate, 16_000 | 24_000) {
@@ -5957,7 +5982,7 @@ async fn run_streaming_caption_sockets(
         let (mut ws, _) = match tokio_tungstenite::connect_async(request).await {
             Ok(connected) => connected,
             Err(error) => {
-                leases.settle_active(session);
+                leases.settle_active();
                 let message = format!("streaming caption connect failed: {error}");
                 if !ever_connected {
                     return RealtimeOutcome::Fallback(message);
@@ -5983,7 +6008,7 @@ async fn run_streaming_caption_sockets(
             .await
             .is_err()
         {
-            leases.settle_active(session);
+            leases.settle_active();
             let message = "streaming caption socket closed while starting";
             let Some(wait) = retry_budget.retry_delay() else {
                 return RealtimeOutcome::Fallback(message.to_string());
@@ -6147,7 +6172,7 @@ async fn run_streaming_caption_sockets(
                         }
                     }
                     if send_failed {
-                        leases.settle_active(session);
+                        leases.settle_active();
                         if retry_budget.retry_delay().is_none() {
                             return RealtimeOutcome::Fallback("streaming caption socket repeatedly dropped".to_string());
                         }
@@ -6167,7 +6192,7 @@ async fn run_streaming_caption_sockets(
                 }
                 maybe_message = ws.next() => {
                     let Some(message) = maybe_message else {
-                        leases.settle_active(session);
+                        leases.settle_active();
                         if retry_budget.retry_delay().is_none() {
                             return RealtimeOutcome::Fallback("streaming caption socket repeatedly closed".to_string());
                         }
@@ -6177,7 +6202,7 @@ async fn run_streaming_caption_sockets(
                     let message = match message {
                         Ok(message) => message,
                         Err(error) => {
-                            leases.settle_active(session);
+                            leases.settle_active();
                             let reason = format!("streaming caption socket error: {error}");
                             if retry_budget.retry_delay().is_none() {
                                 return RealtimeOutcome::Fallback(reason);
@@ -6187,7 +6212,7 @@ async fn run_streaming_caption_sockets(
                         }
                     };
                     if let Message::Close(frame) = message {
-                        leases.settle_active(session);
+                        leases.settle_active();
                         let failure = frame
                             .map(|frame| classify_realtime_close(u16::from(frame.code), &frame.reason))
                             .unwrap_or_else(|| classify_realtime_close(1006, "socket ended without a close frame"));
@@ -6230,7 +6255,7 @@ async fn run_streaming_caption_sockets(
                                 }
                             }
                             RealtimeCaptionEvent::Error(failure) => {
-                                leases.settle_active(session);
+                                leases.settle_active();
                                 let _ = ws.send(Message::Close(None)).await;
                                 if failure.kind == RealtimeFailureKind::Retryable
                                     && retry_budget.retry_delay().is_some()
@@ -6325,7 +6350,7 @@ async fn run_streaming_caption_sockets(
                             }
                         }
                     }
-                    leases.settle_active(session);
+                    leases.settle_active();
                     tracing::info!("Streaming captions handed over to a new lease.");
                     continue 'reconnect;
                 }
