@@ -76,6 +76,7 @@ import {
 import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
 import { cleanCutModeLabel, isCleanCutEligible, type CleanCutSession } from '@/lib/clean-cut-view'
 import { revealInFileManagerLabel, trashName } from '@/lib/platform'
+import { sessionStatusLabel, sessionStatusPulses, sessionStatusTone } from '@/lib/state-labels'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   LIBRARY_FILTERS,
@@ -83,7 +84,6 @@ import {
   hasBuddyReport,
   isLiveSession,
   libraryStorageLabel,
-  liveSessionLabel,
   sessionFormatLabel,
   sessionPosterUrl,
   sortLibrarySessions,
@@ -611,7 +611,11 @@ function LibraryRow({
       </span>
       <div>
         {live ? (
-          <StatusDot pulse label={liveSessionLabel(recording)} tone="error" />
+          <StatusDot
+            label={sessionStatusLabel(recording)}
+            pulse={sessionStatusPulses(recording)}
+            tone={sessionStatusTone(recording)}
+          />
         ) : finalizing ? (
           <Badge variant="outline">
             <SpinnerIcon className="animate-spin" data-icon="inline-start" />
@@ -671,7 +675,7 @@ export function SessionPoster({
   return (
     <span className="grid h-10 w-[4.5rem] shrink-0 place-items-center overflow-hidden rounded-row border bg-muted/30">
       {isLiveSession(session, recording) ? (
-        <StatusDot pulse tone="error" />
+        <StatusDot pulse={sessionStatusPulses(recording)} tone={sessionStatusTone(recording)} />
       ) : source && !failed ? (
         <img
           alt=""

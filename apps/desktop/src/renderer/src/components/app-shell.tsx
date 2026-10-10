@@ -6,7 +6,7 @@ const CommandPalette = lazy(async () => ({
 import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
-import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { StatusBarSessionState } from '@/components/status-bar-session'
 import { GoLiveDialogGate } from '@/components/go-live-dialog-gate'
 import {
   WORKSPACE_SHORTCUTS,
@@ -38,7 +38,7 @@ import { readLastBuddyTab, writeLastBuddyTab, type BuddyTabId } from '@/lib/budd
 import { readLastSettingsTab, writeLastSettingsTab, type SettingsTabId } from '@/lib/settings-tabs'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 import { isActiveRecordingState } from '@/lib/format'
-import { sessionIsLive } from '../../../shared/capture-state'
+import { sessionStatusLabel, sessionStatusPulses, sessionStatusTone } from '@/lib/state-labels'
 import {
   isMediaAccessSnapshotReady,
   shouldShowPermissionsOnboarding,
@@ -159,7 +159,6 @@ function PermissionsOnboardingGate({
 export function AppShell(): ReactElement {
   const {
     wsStatus,
-    backendConnected,
     recordingState,
     runtimeInfo,
     entitlementTier,
@@ -405,16 +404,11 @@ export function AppShell(): ReactElement {
   }, [openCleanCut])
 
   const live = isActiveRecordingState(recordingState)
-  const statusTone: StatusDotTone = live
-    ? 'error'
-    : backendConnected
-      ? 'good'
-      : wsStatus === 'failed'
-        ? 'error'
-        : 'warn'
-  // Go Live is record+stream, which the backend reports as `recording`: the
-  // stream URL is what makes it on air (plan 095 S5).
-  const statusLabel = live ? (sessionIsLive(recording) ? 'streaming' : recordingState) : wsStatus
+  // The session's own words and tone, never the socket's enum (plan 174
+  // S1.3, A-4); Go Live is record+stream, and its stream URL makes it on air.
+  const statusLabel = sessionStatusLabel(recording, wsStatus)
+  const statusTone = sessionStatusTone(recording, wsStatus)
+  const statusPulse = sessionStatusPulses(recording, wsStatus)
 
   return (
     <WorkspaceNavContext.Provider
@@ -445,6 +439,7 @@ export function AppShell(): ReactElement {
           onOpenSettings={openSettings}
           statusTone={statusTone}
           statusLabel={statusLabel}
+          statusPulse={statusPulse}
           live={live}
           onOpenCommand={() => setCommandOpen(true)}
           platform={runtimeInfo?.platform}
@@ -498,7 +493,7 @@ export function AppShell(): ReactElement {
           </Pane>
           {/* State on the left, the shell's real shortcuts on the right:
                 keyboard-first, only quieter than the old footer bar. */}
-          <StatusBar leading={<StatusDot label={statusLabel} pulse={live} tone={statusTone} />}>
+          <StatusBar leading={<StatusBarSessionState recording={recording} wsStatus={wsStatus} />}>
             <StatusBarHint
               keys={`${modKey}K`}
               label="Search"

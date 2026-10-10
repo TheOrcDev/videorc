@@ -41,6 +41,7 @@ import type {
 import { backendCrashView, latestBackendCrash } from '@/lib/backend-crash-view'
 import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
 import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/lib/record-latency'
+import { previewSourceStateLabel, previewStateLabel } from '@/lib/state-labels'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isNativePreviewCapability } from '../../../../shared/native-preview-capability'
 
@@ -194,7 +195,7 @@ export function DiagnosticsTab(): ReactElement {
             <StatusBadge
               label="Preview"
               tone={previewStatusTone(previewLiveStatus, previewCameraStatus, previewScreenStatus)}
-              value={previewLiveStatus.state}
+              value={previewStateLabel(previewLiveStatus.state)}
             />
             <StatusBadge
               label="Preview path"
@@ -223,12 +224,12 @@ export function DiagnosticsTab(): ReactElement {
             <StatusBadge
               label="Camera"
               tone={previewSourceTone(previewCameraStatus.state)}
-              value={previewCameraStatus.state}
+              value={previewSourceStateLabel(previewCameraStatus.state)}
             />
             <StatusBadge
               label="Screen"
               tone={previewSourceTone(previewScreenStatus.state)}
-              value={previewScreenStatus.state}
+              value={previewSourceStateLabel(previewScreenStatus.state)}
             />
             <StatusBadge
               label="Maintenance"

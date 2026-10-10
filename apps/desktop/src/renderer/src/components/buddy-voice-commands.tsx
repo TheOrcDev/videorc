@@ -237,15 +237,11 @@ export function BuddyVoiceCommands({
                   icon={<ChatPlatformIcon decorative platform={row.platform} />}
                   interactive={false}
                   meta={
-                    row.ready ? (
-                      <StatusDot label={row.status} tone="good" />
-                    ) : (
-                      // Not StatusDot's label: it capitalizes every word.
-                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                        <StatusDot tone="warn" />
-                        {row.status}
-                      </span>
-                    )
+                    <StatusDot
+                      className="whitespace-nowrap"
+                      label={row.status}
+                      tone={row.ready ? 'good' : 'warn'}
+                    />
                   }
                   title={row.label}
                 >

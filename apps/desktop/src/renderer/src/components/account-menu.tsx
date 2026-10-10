@@ -38,6 +38,7 @@ export function AccountMenu({
   tier,
   statusTone,
   statusLabel,
+  statusPulse,
   live,
   onOpenHealth,
   onOpenSettings
@@ -45,6 +46,7 @@ export function AccountMenu({
   tier: EntitlementTier | null
   statusTone: StatusDotTone
   statusLabel: string
+  statusPulse: boolean
   live: boolean
   onOpenHealth: () => void
   onOpenSettings: () => void
@@ -141,7 +143,7 @@ export function AccountMenu({
           <HealthIcon />
           Health
           <span className="ml-auto">
-            <StatusDot tone={statusTone} label={statusLabel} pulse={live} />
+            <StatusDot tone={statusTone} label={statusLabel} pulse={statusPulse} />
           </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onOpenSettings}>

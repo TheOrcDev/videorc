@@ -1,7 +1,6 @@
 import type { BackendConnection, RecordingStatus, SessionSummary } from '@/lib/backend'
 import { formatBytes, isActiveRecordingState } from '@/lib/format'
 import { sessionModeRecorded, sessionModeStreamed } from '@/lib/session-modes'
-import { sessionIsLive } from '../../../shared/capture-state'
 
 // Library table view logic (Library rewrite L4): filtering, sorting, search,
 // selection, poster URLs, and the storage footer — all pure and unit-tested;
@@ -85,18 +84,6 @@ export function isLiveSession(
     recording.sessionId === session.id &&
     isActiveRecordingState(recording.state)
   )
-}
-
-/** Row status label while a session is live. Go Live records too, and the
- * backend calls record+stream `recording`: its stream URL says on air. */
-export function liveSessionLabel(recording: Pick<RecordingStatus, 'state' | 'streamUrl'>): string {
-  if (sessionIsLive(recording)) {
-    return 'Streaming'
-  }
-  if (recording.state === 'stopping') {
-    return 'Finishing'
-  }
-  return 'Recording'
 }
 
 /** Poster over the backend's token-authenticated HTTP server; null while the

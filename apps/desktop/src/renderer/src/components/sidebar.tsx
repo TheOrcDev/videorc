@@ -150,6 +150,7 @@ export function Sidebar({
   onOpenSettings,
   statusTone,
   statusLabel,
+  statusPulse,
   live,
   onOpenCommand,
   platform
@@ -163,6 +164,8 @@ export function Sidebar({
   onOpenSettings: (tab?: SettingsTabId) => void
   statusTone: StatusDotTone
   statusLabel: string
+  /** Only while recording or on air (plan 174 S1.3). */
+  statusPulse: boolean
   live: boolean
   onOpenCommand: () => void
   platform?: string
@@ -305,6 +308,7 @@ export function Sidebar({
           tier={accountTier}
           statusTone={statusTone}
           statusLabel={statusLabel}
+          statusPulse={statusPulse}
           live={live}
           onOpenHealth={() => onSelect('diagnostics')}
           onOpenSettings={() => onSelect('settings')}

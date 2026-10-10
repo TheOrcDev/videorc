@@ -10,8 +10,8 @@ import { sessionStopControl } from '@/lib/studio-session-view'
 import { SessionStatusPill, SessionTransport } from './session-panel'
 
 // Plan 095 S5: Go Live is record+stream, which the backend reports as
-// `recording`; the inspector must still say Streaming, and its clock must tick
-// from startedAt (running statuses carry no durationMs).
+// `recording`; the inspector must still say On air (plan 174 D4), and its
+// clock must tick from startedAt (running statuses carry no durationMs).
 
 const STARTED_AT = '2026-10-02T18:00:00.000Z'
 const STREAM_URL = 'rtmp://live.twitch.tv/app/***'
@@ -37,7 +37,10 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-function renderTransport(recording: RecordingStatus): void {
+function renderTransport(
+  recording: RecordingStatus,
+  { active = true, wsStatus = 'connected', startBlocked = false } = {}
+): void {
   const stop = sessionStopControl(recording, false)
   act(() =>
     root.render(
@@ -53,14 +56,14 @@ function renderTransport(recording: RecordingStatus): void {
           audio: unused
         },
         createElement(SessionTransport, {
-          active: true,
+          active,
           canStop: true,
           stopLabel: stop.label,
           stopNote: stop.note,
           startRequestPending: false,
           recordBlockedReason: null,
           liveStreamBlockedReason: null,
-          status: createElement(SessionStatusPill, { recording, wsStatus: 'connected' }),
+          status: createElement(SessionStatusPill, { recording, wsStatus, startBlocked }),
           onRecord: noop,
           onLiveStream: noop,
           onStop: noop
@@ -85,17 +88,20 @@ describe('SessionTransport (plan 095 S5)', () => {
     expect(text('[data-slot=session-clock]')).toBe('1:01:01')
   })
 
-  it('reads Go Live as Streaming in the live tone, with a quiet Rec', () => {
+  it('reads Go Live as On air in the live tone, with a quiet Rec', () => {
     renderTransport({
       state: 'recording',
       sessionId: 's',
       startedAt: STARTED_AT,
       streamUrl: STREAM_URL
     })
-    expect(text('[data-videorc-session-status]')).toBe('Streaming')
+    expect(text('[data-videorc-session-status]')).toBe('On air')
     expect(
       container.querySelector('[data-videorc-session-status] [data-slot=status-badge]')
     ).toHaveProperty('dataset.tone', 'live')
+    expect(container.querySelector('[data-videorc-session-status]')?.getAttribute('role')).toBe(
+      'status'
+    )
     const rec = container.querySelector('[data-testid=session-also-recording]')
     expect(rec?.textContent).toBe('Rec')
     expect(rec?.getAttribute('data-variant')).toBe('outline')
@@ -108,14 +114,14 @@ describe('SessionTransport (plan 095 S5)', () => {
     expect(text('[data-slot=session-stop-note]')).toBe('Your recording stops too.')
   })
 
-  it('keeps stream-only free of Rec and a recording free of Streaming', () => {
+  it('keeps stream-only free of Rec and a recording free of On air', () => {
     renderTransport({
       state: 'streaming',
       sessionId: 's',
       startedAt: STARTED_AT,
       streamUrl: STREAM_URL
     })
-    expect(text('[data-videorc-session-status]')).toBe('Streaming')
+    expect(text('[data-videorc-session-status]')).toBe('On air')
     expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
     expect(container.querySelector('[data-slot=session-stop-note]')).toBeNull()
 
@@ -124,5 +130,40 @@ describe('SessionTransport (plan 095 S5)', () => {
     expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
     expect(container.querySelector('[data-slot=session-stop-note]')).toBeNull()
     expect(text('button')).toContain('Stop recording')
+  })
+})
+
+// Plan 174 S1.3 (B-17): recording, on air and trouble no longer read as the
+// same red chip, and a blocked start no longer reads a green Ready.
+describe('SessionStatusPill (plan 174 S1.3)', () => {
+  const badge = (): Element | null =>
+    container.querySelector('[data-videorc-session-status] [data-slot=status-badge]')
+  const iconCount = (): number => badge()?.querySelectorAll('svg').length ?? 0
+
+  it('leads recording, on air and trouble with an icon, and idle with a dot', () => {
+    renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
+    expect(iconCount()).toBe(1)
+    renderTransport({ state: 'streaming', sessionId: 's', streamUrl: STREAM_URL })
+    expect(iconCount()).toBe(1)
+    renderTransport({ state: 'failed' }, { active: false })
+    expect(text('[data-videorc-session-status]')).toBe('Failed')
+    expect(badge()).toHaveProperty('dataset.tone', 'error')
+    expect(iconCount()).toBe(1)
+    renderTransport({ state: 'idle' }, { active: false })
+    expect(text('[data-videorc-session-status]')).toBe('Ready')
+    expect(iconCount()).toBe(0)
+  })
+
+  it('reads a blocked start as a neutral Not ready', () => {
+    renderTransport({ state: 'idle' }, { active: false, startBlocked: true })
+    expect(text('[data-videorc-session-status]')).toBe('Not ready')
+    expect(badge()).toHaveProperty('dataset.tone', 'neutral')
+  })
+
+  it('says Videorc is reconnecting when the backend drops, not Backend offline', () => {
+    renderTransport({ state: 'idle' }, { active: false, wsStatus: 'closed' })
+    expect(text('[data-videorc-session-status]')).toBe('Videorc is reconnecting…')
+    expect(badge()).toHaveProperty('dataset.tone', 'warn')
+    expect(iconCount()).toBe(1)
   })
 })

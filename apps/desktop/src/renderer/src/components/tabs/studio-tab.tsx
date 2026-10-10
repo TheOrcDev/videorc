@@ -176,7 +176,11 @@ export function StudioTab(): ReactElement {
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
-      <SessionStatusPill recording={recording} wsStatus={wsStatus} />
+      <SessionStatusPill
+        recording={recording}
+        startBlocked={Boolean(visibleStartBlockedReason)}
+        wsStatus={wsStatus}
+      />
     </span>
   )
 

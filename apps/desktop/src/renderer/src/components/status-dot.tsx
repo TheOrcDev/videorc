@@ -1,19 +1,25 @@
 import type { ReactElement } from 'react'
 
+import type { StatusTone } from '@/components/status-badge'
+import { assertStatusWord } from '@/lib/status-word'
 import { cn } from '@/lib/utils'
 
-export type StatusDotTone = 'good' | 'warn' | 'error' | 'neutral'
+/** The same tones as `StatusBadge` (plan 174 S1.3): one tone API. */
+export type StatusDotTone = StatusTone
 
 const toneClass: Record<StatusDotTone, string> = {
   good: 'tone-success',
   warn: 'tone-warning',
-  error: 'tone-live',
+  error: 'tone-destructive',
+  live: 'tone-live',
   neutral: 'tone-neutral'
 }
 
 /**
  * Ambient status: the glass status dot (plan 050, D9), optionally pulsing,
- * and a monochrome label. Replaces the loud header badges.
+ * and a monochrome label. Replaces the loud header badges. `live` is record
+ * and on air; `error` is a failure. The label is a word in sentence case,
+ * already mapped from its state (plan 174 S1.3): the dot never recases it.
  */
 export function StatusDot({
   tone = 'neutral',
@@ -26,6 +32,7 @@ export function StatusDot({
   pulse?: boolean
   className?: string
 }): ReactElement {
+  assertStatusWord(label, 'StatusDot')
   return (
     <span
       className={cn(
@@ -42,7 +49,7 @@ export function StatusDot({
         ) : null}
         <span className="relative inline-flex size-1.5 rounded-full glass-dot" />
       </span>
-      {label ? <span className="truncate capitalize">{label}</span> : null}
+      {label ? <span className="truncate">{label}</span> : null}
     </span>
   )
 }
