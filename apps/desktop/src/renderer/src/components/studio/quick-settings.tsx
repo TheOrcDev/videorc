@@ -230,7 +230,10 @@ export function QuickSettings(): ReactElement {
               }
             }}
           >
-            <SelectTrigger className="w-full justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent">
+            <SelectTrigger
+              aria-label="Output"
+              className="w-full justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent"
+            >
               {/* Q7 (plan 022): the compact trigger shows the short canonical
                 form ("2K · 1440p30"); the full dimensions live in the items. */}
               <SelectValue placeholder="Custom">

@@ -138,8 +138,13 @@ afterEach(() => {
 describe('DestinationCard header', () => {
   it('is a keyboard-reachable row that says Stream key in key mode', () => {
     const markup = render({ target: target('kick', { authMode: 'manual-rtmp' }), expanded: false })
-    expect(markup).toContain('tabindex="0"')
-    expect(markup).toContain('aria-expanded="false"')
+    // Its title is a real button and the enable switch its sibling (plan 174
+    // S0.5, D-12), never a role="button" row around the switch.
+    expect(markup).toMatch(
+      /<button[^>]*data-slot="list-row-button"[^>]*aria-expanded="false"[^>]*>kick</
+    )
+    expect(markup).not.toContain('role="button"')
+    expect(markup).toMatch(/<button[^>]*role="switch"[^>]*aria-label="Enable kick"/)
     expect(markup).toContain('>Stream key<')
   })
 

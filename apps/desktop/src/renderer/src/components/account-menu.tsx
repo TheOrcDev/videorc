@@ -80,10 +80,12 @@ export function AccountMenu({
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
+      {/* Named by what it shows, "Sign in" or the account's name (plan 174
+          S0.5, A-21): an aria-label hid the words a voice user would say, and
+          the trigger already announces its menu. */}
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label="Open account menu"
           className="flex min-w-0 items-center gap-1.5 rounded-row px-1.5 py-1 text-sm transition-colors hover:bg-sidebar-accent/60"
         >
           {/* The web account's avatar (uploaded on videorc.com or the Google

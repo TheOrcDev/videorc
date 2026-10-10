@@ -214,7 +214,7 @@ export function BuddyRepliesSection({
           onChange={(banter) => saveAutoChat({ ...autoChat, banter })}
         />
         <Field>
-          <FieldLabel htmlFor="cohost-tone">Reply tone</FieldLabel>
+          <FieldLabel>Reply tone</FieldLabel>
           <FieldDescription>How the drafted replies read before you edit them.</FieldDescription>
           <ToggleGroup
             className="w-fit"
@@ -455,7 +455,7 @@ export function BuddyModerationSection({
           </span>
         </Field>
         <Field>
-          <FieldLabel htmlFor="cohost-sensitivity">Flag sensitivity</FieldLabel>
+          <FieldLabel>Flag sensitivity</FieldLabel>
           <FieldDescription>
             How sure Buddy must be before a flag shows up. Relaxed shows only the clear cases,
             Strict shows everything it noticed.
@@ -479,7 +479,7 @@ export function BuddyModerationSection({
           </ToggleGroup>
         </Field>
         <Field>
-          <FieldLabel htmlFor="cohost-show-on-stream">Show on stream automatically</FieldLabel>
+          <FieldLabel>Show on stream automatically</FieldLabel>
           <FieldDescription>
             Puts a chat comment on your stream by itself. You can always show one yourself with H.
           </FieldDescription>

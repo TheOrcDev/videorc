@@ -285,7 +285,7 @@ export function LibraryTab({
       {/* Filter bar: filter · sort · search. */}
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-gutter py-2">
         <Select value={filter} onValueChange={(value) => setFilter(value as LibraryFilter)}>
-          <SelectTrigger className="w-40">
+          <SelectTrigger aria-label="Filter" className="w-40">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

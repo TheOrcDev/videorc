@@ -4,6 +4,7 @@ import { useMemo } from 'react'
 import { cva, type VariantProps } from 'class-variance-authority'
 
 import { cn } from '@/lib/utils'
+import { FieldIdsContext, useFieldIds, useFieldLabelIds } from '@/components/ui/field-context'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 
@@ -77,19 +78,24 @@ const fieldVariants = cva('group/field flex w-full gap-3 data-[invalid=true]:tex
   }
 })
 
+// A Field names its control (plan 174 S0.5): FieldLabel points at it, see
+// field-context.ts.
 function Field({
   className,
   orientation = 'vertical',
   ...props
 }: React.ComponentProps<'div'> & VariantProps<typeof fieldVariants>) {
+  const ids = useFieldIds()
   return (
-    <div
-      role="group"
-      data-slot="field"
-      data-orientation={orientation}
-      className={cn(fieldVariants({ orientation }), className)}
-      {...props}
-    />
+    <FieldIdsContext.Provider value={ids}>
+      <div
+        role="group"
+        data-slot="field"
+        data-orientation={orientation}
+        className={cn(fieldVariants({ orientation }), className)}
+        {...props}
+      />
+    </FieldIdsContext.Provider>
   )
 }
 
@@ -103,10 +109,13 @@ function FieldContent({ className, ...props }: React.ComponentProps<'div'>) {
   )
 }
 
-function FieldLabel({ className, ...props }: React.ComponentProps<typeof Label>) {
+function FieldLabel({ className, id, htmlFor, ...props }: React.ComponentProps<typeof Label>) {
+  const field = useFieldLabelIds(id)
   return (
     <Label
       data-slot="field-label"
+      id={field.id}
+      htmlFor={htmlFor ?? field.htmlFor}
       className={cn(
         'group/field-label peer/field-label flex w-fit gap-2 leading-snug group-data-[disabled=true]/field:opacity-50 has-data-[state=checked]:bg-input/30 has-[>[data-slot=field]]:rounded-row has-[>[data-slot=field]]:border *:data-[slot=field]:p-4',
         'has-[>[data-slot=field]]:w-full has-[>[data-slot=field]]:flex-col',

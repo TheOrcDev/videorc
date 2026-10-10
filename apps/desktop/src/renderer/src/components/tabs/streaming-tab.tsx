@@ -677,7 +677,7 @@ function KickCategoryField({
             }
           }}
         >
-          <SelectTrigger className="w-full">
+          <SelectTrigger aria-label="Matching categories" className="w-full">
             <SelectValue placeholder="Select category" />
           </SelectTrigger>
           <SelectContent>
@@ -882,7 +882,7 @@ function MetadataOverride({
                   }
                 }}
               >
-                <SelectTrigger className="w-full">
+                <SelectTrigger aria-label="Matching categories" className="w-full">
                   <SelectValue placeholder="Select category" />
                 </SelectTrigger>
                 <SelectContent>

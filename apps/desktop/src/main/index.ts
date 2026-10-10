@@ -11373,7 +11373,7 @@ async function runSmokePreviewMotionCommand(
           highlightPositionControl:
             document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('title') ?? null,
           windowFrame: document.querySelector('[data-slot="window-frame"]') !== null,
-          highlightActionCount: document.querySelectorAll('button[aria-label^="Show "][aria-label$=" on the stream"]').length,
+          highlightActionCount: document.querySelectorAll('[data-message-id] button[aria-description^="Shows it on stream"]').length,
           destinationStatus: document.querySelector('[data-slot="comments-destination-status"]')?.textContent ?? '',
           deliveryStatus: document.querySelector('[aria-label="Latest message delivery"]')?.textContent ?? '',
           highlightPhases: Object.fromEntries(rows.map((row) => [

@@ -121,3 +121,24 @@ export function GroupedList({
     </div>
   )
 }
+
+/**
+ * A row's title as its button (plan 174 S0.5): stretched over the whole row,
+ * so a click anywhere on the row acts, while a control in the row (a switch)
+ * stays its sibling instead of nesting inside a button. Give the ListRow
+ * `relative`; a control meant to stay clickable must be positioned too, as
+ * the Switch is.
+ */
+export function ListRowButton({ className, ...props }: ComponentProps<'button'>): ReactElement {
+  return (
+    <button
+      className={cn(
+        'block max-w-full truncate text-left outline-hidden after:absolute after:inset-0 focus-visible:after:ring-2 focus-visible:after:ring-ring focus-visible:after:ring-inset',
+        className
+      )}
+      data-slot="list-row-button"
+      type="button"
+      {...props}
+    />
+  )
+}

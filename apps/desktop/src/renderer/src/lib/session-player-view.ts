@@ -38,6 +38,16 @@ export function formatMediaTime(ms: number, withHours: boolean): string {
   return withHours ? `${hours}:${mmss}` : mmss
 }
 
+/**
+ * The scrubber's spoken value (plan 174 S0.5, E-3): "2:05 of 41:10", the
+ * screen's times without the leading zero, never raw milliseconds.
+ */
+export function playheadValueText(positionMs: number, durationMs: number): string {
+  const withHours = mediaTimeHasHours(durationMs)
+  const spoken = (ms: number): string => formatMediaTime(ms, withHours).replace(/^0(?=\d)/, '')
+  return `${spoken(positionMs)} of ${spoken(durationMs)}`
+}
+
 /** Keeps a seek inside the recording. Unknown durations clamp at zero only. */
 export function clampSeekMs(ms: number, durationMs: number): number {
   if (!Number.isFinite(ms)) return 0

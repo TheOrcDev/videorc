@@ -129,4 +129,10 @@ describe('SessionPlayerControls', () => {
     expect(controls({ positionMs: 0, durationMs: 0 })).toContain('aria-valuemax="100"')
     expect(controls({ disabled: true })).toMatch(/data-disabled/)
   })
+
+  it('names the scrubber thumb and speaks its time, never raw milliseconds (plan 174 S0.5)', () => {
+    const markup = controls({ positionMs: 125_000, durationMs: 2_470_000 })
+    expect(markup).toMatch(/<span[^>]*role="slider"[^>]*aria-label="Playhead"/)
+    expect(markup).toMatch(/<span[^>]*role="slider"[^>]*aria-valuetext="2:05 of 41:10"/)
+  })
 })

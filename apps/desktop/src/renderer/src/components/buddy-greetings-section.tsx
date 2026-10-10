@@ -1,8 +1,8 @@
-import { CloseIcon } from '@/components/icons'
-import { useEffect, useState, type KeyboardEvent, type ReactElement } from 'react'
+import { CloseIcon, WarningIcon } from '@/components/icons'
+import { useEffect, useId, useState, type KeyboardEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import { GroupedList, ListRow } from '@/components/list-row'
+import { GroupedList, ListRow, ListRowButton } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -206,10 +206,15 @@ function GreetingRow({
   onRemove: () => void
 }): ReactElement {
   const warnings = greetingTemplateWarnings(template)
+  const warningsId = useId()
+  const title = BUDDY_TEMPLATE_KIND_TITLES[template.kind]
   return (
     <div data-slot="buddy-greeting" data-template-kind={template.kind}>
+      {/* The title is the row's button, stretched over the row, so a click
+          anywhere or Enter opens the editor. The switch is its sibling,
+          never inside a button (plan 174 S0.5, G-8). */}
       <ListRow
-        aria-expanded={editing}
+        className="relative"
         icon={
           template.platform ? (
             <ChatPlatformIcon decorative platform={template.platform} />
@@ -217,33 +222,32 @@ function GreetingRow({
         }
         meta={
           <Switch
-            aria-label={`${BUDDY_TEMPLATE_KIND_TITLES[template.kind]} greeting on`}
+            aria-label={`${title} greeting on`}
             checked={template.enabled}
             size="sm"
             onCheckedChange={(enabled) => onChange({ ...template, enabled })}
-            onClick={(event) => event.stopPropagation()}
           />
         }
-        role="button"
         statusIcons={
           warnings.length > 0 ? (
-            <span className="text-[11px] text-warning" title={warnings.join('\n')}>
-              !
+            <span className="flex" data-slot="buddy-greeting-alert" id={warningsId}>
+              <WarningIcon aria-hidden className="size-3.5 text-warning" weight="fill" />
+              <span className="sr-only">{warnings.join(' ')}</span>
             </span>
           ) : undefined
         }
-        tabIndex={0}
-        title={BUDDY_TEMPLATE_KIND_TITLES[template.kind]}
+        title={
+          <ListRowButton
+            aria-describedby={warnings.length > 0 ? warningsId : undefined}
+            aria-expanded={editing}
+            onClick={() => onEdit(!editing)}
+          >
+            {title}
+          </ListRowButton>
+        }
         context={
           <span className="min-w-0 truncate text-muted-foreground">{template.text || 'Empty'}</span>
         }
-        onClick={() => onEdit(!editing)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' && event.target === event.currentTarget) {
-            event.preventDefault()
-            onEdit(!editing)
-          }
-        }}
       />
       {editing ? (
         <GreetingEditor

@@ -1,6 +1,7 @@
 import {
   Fragment,
   useEffect,
+  useId,
   useRef,
   type CSSProperties,
   type ReactElement,
@@ -10,7 +11,12 @@ import {
 
 import { gifTitle } from '../../../shared/chat-gif'
 
-import { commentCanHighlight, commentRowTint, type CommentRowTint } from '@/lib/live-chat-view'
+import {
+  CHAT_PLATFORM_LABELS,
+  commentCanHighlight,
+  commentRowTint,
+  type CommentRowTint
+} from '@/lib/live-chat-view'
 export { commentCanHighlight } from '@/lib/live-chat-view'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -614,6 +620,9 @@ function EventStatus({ message }: { message: LiveChatMessage }): ReactElement | 
   return null
 }
 
+/** The parts a highlightable row's button is named by: who, where, what. */
+type CommentNameIds = { author: string; platform: string; text: string }
+
 function CommentContent({
   message,
   density,
@@ -623,7 +632,8 @@ function CommentContent({
   suggested,
   spotlight,
   mentioned,
-  timestamps
+  timestamps,
+  nameIds
 }: {
   message: LiveChatMessage
   density: 'compact' | 'comfortable'
@@ -634,6 +644,7 @@ function CommentContent({
   spotlight: boolean
   mentioned: boolean
   timestamps: CommentTimestamps
+  nameIds?: CommentNameIds
 }): ReactElement {
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
@@ -651,7 +662,10 @@ function CommentContent({
         <span className="flex min-w-0 items-center gap-1.5">
           {/* text-left: a highlightable row is a Button, whose centred text
               would otherwise float the name mid-row, away from the avatar. */}
-          <span className="min-w-0 truncate text-left font-medium text-foreground">
+          <span
+            className="min-w-0 truncate text-left font-medium text-foreground"
+            id={nameIds?.author}
+          >
             {message.authorName}
           </span>
           {message.authorVerified ? <VerifiedCheck verified={message.authorVerified} /> : null}
@@ -697,6 +711,14 @@ function CommentContent({
           {/* The platform mark closes the row on the far right (owner call,
               plan 165): 20 px, YouTube's official icon, clear of the name. */}
           <ChatPlatformIcon className="ml-1 mr-0" decorative platform={message.platform} />
+          {nameIds ? (
+            // The mark's words, for the row button's name only ("Ada on
+            // YouTube: Ship it!"): a hidden node still counts when
+            // aria-labelledby points at it.
+            <span hidden id={nameIds.platform}>
+              {`on ${CHAT_PLATFORM_LABELS[message.platform]}:`}
+            </span>
+          ) : null}
         </span>
         {message.reply ? (
           <span
@@ -715,6 +737,7 @@ function CommentContent({
             message.eventType === 'moderation' && 'italic text-muted-foreground',
             message.isDeleted && 'text-muted-foreground line-through'
           )}
+          id={nameIds?.text}
         >
           <MessageBody density={density} message={message} noticeWords={noticeWords} />
         </span>
@@ -863,6 +886,12 @@ export function CommentRow({
     spotlight: cohostSpotlight,
     onStream: highlight.phase === 'live'
   })
+  const rowId = useId()
+  const nameIds: CommentNameIds = {
+    author: `${rowId}-author`,
+    platform: `${rowId}-platform`,
+    text: `${rowId}-text`
+  }
   const content = (
     <CommentContent
       density={density}
@@ -870,6 +899,7 @@ export function CommentRow({
       highlight={highlight}
       mentioned={mentioned}
       message={message}
+      nameIds={highlightable ? nameIds : undefined}
       removal={removal}
       spotlight={cohostSpotlight && !cohostFlag}
       suggested={suggested}
@@ -899,14 +929,19 @@ export function CommentRow({
       style={style}
     >
       {highlightable ? (
+        // One button, and a click on it shows the message on stream or takes
+        // it off (owner call, plan 174 D10). Its name is what the row says,
+        // so a screen reader reads the chat (S0.5, H-2): author, platform,
+        // message. aria-pressed says on stream; the action is the description.
         <Button
-          aria-label={
+          aria-description={
             highlight.phase === 'live'
-              ? `Take ${message.authorName}'s message off the stream`
+              ? 'Takes it off the stream'
               : suggested
-                ? `Show ${message.authorName}'s message on the stream (Buddy suggestion)`
-                : `Show ${message.authorName}'s message on the stream`
+                ? 'Shows it on stream. Buddy suggests it'
+                : 'Shows it on stream'
           }
+          aria-labelledby={`${nameIds.author} ${nameIds.platform} ${nameIds.text}`}
           aria-pressed={highlight.phase === 'live'}
           disabled={highlight.phase === 'applying'}
           className={cn(

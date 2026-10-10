@@ -27,6 +27,7 @@ import {
   mediaErrorCopy,
   mediaTimeHasHours,
   playerKeyAction,
+  playheadValueText,
   sessionMediaRefusalCopy
 } from '@/lib/session-player-view'
 import { normalizeSkipRanges, skipTargetMs, type SkipRange } from '@/lib/skip-ranges'
@@ -482,6 +483,7 @@ export function SessionPlayerControls({
       </span>
       <Slider
         aria-label="Playhead"
+        aria-valuetext={playheadValueText(positionMs, durationMs)}
         className="flex-1"
         min={0}
         max={max}
