@@ -1,5 +1,5 @@
 import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
-import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useEffectEvent, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
 import { PanelSection } from '@/components/panel-section'
@@ -26,7 +26,12 @@ import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
-import { isSessionTransportActive, sessionStopControl } from '@/lib/studio-session-view'
+import {
+  isSessionTransportActive,
+  sessionIsLive,
+  sessionStopControl
+} from '@/lib/studio-session-view'
+import { spaceShortcutBlocked } from '@/lib/studio-space-shortcut'
 
 const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
@@ -46,7 +51,7 @@ export function StudioTab(): ReactElement {
     stopRequestPending,
     visibleStartBlockedReason,
     startSession,
-    stopSession,
+    requestStopSession,
     noteRecordClick,
     captureConfig,
     setCaptureConfig,
@@ -140,14 +145,39 @@ export function StudioTab(): ReactElement {
     setCaptureConfig((current) => ({ ...current, streamEnabled: true }))
     setPendingStart(true)
   }
-  const handleStop = (): void => {
-    noteRecordClick('stop')
-    void stopSession()
+  // Every stop goes through the provider's decision (plan 174 S0.1, D2): a
+  // recording stops at once, a livestream asks first. The latency clock arms
+  // on the click that stops; while live that is the dialog's confirm, not
+  // the click that only asks.
+  const handleStop = (origin: 'button' | 'space' = 'button'): void => {
+    if (!sessionIsLive(recording)) noteRecordClick('stop')
+    void requestStopSession(origin)
   }
 
+  // Space (D1): Record when idle, Stop recording while recording, the End
+  // livestream question while live. It exists only on this page, and yields
+  // to a dialog, a menu, a focused control or widget, and a stage gesture.
+  const onSpace = useEffectEvent((event: KeyboardEvent): void => {
+    if (spaceShortcutBlocked(event, document)) return
+    event.preventDefault()
+    if (active) {
+      if (canStop) handleStop('space')
+      return
+    }
+    if (!recordBlockedReason && !startRequestPending) handleRecord()
+  })
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.code === 'Space') onSpace(event)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
   // Go Live is record+stream, which the backend reports as `recording`: the
-  // stream URL is what makes it on air (plan 095 S5).
-  const stopControl = sessionStopControl(recording, stopRequestPending)
+  // stream URL is what makes it on air (plan 095 S5). While it starts, the
+  // control cancels the livestream rather than "stopping a recording" (B-16).
+  const stopControl = sessionStopControl(recording, stopRequestPending, captureConfig.streamEnabled)
 
   // The status pill rides the inspector's transport block, so it exists in
   // every preview mode, docked included, and the mic sliver shares its one
@@ -208,10 +238,10 @@ export function StudioTab(): ReactElement {
             startRequestPending={startRequestPending}
             status={sessionStatus}
             stopLabel={stopControl.label}
-            stopTitle={stopControl.title}
+            stopNote={stopControl.note}
             onLiveStream={handleLiveStream}
             onRecord={handleRecord}
-            onStop={handleStop}
+            onStop={() => handleStop('button')}
           />
           <SessionPanel
             active={active}

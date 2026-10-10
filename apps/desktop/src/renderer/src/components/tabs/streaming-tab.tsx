@@ -119,7 +119,7 @@ function StreamingSetup(): ReactElement {
     xNativeCapabilityLoading,
     refreshXNativeCapability,
     authorizeXLive,
-    stopSession,
+    requestStopSession,
     youtubeQuota
   } = useStudioCore()
   const youtubeQuotaPaused = youtubeQuotaPausedUntil(youtubeQuota)
@@ -213,7 +213,7 @@ function StreamingSetup(): ReactElement {
               <StreamFailureBanner
                 problems={problems}
                 onDismiss={() => setDismissedKey(problemsKey)}
-                onStopAll={() => void stopSession()}
+                onEndLivestream={() => void requestStopSession('failure-banner')}
               />
             ) : null}
             {isSessionActive ? (
@@ -344,13 +344,18 @@ const DESTINATION_PROBLEM_STATES: ReadonlySet<StreamTargetRuntime['state']> = ne
   'not-configured'
 ])
 
-function StreamFailureBanner({
+/**
+ * Destinations in trouble mid-stream. Its one destructive action ends the
+ * whole livestream (every destination and the recording), so it says so and
+ * asks through the End livestream dialog (plan 174 S0.1, D-4).
+ */
+export function StreamFailureBanner({
   problems,
-  onStopAll,
+  onEndLivestream,
   onDismiss
 }: {
   problems: StreamTargetRuntime[]
-  onStopAll: () => void
+  onEndLivestream: () => void
   onDismiss: () => void
 }): ReactElement {
   const failed = problems.filter((target) => target.state === 'failed')
@@ -393,8 +398,8 @@ function StreamFailureBanner({
           </span>
         ) : null}
         <span className="flex gap-2 pt-1.5">
-          <Button size="sm" variant="destructive" onClick={onStopAll}>
-            Stop all
+          <Button size="sm" variant="destructive" onClick={onEndLivestream}>
+            End livestream
           </Button>
           <Button size="sm" variant="outline" onClick={onDismiss}>
             Continue streaming

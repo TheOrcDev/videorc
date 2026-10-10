@@ -49,7 +49,7 @@ export function CommandPalette({
     savedScenes,
     applySavedScene,
     startSession,
-    stopSession,
+    requestStopSession,
     commentsWindow,
     toggleCommentsWindow,
     captionsWindow,
@@ -194,7 +194,8 @@ export function CommandPalette({
             <CommandItem
               value="Stop session"
               disabled={busy}
-              onSelect={() => run(() => void stopSession())}
+              // A livestream asks first (plan 174 S0.1); a recording stops.
+              onSelect={() => run(() => void requestStopSession('palette'))}
             >
               <StopIcon className="size-4" />
               Stop session

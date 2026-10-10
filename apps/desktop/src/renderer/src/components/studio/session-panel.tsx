@@ -48,14 +48,14 @@ import {
  * Stop at the top of the Studio inspector, right above Session (owner call,
  * 2026-09-23: no buttons in the toolbar's top-right corner). The buttons
  * reuse the transport handlers StudioTab owns (no second session state
- * machine). Space still records: that shortcut lives in the Studio provider,
- * not on this button.
+ * machine). Space still records: that shortcut lives on the Studio page
+ * (plan 174 S0.1), not on this button.
  */
 export function SessionTransport({
   active,
   canStop,
   stopLabel,
-  stopTitle,
+  stopNote,
   startRequestPending,
   recordBlockedReason,
   liveStreamBlockedReason,
@@ -67,8 +67,8 @@ export function SessionTransport({
   active: boolean
   canStop: boolean
   stopLabel: string
-  /** Why Stop does more than its label says ("Also stops the recording"). */
-  stopTitle?: string
+  /** What Stop does beyond its label, said visibly ("Your recording stops too."). */
+  stopNote?: string
   startRequestPending: boolean
   recordBlockedReason: string | null
   liveStreamBlockedReason: string | null
@@ -94,7 +94,6 @@ export function SessionTransport({
             className="flex-1"
             disabled={!canStop}
             size="lg"
-            title={stopTitle}
             variant="destructive"
             onClick={onStop}
           >
@@ -129,6 +128,13 @@ export function SessionTransport({
           </>
         )}
       </div>
+      {/* D19: Go Live and Stop are one session, said where the control is,
+          never in a title that disabled controls never show. */}
+      {active && stopNote ? (
+        <p className="text-xs text-muted-foreground" data-slot="session-stop-note">
+          {stopNote}
+        </p>
+      ) : null}
     </section>
   )
 }

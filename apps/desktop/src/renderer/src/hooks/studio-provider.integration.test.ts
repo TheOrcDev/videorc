@@ -20,6 +20,7 @@ const toastSpies = vi.hoisted(() => ({
   error: vi.fn(),
   info: vi.fn(),
   loading: vi.fn(),
+  message: vi.fn(),
   success: vi.fn(),
   warning: vi.fn()
 }))
@@ -106,10 +107,12 @@ import {
   useStudioCore,
   useStudioDiagnostics,
   useStudioRecording,
+  useStudioShell,
   type StudioCoreContextValue,
   type StudioRecordingContextValue
 } from './use-studio'
 import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlements'
+import type { SessionStopOrigin } from '../lib/session-stop'
 import {
   buildCameraSources,
   defaultCaptureConfig,
@@ -4252,6 +4255,155 @@ describe('real StudioProvider lifecycle', () => {
       'Recording saved',
       expect.objectContaining({ duration: 12000 })
     )
+  })
+
+  // Plan 174 S0.1 (D2): every stop path asks through requestStopSession. While
+  // live, an in-app origin opens the End livestream question (the shell hosts
+  // it), a global hotkey arms for a second press, and the device intents keep
+  // their contract. A recording that is not live stops at once.
+  it('asks before ending a livestream, arms a hotkey, and keeps the device contract', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(now))
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          enabledTargetIds: ['twitch'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) =>
+            target.id === 'twitch' ? { ...target, enabled: true, authMode: 'manual-rtmp' } : target
+          )
+        }
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const pushStatus = async (status: RecordingStatus): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'recording.status', payload: status })
+        })
+        await Promise.resolve()
+      })
+    }
+    const goLive = (sessionId: string): RecordingStatus => ({
+      state: 'recording',
+      sessionId,
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    })
+    const stopsSent = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'session.stop').length
+    const request = async (origin: SessionStopOrigin): Promise<boolean> => {
+      let outcome = false
+      await act(async () => {
+        outcome = await latest().core.requestStopSession(origin)
+      })
+      return outcome
+    }
+
+    await pushStatus(goLive('go-live-1'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-1')
+
+    // Every in-app origin asks first, naming the session and its audience.
+    for (const origin of ['button', 'space', 'palette', 'failure-banner'] as const) {
+      expect(await request(origin)).toBe(false)
+      await waitForObservation(() => shell?.stopConfirmation?.origin === origin)
+      expect(stopsSent()).toBe(0)
+    }
+    expect(shell?.stopConfirmation).toMatchObject({
+      sessionId: 'go-live-1',
+      platforms: ['Twitch'],
+      alsoRecords: true
+    })
+    // Keep streaming: nothing is sent, the question goes away.
+    await act(async () => shell!.cancelStopSession())
+    await waitForObservation(() => shell?.stopConfirmation === null)
+    expect(stopsSent()).toBe(0)
+
+    // A global hotkey arms with one plain keyed toast; an expired arm starts
+    // over; a second press within the window ends the livestream.
+    expect(await request('global-hotkey')).toBe(false)
+    expect(toastSpies.message).toHaveBeenCalledExactlyOnceWith(
+      'Press again to end the livestream',
+      expect.objectContaining({ id: 'end-livestream-armed', duration: 2000 })
+    )
+    expect(shell?.stopConfirmation).toBeNull()
+    expect(stopsSent()).toBe(0)
+    vi.setSystemTime(new Date(Date.parse(now) + 2001))
+    expect(await request('global-hotkey')).toBe(false)
+    expect(toastSpies.message).toHaveBeenCalledTimes(2)
+    expect(stopsSent()).toBe(0)
+    vi.setSystemTime(new Date(Date.parse(now) + 3000))
+    expect(await request('global-hotkey')).toBe(true)
+    expect(stopsSent()).toBe(1)
+    expect(toastSpies.dismiss).toHaveBeenCalledWith('end-livestream-armed')
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // Stream Deck and phone intents are deliberate: they stop at once.
+    await pushStatus(goLive('go-live-2'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-2')
+    expect(await request('remote-control')).toBe(true)
+    expect(stopsSent()).toBe(2)
+    expect(shell?.stopConfirmation).toBeNull()
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // The confirm button is the stop.
+    await pushStatus(goLive('go-live-3'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-3')
+    expect(await request('palette')).toBe(false)
+    await waitForObservation(() => shell?.stopConfirmation?.sessionId === 'go-live-3')
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() => stopsSent() === 3)
+    await waitForObservation(() => shell?.stopConfirmation === null)
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // A recording that is not live never asks.
+    await pushStatus({
+      state: 'recording',
+      sessionId: 'rec-1',
+      startedAt: now,
+      message: 'Recording.'
+    })
+    await waitForObservation(() => latest().recording.recording.sessionId === 'rec-1')
+    expect(await request('button')).toBe(true)
+    expect(stopsSent()).toBe(4)
+    expect(shell?.stopConfirmation).toBeNull()
+    expect(toastSpies.message).toHaveBeenCalledTimes(2)
   })
 
   it('returns a fully cloneable development scene-preset state with evaluated source diagnostics', async () => {

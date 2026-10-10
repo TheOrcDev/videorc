@@ -3,6 +3,7 @@
 // status strings/tones are shared by the Session rows and the Preview badge.
 
 import { sessionIsLive } from '../../../shared/capture-state'
+import { RECORDING_STOPS_TOO } from './session-stop'
 
 export { sessionIsLive }
 
@@ -123,13 +124,17 @@ export function sessionClockLabel(durationMs?: number): string {
 }
 
 /**
- * The Stop button. A live session ends the livestream, and says so when it
- * also stops a recording (Go Live is record+stream by default).
+ * The Stop button. A live session ends the livestream, with a visible line
+ * when that also stops a recording (Go Live is record+stream by default;
+ * plan 174 D19). A Go Live still starting is cancelled, not "stopped": the
+ * backend reports it as `recording` until the stream is up, so the session's
+ * `streamEnabled` tells the two apart (B-16).
  */
 export function sessionStopControl(
   status: SessionStatusView,
-  stopRequestPending: boolean
-): { label: string; title?: string } {
+  stopRequestPending: boolean,
+  streamEnabled = false
+): { label: string; note?: string } {
   if (stopRequestPending) {
     return { label: 'Stopping…' }
   }
@@ -138,8 +143,11 @@ export function sessionStopControl(
   }
   if (sessionIsLive(status)) {
     return sessionAlsoRecords(status)
-      ? { label: 'End livestream', title: 'Also stops the recording' }
+      ? { label: 'End livestream', note: RECORDING_STOPS_TOO }
       : { label: 'End livestream' }
+  }
+  if (status.state === 'starting' && streamEnabled) {
+    return { label: 'Cancel livestream' }
   }
   return { label: 'Stop recording' }
 }

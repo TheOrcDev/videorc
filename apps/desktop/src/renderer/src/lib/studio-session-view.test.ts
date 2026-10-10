@@ -168,18 +168,32 @@ describe('sessionStatusLabel / sessionStatusTone', () => {
 })
 
 describe('sessionStopControl', () => {
-  it('ends a livestream, and says when that also stops the recording (plan 095 S5)', () => {
+  it('ends a livestream, and says visibly when that also stops the recording (plan 095 S5, 174 D19)', () => {
     expect(sessionStopControl(recordOnly, false)).toEqual({ label: 'Stop recording' })
     expect(sessionStopControl(streamOnly, false)).toEqual({ label: 'End livestream' })
     expect(sessionStopControl(recordAndStream, false)).toEqual({
       label: 'End livestream',
-      title: 'Also stops the recording'
+      note: 'Your recording stops too.'
     })
   })
   it('keeps the in-flight labels', () => {
     expect(sessionStopControl(recordAndStream, true)).toEqual({ label: 'Stopping…' })
     expect(sessionStopControl({ state: 'stopping', streamUrl: STREAM_URL }, false)).toEqual({
       label: 'Force stop'
+    })
+  })
+  it('cancels a Go Live that is still starting, and stops a starting recording (B-16)', () => {
+    expect(sessionStopControl({ state: 'starting' }, false, true)).toEqual({
+      label: 'Cancel livestream'
+    })
+    expect(sessionStopControl({ state: 'starting' }, false, false)).toEqual({
+      label: 'Stop recording'
+    })
+    expect(sessionStopControl({ state: 'starting' }, false)).toEqual({ label: 'Stop recording' })
+    // Once the stream is up the session is live whatever the flag says.
+    expect(sessionStopControl(recordAndStream, false, true)).toEqual({
+      label: 'End livestream',
+      note: 'Your recording stops too.'
     })
   })
 })
