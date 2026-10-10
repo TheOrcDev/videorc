@@ -1,6 +1,8 @@
 import { AlertIcon, SaveIcon, SearchIcon, TextIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from 'react'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { PageTabs } from '@/components/page-tabs'
+import { TabsContent } from '@/components/ui/tabs'
+import { LIVESTREAM_VIEWS, type LivestreamViewId } from '@/lib/livestream-tabs'
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
@@ -51,26 +53,26 @@ import type {
 import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 
-export function StreamingTab(): ReactElement {
-  const [view, setView] = useState(() =>
-    sessionStorage.getItem('videorc-scheduling-view') === 'upcoming' ? 'upcoming' : 'setup'
-  )
-  useEffect(() => {
-    const open = () => setView('upcoming')
-    window.addEventListener('videorc:upcoming', open)
-    sessionStorage.removeItem('videorc-scheduling-view')
-    return () => window.removeEventListener('videorc:upcoming', open)
-  }, [])
+/**
+ * Livestream (plan 174 S1.6b, A-14): Setup and Upcoming in a strip pinned
+ * under the toolbar, like Settings; only the view under it scrolls. The view
+ * lives in the shell, so the page reopens on the one used last and ⌘K can
+ * open Upcoming by name.
+ */
+export function StreamingTab({
+  view,
+  onViewChange
+}: {
+  view: LivestreamViewId
+  onViewChange: (view: LivestreamViewId) => void
+}): ReactElement {
   return (
-    <Tabs className="gap-0" value={view} onValueChange={setView}>
-      {/* Setup / Upcoming leads the page body; the toolbar carries only the
-          title (owner call, 2026-09-23: no buttons in its top-right corner). */}
-      <div className="border-b border-border px-gutter py-2">
-        <TabsList aria-label="Livestream view">
-          <TabsTrigger value="setup">Setup</TabsTrigger>
-          <TabsTrigger value="upcoming">Upcoming</TabsTrigger>
-        </TabsList>
-      </div>
+    <PageTabs
+      label="Livestream view"
+      tabs={LIVESTREAM_VIEWS}
+      value={view}
+      onValueChange={onViewChange}
+    >
       <TabsContent value="setup">
         <StreamingSetup />
       </TabsContent>
@@ -79,7 +81,7 @@ export function StreamingTab(): ReactElement {
           <ScheduledStreams />
         </Suspense>
       </TabsContent>
-    </Tabs>
+    </PageTabs>
   )
 }
 

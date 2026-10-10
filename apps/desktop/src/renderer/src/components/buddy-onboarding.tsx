@@ -90,6 +90,7 @@ import {
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
+import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import {
@@ -330,7 +331,8 @@ export function BuddyOnboarding({
       <DialogContent
         ref={sheetRef}
         aria-describedby={undefined}
-        className="flex h-[min(48rem,calc(100vh-3rem))] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl"
+        className="h-[min(48rem,calc(100vh-2rem))] gap-0 overflow-hidden p-0"
+        size="xl"
         data-step={step}
         data-testid="buddy-onboarding"
         onKeyDown={onKeyDown}
@@ -613,15 +615,13 @@ function MeetStep({
           data-testid="buddy-onboarding-gallery"
         >
           {official.map((card) => (
-            <div
+            <MediaCard
               key={card.id}
-              className={cn(
-                'flex flex-col gap-1.5 rounded-row border border-border bg-foreground/[0.04] p-1.5',
-                card.active && 'border-foreground/25 bg-accent'
-              )}
+              className="gap-1.5 p-1.5"
               data-active={card.active || undefined}
               data-id={card.id}
               data-testid="buddy-onboarding-official"
+              selected={card.active}
               title={card.hint}
             >
               <div className="aspect-square overflow-hidden rounded-chip bg-foreground/[0.04]">
@@ -656,7 +656,7 @@ function MeetStep({
                   {BUDDY_ONBOARDING_STEP1.cardAction}
                 </Button>
               )}
-            </div>
+            </MediaCard>
           ))}
         </div>
       </section>

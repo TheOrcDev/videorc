@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -14,7 +15,6 @@ import {
 } from '@/components/ui/dialog'
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Select,
   SelectContent,
@@ -137,7 +137,7 @@ export function GoLiveConfirmationDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
-      <DialogContent className="max-h-[88vh] gap-4 overflow-hidden sm:max-w-3xl">
+      <DialogContent className="gap-4" size="xl">
         <DialogHeader>
           <DialogTitle>Confirm Go Live</DialogTitle>
           <DialogDescription>
@@ -145,7 +145,7 @@ export function GoLiveConfirmationDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[60vh] pr-3">
+        <DialogBody>
           <div className="flex flex-col gap-4">
             {scheduledTargets.map((target) => (
               <div
@@ -396,7 +396,7 @@ export function GoLiveConfirmationDialog({
               </div>
             ) : null}
           </div>
-        </ScrollArea>
+        </DialogBody>
 
         <DialogFooter>
           <Button disabled={pending} variant="outline" onClick={onCancel}>

@@ -24,6 +24,7 @@ import {
   phoneRemoteSummary,
   qrCodePath
 } from '@/lib/phone-remote-view'
+import { useCopyText } from '@/lib/copy-text'
 import { cn } from '@/lib/utils'
 
 // One shared 1 Hz clock for the countdown and "seen N min ago" labels. An
@@ -86,13 +87,14 @@ function PairingDialog({
 }): ReactElement {
   const now = useNow()
   const [revealed, setRevealed] = useState(false)
+  const { copied: linkCopied, copy: copyLink } = useCopyText()
   const secondsLeft = pairingSecondsLeft(pairing.expiresAt, now)
   const expired = secondsLeft === 0
   const showTrouble = !expired && now - pairedSince > PAIRING_TROUBLE_HINT_AFTER_MS
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>Pair a phone</DialogTitle>
           <DialogDescription>
@@ -154,10 +156,10 @@ function PairingDialog({
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => void navigator.clipboard.writeText(pairing.url)}
+              onClick={() => void copyLink(pairing.url, "Couldn't copy the pairing link.")}
             >
               <CopyIcon data-icon="inline-start" />
-              Copy link instead
+              {linkCopied ? 'Copied' : 'Copy link instead'}
             </Button>
           ) : null}
 

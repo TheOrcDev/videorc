@@ -36,7 +36,7 @@ export function WhatsNewDialog({
         }
       }}
     >
-      <DialogContent className="max-w-md">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>
             What&apos;s new in Videorc {formatChangelogVersion(entry.version)}

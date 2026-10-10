@@ -29,6 +29,7 @@ import type { SessionPlayerHandle } from '@/components/media/session-player'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { PaneStrip } from '@/components/pane'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { Kbd } from '@/components/ui/kbd'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -565,13 +566,13 @@ export function CleanCutReview({
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex shrink-0 flex-col gap-1.5 border-b border-border px-gutter py-2">
+            <PaneStrip className="flex flex-col gap-1.5">
               <KindChips chips={chips} onToggle={toggleGroup} />
               <p className="text-[11px] text-subtle">
                 ↑ ↓ move between cuts · Enter keeps or cuts one · Space plays · click a word to jump
                 there
               </p>
-            </div>
+            </PaneStrip>
             {data.transcript ? null : (
               <Alert className="mx-gutter mt-2 w-auto" variant="warning">
                 <AlertTitle className="font-normal">

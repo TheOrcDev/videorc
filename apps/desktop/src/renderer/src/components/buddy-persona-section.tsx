@@ -151,7 +151,7 @@ export function BuddyPersonaSection(): ReactElement | null {
       {/* The sample is a stream-sized bitmap shown small; zoomed, it is drawn
           again at twice the size so the bubble reads. */}
       <Dialog open={bubbleZoomOpen} onOpenChange={setBubbleZoomOpen}>
-        <DialogContent className="sm:max-w-lg" data-testid="buddy-bubble-zoom-dialog">
+        <DialogContent data-testid="buddy-bubble-zoom-dialog" size="lg">
           <DialogHeader>
             <DialogTitle>Bubble</DialogTitle>
             <DialogDescription>

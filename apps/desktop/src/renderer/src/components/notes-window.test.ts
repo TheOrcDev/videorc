@@ -10,12 +10,13 @@ const render = (props: Parameters<typeof NotesWindow>[0] = {}): string =>
 describe('NotesWindow', () => {
   it('renders the window-family header: title, text size and keep-on-top', () => {
     const markup = render()
-    expect(markup).toContain('>Notes<')
+    // Plan 174 S1.6b (I-29): the shared window header, its title an h1.
+    expect(markup).toContain('data-slot="window-header-title">Notes</h1>')
     expect(markup).toContain('aria-label="Text size"')
     for (const label of ['S text', 'M text', 'L text']) {
       expect(markup).toContain(`aria-label="${label}"`)
     }
-    expect(markup).toContain('aria-label="Keep notes in front of all apps"')
+    expect(markup).toContain('aria-label="Keep on top"')
     expect(markup).toContain('[-webkit-app-region:drag]')
   })
 

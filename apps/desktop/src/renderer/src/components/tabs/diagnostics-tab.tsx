@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 
 
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
+import { SupportBundleButton } from '@/components/support-bundle-button'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -57,9 +58,7 @@ export function DiagnosticsTab(): ReactElement {
     captureConfig,
     deviceList,
     mediaAccess,
-    runtimeInfo,
-    exportSupportBundle,
-    supportBundleExportPending
+    runtimeInfo
   } = useStudioCore()
   const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
@@ -699,14 +698,7 @@ export function DiagnosticsTab(): ReactElement {
               <p className="text-sm font-medium">Redacted diagnostics JSON</p>
               <p className="truncate text-xs text-muted-foreground">Logs, health, sessions.</p>
             </div>
-            <Button
-              size="sm"
-              disabled={supportBundleExportPending}
-              onClick={() => void exportSupportBundle()}
-            >
-              <ExternalLinkIcon className="mr-2 size-4" />
-              {supportBundleExportPending ? 'Exporting' : 'Export'}
-            </Button>
+            <SupportBundleButton className="shrink-0" />
           </div>
         </PanelSection>
 

@@ -74,7 +74,7 @@ export function PermissionsOnboardingDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onComplete()}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent size="lg">
         <DialogHeader>
           <div className="flex items-center gap-3">
             <img alt="Videorc" className="size-14 object-contain" src={logoUrl} />

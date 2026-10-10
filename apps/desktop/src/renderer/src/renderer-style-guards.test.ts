@@ -326,6 +326,49 @@ describe('renderer style guards (plan 050)', () => {
   })
 })
 
+/**
+ * Every DialogContent or AlertDialogContent whose className sets its own
+ * width or height, as `path:line: <Tag className=...>` (plan 174 S1.6b,
+ * J1-20): a dialog takes `size`, and DialogBody scrolls.
+ */
+function handSizedDialogs(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: string[] = []
+  const visit = (node: ts.Node): void => {
+    const parts = jsxParts(file, node)
+    if (parts && (parts.tag === 'DialogContent' || parts.tag === 'AlertDialogContent')) {
+      const className = parts.attributes.get('className') ?? ''
+      if (/(?:^|[\s'"`:])max-[wh]-/.test(className)) {
+        const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+        found.push(`${path}:${line + 1}: <${parts.tag} className=${className}>`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+describe('dialog anatomy (plan 174 S1.6b)', () => {
+  it('sizes every dialog with `size`, never a hand-set max width or height', () => {
+    const offending = files
+      .filter(({ path, code }) => path.endsWith('.tsx') && /DialogContent\b/.test(code))
+      .flatMap(({ path }) =>
+        handSizedDialogs(path, readFileSync(join(RENDERER_ROOT, path), 'utf8'))
+      )
+    expect(offending).toEqual([])
+  })
+
+  it('catches a hand-sized dialog however the props wrap', () => {
+    const oldObsDialog =
+      '<DialogContent\n  className="sm:max-w-xl"\n  onKeyDown={() => {}}\n>x</DialogContent>'
+    expect(handSizedDialogs('obs.tsx', oldObsDialog)).toEqual([
+      'obs.tsx:1: <DialogContent className=sm:max-w-xl>'
+    ])
+    expect(handSizedDialogs('ok.tsx', '<DialogContent size="lg" className="gap-4" />')).toEqual([])
+  })
+})
+
 describe('renderer accessible names (plan 174 S0.5)', () => {
   const withControls = files.filter(
     ({ path, code }) =>

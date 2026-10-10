@@ -11,6 +11,7 @@ const read = (path: string): string => readFileSync(new URL(path, import.meta.ur
 const shellSource = read('./settings-tab.tsx')
 const pageSource = read('../page.tsx')
 const appShellSource = read('../app-shell.tsx')
+const pageTabsSource = read('../page-tabs.tsx')
 
 /** The panel component each tab renders, and the file it lives in. */
 const PANEL_FILES: Record<string, string> = {
@@ -101,11 +102,11 @@ describe('Settings layout', () => {
   })
 
   it('builds the tab strip from SETTINGS_TABS, so the strip and the tab model cannot drift', () => {
-    expect(shellSource).toContain('{SETTINGS_TABS.map(({ id, label }) => (')
-    expect(shellSource).toContain(
-      '<TabsTrigger key={id} data-videorc-settings-tab={id} value={id}>'
-    )
-    expect(shellSource.match(/<TabsTrigger\b/g)).toHaveLength(1)
+    // Plan 174 S1.6b: the shared PageTabs draws the strip from the tab list.
+    expect(shellSource).toContain('tabs={SETTINGS_TABS}')
+    expect(shellSource).toContain('triggerAttribute="data-videorc-settings-tab"')
+    expect(shellSource).not.toMatch(/<TabsTrigger\b/)
+    expect(pageTabsSource).toContain('{tabs.map(({ id, label: tabLabel }) => (')
   })
 
   it('gives every tab exactly one panel, in strip order', () => {
@@ -193,17 +194,20 @@ describe('Settings layout', () => {
   })
 
   it('pins the strip: Settings owns its scroll and only the region under the strip scrolls', () => {
-    expect(appShellSource).toContain(
-      "<PaneBody scroll={active !== 'library' && active !== 'settings' && active !== 'ai'}>"
-    )
-    const strip = shellSource.indexOf('<TabsList')
-    const scroll = shellSource.indexOf('data-slot="settings-scroll"')
+    // Plan 174 S1.6b (A-14): the page says it owns its scroll on its root
+    // (PageTabs), so the shell keeps no list of such pages.
+    expect(appShellSource).toContain('<PaneBody>')
+    expect(appShellSource).not.toMatch(/<PaneBody scroll=/)
+    expect(shellSource).toContain('<PageTabs')
+    expect(pageTabsSource).toContain('{...PANE_OWNS_SCROLL}')
+    const strip = pageTabsSource.indexOf('<TabsList')
+    const scroll = pageTabsSource.indexOf('data-slot="page-tabs-scroll"')
     expect(strip).toBeGreaterThan(-1)
     expect(scroll).toBeGreaterThan(strip)
-    const scrollRegion = shellSource.slice(shellSource.lastIndexOf('<div', scroll), scroll)
-    expect(scrollRegion).toContain('key={tab}')
+    const scrollRegion = pageTabsSource.slice(pageTabsSource.lastIndexOf('<div', scroll), scroll)
+    expect(scrollRegion).toContain('key={value}')
     expect(scrollRegion).toContain('overflow-y-auto')
-    expect(tabPanels().every((panel) => shellSource.indexOf(panel.jsx) > scroll)).toBe(true)
+    expect(pageTabsSource.indexOf('{children}')).toBeGreaterThan(scroll)
   })
 
   it('never pins a Settings card to a fixed height', () => {

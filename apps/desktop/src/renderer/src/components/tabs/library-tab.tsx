@@ -7,7 +7,6 @@ import {
   EditIcon,
   FolderIcon,
   LockIcon,
-  MoreIcon,
   BuddyIcon,
   PlayIcon,
   RepairIcon,
@@ -32,19 +31,13 @@ import {
 } from 'react'
 import { toast } from '@/lib/toast'
 
+import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { PageHeader } from '@/components/page'
+import { PANE_OWNS_SCROLL, PaneStrip } from '@/components/pane'
 import { StatusDot } from '@/components/status-dot'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Dialog,
@@ -277,14 +270,16 @@ export function LibraryTab({
   }, [settings.outputDirectoryHandle, sessions.length])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    // Library owns its scroll: the header and the filter bar stay pinned and
+    // only the table scrolls (plan 174 S1.6b).
+    <div {...PANE_OWNS_SCROLL} className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         description="Every recording and stream becomes a local session. Files stay on disk."
         title="Library"
       />
 
       {/* Filter bar: filter · sort · search. */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-border px-gutter py-2">
+      <PaneStrip className="flex flex-wrap items-center gap-2">
         <Select value={filter} onValueChange={(value) => setFilter(value as LibraryFilter)}>
           <SelectTrigger aria-label="Filter" className="w-40">
             <SelectValue />
@@ -328,7 +323,7 @@ export function LibraryTab({
           <CameraIcon data-icon="inline-start" weight="fill" />
           New Recording
         </Button>
-      </div>
+      </PaneStrip>
 
       {/* Selection bar: the checkbox column's one bulk action. */}
       {selected.length > 0 ? (
@@ -454,7 +449,7 @@ export function LibraryTab({
         </Suspense>
       ) : null}
       <Dialog open={renaming !== null} onOpenChange={(open) => !open && setRenaming(null)}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent size="sm">
           <DialogHeader>
             <DialogTitle>Rename recording</DialogTitle>
             <DialogDescription>The file on disk keeps its name.</DialogDescription>
@@ -899,6 +894,141 @@ function RowActions({
     }
   }
 
+  // One anatomy for every ⋯ menu (plan 174 S1.6b, E-PAT): open and share,
+  // then edit, then repair, and Delete on its own at the end.
+  const sessionMenu: KebabMenuItem[] = [
+    {
+      id: 'play',
+      group: 'open',
+      icon: PlayIcon,
+      label: 'Play',
+      disabled: !filePath || live,
+      onSelect: () => void playFile()
+    },
+    ...(hasBuddyReport(session)
+      ? [
+          // The report is saved when the stream ends (plan 119 S3).
+          {
+            id: 'buddy-report',
+            group: 'open',
+            icon: BuddyIcon,
+            label: 'Buddy report',
+            disabled: live,
+            onSelect: onOpenBuddyReport
+          }
+        ]
+      : []),
+    ...(isCleanCutEligible(session)
+      ? [
+          // The Buddy tab's Clean cut, on this recording (plan 119 S14).
+          {
+            id: 'clean-cut',
+            group: 'open',
+            icon: ClipIcon,
+            label: 'Clean cut',
+            onSelect: onOpenCleanCut
+          }
+        ]
+      : []),
+    { id: 'markers', group: 'open', icon: ClipIcon, label: 'Markers', onSelect: onOpenMarkers },
+    {
+      id: 'reveal',
+      group: 'open',
+      icon: FolderIcon,
+      label: finalizing ? 'Show original · MP4 is saving' : revealInFileManagerLabel(),
+      disabled: !filePath,
+      onSelect: () => {
+        if (filePath) void window.videorc?.revealSession?.(session.id)
+      }
+    },
+    ...(cleanupView.menuLabel
+      ? [
+          {
+            id: 'noise-cleanup',
+            group: 'open',
+            icon: cleanupView.premiumLocked ? LockIcon : WaveformMutedIcon,
+            label: cleanupView.menuLabel,
+            disabled: !cleanupMenuAction,
+            onSelect: () => {
+              if (cleanupMenuAction) void runNoiseCleanupAction(cleanupMenuAction)
+            }
+          }
+        ]
+      : []),
+    {
+      id: 'export-mp4',
+      group: 'open',
+      icon: VideoFileIcon,
+      label: finalizationFailed(session) ? 'Retry MP4 export' : 'Export MP4',
+      disabled: !canExportMp4 || fileActionsBusy,
+      onSelect: () => void remuxSession(session.id)
+    },
+    {
+      id: 'stream-manager',
+      group: 'open',
+      icon: ChatIcon,
+      label: 'Open in Stream Manager',
+      disabled: !canOpenComments || busy || disconnected,
+      onSelect: () => void openSessionCommentsWindow(session.id, session.title, session.startedAt)
+    },
+    {
+      id: 'rename',
+      group: 'edit',
+      icon: EditIcon,
+      label: 'Rename',
+      disabled: busy,
+      onSelect: onRename
+    },
+    {
+      id: 'duplicate',
+      group: 'edit',
+      icon: CopyIcon,
+      label: duplicating ? 'Duplicating…' : 'Duplicate',
+      disabled: !filePath || fileActionsBusy || duplicating || live,
+      onSelect: () => void runDuplicate()
+    },
+    {
+      id: 'check',
+      group: 'repair',
+      icon: SuccessIcon,
+      label: phase === 'checking' ? 'Checking…' : 'Check quality',
+      disabled: !filePath || fileActionsBusy || captureProtected,
+      onSelect: () => void runCheck()
+    },
+    ...(canRepair
+      ? [
+          {
+            id: 'repair',
+            group: 'repair',
+            icon: RepairIcon,
+            label: phase === 'repairing' ? 'Repairing…' : 'Repair & fix',
+            disabled: fileActionsBusy || captureProtected,
+            onSelect: () => void runRepair()
+          }
+        ]
+      : []),
+    ...(hasBackup || persistedRepaired
+      ? [
+          {
+            id: 'restore',
+            group: 'repair',
+            icon: ResetIcon,
+            label: 'Restore original',
+            disabled: fileActionsBusy || captureProtected,
+            onSelect: () => void runRestore()
+          }
+        ]
+      : []),
+    {
+      id: 'delete',
+      destructive: true,
+      icon: DeleteIcon,
+      label: 'Delete',
+      disabled: fileActionsBusy || captureProtected,
+      onSelect: onDelete
+    }
+  ]
+
   return (
     <div className="flex items-center justify-end gap-0.5">
       <Button
@@ -917,133 +1047,12 @@ function RowActions({
         view={cleanupView}
         onAction={(action) => void runNoiseCleanupAction(action)}
       />
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            aria-label="Session actions"
-            disabled={disconnected}
-            size="icon-sm"
-            variant="ghost"
-          >
-            {busy || cleanupView.busy ? (
-              <SpinnerIcon className="animate-spin" />
-            ) : (
-              <MoreIcon weight="bold" />
-            )}
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuGroup>
-            <DropdownMenuItem disabled={!filePath || live} onClick={() => void playFile()}>
-              <PlayIcon />
-              Play
-            </DropdownMenuItem>
-            {hasBuddyReport(session) ? (
-              // The report is saved when the stream ends (plan 119 S3).
-              <DropdownMenuItem disabled={live} onClick={onOpenBuddyReport}>
-                <BuddyIcon />
-                Buddy report
-              </DropdownMenuItem>
-            ) : null}
-            {isCleanCutEligible(session) ? (
-              // The Buddy tab's Clean cut, on this recording (plan 119 S14).
-              <DropdownMenuItem onClick={onOpenCleanCut}>
-                <ClipIcon />
-                Clean cut
-              </DropdownMenuItem>
-            ) : null}
-            <DropdownMenuItem onClick={onOpenMarkers}>
-              <ClipIcon />
-              Markers
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={!filePath}
-              onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}
-            >
-              <FolderIcon />
-              {finalizing ? 'Show original · MP4 is saving' : revealInFileManagerLabel()}
-            </DropdownMenuItem>
-            {cleanupView.menuLabel ? (
-              <DropdownMenuItem
-                disabled={!cleanupMenuAction}
-                onClick={() => cleanupMenuAction && void runNoiseCleanupAction(cleanupMenuAction)}
-              >
-                {cleanupView.premiumLocked ? <LockIcon /> : <WaveformMutedIcon />}
-                {cleanupView.menuLabel}
-              </DropdownMenuItem>
-            ) : null}
-            <DropdownMenuItem
-              disabled={!canExportMp4 || fileActionsBusy}
-              onClick={() => void remuxSession(session.id)}
-            >
-              <VideoFileIcon />
-              {finalizationFailed(session) ? 'Retry MP4 export' : 'Export MP4'}
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={!canOpenComments || busy || disconnected}
-              onClick={() =>
-                void openSessionCommentsWindow(session.id, session.title, session.startedAt)
-              }
-            >
-              <ChatIcon />
-              Open in Stream Manager
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuGroup>
-            <DropdownMenuItem disabled={busy} onClick={onRename}>
-              <EditIcon />
-              Rename
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={!filePath || fileActionsBusy || duplicating || live}
-              onClick={() => void runDuplicate()}
-            >
-              <CopyIcon />
-              {duplicating ? 'Duplicating…' : 'Duplicate'}
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuGroup>
-            <DropdownMenuItem
-              disabled={!filePath || fileActionsBusy || captureProtected}
-              onClick={() => void runCheck()}
-            >
-              <SuccessIcon />
-              {phase === 'checking' ? 'Checking…' : 'Check quality'}
-            </DropdownMenuItem>
-            {canRepair ? (
-              <DropdownMenuItem
-                disabled={fileActionsBusy || captureProtected}
-                onClick={() => void runRepair()}
-              >
-                <RepairIcon />
-                {phase === 'repairing' ? 'Repairing…' : 'Repair & fix'}
-              </DropdownMenuItem>
-            ) : null}
-            {hasBackup || persistedRepaired ? (
-              <DropdownMenuItem
-                disabled={fileActionsBusy || captureProtected}
-                onClick={() => void runRestore()}
-              >
-                <ResetIcon />
-                Restore original
-              </DropdownMenuItem>
-            ) : null}
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuGroup>
-            <DropdownMenuItem
-              disabled={fileActionsBusy || captureProtected}
-              variant="destructive"
-              onClick={onDelete}
-            >
-              <DeleteIcon />
-              Delete
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <KebabMenu
+        busy={busy || cleanupView.busy}
+        disabled={disconnected}
+        items={sessionMenu}
+        label="Session actions"
+      />
     </div>
   )
 }

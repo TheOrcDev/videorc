@@ -1,8 +1,8 @@
-import { PinIcon } from '@/components/icons'
 import { useEffect, useRef, type CSSProperties, type ReactElement } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { useTrafficLightGutter } from '@/components/window-frame'
+import { PinWindowButton } from '@/components/pin-window-button'
+import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { WindowHeader } from '@/components/window-frame'
 import type { CaptionStyleId, CaptionsStatus, CaptionsUpdate } from '@/lib/backend'
 import { captionStyleDefinition } from '@/lib/caption-overlay'
 import { latestFinalCaptionText } from '@/lib/captions-ui'
@@ -11,7 +11,8 @@ import { cn } from '@/lib/utils'
 /**
  * Big-text caption display for the detached Captions window: a dark glass
  * reader meant for a second monitor — or to be captured into the scene as a
- * caption bar. Minimal chrome (drag bar + pin); the newest line is emphasized.
+ * caption bar. Minimal chrome (the window header and its pin); the newest
+ * line is emphasized.
  */
 export function CaptionsReader({
   lines,
@@ -30,7 +31,6 @@ export function CaptionsReader({
   alwaysOnTop?: boolean
   onToggleAlwaysOnTop?: () => void
 }): ReactElement {
-  const trafficLightGutter = useTrafficLightGutter()
   const feedRef = useRef<HTMLDivElement | null>(null)
 
   // Captions always track the latest speech — no unread state, just follow.
@@ -49,41 +49,16 @@ export function CaptionsReader({
 
   return (
     <div className="flex h-screen flex-col text-foreground">
-      {/* The whole drag bar moves the window (hiddenInset titlebar); the
-          controls opt back out of the drag region. The label clears the
-          traffic lights with the shared gutter. */}
-      <header
-        className={cn(
-          'flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border pr-3 [-webkit-app-region:drag]',
-          trafficLightGutter
-        )}
+      {/* The shared window header (plan 174 S1.6b): the title on the traffic
+          lights' line, the state as a status dot, and Keep on top. */}
+      <WindowHeader
+        meta={<StatusDot label={statusLabel} tone={captionStatusDotTone(status.state)} />}
+        title="Live captions"
       >
-        <span className="flex items-center gap-2 text-xs font-medium text-subtle">
-          Live captions
-          <span className="flex items-center gap-1.5 text-muted-foreground">
-            <span
-              aria-hidden
-              className={cn(
-                'size-1.5 rounded-full glass-dot',
-                captionStatusToneClass(status.state)
-              )}
-            />
-            {statusLabel}
-          </span>
-        </span>
         {onToggleAlwaysOnTop ? (
-          <Button
-            aria-label="Keep this window on top"
-            aria-pressed={alwaysOnTop}
-            className={cn('size-7 [-webkit-app-region:no-drag]', alwaysOnTop && 'text-foreground')}
-            size="icon"
-            variant="ghost"
-            onClick={onToggleAlwaysOnTop}
-          >
-            <PinIcon className="size-4" weight={alwaysOnTop ? 'fill' : 'regular'} />
-          </Button>
+          <PinWindowButton pinned={alwaysOnTop} onPinnedChange={() => onToggleAlwaysOnTop()} />
         ) : null}
-      </header>
+      </WindowHeader>
 
       <div
         className={cn(
@@ -162,20 +137,20 @@ export function captionReaderAppearance(styleId: CaptionStyleId): {
   }
 }
 
-/** The header dot's glass tone: colour only where the state means something. */
-export function captionStatusToneClass(state: CaptionsStatus['state']): string {
+/** The header dot's tone: colour only where the state means something. */
+export function captionStatusDotTone(state: CaptionsStatus['state']): StatusDotTone {
   switch (state) {
     case 'listening':
     case 'live':
-      return 'tone-success'
+      return 'good'
     case 'reconnecting':
     case 'degraded':
-      return 'tone-warning'
+      return 'warn'
     case 'blocked':
     case 'error':
-      return 'tone-destructive'
+      return 'error'
     default:
-      return 'tone-neutral'
+      return 'neutral'
   }
 }
 

@@ -54,6 +54,7 @@ import {
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
+import { copyText } from '@/lib/copy-text'
 import { toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -10405,7 +10406,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const exportSupportBundle = useCallback(async () => {
     if (!client) {
-      toast.error('Backend socket is not connected.')
+      // Plan 174 S1.6b (I-1): plain words, not the socket.
+      toast.error("Couldn't export a support bundle", {
+        description: 'Videorc is reconnecting. Try again in a moment.'
+      })
       return
     }
     if (supportBundleExportPending) {
@@ -10435,8 +10439,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         'diagnostics.supportBundle.export',
         params
       )
-      toast.success('Support bundle exported.', {
-        description: basename(result.path)
+      // The bundle lands in the app's own data folder, which Finder hides;
+      // Copy path gets the streamer to it (a reveal needs a main-process
+      // handler for this file, which the renderer cannot ask for yet).
+      toast.success('Support bundle exported', {
+        description: basename(result.path),
+        action: {
+          label: 'Copy path',
+          onClick: () => void copyText(result.path, "Couldn't copy the path.")
+        }
       })
     } catch (error) {
       reportError(error)
@@ -11667,11 +11678,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           duration: Number.POSITIVE_INFINITY,
           action: {
             label: 'Copy link',
+            // The toast closes on the click, so success still says so here.
             onClick: () => {
-              void navigator.clipboard
-                .writeText(result.authUrl)
-                .then(() => toast.success('Authorization link copied.'))
-                .catch(() => toast.error('Could not copy the link.'))
+              void copyText(result.authUrl, "Couldn't copy the link.").then(
+                (copied) => copied && toast.success('Authorization link copied.')
+              )
             }
           }
         })

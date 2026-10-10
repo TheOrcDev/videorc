@@ -315,7 +315,7 @@ export function BuddyAvatarSection({
           click like the small one, with the same pack, motion and images. */}
       {previewPackId ? (
         <Dialog open={zoomOpen} onOpenChange={setZoomOpen}>
-          <DialogContent className="sm:max-w-lg" data-testid="buddy-preview-zoom-dialog">
+          <DialogContent data-testid="buddy-preview-zoom-dialog" size="lg">
             <DialogHeader>
               <DialogTitle>{persona.name}</DialogTitle>
               <DialogDescription>

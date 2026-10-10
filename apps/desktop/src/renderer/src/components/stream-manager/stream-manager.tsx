@@ -36,7 +36,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { useTrafficLightGutter } from '@/components/window-frame'
+import { WindowHeader } from '@/components/window-frame'
 import type {
   CohostAutoChat,
   CohostAutoChatRelayPatch,
@@ -397,7 +397,6 @@ export function StreamManager({
   onCohostEnableConsent,
   onCohostUpgrade
 }: StreamManagerProps): ReactElement {
-  const trafficLightGutter = useTrafficLightGutter()
   const messages = useMemo(() => sortMessagesChronological(snapshot.messages), [snapshot.messages])
   // The message on stream now (plan 095, S2): the backend's live state when
   // it has one. Chat, Activity and Buddy all read this one slot.
@@ -923,17 +922,7 @@ export function StreamManager({
       {/* The title row: the title only (owner call, 2026-09-23). Fixed height:
           the traffic lights are centred on this strip. The stats bar says
           On air, and History has its own bar (plan 057). */}
-      <header
-        className={cn(
-          'flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b border-border pr-3 [-webkit-app-region:drag]',
-          trafficLightGutter
-        )}
-        data-slot="chat-header"
-      >
-        <span className="shrink-0 truncate text-xs font-medium" data-slot="stream-manager-title">
-          Stream Manager
-        </span>
-      </header>
+      <WindowHeader title="Stream Manager" />
 
       {viewMode?.kind === 'history' ? (
         <div

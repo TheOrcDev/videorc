@@ -239,7 +239,7 @@ export function ObsImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !applying && onOpenChange(nextOpen)}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>Import from OBS</DialogTitle>
           <DialogDescription>

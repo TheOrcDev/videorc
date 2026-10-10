@@ -1,4 +1,5 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { copyText } from '@/lib/copy-text'
 import { toast } from '@/lib/toast'
 import { CopyIcon, DeleteIcon, EditIcon, ExternalLinkIcon, LinkIcon } from '@/components/icons'
 import { useScheduledStreams } from '@/hooks/use-scheduled-streams'
@@ -466,9 +467,8 @@ function EventRow({
         id: 'copy-link',
         label: 'Copy link',
         icon: LinkIcon,
-        onSelect: () => {
-          void navigator.clipboard.writeText(url).then(() => toast.success('Event link copied.'))
-        }
+        // The menu closing is the confirmation; a failed copy says so.
+        onSelect: () => void copyText(url, "Couldn't copy the event link.")
       },
       {
         id: 'open',

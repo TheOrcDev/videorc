@@ -21,6 +21,7 @@ import { BuddyEmblem } from '@/components/buddy-emblem'
 import { BuddyReportCard } from '@/components/buddy-report-card'
 import { BuddyVoiceCommands } from '@/components/buddy-voice-commands'
 import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
+import { PageTabs } from '@/components/page-tabs'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -35,7 +36,7 @@ import {
 } from '@/components/ui/field'
 import { Kbd } from '@/components/ui/kbd'
 import { Switch } from '@/components/ui/switch'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { TabsContent } from '@/components/ui/tabs'
 import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { useCleanCut } from '@/hooks/use-clean-cut'
@@ -58,7 +59,7 @@ import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
-import { BUDDY_TABS, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
+import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
 import { closeBuddyPetCreator, useBuddyPetCreatorOpen } from '@/lib/buddy-pet-creator-nav'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
@@ -155,86 +156,69 @@ export function BuddyTab({
 
   return (
     <>
-      <Tabs
-        className="min-h-0 flex-1 gap-0"
-        data-testid="buddy-tab"
+      <PageTabs
+        label="Buddy sections"
+        tabs={BUDDY_TABS}
+        testId="buddy-tab"
+        triggerAttribute="data-videorc-buddy-tab"
         value={current}
-        onValueChange={(value) => {
-          if (isBuddyTabId(value)) selectTab(value)
-        }}
+        onValueChange={selectTab}
       >
-        {/* Settings' strip, verbatim; the toolbar carries only the title. */}
-        <div className="shrink-0 border-b border-border px-gutter py-2">
-          <TabsList aria-label="Buddy sections">
-            {BUDDY_TABS.map(({ id, label }) => (
-              <TabsTrigger key={id} data-videorc-buddy-tab={id} value={id}>
-                {label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </div>
-        {/* Keyed by tab, so every tab change starts the new tab at the top. */}
-        <div
-          key={current}
-          className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain"
-          data-slot="buddy-scroll"
-        >
-          <TabsContent className="flex flex-1 flex-col" value="live">
-            {/* Plan 164 S-A4: the creation screen leads; the old Live switch
+        <TabsContent className="flex flex-1 flex-col" value="live">
+          {/* Plan 164 S-A4: the creation screen leads; the old Live switch
                 and Cloud AI stay at the bottom until Stream Manager takes the
                 switch (S-D6). */}
-            {creatorOpen ? <BuddyPetCreator onClose={closeBuddyPetCreator} /> : null}
-            {/* Plan 170: My Buddies, the look panel and the onboarding share
+          {creatorOpen ? <BuddyPetCreator onClose={closeBuddyPetCreator} /> : null}
+          {/* Plan 170: My Buddies, the look panel and the onboarding share
                 one backend client and one look controller. */}
-            <BuddyLookClientProvider>
-              <PageStack className={creatorOpen ? 'hidden' : undefined}>
-                <BuddyLibrarySection />
-                <BuddyPersonaSection />
-                <BuddyPetSettings />
-                <ConfigGrid className={CONFIG_GRID_PAIR}>
-                  <BuddyLiveSection />
-                  <div className="flex flex-col">
-                    <BuddyLivePowers onSelectTab={selectTab} />
-                    <CloudAiSection />
-                  </div>
-                </ConfigGrid>
-              </PageStack>
-            </BuddyLookClientProvider>
-          </TabsContent>
-          <TabsContent className="flex flex-1 flex-col" value="chat">
-            <BuddyChatTab />
-          </TabsContent>
-          <TabsContent className="flex flex-1 flex-col" value="voice">
-            <BuddyVoiceTab onOpenLive={() => selectTab('live')} />
-          </TabsContent>
-          <TabsContent className="flex flex-col" value="reports">
-            <PageStack>
-              <BuddyReportCard sessionId={reportSession} onSessionChange={setReportSession} />
-            </PageStack>
-          </TabsContent>
-          <TabsContent className="flex flex-1 flex-col" value="clean-cut">
-            {review ? (
-              <Suspense fallback={<CleanCutReviewFallback />}>
-                <CleanCutReview
-                  client={cleanCut}
-                  target={review}
-                  onClose={() => setReview(null)}
-                  onOpenLibrarySession={openLibrarySession}
-                />
-              </Suspense>
-            ) : (
+          <BuddyLookClientProvider>
+            <PageStack className={creatorOpen ? 'hidden' : undefined}>
+              <BuddyLibrarySection />
+              <BuddyPersonaSection />
+              <BuddyPetSettings />
               <ConfigGrid className={CONFIG_GRID_PAIR}>
-                <CleanCutCard
-                  client={cleanCut}
-                  focus={focus}
-                  onOpenLibrarySession={openLibrarySession}
-                  onReview={setReview}
-                />
+                <BuddyLiveSection />
+                <div className="flex flex-col">
+                  <BuddyLivePowers onSelectTab={selectTab} />
+                  <CloudAiSection />
+                </div>
               </ConfigGrid>
-            )}
-          </TabsContent>
-        </div>
-      </Tabs>
+            </PageStack>
+          </BuddyLookClientProvider>
+        </TabsContent>
+        <TabsContent className="flex flex-1 flex-col" value="chat">
+          <BuddyChatTab />
+        </TabsContent>
+        <TabsContent className="flex flex-1 flex-col" value="voice">
+          <BuddyVoiceTab onOpenLive={() => selectTab('live')} />
+        </TabsContent>
+        <TabsContent className="flex flex-col" value="reports">
+          <PageStack>
+            <BuddyReportCard sessionId={reportSession} onSessionChange={setReportSession} />
+          </PageStack>
+        </TabsContent>
+        <TabsContent className="flex flex-1 flex-col" value="clean-cut">
+          {review ? (
+            <Suspense fallback={<CleanCutReviewFallback />}>
+              <CleanCutReview
+                client={cleanCut}
+                target={review}
+                onClose={() => setReview(null)}
+                onOpenLibrarySession={openLibrarySession}
+              />
+            </Suspense>
+          ) : (
+            <ConfigGrid className={CONFIG_GRID_PAIR}>
+              <CleanCutCard
+                client={cleanCut}
+                focus={focus}
+                onOpenLibrarySession={openLibrarySession}
+                onReview={setReview}
+              />
+            </ConfigGrid>
+          )}
+        </TabsContent>
+      </PageTabs>
       <BuddyTabConsentDialog />
     </>
   )

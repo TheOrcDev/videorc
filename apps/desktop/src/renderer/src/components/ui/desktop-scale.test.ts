@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { Button } from './button'
+import { dialogContentVariants } from './dialog'
 import { Input } from './input'
 import { Tabs, TabsList, TabsTrigger } from './tabs'
 import { TooltipProvider } from './tooltip'
@@ -87,6 +88,37 @@ describe('desktop scale', () => {
     expect(read('dialog.tsx')).toContain('rounded-panel border glass-float-dialog p-5')
     // Command always sits inside a Dialog or Popover: it never paints a coat.
     expect(read('command.tsx')).not.toMatch(/\bbg-(popover|card|background)\b/)
+  })
+
+  it('sizes menu, select and context items at 6 px, concentric inside the 4 px inset (J1-14)', () => {
+    for (const name of ['dropdown-menu.tsx', 'context-menu.tsx', 'select.tsx']) {
+      const source = read(name)
+      expect(source, name).not.toMatch(/\brounded-(?:sm|md)\b/)
+      expect(source.match(/min-h-7[^"']*rounded-chip/g)?.length ?? 0, name).toBeGreaterThan(0)
+      // One separator strength in every float: the hairline itself.
+      expect(source, name).not.toContain('bg-border/50')
+    }
+    expect(read('command.tsx')).not.toContain('bg-border/50')
+    expect(read('chart.tsx')).not.toContain('rounded-xl')
+  })
+
+  it('gives dialogs four widths and one height rule, shared with AlertDialog (J1-20)', () => {
+    const widths = {
+      sm: 'sm:max-w-sm',
+      md: 'sm:max-w-md',
+      lg: 'sm:max-w-xl',
+      xl: 'sm:max-w-3xl'
+    } as const
+    for (const [size, width] of Object.entries(widths)) {
+      const classes = dialogContentVariants({ size: size as keyof typeof widths })
+      expect(classes).toContain(width)
+      expect(classes).toContain('max-h-[calc(100vh-2rem)]')
+      expect(classes).toContain('flex-col')
+      expect(classes).toContain('rounded-panel border glass-float-dialog p-5')
+    }
+    expect(dialogContentVariants()).toContain('sm:max-w-md')
+    expect(read('alert-dialog.tsx')).toContain('dialogContentVariants({ size })')
+    expect(read('dialog.tsx')).toContain('data-slot="dialog-body"')
   })
 
   it('mounts the tooltip provider with the desktop delay', () => {

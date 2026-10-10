@@ -16,6 +16,7 @@ import {
   simulcastArmed,
   simulcastLegPreset
 } from '@/lib/capture'
+import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
 
 /**
@@ -71,26 +72,28 @@ export function VerticalLegMonitor(): ReactElement | null {
           const selected = captureConfig.lastVerticalPreset === scene.id
           const streaming = streamingPreset === scene.id
           return (
-            <button
+            <MediaCard
               key={scene.id}
-              aria-pressed={selected}
-              className={cn(
-                'flex flex-col gap-1.5 rounded-row border p-2 text-left transition-colors',
-                streaming ? 'border-primary bg-primary/5' : 'hover:bg-accent',
-                disabled && 'cursor-not-allowed opacity-50'
-              )}
-              disabled={disabled}
-              type="button"
-              onClick={() => applySimulcastLeg({ lastVerticalPreset: scene.id })}
+              asChild
+              className={cn('gap-1.5 p-2 text-left', disabled && 'cursor-not-allowed opacity-50')}
+              interactive={!streaming}
+              selected={streaming}
             >
-              <LayoutThumb framing={framing} preset={scene.id} />
-              <span className="flex items-center justify-between gap-1">
-                <span className="truncate text-xs font-medium">{scene.label}</span>
-                {streaming ? (
-                  <CheckIcon className="size-3.5 shrink-0 text-primary" weight="bold" />
-                ) : null}
-              </span>
-            </button>
+              <button
+                aria-pressed={selected}
+                disabled={disabled}
+                type="button"
+                onClick={() => applySimulcastLeg({ lastVerticalPreset: scene.id })}
+              >
+                <LayoutThumb framing={framing} preset={scene.id} />
+                <span className="flex items-center justify-between gap-1">
+                  <span className="truncate text-xs font-medium">{scene.label}</span>
+                  {streaming ? (
+                    <CheckIcon className="size-3.5 shrink-0 text-primary" weight="bold" />
+                  ) : null}
+                </span>
+              </button>
+            </MediaCard>
           )
         })}
       </div>
