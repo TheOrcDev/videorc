@@ -4,6 +4,7 @@ import {
   microphoneStatus,
   selectedDeviceStatus,
   systemAudioStatus,
+  uncoveredDeviceWarnings,
   videoSourceStatus
 } from '@/lib/source-status'
 
@@ -71,21 +72,34 @@ describe('videoSourceStatus', () => {
     )
   })
 
-  it('says Not found for a missing source, where the old chip said nothing', () => {
-    expect(videoSourceStatus({ ...base, preview: { state: 'device-missing' } })).toEqual({
+  it('says Not found when the device list lost the source, where the old chip said nothing', () => {
+    expect(videoSourceStatus({ ...base, device: 'missing' })).toEqual({
       label: 'Not found',
       tone: 'warn',
       hint: 'It is not connected. Reconnect it, or pick another.'
     })
-    expect(
-      videoSourceStatus({ ...base, kind: 'screen', preview: { state: 'source-missing' } })
-    ).toEqual({
+    expect(videoSourceStatus({ ...base, kind: 'screen', device: 'missing' })).toEqual({
       label: 'Not found',
       tone: 'warn',
       hint: 'That screen or window is gone. Pick another.'
     })
-    expect(videoSourceStatus({ ...base, device: 'missing' })?.label).toBe('Not found')
     expect(videoSourceStatus({ ...base, device: 'unavailable' })?.label).toBe('Not found')
+  })
+
+  it("never reads the preview's idle state as Not found (found by eye, 2026-10-10)", () => {
+    // The backend's idle screen status is `source-missing`, and the camera's is
+    // `device-missing`: a connected display whose preview is not running.
+    expect(
+      videoSourceStatus({
+        ...base,
+        kind: 'screen',
+        device: 'available',
+        preview: { state: 'source-missing' }
+      })
+    ).toBeNull()
+    expect(
+      videoSourceStatus({ ...base, device: 'available', preview: { state: 'device-missing' } })
+    ).toBeNull()
   })
 
   it('says Starting, then Failed with the backend message or a retry hint', () => {
@@ -180,5 +194,22 @@ describe('systemAudioStatus', () => {
     expect(systemAudioStatus({ ...off, permissionRequired: true }, false)?.label).toBe(
       'Needs permission'
     )
+  })
+})
+
+describe('uncoveredDeviceWarnings', () => {
+  const warnings = [
+    'Camera permission has not been granted yet. Open Camera privacy settings if preview shows black frames.',
+    'macOS Screen Recording permission is not granted for /x/videorc-backend. Grant Screen Recording permission to this capture helper, then quit and relaunch Videorc.',
+    'MediaFoundation camera discovery failed: busy'
+  ]
+
+  it('drops only the permission warnings a column alert already covers', () => {
+    expect(uncoveredDeviceWarnings(warnings, { camera: true, screen: false })).toEqual([
+      warnings[1],
+      warnings[2]
+    ])
+    expect(uncoveredDeviceWarnings(warnings, { camera: true, screen: true })).toEqual([warnings[2]])
+    expect(uncoveredDeviceWarnings(warnings, { camera: false, screen: false })).toEqual(warnings)
   })
 })

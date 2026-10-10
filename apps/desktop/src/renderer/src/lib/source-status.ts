@@ -84,12 +84,12 @@ export function videoSourceStatus(input: {
   if (state === 'permission-needed' || input.device === 'permission-required') {
     return { label: 'Needs permission', tone: 'warn', hint: message }
   }
-  if (
-    state === 'source-missing' ||
-    state === 'device-missing' ||
-    input.device === 'missing' ||
-    input.device === 'unavailable'
-  ) {
+  // Only the device list says a source is gone. The preview's own
+  // `source-missing` / `device-missing` is also its IDLE state (the backend's
+  // `idle_status` in preview_screen.rs, and the camera's twin): a selected,
+  // connected display whose preview is not running reports it, so it must
+  // never read "Not found" (the old chip ignored it for the same reason).
+  if (input.device === 'missing' || input.device === 'unavailable') {
     return notFound(input.kind)
   }
   if (state === 'starting') return { label: 'Starting', tone: 'warn' }
@@ -143,4 +143,21 @@ export function systemAudioStatus(
   return sessionActive && view.meter
     ? { label: 'Live', tone: 'good' }
     : { label: 'On', tone: 'neutral' }
+}
+
+/**
+ * The device list's warnings, minus the permission ones the Video column
+ * already shows with their fix ("Locked means disabled, with one reason"): the
+ * backend says "Camera permission has not been granted yet…" while the column
+ * says "Camera permission is required…" with Enable Camera.
+ */
+export function uncoveredDeviceWarnings(
+  warnings: readonly string[],
+  covered: { camera: boolean; screen: boolean }
+): string[] {
+  return warnings.filter(
+    (warning) =>
+      !(covered.camera && /camera permission/i.test(warning)) &&
+      !(covered.screen && /screen recording permission/i.test(warning))
+  )
 }

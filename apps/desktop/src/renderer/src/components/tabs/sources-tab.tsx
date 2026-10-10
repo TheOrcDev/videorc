@@ -3,11 +3,12 @@ import { useState, type ReactElement } from 'react'
 
 import { ConfigGrid, CONFIG_GRID_PAIR, PageHeader } from '@/components/page'
 import { SourcesAudioMixer } from '@/components/sources/sources-audio-mixer'
-import { VideoSources } from '@/components/sources/video-sources'
+import { VideoSources, videoPermissionState } from '@/components/sources/video-sources'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
+import { uncoveredDeviceWarnings } from '@/lib/source-status'
 
 // The single home for every capture device (UI rewrite plan V1/V2,
 // 2026-06-10). Plan 173 rebuilt it as the Config-grid page `page.tsx` names:
@@ -15,8 +16,17 @@ import { useStudioCore } from '@/hooks/use-studio'
 // stacked below it, every source in the same SourceItem shape. The page's one
 // action, Refresh, re-reads every device, so it sits on the intro line.
 export function SourcesTab(): ReactElement {
-  const { deviceList, refreshBackend } = useStudioCore()
+  const { deviceList, refreshBackend, runtimeInfo, mediaAccess } = useStudioCore()
   const [refreshing, setRefreshing] = useState(false)
+  const permissions = videoPermissionState({
+    deviceList,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  })
+  const warnings = uncoveredDeviceWarnings(deviceList.warnings, {
+    camera: permissions.cameraPermissionRequired,
+    screen: permissions.screenPermissionRequired
+  })
 
   return (
     <div className="flex min-h-full flex-col" data-videorc-sources-page="">
@@ -53,9 +63,9 @@ export function SourcesTab(): ReactElement {
         description="What gets recorded and streamed. Changes apply live."
         title="Sources"
       />
-      {deviceList.warnings.length > 0 ? (
+      {warnings.length > 0 ? (
         <div className="flex flex-col gap-2 px-gutter pt-3">
-          {deviceList.warnings.map((warning) => (
+          {warnings.map((warning) => (
             <Alert key={warning} variant="warning">
               <WarningIcon weight="fill" />
               <AlertTitle>{warning}</AlertTitle>

@@ -10,7 +10,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
-import type { Device, SourceSelection } from '@/lib/backend'
+import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
@@ -193,6 +193,55 @@ export function VideoSourcesView({
   )
 }
 
+/**
+ * What the Video column's permission alerts say and lock. The page frame
+ * reads it too, to drop the device-list warnings these alerts already cover.
+ */
+export function videoPermissionState({
+  deviceList,
+  platform,
+  mediaAccess
+}: {
+  deviceList: DeviceList
+  platform: Parameters<typeof systemAccessRows>[0]['platform']
+  mediaAccess: Parameters<typeof systemAccessRows>[0]['mediaAccess']
+}): {
+  screenPermissionRequired: boolean
+  screenLocked: boolean
+  cameraPermissionRequired: boolean
+  cameraPermissionAction: ReturnType<typeof systemAccessAction>
+  cameraLocked: boolean
+} {
+  const captureDevices = capturePickerDevices(deviceList.devices)
+  const cameraAccess = systemAccessRows({
+    deviceList,
+    audioMeter: null,
+    platform,
+    mediaAccess
+  }).find((row) => row.id === 'camera')
+  return {
+    // Screen Recording: any capture device waiting on it raises the alert (as
+    // before); the picker locks only when nothing can be captured at all.
+    screenPermissionRequired: captureDevices.some(
+      (device) => device.status === 'permission-required'
+    ),
+    screenLocked:
+      captureDevices.length > 0 &&
+      captureDevices.every((device) => device.status === 'permission-required'),
+    cameraPermissionRequired:
+      cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted',
+    cameraPermissionAction: systemAccessAction({
+      pane: 'camera',
+      state: cameraAccess?.state,
+      platform,
+      mediaAccessStatus: mediaAccess?.camera
+    }),
+    // Denied locks the picker; first use stays open, because picking a camera
+    // is one way the system asks.
+    cameraLocked: cameraAccess?.state === 'not-granted'
+  }
+}
+
 /** The Video column, wired to the studio. */
 export function VideoSources(): ReactElement {
   const {
@@ -220,32 +269,13 @@ export function VideoSources(): ReactElement {
   const targetName =
     runtimeInfo?.capturePermissionTargetName ?? runtimeInfo?.permissionTargetName ?? 'Videorc'
 
-  // Screen Recording: any capture device waiting on it raises the alert (as
-  // before); the picker locks only when nothing can be captured at all.
-  const screenPermissionRequired = captureDevices.some(
-    (device) => device.status === 'permission-required'
-  )
-  const screenLocked =
-    captureDevices.length > 0 &&
-    captureDevices.every((device) => device.status === 'permission-required')
-
-  const cameraAccess = systemAccessRows({
-    deviceList,
-    audioMeter: null,
-    platform: runtimeInfo?.platform,
-    mediaAccess
-  }).find((row) => row.id === 'camera')
-  const cameraPermissionRequired =
-    cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted'
-  const cameraPermissionAction = systemAccessAction({
-    pane: 'camera',
-    state: cameraAccess?.state,
-    platform: runtimeInfo?.platform,
-    mediaAccessStatus: mediaAccess?.camera
-  })
-  // Denied locks the picker; first use stays open, because picking a camera
-  // is one way the system asks.
-  const cameraLocked = cameraAccess?.state === 'not-granted'
+  const {
+    screenPermissionRequired,
+    screenLocked,
+    cameraPermissionRequired,
+    cameraPermissionAction,
+    cameraLocked
+  } = videoPermissionState({ deviceList, platform: runtimeInfo?.platform, mediaAccess })
 
   const shortfall = sources.cameraId ? cameraFormatShortfall(diagnosticStats) : null
 
