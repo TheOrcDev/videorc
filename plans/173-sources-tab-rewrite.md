@@ -59,9 +59,10 @@ screenshot was taken at a ~1,166 pt window, so the work pane is ~990 pt wide.
    apart (Sync at the left edge, "150 ms" at the right; the System audio
    switch ~700 pt from its title). `page.tsx:12` lists Sources as a
    Config-grid page (two columns at `lg`); the page never adopted it.
-2. **Inverted hierarchy.** Field labels come from `FieldLabel` (14 px / 500,
-   `source-select.tsx:126`), bigger than the section titles they sit under
-   (13 px / 600, `panel-section.tsx:43`). "Screen / window" outranks
+2. **Inverted hierarchy.** Field labels come from `FieldLabel`
+   (`source-select.tsx:98`, styled by `ui/field.tsx:106-117` and
+   `ui/label.tsx`: 14 px / 500), bigger than the section titles they sit
+   under (13 px / 600, `panel-section.tsx:43`). "Screen / window" outranks
    "Capture sources".
 3. **Four sources, four shapes.** Screen and Camera are a label, a select
    and a chip on its own line. The Microphone is a labelled select, then a
@@ -100,27 +101,29 @@ screenshot was taken at a ~1,166 pt window, so the work pane is ~990 pt wide.
 
 ```
  Sources                                                         (toolbar, title only)
- What gets recorded and streamed. Changes apply live.          [⟳ Refresh devices]
+ What gets recorded and streamed. Changes apply live.                  [⟳ Refresh]
  ─────────────────────────────────────┬──────────────────────────────────────────────
  Video                                │ Audio
- What people see.                     │ What people hear, after gain. Nothing is
-                                      │ processed automatically.
+ What people see.                     │ What your recording and stream hear, after
+                                      │ gain. Nothing is processed automatically.
  ┌──────────────────────────────────┐ │ ┌─────────────────────────────────────────┐
  │ ▣ Screen                ● Live   │ │ │ 🎙 Microphone   Sync +150 ms  ● Live 🔈 ⌄│
  │   [ Display 1                 ▾ ]│ │ │   [ MacBook Pro Microphone           ▾ ]│
  │   2560 × 1664                    │ │ │   ▮▮▮▮▮▮▮▮▮▮▮▯▯▯▯▯▯▯▯▯▯▯▯               │
  ├──────────────────────────────────┤ │ │   Gain ───────●───────        0 dB      │
  │ ◉ Camera                ● Live   │ │ ├─────────────────────────────────────────┤
- │   [ MacBook Pro Camera        ▾ ]│ │ │ 🖥 System audio            Off  [◯ ]  ⌄ │
+ │   [ MacBook Pro Camera        ▾ ]│ │ │ 🖥 System audio                 [◯ ]  ⌄ │
  │   1920 × 1080 · 30 fps           │ │ │   Everything your Mac plays, except      │
  └──────────────────────────────────┘ │ │   Videorc.                               │
                                       │ └─────────────────────────────────────────┘
 ```
 
 - **Frame.** The toolbar keeps the title only. A `PageHeader` row carries
-  the intro line and the page's one action, Refresh devices (it re-reads
-  every device, so it belongs to the page, not to a section; design skill:
-  page actions sit in the PageHeader row).
+  the intro line and the page's one action, Refresh (it re-reads every
+  device, so it belongs to the page, not to a section; design skill: page
+  actions sit in the PageHeader row). Its words stay exactly "Refresh":
+  `smoke-scene-presets-app.mjs:85-99` clicks the button by its text and
+  waits for it to come back enabled. A tooltip says what it does.
 - **Grid.** `ConfigGrid` with `CONFIG_GRID_PAIR`: two flush `PanelSection`s,
   **Video** and **Audio**, split by the column hairline that runs the full
   height. Below `lg` they stack, Video first. At the owner's window size each
@@ -208,11 +211,16 @@ not from diagnostics:
 
 - **Screen**: picker (searchable, grouped Screens / Windows, as in Studio
   Inputs since #514), the switch-status line under it, facts. Development
-  builds put the synthetic diagnostic source switch in Screen's More area
-  (today a boxed row at the bottom of the section, `:292-323`; keep its
-  `data-videorc-synthetic-source-toggle`).
-- **Camera**: picker (Off first), the switch-status line, facts or the
-  shortfall warning. No More area.
+  builds show the synthetic diagnostic source switch in Screen's body
+  (today a boxed row at the bottom of the section, `:292-323`). It stays
+  visible, never folded: eleven smokes open Sources and click
+  `[data-videorc-synthetic-source-toggle]` through `enable-synthetic-source`
+  (`main/index.ts:12224-12244`).
+- **Camera**: picker with **Off** as its no-camera item (Studio Inputs' word
+  since plan 080 D5; Sources said "None"), the switch-status line, facts or
+  the shortfall warning. No More area.
+- **The Microphone's no-device item stays "None"**: `perf-idle-probe.mjs`
+  picks the first option whose text is not `None`.
 - **Microphone**: picker, the meter (unchanged `MicLevelMeter`, segmented,
   full body width), then one row `Gain  [fader]  0 dB`. The level-unavailable
   line stays. More: the Sync `ParameterSlider` (unchanged range, reset and
@@ -231,9 +239,15 @@ not from diagnostics:
 - A missing Screen Recording or Camera permission shows **one** `Alert` at
   the top of the Video column with its one action (Open Screen Recording /
   Enable Camera, plus Show Capture Helper), and the affected item is
-  disabled with `Needs permission`. Microphone permission does the same at
-  the top of the Audio column. `deviceList.warnings` stay above the grid,
-  full width.
+  disabled with `Needs permission`. Denied camera access disables the
+  Camera picker; first use keeps it open, because picking a camera is one
+  way the system asks. Screen Recording disables the Screen picker only
+  when every capture device waits on it. `deviceList.warnings` stay above
+  the grid, full width.
+- No new Microphone permission alert: `microphoneAccessState` needs an audio
+  meter sample this page does not take, so it would read "first use" (or,
+  with a granted TCC value, "device issue") on a working Mac. The level line
+  already says "Check Settings → Permissions" on a real refusal.
 - System audio without permission keeps today's rule: the header switch and
   fader disabled, the reason and Open Settings under the line.
 
@@ -250,16 +264,62 @@ not from diagnostics:
 
 ### Pictures (why D5 says not now)
 
-FILL FROM RESEARCH: what exists for source pictures and the AGENTS.md
-transport rules.
+No renderer page shows a picture of a screen, window or camera today, and
+both browser routes are closed on purpose:
+
+- `getUserMedia` for video is denied by policy
+  (`main/web-contents-security.ts:36-59`, enforced by
+  `renderer-security-policy.test.ts:143`); the renderer's only capture is the
+  audio-only `lib/mic-stream.ts`.
+- `desktopCapturer` thumbnails would need the Electron app's own Screen
+  Recording grant; capture runs under the backend's TCC identity, so that is
+  a second permission prompt.
+- Backend routes: `/preview/{camera,screen}/live.png` return 404 in
+  production and count as a transport bug (AGENTS.md: "Production PNG
+  requests remain a transport bug"); the JPEG/MJPEG routes are "fallback or
+  debug paths only" (AGENTS.md). `/preview/{camera,screen}/latest.bmp` is
+  allowed in production but serves only the *active* source, forces a CPU
+  readback of the zero-copy surface on macOS, and counts against the Windows
+  D3D11 "zero BMP" evidence.
+- Studio and Scene draw no pixels in the renderer: they report a dock-slot
+  rectangle and main places the one native surface over it.
+  `preview-window-probe.mjs:437-447` asserts that opening Sources unmounts
+  the dock slot, so Sources must never mount one.
+
+A picture of the selected screen and camera is possible (poll `latest.bmp`),
+but it needs a perf gate and a Windows evidence decision; pictures of
+*candidate* windows need new backend work. That is a follow-up plan.
 
 ## Who reads this page's DOM
 
-FILL FROM RESEARCH.
+| Reader | What it finds | Kept by |
+| ------ | ------------- | ------- |
+| main's smoke `openTab` (`main/index.ts:12180-12212`) | `[data-videorc-tab-trigger="sources"]`, `[data-videorc-active-tab="sources"]` | untouched (sidebar, app-shell) |
+| `enable-synthetic-source` (`main/index.ts:12224-12244`), used by 11 smokes | `[data-videorc-synthetic-source-toggle]`: visible, a Radix switch (`aria-checked`, `.disabled`) | the switch stays in Screen's body in DEV |
+| `scripts/perf-idle-probe.mjs:757-797` | `[data-videorc-mic-preview]`; the `<label>` whose text is exactly `Microphone` and its `htmlFor` trigger; the first option not named `None` | the meter wrapper keeps the attribute; `labelHidden` keeps the label in the DOM (`sr-only`); the no-mic item stays "None" |
+| `scripts/smoke-scene-presets-app.mjs:85-99` | the button whose text is exactly `Refresh`, disabled while refreshing | the button's words and behaviour unchanged |
+| `scripts/preview-window-probe.mjs:437-447` | Sources unmounts the dock slot | no dock slot on Sources |
+| `scripts/capture-ui-pages.mjs:37` | a screenshot of `{ tab: 'sources' }` | n/a |
+| `hooks/studio-mic-meter.integration.test.ts` | renders `SourcesAudioMixer`; `[role="meter"][aria-label="Microphone level"]`, `[data-videorc-mic-monitor-state=…]`, the text "No microphone" | the export name, the attribute (now on the row) and "No microphone selected." |
+| `hooks/use-studio-context-partition.test.ts:119-134` | reads `components/sources/sources-audio-mixer.tsx` by path | the file keeps its name |
+| `docs/acceptance/2026-10-02-sources-audio-mixer.md` | VoiceOver names: Microphone level, Microphone gain, Mute microphone, Sync, System audio level, System audio gain, System audio; Cmd+Up/Down between rows | every `aria-label` unchanged; the audiocn `Mixer` stays around the rows, each row in a `[data-slot=channel-strip]` wrapper its keyboard map looks for |
+
+No test rendered `SourcesTab` itself before this plan.
 
 ## In-flight work on these files
 
-FILL FROM RESEARCH.
+Checked 2026-10-10 against the open PRs:
+
+- #632 (separate source recordings) touches only `lib/capture.ts` of these
+  files and adds no Sources control (its switch is on Output).
+- #647 (Buddy) touches `page.tsx` comments and `lib/capture.ts` storage
+  keys; nothing on Sources.
+- #609 (dependency updates) reformats one union in `lib/capture.ts`.
+- #619, #502: none of these files.
+
+None touches `sources-tab.tsx`, `sources-audio-mixer.tsx`,
+`source-select*.tsx`, `panel-section.tsx` or `list-row.tsx`, and this plan
+does not edit `lib/capture.ts`, so no conflicts are expected.
 
 ## Slices
 
@@ -352,14 +412,18 @@ Done when:
 
 Files:
 
-- `components/sources/sources-audio-mixer.tsx` → becomes
-  `components/sources/audio-sources.tsx` (rename with `git mv` so history
-  follows)
-- `components/sources/sources-audio-mixer.test.ts` → `audio-sources.test.ts`
+- `components/sources/sources-audio-mixer.tsx` and its test (the file
+  keeps its name: `use-studio-context-partition.test.ts` reads it by path and
+  `studio-mic-meter.integration.test.ts` imports `SourcesAudioMixer`)
+- `components/ui/channel-strip.tsx` (removed: no user left)
+- `docs/audiocn.md`, `.claude/skills/videorc-design/SKILL.md`
 
 1. Microphone and System audio become `SourceItem`s inside the audiocn
-   `Mixer` (keep it: it gives the meters their range). The section is titled
-   **Audio**; its description is unchanged.
+   `Mixer` (keep it: it gives the meters their range, and its keyboard map
+   moves Cmd+Up/Down between `[data-slot=channel-strip]` elements, so each
+   row sits in a wrapper with that slot). Dimmed and disabled reach the
+   audiocn controls through `AudioConfigProvider`, as `ChannelStrip` did.
+   The section is titled **Audio**; its description is unchanged.
 2. Microphone: picker in the body (no second "Microphone" title), meter,
    one `Gain` row; Mute in the header; Sync and (DEV only) Calibrate in More;
    the `Sync +N ms` tag when `microphoneSyncOffsetUserSet` and the offset is
@@ -382,7 +446,7 @@ Files:
 
 Done when:
 
-- `pnpm --filter @videorc/desktop test audio-sources studio-mic-meter microphone-section`
+- `pnpm --filter @videorc/desktop test sources-audio-mixer studio-mic-meter microphone-section`
 - `pnpm typecheck`
 
 ### S5: The page frame
@@ -392,11 +456,12 @@ Files:
 - `components/tabs/sources-tab.tsx`
 - `components/page.tsx` (comment only, if the archetype note needs a word)
 
-1. `SourcesTab` becomes: `PageHeader` (intro line + Refresh devices, the
-   refresh logic unchanged: `refreshBackend({ fresh: true })`, the spinning
+1. `SourcesTab` becomes: `PageHeader` (intro line + Refresh, the refresh
+   logic unchanged: `refreshBackend({ fresh: true })`, the spinning
    `SyncIcon`), `deviceList.warnings` as full-width alerts, then
    `ConfigGrid className={CONFIG_GRID_PAIR}` holding `VideoSources` and
-   `AudioSources`.
+   `SourcesAudioMixer`, in a `min-h-full` flex column so the column hairline
+   runs the full height.
 2. Delete the dead code (`RuntimeChip`, `sourceRuntimeChip`, the old grid).
 3. Check the shell: Sources stays inside `PaneBody`'s scroll (no tab strip,
    so no own scroll region). The stacked layout below `lg` must not clip.
@@ -408,14 +473,16 @@ Done when:
 
 ### S6: Probes and smokes still find everything
 
-FILL FROM RESEARCH: the exact list of scripts and the selector each one uses.
+The readers are the table in "Who reads this page's DOM".
 
-1. Run each script's selector against the new markup (grep, then the
-   by-eye pass in S7). Fix the markup, never the probe, unless the probe
-   reads layout text that this plan removes on purpose; then update the
-   probe in the same commit and say so in the PR.
+1. Check each reader's selector against the new markup (grep, the unit
+   tests, then the by-eye pass in S7). Fix the markup, never the probe,
+   unless the probe reads layout text that this plan removes on purpose;
+   then update the probe in the same commit and say so in the PR.
 
-Done when: FILL.
+Done when: every row of that table is kept (no script changed), and
+`studio-mic-meter.integration.test.ts`, `use-studio-context-partition.test.ts`
+and `source-select.test.ts` pass.
 
 ### S7: Gates, by-eye proof and PR
 
