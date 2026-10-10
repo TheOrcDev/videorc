@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import type { CohostAutoChat, CohostAutoChatMode, CohostAutoChatRelayPatch } from '@/lib/backend'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import {
@@ -94,28 +94,19 @@ export function BuddyChatControls({
       >
         <div className="flex min-w-0 items-center gap-2">
           <span className="shrink-0 text-[11px] font-semibold text-subtle">Chat</span>
-          <ToggleGroup
+          <SegmentedControl
             aria-label="Buddy chat mode"
             disabled={disabled}
+            options={BUDDY_MODES.map((mode) => ({
+              value: mode,
+              label: BUDDY_MODE_LABELS[mode],
+              'data-buddy-mode': mode,
+              title: BUDDY_MODE_HINTS[mode]
+            }))}
             size="sm"
-            type="single"
             value={autoChat.mode}
-            onValueChange={(value) => {
-              if (value) requestMode(value as CohostAutoChatMode)
-            }}
-          >
-            {BUDDY_MODES.map((mode) => (
-              <ToggleGroupItem
-                key={mode}
-                className="px-2.5 text-xs"
-                data-buddy-mode={mode}
-                title={BUDDY_MODE_HINTS[mode]}
-                value={mode}
-              >
-                {BUDDY_MODE_LABELS[mode]}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+            onValueChange={requestMode}
+          />
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <BuddyBehaviourSwitch

@@ -43,7 +43,7 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import type {
   OAuthProviderCredentialStatus,
   PlatformAccount,
@@ -82,6 +82,16 @@ import {
 // OAuth scopes, no credential sources, no raw validation strings inline).
 
 type BadgeTone = 'success' | 'warning' | 'destructive' | 'live' | 'outline'
+
+const URL_MODE_OPTIONS: SegmentedControlOption<StreamUrlMode>[] = [
+  { value: 'server-and-key', label: 'Server + key' },
+  { value: 'full-url', label: 'Full URL' }
+]
+
+const AUTH_MODE_OPTIONS: SegmentedControlOption<StreamAuthMode>[] = [
+  { value: 'oauth', label: 'Sign in' },
+  { value: 'manual-rtmp', label: 'Stream key' }
+]
 
 function runtimeBadge(runtime: StreamTargetRuntime): { tone: BadgeTone; label: string } {
   switch (runtime.state) {
@@ -368,15 +378,12 @@ export function DestinationCard({
             {target.platform === 'custom' ? (
               <Field>
                 <FieldLabel>URL mode</FieldLabel>
-                <SegmentedChoice
+                <SegmentedControl
+                  className="w-full"
                   disabled={disabled}
-                  label="URL mode"
-                  options={[
-                    { value: 'server-and-key', label: 'Server + key' },
-                    { value: 'full-url', label: 'Full URL' }
-                  ]}
+                  options={URL_MODE_OPTIONS}
                   value={target.urlMode ?? 'server-and-key'}
-                  onChange={(value) => onPatch(target.id, { urlMode: value as StreamUrlMode })}
+                  onValueChange={(urlMode) => onPatch(target.id, { urlMode })}
                 />
               </Field>
             ) : null}
@@ -384,15 +391,12 @@ export function DestinationCard({
             {nativeDestination && !oauthUnavailableMessage ? (
               <Field>
                 <FieldLabel>Connect with</FieldLabel>
-                <SegmentedChoice
+                <SegmentedControl
+                  className="w-full"
                   disabled={disabled}
-                  label="Connect with"
-                  options={[
-                    { value: 'oauth', label: 'Sign in' },
-                    { value: 'manual-rtmp', label: 'Stream key' }
-                  ]}
+                  options={AUTH_MODE_OPTIONS}
                   value={target.authMode}
-                  onChange={(value) => onPatch(target.id, { authMode: value as StreamAuthMode })}
+                  onValueChange={(authMode) => onPatch(target.id, { authMode })}
                 />
               </Field>
             ) : null}
@@ -631,38 +635,6 @@ export function DestinationCard({
         )}
       </div>
     </section>
-  )
-}
-
-/** A two-way choice as the glass segmented control (design skill: Tabs). */
-function SegmentedChoice({
-  label,
-  value,
-  options,
-  disabled,
-  onChange
-}: {
-  label: string
-  value: string
-  options: Array<{ value: string; label: string }>
-  disabled: boolean
-  onChange: (value: string) => void
-}): ReactElement {
-  return (
-    <Tabs value={value} onValueChange={(next) => next && onChange(next)}>
-      <TabsList aria-label={label} className="w-full">
-        {options.map((option) => (
-          <TabsTrigger
-            className="flex-1"
-            disabled={disabled}
-            key={option.value}
-            value={option.value}
-          >
-            {option.label}
-          </TabsTrigger>
-        ))}
-      </TabsList>
-    </Tabs>
   )
 }
 

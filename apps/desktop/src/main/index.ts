@@ -12524,7 +12524,8 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
           if (!orientationButton || orientationButton.disabled) {
             throw new Error('Could not switch Studio orientation for layout preset ' + preset);
           }
-          if (orientationButton.getAttribute('aria-pressed') !== 'true') {
+          // Segmented options are radios (plan 174 S1.7): aria-checked, not aria-pressed.
+          if (orientationButton.getAttribute('aria-checked') !== 'true') {
             orientationButton.click();
           }
           await openTab('layout', '[data-videorc-layout-preset]');
@@ -12544,7 +12545,10 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         }
         button.click();
         while (Date.now() < deadline) {
-          if (button.getAttribute('aria-pressed') === 'true') {
+          if (
+            button.getAttribute('aria-checked') === 'true' ||
+            button.getAttribute('aria-pressed') === 'true'
+          ) {
             await sleep(Number(params.settleMs ?? 600));
             return {
               preset,

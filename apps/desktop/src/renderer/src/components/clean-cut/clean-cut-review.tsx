@@ -32,7 +32,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PaneStrip } from '@/components/pane'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { Kbd } from '@/components/ui/kbd'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { useBuddyReport } from '@/hooks/use-buddy-report'
@@ -87,6 +87,16 @@ const SessionPlayer = lazy(async () => ({
 }))
 
 const UNTITLED = 'Untitled recording'
+
+const CLEAN_CUT_MODE_OPTIONS: SegmentedControlOption<CleanCutMode>[] = [
+  { value: 'clean', label: 'Clean' },
+  { value: 'condensed', label: 'Condensed' }
+]
+
+const WHAT_PLAYS_OPTIONS: SegmentedControlOption<'cut' | 'original'>[] = [
+  { value: 'cut', label: 'Preview the cut' },
+  { value: 'original', label: 'Original' }
+]
 
 interface ReviewData {
   job: CleanCutJob
@@ -508,28 +518,18 @@ export function CleanCutReview({
             </span>
           </p>
         ) : null}
-        <Tabs
+        <SegmentedControl
+          aria-label="Kind of cut"
+          options={CLEAN_CUT_MODE_OPTIONS.map((option) => ({
+            ...option,
+            disabled: mode !== option.value && (changes > 0 || !otherModeJob)
+          }))}
           value={mode}
-          onValueChange={(value) => {
-            setMode(value as CleanCutMode)
+          onValueChange={(next) => {
+            setMode(next)
             setJobId(null)
           }}
-        >
-          <TabsList aria-label="Kind of cut">
-            <TabsTrigger
-              disabled={mode !== 'clean' && (changes > 0 || !otherModeJob)}
-              value="clean"
-            >
-              Clean
-            </TabsTrigger>
-            <TabsTrigger
-              disabled={mode !== 'condensed' && (changes > 0 || !otherModeJob)}
-              value="condensed"
-            >
-              Condensed
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
+        />
       </header>
 
       {load.kind === 'ready' && data ? (
@@ -552,15 +552,13 @@ export function CleanCutReview({
               )}
             </div>
             <div className="flex min-w-0 flex-1 flex-col gap-3">
-              <Tabs
+              <SegmentedControl
+                aria-label="What plays"
+                className="self-start"
+                options={WHAT_PLAYS_OPTIONS}
                 value={preview ? 'cut' : 'original'}
                 onValueChange={(value) => setPreview(value === 'cut')}
-              >
-                <TabsList aria-label="What plays">
-                  <TabsTrigger value="cut">Preview the cut</TabsTrigger>
-                  <TabsTrigger value="original">Original</TabsTrigger>
-                </TabsList>
-              </Tabs>
+              />
               <Moments pins={pins} onSeek={seek} />
             </div>
           </div>

@@ -361,7 +361,10 @@ async function issueLayoutIntentBurst(smoke, sequence) {
       while (Date.now() < deadline) {
         const button = Array.from(document.querySelectorAll('[data-videorc-layout-preset]'))
           .find((candidate) => candidate.getAttribute('data-videorc-layout-preset') === preset);
-        if (button?.getAttribute('aria-pressed') === 'true') {
+        if (
+          button?.getAttribute('aria-checked') === 'true' ||
+          button?.getAttribute('aria-pressed') === 'true'
+        ) {
           observe(preset, 'committed', button);
           return { preset, pressed: true, disabled: Boolean(button.disabled), label: button.textContent?.trim() ?? '', timeline };
         }

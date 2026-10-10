@@ -7,6 +7,7 @@ const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
 
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
@@ -36,6 +37,26 @@ export const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
   { id: 'vertical-screen-camera', label: 'Screen + Cam' },
   { id: 'vertical-screen-only', label: 'Screen' },
   { id: 'vertical-camera-only', label: 'Camera' }
+]
+
+const STUDIO_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = [
+  {
+    value: 'horizontal',
+    label: <DisplayIcon />,
+    'aria-label': 'Horizontal studio (16:9)',
+    title: 'Horizontal · 16:9'
+  },
+  {
+    value: 'vertical',
+    label: <MobileIcon />,
+    'aria-label': 'Vertical studio (9:16)',
+    title: 'Vertical · 9:16'
+  }
+]
+
+const SCREEN_FRAMING_OPTIONS: SegmentedControlOption<VerticalScreenFraming>[] = [
+  { value: 'fill', label: 'Fill' },
+  { value: 'fit', label: 'Fit' }
 ]
 
 export function ScenesGallery(): ReactElement {
@@ -73,51 +94,24 @@ export function ScenesGallery(): ReactElement {
         <div className="flex items-center gap-1.5">
           {/* The mode toggle changes the canvas orientation, and the encoder
               canvas is fixed at session start — disabled while live (the
-              backend refuses cross-orientation scene switches too). Composed
-              from Button, not radix ToggleGroup: the gallery is in the EAGER
-              Studio chunk and ToggleGroup lives only in lazy tab chunks —
-              importing it here blows the renderer initial asset budget. */}
-          <div
+              backend refuses cross-orientation scene switches too). The
+              gallery is in the EAGER Studio chunk: SegmentedControl has no
+              Radix, so it costs the initial asset budget nothing. A switch
+              restarts the canvas, so arrows only move focus (manual). */}
+          <SegmentedControl
+            activationMode="manual"
             aria-label="Studio orientation"
-            className="flex items-center overflow-hidden rounded-chip border"
-            role="group"
+            disabled={isSessionActive}
+            options={STUDIO_ORIENTATION_OPTIONS}
+            size="sm"
             title={
               isSessionActive
                 ? 'The canvas is fixed while a session is running. Stop to switch orientation.'
                 : undefined
             }
-          >
-            <Button
-              aria-label="Horizontal studio (16:9)"
-              aria-pressed={mode === 'horizontal'}
-              className={cn(
-                'size-8 rounded-none',
-                mode === 'horizontal' ? 'bg-accent text-foreground' : 'text-muted-foreground'
-              )}
-              disabled={isSessionActive}
-              size="icon"
-              title="Horizontal · 16:9"
-              variant="ghost"
-              onClick={() => switchMode('horizontal')}
-            >
-              <DisplayIcon className="size-4" />
-            </Button>
-            <Button
-              aria-label="Vertical studio (9:16)"
-              aria-pressed={mode === 'vertical'}
-              className={cn(
-                'size-8 rounded-none border-l',
-                mode === 'vertical' ? 'bg-accent text-foreground' : 'text-muted-foreground'
-              )}
-              disabled={isSessionActive}
-              size="icon"
-              title="Vertical · 9:16"
-              variant="ghost"
-              onClick={() => switchMode('vertical')}
-            >
-              <MobileIcon className="size-4" />
-            </Button>
-          </div>
+            value={mode}
+            onValueChange={switchMode}
+          />
           <Button size="sm" variant="ghost" onClick={() => openStudioPanel('layouts')}>
             Edit scene
           </Button>
@@ -201,7 +195,7 @@ export function ScenesGallery(): ReactElement {
 /**
  * Fill / Fit for the screen in vertical scenes. Fill is the short-form look
  * (the screen fills its area and is cropped); Fit keeps the whole screen
- * visible. Composed from Button for the same bundle reason as the mode toggle.
+ * visible. A SegmentedControl, Radix-free like the mode toggle.
  */
 export function ScreenFramingControl({
   value,
@@ -210,10 +204,6 @@ export function ScreenFramingControl({
   value: VerticalScreenFraming
   onChange: (value: VerticalScreenFraming) => void
 }): ReactElement {
-  const options: { id: VerticalScreenFraming; label: string }[] = [
-    { id: 'fill', label: 'Fill' },
-    { id: 'fit', label: 'Fit' }
-  ]
   return (
     <div className="flex items-center justify-between gap-3" data-slot="screen-framing-control">
       <div className="flex min-w-0 flex-col gap-0.5">
@@ -224,27 +214,13 @@ export function ScreenFramingControl({
             : 'Fills the area and crops the sides of your screen.'}
         </span>
       </div>
-      <div
+      <SegmentedControl
         aria-label="Screen framing"
-        className="flex shrink-0 items-center overflow-hidden rounded-chip border"
-        role="group"
-      >
-        {options.map((option) => (
-          <Button
-            key={option.id}
-            aria-pressed={value === option.id}
-            className={cn(
-              'h-8 rounded-none px-3',
-              value === option.id ? 'bg-accent text-foreground' : 'text-muted-foreground'
-            )}
-            size="sm"
-            variant="ghost"
-            onClick={() => onChange(option.id)}
-          >
-            {option.label}
-          </Button>
-        ))}
-      </div>
+        className="shrink-0"
+        options={SCREEN_FRAMING_OPTIONS}
+        value={value}
+        onValueChange={onChange}
+      />
     </div>
   )
 }

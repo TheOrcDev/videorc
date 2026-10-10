@@ -126,7 +126,7 @@ const LABELABLE_CONTROLS = new Set([
 ])
 // No label element can name these (a group, a slider thumb): inside a Field
 // they take the FieldLabel through `aria-labelledby`.
-const LABELLED_BY_CONTROLS = new Set(['ToggleGroup', 'TabsList', 'Slider'])
+const LABELLED_BY_CONTROLS = new Set(['ToggleGroup', 'TabsList', 'SegmentedControl', 'Slider'])
 const LABEL_TAGS = new Set(['FieldLabel', 'Label', 'label'])
 
 /** A JSX element's tag and its attributes as source text (`true` when bare). */
@@ -226,7 +226,12 @@ function unnamedControls(path: string, source: string): string[] {
       const { tag, attributes } = parts
       if (tag === 'Field') checkField(node)
       const ownName = namesItself(attributes) || (tag === 'SelectTrigger' && attributes.has('id'))
-      if ((tag === 'SelectTrigger' || tag === 'Slider') && !inField && !inLabel && !ownName) {
+      if (
+        (tag === 'SelectTrigger' || tag === 'Slider' || tag === 'SegmentedControl') &&
+        !inField &&
+        !inLabel &&
+        !ownName
+      ) {
         report(node, `<${tag}> has no name`)
       }
       if (tag === 'Switch' && inButton) report(node, 'a Switch inside a button')
@@ -483,13 +488,14 @@ describe('dialog anatomy (plan 174 S1.6b)', () => {
 describe('renderer accessible names (plan 174 S0.5)', () => {
   const withControls = files.filter(
     ({ path, code }) =>
-      path.endsWith('.tsx') && /\b(?:Field|SelectTrigger|Slider|Switch)\b/.test(code)
+      path.endsWith('.tsx') &&
+      /\b(?:Field|SelectTrigger|Slider|Switch|SegmentedControl)\b/.test(code)
   )
   const controlOffenders = withControls.flatMap(({ path }) =>
     unnamedControls(path, readFileSync(join(RENDERER_ROOT, path), 'utf8'))
   )
 
-  it('names every SelectTrigger and Slider outside a Field: an id, aria-label or aria-labelledby', () => {
+  it('names every SelectTrigger, Slider and SegmentedControl outside a Field: an id, aria-label or aria-labelledby', () => {
     expect(withControls.length).toBeGreaterThan(50)
     // E-26: the Library filter was a bare select; B-2: so was the Inspector's Output.
     expect(controlOffenders.filter((line) => line.endsWith('has no name'))).toEqual([])
@@ -544,12 +550,18 @@ describe('renderer accessible names (plan 174 S0.5)', () => {
     expect(unnamedControls('player.tsx', '<Slider max={10} />')).toEqual([
       'player.tsx:1: <Slider> has no name'
     ])
+    // Plan 174 S1.7: a segmented control is named like any other group.
+    expect(unnamedControls('remote.tsx', '<SegmentedControl options={networks} />')).toEqual([
+      'remote.tsx:1: <SegmentedControl> has no name'
+    ])
     const named = [
       '<>',
       '  <Field><FieldLabel>Theme</FieldLabel><ToggleGroup type="single" /></Field>',
       '  <Field><FieldLabel>Default privacy</FieldLabel><SelectTrigger /></Field>',
       '  <Field><FieldLabel htmlFor="title">Title</FieldLabel><Input id="title" /></Field>',
       '  <Field><FieldLabel>Motion</FieldLabel><Slider max={1} /></Field>',
+      '  <Field><FieldLabel>Fit</FieldLabel><SegmentedControl options={fits} /></Field>',
+      '  <SegmentedControl aria-label="Network" options={networks} />',
       '  <SelectTrigger aria-label="Filter" />',
       '  <SelectTrigger id="schedule-privacy" />',
       '  <Slider aria-label="Playhead" />',

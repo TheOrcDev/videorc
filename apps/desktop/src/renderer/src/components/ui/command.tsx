@@ -24,8 +24,9 @@ function Command({ className, ...props }: React.ComponentProps<typeof CommandPri
 }
 
 function CommandDialog({
-  title = 'Command Palette',
-  description = 'Search for a command to run...',
+  // ⌘K is "Search" everywhere it is named (status bar, docs/ui-copy.md).
+  title = 'Search',
+  description = 'Search for a command to run…',
   children,
   className,
   showCloseButton = false,

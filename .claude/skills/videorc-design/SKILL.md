@@ -204,8 +204,15 @@ Everything except ⌘K uses the desktop scale.
   - Tags use 7 px. Status chips are round.
   - Window corners belong to the OS.
 - **Controls.** The default height is 28 px for Button, Select trigger, and
-  Input. Retune it once in `components/ui`, never per screen. Segmented
-  choices use `Tabs`, a glass segmented control.
+  Input. Retune it once in `components/ui`, never per screen.
+- **One control per kind of choice** (plan 174 S1.7). Each wears one look:
+  - Choosing one of 2–4 values: `SegmentedControl` (`ui/segmented-control.tsx`),
+    the glass Tabs track with no Radix, a radio group with arrow keys. Its
+    Field label names it; disabled, it says why (`disabledReason`).
+  - Switching a view (a page or a pane): `Tabs`.
+  - Filter chips (several on at once, or a filter row): `ToggleGroup`.
+  - A boolean: `Switch`, never an On/Off or Yes/No pair.
+  - A one-shot action: `Button`, never a toggle that stays pressed.
 - **Type.** The system stack (SF Pro). Body 14 px, metadata 12 px, section
   labels 11 px. Density comes from structure, not from smaller text.
 
@@ -439,7 +446,9 @@ confirming a routine interaction the user just watched succeed.
 | Global state and hints    | `StatusBar`                                     |
 | Palette / searchable list | `Command` (+ `CommandDialog`), palette scale    |
 | Modals and confirmations  | `Dialog`                                        |
-| Segmented choice          | `Tabs` (glass segmented control)                |
+| Segmented choice (2–4)    | `SegmentedControl` (the glass Tabs track)       |
+| Views and page tabs       | `Tabs`                                          |
+| Filter chips              | `ToggleGroup`                                   |
 | Buttons                   | `Button` ghost/outline/secondary; 28 px default |
 | Status, tags, counts      | `Badge`, `StatusBadge`, `StatusDot`             |
 | Shortcut hints            | `Kbd`                                           |

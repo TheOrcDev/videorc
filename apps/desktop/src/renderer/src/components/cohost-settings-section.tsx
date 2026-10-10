@@ -11,9 +11,9 @@ import {
 } from '@/components/ui/input-group'
 import { Kbd } from '@/components/ui/kbd'
 import { Slider } from '@/components/ui/slider'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
 import type { CohostAutoChat, CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
@@ -22,8 +22,7 @@ import {
   COHOST_LISTEN_CONSENT_SENTENCE,
   COHOST_SENSITIVITIES,
   COHOST_SENSITIVITY_LABELS,
-  cohostListenAllowanceLabel,
-  type CohostSensitivity
+  cohostListenAllowanceLabel
 } from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
 
@@ -32,11 +31,11 @@ export const COHOST_NOTES_MAX_CHARS = 4000
 export const COHOST_RULES_MAX = 10
 export const COHOST_RULE_MAX_CHARS = 120
 
-const TONE_LABELS: Record<CohostTone, string> = {
-  friendly: 'Friendly',
-  short: 'Short',
-  professional: 'Professional'
-}
+const TONE_OPTIONS: SegmentedControlOption<CohostTone>[] = [
+  { value: 'friendly', label: 'Friendly' },
+  { value: 'short', label: 'Short' },
+  { value: 'professional', label: 'Professional' }
+]
 
 /** "Show on stream automatically" (plan 060 D8): one three-way choice over the
  * two engine flags. `autoHighlight` keeps meaning Buddy's picks and
@@ -212,23 +211,15 @@ export function BuddyRepliesSection({
         <Field>
           <FieldLabel>Reply tone</FieldLabel>
           <FieldDescription>How the drafted replies read before you edit them.</FieldDescription>
-          <ToggleGroup
+          <SegmentedControl
             className="w-fit"
             disabled={locked}
             id="cohost-tone"
+            options={TONE_OPTIONS}
             size="sm"
-            type="single"
             value={cohostSettings.tone}
-            onValueChange={(tone) => {
-              if (tone) save({ tone: tone as CohostTone })
-            }}
-          >
-            {(Object.keys(TONE_LABELS) as CohostTone[]).map((tone) => (
-              <ToggleGroupItem key={tone} className="px-3 text-xs" value={tone}>
-                {TONE_LABELS[tone]}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+            onValueChange={(tone) => save({ tone })}
+          />
         </Field>
         <Field>
           <FieldLabel htmlFor="cohost-notes">Buddy notes</FieldLabel>
@@ -366,6 +357,15 @@ export function BuddyModerationSection({
     return null
   }
   const showOnStream = cohostShowOnStreamMode(cohostSettings)
+  const saveShowOnStream = (mode: CohostShowOnStreamMode): void => {
+    const patch = COHOST_SHOW_ON_STREAM_PATCHES[mode]
+    if (
+      patch.autoHighlight !== cohostSettings.autoHighlight ||
+      patch.voiceHighlight !== cohostSettings.voiceHighlight
+    ) {
+      save(patch)
+    }
+  }
   const rules = cohostSettings.rules ?? []
   const rulesFull = rules.length >= COHOST_RULES_MAX
   const addRule = (): void => {
@@ -461,55 +461,39 @@ export function BuddyModerationSection({
             How sure Buddy must be before a flag shows up. Relaxed shows only the clear cases,
             Strict shows everything it noticed.
           </FieldDescription>
-          <ToggleGroup
+          <SegmentedControl
             className="w-fit"
             disabled={locked}
             id="cohost-sensitivity"
+            options={COHOST_SENSITIVITIES.map((step) => ({
+              value: step,
+              label: COHOST_SENSITIVITY_LABELS[step]
+            }))}
             size="sm"
-            type="single"
             value={sensitivity}
-            onValueChange={(next) => {
-              if (next) setCohostSensitivity(next as CohostSensitivity)
-            }}
-          >
-            {COHOST_SENSITIVITIES.map((step) => (
-              <ToggleGroupItem key={step} className="px-3 text-xs" value={step}>
-                {COHOST_SENSITIVITY_LABELS[step]}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+            onValueChange={setCohostSensitivity}
+          />
         </Field>
         <Field>
           <FieldLabel>Show on stream automatically</FieldLabel>
           <FieldDescription>
             Puts a chat comment on your stream by itself. You can always show one yourself with H.
           </FieldDescription>
-          <ToggleGroup
-            className="w-fit flex-wrap"
+          <SegmentedControl
+            className="w-fit"
             disabled={locked}
             id="cohost-show-on-stream"
+            options={COHOST_SHOW_ON_STREAM_MODES.map((mode) => ({
+              value: mode,
+              label: COHOST_SHOW_ON_STREAM_LABELS[mode],
+              // Choosing the checked option again rewrites a stored picks-only
+              // row as both flags on (cohostShowOnStreamMode).
+              onClick: mode === showOnStream ? () => saveShowOnStream(mode) : undefined
+            }))}
             size="sm"
-            type="single"
             value={showOnStream}
-            onValueChange={(mode) => {
-              // Radix reports a click on the pressed item as '': keep that item,
-              // which also rewrites a stored picks-only row as both flags on.
-              const patch =
-                COHOST_SHOW_ON_STREAM_PATCHES[(mode || showOnStream) as CohostShowOnStreamMode]
-              if (
-                patch.autoHighlight !== cohostSettings.autoHighlight ||
-                patch.voiceHighlight !== cohostSettings.voiceHighlight
-              ) {
-                save(patch)
-              }
-            }}
-          >
-            {COHOST_SHOW_ON_STREAM_MODES.map((mode) => (
-              <ToggleGroupItem key={mode} className="px-3 text-xs" value={mode}>
-                {COHOST_SHOW_ON_STREAM_LABELS[mode]}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+            onValueChange={saveShowOnStream}
+          />
           <FieldDescription className="flex flex-col gap-0.5">
             <span>What I talk about needs Buddy to hear you (or live captions).</span>
             <span>

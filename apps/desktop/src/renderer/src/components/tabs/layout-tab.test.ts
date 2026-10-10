@@ -23,7 +23,12 @@ function render(blockedReason: string | null): string {
 
 const switches = (markup: string): string[] =>
   markup.match(/<button[^>]*role="switch"[^>]*>/g) ?? []
-const snaps = (markup: string): string[] => markup.match(/<button[^>]*role="radio"[^>]*>/g) ?? []
+// The snaps are one-shot Buttons inside the "Snap overlay" group (plan 174 S1.7, C-37).
+const snaps = (markup: string): string[] =>
+  markup
+    .split('aria-label="Snap overlay"')[1]
+    ?.match(/<button[^>]*>/g)
+    ?.filter((button) => !button.includes('role=')) ?? []
 
 describe('the overlay inspector (plan 174, C-6)', () => {
   it('turns every control off with one reason while the backend is away', () => {

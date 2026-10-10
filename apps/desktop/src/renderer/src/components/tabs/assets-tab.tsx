@@ -24,7 +24,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import {
   BACKGROUND_STYLE_FIELDS,
@@ -66,7 +66,7 @@ const STATUS_BADGE: Record<BackgroundAssetSlotStatus, { label: string; variant: 
   unsupported: { label: 'Unsupported', variant: 'destructive' }
 }
 
-const FIT_OPTIONS: { value: BackgroundFit; label: string }[] = [
+const FIT_OPTIONS: SegmentedControlOption<BackgroundFit>[] = [
   { value: 'fill', label: 'Fill' },
   { value: 'fit', label: 'Fit' },
   { value: 'stretch', label: 'Stretch' }
@@ -512,20 +512,13 @@ function BackgroundStylePopover({
       <PopoverContent align="end" className="flex w-80 flex-col gap-3">
         <div className="flex flex-col gap-1.5">
           <Label>Fit</Label>
-          <ToggleGroup
+          <SegmentedControl
             aria-label="Fit"
             className="w-full"
-            type="single"
+            options={FIT_OPTIONS}
             value={style.fit}
-            variant="outline"
-            onValueChange={(value) => value && onStyle(asset.id, { fit: value as BackgroundFit })}
-          >
-            {FIT_OPTIONS.map((option) => (
-              <ToggleGroupItem key={option.value} className="flex-1" value={option.value}>
-                {option.label}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+            onValueChange={(fit) => onStyle(asset.id, { fit })}
+          />
         </div>
         {BACKGROUND_STYLE_FIELDS.map((config) => (
           <PowerSlider

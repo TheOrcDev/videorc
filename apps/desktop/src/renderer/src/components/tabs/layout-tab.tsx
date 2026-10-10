@@ -27,8 +27,9 @@ import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Field, FieldContent, FieldLabel, FieldSet } from '@/components/ui/field'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Toggle } from '@/components/ui/toggle'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
 import { useStudioCore } from '@/hooks/use-studio'
 import type {
@@ -37,6 +38,7 @@ import type {
   CameraFit,
   CameraShape,
   CameraSize,
+  LayoutPreset,
   OverlayItem,
   OverlayOrientation,
   OverlaySnap,
@@ -84,6 +86,57 @@ const VERTICAL_LAYOUT_TAB_PRESETS = [
   { id: 'vertical-screen-only', label: 'Screen only', enabled: true },
   { id: 'vertical-camera-only', label: 'Camera only', enabled: true }
 ] as const
+
+const OVERLAY_ORIENTATION_OPTIONS: SegmentedControlOption<OverlayOrientation>[] = [
+  { value: 'horizontal', label: 'Horizontal' },
+  { value: 'vertical', label: 'Vertical' }
+]
+
+const SIDE_BY_SIDE_SPLIT_OPTIONS: SegmentedControlOption<SideBySideSplit>[] = [
+  { value: '50-50', label: '50/50' },
+  { value: '60-40', label: '60/40' },
+  { value: '70-30', label: '70/30' }
+]
+
+const CAMERA_SIDE_OPTIONS: SegmentedControlOption<SideBySideCameraSide>[] = [
+  { value: 'left', label: 'Camera left' },
+  { value: 'right', label: 'Camera right' }
+]
+
+const CAMERA_CORNER_OPTIONS: SegmentedControlOption<CameraCorner>[] = [
+  { value: 'top-left', label: 'Top L' },
+  { value: 'top-right', label: 'Top R' },
+  { value: 'bottom-left', label: 'Bot L' },
+  { value: 'bottom-right', label: 'Bot R' }
+]
+
+const CAMERA_SIZE_OPTIONS: SegmentedControlOption<CameraSize>[] = [
+  { value: 'small', label: 'S' },
+  { value: 'medium', label: 'M' },
+  { value: 'large', label: 'L' }
+]
+
+const CAMERA_SHAPE_OPTIONS: SegmentedControlOption<CameraShape>[] = [
+  { value: 'rectangle', label: 'Rect', 'data-videorc-camera-shape': 'rectangle' },
+  { value: 'rounded', label: 'Round', 'data-videorc-camera-shape': 'rounded' },
+  { value: 'circle', label: 'Circle', 'data-videorc-camera-shape': 'circle' }
+]
+
+const CAMERA_ASPECT_OPTIONS: SegmentedControlOption<CameraAspect>[] = [
+  { value: 'source', label: 'Wide', 'data-videorc-camera-aspect': 'source' },
+  { value: 'square', label: 'Square', 'data-videorc-camera-aspect': 'square' },
+  { value: 'portrait', label: 'Portrait', 'data-videorc-camera-aspect': 'portrait' }
+]
+
+const CAMERA_FIT_OPTIONS: SegmentedControlOption<CameraFit>[] = [
+  { value: 'fill', label: 'Fill crop' },
+  { value: 'fit', label: 'Fit frame' }
+]
+
+const CHROMA_KEY_COLOR_OPTIONS: SegmentedControlOption<'green' | 'blue'>[] = [
+  { value: 'green', label: 'Green' },
+  { value: 'blue', label: 'Blue' }
+]
 
 export function LayoutTab(): ReactElement {
   const {
@@ -314,42 +367,53 @@ export function LayoutTab(): ReactElement {
             icon={LayoutIcon}
             title="Layout preset"
           >
-            <div className="flex flex-wrap gap-2">
-              {layoutTabPresets.map((preset) => {
-                const needsCamera = layoutPresetNeedsCamera(preset.id)
-                const needsScreen = layoutPresetNeedsScreen(preset.id)
-                const switching = layoutSwitchPending === preset.id
+            <div className="flex flex-wrap items-center gap-2">
+              {/* One segmented control for the presets; Freeform is a mode, not
+                  a preset, so it is its own toggle beside them (plan 174 C-15).
+                  A switch applies live, so arrows only move focus (manual). */}
+              <SegmentedControl<LayoutPreset>
+                activationMode="manual"
+                aria-label="Layout preset"
                 // Live sessions switch through the backend's latest-intent engine.
                 // Keep controls clickable while one warms so a newer choice can supersede it.
-                const disabled =
-                  !preset.enabled || (needsCamera && !hasCamera) || (needsScreen && !hasScreen)
-                return (
-                  <button
-                    aria-pressed={layout.layoutPreset === preset.id && !isFreeform}
-                    className="inline-flex h-control items-center gap-1.5 rounded-chip border border-border px-3 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground aria-pressed:text-foreground aria-pressed:glass-chip disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={disabled || stageBusy}
-                    key={preset.id}
-                    data-videorc-layout-preset={preset.id}
-                    type="button"
-                    onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
-                  >
-                    {switching ? 'Switching…' : preset.label}
-                    {!preset.enabled ? <Badge variant="outline">Soon</Badge> : null}
-                  </button>
-                )
-              })}
+                disabled={stageBusy}
+                options={layoutTabPresets.map((preset) => {
+                  const needsCamera = layoutPresetNeedsCamera(preset.id)
+                  const needsScreen = layoutPresetNeedsScreen(preset.id)
+                  return {
+                    value: preset.id,
+                    label: (
+                      <>
+                        {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+                        {!preset.enabled ? <Badge variant="outline">Soon</Badge> : null}
+                      </>
+                    ),
+                    disabled:
+                      !preset.enabled || (needsCamera && !hasCamera) || (needsScreen && !hasScreen),
+                    'data-videorc-layout-preset': preset.id,
+                    // Every click is an intent: the checked preset is the committed
+                    // one, so a click on it supersedes a newer pending switch.
+                    onClick:
+                      !isFreeform && layout.layoutPreset === preset.id
+                        ? () => applyCameraPreset({ layoutPreset: preset.id })
+                        : undefined
+                  }
+                })}
+                value={isFreeform ? null : layout.layoutPreset}
+                onValueChange={(layoutPreset) => applyCameraPreset({ layoutPreset })}
+              />
               {/* Freeform is a mode, not a preset: composition becomes the
-                  user's per-source overrides (plan phase 4). */}
-              <button
-                aria-pressed={isFreeform}
-                className="inline-flex h-control items-center gap-1.5 rounded-chip border border-border px-3 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground aria-pressed:text-foreground aria-pressed:glass-chip disabled:cursor-not-allowed disabled:opacity-50"
+                  user's per-source overrides (plan phase 4). A preset leaves it. */}
+              <Toggle
                 data-videorc-layout-preset="freeform"
                 disabled={!scene || stageBusy}
-                type="button"
-                onClick={enterFreeform}
+                pressed={isFreeform}
+                variant="outline"
+                // Every click is an intent, as on the presets.
+                onPressedChange={enterFreeform}
               >
                 {layoutSwitchPending && isFreeform ? 'Switching…' : 'Freeform'}
-              </button>
+              </Toggle>
             </div>
             {isSessionActive ? (
               <p className="text-xs text-muted-foreground">
@@ -377,20 +441,14 @@ export function LayoutTab(): ReactElement {
             {verticalLeg ? (
               <div className="flex items-center justify-between gap-3">
                 <span className="text-xs text-subtle">Overlays on</span>
-                <ToggleGroup
+                <SegmentedControl
                   aria-label="Overlay orientation"
                   data-videorc-overlay-orientation
+                  options={OVERLAY_ORIENTATION_OPTIONS}
                   size="sm"
-                  type="single"
                   value={verticalView ? 'vertical' : 'horizontal'}
-                  variant="outline"
-                  onValueChange={(value) => {
-                    if (value === 'horizontal' || value === 'vertical') setOrientationChoice(value)
-                  }}
-                >
-                  <ToggleGroupItem value="horizontal">Horizontal</ToggleGroupItem>
-                  <ToggleGroupItem value="vertical">Vertical</ToggleGroupItem>
-                </ToggleGroup>
+                  onValueChange={setOrientationChoice}
+                />
               </div>
             ) : null}
             <SceneStage
@@ -535,35 +593,23 @@ export function LayoutTab(): ReactElement {
                   <>
                     <Field>
                       <FieldLabel>Split</FieldLabel>
-                      <ToggleGroup
+                      <SegmentedControl
                         className="w-full"
-                        type="single"
+                        options={SIDE_BY_SIDE_SPLIT_OPTIONS}
                         value={layout.sideBySideSplit}
-                        variant="outline"
-                        onValueChange={(value) =>
-                          value && applyCameraPreset({ sideBySideSplit: value as SideBySideSplit })
-                        }
-                      >
-                        <ToggleGroupItem value="50-50">50/50</ToggleGroupItem>
-                        <ToggleGroupItem value="60-40">60/40</ToggleGroupItem>
-                        <ToggleGroupItem value="70-30">70/30</ToggleGroupItem>
-                      </ToggleGroup>
+                        onValueChange={(sideBySideSplit) => applyCameraPreset({ sideBySideSplit })}
+                      />
                     </Field>
                     <Field>
                       <FieldLabel>Camera side</FieldLabel>
-                      <ToggleGroup
+                      <SegmentedControl
                         className="w-full"
-                        type="single"
+                        options={CAMERA_SIDE_OPTIONS}
                         value={layout.sideBySideCameraSide}
-                        variant="outline"
-                        onValueChange={(value) =>
-                          value &&
-                          applyCameraPreset({ sideBySideCameraSide: value as SideBySideCameraSide })
+                        onValueChange={(sideBySideCameraSide) =>
+                          applyCameraPreset({ sideBySideCameraSide })
                         }
-                      >
-                        <ToggleGroupItem value="left">Camera left</ToggleGroupItem>
-                        <ToggleGroupItem value="right">Camera right</ToggleGroupItem>
-                      </ToggleGroup>
+                      />
                     </Field>
                   </>
                 ) : null}
@@ -592,20 +638,12 @@ export function LayoutTab(): ReactElement {
                 {showCameraCornerControls ? (
                   <Field>
                     <FieldLabel>Corner</FieldLabel>
-                    <ToggleGroup
+                    <SegmentedControl
                       className="w-full"
-                      type="single"
-                      value={layout.cameraTransformMode === 'custom' ? '' : layout.cameraCorner}
-                      variant="outline"
-                      onValueChange={(value) =>
-                        value && applyCameraPreset({ cameraCorner: value as CameraCorner })
-                      }
-                    >
-                      <ToggleGroupItem value="top-left">Top L</ToggleGroupItem>
-                      <ToggleGroupItem value="top-right">Top R</ToggleGroupItem>
-                      <ToggleGroupItem value="bottom-left">Bot L</ToggleGroupItem>
-                      <ToggleGroupItem value="bottom-right">Bot R</ToggleGroupItem>
-                    </ToggleGroup>
+                      options={CAMERA_CORNER_OPTIONS}
+                      value={layout.cameraTransformMode === 'custom' ? null : layout.cameraCorner}
+                      onValueChange={(cameraCorner) => applyCameraPreset({ cameraCorner })}
+                    />
                   </Field>
                 ) : null}
 
@@ -615,71 +653,32 @@ export function LayoutTab(): ReactElement {
                       {!isFreeform ? (
                         <Field className="min-w-0">
                           <FieldLabel>Size</FieldLabel>
-                          <ToggleGroup
+                          <SegmentedControl
                             className="w-full"
-                            spacing={0}
-                            type="single"
+                            options={CAMERA_SIZE_OPTIONS}
                             value={layout.cameraSize}
-                            variant="outline"
-                            onValueChange={(value) =>
-                              value && applyCameraPreset({ cameraSize: value as CameraSize })
-                            }
-                          >
-                            <ToggleGroupItem className="flex-1" value="small">
-                              S
-                            </ToggleGroupItem>
-                            <ToggleGroupItem className="flex-1" value="medium">
-                              M
-                            </ToggleGroupItem>
-                            <ToggleGroupItem className="flex-1" value="large">
-                              L
-                            </ToggleGroupItem>
-                          </ToggleGroup>
+                            onValueChange={(cameraSize) => applyCameraPreset({ cameraSize })}
+                          />
                         </Field>
                       ) : null}
                       <Field className="min-w-0">
                         <FieldLabel>Shape</FieldLabel>
-                        <ToggleGroup
+                        <SegmentedControl
                           className="w-full"
-                          spacing={0}
-                          type="single"
+                          options={CAMERA_SHAPE_OPTIONS}
                           value={layout.cameraShape}
-                          variant="outline"
-                          onValueChange={(value) =>
-                            value &&
+                          onValueChange={(cameraShape) =>
                             applyLayoutPatch(
                               // Rounded means a rounded SQUARE by default (owner
                               // decision 2026-07-06) — picking it snaps the aspect
                               // to square in the same gesture; the Aspect toggle
                               // below still allows wide/portrait afterwards.
-                              value === 'rounded'
+                              cameraShape === 'rounded'
                                 ? { cameraShape: 'rounded', cameraAspect: 'square' }
-                                : { cameraShape: value as CameraShape }
+                                : { cameraShape }
                             )
                           }
-                        >
-                          <ToggleGroupItem
-                            className="min-w-0 flex-1 px-1 text-xs"
-                            data-videorc-camera-shape="rectangle"
-                            value="rectangle"
-                          >
-                            Rect
-                          </ToggleGroupItem>
-                          <ToggleGroupItem
-                            className="min-w-0 flex-1 px-1 text-xs"
-                            data-videorc-camera-shape="rounded"
-                            value="rounded"
-                          >
-                            Round
-                          </ToggleGroupItem>
-                          <ToggleGroupItem
-                            className="min-w-0 flex-1 px-1 text-xs"
-                            data-videorc-camera-shape="circle"
-                            value="circle"
-                          >
-                            Circle
-                          </ToggleGroupItem>
-                        </ToggleGroup>
+                        />
                       </Field>
                     </div>
 
@@ -700,38 +699,12 @@ export function LayoutTab(): ReactElement {
                     {layout.cameraShape !== 'circle' ? (
                       <Field>
                         <FieldLabel>Aspect</FieldLabel>
-                        <ToggleGroup
+                        <SegmentedControl
                           className="w-full"
-                          spacing={0}
-                          type="single"
+                          options={CAMERA_ASPECT_OPTIONS}
                           value={layout.cameraAspect}
-                          variant="outline"
-                          onValueChange={(value) =>
-                            value && applyLayoutPatch({ cameraAspect: value as CameraAspect })
-                          }
-                        >
-                          <ToggleGroupItem
-                            className="min-w-0 flex-1 px-1 text-xs"
-                            data-videorc-camera-aspect="source"
-                            value="source"
-                          >
-                            Wide
-                          </ToggleGroupItem>
-                          <ToggleGroupItem
-                            className="min-w-0 flex-1 px-1 text-xs"
-                            data-videorc-camera-aspect="square"
-                            value="square"
-                          >
-                            Square
-                          </ToggleGroupItem>
-                          <ToggleGroupItem
-                            className="min-w-0 flex-1 px-1 text-xs"
-                            data-videorc-camera-aspect="portrait"
-                            value="portrait"
-                          >
-                            Portrait
-                          </ToggleGroupItem>
-                        </ToggleGroup>
+                          onValueChange={(cameraAspect) => applyLayoutPatch({ cameraAspect })}
+                        />
                         {layout.cameraAspect !== 'source' ? (
                           <p className="text-xs text-muted-foreground">
                             Crops the sides of the camera. Frame yourself centered.
@@ -796,19 +769,14 @@ export function LayoutTab(): ReactElement {
                 ) : (
                   <Field>
                     <FieldLabel>Fit</FieldLabel>
-                    <ToggleGroup
-                      type="single"
+                    <SegmentedControl
+                      options={CAMERA_FIT_OPTIONS}
                       value={layout.cameraFit}
-                      variant="outline"
-                      onValueChange={(value) => {
-                        if (!value) return
-                        patchLayout({ cameraFit: value as CameraFit })
-                        applyLayoutPatch({ cameraFit: value as CameraFit })
+                      onValueChange={(cameraFit) => {
+                        patchLayout({ cameraFit })
+                        applyLayoutPatch({ cameraFit })
                       }}
-                    >
-                      <ToggleGroupItem value="fill">Fill crop</ToggleGroupItem>
-                      <ToggleGroupItem value="fit">Fit frame</ToggleGroupItem>
-                    </ToggleGroup>
+                    />
                   </Field>
                 )}
 
@@ -882,27 +850,17 @@ export function LayoutTab(): ReactElement {
                   <>
                     <Field>
                       <FieldLabel>Key color</FieldLabel>
-                      <ToggleGroup
+                      <SegmentedControl
                         className="w-full"
-                        spacing={0}
-                        type="single"
+                        options={CHROMA_KEY_COLOR_OPTIONS}
                         value={layout.cameraChromaKeyColor === CHROMA_KEY_BLUE ? 'blue' : 'green'}
-                        variant="outline"
-                        onValueChange={(value) =>
-                          value &&
+                        onValueChange={(color) =>
                           applyLayoutPatch({
                             cameraChromaKeyColor:
-                              value === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
+                              color === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
                           })
                         }
-                      >
-                        <ToggleGroupItem className="flex-1" value="green">
-                          Green
-                        </ToggleGroupItem>
-                        <ToggleGroupItem className="flex-1" value="blue">
-                          Blue
-                        </ToggleGroupItem>
-                      </ToggleGroup>
+                      />
                     </Field>
                     <PowerSlider
                       label="Similarity"
@@ -1174,23 +1132,20 @@ export function OverlayItemInspector({
       </Field>
       <Field>
         <FieldLabel>Snap ({orientation})</FieldLabel>
-        <ToggleGroup
-          aria-label="Snap overlay"
-          className="w-full flex-wrap"
-          disabled={blocked}
-          type="single"
-          value=""
-          variant="outline"
-          onValueChange={(value) => {
-            if ((OVERLAY_SNAPS as readonly string[]).includes(value)) onSnap(value as OverlaySnap)
-          }}
-        >
+        {/* One-shot moves, so plain Buttons: nothing stays selected (plan 174 C-37). */}
+        <div aria-label="Snap overlay" className="flex w-full flex-wrap gap-2" role="group">
           {OVERLAY_SNAPS.map((snap) => (
-            <ToggleGroupItem key={snap} value={snap}>
+            <Button
+              key={snap}
+              disabled={blocked}
+              size="sm"
+              variant="outline"
+              onClick={() => onSnap(snap)}
+            >
               {OVERLAY_SNAP_LABELS[snap]}
-            </ToggleGroupItem>
+            </Button>
           ))}
-        </ToggleGroup>
+        </div>
       </Field>
     </div>
   )

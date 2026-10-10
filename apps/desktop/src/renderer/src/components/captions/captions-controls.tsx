@@ -29,6 +29,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -57,6 +58,12 @@ const LANGUAGES = [
   { id: 'pt', label: 'Portuguese' },
   { id: 'it', label: 'Italian' }
 ] as const
+
+const CAPTION_TEXT_SIZE_OPTIONS: SegmentedControlOption<CaptionTextSize>[] = [
+  { value: 's', label: 'Small' },
+  { value: 'm', label: 'Medium' },
+  { value: 'l', label: 'Large' }
+]
 
 type CaptionStatusPresentation = {
   value: string
@@ -324,28 +331,13 @@ export function CaptionsControls(): ReactElement {
               twice). min-w-fit keeps each item's intrinsic floor. */}
           <Field className="sm:col-span-2">
             <FieldLabel>Text size</FieldLabel>
-            <ToggleGroup
+            <SegmentedControl
               aria-label="Caption text size"
               className="w-full"
-              type="single"
+              options={CAPTION_TEXT_SIZE_OPTIONS}
               value={captions.textSize}
-              variant="outline"
-              onValueChange={(value) => {
-                if (value === 's' || value === 'm' || value === 'l') {
-                  patchCaptions({ textSize: value as CaptionTextSize }, true)
-                }
-              }}
-            >
-              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="s">
-                Small
-              </ToggleGroupItem>
-              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="m">
-                Medium
-              </ToggleGroupItem>
-              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="l">
-                Large
-              </ToggleGroupItem>
-            </ToggleGroup>
+              onValueChange={(textSize) => patchCaptions({ textSize }, true)}
+            />
           </Field>
         </div>
 

@@ -26,8 +26,8 @@ import {
 import { Empty, EmptyContent, EmptyDescription } from '@/components/ui/empty'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { FieldError } from '@/components/ui/field'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import type { BuddyPets } from '@/hooks/use-buddy-pets'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyPetImportResult, BuddyPetSummary } from '@/lib/backend'
@@ -191,14 +191,16 @@ export function BuddyAvatarSection({
   return (
     <PanelSection
       action={
-        <ToggleGroup
+        <SegmentedControl
           aria-label="Avatar"
           data-testid="buddy-avatar-kind"
+          options={(['still', 'alive'] as const).map((kind) => ({
+            value: kind,
+            label: BUDDY_AVATAR_KIND_LABELS[kind]
+          }))}
           size="sm"
-          type="single"
           value={view}
           onValueChange={(next) => {
-            if (next !== 'still' && next !== 'alive') return
             setActionError(null)
             onViewChange(next).catch((failure: unknown) =>
               setActionError(
@@ -206,13 +208,7 @@ export function BuddyAvatarSection({
               )
             )
           }}
-        >
-          {(['still', 'alive'] as const).map((kind) => (
-            <ToggleGroupItem key={kind} className="px-3 text-xs" value={kind}>
-              {BUDDY_AVATAR_KIND_LABELS[kind]}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
+        />
       }
       description="How your Buddy looks on stream and here. Still is your four images; Alive is a pet pack that looks around and reacts. Importing a pack is free; creating one is part of Premium."
       title="Avatar"

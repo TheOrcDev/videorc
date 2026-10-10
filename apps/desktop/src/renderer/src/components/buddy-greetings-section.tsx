@@ -17,7 +17,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useStudioCore } from '@/hooks/use-studio'
 import type {
   CohostActivityTemplateKind,
@@ -42,11 +42,11 @@ import {
 } from '@/lib/buddy-auto-chat-view'
 import { cn } from '@/lib/utils'
 
-const STATE_LABELS: Record<CohostUtteranceState, string> = {
-  talk: 'Talk',
-  laugh: 'Laugh',
-  think: 'Think'
-}
+const STATE_OPTIONS: SegmentedControlOption<CohostUtteranceState>[] = [
+  { value: 'talk', label: 'Talk' },
+  { value: 'laugh', label: 'Laugh' },
+  { value: 'think', label: 'Think' }
+]
 
 /**
  * Greetings (plan 164 S-D5, Buddy tab → Chat): the messages the Buddy posts
@@ -317,21 +317,13 @@ function GreetingEditor({
         <span className="text-xs tabular-nums text-muted-foreground">
           {draft.length}/{BUDDY_TEMPLATE_TEXT_MAX_CHARS}
         </span>
-        <ToggleGroup
+        <SegmentedControl
           aria-label="Avatar state"
+          options={STATE_OPTIONS}
           size="sm"
-          type="single"
           value={template.state}
-          onValueChange={(state) => {
-            if (state) onChange({ ...template, state: state as CohostUtteranceState })
-          }}
-        >
-          {(Object.keys(STATE_LABELS) as CohostUtteranceState[]).map((state) => (
-            <ToggleGroupItem key={state} className="px-2.5 text-xs" value={state}>
-              {STATE_LABELS[state]}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
+          onValueChange={(state) => onChange({ ...template, state })}
+        />
         <Select
           value={template.platform ?? 'any'}
           onValueChange={(platform) =>

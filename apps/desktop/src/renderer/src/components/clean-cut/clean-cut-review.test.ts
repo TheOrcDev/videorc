@@ -322,12 +322,10 @@ describe('Clean cut review (plan 119 S14)', () => {
       { startMs: 3_700, endMs: 5_900 },
       { startMs: 8_200, endMs: 9_000 }
     ])
-    const original = [...document.querySelectorAll('[role="tab"]')].find(
-      (tab) => tab.textContent === 'Original'
+    const original = [...document.querySelectorAll('[role="radio"]')].find(
+      (option) => option.textContent === 'Original'
     ) as HTMLElement
-    await act(async () => {
-      original.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-    })
+    await act(async () => original.click())
     expect(mocked.skipRanges).toEqual([])
   })
 

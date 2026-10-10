@@ -10,7 +10,7 @@ import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
 import type { CohostSettingsPatch, RemoveConfirmMode } from '@/lib/backend'
 import { COHOST_ACTS_ON_ASK_COPY } from '@/lib/cohost-view'
@@ -185,23 +185,18 @@ export function BuddyVoiceCommands({
               <FieldDescription>
                 {REMOVE_CONFIRM_DESCRIPTIONS[removeConfirm]} {YOUTUBE_ALWAYS_CONFIRMS}
               </FieldDescription>
-              <ToggleGroup
+              <SegmentedControl
                 className="w-fit"
                 disabled={locked}
                 id="buddy-remove-confirm"
+                options={REMOVE_CONFIRM_MODES.map((mode) => ({
+                  value: mode,
+                  label: REMOVE_CONFIRM_LABELS[mode]
+                }))}
                 size="sm"
-                type="single"
                 value={removeConfirm}
-                onValueChange={(value) => {
-                  if (value === 'confirm' || value === 'countdown') save({ removeConfirm: value })
-                }}
-              >
-                {REMOVE_CONFIRM_MODES.map((mode) => (
-                  <ToggleGroupItem key={mode} className="px-3 text-xs" value={mode}>
-                    {REMOVE_CONFIRM_LABELS[mode]}
-                  </ToggleGroupItem>
-                ))}
-              </ToggleGroup>
+                onValueChange={(next) => save({ removeConfirm: next })}
+              />
             </Field>
           </FieldGroup>
         </PanelSection>

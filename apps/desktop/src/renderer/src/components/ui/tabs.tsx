@@ -1,9 +1,10 @@
 import * as React from 'react'
-import { cva, type VariantProps } from 'class-variance-authority'
+import { type VariantProps } from 'class-variance-authority'
 import { Tabs as TabsPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
 import { useFieldLabelledBy } from '@/components/ui/field-context'
+import { tabsListVariants, tabsTriggerBaseClassName } from '@/components/ui/tabs-variants'
 
 function Tabs({
   className,
@@ -20,22 +21,8 @@ function Tabs({
   )
 }
 
-const tabsListVariants = cva(
-  'group/tabs-list inline-flex w-fit items-center justify-center rounded-row p-0.5 text-muted-foreground group-data-horizontal/tabs:h-control group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col group-data-vertical/tabs:p-1 data-[variant=line]:rounded-none',
-  {
-    variants: {
-      variant: {
-        // A glass segmented control (plan 050, D9): a recessed track.
-        default: 'bg-foreground/[0.05] ring-1 ring-border ring-inset',
-        line: 'gap-1 bg-transparent'
-      }
-    },
-    defaultVariants: {
-      variant: 'default'
-    }
-  }
-)
-
+// Tabs switch a view (a page or a pane). Choosing a value among 2–4 options is
+// `SegmentedControl`, which shares this look (plan 174 S1.7, D13).
 function TabsList({
   className,
   variant = 'default',
@@ -59,7 +46,7 @@ function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPr
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        "relative inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-chip border border-transparent px-3 text-[13px] font-medium whitespace-nowrap text-muted-foreground group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:px-3 group-data-vertical/tabs:py-1 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        tabsTriggerBaseClassName,
         // Selected = a raised glass chip with primary text, keyed off Radix's
         // data-state="active" (#392: a data-active variant never matches), so
         // the choice reads at a glance without leaning on the focus ring.
