@@ -9,12 +9,18 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Maintained caption transport contract gate. This launches the real debug app/backend,
 // points its Videorc API client at a local authenticated HTTP service, upgrades the real
-// Rust realtime client into a fake Gateway WebSocket, injects deterministic post-controls
-// PCM through a debug+env double-gated seam, and proves:
+// Rust streaming client into a fake Gateway streaming-transcription WebSocket (plan 175),
+// injects deterministic post-controls PCM through a debug+env double-gated seam, and
+// proves:
 //
-//   token mint -> configuration ack -> audio append -> partial/final -> canonical cue
-//   repeated provider completions upsert one cue
-//   assistant-response event -> immediate transcription-only chunk fallback
+//   lease mint (transport=transcription, language) -> transcription-stream.start with the
+//     server's providerOptions -> binary PCM -> partial/final -> canonical cue ->
+//     stop settles the lease
+//   repeated provider finals upsert one cue
+//   a short lease hands over to a second socket without falling back, and every lease
+//     minted (spare included) is settled
+//   a web deploy minting the retired voice dialect -> chunk fallback, no socket
+//   assistant-response part -> immediate transcription-only chunk fallback
 //   realtime-unavailable -> chunk upload fallback -> final caption
 //   first audio, then producer silence -> truthful blocked/stalled status
 //   Orcle listen-only (plan 068): captions off, cohost.start with listen on ->
@@ -77,16 +83,21 @@ try {
   const observed = collectCaptionEvents(backend)
 
   await proveRealtimeContract({ backend, observed, fake })
+  await proveLeaseHandover({ backend, observed, fake })
+  await proveVoiceDialectFallback({ backend, fake })
   await proveAssistantResponseFallback({ backend, observed, fake })
   await proveChunkFallback({ backend, observed, fake })
   const listenChunks = await proveListenOnlySession({ backend, observed, fake })
 
   console.log(
-    `Caption contract smoke PASS — realtime partial/final, repeated-completion upsert, ` +
+    `Caption contract smoke PASS — streaming partial/final, repeated-completion upsert, ` +
+      `lease mint/handover/settlement, voice-dialect fallback, ` +
       `assistant-response safety fallback, provider-ready truth, deterministic audio, ` +
       `chunk fallback with post-frame stall detection, ` +
       `and listen-only Orcle transcription without caption emits passed ` +
-      `(realtime appends=${fake.state.audioAppends}, chunk requests=${fake.state.chunkRequests}, ` +
+      `(audio frames=${fake.state.audioAppends}, sockets=${fake.state.realtimeConnections}, ` +
+      `leases=${fake.state.leases.length}, settlements=${fake.state.settlements.length}, ` +
+      `chunk requests=${fake.state.chunkRequests}, ` +
       `listen chunks=${listenChunks}).`
   )
 } finally {
@@ -152,18 +163,24 @@ async function proveRealtimeContract({ backend, observed, fake }) {
     throw new Error(`Realtime captions did not enter Starting: ${JSON.stringify(started)}`)
   }
 
-  await waitFor(() => fake.state.configurations.length === 1, timeoutMs, 'Gateway configuration')
+  await waitFor(() => fake.state.configurations.length === 1, timeoutMs, 'Gateway stream start')
+  const mint = fake.state.mintBodies.at(-1)
+  if (mint?.transport !== 'transcription' || mint.language !== 'en' || !mint.hasSessionClientId) {
+    throw new Error(`The lease mint did not name the streaming dialect: ${JSON.stringify(mint)}`)
+  }
   const configuration = fake.state.configurations[0]
   if (
-    configuration.type !== 'session.update' ||
-    configuration.session?.turn_detection?.create_response !== false ||
-    !configuration.session?.input_audio_transcription
+    configuration.type !== 'transcription-stream.start' ||
+    configuration.inputAudioFormat?.type !== 'audio/pcm' ||
+    configuration.inputAudioFormat?.rate !== 16_000 ||
+    !configuration.providerOptions?.gateway?.tags?.includes('feature:captions')
   ) {
     throw new Error(
-      `Realtime configuration did not suppress assistant responses or enable transcription: ` +
+      `The stream start did not carry the server's format and providerOptions: ` +
         JSON.stringify(configuration)
     )
   }
+  const lease = fake.state.leases.at(-1)
 
   const injected = await request(backend, timeoutMs, 'captions.test.inject-audio', {
     durationMs: 900
@@ -198,10 +215,109 @@ async function proveRealtimeContract({ backend, observed, fake }) {
     throw new Error(`Repeated completions created duplicate cues: ${JSON.stringify(snapshot)}`)
   }
   if (fake.state.audioAppends < 1 || fake.state.emptyAudioAppends > 0) {
-    throw new Error(`Realtime client did not append valid PCM: ${JSON.stringify(fake.state)}`)
+    throw new Error(`Streaming client did not send valid binary PCM: ${JSON.stringify(fake.state)}`)
   }
 
   await request(backend, timeoutMs, 'captions.stop', {})
+  await waitFor(
+    () => fake.state.settlements.some((settlement) => settlement.leaseId === lease.leaseId),
+    timeoutMs,
+    'lease settlement after stop'
+  )
+  const settlement = fake.state.settlements.find((entry) => entry.leaseId === lease.leaseId)
+  if (!(settlement.durationSeconds >= 1 && settlement.durationSeconds <= 5)) {
+    throw new Error(`The lease settled an implausible duration: ${JSON.stringify(settlement)}`)
+  }
+  if (fake.state.legacyUsageReports !== 0 || fake.state.invalidStarts !== 0) {
+    throw new Error(`Retired usage reports or bad stream starts: ${JSON.stringify(fake.state)}`)
+  }
+}
+
+// Plan 175 D2: each socket rides one lease. A 4 s lease hands over every 2 s,
+// so 5 s of speech crosses at least one handover; captions keep streaming
+// (no fallback), the first lease is settled with its audio, and once captions
+// stop every lease minted in the scenario, the pre-minted spare included, is
+// settled.
+async function proveLeaseHandover({ backend, observed, fake }) {
+  fake.state.realtimeAvailable = true
+  fake.state.leaseSeconds = 4
+  const connectionsBefore = fake.state.realtimeConnections
+  const leasesBefore = fake.state.leases.length
+  const started = await request(backend, timeoutMs, 'captions.start', { language: 'en' })
+  if (!started.sessionClientId) {
+    throw new Error(`Lease handover scenario returned no session id: ${JSON.stringify(started)}`)
+  }
+  await waitFor(
+    () => fake.state.realtimeConnections > connectionsBefore,
+    timeoutMs,
+    'first leased socket'
+  )
+  const injected = await request(backend, timeoutMs, 'captions.test.inject-audio', {
+    durationMs: 5_000
+  })
+  if ((injected.framesAccepted ?? 0) < 1) {
+    throw new Error(`Lease handover received no deterministic PCM: ${JSON.stringify(injected)}`)
+  }
+  await waitFor(
+    () => fake.state.realtimeConnections >= connectionsBefore + 2,
+    timeoutMs,
+    'a second socket after the lease handover'
+  )
+  const firstLease = fake.state.leases[leasesBefore].leaseId
+  await waitFor(
+    () => fake.state.settlements.some((settlement) => settlement.leaseId === firstLease),
+    timeoutMs,
+    'the first lease settled at handover'
+  )
+  const snapshot = await request(backend, timeoutMs, 'captions.test.snapshot', {})
+  if (snapshot.status?.transport !== 'realtime' || snapshot.status?.state !== 'listening') {
+    throw new Error(`A lease handover must not fall back: ${JSON.stringify(snapshot.status)}`)
+  }
+  const finals = observed.updates.filter(
+    (update) => update.sessionClientId === started.sessionClientId && update.kind === 'final'
+  )
+  if (finals.length < 2) {
+    throw new Error(`Captions did not continue across the handover: ${JSON.stringify(finals)}`)
+  }
+  if (fake.state.audioDoneFrames < 1) {
+    throw new Error('The handover did not end the first socket with audio-done.')
+  }
+
+  await request(backend, timeoutMs, 'captions.stop', {})
+  await waitFor(
+    () =>
+      fake.state.leases
+        .slice(leasesBefore)
+        .every((minted) =>
+          fake.state.settlements.some((settlement) => settlement.leaseId === minted.leaseId)
+        ),
+    timeoutMs,
+    'every handover lease settled after stop'
+  )
+  fake.state.leaseSeconds = 600
+}
+
+// A web deploy that predates plan 175 mints the voice-model token shape (no
+// `transport`). The desktop must not open that socket; it falls back to chunks.
+async function proveVoiceDialectFallback({ backend, fake }) {
+  fake.state.realtimeAvailable = true
+  fake.state.realtimeDialect = 'voice'
+  const upgradesBefore = fake.state.realtimeUpgradeAttempts
+  const started = await request(backend, timeoutMs, 'captions.start', { language: 'en' })
+  if (!started.sessionClientId) {
+    throw new Error(`Voice-dialect scenario returned no session id: ${JSON.stringify(started)}`)
+  }
+  await waitForSnapshot(
+    backend,
+    (candidate) =>
+      candidate.status?.transport === 'chunked' &&
+      candidate.status?.reasonCode === 'realtime-fallback'
+  )
+  if (fake.state.realtimeUpgradeAttempts !== upgradesBefore) {
+    throw new Error('The desktop opened a socket for the retired voice dialect.')
+  }
+  await request(backend, timeoutMs, 'captions.stop', {})
+  fake.state.realtimeDialect = 'transcription'
 }
 
 async function proveAssistantResponseFallback({ backend, observed, fake }) {

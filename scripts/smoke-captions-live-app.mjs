@@ -826,7 +826,9 @@ function safeFakeCounters(state) {
     emptyAudioAppends: state.emptyAudioAppends,
     chunkRequests: state.chunkRequests,
     chunkAudioInspections: state.chunkAudio.length,
-    usageReports: state.usageReports
+    usageReports: state.usageReports,
+    leases: state.leases.length,
+    settlements: state.settlements.length
   }
 }
 
