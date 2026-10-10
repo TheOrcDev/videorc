@@ -11,7 +11,7 @@ import {
   WORKSPACE_SHORTCUTS,
   WorkspaceNavContext,
   isStudioPanel,
-  isWorkspaceTab,
+  readWorkspaceNavigation,
   workspaceTabLabel,
   type StudioPanel,
   type WorkspaceTab
@@ -33,18 +33,9 @@ import {
 } from '@/lib/clean-cut-events'
 import { displayKeyGlyph } from '@/lib/platform'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
-import {
-  isBuddyTabId,
-  readLastBuddyTab,
-  writeLastBuddyTab,
-  type BuddyTabId
-} from '@/lib/buddy-tabs'
-import {
-  isSettingsTabId,
-  readLastSettingsTab,
-  writeLastSettingsTab,
-  type SettingsTabId
-} from '@/lib/settings-tabs'
+import { readLastBuddyTab, writeLastBuddyTab, type BuddyTabId } from '@/lib/buddy-tabs'
+import { readLastSettingsTab, writeLastSettingsTab, type SettingsTabId } from '@/lib/settings-tabs'
+import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 import { isActiveRecordingState } from '@/lib/format'
 import { sessionIsLive } from '../../../shared/capture-state'
 import {
@@ -370,22 +361,18 @@ export function AppShell(): ReactElement {
     return off
   }, [setActive])
 
+  // Pages opened from outside React arrive through `openWorkspaceTab`
+  // (plan 174, I-PAT-12); a page id that does not exist is dropped here.
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
-      const detail = (
-        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; buddyTab?: unknown }>
-      ).detail
-      const tab = detail?.tab
-      if (tab === 'settings') {
-        openSettings(isSettingsTabId(detail?.settingsTab) ? detail.settingsTab : undefined)
-      } else if (tab === 'ai') {
-        openBuddy(isBuddyTabId(detail?.buddyTab) ? detail.buddyTab : undefined)
-      } else if (isWorkspaceTab(tab)) {
-        setActive(tab)
-      }
+      const navigation = readWorkspaceNavigation((event as CustomEvent<unknown>).detail)
+      if (!navigation) return
+      if (navigation.tab === 'settings') openSettings(navigation.settingsTab)
+      else if (navigation.tab === 'ai') openBuddy(navigation.buddyTab)
+      else setActive(navigation.tab)
     }
-    window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-    return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
+    window.addEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
+    return () => window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
   }, [openBuddy, openSettings, setActive])
 
   // Plan 170 D18: `videorc://buddy` opens the Buddy tab (main focused the

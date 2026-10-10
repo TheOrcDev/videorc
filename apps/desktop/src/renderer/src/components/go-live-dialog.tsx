@@ -180,7 +180,7 @@ export function GoLiveConfirmationDialog({
                 <p className="text-sm">
                   This starts the saved event now, even if its scheduled time is earlier or later.
                   {hasInstantTargets &&
-                    'The instant-stream metadata below applies to other destinations.'}
+                    ' The instant-stream metadata below applies to other destinations.'}
                 </p>
               </div>
             ))}

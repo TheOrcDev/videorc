@@ -20,6 +20,7 @@ import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifyOnce } from '@/lib/notify-once'
 import { toast } from '@/lib/toast'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import type { StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
 import {
   youtubeBroadcastToast,
@@ -59,7 +60,6 @@ export function showYouTubeBudgetStep(
   })
 }
 
-const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
 const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
 
@@ -101,11 +101,7 @@ export function sessionRuntimeContinuationIsCurrent(
 }
 
 function openLibrary(sessionId?: string): void {
-  window.dispatchEvent(
-    new CustomEvent(WORKSPACE_NAVIGATE_EVENT, {
-      detail: { tab: 'library', sessionId: sessionId ?? null }
-    })
-  )
+  openWorkspaceTab('library', sessionId)
 }
 
 export function recordingFailurePresentation({

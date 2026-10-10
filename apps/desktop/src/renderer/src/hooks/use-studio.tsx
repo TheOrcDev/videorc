@@ -46,6 +46,7 @@ import {
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import { toast } from '@/lib/toast'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
 import {
@@ -528,7 +529,6 @@ type PlatformLifecycleSettlement = {
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX = 'prepared-platform:'
 const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
-const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
 const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
 const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
@@ -2453,13 +2453,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       chatSetupWarnedRef.current.warned.add(warning.id)
       toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat is not connected`, {
         description: warning.message,
-        action: {
-          label: 'Open Livestream',
-          onClick: () =>
-            window.dispatchEvent(
-              new CustomEvent(WORKSPACE_NAVIGATE_EVENT, { detail: { tab: 'streaming' } })
-            )
-        }
+        action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
       })
     }
   }, [liveChatSnapshot, captureConfig.streamEnabled])

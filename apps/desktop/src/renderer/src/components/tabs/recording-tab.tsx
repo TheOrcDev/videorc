@@ -1,21 +1,27 @@
-import { recordingResolutionSettings } from '@/lib/output-quality'
+import {
+  commitOutputField,
+  outputFieldLimits,
+  pickRecordingResolution,
+  type OutputNumberField
+} from '@/lib/output-quality'
 import { AlertIcon, SpinnerIcon, VideoFileIcon } from '@/components/icons'
-import type { ReactElement } from 'react'
+import { useId, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { VideoPreset } from '@/lib/backend'
+import type { VideoPreset, VideoSettings } from '@/lib/backend'
 import {
   layoutPresetOrientation,
   resolutionOptionsForOrientation,
-  videoProfileCompatibility
+  videoProfileCompatibility,
+  type LayoutOrientation
 } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { performanceCheckLine } from '@/lib/performance-check-line'
@@ -175,7 +181,7 @@ export function RecordingTab(): ReactElement {
                   key={preset.label}
                   type="button"
                   onClick={() =>
-                    patchVideo(recordingResolutionSettings(video, preset.width, preset.height))
+                    patchVideo(pickRecordingResolution(video, preset.width, preset.height))
                   }
                 >
                   <div>{preset.label}</div>
@@ -186,42 +192,22 @@ export function RecordingTab(): ReactElement {
           </Field>
 
           <div className="grid grid-cols-2 gap-4">
-            {/* Bounds are orientation-symmetric (a portrait canvas is the
-                transposed landscape one); patchVideo transposes any entry
-                that would contradict the Studio mode's orientation. */}
-            <NumberField
-              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
-              label="Width"
-              max={3840}
-              min={360}
-              value={video.width}
-              onChange={(width) => patchVideo({ width })}
-            />
-            <NumberField
-              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
-              label="Height"
-              max={3840}
-              min={360}
-              value={video.height}
-              onChange={(height) => patchVideo({ height })}
-            />
-            <NumberField
-              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
-              label="FPS"
-              max={60}
-              min={24}
-              value={video.fps}
-              onChange={(fps) => patchVideo({ fps })}
-            />
-            <NumberField
-              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
-              label="Bitrate kbps"
-              max={50000}
-              min={1000}
-              step={500}
-              value={video.bitrateKbps}
-              onChange={(bitrateKbps) => patchVideo({ bitrateKbps })}
-            />
+            {/* Each field commits once, when it is left or Enter is pressed
+                (plan 174, D-1); a size that contradicts the scene's
+                orientation is refused with the rule, never transposed. */}
+            {OUTPUT_NUMBER_FIELDS.map(({ field, label }) => (
+              <OutputNumberInput
+                disabled={
+                  isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
+                }
+                field={field}
+                key={field}
+                label={label}
+                orientation={orientation}
+                video={video}
+                onCommit={patchVideo}
+              />
+            ))}
           </div>
         </FieldGroup>
       </PanelSection>
@@ -239,35 +225,84 @@ function openExternalUrl(url: string): void {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-function NumberField({
+const OUTPUT_NUMBER_FIELDS: { field: OutputNumberField; label: string }[] = [
+  { field: 'width', label: 'Width' },
+  { field: 'height', label: 'Height' },
+  { field: 'fps', label: 'FPS' },
+  { field: 'bitrateKbps', label: 'Bitrate kbps' }
+]
+
+/**
+ * One typed Output value. Typing edits a local draft only; leaving the field
+ * or pressing Enter commits it once through `commitOutputField`, and Escape
+ * puts the setting back. A refused size keeps the setting and says why under
+ * the field.
+ */
+function OutputNumberInput({
+  field,
   label,
-  value,
-  min,
-  max,
-  step,
+  video,
+  orientation,
   disabled,
-  onChange
+  onCommit
 }: {
+  field: OutputNumberField
   label: string
-  value: number
-  min: number
-  max: number
-  step?: number
+  video: VideoSettings
+  orientation: LayoutOrientation
   disabled?: boolean
-  onChange: (value: number) => void
+  onCommit: (patch: Partial<VideoSettings>) => void
 }): ReactElement {
+  const id = useId()
+  const errorId = `${id}-error`
+  const [draft, setDraft] = useState<string | null>(null)
+  // A refusal belongs to the canvas it was refused against: once the size
+  // changes some other way (a resolution button), it no longer applies.
+  const canvas = `${video.width}x${video.height}`
+  const [refused, setRefused] = useState<{ message: string; canvas: string } | null>(null)
+  const refusal = refused?.canvas === canvas ? refused.message : null
+  const { min, max, step } = outputFieldLimits(field, orientation)
+
+  const commit = (): void => {
+    if (draft === null) return
+    setDraft(null)
+    if (disabled) return
+    const result = commitOutputField(video, field, draft, orientation)
+    setRefused(result.kind === 'refused' ? { message: result.message, canvas } : null)
+    if (result.kind === 'commit') onCommit(result.patch)
+  }
+
   return (
     <Field>
-      <FieldLabel>{label}</FieldLabel>
+      <FieldLabel htmlFor={id}>{label}</FieldLabel>
       <Input
+        aria-describedby={refusal ? errorId : undefined}
+        aria-invalid={refusal ? true : undefined}
         disabled={disabled}
+        id={id}
+        inputMode="numeric"
         max={max}
         min={min}
         step={step}
         type="number"
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
+        value={draft ?? String(video[field])}
+        onBlur={commit}
+        onChange={(event) => {
+          setDraft(event.target.value)
+          setRefused(null)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            commit()
+          } else if (event.key === 'Escape' && draft !== null) {
+            event.preventDefault()
+            setDraft(null)
+            setRefused(null)
+          }
+        }}
       />
+      {refusal ? <FieldError id={errorId}>{refusal}</FieldError> : null}
     </Field>
   )
 }
