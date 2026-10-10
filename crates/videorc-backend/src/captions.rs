@@ -1,10 +1,11 @@
 //! Live captions: taps microphone PCM off the native audio pipeline and
-//! transcribes it through videorc-web, streaming-first (S2): the gateway
-//! realtime WebSocket (voice-model input-audio transcription events, ~1s
-//! behind speech, partial + final updates) with automatic fallback to ~3s
-//! chunked batch transcription (`/api/ai/captions/chunks` → grok-stt)
-//! whenever streaming is unavailable. Transcripts broadcast to renderer
-//! clients and accumulate as chunk records for the SRT + burned copy.
+//! transcribes it through videorc-web, streaming-first (plan 175): the
+//! gateway's transcription-only WebSocket (partial + final transcript parts,
+//! well under a second behind speech, one metered lease per socket) with
+//! automatic fallback to ~3s chunked batch transcription
+//! (`/api/ai/captions/chunks` → grok-stt) whenever streaming is unavailable.
+//! Transcripts broadcast to renderer clients and accumulate as chunk records
+//! for the SRT + burned copy.
 
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -386,6 +387,37 @@ pub fn downmix_resample_to_16k_mono(samples: &[f32], channels: u16, sample_rate:
             (value.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
         })
         .collect()
+}
+
+/// 48kHz interleaved f32 → 24kHz mono s16le (2:1 with a 2-sample boxcar), for
+/// streaming models that document 24 kHz input (plan 175 D5). Same contract
+/// as the 16 kHz path: empty for unsupported input.
+pub fn downmix_resample_to_24k_mono(samples: &[f32], channels: u16, sample_rate: u32) -> Vec<i16> {
+    if sample_rate != 48_000 || !(1..=2).contains(&channels) {
+        return Vec::new();
+    }
+    let channels = usize::from(channels);
+    let mono: Vec<f32> = samples
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect();
+    mono.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|window| {
+            let value = (window[0] + window[1]) / 2.0;
+            (value.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
+        })
+        .collect()
+}
+
+/// Little-endian bytes of mono s16 PCM: one binary streaming frame.
+fn pcm_s16le_bytes(samples: &[i16]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
 }
 
 /// Minimal 44-byte-header PCM WAV (16kHz mono s16le) — what the caption route
@@ -5109,7 +5141,14 @@ impl CaptionTimeline {
 /// Provider-specific wire details live behind this adapter. The coordinator
 /// consumes stable caption-domain events and does not construct or inspect raw
 /// Gateway JSON anywhere else.
-struct GatewayRealtimeCaptionTransport;
+///
+/// Plan 175: the gateway's transcription-only streaming envelope (v1, from
+/// `@ai-sdk/provider-utils`): one `transcription-stream.start` TEXT frame,
+/// raw PCM s16le mono as BINARY frames of at most 64 KiB, then a
+/// `transcription-stream.audio-done` TEXT frame. Every server TEXT frame is
+/// one JSON stream part. A transcription model cannot start an assistant turn,
+/// which is what retired the July voice-model socket.
+struct GatewayStreamingCaptionTransport;
 
 #[derive(Debug, Clone, PartialEq)]
 enum RealtimeCaptionEvent {
@@ -5126,6 +5165,11 @@ enum RealtimeCaptionEvent {
         item_id: String,
         transcript: String,
     },
+    /// The provider's `finish` part: the socket's audio is fully transcribed
+    /// and `duration_seconds` is what the provider consumed (lease settlement).
+    Finished {
+        duration_seconds: Option<f64>,
+    },
     Error(RealtimeTransportFailure),
     AssistantResponse,
     Ignored,
@@ -5133,7 +5177,11 @@ enum RealtimeCaptionEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RealtimeFailureKind {
-    Terminal,
+    /// Streaming cannot work for this session (rejected token, unknown model,
+    /// bad request, policy close): continue on metered chunks. Entitlement and
+    /// quota are decided by the mint route, never by the socket.
+    Fallback,
+    /// Transient provider trouble: reconnect within the retry budget.
     Retryable,
 }
 
@@ -5243,187 +5291,264 @@ impl RealtimeAudioAdmissions {
     }
 }
 
-impl GatewayRealtimeCaptionTransport {
-    fn configure(language: Option<&str>) -> serde_json::Value {
-        let mut transcription = serde_json::json!({ "enabled": true });
-        if let Some(language) = language {
-            transcription["language"] = serde_json::Value::String(language.to_string());
+/// Marker subprotocol for gateway streaming-transcription handshakes.
+const GATEWAY_TRANSCRIPTION_SUBPROTOCOL: &str = "ai-gateway-transcription.v1";
+/// Envelope rule 7: clients keep binary audio frames at or under 64 KiB.
+const STREAMING_AUDIO_FRAME_MAX_BYTES: usize = 64 * 1024;
+/// When a provider omits `startSecond`, an utterance is anchored this far
+/// before the audio already sent when its first text arrived.
+const STREAMING_ANCHOR_LAG_MS: f64 = 600.0;
+
+impl GatewayStreamingCaptionTransport {
+    fn start_frame(rate: u32, provider_options: Option<&serde_json::Value>) -> serde_json::Value {
+        let mut frame = serde_json::json!({
+            "type": "transcription-stream.start",
+            "inputAudioFormat": { "type": "audio/pcm", "rate": rate },
+        });
+        if let Some(options) = provider_options.filter(|options| options.is_object()) {
+            frame["providerOptions"] = options.clone();
         }
-        serde_json::json!({
-            "type": "session.update",
-            "session": {
-                // `create_response: false` is the important guard: server VAD
-                // must transcribe input without
-                // starting an assistant turn whose audio Videorc would discard.
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": transcription,
-                "turn_detection": {
-                    "type": "server_vad",
-                    "create_response": false,
-                    "interrupt_response": false
-                }
-            }
-        })
+        frame
     }
 
-    fn append_audio(pcm_s16le: &[u8]) -> serde_json::Value {
-        use base64::Engine as _;
-        serde_json::json!({
-            "type": "input_audio_buffer.append",
-            "audio": base64::engine::general_purpose::STANDARD.encode(pcm_s16le),
-        })
+    fn audio_done_frame() -> serde_json::Value {
+        serde_json::json!({ "type": "transcription-stream.audio-done" })
     }
 
-    fn parse(event: &serde_json::Value) -> RealtimeCaptionEvent {
-        let event_type = event
+    /// The `Sec-WebSocket-Protocol` value: the server's list when it sent
+    /// one, else the marker plus the auth-carrying protocol.
+    fn subprotocols(token: &crate::videorc_api::CaptionRealtimeToken) -> String {
+        if token.subprotocols.is_empty() {
+            format!(
+                "{GATEWAY_TRANSCRIPTION_SUBPROTOCOL}, ai-gateway-auth.{}",
+                token.token
+            )
+        } else {
+            token.subprotocols.join(", ")
+        }
+    }
+}
+
+/// Turns one socket's stream parts into caption-domain events. The envelope
+/// has no VAD event, so the first text of an utterance synthesizes the
+/// `SpeechStarted` that anchors its item; `transcript-final` closes it. Item
+/// ids are namespaced per socket so reconnects and lease handovers never
+/// collide in the session's item map.
+struct StreamingCaptionDecoder {
+    socket_index: u64,
+    open_item: Option<String>,
+    /// Accumulated `transcript-delta` text of the open item.
+    open_text: String,
+    next_unnamed: u64,
+}
+
+impl StreamingCaptionDecoder {
+    fn new(socket_index: u64) -> Self {
+        Self {
+            socket_index,
+            open_item: None,
+            open_text: String::new(),
+            next_unnamed: 0,
+        }
+    }
+
+    /// `socket_ms_sent` is the audio already sent on this socket, the fallback
+    /// anchor when a part carries no `startSecond`.
+    fn decode(&mut self, part: &serde_json::Value, socket_ms_sent: f64) -> Vec<RealtimeCaptionEvent> {
+        let part_type = part
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        let raw_type = event
-            .get("rawType")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        match part_type {
+            "stream-start" | "response-metadata" => {
+                if let Some(warnings) = part
+                    .get("warnings")
+                    .and_then(serde_json::Value::as_array)
+                    .filter(|warnings| !warnings.is_empty())
+                {
+                    tracing::info!(
+                        warnings = %serde_json::Value::Array(warnings.clone()),
+                        "Streaming captions provider warnings."
+                    );
+                }
+                vec![RealtimeCaptionEvent::ConfigurationAcknowledged]
+            }
+            "transcript-partial" => {
+                let text = part_text(part, "text");
+                let (item_id, opened) = self.item_for(part);
+                let mut events = Vec::with_capacity(2);
+                if opened {
+                    events.push(self.speech_started(&item_id, part, socket_ms_sent));
+                }
+                if !text.is_empty() {
+                    self.open_text = text.clone();
+                    events.push(RealtimeCaptionEvent::Partial {
+                        item_id,
+                        transcript: text,
+                    });
+                }
+                events
+            }
+            "transcript-delta" => {
+                let delta = part
+                    .get("delta")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let (item_id, opened) = self.item_for(part);
+                let mut events = Vec::with_capacity(2);
+                if opened {
+                    events.push(self.speech_started(&item_id, part, socket_ms_sent));
+                }
+                self.open_text.push_str(delta);
+                let text = self.open_text.trim().to_string();
+                if !text.is_empty() {
+                    events.push(RealtimeCaptionEvent::Partial {
+                        item_id,
+                        transcript: text,
+                    });
+                }
+                events
+            }
+            "transcript-final" => {
+                let mut text = part_text(part, "text");
+                let (item_id, opened) = self.item_for(part);
+                if text.is_empty() {
+                    text = self.open_text.trim().to_string();
+                }
+                let mut events = Vec::with_capacity(2);
+                if opened {
+                    events.push(self.speech_started(&item_id, part, socket_ms_sent));
+                }
+                if !text.is_empty() {
+                    events.push(RealtimeCaptionEvent::Completed {
+                        item_id,
+                        transcript: text,
+                    });
+                }
+                self.open_item = None;
+                self.open_text.clear();
+                events
+            }
+            "finish" => vec![RealtimeCaptionEvent::Finished {
+                duration_seconds: part
+                    .get("durationInSeconds")
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|seconds| seconds.is_finite() && *seconds >= 0.0),
+            }],
+            "error" => vec![RealtimeCaptionEvent::Error(classify_stream_error(part))],
+            // The envelope's own parts that carry no caption meaning.
+            "raw" | "" => vec![RealtimeCaptionEvent::Ignored],
+            // Never expected from a transcription model: keep the July guard.
+            other if other.starts_with("response") || other.starts_with("conversation.") => {
+                vec![RealtimeCaptionEvent::AssistantResponse]
+            }
+            _ => vec![RealtimeCaptionEvent::Ignored],
+        }
+    }
 
-        if matches!(event_type, "session-updated" | "session.updated")
-            || (event_type == "custom" && raw_type == "session.updated")
-        {
-            return RealtimeCaptionEvent::ConfigurationAcknowledged;
-        }
-        if event_type == "error" || raw_type == "error" {
-            return RealtimeCaptionEvent::Error(parse_realtime_error(event));
-        }
-        if event_type.starts_with("response-") || raw_type.starts_with("response.") {
-            return RealtimeCaptionEvent::AssistantResponse;
-        }
-        if event_type == "speech-started" {
-            let item_id = realtime_item_id(event);
-            if item_id.is_empty() {
-                return RealtimeCaptionEvent::Ignored;
+    /// The item a text part belongs to, and whether this part opened it.
+    fn item_for(&mut self, part: &serde_json::Value) -> (String, bool) {
+        let provider_id = part
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty());
+        match provider_id {
+            Some(id) => {
+                let key = format!("stream{}:{id}", self.socket_index);
+                if self.open_item.as_deref() == Some(key.as_str()) {
+                    return (key, false);
+                }
+                // A new provider id abandons an unfinished one: the provider
+                // moved on to the next segment.
+                self.open_item = Some(key.clone());
+                self.open_text.clear();
+                (key, true)
             }
-            return RealtimeCaptionEvent::SpeechStarted {
-                item_id,
-                audio_start_ms: event
-                    .get("audioStartMs")
-                    .or_else(|| event.pointer("/raw/audio_start_ms"))
-                    .and_then(serde_json::Value::as_f64),
-            };
-        }
-        if event_type == "input-transcription-delta"
-            || (event_type == "custom"
-                && matches!(
-                    raw_type,
-                    "conversation.item.input_audio_transcription.updated"
-                        | "conversation.item.input_audio_transcription.delta"
-                ))
-        {
-            let item_id = realtime_item_id(event);
-            let transcript = realtime_transcript(event, true);
-            if item_id.is_empty() || transcript.is_empty() {
-                return RealtimeCaptionEvent::Ignored;
+            None => {
+                if let Some(open) = &self.open_item {
+                    return (open.clone(), false);
+                }
+                let key = format!("stream{}:u{}", self.socket_index, self.next_unnamed);
+                self.next_unnamed += 1;
+                self.open_item = Some(key.clone());
+                self.open_text.clear();
+                (key, true)
             }
-            return RealtimeCaptionEvent::Partial {
-                item_id,
-                transcript,
-            };
         }
-        if event_type == "input-transcription-completed"
-            || (event_type == "custom"
-                && raw_type == "conversation.item.input_audio_transcription.completed")
-        {
-            let item_id = realtime_item_id(event);
-            let transcript = realtime_transcript(event, false);
-            if item_id.is_empty() || transcript.is_empty() {
-                return RealtimeCaptionEvent::Ignored;
-            }
-            return RealtimeCaptionEvent::Completed {
-                item_id,
-                transcript,
-            };
+    }
+
+    fn speech_started(
+        &self,
+        item_id: &str,
+        part: &serde_json::Value,
+        socket_ms_sent: f64,
+    ) -> RealtimeCaptionEvent {
+        let start_ms = part
+            .get("startSecond")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .map(|seconds| seconds * 1000.0)
+            .unwrap_or_else(|| (socket_ms_sent - STREAMING_ANCHOR_LAG_MS).max(0.0));
+        RealtimeCaptionEvent::SpeechStarted {
+            item_id: item_id.to_string(),
+            audio_start_ms: Some(start_ms),
         }
-        RealtimeCaptionEvent::Ignored
     }
 }
 
-fn realtime_item_id(event: &serde_json::Value) -> String {
-    event
-        .get("itemId")
-        .or_else(|| event.get("item_id"))
-        .or_else(|| event.pointer("/raw/item_id"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn realtime_transcript(event: &serde_json::Value, allow_delta: bool) -> String {
-    event
-        .get("transcript")
-        .or_else(|| allow_delta.then(|| event.get("delta")).flatten())
-        .or_else(|| event.pointer("/raw/transcript"))
-        .or_else(|| allow_delta.then(|| event.pointer("/raw/delta")).flatten())
+fn part_text(part: &serde_json::Value, field: &str) -> String {
+    part.get(field)
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .trim()
         .to_string()
 }
 
-fn parse_realtime_error(event: &serde_json::Value) -> RealtimeTransportFailure {
-    let code = event
-        .pointer("/error/code")
-        .or_else(|| event.pointer("/raw/error/code"))
-        .or_else(|| event.get("code"))
+/// Gateway error parts carry `{ message, type }` with the gateway's error
+/// types (`authentication_error`, `forbidden`, `rate_limit_exceeded`,
+/// `model_not_found`, `invalid_request_error`, `failed_dependency`,
+/// `internal_server_error`). Configuration-shaped errors fall back to chunks;
+/// everything else is worth a reconnect.
+fn classify_stream_error(part: &serde_json::Value) -> RealtimeTransportFailure {
+    let error = part.get("error");
+    let error_type = error
+        .and_then(|error| error.get("type"))
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("realtime-provider-error")
-        .to_string();
-    let message = event
-        .pointer("/error/message")
-        .or_else(|| event.pointer("/raw/error/message"))
-        .or_else(|| event.get("message"))
-        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let message = error
+        .and_then(|error| error.get("message").and_then(serde_json::Value::as_str))
+        .or_else(|| error.and_then(serde_json::Value::as_str))
         .filter(|message| !message.trim().is_empty())
-        .unwrap_or("The realtime caption provider reported an error.")
+        .unwrap_or("The streaming caption provider reported an error.")
         .to_string();
-    let haystack = format!("{code} {message}").to_ascii_lowercase();
-    let terminal = [
-        "auth",
-        "unauthor",
-        "forbidden",
-        "permission",
-        "api_key",
-        "quota",
-        "rate_limit",
-        "billing",
-        "model_not_found",
-        "invalid_model",
-        "invalid_session",
-        "configuration",
-        "not_configured",
-    ]
-    .iter()
-    .any(|needle| haystack.contains(needle));
+    let fallback = matches!(
+        error_type,
+        "authentication_error" | "forbidden" | "model_not_found" | "invalid_request_error"
+    );
     RealtimeTransportFailure {
-        kind: if terminal {
-            RealtimeFailureKind::Terminal
+        kind: if fallback {
+            RealtimeFailureKind::Fallback
         } else {
             RealtimeFailureKind::Retryable
         },
-        code,
+        code: format!("captions-stream-{}", error_type.replace('_', "-")),
         message,
     }
 }
 
 fn classify_realtime_close(code: u16, reason: &str) -> RealtimeTransportFailure {
-    let terminal = matches!(code, 1008 | 4001 | 4003 | 4401 | 4403 | 4429);
+    let fallback = matches!(code, 1008 | 4001 | 4003 | 4400 | 4401 | 4403 | 4404);
     RealtimeTransportFailure {
-        kind: if terminal {
-            RealtimeFailureKind::Terminal
+        kind: if fallback {
+            RealtimeFailureKind::Fallback
         } else {
             RealtimeFailureKind::Retryable
         },
         code: format!("realtime-close-{code}"),
         message: if reason.trim().is_empty() {
-            format!("Realtime caption socket closed with code {code}.")
+            format!("Streaming caption socket closed with code {code}.")
         } else {
-            format!("Realtime caption socket closed with code {code}: {reason}")
+            format!("Streaming caption socket closed with code {code}: {reason}")
         },
     }
 }
@@ -5478,9 +5603,10 @@ fn pcm_has_speech_energy(samples: &[i16]) -> bool {
     mean_square.sqrt() >= 0.015
 }
 
-/// Streaming-first: try the gateway realtime transport (S2) and fall back to
-/// chunked transcription whenever streaming is unavailable — the caption
-/// session always works, streaming just makes it ~1s instead of ~4s.
+/// Streaming-first: try the gateway streaming-transcription socket (plan 175)
+/// and fall back to chunked transcription whenever streaming is unavailable.
+/// The caption session always works; streaming makes it well under a second
+/// behind speech instead of 3-5 s.
 async fn run_caption_session(mut session: CaptionSession) {
     let sequence = session.sequence.clone();
     let mut timeline = CaptionTimeline::new(session.capture_elapsed_seconds);
@@ -5586,19 +5712,146 @@ enum RealtimeOutcome {
     Terminal,
 }
 
-/// Streaming caption transport (S2): gateway realtime WebSocket against the
-/// voice model, using its input-audio transcription events (grok-stt itself
-/// is not WS-enabled on the gateway — spike 2026-07-02). Mic PCM streams up
-/// as pcm16 append events; `…transcription.updated` events become PARTIAL
-/// captions (~1s behind speech) and `…transcription.completed` become FINAL
-/// captions + chunk records for the SRT/burned copy. Tokens are short-lived
-/// (≤300s): the loop reminting + reconnects transparently, reports streamed
-/// seconds to the usage route, and degrades per R0 on socket loss.
+type StreamingCaptionSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type StreamingMint = tokio::task::JoinHandle<
+    std::result::Result<crate::videorc_api::CaptionRealtimeToken, CaptionChunkFailure>,
+>;
+
+/// A lease reserved by the mint route and not yet settled (plan 175 D2).
+#[derive(Debug, Clone, PartialEq)]
+struct ActiveStreamingLease {
+    id: String,
+    /// Audio sent on the lease's socket, the settlement when the provider
+    /// never reports a `finish` duration.
+    audio_ms: f64,
+    provider_seconds: Option<f64>,
+}
+
+impl ActiveStreamingLease {
+    fn from_token(token: &crate::videorc_api::CaptionRealtimeToken) -> Option<Self> {
+        token.lease_id.clone().map(|id| Self {
+            id,
+            audio_ms: 0.0,
+            provider_seconds: None,
+        })
+    }
+
+    fn settlement_seconds(&self) -> f64 {
+        self.provider_seconds
+            .unwrap_or(self.audio_ms / 1000.0)
+            .max(0.0)
+    }
+}
+
+/// Every lease the streaming task holds. Settling them is the task's last
+/// act whatever ended it, so a reserved lease is never left counting in full
+/// because of an early return.
+#[derive(Default)]
+struct StreamingLeases {
+    active: Option<ActiveStreamingLease>,
+    /// A token minted ahead of a lease handover, not yet connected.
+    spare: Option<crate::videorc_api::CaptionRealtimeToken>,
+    /// A handover mint still in flight.
+    pending: Option<StreamingMint>,
+}
+
+impl StreamingLeases {
+    fn settle_active(&mut self, session: &CaptionSession) {
+        if let Some(lease) = self.active.take() {
+            spawn_lease_settlement(session, lease.id.clone(), lease.settlement_seconds());
+        }
+    }
+
+    /// Settle everything: the active lease with what it consumed, and any
+    /// spare or in-flight handover lease with zero.
+    fn release(&mut self, session: &CaptionSession) {
+        self.settle_active(session);
+        if let Some(spare) = self.spare.take()
+            && let Some(id) = spare.lease_id
+        {
+            spawn_lease_settlement(session, id, 0.0);
+        }
+        if let Some(pending) = self.pending.take() {
+            let client = session.client.clone();
+            let bearer = session.bearer.clone();
+            let session_client_id = session.session_client_id.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(token)) = pending.await
+                    && let Some(id) = token.lease_id
+                    && let Err(error) = client
+                        .settle_caption_lease(&bearer, &session_client_id, &id, 0.0)
+                        .await
+                {
+                    tracing::warn!("Caption lease settlement failed: {error}");
+                }
+            });
+        }
+    }
+}
+
+fn spawn_lease_settlement(session: &CaptionSession, lease_id: String, seconds: f64) {
+    let client = session.client.clone();
+    let bearer = session.bearer.clone();
+    let session_client_id = session.session_client_id.clone();
+    tokio::spawn(async move {
+        if let Err(error) = client
+            .settle_caption_lease(&bearer, &session_client_id, &lease_id, seconds)
+            .await
+        {
+            tracing::warn!("Caption lease settlement failed: {error}");
+        }
+    });
+}
+
+/// How long one socket streams before handing over to the next lease: 30 s
+/// before the lease ends (never sooner than half the lease). A token without
+/// a lease keeps the four-minute refresh of the 300 s token TTL.
+fn streaming_handover_after(lease_seconds: Option<u64>) -> std::time::Duration {
+    let seconds = match lease_seconds {
+        Some(lease) if lease > 0 => lease.saturating_sub(30).max(lease / 2).max(1),
+        _ => 240,
+    };
+    std::time::Duration::from_secs(seconds)
+}
+
+/// The handover mint starts this long before the handover itself.
+const STREAMING_HANDOVER_PREMINT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Streaming caption transport (plan 175): the gateway's transcription-only
+/// WebSocket. Mic PCM streams up as binary frames; `transcript-partial` and
+/// `transcript-delta` parts become PARTIAL captions and `transcript-final`
+/// parts become FINAL captions + chunk records for the SRT/burned copy. Each
+/// socket rides one metered lease: before it runs out the loop mints the next
+/// one, ends the socket with `audio-done`, settles the lease with the
+/// provider's `finish` duration, and reconnects. Audio arriving during the
+/// handover waits in the tap channel, so none is lost. Any streaming failure
+/// degrades to chunked transcription per R0.
 async fn run_realtime_caption_session(
     session: &mut CaptionSession,
     sequence: &CaptionSequence,
     timeline: &mut CaptionTimeline,
     audio_heartbeat: &mut CaptionAudioHeartbeat,
+) -> RealtimeOutcome {
+    let mut leases = StreamingLeases::default();
+    let outcome = run_streaming_caption_sockets(
+        session,
+        sequence,
+        timeline,
+        audio_heartbeat,
+        &mut leases,
+    )
+    .await;
+    leases.release(session);
+    outcome
+}
+
+async fn run_streaming_caption_sockets(
+    session: &mut CaptionSession,
+    sequence: &CaptionSequence,
+    timeline: &mut CaptionTimeline,
+    audio_heartbeat: &mut CaptionAudioHeartbeat,
+    leases: &mut StreamingLeases,
 ) -> RealtimeOutcome {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -5610,14 +5863,14 @@ async fn run_realtime_caption_session(
     let mut items: std::collections::HashMap<String, RealtimeCaptionItem> =
         std::collections::HashMap::new();
     // Recording-epoch anchoring (same idea as chunked): mono ms sent since the
-    // capture pipeline (re)started. speech_started's audio_start_ms is
-    // relative to the WS stream, so remember the stream ms at each anchor.
+    // capture pipeline (re)started. Part `startSecond`s are relative to the
+    // socket, so remember the stream ms at each anchor.
     let mut ms_sent: f64 = 0.0;
     let mut ms_at_anchor: f64 = 0.0;
     let mut last_frame_timestamp: Option<u64> = None;
-    let mut unreported_ms: f64 = 0.0;
     let mut reconnecting = false;
     let mut capture_epoch = session.state.captions.lock().await.capture_epoch;
+    let mut socket_index: u64 = 0;
 
     'reconnect: loop {
         if session.stop.load(Ordering::Relaxed) {
@@ -5625,11 +5878,20 @@ async fn run_realtime_caption_session(
         }
 
         let socket_admission = session.admitted_orcle_audio().await;
-        let token = match session
-            .client
-            .mint_caption_realtime_token(&session.bearer, &session.session_client_id)
-            .await
-        {
+        let minted = match leases.spare.take() {
+            Some(token) => Ok(token),
+            None => {
+                session
+                    .client
+                    .mint_caption_realtime_token(
+                        &session.bearer,
+                        &session.session_client_id,
+                        session.language.as_deref(),
+                    )
+                    .await
+            }
+        };
+        let token = match minted {
             Ok(token) => token,
             Err(CaptionChunkFailure::Terminal { code, message }) => {
                 tracing::warn!("Live captions stopped ({code}): {message}");
@@ -5647,7 +5909,7 @@ async fn run_realtime_caption_session(
             }
             Err(CaptionChunkFailure::Transient { code, message }) => {
                 if let Some(code) = code.as_deref() {
-                    tracing::warn!(reason_code = code, "Realtime caption token request failed.");
+                    tracing::warn!(reason_code = code, "Streaming caption token request failed.");
                 }
                 if !ever_connected {
                     return RealtimeOutcome::Fallback(message);
@@ -5660,25 +5922,41 @@ async fn run_realtime_caption_session(
                 continue 'reconnect;
             }
         };
+        if !token.speaks_streaming_transcription() {
+            // A web deploy that still mints the retired voice-model socket.
+            return RealtimeOutcome::Fallback(
+                "the caption service offered the retired realtime voice transport".to_string(),
+            );
+        }
+        leases.settle_active(session);
+        leases.active = ActiveStreamingLease::from_token(&token);
+        let input_rate = token.input_rate();
+        if !matches!(input_rate, 16_000 | 24_000) {
+            return RealtimeOutcome::Fallback(format!(
+                "streaming captions asked for unsupported {input_rate} Hz audio"
+            ));
+        }
 
         let mut request = match token.url.as_str().into_client_request() {
             Ok(request) => request,
-            Err(error) => return RealtimeOutcome::Fallback(format!("bad realtime url: {error}")),
+            Err(error) => {
+                return RealtimeOutcome::Fallback(format!("bad streaming caption url: {error}"));
+            }
         };
-        let protocols = format!("ai-gateway-realtime.v1, ai-gateway-auth.{}", token.token);
-        match protocols.parse() {
+        match GatewayStreamingCaptionTransport::subprotocols(&token).parse() {
             Ok(value) => {
                 request
                     .headers_mut()
                     .insert("Sec-WebSocket-Protocol", value);
             }
-            Err(_) => return RealtimeOutcome::Fallback("bad realtime token".to_string()),
+            Err(_) => return RealtimeOutcome::Fallback("bad streaming caption token".to_string()),
         }
 
         let (mut ws, _) = match tokio_tungstenite::connect_async(request).await {
             Ok(connected) => connected,
             Err(error) => {
-                let message = format!("realtime connect failed: {error}");
+                leases.settle_active(session);
+                let message = format!("streaming caption connect failed: {error}");
                 if !ever_connected {
                     return RealtimeOutcome::Fallback(message);
                 }
@@ -5691,15 +5969,20 @@ async fn run_realtime_caption_session(
             }
         };
         ever_connected = true;
+        socket_index += 1;
         tracing::info!("Streaming captions connected ({}).", token.model);
 
-        let configure = GatewayRealtimeCaptionTransport::configure(session.language.as_deref());
+        let start = GatewayStreamingCaptionTransport::start_frame(
+            input_rate,
+            token.provider_options.as_ref(),
+        );
         if ws
-            .send(Message::Text(configure.to_string().into()))
+            .send(Message::Text(start.to_string().into()))
             .await
             .is_err()
         {
-            let message = "realtime socket closed while configuring captions";
+            leases.settle_active(session);
+            let message = "streaming caption socket closed while starting";
             let Some(wait) = retry_budget.retry_delay() else {
                 return RealtimeOutcome::Fallback(message.to_string());
             };
@@ -5718,39 +6001,44 @@ async fn run_realtime_caption_session(
         }
         let connected_at = tokio::time::Instant::now();
         let socket_audio_base_ms = ms_sent;
+        let mut decoder = StreamingCaptionDecoder::new(socket_index);
         let mut provider_ready = false;
         let mut listening_published = false;
         let mut published_listen_epoch = None;
         let mut audio_admissions = RealtimeAudioAdmissions::default();
         let mut speech_watchdog_since: Option<tokio::time::Instant> = None;
 
-        // Refresh well before the token expires (60s of headroom against the
-        // server-reported expiry, else 240s for the ≤300s default TTL).
-        let refresh_in = token
-            .expires_at
-            .map(|expires_at| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|since| since.as_secs())
-                    .unwrap_or(0);
-                expires_at
-                    .saturating_sub(now)
-                    .saturating_sub(60)
-                    .clamp(30, 600)
-            })
-            .unwrap_or(240);
-        let refresh_at = tokio::time::Instant::now() + std::time::Duration::from_secs(refresh_in);
-        let mut report_tick = tokio::time::interval(std::time::Duration::from_secs(60));
-        report_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        report_tick.reset();
+        let handover_at = connected_at + streaming_handover_after(token.lease_seconds);
+        let premint_at = handover_at
+            .checked_sub(STREAMING_HANDOVER_PREMINT)
+            .unwrap_or(connected_at)
+            .max(connected_at);
+        let mut premint_started = false;
         let mut watchdog_tick = tokio::time::interval(std::time::Duration::from_millis(250));
         watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         watchdog_tick.reset();
 
+        // One streaming socket's events through the shared caption path.
+        macro_rules! socket_timeline {
+            ($admission:expr) => {
+                RealtimeCaptionTimeline {
+                    capture_base_seconds: timeline.capture_base_seconds,
+                    ms_at_anchor,
+                    socket_audio_base_ms,
+                    ms_sent,
+                    capture_epoch,
+                    admission: $admission,
+                }
+            };
+        }
+
         loop {
             if session.stop.load(Ordering::Relaxed) {
+                // Explicit stop: discard anything still in flight (privacy),
+                // end the socket and settle with the audio actually sent.
+                let audio_done = GatewayStreamingCaptionTransport::audio_done_frame();
+                let _ = ws.send(Message::Text(audio_done.to_string().into())).await;
                 let _ = ws.send(Message::Close(None)).await;
-                report_usage(session, &mut unreported_ms).await;
                 return RealtimeOutcome::Ended;
             }
             tokio::select! {
@@ -5765,47 +6053,38 @@ async fn run_realtime_caption_session(
                                 failure,
                             )
                             .await;
-                            report_usage(session, &mut unreported_ms).await;
                             return RealtimeOutcome::Terminal;
                         }
-                        // Server VAD owns commit. The provider documents manual
-                        // input_audio_buffer.commit as invalid while VAD is on,
-                        // so simply keep reading for a bounded final-transcript
-                        // grace after the post-controls audio bus closes.
-                        let drain_until = tokio::time::Instant::now() + CAPTION_FINAL_TRANSCRIPT_GRACE;
-                        while let Ok(Some(Ok(Message::Text(text)))) =
-                            tokio::time::timeout_at(drain_until, ws.next()).await
-                        {
-                            let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) else {
-                                continue;
-                            };
-                            let parsed = GatewayRealtimeCaptionTransport::parse(&event);
-                            if matches!(
-                                &parsed,
-                                RealtimeCaptionEvent::SpeechStarted { .. }
+                        // The post-controls audio bus closed: end the audio so
+                        // the provider finalizes, then read finals for a
+                        // bounded grace.
+                        let grace_until = tokio::time::Instant::now() + CAPTION_FINAL_TRANSCRIPT_GRACE;
+                        let mut drained = finish_streaming_socket(&mut ws, grace_until).await;
+                        for part in drained.drain(..) {
+                            for event in decoder.decode(&part, ms_sent - socket_audio_base_ms) {
+                                match &event {
+                                    RealtimeCaptionEvent::Finished { duration_seconds } => {
+                                        if let Some(lease) = leases.active.as_mut() {
+                                            lease.provider_seconds = *duration_seconds;
+                                        }
+                                    }
+                                    RealtimeCaptionEvent::SpeechStarted { .. }
                                     | RealtimeCaptionEvent::Partial { .. }
-                                    | RealtimeCaptionEvent::Completed { .. }
-                            ) {
-                                let admission = audio_admissions.for_event(&parsed, &items, socket_admission);
-                                handle_realtime_event(
-                                    session,
-                                    parsed,
-                                    &mut items,
-                                    sequence,
-                                    RealtimeCaptionTimeline {
-                                        capture_base_seconds: timeline.capture_base_seconds,
-                                        ms_at_anchor,
-                                        socket_audio_base_ms,
-                                        ms_sent,
-                                        capture_epoch,
-                                        admission,
-                                    },
-                                )
-                                .await;
+                                    | RealtimeCaptionEvent::Completed { .. } => {
+                                        let admission = audio_admissions.for_event(&event, &items, socket_admission);
+                                        handle_realtime_event(
+                                            session,
+                                            event,
+                                            &mut items,
+                                            sequence,
+                                            socket_timeline!(admission),
+                                        )
+                                        .await;
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
-                        let _ = ws.send(Message::Close(None)).await;
-                        report_usage(session, &mut unreported_ms).await;
                         return RealtimeOutcome::Ended;
                     };
                     audio_heartbeat.record_frame(std::time::Instant::now());
@@ -5845,19 +6124,32 @@ async fn run_realtime_caption_session(
                     let frame_seconds = mono.len() as f64 / f64::from(CAPTION_SAMPLE_RATE);
                     audio_admissions.record(frame_seconds * 1000.0, input_admission);
                     ms_sent += frame_seconds * 1000.0;
-                    unreported_ms += frame_seconds * 1000.0;
-                    timeline.advance_seconds(frame_seconds);
-                    let mut bytes = Vec::with_capacity(mono.len() * 2);
-                    for sample in &mono {
-                        bytes.extend_from_slice(&sample.to_le_bytes());
+                    if let Some(lease) = leases.active.as_mut() {
+                        lease.audio_ms += frame_seconds * 1000.0;
                     }
-                    let event = GatewayRealtimeCaptionTransport::append_audio(&bytes);
-                    if ws.send(Message::Text(event.to_string().into())).await.is_err() {
-                        if retry_budget.retry_delay().is_none() {
-                            report_usage(session, &mut unreported_ms).await;
-                            return RealtimeOutcome::Fallback("realtime socket repeatedly dropped".to_string());
+                    timeline.advance_seconds(frame_seconds);
+                    let wire = if input_rate == 24_000 {
+                        pcm_s16le_bytes(&downmix_resample_to_24k_mono(
+                            &frame.samples,
+                            frame.channels,
+                            frame.sample_rate,
+                        ))
+                    } else {
+                        pcm_s16le_bytes(&mono)
+                    };
+                    let mut send_failed = false;
+                    for audio in wire.chunks(STREAMING_AUDIO_FRAME_MAX_BYTES) {
+                        if ws.send(Message::Binary(audio.to_vec().into())).await.is_err() {
+                            send_failed = true;
+                            break;
                         }
-                        signal_reconnecting(session, &mut reconnecting, "realtime socket dropped").await;
+                    }
+                    if send_failed {
+                        leases.settle_active(session);
+                        if retry_budget.retry_delay().is_none() {
+                            return RealtimeOutcome::Fallback("streaming caption socket repeatedly dropped".to_string());
+                        }
+                        signal_reconnecting(session, &mut reconnecting, "streaming caption socket dropped").await;
                         continue 'reconnect;
                     }
                     publish_listening_if_ready(
@@ -5873,19 +6165,19 @@ async fn run_realtime_caption_session(
                 }
                 maybe_message = ws.next() => {
                     let Some(message) = maybe_message else {
+                        leases.settle_active(session);
                         if retry_budget.retry_delay().is_none() {
-                            report_usage(session, &mut unreported_ms).await;
-                            return RealtimeOutcome::Fallback("realtime socket repeatedly closed".to_string());
+                            return RealtimeOutcome::Fallback("streaming caption socket repeatedly closed".to_string());
                         }
-                        signal_reconnecting(session, &mut reconnecting, "realtime socket closed").await;
+                        signal_reconnecting(session, &mut reconnecting, "streaming caption socket closed").await;
                         continue 'reconnect;
                     };
                     let message = match message {
                         Ok(message) => message,
                         Err(error) => {
-                            let reason = format!("realtime socket error: {error}");
+                            leases.settle_active(session);
+                            let reason = format!("streaming caption socket error: {error}");
                             if retry_budget.retry_delay().is_none() {
-                                report_usage(session, &mut unreported_ms).await;
                                 return RealtimeOutcome::Fallback(reason);
                             }
                             signal_reconnecting(session, &mut reconnecting, &reason).await;
@@ -5893,125 +6185,155 @@ async fn run_realtime_caption_session(
                         }
                     };
                     if let Message::Close(frame) = message {
+                        leases.settle_active(session);
                         let failure = frame
                             .map(|frame| classify_realtime_close(u16::from(frame.code), &frame.reason))
                             .unwrap_or_else(|| classify_realtime_close(1006, "socket ended without a close frame"));
-                        if failure.kind == RealtimeFailureKind::Terminal {
-                            let outcome = handle_terminal_failure(
-                                session,
-                                &failure.code,
-                                &failure.message,
-                                CaptionsTransport::Realtime,
-                                TerminalOrigin::RealtimeSocket,
-                            )
-                            .await;
-                            report_usage(session, &mut unreported_ms).await;
-                            return realtime_terminal_outcome(outcome, &failure.message);
+                        if failure.kind == RealtimeFailureKind::Fallback {
+                            return RealtimeOutcome::Fallback(failure.message);
                         }
                         if retry_budget.retry_delay().is_none() {
-                            report_usage(session, &mut unreported_ms).await;
                             return RealtimeOutcome::Fallback(failure.message);
                         }
                         signal_reconnecting(session, &mut reconnecting, &failure.message).await;
                         continue 'reconnect;
                     }
                     let Message::Text(text) = message else { continue };
-                    let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    let Ok(part) = serde_json::from_str::<serde_json::Value>(&text) else {
                         continue;
                     };
-                    let parsed = GatewayRealtimeCaptionTransport::parse(&event);
-                    match &parsed {
-                        RealtimeCaptionEvent::ConfigurationAcknowledged => {
-                            provider_ready = true;
-                            retry_budget.observe(
-                                RealtimeHealthEvidence::ConfigurationAcknowledged,
-                            );
-                        }
-                        RealtimeCaptionEvent::SpeechStarted { .. } => {
-                            // Receiving VAD proves the configured input pipeline
-                            // is active even if an older provider omits the ack.
-                            provider_ready = true;
-                            retry_budget.observe(RealtimeHealthEvidence::SpeechStarted);
-                            speech_watchdog_since.get_or_insert_with(tokio::time::Instant::now);
-                        }
-                        RealtimeCaptionEvent::Partial { .. }
-                        | RealtimeCaptionEvent::Completed { .. } => {
-                            provider_ready = true;
-                            speech_watchdog_since = None;
-                            retry_budget.observe(RealtimeHealthEvidence::Transcript);
-                        }
-                        RealtimeCaptionEvent::Error(failure) => {
-                            if failure.kind == RealtimeFailureKind::Terminal {
-                                let outcome = handle_terminal_failure(
-                                    session,
-                                    &failure.code,
-                                    &failure.message,
-                                    CaptionsTransport::Realtime,
-                                    TerminalOrigin::RealtimeSocket,
-                                )
-                                .await;
-                                report_usage(session, &mut unreported_ms).await;
-                                return realtime_terminal_outcome(outcome, &failure.message);
+                    for event in decoder.decode(&part, ms_sent - socket_audio_base_ms) {
+                        match &event {
+                            RealtimeCaptionEvent::ConfigurationAcknowledged => {
+                                provider_ready = true;
+                                retry_budget.observe(
+                                    RealtimeHealthEvidence::ConfigurationAcknowledged,
+                                );
                             }
-                            report_usage(session, &mut unreported_ms).await;
-                            return RealtimeOutcome::Fallback(failure.message.clone());
+                            RealtimeCaptionEvent::SpeechStarted { .. } => {
+                                provider_ready = true;
+                                retry_budget.observe(RealtimeHealthEvidence::SpeechStarted);
+                            }
+                            RealtimeCaptionEvent::Partial { .. }
+                            | RealtimeCaptionEvent::Completed { .. } => {
+                                provider_ready = true;
+                                speech_watchdog_since = None;
+                                retry_budget.observe(RealtimeHealthEvidence::Transcript);
+                            }
+                            RealtimeCaptionEvent::Finished { duration_seconds } => {
+                                // The provider ended this socket on its own; its
+                                // close follows and reconnects.
+                                if let Some(lease) = leases.active.as_mut() {
+                                    lease.provider_seconds = *duration_seconds;
+                                }
+                            }
+                            RealtimeCaptionEvent::Error(failure) => {
+                                leases.settle_active(session);
+                                let _ = ws.send(Message::Close(None)).await;
+                                if failure.kind == RealtimeFailureKind::Retryable
+                                    && retry_budget.retry_delay().is_some()
+                                {
+                                    signal_reconnecting(session, &mut reconnecting, &failure.message).await;
+                                    continue 'reconnect;
+                                }
+                                return RealtimeOutcome::Fallback(failure.message.clone());
+                            }
+                            RealtimeCaptionEvent::AssistantResponse => {
+                                let message = "Streaming caption provider sent an assistant response; switching to transcription-only fallback.";
+                                session.emit_health(
+                                    crate::protocol::HealthLevel::Warn,
+                                    "captions-assistant-response-generated",
+                                    message,
+                                );
+                                let _ = ws.send(Message::Close(None)).await;
+                                return RealtimeOutcome::Fallback(message.to_string());
+                            }
+                            RealtimeCaptionEvent::Ignored => {}
                         }
-                        RealtimeCaptionEvent::AssistantResponse => {
-                            let message = "Realtime caption model generated an assistant response; switching to transcription-only fallback.";
-                            session.emit_health(
-                                crate::protocol::HealthLevel::Warn,
-                                "captions-assistant-response-generated",
-                                message,
-                            );
-                            report_usage(session, &mut unreported_ms).await;
-                            return RealtimeOutcome::Fallback(message.to_string());
-                        }
-                        RealtimeCaptionEvent::Ignored => {}
+                        let admission = audio_admissions.for_event(&event, &items, socket_admission);
+                        handle_realtime_event(
+                            session,
+                            event,
+                            &mut items,
+                            sequence,
+                            socket_timeline!(admission),
+                        )
+                        .await;
+                        publish_listening_if_ready(
+                            session,
+                            provider_ready,
+                            audio_heartbeat.has_seen_frame(),
+                            &mut listening_published,
+                            admission.listen_epoch,
+                            &mut published_listen_epoch,
+                            token.remaining_seconds,
+                        )
+                        .await;
                     }
-                    let admission = audio_admissions.for_event(&parsed, &items, socket_admission);
-                    handle_realtime_event(
-                        session,
-                        parsed,
-                        &mut items,
-                        sequence,
-                        RealtimeCaptionTimeline {
-                            capture_base_seconds: timeline.capture_base_seconds,
-                            ms_at_anchor,
-                            socket_audio_base_ms,
-                            ms_sent,
-                            capture_epoch,
-                            admission,
-                        },
-                    )
-                    .await;
-                    publish_listening_if_ready(
-                        session,
-                        provider_ready,
-                        audio_heartbeat.has_seen_frame(),
-                        &mut listening_published,
-                        admission.listen_epoch,
-                        &mut published_listen_epoch,
-                        token.remaining_seconds,
-                    )
-                    .await;
                 }
-                _ = tokio::time::sleep_until(refresh_at) => {
-                    // Token expiring: reconnect with a fresh one (audio pauses
-                    // for the handshake, ~100-300ms).
-                    let _ = ws.send(Message::Close(None)).await;
+                _ = tokio::time::sleep_until(premint_at), if !premint_started => {
+                    premint_started = true;
+                    let client = session.client.clone();
+                    let bearer = session.bearer.clone();
+                    let session_client_id = session.session_client_id.clone();
+                    let language = session.language.clone();
+                    leases.pending = Some(tokio::spawn(async move {
+                        client
+                            .mint_caption_realtime_token(&bearer, &session_client_id, language.as_deref())
+                            .await
+                    }));
+                }
+                _ = tokio::time::sleep_until(handover_at) => {
+                    // Lease handover: finish this socket's audio and finals,
+                    // settle it, and continue on the next lease. Frames that
+                    // arrive meanwhile wait in the tap channel.
+                    if let Some(pending) = leases.pending.take() {
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), pending).await {
+                            Ok(Ok(Ok(next))) => leases.spare = Some(next),
+                            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                                // The handover mints again synchronously and
+                                // reports any terminal answer there.
+                            }
+                        }
+                    }
+                    let grace_until = tokio::time::Instant::now() + CAPTION_FINAL_TRANSCRIPT_GRACE;
+                    let mut drained = finish_streaming_socket(&mut ws, grace_until).await;
+                    for part in drained.drain(..) {
+                        for event in decoder.decode(&part, ms_sent - socket_audio_base_ms) {
+                            match &event {
+                                RealtimeCaptionEvent::Finished { duration_seconds } => {
+                                    if let Some(lease) = leases.active.as_mut() {
+                                        lease.provider_seconds = *duration_seconds;
+                                    }
+                                }
+                                RealtimeCaptionEvent::SpeechStarted { .. }
+                                | RealtimeCaptionEvent::Partial { .. }
+                                | RealtimeCaptionEvent::Completed { .. } => {
+                                    let admission = audio_admissions.for_event(&event, &items, socket_admission);
+                                    handle_realtime_event(
+                                        session,
+                                        event,
+                                        &mut items,
+                                        sequence,
+                                        socket_timeline!(admission),
+                                    )
+                                    .await;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    leases.settle_active(session);
+                    tracing::info!("Streaming captions handed over to a new lease.");
                     continue 'reconnect;
-                }
-                _ = report_tick.tick() => {
-                    report_usage(session, &mut unreported_ms).await;
                 }
                 _ = watchdog_tick.tick() => {
                     let elapsed = connected_at.elapsed();
                     audio_heartbeat.refresh_from_caption_bus();
                     if !provider_ready && elapsed >= REALTIME_CONFIG_ACK_TIMEOUT {
                         let _ = ws.send(Message::Close(None)).await;
-                        report_usage(session, &mut unreported_ms).await;
                         return RealtimeOutcome::Fallback(
-                            "realtime provider did not acknowledge the caption configuration".to_string(),
+                            "streaming caption provider did not start the transcription stream".to_string(),
                         );
                     }
                     if provider_ready
@@ -6031,29 +6353,66 @@ async fn run_realtime_caption_session(
                                 failure,
                             )
                             .await;
-                            report_usage(session, &mut unreported_ms).await;
                             return RealtimeOutcome::Terminal;
                         }
                         let _ = ws.send(Message::Close(None)).await;
-                        report_usage(session, &mut unreported_ms).await;
                         return RealtimeOutcome::Ended;
                     }
                     if speech_watchdog_since
                         .is_some_and(|started| started.elapsed() >= TRANSCRIPT_WATCHDOG_TIMEOUT)
                     {
-                        let message = "speech reached the realtime socket but no transcript arrived";
+                        let message = "speech reached the streaming socket but no transcript arrived";
                         session.emit_health(
                             crate::protocol::HealthLevel::Warn,
                             "captions-transcript-watchdog",
-                            "Realtime captions detected speech without a transcript; switching to chunked fallback.",
+                            "Streaming captions detected speech without a transcript; switching to chunked fallback.",
                         );
-                        report_usage(session, &mut unreported_ms).await;
+                        let _ = ws.send(Message::Close(None)).await;
                         return RealtimeOutcome::Fallback(message.to_string());
                     }
                 }
             }
         }
     }
+}
+
+/// End one socket's audio: send `audio-done`, collect every text part until
+/// the provider's `finish`, its close, or the grace deadline, then close.
+/// The caller decodes the parts, so finals still reach the captions.
+async fn finish_streaming_socket(
+    ws: &mut StreamingCaptionSocket,
+    grace_until: tokio::time::Instant,
+) -> Vec<serde_json::Value> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    let mut parts = Vec::new();
+    let audio_done = GatewayStreamingCaptionTransport::audio_done_frame();
+    if ws
+        .send(Message::Text(audio_done.to_string().into()))
+        .await
+        .is_err()
+    {
+        return parts;
+    }
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(grace_until, ws.next()).await {
+        let Message::Text(text) = message else {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+            continue;
+        };
+        let Ok(part) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let finished = part.get("type").and_then(serde_json::Value::as_str) == Some("finish");
+        parts.push(part);
+        if finished {
+            break;
+        }
+    }
+    let _ = ws.send(Message::Close(None)).await;
+    parts
 }
 
 async fn signal_reconnecting(session: &CaptionSession, reconnecting: &mut bool, message: &str) {
@@ -6335,25 +6694,6 @@ pub async fn publish_terminal_caption_failure_for_test(state: &AppState) {
     publish_blocked_presentation(state, status).await;
 }
 
-async fn report_usage(session: &CaptionSession, unreported_ms: &mut f64) {
-    let seconds = (*unreported_ms / 1000.0).floor() as u64;
-    if seconds == 0 {
-        return;
-    }
-    *unreported_ms -= seconds as f64 * 1000.0;
-    let client = session.client.clone();
-    let bearer = session.bearer.clone();
-    let session_client_id = session.session_client_id.clone();
-    tokio::spawn(async move {
-        if let Err(error) = client
-            .report_caption_usage(&bearer, &session_client_id, seconds)
-            .await
-        {
-            tracing::warn!("Caption usage report failed: {error}");
-        }
-    });
-}
-
 // The realtime audio loop owns the decreasing-clock condition. Keep its
 // capture reset together so actual input-clock tests exercise the same item,
 // sequence and coordinator retirement as the provider task.
@@ -6376,7 +6716,7 @@ async fn reanchor_realtime_caption_capture(
     (ms_at_anchor, coordinator.capture_epoch)
 }
 
-/// Route one gateway realtime event into caption updates + chunk records.
+/// Route one streaming caption event into caption updates + chunk records.
 async fn handle_realtime_event(
     session: &CaptionSession,
     event: RealtimeCaptionEvent,
@@ -6556,6 +6896,7 @@ async fn handle_realtime_event(
             }
         }
         RealtimeCaptionEvent::ConfigurationAcknowledged
+        | RealtimeCaptionEvent::Finished { .. }
         | RealtimeCaptionEvent::Error(_)
         | RealtimeCaptionEvent::AssistantResponse
         | RealtimeCaptionEvent::Ignored => {}
@@ -7949,11 +8290,10 @@ mod tests {
                     ] {
                         handle_realtime_event(
                             &session,
-                            GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                                "type": "speech-started",
-                                "itemId": item_id,
-                                "raw": { "audio_start_ms": ms_sent - 20.0, "item_id": item_id }
-                            })),
+                            RealtimeCaptionEvent::SpeechStarted {
+                                item_id: item_id.to_string(),
+                                audio_start_ms: Some(ms_sent - 20.0),
+                            },
                             &mut items,
                             &sequence,
                             current,
@@ -7962,11 +8302,10 @@ mod tests {
                         if complete {
                             handle_realtime_event(
                                 &session,
-                                GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                                    "type": "input-transcription-completed",
-                                    "itemId": item_id,
-                                    "transcript": transcript
-                                })),
+                                RealtimeCaptionEvent::Completed {
+                                    item_id: item_id.to_string(),
+                                    transcript: transcript.to_string(),
+                                },
                                 &mut items,
                                 &sequence,
                                 current,
@@ -7977,11 +8316,10 @@ mod tests {
                 } else {
                     handle_realtime_event(
                         &session,
-                        GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                            "type": "input-transcription-completed",
-                            "itemId": "held",
-                            "transcript": "fixture retained utterance"
-                        })),
+                        RealtimeCaptionEvent::Completed {
+                            item_id: "held".to_string(),
+                            transcript: "fixture retained utterance".to_string(),
+                        },
                         &mut items,
                         &sequence,
                         current,
@@ -7989,11 +8327,10 @@ mod tests {
                     .await;
                     handle_realtime_event(
                         &session,
-                        GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                            "type": "speech-started",
-                            "itemId": "after-control",
-                            "raw": { "audio_start_ms": ms_sent - 20.0, "item_id": "after-control" }
-                        })),
+                        RealtimeCaptionEvent::SpeechStarted {
+                            item_id: "after-control".to_string(),
+                            audio_start_ms: Some(ms_sent - 20.0),
+                        },
                         &mut items,
                         &sequence,
                         current,
@@ -8001,11 +8338,10 @@ mod tests {
                     .await;
                     handle_realtime_event(
                         &session,
-                        GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                            "type": "input-transcription-completed",
-                            "itemId": "after-control",
-                            "transcript": "fixture after batch"
-                        })),
+                        RealtimeCaptionEvent::Completed {
+                            item_id: "after-control".to_string(),
+                            transcript: "fixture after batch".to_string(),
+                        },
                         &mut items,
                         &sequence,
                         current,
@@ -8555,122 +8891,251 @@ mod tests {
     }
 
     #[test]
+    fn resample_to_24k_halves_48k_and_downmixes_stereo() {
+        let stereo: Vec<f32> = (0..8).flat_map(|i| [i as f32 / 10.0, 0.0]).collect();
+        let mono = downmix_resample_to_24k_mono(&stereo, 2, 48_000);
+        assert_eq!(mono.len(), 4);
+        // (0.0 + 0.1) / 2 per pair, then halved by the stereo downmix.
+        let expected = ((0.0_f32 + 0.05) / 2.0 * f32::from(i16::MAX)) as i16;
+        assert_eq!(mono[0], expected);
+        let one_channel = downmix_resample_to_24k_mono(&[0.5; 960], 1, 48_000);
+        assert_eq!(one_channel.len(), 480);
+        assert!(downmix_resample_to_24k_mono(&[0.0; 12], 2, 44_100).is_empty());
+        assert!(downmix_resample_to_24k_mono(&[0.0; 12], 6, 48_000).is_empty());
+        assert_eq!(pcm_s16le_bytes(&[1, -2]), vec![1, 0, 254, 255]);
+    }
+
+    #[test]
     fn resample_rejects_unexpected_formats() {
         assert!(downmix_resample_to_16k_mono(&[0.0; 12], 2, 44_100).is_empty());
         assert!(downmix_resample_to_16k_mono(&[0.0; 12], 6, 48_000).is_empty());
     }
 
     #[test]
-    fn realtime_adapter_serializes_transcription_only_session_and_audio() {
-        let configure = GatewayRealtimeCaptionTransport::configure(Some("es"));
-        assert_eq!(configure["type"], "session.update");
+    fn streaming_adapter_frames_the_transcription_envelope() {
+        let options = serde_json::json!({
+            "xai": { "streaming": { "interimResults": true, "endpointing": 300 } },
+            "gateway": { "user": "abc", "tags": ["feature:captions"] }
+        });
+        let start = GatewayStreamingCaptionTransport::start_frame(16_000, Some(&options));
+        assert_eq!(start["type"], "transcription-stream.start");
+        assert_eq!(start["inputAudioFormat"]["type"], "audio/pcm");
+        assert_eq!(start["inputAudioFormat"]["rate"], 16_000);
+        assert_eq!(start["providerOptions"], options);
+        let bare = GatewayStreamingCaptionTransport::start_frame(24_000, Some(&serde_json::json!("x")));
+        assert!(bare.get("providerOptions").is_none());
         assert_eq!(
-            configure["session"]["turn_detection"]["create_response"],
-            false
+            GatewayStreamingCaptionTransport::audio_done_frame()["type"],
+            "transcription-stream.audio-done"
         );
-        assert_eq!(
-            configure["session"]["turn_detection"]["interrupt_response"],
-            false
-        );
-        assert_eq!(
-            configure["session"]["input_audio_transcription"]["language"],
-            "es"
-        );
-
-        let append = GatewayRealtimeCaptionTransport::append_audio(&[0, 1, 2, 3]);
-        assert_eq!(append["type"], "input_audio_buffer.append");
-        assert_eq!(append["audio"], "AAECAw==");
+        // No voice-dialect frames survive.
+        let wire = format!("{start}{bare}");
+        assert!(!wire.contains("session.update"));
+        assert!(!wire.contains("input_audio_buffer"));
     }
 
     #[test]
-    fn realtime_adapter_parses_normalized_and_provider_events() {
+    fn streaming_adapter_uses_server_subprotocols_or_the_marker() {
+        let mut token: crate::videorc_api::CaptionRealtimeToken =
+            serde_json::from_value(serde_json::json!({
+                "token": "vcst_abc",
+                "url": "wss://gateway.test/v4/ai/transcription-model?ai-model-id=m",
+                "model": "m",
+                "transport": "transcription"
+            }))
+            .unwrap();
         assert_eq!(
-            GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                "type": "session-updated"
-            })),
-            RealtimeCaptionEvent::ConfigurationAcknowledged
+            GatewayStreamingCaptionTransport::subprotocols(&token),
+            "ai-gateway-transcription.v1, ai-gateway-auth.vcst_abc"
+        );
+        token.subprotocols = vec!["a".into(), "b".into()];
+        assert_eq!(GatewayStreamingCaptionTransport::subprotocols(&token), "a, b");
+    }
+
+    #[test]
+    fn streaming_decoder_opens_items_on_first_text_and_closes_on_final() {
+        let mut decoder = StreamingCaptionDecoder::new(3);
+        assert_eq!(
+            decoder.decode(&serde_json::json!({ "type": "stream-start", "warnings": [] }), 0.0),
+            vec![RealtimeCaptionEvent::ConfigurationAcknowledged]
         );
         assert_eq!(
-            GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                "type": "custom",
-                "rawType": "session.updated",
-                "raw": {}
-            })),
-            RealtimeCaptionEvent::ConfigurationAcknowledged
+            decoder.decode(
+                &serde_json::json!({ "type": "transcript-partial", "text": " hello ", "startSecond": 1.25 }),
+                2_000.0
+            ),
+            vec![
+                RealtimeCaptionEvent::SpeechStarted {
+                    item_id: "stream3:u0".to_string(),
+                    audio_start_ms: Some(1_250.0),
+                },
+                RealtimeCaptionEvent::Partial {
+                    item_id: "stream3:u0".to_string(),
+                    transcript: "hello".to_string(),
+                },
+            ]
         );
         assert_eq!(
-            GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                "type": "speech-started",
-                "itemId": "item-1",
-                "raw": { "audio_start_ms": 125 }
-            })),
+            decoder.decode(
+                &serde_json::json!({ "type": "transcript-partial", "text": "hello there" }),
+                2_400.0
+            ),
+            vec![RealtimeCaptionEvent::Partial {
+                item_id: "stream3:u0".to_string(),
+                transcript: "hello there".to_string(),
+            }]
+        );
+        assert_eq!(
+            decoder.decode(
+                &serde_json::json!({ "type": "transcript-final", "text": "Hello there.", "startSecond": 1.25, "endSecond": 2.1 }),
+                2_800.0
+            ),
+            vec![RealtimeCaptionEvent::Completed {
+                item_id: "stream3:u0".to_string(),
+                transcript: "Hello there.".to_string(),
+            }]
+        );
+        // The next text opens a new item, anchored by the lag fallback when
+        // the provider sends no startSecond.
+        assert_eq!(
+            decoder.decode(&serde_json::json!({ "type": "transcript-partial", "text": "next" }), 5_000.0)[0],
             RealtimeCaptionEvent::SpeechStarted {
-                item_id: "item-1".to_string(),
-                audio_start_ms: Some(125.0),
-            }
-        );
-        assert_eq!(
-            GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                "type": "custom",
-                "rawType": "conversation.item.input_audio_transcription.updated",
-                "raw": { "item_id": "item-1", "transcript": "hola" }
-            })),
-            RealtimeCaptionEvent::Partial {
-                item_id: "item-1".to_string(),
-                transcript: "hola".to_string(),
-            }
-        );
-        assert_eq!(
-            GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                "type": "input-transcription-completed",
-                "itemId": "item-1",
-                "transcript": "hola mundo"
-            })),
-            RealtimeCaptionEvent::Completed {
-                item_id: "item-1".to_string(),
-                transcript: "hola mundo".to_string(),
+                item_id: "stream3:u1".to_string(),
+                audio_start_ms: Some(5_000.0 - STREAMING_ANCHOR_LAG_MS),
             }
         );
     }
 
     #[test]
-    fn realtime_adapter_classifies_errors_and_assistant_responses() {
-        let auth = GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-            "type": "error",
-            "error": { "code": "invalid_api_key", "message": "bad client secret" }
-        }));
-        assert!(matches!(
-            auth,
-            RealtimeCaptionEvent::Error(RealtimeTransportFailure {
-                kind: RealtimeFailureKind::Terminal,
-                ..
-            })
-        ));
-        let outage = GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-            "type": "error",
-            "error": { "code": "provider_unavailable", "message": "try again" }
-        }));
-        assert!(matches!(
-            outage,
-            RealtimeCaptionEvent::Error(RealtimeTransportFailure {
-                kind: RealtimeFailureKind::Retryable,
-                ..
-            })
-        ));
+    fn streaming_decoder_accumulates_deltas_and_finalizes_with_them() {
+        let mut decoder = StreamingCaptionDecoder::new(1);
+        let first = decoder.decode(
+            &serde_json::json!({ "type": "transcript-delta", "delta": "Wel", "id": "a" }),
+            100.0,
+        );
         assert_eq!(
-            GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
-                "type": "response-audio-delta"
-            })),
-            RealtimeCaptionEvent::AssistantResponse
+            first,
+            vec![
+                RealtimeCaptionEvent::SpeechStarted {
+                    item_id: "stream1:a".to_string(),
+                    audio_start_ms: Some(0.0),
+                },
+                RealtimeCaptionEvent::Partial {
+                    item_id: "stream1:a".to_string(),
+                    transcript: "Wel".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            decoder.decode(&serde_json::json!({ "type": "transcript-delta", "delta": "come back", "id": "a" }), 300.0),
+            vec![RealtimeCaptionEvent::Partial {
+                item_id: "stream1:a".to_string(),
+                transcript: "Welcome back".to_string(),
+            }]
+        );
+        // A final with no text keeps what the deltas built.
+        assert_eq!(
+            decoder.decode(&serde_json::json!({ "type": "transcript-final", "text": "", "id": "a" }), 600.0),
+            vec![RealtimeCaptionEvent::Completed {
+                item_id: "stream1:a".to_string(),
+                transcript: "Welcome back".to_string(),
+            }]
+        );
+        // A final for a never-seen id opens and completes in one part.
+        let lone = decoder.decode(
+            &serde_json::json!({ "type": "transcript-final", "text": "Bye", "id": "b", "startSecond": 0.5 }),
+            900.0,
+        );
+        assert_eq!(lone.len(), 2);
+        assert!(matches!(&lone[0], RealtimeCaptionEvent::SpeechStarted { audio_start_ms: Some(ms), .. } if *ms == 500.0));
+        assert!(matches!(&lone[1], RealtimeCaptionEvent::Completed { transcript, .. } if transcript == "Bye"));
+    }
+
+    #[test]
+    fn streaming_decoder_reports_finish_errors_and_assistant_turns() {
+        let mut decoder = StreamingCaptionDecoder::new(1);
+        assert_eq!(
+            decoder.decode(
+                &serde_json::json!({ "type": "finish", "text": "", "segments": [], "durationInSeconds": 41.5 }),
+                0.0
+            ),
+            vec![RealtimeCaptionEvent::Finished {
+                duration_seconds: Some(41.5)
+            }]
+        );
+        assert_eq!(
+            decoder.decode(&serde_json::json!({ "type": "finish", "text": "", "segments": [] }), 0.0),
+            vec![RealtimeCaptionEvent::Finished {
+                duration_seconds: None
+            }]
+        );
+        for (error_type, kind) in [
+            ("authentication_error", RealtimeFailureKind::Fallback),
+            ("forbidden", RealtimeFailureKind::Fallback),
+            ("model_not_found", RealtimeFailureKind::Fallback),
+            ("invalid_request_error", RealtimeFailureKind::Fallback),
+            ("rate_limit_exceeded", RealtimeFailureKind::Retryable),
+            ("internal_server_error", RealtimeFailureKind::Retryable),
+            ("failed_dependency", RealtimeFailureKind::Retryable),
+        ] {
+            let events = decoder.decode(
+                &serde_json::json!({ "type": "error", "error": { "type": error_type, "message": "no" } }),
+                0.0,
+            );
+            let [RealtimeCaptionEvent::Error(failure)] = events.as_slice() else {
+                panic!("{error_type} should decode to one error");
+            };
+            assert_eq!(failure.kind, kind, "{error_type}");
+            assert!(failure.code.starts_with("captions-stream-"));
+        }
+        assert_eq!(
+            decoder.decode(&serde_json::json!({ "type": "response-created" }), 0.0),
+            vec![RealtimeCaptionEvent::AssistantResponse]
+        );
+        assert_eq!(
+            decoder.decode(&serde_json::json!({ "type": "response-metadata", "modelId": "m" }), 0.0),
+            vec![RealtimeCaptionEvent::ConfigurationAcknowledged]
+        );
+        assert_eq!(
+            decoder.decode(&serde_json::json!({ "type": "raw", "rawValue": {} }), 0.0),
+            vec![RealtimeCaptionEvent::Ignored]
         );
         assert_eq!(
             classify_realtime_close(1008, "policy").kind,
-            RealtimeFailureKind::Terminal
+            RealtimeFailureKind::Fallback
         );
         assert_eq!(
             classify_realtime_close(1013, "retry later").kind,
             RealtimeFailureKind::Retryable
         );
+    }
+
+    #[test]
+    fn streaming_lease_hands_over_before_it_runs_out_and_settles_what_was_used() {
+        assert_eq!(
+            streaming_handover_after(Some(600)),
+            std::time::Duration::from_secs(570)
+        );
+        assert_eq!(
+            streaming_handover_after(Some(60)),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            streaming_handover_after(Some(40)),
+            std::time::Duration::from_secs(20)
+        );
+        assert_eq!(
+            streaming_handover_after(None),
+            std::time::Duration::from_secs(240)
+        );
+        let mut lease = ActiveStreamingLease {
+            id: "lease".to_string(),
+            audio_ms: 12_400.0,
+            provider_seconds: None,
+        };
+        assert_eq!(lease.settlement_seconds(), 12.4);
+        lease.provider_seconds = Some(11.0);
+        assert_eq!(lease.settlement_seconds(), 11.0);
     }
 
     #[test]
