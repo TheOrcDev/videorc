@@ -1,5 +1,6 @@
 import { ChevronDownIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -596,22 +597,16 @@ export function ScheduleStreamDialog({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={discard} onOpenChange={setDiscard}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Discard changes?</DialogTitle>
-            <DialogDescription>Your unsaved form edits will be lost.</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setDiscard(false)}>
-              Keep editing
-            </Button>
-            <Button variant="destructive" onClick={onClose}>
-              Discard
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        cancelLabel="Keep editing"
+        confirmLabel="Discard changes"
+        description="Your unsaved form edits will be lost."
+        open={discard}
+        testId="schedule-discard"
+        title="Discard changes?"
+        onCancel={() => setDiscard(false)}
+        onConfirm={onClose}
+      />
     </>
   )
 }

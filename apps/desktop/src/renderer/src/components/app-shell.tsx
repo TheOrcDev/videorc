@@ -84,6 +84,11 @@ const PermissionsOnboardingDialog = lazy(async () => ({
 const WhatsNewDialog = lazy(async () => ({
   default: (await import('@/components/whats-new-dialog')).WhatsNewDialog
 }))
+// "End livestream?" (plan 174 S0.1): hosted here so every stop path asks
+// from every page; loaded only when a livestream is asked to end.
+const EndLivestreamDialog = lazy(async () => ({
+  default: (await import('@/components/end-livestream-dialog')).EndLivestreamDialog
+}))
 
 function WorkspaceTabFallback(): ReactElement {
   return (
@@ -167,7 +172,10 @@ export function AppShell(): ReactElement {
     openCommentsWindow,
     closeCommentsWindow,
     toggleCommentsWindow,
-    toggleCaptionsWindow
+    toggleCaptionsWindow,
+    stopConfirmation,
+    confirmStopSession,
+    cancelStopSession
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
@@ -542,6 +550,15 @@ export function AppShell(): ReactElement {
         <Suspense fallback={null}>
           {whatsNew.open && !onboardingOpen ? (
             <WhatsNewDialog entry={whatsNew.entry} open onClose={whatsNew.dismiss} />
+          ) : null}
+        </Suspense>
+        <Suspense fallback={null}>
+          {stopConfirmation ? (
+            <EndLivestreamDialog
+              confirmation={stopConfirmation}
+              onCancel={cancelStopSession}
+              onConfirm={confirmStopSession}
+            />
           ) : null}
         </Suspense>
       </div>

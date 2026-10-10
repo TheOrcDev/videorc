@@ -4,6 +4,7 @@ import { CopyIcon, DeleteIcon, EditIcon, ExternalLinkIcon, LinkIcon } from '@/co
 import { useScheduledStreams } from '@/hooks/use-scheduled-streams'
 import { useStudioCore } from '@/hooks/use-studio'
 import { ScheduleStreamDialog } from '@/components/schedule-stream-dialog'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { PageHeader } from '@/components/page'
 import { PlatformGlyph } from '@/components/platform-glyph'
@@ -187,44 +188,30 @@ export function ScheduledStreams(): ReactElement {
           }}
         />
       )}
-      <Dialog
+      <ConfirmDialog
+        cancelLabel={canceling?.providerEventId ? 'Keep event' : 'Keep draft'}
+        confirmDisabled={state.busy}
+        confirmLabel={canceling?.providerEventId ? 'Cancel event' : 'Delete draft'}
+        description={
+          canceling?.providerEventId
+            ? `The upcoming broadcast will be deleted from ${scheduledProviderLabel(canceling.provider)} and its link will stop working.`
+            : 'This draft moves to history. No platform event is deleted.'
+        }
         open={Boolean(canceling)}
-        onOpenChange={(open) => {
-          if (!open) setCanceling(null)
+        testId="scheduled-cancel"
+        title={
+          canceling?.providerEventId
+            ? `Cancel this ${scheduledProviderLabel(canceling.provider)} ${scheduledProviderNoun(canceling.provider)}?`
+            : 'Delete local draft?'
+        }
+        onCancel={() => setCanceling(null)}
+        onConfirm={() => {
+          if (canceling)
+            void perform('cancel', canceling).then((ok) => {
+              if (ok) setCanceling(null)
+            })
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {canceling?.providerEventId
-                ? `Cancel this ${scheduledProviderLabel(canceling.provider)} ${scheduledProviderNoun(canceling.provider)}?`
-                : 'Delete local draft?'}
-            </DialogTitle>
-            <DialogDescription>
-              {canceling?.providerEventId
-                ? `The upcoming broadcast will be deleted from ${scheduledProviderLabel(canceling.provider)} and its link will stop working.`
-                : 'This draft moves to history. No platform event is deleted.'}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setCanceling(null)}>
-              Keep event
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={state.busy}
-              onClick={() => {
-                if (canceling)
-                  void perform('cancel', canceling).then((ok) => {
-                    if (ok) setCanceling(null)
-                  })
-              }}
-            >
-              Confirm cancellation
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      />
       <Dialog
         open={Boolean(recovering)}
         onOpenChange={(open) => {

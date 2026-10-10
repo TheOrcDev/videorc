@@ -56,7 +56,7 @@ function renderTransport(recording: RecordingStatus): void {
           active: true,
           canStop: true,
           stopLabel: stop.label,
-          stopTitle: stop.title,
+          stopNote: stop.note,
           startRequestPending: false,
           recordBlockedReason: null,
           liveStreamBlockedReason: null,
@@ -103,7 +103,9 @@ describe('SessionTransport (plan 095 S5)', () => {
     const stop = [...container.querySelectorAll('button')].find((button) =>
       button.textContent?.includes('End livestream')
     )
-    expect(stop?.getAttribute('title')).toBe('Also stops the recording')
+    // Plan 174 D19: the consequence is a visible line, never a title.
+    expect(stop?.getAttribute('title')).toBeNull()
+    expect(text('[data-slot=session-stop-note]')).toBe('Your recording stops too.')
   })
 
   it('keeps stream-only free of Rec and a recording free of Streaming', () => {
@@ -115,11 +117,12 @@ describe('SessionTransport (plan 095 S5)', () => {
     })
     expect(text('[data-videorc-session-status]')).toBe('Streaming')
     expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
-    expect(container.querySelector('button[title]')).toBeNull()
+    expect(container.querySelector('[data-slot=session-stop-note]')).toBeNull()
 
     renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
     expect(text('[data-videorc-session-status]')).toBe('Recording')
     expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
+    expect(container.querySelector('[data-slot=session-stop-note]')).toBeNull()
     expect(text('button')).toContain('Stop recording')
   })
 })

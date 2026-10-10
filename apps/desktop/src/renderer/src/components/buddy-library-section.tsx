@@ -16,10 +16,10 @@ import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle
@@ -579,45 +579,40 @@ function EditDialog({
   }) => Promise<void>
   onDelete: (card: BuddyLibraryCard) => Promise<void>
 }): ReactElement {
+  const deleting = target?.kind === 'delete' ? target : null
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) onClose()
-      }}
-    >
-      {target?.kind === 'delete' ? (
-        <DialogContent data-testid="buddy-library-delete-dialog" showCloseButton={false}>
-          <DialogHeader>
-            <DialogTitle>{buddyLibraryDeleteTitle(target.card.name)}</DialogTitle>
-            <DialogDescription>{BUDDY_LIBRARY_COPY.deleteBody}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button autoFocus type="button" variant="ghost" onClick={onClose}>
-              {BUDDY_LIBRARY_COPY.cancel}
-            </Button>
-            <Button
-              data-testid="buddy-library-delete-confirm"
-              type="button"
-              variant="destructive"
-              onClick={() => void onDelete(target.card)}
-            >
-              {BUDDY_LIBRARY_COPY.delete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      ) : target ? (
-        <EditForm
-          // A fresh form for every Buddy and every open.
-          key={`${target.kind}:${target.card.id}:${String(open)}`}
-          context={context}
-          personality={personality}
-          target={target}
-          onClose={onClose}
-          onUpdate={onUpdate}
-        />
-      ) : null}
-    </Dialog>
+    <>
+      <ConfirmDialog
+        cancelLabel={BUDDY_LIBRARY_COPY.cancel}
+        confirmLabel={BUDDY_LIBRARY_COPY.delete}
+        description={BUDDY_LIBRARY_COPY.deleteBody}
+        open={open && deleting !== null}
+        testId="buddy-library-delete"
+        title={deleting ? buddyLibraryDeleteTitle(deleting.card.name) : ''}
+        onCancel={onClose}
+        onConfirm={() => {
+          if (deleting) void onDelete(deleting.card)
+        }}
+      />
+      <Dialog
+        open={open && deleting === null}
+        onOpenChange={(next) => {
+          if (!next) onClose()
+        }}
+      >
+        {target && target.kind !== 'delete' ? (
+          <EditForm
+            // A fresh form for every Buddy and every open.
+            key={`${target.kind}:${target.card.id}:${String(open)}`}
+            context={context}
+            personality={personality}
+            target={target}
+            onClose={onClose}
+            onUpdate={onUpdate}
+          />
+        ) : null}
+      </Dialog>
+    </>
   )
 }
 

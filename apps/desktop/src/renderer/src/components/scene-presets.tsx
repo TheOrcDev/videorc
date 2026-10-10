@@ -2,6 +2,7 @@ import { layoutPresetOrientation } from '@/lib/capture'
 import { useState, type ReactElement } from 'react'
 import { useStudioCore } from '@/hooks/use-studio'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   Dialog,
   DialogContent,
@@ -193,8 +194,21 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
           {savedSceneModified ? ' · Modified' : ''}
         </span>
       ) : null}
+      {/* The delete is the model confirm (plan 174 S0.3): what is lost, in
+          one sentence, behind the one recipe. */}
+      <ConfirmDialog
+        confirmLabel="Delete scene"
+        description="Only the saved snapshot is deleted. Your current scene and recording continue."
+        open={action?.kind === 'delete'}
+        testId="scene-delete"
+        title="Delete saved scene?"
+        onCancel={() => setAction(null)}
+        onConfirm={() => {
+          if (action?.scene && studio.deleteSavedScene(action.scene.id)) setAction(null)
+        }}
+      />
       <Dialog
-        open={action !== null}
+        open={action !== null && action.kind !== 'delete'}
         onOpenChange={(value) => {
           if (!value) setAction(null)
         }}
@@ -202,22 +216,18 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {action?.kind === 'delete'
-                ? 'Delete saved scene?'
-                : action?.kind === 'repair'
-                  ? 'Resolve scene sources'
-                  : action?.kind === 'rename'
-                    ? 'Rename scene'
-                    : action?.scene
-                      ? 'Update saved scene'
-                      : 'Save scene'}
+              {action?.kind === 'repair'
+                ? 'Resolve scene sources'
+                : action?.kind === 'rename'
+                  ? 'Rename scene'
+                  : action?.scene
+                    ? 'Update saved scene'
+                    : 'Save scene'}
             </DialogTitle>
             <DialogDescription>
-              {action?.kind === 'delete'
-                ? 'Only the saved snapshot is deleted. Your current scene and recording continue.'
-                : action?.kind === 'repair'
-                  ? 'Choose exact replacement sources. Repairs change the working scene; use Update to replace its saved snapshot.'
-                  : 'Save the visual setup. Audio, recording and streaming settings stay separate.'}
+              {action?.kind === 'repair'
+                ? 'Choose exact replacement sources. Repairs change the working scene; use Update to replace its saved snapshot.'
+                : 'Save the visual setup. Audio, recording and streaming settings stay separate.'}
             </DialogDescription>
           </DialogHeader>
           {action?.kind === 'repair' && repair ? (
@@ -262,7 +272,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                 </Button>
               ) : null}
             </div>
-          ) : action?.kind !== 'delete' ? (
+          ) : (
             <Field data-invalid={Boolean(error)}>
               <FieldLabel htmlFor="scene-preset-name">Name</FieldLabel>
               <Input
@@ -284,7 +294,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                 {error ?? 'Names must be unique.'}
               </FieldDescription>
             </Field>
-          ) : null}
+          )}
           {error && action?.kind === 'repair' ? (
             <p role="status" className="text-sm text-muted-foreground">
               {error}
@@ -294,16 +304,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
             <Button variant="ghost" onClick={() => setAction(null)}>
               Cancel
             </Button>
-            {action?.kind === 'delete' ? (
-              <Button
-                variant="destructive"
-                onClick={() => {
-                  if (action.scene && studio.deleteSavedScene(action.scene.id)) setAction(null)
-                }}
-              >
-                Delete scene
-              </Button>
-            ) : action?.kind === 'repair' ? (
+            {action?.kind === 'repair' ? (
               <Button
                 disabled={
                   busy || !repair || sceneSourceProblems(repair, deviceList.devices).length > 0

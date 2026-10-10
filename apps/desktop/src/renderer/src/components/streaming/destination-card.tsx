@@ -11,6 +11,7 @@ import {
 } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { ListRow, ListRowButton } from '@/components/list-row'
 import {
   YOUTUBE_STREAM_KEY_LINK_LABEL,
@@ -583,73 +584,49 @@ export function DestinationCard({
               </>
             )}
 
-            <Dialog
-              open={pendingKeySave !== null}
-              onOpenChange={(open) => {
-                if (!open) {
-                  setPendingKeySave(null)
-                }
-              }}
-            >
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>
-                    {target.streamKeyPresent
-                      ? `Replace the ${target.label} ${credentialLabel}?`
-                      : `Save this ${credentialLabel} to ${target.label}?`}
-                  </DialogTitle>
-                  <DialogDescription>
-                    {target.streamKeyPresent
-                      ? `The saved ${credentialLabel}${
-                          target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
-                        } will be replaced by the new one ending ${streamKeyTailHint(
-                          pendingKeySave?.value ?? ''
-                        )}. The old one is kept as your previous ${credentialLabel}, so you can restore it.`
-                      : `The key ending ${streamKeyTailHint(pendingKeySave?.value ?? '')} will be saved to ${target.label}.`}
-                  </DialogDescription>
-                </DialogHeader>
-                {pendingKeySave?.warning ? (
-                  <Alert variant="warning">
-                    <WarningIcon />
-                    <AlertDescription>{pendingKeySave.warning}</AlertDescription>
-                  </Alert>
-                ) : null}
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setPendingKeySave(null)}>
-                    Cancel
-                  </Button>
-                  <Button
-                    variant={pendingKeySave?.warning ? 'destructive' : 'default'}
-                    onClick={confirmPendingKeySave}
-                  >
-                    {target.streamKeyPresent
-                      ? `Replace ${credentialLabel}`
-                      : `Save ${credentialLabel}`}
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-
-            <Dialog open={confirmingClear} onOpenChange={setConfirmingClear}>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>{`Remove the ${target.label} ${credentialLabel}?`}</DialogTitle>
-                  <DialogDescription>
-                    {`The saved ${credentialLabel}${
+            <ConfirmDialog
+              confirmLabel={
+                target.streamKeyPresent ? `Replace ${credentialLabel}` : `Save ${credentialLabel}`
+              }
+              confirmVariant={pendingKeySave?.warning ? 'destructive' : 'default'}
+              description={
+                target.streamKeyPresent
+                  ? `The saved ${credentialLabel}${
                       target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
-                    } is kept as your previous ${credentialLabel} after removal, so you can restore it.`}
-                  </DialogDescription>
-                </DialogHeader>
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setConfirmingClear(false)}>
-                    Cancel
-                  </Button>
-                  <Button variant="destructive" onClick={confirmClearKey}>
-                    Remove {credentialLabel}
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+                    } will be replaced by the new one ending ${streamKeyTailHint(
+                      pendingKeySave?.value ?? ''
+                    )}. The old one is kept as your previous ${credentialLabel}, so you can restore it.`
+                  : `The key ending ${streamKeyTailHint(pendingKeySave?.value ?? '')} will be saved to ${target.label}.`
+              }
+              open={pendingKeySave !== null}
+              testId="stream-key-save"
+              title={
+                target.streamKeyPresent
+                  ? `Replace the ${target.label} ${credentialLabel}?`
+                  : `Save this ${credentialLabel} to ${target.label}?`
+              }
+              onCancel={() => setPendingKeySave(null)}
+              onConfirm={confirmPendingKeySave}
+            >
+              {pendingKeySave?.warning ? (
+                <Alert variant="warning">
+                  <WarningIcon />
+                  <AlertDescription>{pendingKeySave.warning}</AlertDescription>
+                </Alert>
+              ) : null}
+            </ConfirmDialog>
+
+            <ConfirmDialog
+              confirmLabel={`Remove ${credentialLabel}`}
+              description={`The saved ${credentialLabel}${
+                target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
+              } is kept as your previous ${credentialLabel} after removal, so you can restore it.`}
+              open={confirmingClear}
+              testId="stream-key-remove"
+              title={`Remove the ${target.label} ${credentialLabel}?`}
+              onCancel={() => setConfirmingClear(false)}
+              onConfirm={confirmClearKey}
+            />
           </>
         )}
       </div>
@@ -852,6 +829,9 @@ function OAuthAccountPanel({
 }): ReactElement {
   const [youtubeConsentOpen, setYoutubeConsentOpen] = useState(false)
   const [youtubeConsentAccepted, setYoutubeConsentAccepted] = useState(false)
+  // Plan 174 S0.3 (D-16): Disconnect signs the account out at once (YouTube
+  // and YouTube Vertical share one), so it asks first.
+  const [disconnectOpen, setDisconnectOpen] = useState(false)
   const platformName = metadataPlatformLabel(platform)
   // Connect and Reconnect ask for the platform's ordinary optional
   // permissions (plan 071 S2, plan 140 S5): all of Twitch's, so Activity names
@@ -1027,13 +1007,29 @@ function OAuthAccountPanel({
             disabled={disabled}
             size="sm"
             variant="ghost"
-            onClick={() => onDisconnect(platform)}
+            onClick={() => setDisconnectOpen(true)}
           >
             <SignOutIcon data-icon="inline-start" weight="bold" />
             Disconnect
           </Button>
         )}
       </div>
+      <ConfirmDialog
+        confirmLabel={`Disconnect ${platformName}`}
+        description={
+          platform === 'youtube'
+            ? 'Videorc signs out of YouTube and YouTube Vertical. To stream there again, connect the account again.'
+            : `Videorc signs out of ${platformName}. To stream there again, connect the account again.`
+        }
+        open={disconnectOpen}
+        testId="account-disconnect"
+        title={`Disconnect ${platformName}?`}
+        onCancel={() => setDisconnectOpen(false)}
+        onConfirm={() => {
+          setDisconnectOpen(false)
+          onDisconnect(platform)
+        }}
+      />
 
       {status === 'reconnect' ? (
         <p className="text-xs text-muted-foreground">

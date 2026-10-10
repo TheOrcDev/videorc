@@ -281,7 +281,7 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     const list = pets([PACK_A])
     await render({ cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }), list })
     await act(async () => button('buddy-pack-remove').click())
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Remove Moss?')
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('Remove Moss?')
     expect(list.remove).not.toHaveBeenCalled()
     await act(async () => button('buddy-pack-remove-confirm').click())
     expect(lastPersona().avatar).toEqual({ kind: 'still' })

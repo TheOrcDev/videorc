@@ -7,6 +7,14 @@ import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { clipMarkedToast } from '../../../shared/clip-marks'
 import { sessionActivity, sessionIsLive } from '../../../shared/capture-state'
+import {
+  END_LIVESTREAM_ARMED_TOAST,
+  END_LIVESTREAM_ARMED_TOAST_ID,
+  END_LIVESTREAM_ARM_WINDOW_MS,
+  stopDecision,
+  type SessionStopConfirmation,
+  type SessionStopOrigin
+} from '@/lib/session-stop'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -1393,6 +1401,13 @@ export type StudioContextValue = {
   warmMicrophone: WarmMicrophoneStatus | null
   startSession: () => Promise<boolean>
   stopSession: () => Promise<boolean>
+  /**
+   * Every stop path goes through here (plan 174 S0.1, D2). A recording stops
+   * at once; a livestream asks first (the End livestream dialog the shell
+   * hosts), or arms a global hotkey for a second press. Resolves true only
+   * when the session stopped on this call.
+   */
+  requestStopSession: (origin: SessionStopOrigin) => Promise<boolean>
   /** Arms the record start/stop latency clock at the moment of a user click. */
   noteRecordClick: (kind: RecordLatencyKind, origin?: RecordLatencyOrigin) => void
   remuxSession: (sessionId: string) => Promise<void>
@@ -1517,6 +1532,10 @@ interface StudioShellContextValue {
   closeCommentsWindow: () => Promise<void>
   toggleCommentsWindow: () => Promise<void>
   toggleCaptionsWindow: () => Promise<void>
+  /** The End livestream question waiting for an answer, if any (plan 174 S0.1). */
+  stopConfirmation: SessionStopConfirmation | null
+  confirmStopSession: () => void
+  cancelStopSession: () => void
 }
 
 const StudioShellContext = createContext<StudioShellContextValue | null>(null)
@@ -3422,6 +3441,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   const [startRequestPending, setStartRequestPending] = useState(false)
   const [stopRequestPending, setStopRequestPending] = useState(false)
+  // Plan 174 S0.1: the End livestream question in flight, and when a global
+  // hotkey was last armed for its second press.
+  const [stopConfirmation, setStopConfirmation] = useState<SessionStopConfirmation | null>(null)
+  const endLivestreamArmedAtRef = useRef<number | null>(null)
   const [screenImportPending, setScreenImportPending] = useState(false)
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
@@ -11445,14 +11468,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
       try {
         setLastError(null)
+        const name = screens.find((screen) => screen.id === screenId)?.name ?? 'takeover'
         const nextScreens = await client.request<StreamScreen[]>('screens.delete', { screenId })
         setScreens(nextScreens)
-        toast.success('Deleted Screen.')
+        // A confirmed delete may say so, and names what went (plan 174 C-1).
+        toast.success(`Deleted “${name}”`)
       } catch (error) {
         reportError(error)
       }
     },
-    [client, isSessionActive, reportError]
+    [client, isSessionActive, reportError, screens]
   )
 
   const reorderScreen = useCallback(
@@ -14063,6 +14088,60 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     stopRequestPending
   ])
 
+  // Plan 174 S0.1 (D2): the one door to stopSession for every origin. A
+  // recording stops at once. A livestream asks through the End livestream
+  // dialog (the shell hosts it, so it works from every page), or, for a
+  // global hotkey pressed with Videorc possibly in the background, arms a
+  // second press within END_LIVESTREAM_ARM_WINDOW_MS. Stream Deck and phone
+  // intents keep their contract and stop at once (smoke:remote-control pins
+  // it).
+  const requestStopSession = useCallback(
+    (origin: SessionStopOrigin): Promise<boolean> => {
+      const now = Date.now()
+      const status = recordingRef.current
+      const decision = stopDecision({
+        origin,
+        live: sessionIsLive(status),
+        armedAt: endLivestreamArmedAtRef.current,
+        now
+      })
+      if (decision === 'stop') {
+        endLivestreamArmedAtRef.current = null
+        toast.dismiss(END_LIVESTREAM_ARMED_TOAST_ID)
+        return stopSession()
+      }
+      if (decision === 'arm') {
+        endLivestreamArmedAtRef.current = now
+        toast.message(END_LIVESTREAM_ARMED_TOAST, {
+          id: END_LIVESTREAM_ARMED_TOAST_ID,
+          duration: END_LIVESTREAM_ARM_WINDOW_MS
+        })
+        return Promise.resolve(false)
+      }
+      const streaming = captureConfigRef.current.streaming
+      setStopConfirmation({
+        origin,
+        sessionId: status.sessionId ?? null,
+        platforms: streaming.targets
+          .filter((target) => target.enabled)
+          .map((target) => target.label || target.platform),
+        alsoRecords: status.state === 'recording'
+      })
+      return Promise.resolve(false)
+    },
+    [stopSession]
+  )
+  const confirmStopSession = useCallback(() => {
+    setStopConfirmation(null)
+    // The confirm click is the user's stop: arm the latency clock here, not
+    // at the click that only opened the question.
+    noteRecordClick('stop')
+    void stopSession()
+  }, [noteRecordClick, stopSession])
+  const cancelStopSession = useCallback(() => {
+    setStopConfirmation(null)
+  }, [])
+
   useEffect(() => {
     type WindowsLiveAudioSmokeWindow = Window & {
       __videorcWindowsLiveAudioHarness?: (
@@ -14833,6 +14912,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [openSystemPermissionSettings, refreshMediaAccess, reportError, runtimeInfo?.platform]
   )
 
+  // Space lives on the Studio page (plan 174 S0.1, D1): StudioTab owns it, so
+  // it never starts or ends a session from another page, a dialog, a slider or
+  // a menu. This handler keeps the preview refresh and the scene nudges.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
@@ -14843,18 +14925,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           '[data-videorc-stage-phase="dragging"], [data-videorc-stage-phase="pending"]'
         )
       ) {
-        return
-      }
-
-      if (event.code === 'Space') {
-        event.preventDefault()
-        if (canStop) {
-          void stopSession()
-          return
-        }
-        if (canStart) {
-          void startSession()
-        }
         return
       }
 
@@ -14895,16 +14965,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [
-    canStart,
-    canStop,
     isSessionActive,
     nudgeSceneSource,
     refreshPreview,
     resetSceneSource,
     sceneEditMode,
-    selectedSceneSourceId,
-    startSession,
-    stopSession
+    selectedSceneSourceId
   ])
 
   const requestRemoteMicrophoneMute = useCallback(
@@ -15269,7 +15335,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionActive: isActiveRecordingState(recordingRef.current.state),
       streamEnabled: captureConfigRef.current.streamEnabled,
       startSession,
-      stopSession,
+      // A global hotkey may fire with Videorc in the background: while live it
+      // arms, and a second press within the window ends the livestream (D2).
+      stopSession: () => requestStopSession('global-hotkey'),
       toggleMicrophoneMute: () => {
         setCaptureConfig((current) => ({
           ...current,
@@ -15307,20 +15375,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       openCommentsWindow,
       closeCommentsWindow,
       toggleCommentsWindow,
-      toggleCaptionsWindow
+      toggleCaptionsWindow,
+      // The question belongs to one session: a session that ended, or a later
+      // one, never shows a stale answer sheet.
+      stopConfirmation:
+        stopConfirmation !== null &&
+        stopConfirmation.sessionId === (recording.sessionId ?? null) &&
+        isActiveRecordingState(recording.state)
+          ? stopConfirmation
+          : null,
+      confirmStopSession,
+      cancelStopSession
     }),
     [
+      cancelStopSession,
       closeCommentsWindow,
       closeNotesWindow,
       commentsWindow.open,
+      confirmStopSession,
       connection,
       entitlements?.tier,
       notesWindow.open,
       openCommentsWindow,
       openNotesWindow,
       previewWindow.open,
+      recording.sessionId,
       recording.state,
       runtimeInfo,
+      stopConfirmation,
       toggleCommentsWindow,
       toggleCaptionsWindow,
       togglePreviewWindow,
@@ -15667,6 +15749,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       noteRecordClick,
       startSession,
       stopSession,
+      requestStopSession,
       remuxSession,
       ensureSessionPoster,
       renameSession,
@@ -15901,6 +15984,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       noteRecordClick,
       startSession,
       stopSession,
+      requestStopSession,
       remuxSession,
       ensureSessionPoster,
       renameSession,

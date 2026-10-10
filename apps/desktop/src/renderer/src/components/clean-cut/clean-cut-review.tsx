@@ -28,14 +28,7 @@ import {
 import type { SessionPlayerHandle } from '@/components/media/session-player'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { Kbd } from '@/components/ui/kbd'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -690,31 +683,19 @@ export function CleanCutReview({
         </Button>
       </footer>
 
-      <Dialog open={leaving} onOpenChange={setLeaving}>
-        <DialogContent showCloseButton={false}>
-          <DialogHeader>
-            <DialogTitle>Leave without saving?</DialogTitle>
-            <DialogDescription>
-              Your {changes === 1 ? 'change' : `${changes} changes`} to this cut will be lost.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => setLeaving(false)}>
-              Keep editing
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={() => {
-                setLeaving(false)
-                onClose()
-              }}
-            >
-              Discard changes
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        cancelLabel="Keep editing"
+        confirmLabel="Discard changes"
+        description={`Your ${changes === 1 ? 'change' : `${changes} changes`} to this cut will be lost.`}
+        open={leaving}
+        testId="clean-cut-leave"
+        title="Leave without saving?"
+        onCancel={() => setLeaving(false)}
+        onConfirm={() => {
+          setLeaving(false)
+          onClose()
+        }}
+      />
     </div>
   )
 }

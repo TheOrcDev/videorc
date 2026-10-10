@@ -194,7 +194,7 @@ describe('BuddyPersonaSection', () => {
       (button) => button.textContent?.trim() === 'Start over'
     ) as HTMLButtonElement
     await act(async () => startOver.click())
-    const dialog = document.querySelector('[role="dialog"]')
+    const dialog = document.querySelector('[role="alertdialog"]')
     expect(dialog?.textContent).toContain('Start over with a new Buddy?')
     expect(removeBuddyPersona).not.toHaveBeenCalled()
     const confirm = [...dialog!.querySelectorAll('button')].find(

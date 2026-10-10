@@ -1,5 +1,7 @@
-import { SparkleIcon } from '@/components/icons'
+import { DeleteIcon, SparkleIcon } from '@/components/icons'
 import { useState, type KeyboardEvent, type ReactElement } from 'react'
+
+import { ConfirmDialog } from '@/components/confirm-dialog'
 
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import {
@@ -74,6 +76,7 @@ export function BuddyLookSection({
   })
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [deleteOpen, setDeleteOpen] = useState(false)
 
   if (!persona) return null
 
@@ -183,10 +186,26 @@ export function BuddyLookSection({
                     disabled={!controller || busy}
                     type="button"
                     variant="ghost"
-                    onClick={() => void controller?.discard()}
+                    onClick={() => setDeleteOpen(true)}
                   >
-                    Discard
+                    <DeleteIcon data-icon="inline-start" />
+                    Delete…
                   </Button>
+                  {/* Plan 174 S0.3 (G-1): the draft is saved to the library
+                      as soon as it is made, so throwing it away asks. */}
+                  <ConfirmDialog
+                    cancelLabel="Keep it"
+                    confirmLabel="Delete look"
+                    description={`Its pictures are removed from your Videorc account. ${persona.name} keeps the current look.`}
+                    open={deleteOpen}
+                    testId="buddy-look-delete"
+                    title="Delete the new look?"
+                    onCancel={() => setDeleteOpen(false)}
+                    onConfirm={() => {
+                      setDeleteOpen(false)
+                      void controller?.discard()
+                    }}
+                  />
                 </div>
               </div>
             </div>

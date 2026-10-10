@@ -15,11 +15,11 @@ import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
@@ -361,35 +361,26 @@ export function BuddyAvatarSection({
         </Suspense>
       ) : null}
 
-      <Dialog open={removeOpen} onOpenChange={setRemoveOpen}>
-        <DialogContent showCloseButton={false}>
-          <DialogHeader>
-            <DialogTitle>Remove {removeTarget?.name}?</DialogTitle>
-            <DialogDescription>
-              Its files are deleted from this computer.
-              {removeTarget?.source === 'videorc-creator'
-                ? ' Making it again uses one of your creations.'
-                : ' You can import it again from its folder.'}
-              {removeTarget?.packId === wornPackId ? ` ${persona.name} goes back to Still.` : ''}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button autoFocus type="button" variant="ghost" onClick={() => setRemoveOpen(false)}>
-              Keep it
-            </Button>
-            <Button
-              data-testid="buddy-pack-remove-confirm"
-              type="button"
-              variant="destructive"
-              onClick={() => {
-                if (removeTarget) void remove(removeTarget)
-              }}
-            >
-              Remove
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        cancelLabel="Keep it"
+        confirmLabel="Remove"
+        description={
+          <>
+            Its files are deleted from this computer.
+            {removeTarget?.source === 'videorc-creator'
+              ? ' Making it again uses one of your creations.'
+              : ' You can import it again from its folder.'}
+            {removeTarget?.packId === wornPackId ? ` ${persona.name} goes back to Still.` : ''}
+          </>
+        }
+        open={removeOpen}
+        testId="buddy-pack-remove"
+        title={`Remove ${removeTarget?.name ?? 'this pack'}?`}
+        onCancel={() => setRemoveOpen(false)}
+        onConfirm={() => {
+          if (removeTarget) void remove(removeTarget)
+        }}
+      />
     </PanelSection>
   )
 }

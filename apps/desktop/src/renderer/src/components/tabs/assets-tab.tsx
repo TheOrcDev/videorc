@@ -20,14 +20,7 @@ import { PanelSection } from '@/components/panel-section'
 import { PowerSlider } from '@/components/power-slider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter
-} from '@/components/ui/dialog'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -42,6 +35,7 @@ import {
   markSlotMissingIfAssetMatches,
   markSlotStatus,
   removeSlotAsset,
+  removeSlotNeedsConfirm,
   restoreSlotDefault,
   renameAsset,
   setAssetStyle,
@@ -99,6 +93,13 @@ export function AssetsTab(): ReactElement {
   const [importing, setImporting] = useState(false)
   const [pendingReplace, setPendingReplace] = useState<PendingBackgroundReplace | null>(null)
   const [renamingSlotId, setRenamingSlotId] = useState<string | null>(null)
+  // What the remove question is about: the slot on stage, or an imported file.
+  const removingSlot = registry.slots.find((entry) => entry.id === removingSlotId) ?? null
+  const removingAsset = removingSlot ? slotAsset(removingSlot, registry) : null
+  const removingApplied =
+    removingSlot !== null &&
+    (registry.activeSlotId === removingSlot.id ||
+      scene?.background?.assetId === removingSlot.assetId)
 
   // An <img> load failure is only allowed to brand a slot "Missing" when the
   // file is genuinely gone — decode hiccups and transient read errors must
@@ -226,10 +227,11 @@ export function AssetsTab(): ReactElement {
                 setRegistry((current) => setAssetStyle(current, assetId, defaultBackgroundStyle()))
               }
               onRemove={() => {
-                if (
-                  registry.activeSlotId === slot.id ||
-                  scene?.background?.assetId === slot.assetId
-                )
+                // An applied background leaves the scene, and an imported one
+                // loses its file (plan 174 C-12): both ask first. Emptying a
+                // built-in slot is reversible (Restore default), so it just
+                // happens.
+                if (removeSlotNeedsConfirm(registry, slot.id, scene?.background?.assetId))
                   setRemovingSlotId(slot.id)
                 else setRegistry((current) => removeSlotAsset(current, slot.id))
               }}
@@ -242,44 +244,34 @@ export function AssetsTab(): ReactElement {
         </Gallery>
       </PanelSection>
 
-      <Dialog
+      <ConfirmDialog
+        confirmLabel="Remove background"
+        description={
+          removingApplied
+            ? 'This empties the library slot and removes the background from the current scene, including a running recording or stream. Saved scenes keep their copy.'
+            : 'The imported image is deleted from this computer. The slot stays empty until you restore its built-in background or import another.'
+        }
         open={removingSlotId !== null}
-        onOpenChange={(open) => {
-          if (!open) setRemovingSlotId(null)
+        testId="background-remove"
+        title={
+          removingApplied
+            ? 'Remove applied background?'
+            : `Remove ${removingAsset?.name ?? 'this background'}?`
+        }
+        onCancel={() => setRemovingSlotId(null)}
+        onConfirm={() => {
+          if (removingSlotId) {
+            const slot = registry.slots.find((entry) => entry.id === removingSlotId)
+            if (
+              slot?.assetId === scene?.background?.assetId &&
+              registry.activeSlotId !== removingSlotId
+            )
+              applyBackgroundSlot(null)
+            setRegistry((current) => removeSlotAsset(current, removingSlotId))
+          }
+          setRemovingSlotId(null)
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Remove applied background?</DialogTitle>
-            <DialogDescription>
-              This empties the library slot and removes the background from the current scene,
-              including a running recording or stream. Saved scenes keep their copy.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRemovingSlotId(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                if (removingSlotId) {
-                  const slot = registry.slots.find((entry) => entry.id === removingSlotId)
-                  if (
-                    slot?.assetId === scene?.background?.assetId &&
-                    registry.activeSlotId !== removingSlotId
-                  )
-                    applyBackgroundSlot(null)
-                  setRegistry((current) => removeSlotAsset(current, removingSlotId))
-                }
-                setRemovingSlotId(null)
-              }}
-            >
-              Remove background
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      />
       {scene?.background ? (
         <div className="flex items-center gap-2">
           <BackgroundStylePopover

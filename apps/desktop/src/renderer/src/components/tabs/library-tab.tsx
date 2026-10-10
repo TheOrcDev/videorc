@@ -75,7 +75,8 @@ import {
 } from '@/lib/session-finalization'
 import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
 import { cleanCutModeLabel, isCleanCutEligible, type CleanCutSession } from '@/lib/clean-cut-view'
-import { revealInFileManagerLabel } from '@/lib/platform'
+import { revealInFileManagerLabel, trashName } from '@/lib/platform'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   LIBRARY_FILTERS,
   filterLibrarySessions,
@@ -181,8 +182,8 @@ export function LibraryTab({
       await deleteSessions(deleting)
       toast.success(
         deleting.length === 1
-          ? 'Recording moved to Trash.'
-          : `${deleting.length} recordings moved to Trash.`
+          ? `Recording moved to the ${trashName()}.`
+          : `${deleting.length} recordings moved to the ${trashName()}.`
       )
       setSelected((current) => current.filter((id) => !deleting.some((s) => s.id === id)))
       setDeleting([])
@@ -483,45 +484,30 @@ export function LibraryTab({
         </DialogContent>
       </Dialog>
 
-      {/* Delete confirm: files go to the system Trash first — Trash is the undo. */}
-      <Dialog
+      {/* Delete confirm (plan 174 E-2): only the video file can come back,
+          from the OS trash; the Library entry and everything attached to it
+          cannot, and the copy says so. */}
+      <ConfirmDialog
+        cancelDisabled={deletePending}
+        confirmDisabled={deletePending || captureProtected}
+        confirmLabel={deletePending ? 'Deleting…' : `Move to ${trashName()}`}
+        description={
+          deleting.length === 1
+            ? `The video file goes to the ${trashName()}. Its Library entry, markers, Buddy report and chat history are deleted and can't be restored.`
+            : `The video files go to the ${trashName()}. Their Library entries, markers, Buddy reports and chat history are deleted and can't be restored.`
+        }
         open={deleting.length > 0}
-        onOpenChange={(open) => !open && !deletePending && setDeleting([])}
-      >
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>
-              {deleting.length === 1
-                ? 'Delete this recording?'
-                : `Delete ${deleting.length} recordings?`}
-            </DialogTitle>
-            <DialogDescription>
-              {deleting.length === 1
-                ? 'The recording and its file move to the system Trash.'
-                : `${deleting.length} recordings and their files move to the system Trash.`}{' '}
-              You can restore them from the DeleteIcon.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              disabled={deletePending}
-              type="button"
-              variant="ghost"
-              onClick={() => setDeleting([])}
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={deletePending || captureProtected}
-              type="button"
-              variant="destructive"
-              onClick={() => void confirmDelete()}
-            >
-              {deletePending ? 'Deleting…' : 'Move to Trash'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        testId="library-delete"
+        title={
+          deleting.length === 1
+            ? `Move this recording to the ${trashName()}?`
+            : `Move ${deleting.length} recordings to the ${trashName()}?`
+        }
+        onCancel={() => {
+          if (!deletePending) setDeleting([])
+        }}
+        onConfirm={() => void confirmDelete()}
+      />
     </div>
   )
 }
