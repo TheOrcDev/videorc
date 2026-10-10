@@ -1609,8 +1609,6 @@ pub const CAPTION_STREAMING_TRANSPORT: &str = "transcription";
 pub struct CaptionRealtimeToken {
     pub token: String,
     pub url: String,
-    #[serde(default)]
-    pub expires_at: Option<u64>,
     pub model: String,
     #[serde(default)]
     pub remaining_seconds: Option<u64>,
@@ -1644,6 +1642,13 @@ impl CaptionRealtimeToken {
             .as_ref()
             .and_then(|format| format.rate)
             .unwrap_or(16_000)
+    }
+
+    /// The only encoding the desktop sends is raw PCM (`audio/pcm`).
+    pub fn input_is_pcm(&self) -> bool {
+        self.input_audio_format
+            .as_ref()
+            .is_none_or(|format| format.kind == "audio/pcm")
     }
 }
 
@@ -2119,7 +2124,7 @@ mod tests {
         .expect("streaming token");
         assert!(token.speaks_streaming_transcription());
         assert_eq!(token.input_rate(), 24_000);
-        assert_eq!(token.expires_at, None);
+        assert!(token.input_is_pcm());
         assert_eq!(token.subprotocols.len(), 2);
         assert_eq!(token.lease_id.as_deref(), Some("lease-1"));
         assert_eq!(token.lease_seconds, Some(600));
@@ -2140,6 +2145,13 @@ mod tests {
         .expect("legacy token");
         assert!(!token.speaks_streaming_transcription());
         assert_eq!(token.input_rate(), 16_000);
+        assert!(token.input_is_pcm());
+        let mulaw: CaptionRealtimeToken = serde_json::from_value(serde_json::json!({
+            "token": "t", "url": "u", "model": "m", "transport": "transcription",
+            "inputAudioFormat": { "type": "audio/pcmu", "rate": 8000 }
+        }))
+        .unwrap();
+        assert!(!mulaw.input_is_pcm());
         assert!(token.lease_id.is_none());
     }
 

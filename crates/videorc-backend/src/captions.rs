@@ -5354,7 +5354,11 @@ impl StreamingCaptionDecoder {
 
     /// `socket_ms_sent` is the audio already sent on this socket, the fallback
     /// anchor when a part carries no `startSecond`.
-    fn decode(&mut self, part: &serde_json::Value, socket_ms_sent: f64) -> Vec<RealtimeCaptionEvent> {
+    fn decode(
+        &mut self,
+        part: &serde_json::Value,
+        socket_ms_sent: f64,
+    ) -> Vec<RealtimeCaptionEvent> {
         let part_type = part
             .get("type")
             .and_then(serde_json::Value::as_str)
@@ -5834,14 +5838,9 @@ async fn run_realtime_caption_session(
     audio_heartbeat: &mut CaptionAudioHeartbeat,
 ) -> RealtimeOutcome {
     let mut leases = StreamingLeases::default();
-    let outcome = run_streaming_caption_sockets(
-        session,
-        sequence,
-        timeline,
-        audio_heartbeat,
-        &mut leases,
-    )
-    .await;
+    let outcome =
+        run_streaming_caption_sockets(session, sequence, timeline, audio_heartbeat, &mut leases)
+            .await;
     leases.release(session);
     outcome
 }
@@ -5909,7 +5908,10 @@ async fn run_streaming_caption_sockets(
             }
             Err(CaptionChunkFailure::Transient { code, message }) => {
                 if let Some(code) = code.as_deref() {
-                    tracing::warn!(reason_code = code, "Streaming caption token request failed.");
+                    tracing::warn!(
+                        reason_code = code,
+                        "Streaming caption token request failed."
+                    );
                 }
                 if !ever_connected {
                     return RealtimeOutcome::Fallback(message);
@@ -5931,9 +5933,9 @@ async fn run_streaming_caption_sockets(
         leases.settle_active(session);
         leases.active = ActiveStreamingLease::from_token(&token);
         let input_rate = token.input_rate();
-        if !matches!(input_rate, 16_000 | 24_000) {
+        if !token.input_is_pcm() || !matches!(input_rate, 16_000 | 24_000) {
             return RealtimeOutcome::Fallback(format!(
-                "streaming captions asked for unsupported {input_rate} Hz audio"
+                "streaming captions asked for audio other than 16 or 24 kHz PCM ({input_rate} Hz)"
             ));
         }
 
@@ -6489,8 +6491,6 @@ enum TerminalOrigin {
     Upload(crate::videorc_api::CaptionChunkPurpose),
     /// The realtime token route, which checks caption access.
     RealtimeMint,
-    /// The realtime socket or its provider: a transport only captions use.
-    RealtimeSocket,
     /// The microphone path itself.
     AudioPath,
 }
@@ -6504,8 +6504,8 @@ enum TerminalScope {
 }
 
 /// Pure: listen codes end listening only; a caption allowance or captions
-/// switch answer to a caption-metered request, and any realtime transport
-/// failure, end captions only; everything else (sign-in, Premium, the account
+/// switch answer to a caption-metered request ends captions only (a streaming
+/// socket failure is never terminal: it falls back to chunks, plan 175); everything else (sign-in, Premium, the account
 /// blocklist, server configuration, a lost microphone, and any code a listen
 /// chunk got) ends both. The web answers `ai-disabled` for the global switch
 /// too: then the first listen chunk after it gets the same code and ends the
@@ -6521,7 +6521,6 @@ fn terminal_failure_scope(code: &str, origin: TerminalOrigin) -> TerminalScope {
         {
             TerminalScope::Captions
         }
-        TerminalOrigin::RealtimeSocket => TerminalScope::Captions,
         _ => TerminalScope::Both,
     }
 }
@@ -8922,7 +8921,8 @@ mod tests {
         assert_eq!(start["inputAudioFormat"]["type"], "audio/pcm");
         assert_eq!(start["inputAudioFormat"]["rate"], 16_000);
         assert_eq!(start["providerOptions"], options);
-        let bare = GatewayStreamingCaptionTransport::start_frame(24_000, Some(&serde_json::json!("x")));
+        let bare =
+            GatewayStreamingCaptionTransport::start_frame(24_000, Some(&serde_json::json!("x")));
         assert!(bare.get("providerOptions").is_none());
         assert_eq!(
             GatewayStreamingCaptionTransport::audio_done_frame()["type"],
@@ -8949,14 +8949,20 @@ mod tests {
             "ai-gateway-transcription.v1, ai-gateway-auth.vcst_abc"
         );
         token.subprotocols = vec!["a".into(), "b".into()];
-        assert_eq!(GatewayStreamingCaptionTransport::subprotocols(&token), "a, b");
+        assert_eq!(
+            GatewayStreamingCaptionTransport::subprotocols(&token),
+            "a, b"
+        );
     }
 
     #[test]
     fn streaming_decoder_opens_items_on_first_text_and_closes_on_final() {
         let mut decoder = StreamingCaptionDecoder::new(3);
         assert_eq!(
-            decoder.decode(&serde_json::json!({ "type": "stream-start", "warnings": [] }), 0.0),
+            decoder.decode(
+                &serde_json::json!({ "type": "stream-start", "warnings": [] }),
+                0.0
+            ),
             vec![RealtimeCaptionEvent::ConfigurationAcknowledged]
         );
         assert_eq!(
@@ -8998,7 +9004,10 @@ mod tests {
         // The next text opens a new item, anchored by the lag fallback when
         // the provider sends no startSecond.
         assert_eq!(
-            decoder.decode(&serde_json::json!({ "type": "transcript-partial", "text": "next" }), 5_000.0)[0],
+            decoder.decode(
+                &serde_json::json!({ "type": "transcript-partial", "text": "next" }),
+                5_000.0
+            )[0],
             RealtimeCaptionEvent::SpeechStarted {
                 item_id: "stream3:u1".to_string(),
                 audio_start_ms: Some(5_000.0 - STREAMING_ANCHOR_LAG_MS),
@@ -9027,7 +9036,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            decoder.decode(&serde_json::json!({ "type": "transcript-delta", "delta": "come back", "id": "a" }), 300.0),
+            decoder.decode(
+                &serde_json::json!({ "type": "transcript-delta", "delta": "come back", "id": "a" }),
+                300.0
+            ),
             vec![RealtimeCaptionEvent::Partial {
                 item_id: "stream1:a".to_string(),
                 transcript: "Welcome back".to_string(),
@@ -9035,7 +9047,10 @@ mod tests {
         );
         // A final with no text keeps what the deltas built.
         assert_eq!(
-            decoder.decode(&serde_json::json!({ "type": "transcript-final", "text": "", "id": "a" }), 600.0),
+            decoder.decode(
+                &serde_json::json!({ "type": "transcript-final", "text": "", "id": "a" }),
+                600.0
+            ),
             vec![RealtimeCaptionEvent::Completed {
                 item_id: "stream1:a".to_string(),
                 transcript: "Welcome back".to_string(),
@@ -9047,8 +9062,12 @@ mod tests {
             900.0,
         );
         assert_eq!(lone.len(), 2);
-        assert!(matches!(&lone[0], RealtimeCaptionEvent::SpeechStarted { audio_start_ms: Some(ms), .. } if *ms == 500.0));
-        assert!(matches!(&lone[1], RealtimeCaptionEvent::Completed { transcript, .. } if transcript == "Bye"));
+        assert!(
+            matches!(&lone[0], RealtimeCaptionEvent::SpeechStarted { audio_start_ms: Some(ms), .. } if *ms == 500.0)
+        );
+        assert!(
+            matches!(&lone[1], RealtimeCaptionEvent::Completed { transcript, .. } if transcript == "Bye")
+        );
     }
 
     #[test]
@@ -9064,7 +9083,10 @@ mod tests {
             }]
         );
         assert_eq!(
-            decoder.decode(&serde_json::json!({ "type": "finish", "text": "", "segments": [] }), 0.0),
+            decoder.decode(
+                &serde_json::json!({ "type": "finish", "text": "", "segments": [] }),
+                0.0
+            ),
             vec![RealtimeCaptionEvent::Finished {
                 duration_seconds: None
             }]
@@ -9093,7 +9115,10 @@ mod tests {
             vec![RealtimeCaptionEvent::AssistantResponse]
         );
         assert_eq!(
-            decoder.decode(&serde_json::json!({ "type": "response-metadata", "modelId": "m" }), 0.0),
+            decoder.decode(
+                &serde_json::json!({ "type": "response-metadata", "modelId": "m" }),
+                0.0
+            ),
             vec![RealtimeCaptionEvent::ConfigurationAcknowledged]
         );
         assert_eq!(
@@ -12148,12 +12173,6 @@ mod tests {
                 Captions,
             ),
             ("ai-disabled", TerminalOrigin::RealtimeMint, Captions),
-            // The realtime socket is a caption-only transport.
-            (
-                "realtime-close-4401",
-                TerminalOrigin::RealtimeSocket,
-                Captions,
-            ),
             // A listen chunk told `ai-disabled` means the global switch.
             ("ai-disabled", listen_chunk, Both),
             // What applies to listening too ends both.
@@ -12230,15 +12249,16 @@ mod tests {
             );
         }
 
-        // A realtime socket failure while Orcle listens falls back to chunks.
+        // A caption-scoped streaming mint refusal while Orcle listens falls
+        // back to chunks for listening.
         let session = test_caption_session(&state, true);
         state.captions.lock().await.listen_wanted = true;
         let outcome = handle_terminal_failure(
             &session,
-            "realtime-close-4429",
-            "Realtime caption socket closed.",
+            "captions-monthly-quota-exhausted",
+            "Monthly live-caption allowance exhausted.",
             CaptionsTransport::Realtime,
-            TerminalOrigin::RealtimeSocket,
+            TerminalOrigin::RealtimeMint,
         )
         .await;
         assert!(matches!(
