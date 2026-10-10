@@ -326,6 +326,12 @@ import {
   type TwitchGifMode
 } from '../shared/chat-gif'
 import { installContextMenu } from './context-menu'
+import { installAppMenu } from './app-menu'
+import {
+  appMenuReleaseNotesUrl,
+  type AppMenuPageKey,
+  type AppMenuWindowId
+} from '../shared/app-menu-items'
 import {
   DARK_GLASS_COATS,
   DARK_WINDOW_PALETTE,
@@ -14292,6 +14298,80 @@ app.on('open-url', (event, url) => {
   }
 })
 
+// The application menu (plan 174 S0.6, app-menu.ts). A page item sends the key
+// ⌘1–⌘9 or ⌘, forwards, so the renderer's own gates (onboarding, What's New)
+// still apply; a window item runs the toggle its shortcut runs.
+//
+// The macOS app outlives its main window, and every other window closes with
+// it. With no main window, a menu pick reopens it, as the Dock does, and
+// opens nothing that would run without the Studio behind it.
+function appMenuMainWindowOpen(): boolean {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return true
+  }
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
+  }
+  return false
+}
+
+function showMainWindowPage(key: AppMenuPageKey): void {
+  if (!appMenuMainWindowOpen() || !mainWindow) {
+    return
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+  mainWindow.show()
+  mainWindow.focus()
+  sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', key)
+}
+
+function toggleAppMenuWindow(id: AppMenuWindowId): void {
+  if (!appMenuMainWindowOpen()) {
+    return
+  }
+  const failed = (error: unknown): void =>
+    safeConsole.warn(`Window menu: could not toggle the ${id} window:`, error)
+  if (id === 'preview') {
+    void togglePreviewWindow().catch(failed)
+  } else if (id === 'notes') {
+    if (notesWindowIsOpen()) {
+      closeNotesWindow()
+    } else {
+      void openNotesWindow().catch(failed)
+    }
+  } else if (id === 'stream-manager') {
+    void toggleCommentsWindow().catch(failed)
+  } else {
+    void toggleCaptionsWindow().catch(failed)
+  }
+}
+
+function installApplicationMenu(): void {
+  installAppMenu({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    windowsEnabled: {
+      preview: true,
+      notes: notesWindowFeatureEnabled,
+      'stream-manager': commentsWindowFeatureEnabled,
+      captions: captionsWindowFeatureEnabled
+    },
+    actions: {
+      showPage: showMainWindowPage,
+      toggleWindow: toggleAppMenuWindow,
+      openReleaseNotes: () => {
+        void shell
+          .openExternal(appMenuReleaseNotesUrl(app.getVersion()))
+          .catch((error: unknown) =>
+            safeConsole.warn('Help menu: could not open release notes:', error)
+          )
+      }
+    }
+  })
+}
+
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) {
     return
@@ -15200,6 +15280,7 @@ app.whenReady().then(async () => {
     })
   )
 
+  installApplicationMenu()
   createWindow()
   setDockIcon()
   await primeScreenCapturePermission()

@@ -3622,18 +3622,21 @@ describe('real StudioProvider lifecycle', () => {
       () => latest()?.core.sessionRuntimeNotice?.sessionId === 'session-failed-snapshot'
     )
 
+    // A record+stream (Go Live) session was on air: its failure is a live
+    // session's, and it keeps the saved file's actions (plan 174 B-6).
     expect(latest()?.recording.recording.state).toBe('failed')
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
       kind: 'recording-failed',
-      activity: 'recording',
+      activity: 'record+stream',
       sessionId: 'session-failed-snapshot',
       outputPath: 'C:\\recordings\\session-failed-snapshot.mkv',
       message: failedSnapshotEvent.message
     })
     expect(toastSpies.error).toHaveBeenCalledWith(
-      'Recording stopped unexpectedly',
+      'Live session stopped unexpectedly',
       expect.objectContaining({
         description: failedSnapshotEvent.message,
+        action: expect.objectContaining({ label: 'Open Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -4251,6 +4254,91 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.success).toHaveBeenCalledWith(
       'Recording saved',
       expect.objectContaining({ duration: 12000 })
+    )
+  })
+
+  // Plan 174 B-6: the runtime notices read that `recording` + stream URL
+  // session as live. A microphone dropout tells the streamer the live session
+  // goes on silent (the audience hears it), and the saved file is still
+  // announced when it ends.
+  it('reports a microphone loss during Go Live (record+stream) as a live-session notice', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const push = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        await Promise.resolve()
+      })
+    }
+    await push('recording.status', {
+      state: 'recording',
+      sessionId: 'go-live-silent',
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    } satisfies RecordingStatus)
+    await waitForObservation(() => latest()?.recording.recording.sessionId === 'go-live-silent')
+    await push('health.event', {
+      id: 'go-live-microphone-lost',
+      sessionId: 'go-live-silent',
+      level: 'warn',
+      code: 'microphone-input-lost',
+      message: 'The selected microphone stopped providing audio.',
+      permissionPane: null,
+      createdAt: now
+    } satisfies HealthEvent)
+    await waitForObservation(
+      () => latest()?.core.sessionRuntimeNotice?.kind === 'microphone-input-lost'
+    )
+
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone stopped: live session continues with silence',
+      expect.objectContaining({ id: 'microphone-input-lost' })
+    )
+    expect(toastSpies.warning).not.toHaveBeenCalledWith(
+      'Microphone stopped: recording continues with silence',
+      expect.anything()
+    )
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'microphone-input-lost',
+      activity: 'record+stream',
+      phase: 'active',
+      sessionId: 'go-live-silent'
+    })
+
+    await push('recording.status', {
+      state: 'idle',
+      sessionId: 'go-live-silent',
+      outputPath: '/recordings/go-live-silent.mp4',
+      durationMs: 65_000,
+      message: 'Saved.'
+    } satisfies RecordingStatus)
+    await waitForObservation(() => toastSpies.success.mock.calls.length === 1)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Recording saved',
+      expect.objectContaining({ duration: 12000 })
+    )
+    expect(toastSpies.warning).toHaveBeenLastCalledWith(
+      'Microphone stopped during the live session',
+      expect.objectContaining({ id: 'microphone-input-lost' })
     )
   })
 

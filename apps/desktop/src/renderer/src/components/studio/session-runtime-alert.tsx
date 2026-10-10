@@ -2,7 +2,11 @@ import { AlertIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { revealInFileManagerLabel } from '@/lib/platform'
-import { sessionRuntimeNoticeTitle, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
+import {
+  activitySavesRecording,
+  sessionRuntimeNoticeTitle,
+  type SessionRuntimeNotice
+} from '@/lib/session-runtime-notice'
 import type { ReactElement } from 'react'
 
 export function SessionRuntimeAlert({
@@ -17,6 +21,8 @@ export function SessionRuntimeAlert({
   onRevealOutput?: () => void
 }): ReactElement {
   const recordingFailed = notice.kind === 'recording-failed'
+  // Go Live's record+stream saved a file too: it keeps the file's actions.
+  const savedFile = recordingFailed && activitySavesRecording(notice.activity)
 
   return (
     <Alert
@@ -31,15 +37,12 @@ export function SessionRuntimeAlert({
           {notice.message}
         </p>
         <div className="flex flex-wrap gap-1 pt-2">
-          {recordingFailed && notice.activity === 'recording' && onOpenLibrary ? (
+          {savedFile && onOpenLibrary ? (
             <Button size="xs" type="button" variant="ghost" onClick={onOpenLibrary}>
               Open Library
             </Button>
           ) : null}
-          {recordingFailed &&
-          notice.activity === 'recording' &&
-          notice.outputPath &&
-          onRevealOutput ? (
+          {savedFile && notice.outputPath && onRevealOutput ? (
             <Button size="xs" type="button" variant="ghost" onClick={onRevealOutput}>
               {revealInFileManagerLabel()}
             </Button>

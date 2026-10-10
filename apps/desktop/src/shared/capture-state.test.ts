@@ -6,8 +6,28 @@ import {
   captureStateBlocksInterruption,
   isActiveRecordingState,
   recordingStateFromPayload,
+  sessionActivity,
   type MainCaptureState
 } from './capture-state'
+
+// Plan 174 B-6: Go Live (record+stream) reports `recording` with a stream URL,
+// and its notices must speak of the live session while it still saves a file.
+describe('sessionActivity', () => {
+  it('reads Go Live as record+stream, never as a plain recording', () => {
+    expect(sessionActivity({ state: 'recording', streamUrl: 'rtmp://127.0.0.1/live/***' })).toBe(
+      'record+stream'
+    )
+  })
+
+  it('tells a stream-only session from a recording-only one', () => {
+    expect(sessionActivity({ state: 'streaming', streamUrl: 'rtmp://127.0.0.1/live/***' })).toBe(
+      'live-stream'
+    )
+    expect(sessionActivity({ state: 'streaming' })).toBe('live-stream')
+    expect(sessionActivity({ state: 'recording' })).toBe('recording')
+    expect(sessionActivity({ state: 'recording', streamUrl: null })).toBe('recording')
+  })
+})
 
 describe('isActiveRecordingState', () => {
   it.each(['starting', 'recording', 'streaming', 'stopping'] as const)(

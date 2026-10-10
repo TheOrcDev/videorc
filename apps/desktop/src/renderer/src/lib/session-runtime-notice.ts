@@ -1,4 +1,22 @@
-export type SessionRuntimeActivity = 'recording' | 'live-stream'
+import type { SessionActivity } from '../../../shared/capture-state'
+
+/**
+ * What the session was doing when the notice was raised (`sessionActivity`).
+ * The copy follows whether viewers were watching; the recovery actions follow
+ * whether a file was being saved. Go Live's record+stream gets both (plan 174
+ * B-6).
+ */
+export type SessionRuntimeActivity = SessionActivity
+
+/** Viewers were watching: the notice speaks of the live session. */
+export function activityIsLive(activity: SessionRuntimeActivity): boolean {
+  return activity !== 'recording'
+}
+
+/** A local file was being saved: the notice can open it in the Library or reveal it. */
+export function activitySavesRecording(activity: SessionRuntimeActivity): boolean {
+  return activity !== 'live-stream'
+}
 
 export type SessionRuntimeNotice =
   | {
@@ -21,7 +39,7 @@ export type SessionRuntimeNotice =
 
 export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string {
   if (notice.kind === 'recording-failed') {
-    return notice.activity === 'live-stream'
+    return activityIsLive(notice.activity)
       ? 'Live session stopped unexpectedly'
       : 'Recording stopped unexpectedly'
   }
@@ -46,18 +64,18 @@ export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string 
   }
 
   if (notice.phase === 'ended') {
-    return notice.activity === 'live-stream'
+    return activityIsLive(notice.activity)
       ? 'Microphone stopped during the live session'
       : 'Microphone stopped: saved recording contains silence'
   }
 
   if (notice.phase === 'ending') {
-    return notice.activity === 'live-stream'
+    return activityIsLive(notice.activity)
       ? 'Microphone stopped as the live session ends'
       : 'Microphone stopped: finishing recording with silence'
   }
 
-  return notice.activity === 'live-stream'
+  return activityIsLive(notice.activity)
     ? 'Microphone stopped: live session continues with silence'
     : 'Microphone stopped: recording continues with silence'
 }

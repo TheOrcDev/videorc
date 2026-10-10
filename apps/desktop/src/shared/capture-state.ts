@@ -26,6 +26,24 @@ export function sessionIsLive(status: {
   return status.state === 'streaming' || (status.state === 'recording' && Boolean(status.streamUrl))
 }
 
+/**
+ * What a running session does, for the notices that describe it: `recording`
+ * records only, `live-stream` streams only, and `record+stream` is Go Live's
+ * default, on air and saving a file at once. The state alone calls that last
+ * one `recording`, so this reads it through `sessionIsLive` (plan 174 B-6).
+ */
+export type SessionActivity = 'recording' | 'live-stream' | 'record+stream'
+
+export function sessionActivity(status: {
+  state?: string | null
+  streamUrl?: string | null
+}): SessionActivity {
+  if (!sessionIsLive(status)) {
+    return 'recording'
+  }
+  return status.state === 'streaming' ? 'live-stream' : 'record+stream'
+}
+
 export function captureStateBlocksInterruption(
   state: MainCaptureState,
   backendConnected: boolean
