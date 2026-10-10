@@ -193,6 +193,10 @@ Everything except ⌘K uses the desktop scale.
   compact) with hairline separators. Cards remain only for objects with a
   picture (scene thumbnails, library items): 8 px radius, white 4% fill, a
   1 px hairline, no shadow.
+  Sources (plan 173) is the reference for rows that carry controls: one
+  `SourceItem` per source (`components/sources/source-item.tsx`), a header
+  row (icon, title, one status chip, one quick control, More), a body
+  indented to the title, and the rare settings folded into More.
 - **Radii.** Tiers only, never ad-hoc radius values per screen:
   - `rounded-panel`: 12 px. Containers and dialogs.
   - `rounded-row`: 8 px. Rows and cards.
@@ -444,7 +448,7 @@ confirming a routine interaction the user just watched succeed.
 | Menus / popovers          | `DropdownMenu` / `Popover` on `glass-float`     |
 | Toasts                    | sonner on `glass-float`; type colours the icon  |
 | Audio levels              | audiocn meters (`docs/audiocn.md`)              |
-| Audio controls            | audiocn strips on Sources (`docs/audiocn.md`)   |
+| Audio controls            | audiocn controls in Sources rows (`SourceItem`) |
 
 Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
 do not hand-roll it.
