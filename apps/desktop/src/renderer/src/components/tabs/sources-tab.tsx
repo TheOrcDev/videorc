@@ -1,329 +1,82 @@
-import { CameraIcon, DisplayIcon, SyncIcon, UploadIcon, WarningIcon } from '@/components/icons'
+import { SyncIcon, WarningIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
-import { PageStack } from '@/components/page'
-import { PanelSection } from '@/components/panel-section'
+import { ConfigGrid, CONFIG_GRID_PAIR, PageHeader } from '@/components/page'
 import { SourcesAudioMixer } from '@/components/sources/sources-audio-mixer'
-import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
-import { SourceSelect } from '@/components/source-select'
-import { StatusBadge, type StatusTone } from '@/components/status-badge'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { VideoSources, videoPermissionState } from '@/components/sources/video-sources'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
-import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
-import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
-import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
-import type { SourceSelection } from '@/lib/backend'
-import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { useStudioCore } from '@/hooks/use-studio'
+import { uncoveredDeviceWarnings } from '@/lib/source-status'
 
-// Live chip for a capture source (UI rewrite V3): what the preview pipeline says
-// about the source RIGHT NOW. A live source whose newest frame is old is reported
-// honestly — for cameras that means trouble; screens only deliver on change, so
-// staleness is normal there and not flagged.
-function sourceRuntimeChip({
-  state,
-  frameAgeMs,
-  message,
-  staleWarnMs
-}: {
-  state?: 'starting' | 'live' | 'permission-needed' | 'source-missing' | 'device-missing' | 'failed'
-  frameAgeMs?: number
-  message?: string
-  staleWarnMs?: number
-}): { label: string; tone: StatusTone; hint?: string } | null {
-  switch (state) {
-    case 'live':
-      if (staleWarnMs && typeof frameAgeMs === 'number' && frameAgeMs > staleWarnMs) {
-        return {
-          label: `Stale ${Math.round(frameAgeMs / 1000)}s`,
-          tone: 'warn',
-          hint: 'No fresh frames. Re-select the source to restart it.'
-        }
-      }
-      return { label: 'Live', tone: 'good' }
-    case 'starting':
-      return { label: 'Starting', tone: 'warn' }
-    case 'permission-needed':
-      return { label: 'Permission needed', tone: 'warn', hint: message }
-    case 'failed':
-      return { label: 'Failed', tone: 'error', hint: message ?? 'Re-select the source to retry.' }
-    case 'source-missing':
-    case 'device-missing':
-      return null
-    default:
-      return null
-  }
-}
-
-function RuntimeChip({
-  chip
-}: {
-  chip: { label: string; tone: StatusTone; hint?: string } | null
-}): ReactElement | null {
-  if (!chip) {
-    return null
-  }
-  return (
-    <span className="flex items-center gap-2" title={chip.hint}>
-      <StatusBadge label="" tone={chip.tone} value={chip.label} />
-    </span>
-  )
-}
-
-// The single home for every capture device — screen/window, camera, and microphone
-// with its mixer — so changing what gets captured never spans pages (UI rewrite plan
-// V1/V2, 2026-06-10).
+// The single home for every capture device (UI rewrite plan V1/V2,
+// 2026-06-10). Plan 173 rebuilt it as the Config-grid page `page.tsx` names:
+// Video (Screen, Camera) beside Audio (Microphone, System audio) at `lg`,
+// stacked below it, every source in the same SourceItem shape. The page's one
+// action, Refresh, re-reads every device, so it sits on the intro line.
 export function SourcesTab(): ReactElement {
-  const {
+  const { deviceList, refreshBackend, runtimeInfo, mediaAccess } = useStudioCore()
+  const [refreshing, setRefreshing] = useState(false)
+  const permissions = videoPermissionState({
     deviceList,
-    captureConfig,
-    setCaptureConfig,
-    refreshBackend,
-    isSessionActive,
-    layoutSwitchPending,
-    sourceDeviceSwitchPending,
-    switchSourceDeviceLive,
-    sourceSwitchReason,
-    allowCaptureNone,
-    handleSystemPermission,
-    revealPermissionTarget,
-    runtimeInfo,
-    mediaAccess,
-    wsStatus
-  } = useStudioCore()
-  const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
-  const { diagnosticStats } = useStudioDiagnostics()
-  // Q6 (plan 022): explicit select states while device discovery is pending.
-  const discoveryPending = wsStatus !== 'connected'
-  // S5 (plan 024): the selected camera format can't meet the requested fps/res.
-  const cameraShortfall = captureConfig.sources.cameraId
-    ? cameraFormatShortfall(diagnosticStats)
-    : null
-  const captureDevices = capturePickerDevices(deviceList.devices)
-  const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const hasCapturePermissionRequired = captureDevices.some(
-    (device) => device.status === 'permission-required'
-  )
-  const cameraAccess = systemAccessRows({
-    deviceList,
-    audioMeter: null,
     platform: runtimeInfo?.platform,
     mediaAccess
-  }).find((row) => row.id === 'camera')
-  const hasCameraPermissionRequired =
-    cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted'
-  const cameraPermissionAction = systemAccessAction({
-    pane: 'camera',
-    state: cameraAccess?.state,
-    platform: runtimeInfo?.platform,
-    mediaAccessStatus: mediaAccess?.camera
   })
-  const capturePermissionTargetName =
-    runtimeInfo?.capturePermissionTargetName ?? runtimeInfo?.permissionTargetName ?? 'Videorc'
-  const [refreshing, setRefreshing] = useState(false)
-
-  const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
-
-  const captureSourcesForDevice = (captureId: string | undefined): SourceSelection =>
-    buildCaptureSources(captureConfig.sources, captureDevices, captureId)
-
-  const cameraSourcesForDevice = (cameraId: string | undefined): SourceSelection =>
-    buildCameraSources(captureConfig.sources, cameras, cameraId)
-
-  const applyCaptureSource = (captureId: string | undefined): void => {
-    void switchSourceDeviceLive('capture', captureSourcesForDevice(captureId))
-  }
-  const applyCameraSource = (cameraId: string | undefined): void => {
-    void switchSourceDeviceLive('camera', cameraSourcesForDevice(cameraId))
-  }
+  const warnings = uncoveredDeviceWarnings(deviceList.warnings, {
+    camera: permissions.cameraPermissionRequired,
+    screen: permissions.screenPermissionRequired
+  })
 
   return (
-    <PageStack>
-      <PanelSection
+    <div className="flex min-h-full flex-col" data-videorc-sources-page="">
+      <PageHeader
         action={
-          <Button
-            disabled={refreshing}
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              setRefreshing(true)
-              // fresh: a camera plugged in a moment ago must not get an answer
-              // from a refresh that started before the click.
-              void refreshBackend({ fresh: true }).finally(() => setRefreshing(false))
-            }}
-          >
-            <SyncIcon
-              className={refreshing ? 'animate-spin' : undefined}
-              data-icon="inline-start"
-            />
-            {refreshing ? 'Refreshing…' : 'Refresh'}
-          </Button>
-        }
-        description="Pick what gets captured. Unavailable devices need permission or reconnection."
-        icon={DisplayIcon}
-        title="Capture sources"
-      >
-        {deviceList.warnings.map((warning) => (
-          <Alert key={warning} variant="warning">
-            <WarningIcon weight="fill" />
-            <AlertTitle>{warning}</AlertTitle>
-          </Alert>
-        ))}
-        {hasCapturePermissionRequired ? (
-          <Alert variant="warning">
-            <WarningIcon weight="fill" />
-            <AlertTitle>
-              Screen Recording permission is required for {capturePermissionTargetName}.
-            </AlertTitle>
-            <AlertDescription className="flex flex-wrap gap-2 pt-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              {/* The words stay exactly "Refresh": smoke-scene-presets finds the
+                  button by them, and waits for it to come back enabled. */}
               <Button
+                disabled={refreshing}
                 size="sm"
                 variant="outline"
-                onClick={() => void handleSystemPermission('screen-recording')}
+                onClick={() => {
+                  setRefreshing(true)
+                  // fresh: a camera plugged in a moment ago must not get an
+                  // answer from a refresh that started before the click.
+                  void refreshBackend({ fresh: true }).finally(() => setRefreshing(false))
+                }}
               >
-                <DisplayIcon data-icon="inline-start" />
-                Open Screen Recording
+                <SyncIcon
+                  className={refreshing ? 'animate-spin' : undefined}
+                  data-icon="inline-start"
+                />
+                {refreshing ? 'Refreshing…' : 'Refresh'}
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => void revealPermissionTarget()}>
-                <UploadIcon data-icon="inline-start" />
-                Show Capture Helper
-              </Button>
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        {hasCameraPermissionRequired ? (
-          <Alert variant="warning">
-            <WarningIcon weight="fill" />
-            <AlertTitle>
-              Camera permission is required for {capturePermissionTargetName}.
-            </AlertTitle>
-            <AlertDescription className="flex flex-wrap gap-2 pt-2">
-              {cameraPermissionAction ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void handleSystemPermission('camera')}
-                >
-                  <CameraIcon data-icon="inline-start" />
-                  {cameraPermissionAction === 'request-media-access'
-                    ? 'Enable Camera'
-                    : 'Open Camera Settings'}
-                </Button>
-              ) : null}
-              <Button size="sm" variant="ghost" onClick={() => void revealPermissionTarget()}>
-                <UploadIcon data-icon="inline-start" />
-                Show Capture Helper
-              </Button>
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="flex flex-col gap-1.5">
-            <SourceSelect
-              allowNone={allowCaptureNone}
-              devices={captureDevices}
-              discoveryPending={discoveryPending}
-              disabled={Boolean(sourceSwitchReason('capture') || layoutSwitchPending)}
-              description={<SourceSwitchStatus kind="capture" />}
-              selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
-              label="Screen / window"
-              searchable
-              value={selectedCaptureId}
-              onChange={applyCaptureSource}
-            />
-            <RuntimeChip
-              chip={
-                sourceDeviceSwitchPending === 'capture'
-                  ? { label: 'Switching', tone: 'warn' }
-                  : selectedCaptureId
-                    ? sourceRuntimeChip({
-                        state: previewScreenStatus?.state,
-                        frameAgeMs: previewScreenStatus?.frameAgeMs,
-                        message: previewScreenStatus?.message
-                      })
-                    : null
-              }
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <SourceSelect
-              allowNone
-              devices={cameras}
-              disabled={Boolean(sourceSwitchReason('camera') || layoutSwitchPending)}
-              description={<SourceSwitchStatus kind="camera" />}
-              selectedName={captureConfig.sources.cameraName}
-              discoveryPending={discoveryPending}
-              label="Camera"
-              value={captureConfig.sources.cameraId}
-              onChange={applyCameraSource}
-            />
-            <RuntimeChip
-              chip={
-                sourceDeviceSwitchPending === 'camera'
-                  ? { label: 'Switching', tone: 'warn' }
-                  : captureConfig.sources.cameraId
-                    ? sourceRuntimeChip({
-                        state: previewCameraStatus?.state,
-                        frameAgeMs: previewCameraStatus?.frameAgeMs,
-                        message: previewCameraStatus?.message,
-                        staleWarnMs: 3000
-                      })
-                    : null
-              }
-            />
-            {/* Q024 S5: a capture camera (e.g. a Cam Link mirroring 4K@25 PAL)
-                whose only format can't meet the requested fps/resolution used
-                to fall back silently — name the mismatch so 25fps isn't a
-                mystery. */}
-            {cameraShortfall ? (
-              <p className="flex items-start gap-1.5 text-xs text-warning">
-                <WarningIcon className="mt-0.5 size-3.5 shrink-0" weight="fill" />
-                <span>{cameraFormatShortfallMessage(cameraShortfall)}</span>
-              </p>
-            ) : null}
-          </div>
+            </TooltipTrigger>
+            <TooltipContent>
+              Look again for screens, windows, cameras and microphones
+            </TooltipContent>
+          </Tooltip>
+        }
+        className="border-b border-border py-2"
+        description="What gets recorded and streamed. Changes apply live."
+        title="Sources"
+      />
+      {warnings.length > 0 ? (
+        <div className="flex flex-col gap-2 px-gutter pt-3">
+          {warnings.map((warning) => (
+            <Alert key={warning} variant="warning">
+              <WarningIcon weight="fill" />
+              <AlertTitle>{warning}</AlertTitle>
+            </Alert>
+          ))}
         </div>
-        {isSessionActive ? (
-          <p className="text-xs text-muted-foreground">
-            Video sources switch live after the target source produces fresh frames.
-          </p>
-        ) : null}
-
-        {import.meta.env.DEV ? (
-          <div className="flex items-center justify-between gap-3 rounded-row border border-border bg-foreground/[0.03] px-3 py-2">
-            <div className="flex min-w-0 flex-col">
-              <span className="text-sm font-medium">Synthetic diagnostic source</span>
-              <span className="text-xs text-muted-foreground">
-                Dev-only. Replaces the screen with a deterministic frame-number + timecode source
-                for regression tests.
-              </span>
-            </div>
-            <Switch
-              checked={captureConfig.sources.testPattern === true}
-              data-videorc-synthetic-source-toggle
-              disabled={isSessionActive}
-              size="sm"
-              onCheckedChange={(testPattern) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  sources: testPattern
-                    ? {
-                        ...current.sources,
-                        screenId: undefined,
-                        screenName: undefined,
-                        windowId: undefined,
-                        windowName: undefined,
-                        testPattern
-                      }
-                    : { ...current.sources, testPattern }
-                }))
-              }
-            />
-          </div>
-        ) : null}
-      </PanelSection>
-
-      <SourcesAudioMixer />
-    </PageStack>
+      ) : null}
+      <ConfigGrid className={CONFIG_GRID_PAIR}>
+        <VideoSources />
+        <SourcesAudioMixer />
+      </ConfigGrid>
+    </div>
   )
 }
