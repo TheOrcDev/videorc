@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   applyVideorcWindowCaptureProtection,
+  CAPTURE_PROTECTION_UNSUPPORTED_REASON,
+  platformSupportsCaptureProtection,
   videorcWindowRequiresCaptureProtection,
   type VideorcWindowRole,
   WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
@@ -78,6 +80,32 @@ describe('window capture protection policy', () => {
       })
     ).toEqual({ state: 'protected', protected: true })
     expect(window.setContentProtection).toHaveBeenCalledTimes(2)
+  })
+
+  // Plan 174 I-2: Notes tells the streamer whether it is hidden, so a
+  // platform where Electron's setContentProtection does nothing must not
+  // count as protected.
+  it('reports a platform without content protection instead of claiming it', () => {
+    expect(platformSupportsCaptureProtection('darwin')).toBe(true)
+    expect(platformSupportsCaptureProtection('win32')).toBe(true)
+    expect(platformSupportsCaptureProtection('linux')).toBe(false)
+
+    const onFailure = vi.fn()
+    const window = { setContentProtection: vi.fn() }
+    expect(
+      applyVideorcWindowCaptureProtection(window, 'notes', { platform: 'linux', onFailure })
+    ).toEqual({
+      state: 'unsupported',
+      protected: false,
+      reason: CAPTURE_PROTECTION_UNSUPPORTED_REASON
+    })
+    expect(window.setContentProtection).not.toHaveBeenCalled()
+    expect(onFailure).toHaveBeenCalledWith(CAPTURE_PROTECTION_UNSUPPORTED_REASON)
+    // Windows that never need protection stay `not-required` everywhere.
+    expect(applyVideorcWindowCaptureProtection(window, 'captions', { platform: 'linux' })).toEqual({
+      state: 'not-required',
+      protected: false
+    })
   })
 
   it('assigns one unique physical-acceptance marker to every protected role', () => {

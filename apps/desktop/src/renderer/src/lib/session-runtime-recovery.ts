@@ -7,10 +7,13 @@ import type {
   XPlaybackEvent
 } from '@/lib/backend'
 import {
+  activityIsLive,
+  activitySavesRecording,
   sessionRuntimeNoticeTitle,
   type SessionRuntimeActivity,
   type SessionRuntimeNotice
 } from '@/lib/session-runtime-notice'
+import { sessionActivity, sessionIsLive } from '../../../shared/capture-state'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { recordingStartupHealthToast } from '@/lib/studio-health'
@@ -124,7 +127,7 @@ export function recordingFailurePresentation({
   if (currentDedupeKey === dedupeKey) return null
   const message =
     status.message ??
-    (activity === 'live-stream'
+    (activityIsLive(activity)
       ? 'Videorc could not finish this live session.'
       : 'Videorc could not finish this recording.')
   return {
@@ -148,7 +151,7 @@ export function showRecordingFailure({ notice }: RecordingFailurePresentation): 
     id: RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID,
     description: notice.message,
     duration: Infinity,
-    ...(notice.activity === 'recording'
+    ...(activitySavesRecording(notice.activity)
       ? {
           action: {
             label: 'Open Library',
@@ -156,7 +159,7 @@ export function showRecordingFailure({ notice }: RecordingFailurePresentation): 
           }
         }
       : {}),
-    ...(notice.activity === 'recording' && sessionId && notice.outputPath && revealSession
+    ...(activitySavesRecording(notice.activity) && sessionId && notice.outputPath && revealSession
       ? {
           cancel: {
             label: revealInFileManagerLabel(),
@@ -206,12 +209,8 @@ export function microphoneLossPresentation({
     return null
   const audioIssues = [...previousIssues, { code: event.code, message: event.message }]
 
-  const activity: SessionRuntimeActivity =
-    recording.state === 'streaming'
-      ? 'live-stream'
-      : recording.state === 'recording'
-        ? 'recording'
-        : lastActivity
+  // Go Live reports `recording` with a stream URL: still a live session.
+  const activity: SessionRuntimeActivity = active ? sessionActivity(recording) : lastActivity
   return {
     dedupeKey,
     activity,
@@ -359,7 +358,7 @@ export function showSessionFinished({
       duration: Infinity
     })
   }
-  if (activity !== 'recording') return
+  if (!activitySavesRecording(activity)) return
 
   const sessionId = status.sessionId ?? lastSessionId
   const openFinishedRecording = (): void => {
@@ -529,9 +528,11 @@ export function showPremiumUpgrade(title: string, description?: string): void {
   })
 }
 
-export function showSourceFallbackActiveSession(state: RecordingStatus['state']): void {
+export function showSourceFallbackActiveSession(
+  session: Pick<RecordingStatus, 'state' | 'streamUrl'>
+): void {
   toast.warning(
-    state === 'streaming'
+    sessionIsLive(session)
       ? 'Source changed while streaming. Check the output before continuing.'
       : 'Source changed while recording. Check the output before continuing.',
     { duration: 10_000, id: 'source-reconciliation:active-session' }
@@ -595,16 +596,30 @@ export function sessionRuntimeRecoveryPlan({
   }
 }
 
+/**
+ * A stored session's mode as what the session was doing: `record`, Go Live's
+ * default `record+stream` and `stream`, older rows' `recording` and
+ * `streaming`, and `imported`.
+ */
+export function sessionModeActivity(mode: string): SessionRuntimeActivity {
+  const value = mode.toLowerCase()
+  if (!value.includes('stream')) return 'recording'
+  return value.includes('record') ? 'record+stream' : 'live-stream'
+}
+
 export function completeSessionRuntimeRecovery({
   plan,
   recording,
   events,
-  priorSessionState
+  priorSessionState,
+  priorSessionActivity
 }: {
   plan: SessionRuntimeRecoveryPlan
   recording: RecordingStatus
   events: HealthEvent[]
   priorSessionState: RecordingStatus['state']
+  /** What the Studio last saw the prior session do (`sessionActivity`), if it was running. */
+  priorSessionActivity?: SessionRuntimeActivity
 }): SessionRuntimeRecovery {
   if (plan.failureSessionId) {
     const latestFailure = latestMatchingEvent(events, (event) => event.level === 'error')
@@ -619,11 +634,13 @@ export function completeSessionRuntimeRecovery({
         ...(outputPath ? { outputPath } : {}),
         ...(message ? { message } : {})
       },
-      activity: ['stream', 'streaming'].includes(plan.failureSummary?.mode.toLowerCase() ?? '')
-        ? 'live-stream'
-        : plan.failureSummary || priorSessionState !== 'streaming'
-          ? 'recording'
-          : 'live-stream'
+      // The stored mode says what the session did. Without a summary, the
+      // Studio's last sighting does: the state alone reads Go Live as a
+      // recording (plan 174 B-6).
+      activity: plan.failureSummary
+        ? sessionModeActivity(plan.failureSummary.mode)
+        : (priorSessionActivity ??
+          (priorSessionState === 'streaming' ? 'live-stream' : 'recording'))
     }
   }
 
@@ -653,12 +670,14 @@ export async function recoverSessionRuntime({
   sessions,
   priorSessionId,
   priorSessionState,
+  priorSessionActivity,
   loadHealthEvents
 }: {
   recording: RecordingStatus
   sessions: SessionSummary[]
   priorSessionId?: string
   priorSessionState: RecordingStatus['state']
+  priorSessionActivity?: SessionRuntimeActivity
   loadHealthEvents: (sessionId: string) => Promise<HealthEvent[]>
 }): Promise<SessionRuntimeRecovery> {
   const plan = sessionRuntimeRecoveryPlan({
@@ -670,7 +689,13 @@ export async function recoverSessionRuntime({
   const events = plan.healthSessionId
     ? await loadHealthEvents(plan.healthSessionId).catch(() => [])
     : []
-  return completeSessionRuntimeRecovery({ plan, recording, events, priorSessionState })
+  return completeSessionRuntimeRecovery({
+    plan,
+    recording,
+    events,
+    priorSessionState,
+    ...(priorSessionActivity ? { priorSessionActivity } : {})
+  })
 }
 
 export function isSessionAudioLossCode(code: string): boolean {

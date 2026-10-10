@@ -6,7 +6,7 @@ import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { clipMarkedToast } from '../../../shared/clip-marks'
-import { sessionIsLive } from '../../../shared/capture-state'
+import { sessionActivity, sessionIsLive } from '../../../shared/capture-state'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -5054,7 +5054,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const applyRecordingStatus = useCallback(
     (status: RecordingStatus) => {
       if (status.state === 'recording' || status.state === 'streaming') {
-        lastSessionActivityRef.current = status.state === 'streaming' ? 'live-stream' : 'recording'
+        // Go Live reports `recording` with a stream URL (plan 174 B-6).
+        lastSessionActivityRef.current = sessionActivity(status)
       }
       recordingRef.current = status
       if (!['recording', 'streaming'].includes(status.state)) {
@@ -6215,7 +6216,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       const occurredAt = new Date().toISOString()
-      const sessionState = recordingRef.current.state
+      const session = recordingRef.current
+      const sessionState = session.state
       const enrichedEvents = fallbackEvents.map((event) => ({
         ...event,
         occurredAt,
@@ -6228,7 +6230,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
       if (isActiveRecordingState(sessionState)) {
         void loadSessionRuntimeRecovery().then((runtime) =>
-          runtime.showSourceFallbackActiveSession(sessionState)
+          runtime.showSourceFallbackActiveSession(session)
         )
       }
     },
@@ -6276,6 +6278,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const priorSessionWasActive = ['starting', 'recording', 'streaming', 'stopping'].includes(
       priorSessionState
     )
+    // What the prior session was doing while it ran: Go Live reads `recording`
+    // with a stream URL (plan 174 B-6).
+    const priorSessionActivity = ['recording', 'streaming'].includes(priorSessionState)
+      ? sessionActivity(recordingRef.current)
+      : undefined
     const focusRefreshCoordinator = focusRefreshCoordinatorRef.current
     const accountSnapshotCoordinator = accountSnapshotCoordinatorRef.current
     entitlementsRevisionRef.current += 1
@@ -7544,6 +7551,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sessions: nextSessions.items,
             ...(priorSessionId ? { priorSessionId } : {}),
             priorSessionState,
+            ...(priorSessionActivity ? { priorSessionActivity } : {}),
             loadHealthEvents: (sessionId) =>
               bootstrapRequest<SessionHealthEventsPage>('sessions.healthEvents.list', {
                 sessionId,

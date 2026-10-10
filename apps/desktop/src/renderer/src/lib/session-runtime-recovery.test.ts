@@ -12,11 +12,16 @@ import { sessionRuntimeNoticeTitle } from '@/lib/session-runtime-notice'
 import {
   completeSessionRuntimeRecovery,
   microphoneLossPresentation,
+  recordingFailurePresentation,
+  sessionModeActivity,
   sessionRuntimeContinuationIsCurrent,
   sessionRuntimeRecoveryPlan,
   showOAuthCallbackExhausted,
   showOAuthCallbackResult,
+  showRecordingFailure,
+  showSessionFinished,
   showSessionHealthEvent,
+  showSourceFallbackActiveSession,
   showXPlaybackEvent
 } from '@/lib/session-runtime-recovery'
 
@@ -49,14 +54,37 @@ describe('session runtime recovery', () => {
       priorSessionState: 'recording'
     })
 
-    expect(
-      completeSessionRuntimeRecovery({
-        plan,
-        recording,
-        events: [],
-        priorSessionState: 'recording'
+    const recovery = completeSessionRuntimeRecovery({
+      plan,
+      recording,
+      events: [],
+      priorSessionState: 'recording'
+    })
+    // Plan 174 B-6: on air, so the notice says "live session"; it saved a
+    // file, so it keeps Open Library and the reveal.
+    expect(recovery).toMatchObject({ kind: 'recording-failed', activity: 'record+stream' })
+    if (recovery?.kind !== 'recording-failed') throw new Error('Missing recovered failure')
+    const presentation = recordingFailurePresentation({
+      status: recovery.status,
+      activity: recovery.activity,
+      currentDedupeKey: null
+    })!
+    expect(presentation.notice.message).toBe('Videorc could not finish this live session.')
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe('Live session stopped unexpectedly')
+
+    vi.stubGlobal('window', { videorc: { revealSession: vi.fn() } })
+    try {
+      showRecordingFailure(presentation)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Live session stopped unexpectedly',
+      expect.objectContaining({
+        action: expect.objectContaining({ label: 'Open Library' }),
+        cancel: expect.objectContaining({ onClick: expect.any(Function) })
       })
-    ).toMatchObject({ kind: 'recording-failed', activity: 'recording' })
+    )
   })
 
   it('rejects lazy continuations from an old epoch or a different session', () => {
@@ -382,6 +410,116 @@ describe('session audio news (plan 076)', () => {
     expect(toastSpies.warning).toHaveBeenCalledWith(
       'This computer is overloaded',
       expect.objectContaining({ id: 'host-overloaded', description: 'host-overloaded message' })
+    )
+  })
+})
+
+// Plan 174 B-6: Go Live leaves recording on, and the backend reports that
+// record+stream session as `recording` with a stream URL. Its notices speak of
+// the live session (the audience lost something) and keep the saved file's
+// actions (it recorded too).
+describe('record+stream notices (plan 174 B-6)', () => {
+  const goLive = {
+    state: 'recording' as const,
+    sessionId: 'go-live',
+    streamUrl: 'rtmp://127.0.0.1/live/***'
+  }
+  const microphoneLost: HealthEvent = {
+    id: 'mic-lost',
+    code: 'microphone-input-lost',
+    message: 'The selected microphone stopped providing audio.',
+    sessionId: 'go-live',
+    level: 'warn',
+    createdAt: '2026-10-10T10:00:00Z'
+  }
+
+  beforeEach(() => vi.clearAllMocks())
+
+  it('says a microphone dropout during Go Live leaves the live session silent', () => {
+    const presentation = microphoneLossPresentation({
+      event: microphoneLost,
+      recording: goLive,
+      lastActivity: 'recording',
+      currentDedupeKey: null
+    })!
+    expect(presentation.activity).toBe('record+stream')
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe(
+      'Microphone stopped: live session continues with silence'
+    )
+
+    const recordingOnly = microphoneLossPresentation({
+      event: microphoneLost,
+      recording: { state: 'recording', sessionId: 'go-live' },
+      lastActivity: 'record+stream',
+      currentDedupeKey: null
+    })!
+    expect(sessionRuntimeNoticeTitle(recordingOnly.notice)).toBe(
+      'Microphone stopped: recording continues with silence'
+    )
+  })
+
+  it('reads each stored session mode as what the session did', () => {
+    expect(sessionModeActivity('record')).toBe('recording')
+    expect(sessionModeActivity('imported')).toBe('recording')
+    expect(sessionModeActivity('record+stream')).toBe('record+stream')
+    expect(sessionModeActivity('stream')).toBe('live-stream')
+    expect(sessionModeActivity('Streaming')).toBe('live-stream')
+  })
+
+  it('recovers a Go Live failure with no stored summary from the last status the Studio saw', () => {
+    const recording = { state: 'failed' as const, sessionId: 'go-live' }
+    const plan = { failureSessionId: 'go-live' }
+    expect(
+      completeSessionRuntimeRecovery({
+        plan,
+        recording,
+        events: [],
+        priorSessionState: 'recording',
+        priorSessionActivity: 'record+stream'
+      })
+    ).toMatchObject({ kind: 'recording-failed', activity: 'record+stream' })
+    // Without the sighting, the state alone still decides, as before.
+    expect(
+      completeSessionRuntimeRecovery({
+        plan,
+        recording,
+        events: [],
+        priorSessionState: 'recording'
+      })
+    ).toMatchObject({ activity: 'recording' })
+  })
+
+  it('still announces the saved recording when Go Live ends, and never for stream-only', () => {
+    const replaceNotice = vi.fn()
+    const ended = { state: 'idle' as const, sessionId: 'go-live' }
+    showSessionFinished({
+      status: ended,
+      activity: 'record+stream',
+      currentNotice: null,
+      replaceNotice
+    })
+    expect(toastSpies.success).toHaveBeenCalledWith('Recording saved', expect.anything())
+
+    vi.clearAllMocks()
+    showSessionFinished({
+      status: ended,
+      activity: 'live-stream',
+      currentNotice: null,
+      replaceNotice
+    })
+    expect(toastSpies.success).not.toHaveBeenCalled()
+  })
+
+  it('says a source changed while streaming during Go Live', () => {
+    showSourceFallbackActiveSession(goLive)
+    expect(toastSpies.warning).toHaveBeenLastCalledWith(
+      'Source changed while streaming. Check the output before continuing.',
+      expect.objectContaining({ id: 'source-reconciliation:active-session' })
+    )
+    showSourceFallbackActiveSession({ state: 'recording' })
+    expect(toastSpies.warning).toHaveBeenLastCalledWith(
+      'Source changed while recording. Check the output before continuing.',
+      expect.anything()
     )
   })
 })

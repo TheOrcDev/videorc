@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
-import { PinIcon } from '@/components/icons'
+import { AlertIcon, PinIcon } from '@/components/icons'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useTrafficLightGutter } from '@/components/window-frame'
@@ -11,6 +12,7 @@ import { MAX_NOTES_TEXT_LENGTH } from '../../../shared/notes-limits'
 // The detached Notes window (plan 050 S4): the private teleprompter, now a real
 // renderer window on the same glass, header and controls as Chat and Captions.
 // It is capture-protected by main (never in a recording) and follows the app theme.
+// It says so, and says it loudly when main could not hide it (plan 174 I-2).
 
 const SAVE_DELAY_MS = 120
 
@@ -51,6 +53,8 @@ export function NotesWindow({
   const [text, setText] = useState('')
   const [fontScale, setFontScale] = useState<NotesFontScale>('md')
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
+  // Main's capture exclusion (`NotesWindowState.protected`); null until it reports.
+  const [captureProtected, setCaptureProtected] = useState<boolean | null>(null)
   const [status, setStatus] = useState<NotesSaveStatus>('Saved')
   const [loaded, setLoaded] = useState(false)
   const trafficLightGutter = useTrafficLightGutter()
@@ -89,8 +93,12 @@ export function NotesWindow({
   useEffect(() => {
     let cancelled = false
     const applyState = (state: NotesWindowState | null | undefined): void => {
-      if (!cancelled && state && typeof state.alwaysOnTop === 'boolean') {
+      if (cancelled || !state) return
+      if (typeof state.alwaysOnTop === 'boolean') {
         setAlwaysOnTop(state.alwaysOnTop)
+      }
+      if (typeof state.protected === 'boolean') {
+        setCaptureProtected(state.protected)
       }
     }
     void window.videorc
@@ -232,6 +240,21 @@ export function NotesWindow({
           }
         }}
       />
+      {/* Main could not exclude the window from capture (or the platform
+          cannot). Below the text, so the teleprompter's first lines never
+          move. */}
+      {captureProtected === false ? (
+        <div className={cn('shrink-0 border-t border-border p-2', marker)}>
+          <Alert className={marker} data-testid="notes-capture-exposed" variant="destructive">
+            <AlertIcon weight="fill" />
+            <AlertTitle className="text-xs">These notes can appear in your recording</AlertTitle>
+            <AlertDescription className="text-xs">
+              Videorc couldn&apos;t hide this window from screen capture. Keep it off the screen you
+              capture, or close it.
+            </AlertDescription>
+          </Alert>
+        </div>
+      ) : null}
       <footer
         className={cn(
           'flex h-6 shrink-0 items-center gap-3 border-t border-border px-3 text-[11px] text-subtle select-none',
@@ -242,6 +265,11 @@ export function NotesWindow({
           {words} {words === 1 ? 'word' : 'words'}
         </span>
         <span aria-live="polite">{status}</span>
+        {captureProtected ? (
+          <span className="ml-auto min-w-0 truncate" data-testid="notes-capture-hidden">
+            Hidden from recordings and streams
+          </span>
+        ) : null}
       </footer>
     </div>
   )

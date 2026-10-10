@@ -1,7 +1,6 @@
 import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
-import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { QuickSettings } from '@/components/studio/quick-settings'
@@ -53,18 +52,6 @@ export function StudioTab(): ReactElement {
     entitlements,
     wsStatus,
     health,
-    goLiveConfirmationOpen,
-    goLiveConfirmationPending,
-    goLivePartialSetup,
-    goLivePreflight,
-    goLiveCaptionsReadiness,
-    streamMetadataDraft,
-    patchStreamMetadataDraft,
-    cancelGoLiveConfirmation,
-    confirmGoLive,
-    continueGoLiveWithReadyDestinations,
-    continueGoLiveWithoutCaptions,
-    resolveGoLiveBlocker,
     sessionStartFailure,
     dismissSessionStartFailure,
     sessionRuntimeNotice,
@@ -163,24 +150,10 @@ export function StudioTab(): ReactElement {
     </span>
   )
 
+  // The Go Live confirmation is the shell's (GoLiveDialogGate), so it opens
+  // over every page, not only this one (plan 174 S0.6, B-5).
   return (
     <>
-      <GoLiveConfirmationDialog
-        draft={streamMetadataDraft}
-        captionsReadiness={goLiveCaptionsReadiness}
-        entitlementGate={goLiveEntitlement}
-        open={goLiveConfirmationOpen}
-        pending={goLiveConfirmationPending || startRequestPending}
-        preflight={goLivePreflight}
-        partialSetup={goLivePartialSetup}
-        onCancel={cancelGoLiveConfirmation}
-        onConfirm={() => void confirmGoLive()}
-        onContinuePartial={() => void continueGoLiveWithReadyDestinations()}
-        onContinueWithoutCaptions={continueGoLiveWithoutCaptions}
-        onPatchDraft={patchStreamMetadataDraft}
-        onResolveBlocker={(targetId, resolution) => void resolveGoLiveBlocker(targetId, resolution)}
-      />
-
       {/* The Studio bench: the preview pane leads, and the inspector (the
           transport, session facts, microphone, inputs, takeover) sits beside
           it, split by a hairline. Hard

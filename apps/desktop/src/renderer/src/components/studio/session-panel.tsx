@@ -30,7 +30,7 @@ import {
   useStudioShell
 } from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
-import type { SessionRuntimeNotice } from '@/lib/session-runtime-notice'
+import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import {
@@ -303,7 +303,7 @@ export function SessionPanel({
           onOpenLibrary={() => setActive('library')}
           onRevealOutput={
             runtimeNotice.kind === 'recording-failed' &&
-            runtimeNotice.activity === 'recording' &&
+            activitySavesRecording(runtimeNotice.activity) &&
             runtimeNotice.sessionId
               ? () => void window.videorc?.revealSession?.(runtimeNotice.sessionId!)
               : undefined

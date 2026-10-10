@@ -7,6 +7,7 @@ import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { GoLiveDialogGate } from '@/components/go-live-dialog-gate'
 import {
   WORKSPACE_SHORTCUTS,
   WorkspaceNavContext,
@@ -536,6 +537,10 @@ export function AppShell(): ReactElement {
             ) : null}
           </StatusBar>
         </main>
+
+        {/* The Go Live confirmation opens over every page, not only Studio
+            (plan 174 S0.6, B-5): Go Live can start from anywhere. */}
+        <GoLiveDialogGate />
 
         <Suspense fallback={null}>
           {commandOpen ? <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} /> : null}
