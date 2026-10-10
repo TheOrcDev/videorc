@@ -63,7 +63,7 @@ export function BackgroundReplaceDialog({
         if (!open) onCancel()
       }}
     >
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent size="xl">
         {pending ? (
           <ReplacePicker
             key={pending.asset.id}

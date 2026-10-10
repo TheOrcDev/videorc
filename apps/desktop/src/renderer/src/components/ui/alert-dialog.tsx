@@ -3,6 +3,7 @@ import { AlertDialog as AlertDialogPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { dialogContentVariants, type DialogSize } from '@/components/ui/dialog'
 
 // shadcn `alert-dialog` (radix-rhea), moved onto the window family (plan 174
 // S0.1): the dialog tier of the float glass, the panel radius, p-5, no close
@@ -43,19 +44,18 @@ function AlertDialogOverlay({
 
 function AlertDialogContent({
   className,
+  size = 'md',
   ...props
-}: React.ComponentProps<typeof AlertDialogPrimitive.Content>) {
+}: React.ComponentProps<typeof AlertDialogPrimitive.Content> & { size?: DialogSize }) {
   return (
     <AlertDialogPortal>
       <AlertDialogOverlay />
       <AlertDialogPrimitive.Content
         data-slot="alert-dialog-content"
-        className={cn(
-          // The dialog tier of the float glass (videorc-design, plan 091 D6),
-          // exactly as DialogContent: flat and opaque, no backdrop-filter.
-          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-panel border glass-float-dialog p-5 text-sm text-popover-foreground duration-100 outline-none sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-[0.98] data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-[0.98]',
-          className
-        )}
+        data-size={size}
+        // The dialog anatomy, exactly as DialogContent (plan 174 S1.6b):
+        // flat and opaque, no backdrop-filter, the same widths and height rule.
+        className={cn(dialogContentVariants({ size }), className)}
         {...props}
       />
     </AlertDialogPortal>
@@ -66,7 +66,7 @@ function AlertDialogHeader({ className, ...props }: React.ComponentProps<'div'>)
   return (
     <div
       data-slot="alert-dialog-header"
-      className={cn('flex flex-col gap-1.5', className)}
+      className={cn('flex shrink-0 flex-col gap-1.5', className)}
       {...props}
     />
   )
@@ -76,7 +76,7 @@ function AlertDialogFooter({ className, ...props }: React.ComponentProps<'div'>)
   return (
     <div
       data-slot="alert-dialog-footer"
-      className={cn('flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)}
+      className={cn('flex shrink-0 flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)}
       {...props}
     />
   )

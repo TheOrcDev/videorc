@@ -130,7 +130,7 @@ describe('Stream Manager status bar', () => {
     )
     expect(markup).toContain('data-slot="stream-manager-actions"')
     expect(markup).toContain(ABOVE_NARROW)
-    expect(markup).toContain('aria-label="Keep this window on top"')
+    expect(markup).toContain('aria-label="Keep on top"')
     expect(markup).toContain('aria-pressed="true"')
     expect(markup).toContain('title="Highlight position: Bottom left"')
     expect(markup).toContain('aria-label="Clear view"')

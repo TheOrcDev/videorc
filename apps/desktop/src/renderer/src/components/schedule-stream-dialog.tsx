@@ -4,6 +4,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -38,7 +39,6 @@ import {
 } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Kbd } from '@/components/ui/kbd'
 import { PlatformGlyph } from '@/components/platform-glyph'
@@ -279,7 +279,7 @@ export function ScheduleStreamDialog({
         }}
       >
         <DialogContent
-          className="h-[min(90vh,48rem)] grid-rows-[auto_minmax(0,1fr)_auto] gap-4 overflow-hidden p-4 sm:max-w-xl sm:p-6"
+          size="lg"
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
               event.preventDefault()
@@ -300,7 +300,7 @@ export function ScheduleStreamDialog({
                 : 'Your event appears on YouTube. Start it manually from Videorc.'}
             </DialogDescription>
           </DialogHeader>
-          <ScrollArea className="min-h-0 overflow-hidden pr-3">
+          <DialogBody>
             <FieldGroup>
               <Field>
                 <FieldLabel htmlFor="schedule-channel">
@@ -565,7 +565,7 @@ export function ScheduleStreamDialog({
                 </Alert>
               )}
             </FieldGroup>
-          </ScrollArea>
+          </DialogBody>
           <DialogFooter className="flex-row flex-wrap gap-2">
             <Button variant="ghost" disabled={saving} onClick={close}>
               Cancel

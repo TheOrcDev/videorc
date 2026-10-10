@@ -27,6 +27,7 @@ import { Empty, EmptyContent, EmptyDescription } from '@/components/ui/empty'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { FieldError } from '@/components/ui/field'
 import type { BuddyPets } from '@/hooks/use-buddy-pets'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyPetImportResult, BuddyPetSummary } from '@/lib/backend'
@@ -241,12 +242,9 @@ export function BuddyAvatarSection({
               }}
             />
             {previewError ? (
-              <p
-                className="max-w-40 text-center text-xs text-destructive"
-                data-testid="buddy-preview-error"
-              >
+              <FieldError className="max-w-40 text-center" data-testid="buddy-preview-error">
                 {previewError}
-              </p>
+              </FieldError>
             ) : (
               <>
                 <div className="flex items-center gap-1">
@@ -304,9 +302,7 @@ export function BuddyAvatarSection({
             />
           )}
           {actionError ? (
-            <p className="text-xs text-destructive" data-testid="buddy-avatar-error">
-              {actionError}
-            </p>
+            <FieldError data-testid="buddy-avatar-error">{actionError}</FieldError>
           ) : null}
         </div>
       </div>
@@ -315,7 +311,7 @@ export function BuddyAvatarSection({
           click like the small one, with the same pack, motion and images. */}
       {previewPackId ? (
         <Dialog open={zoomOpen} onOpenChange={setZoomOpen}>
-          <DialogContent className="sm:max-w-lg" data-testid="buddy-preview-zoom-dialog">
+          <DialogContent data-testid="buddy-preview-zoom-dialog" size="lg">
             <DialogHeader>
               <DialogTitle>{persona.name}</DialogTitle>
               <DialogDescription>
@@ -337,12 +333,9 @@ export function BuddyAvatarSection({
               />
             </div>
             {zoomError ? (
-              <p
-                className="text-center text-xs text-destructive"
-                data-testid="buddy-preview-zoom-error"
-              >
+              <FieldError className="text-center" data-testid="buddy-preview-zoom-error">
                 {zoomError}
-              </p>
+              </FieldError>
             ) : null}
           </DialogContent>
         </Dialog>
@@ -503,7 +496,7 @@ function AlivePanel({
         </>
       )}
       {createHint ? (
-        <p className="text-xs tabular-nums text-subtle" data-testid="buddy-create-hint">
+        <p className="text-xs tabular-nums text-muted-foreground" data-testid="buddy-create-hint">
           {createHint}
         </p>
       ) : null}

@@ -10,7 +10,7 @@ import {
   type BuddyPoseTilesCopy
 } from '@/components/buddy-look-tiles'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
@@ -222,16 +222,12 @@ export function BuddyLookSection({
                 <SparkleIcon data-icon="inline-start" />
                 Make it Alive
               </Button>
-              <span className="text-xs text-subtle">
+              <span className="text-xs text-muted-foreground">
                 The same character, moving: it looks around and reacts.
               </span>
             </div>
           ) : null}
-          {problem ? (
-            <p className="text-xs text-destructive" data-testid="buddy-look-error">
-              {problem}
-            </p>
-          ) : null}
+          {problem ? <FieldError data-testid="buddy-look-error">{problem}</FieldError> : null}
         </Field>
       </FieldGroup>
     </div>

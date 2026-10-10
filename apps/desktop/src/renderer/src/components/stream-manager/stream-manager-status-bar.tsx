@@ -4,8 +4,9 @@ import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platfo
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/comments-header'
 import { providerBadgeTitle } from '@/components/comments-destination-status'
-import { ClipIcon, FrameIcon, MoreIcon, PinIcon, PreviewIcon } from '@/components/icons'
-import { StatusBar } from '@/components/status-bar'
+import { ClipIcon, FrameIcon, MoreIcon, PreviewIcon } from '@/components/icons'
+import { PIN_WINDOW_LABEL, PinWindowButton } from '@/components/pin-window-button'
+import { StatusBar, StatusBarAction } from '@/components/status-bar'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import {
@@ -31,9 +32,6 @@ import { cn } from '@/lib/utils'
 // Below 640 px the controls fold into one ⋯ menu so none is ever clipped.
 // Quiet when fine (plan 057, D3): a platform that reads and sends is its icon
 // and a green dot, and the controls are icons with their names on hover.
-
-const ACTION_CLASS =
-  'flex h-5 shrink-0 items-center gap-1 rounded-chip px-1.5 text-[11px] text-subtle transition-colors duration-100 hover:bg-accent hover:text-foreground aria-pressed:text-foreground [&_svg]:size-3.5'
 
 function providerTone(provider: LiveChatProviderState): StatusDotTone {
   switch (provider.state) {
@@ -194,28 +192,20 @@ export function StreamManagerStatusBar({
           data-slot="stream-manager-actions"
         >
           {onToggleAlwaysOnTop ? (
-            <button
-              aria-label="Keep this window on top"
-              aria-pressed={alwaysOnTop}
-              className={ACTION_CLASS}
-              title="Keep on top"
-              type="button"
-              onClick={onToggleAlwaysOnTop}
-            >
-              <PinIcon aria-hidden weight={alwaysOnTop ? 'fill' : 'regular'} />
-            </button>
+            <PinWindowButton
+              pinned={alwaysOnTop}
+              variant="status-bar"
+              onPinnedChange={() => onToggleAlwaysOnTop()}
+            />
           ) : null}
           {anchorControl ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button
-                  aria-label="Highlight position"
-                  className={ACTION_CLASS}
-                  title={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
-                  type="button"
-                >
-                  <FrameIcon aria-hidden />
-                </button>
+                <StatusBarAction
+                  hint={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
+                  icon={<FrameIcon aria-hidden />}
+                  label="Highlight position"
+                />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" side="top">
                 <HighlightAnchorOptions {...anchorControl} />
@@ -223,38 +213,28 @@ export function StreamManagerStatusBar({
             </DropdownMenu>
           ) : null}
           {onMarkClip ? (
-            <button
-              aria-label="Mark clip"
-              className={ACTION_CLASS}
-              title="Mark this moment for a clip (or say “clip that”)"
-              type="button"
+            <StatusBarAction
+              hint="Mark this moment for a clip (or say “clip that”)"
+              icon={<ClipIcon aria-hidden />}
+              label="Mark clip"
+              text="Mark clip"
               onClick={onMarkClip}
-            >
-              <ClipIcon aria-hidden />
-              Mark clip
-            </button>
+            />
           ) : null}
           {requestClear ? (
-            <button
-              aria-label="Clear view"
-              className={ACTION_CLASS}
-              title="Clear view (keeps Library history)"
-              type="button"
+            <StatusBarAction
+              hint="Clear view (keeps Library history)"
+              label="Clear view"
+              text="Clear"
               onClick={requestClear}
-            >
-              Clear
-            </button>
+            />
           ) : null}
           {onOpenPreview ? (
-            <button
-              aria-label="Open Preview"
-              className={ACTION_CLASS}
-              title="Open Preview"
-              type="button"
+            <StatusBarAction
+              icon={<PreviewIcon aria-hidden />}
+              label="Open Preview"
               onClick={onOpenPreview}
-            >
-              <PreviewIcon aria-hidden />
-            </button>
+            />
           ) : null}
         </div>
         <DropdownMenu>
@@ -288,7 +268,7 @@ export function StreamManagerStatusBar({
                   checked={alwaysOnTop}
                   onCheckedChange={() => onToggleAlwaysOnTop()}
                 >
-                  Keep on top
+                  {PIN_WINDOW_LABEL}
                 </DropdownMenuCheckboxItem>
               ) : null}
               {onMarkClip ? (

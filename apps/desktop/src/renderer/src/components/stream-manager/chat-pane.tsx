@@ -21,7 +21,7 @@ import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platfo
 import { CohostNudge } from '@/components/cohost-nudge'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
-import { ChatIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
+import { AlertIcon, ChatIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -445,7 +445,7 @@ export function ChatPane({
             >
               Filters
               {activeFilterCount > 0 ? (
-                <Badge className="h-4 px-1.5 text-[10px]" variant="outline">
+                <Badge className="h-4 px-1.5" variant="outline">
                   {activeFilterCount}
                 </Badge>
               ) : null}
@@ -882,10 +882,16 @@ export function Composer({
             {draft.length > 0 ? (
               <span
                 className={cn(
-                  'text-[11px] tabular-nums',
-                  !local && draft.trim().length > maxChars ? 'text-destructive' : 'text-subtle'
+                  'flex items-center gap-1 text-[11px] tabular-nums',
+                  !local && draft.trim().length > maxChars
+                    ? 'font-medium text-foreground'
+                    : 'text-muted-foreground'
                 )}
               >
+                {/* Over the limit, the icon carries the tone (plan 174 S1.8). */}
+                {!local && draft.trim().length > maxChars ? (
+                  <AlertIcon aria-hidden className="size-3 text-destructive" weight="fill" />
+                ) : null}
                 {local
                   ? command.kind === 'marker'
                     ? `${[...(command.label ?? '')].length}/120`
@@ -971,7 +977,7 @@ export function Composer({
           </div>
         ) : null}
         {replyToQuestionId ? (
-          <p className="mt-1 text-[11px] text-subtle">Buddy&apos;s draft. ↵ sends it.</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">Buddy&apos;s draft. ↵ sends it.</p>
         ) : null}
         {/* Only exceptions speak here (plan 057, D3): the "To:" picker names
             where a message goes, and Buddy's segment carries its status. */}

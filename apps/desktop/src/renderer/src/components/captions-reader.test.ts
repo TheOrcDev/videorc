@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { CAPTION_STYLE_IDS, captionStyleDefinition } from '@/lib/caption-overlay'
 
-import { captionReaderAppearance, captionStatusToneClass } from './captions-reader'
+import { captionReaderAppearance, captionStatusDotTone } from './captions-reader'
 
 describe('captionReaderAppearance', () => {
   it.each(CAPTION_STYLE_IDS)('projects the shared %s registry entry', (styleId) => {
@@ -20,15 +20,15 @@ describe('captionReaderAppearance', () => {
   })
 })
 
-describe('captionStatusToneClass', () => {
+describe('captionStatusDotTone', () => {
   it('glows only where the caption state means something (plan 050, D9)', () => {
-    expect(captionStatusToneClass('listening')).toBe('tone-success')
-    expect(captionStatusToneClass('live')).toBe('tone-success')
-    expect(captionStatusToneClass('reconnecting')).toBe('tone-warning')
-    expect(captionStatusToneClass('degraded')).toBe('tone-warning')
-    expect(captionStatusToneClass('blocked')).toBe('tone-destructive')
-    expect(captionStatusToneClass('error')).toBe('tone-destructive')
-    expect(captionStatusToneClass('idle')).toBe('tone-neutral')
-    expect(captionStatusToneClass('starting')).toBe('tone-neutral')
+    expect(captionStatusDotTone('listening')).toBe('good')
+    expect(captionStatusDotTone('live')).toBe('good')
+    expect(captionStatusDotTone('reconnecting')).toBe('warn')
+    expect(captionStatusDotTone('degraded')).toBe('warn')
+    expect(captionStatusDotTone('blocked')).toBe('error')
+    expect(captionStatusDotTone('error')).toBe('error')
+    expect(captionStatusDotTone('idle')).toBe('neutral')
+    expect(captionStatusDotTone('starting')).toBe('neutral')
   })
 })

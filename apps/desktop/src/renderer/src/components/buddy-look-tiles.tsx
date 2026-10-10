@@ -9,6 +9,7 @@ import type { BuddyLookController, BuddyLookState } from '@/hooks/use-buddy-look
 import type { CohostAvatarPhase, CohostAvatarState } from '@/lib/backend'
 import { COHOST_AVATAR_STATES } from '@/lib/backend'
 import { buddyLookDraftImages, isBuddyLookRedoState } from '@/lib/buddy-look-view'
+import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
 import { buddyAssetUrl } from '../../../shared/buddy-assets'
 
@@ -134,8 +135,8 @@ export function BuddyPoseTile({
   redo?: { label: string; disabled: boolean; run: () => void }
 }): ReactNode {
   return (
-    <div
-      className="group/buddy-tile @container/buddy-tile flex flex-col gap-2 rounded-row border border-border bg-muted/20 p-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    <MediaCard
+      className="group/buddy-tile @container/buddy-tile gap-2 p-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-done={done || undefined}
       data-state={state}
       data-testid="buddy-look-tile"
@@ -182,7 +183,7 @@ export function BuddyPoseTile({
         </p>
       ) : null}
       {error ? (
-        <p className="text-xs text-subtle" data-testid="buddy-look-tile-error">
+        <p className="text-xs text-muted-foreground" data-testid="buddy-look-tile-error">
           {error}
         </p>
       ) : null}
@@ -205,6 +206,6 @@ export function BuddyPoseTile({
           )}
         </Button>
       ) : null}
-    </div>
+    </MediaCard>
   )
 }

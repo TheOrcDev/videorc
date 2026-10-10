@@ -160,7 +160,7 @@ export function BuddyVoiceCommands({
                     {buddyVoicePhrasesLabel(command.phrases, command.title === 'Answer' ? 4 : 1)}
                   </span>
                 </p>
-                <p className="text-xs text-subtle">{command.result}</p>
+                <p className="text-xs text-muted-foreground">{command.result}</p>
               </div>
             ))}
           </GroupedList>

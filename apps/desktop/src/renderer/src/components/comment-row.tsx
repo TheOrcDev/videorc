@@ -207,7 +207,7 @@ function CohostMarks({
         >
           <span className="truncate">{cohostFlagChipLabel(flag)}</span>
         </Badge>
-        {action ? <span className="shrink-0 text-[10px] text-subtle">{action}</span> : null}
+        {action ? <span className="shrink-0 text-[11px] text-subtle">{action}</span> : null}
       </span>
     )
   }
@@ -699,7 +699,7 @@ function CommentContent({
             // a clock on every row is noise mid-stream (plan 057, D3).
             <time
               className={cn(
-                'ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground',
+                'ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground',
                 timestamps === 'hover' &&
                   'opacity-0 group-focus-within/comment:opacity-100 group-hover/comment:opacity-100'
               )}
@@ -918,7 +918,10 @@ export function CommentRow({
   return (
     <li
       ref={ref}
-      className={cn('group/comment', menu.length > 0 && 'flex items-start gap-0.5')}
+      className={cn(
+        'group/comment group/kebab-host',
+        menu.length > 0 && 'flex items-start gap-0.5'
+      )}
       data-highlight-phase={highlight.phase}
       data-index={index}
       data-member={tint === 'member' || undefined}
@@ -967,9 +970,10 @@ export function CommentRow({
       )}
       {menu.length > 0 ? (
         <KebabMenu
-          className="mt-1 shrink-0 opacity-0 group-hover/comment:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+          className="mt-1 shrink-0"
           items={menu}
           label={`Actions for ${message.authorName}'s message`}
+          reveal="hover"
         />
       ) : null}
     </li>

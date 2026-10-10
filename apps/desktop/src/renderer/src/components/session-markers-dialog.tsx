@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { DeleteIcon, EditIcon } from '@/components/icons'
+import { AlertIcon, DeleteIcon, EditIcon } from '@/components/icons'
 import type { SessionMarker, SessionSummary } from '@/lib/backend'
 import { toast } from '@/lib/toast'
 import { scheduleUndoableAction, type UndoableAction } from '@/lib/undoable-action'
@@ -179,7 +179,7 @@ export function SessionMarkersDialog({
         if (!open) onClose()
       }}
     >
-      <DialogContent className="max-h-[90vh] sm:max-w-3xl" data-testid="session-markers-dialog">
+      <DialogContent data-testid="session-markers-dialog" size="xl">
         <DialogHeader>
           <DialogTitle>Markers · {session.title || 'Untitled session'}</DialogTitle>
           <DialogDescription>
@@ -201,7 +201,8 @@ export function SessionMarkersDialog({
           </>
         )}
         {error ? (
-          <div role="alert" className="flex items-center gap-2 text-xs text-destructive">
+          <div role="alert" className="flex items-center gap-2 text-xs text-foreground">
+            <AlertIcon aria-hidden className="size-3.5 shrink-0 text-destructive" weight="fill" />
             {error}
             <Button size="sm" variant="ghost" onClick={() => setAttempt((value) => value + 1)}>
               Try again

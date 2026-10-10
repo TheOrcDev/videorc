@@ -212,7 +212,7 @@ export function PowerSlider({
       </span>
 
       {scalePoints ? (
-        <div className="relative h-3.5 text-[10px] text-muted-foreground">
+        <div className="relative h-4 text-[11px] text-muted-foreground">
           {scalePoints.map((point) => (
             <span
               key={point.value}

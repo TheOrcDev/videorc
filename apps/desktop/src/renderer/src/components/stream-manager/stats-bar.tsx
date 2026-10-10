@@ -117,7 +117,10 @@ function StatDetails({ item }: { item: StatItemModel }): ReactElement {
                 {row.value}
               </span>
               {row.note ? (
-                <span className="max-w-40 truncate text-[11px] text-subtle" title={row.note}>
+                <span
+                  className="max-w-40 truncate text-[11px] text-muted-foreground"
+                  title={row.note}
+                >
                   {row.note}
                 </span>
               ) : null}

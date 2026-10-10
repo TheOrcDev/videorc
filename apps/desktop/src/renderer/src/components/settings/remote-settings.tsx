@@ -8,6 +8,7 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { RemoteControlStatus } from '@/lib/backend'
+import { useCopyText } from '@/lib/copy-text'
 
 /**
  * Remote control is off by default, and an empty body made the card render as a
@@ -48,6 +49,7 @@ export function RemoteSettings(): ReactElement {
   const [confirmingRegenerate, setConfirmingRegenerate] = useState(false)
   const [confirmingOff, setConfirmingOff] = useState(false)
   const pairedPhones = phoneStatus?.enabled ? phoneStatus.devices.length : 0
+  const { copied: tokenCopied, copy: copyToken } = useCopyText()
   const runRemoteAction = async (
     action: () => Promise<RemoteControlStatus | null>
   ): Promise<void> => {
@@ -95,15 +97,16 @@ export function RemoteSettings(): ReactElement {
                     : '-'}
                 </div>
                 <Button
+                  disabled={!remoteStatus.token}
                   size="sm"
                   variant="outline"
                   onClick={() => {
                     if (remoteStatus.token) {
-                      void navigator.clipboard.writeText(remoteStatus.token)
+                      void copyToken(remoteStatus.token, "Couldn't copy the pairing token.")
                     }
                   }}
                 >
-                  Copy
+                  {tokenCopied ? 'Copied' : 'Copy'}
                 </Button>
                 <Button
                   disabled={remotePending}

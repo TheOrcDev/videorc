@@ -326,6 +326,160 @@ describe('renderer style guards (plan 050)', () => {
   })
 })
 
+// Plan 174 S1.8 (J1-5, D-35, I-26, C-19): status copy is monochrome. A tone
+// colours an icon, a dot, a chip or an Alert row, never words. The shadcn
+// primitives in components/ui own their variants (a destructive menu item,
+// an invalid field, FieldError until it is restyled).
+const TONE_TEXT = /(?:^|[\s'"`:])text-(?:warning|success|destructive|live|info)(?![\w-])/
+
+/**
+ * Every class string in a TSX source that colours text with a status tone,
+ * as `path:line: classes`, unless it sits on an icon (a JSX tag ending in
+ * Icon, an svg, or an icon-named prop, property or variable) or targets svg
+ * children. Parsed, so a className on its own line still counts.
+ */
+function toneTextOffenders(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: string[] = []
+  const onIcon = (node: ts.Node): boolean => {
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      if (ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent)) {
+        const tag = parent.tagName.getText(file)
+        return /Icon$/.test(tag) || tag === 'svg'
+      }
+      if (
+        (ts.isPropertyAssignment(parent) ||
+          ts.isVariableDeclaration(parent) ||
+          ts.isJsxAttribute(parent)) &&
+        /icon/i.test(parent.name.getText(file))
+      ) {
+        return true
+      }
+    }
+    return false
+  }
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isStringLiteralLike(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
+    ) {
+      const toned = node.text
+        .split(/\s+/)
+        .filter((token) => TONE_TEXT.test(` ${token}`) && !/svg\]/.test(token))
+      if (toned.length > 0 && !onIcon(node)) {
+        const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+        found.push(`${path}:${line + 1}: ${toned.join(' ')}`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+describe('status colour discipline (plan 174 S1.8)', () => {
+  it('never colours status words: the tone rides on an icon, a dot, a chip or an Alert', () => {
+    const offending = files
+      .filter(({ path }) => path.endsWith('.tsx') && !path.startsWith('src/components/ui/'))
+      .flatMap(({ path }) =>
+        toneTextOffenders(path, readFileSync(join(RENDERER_ROOT, path), 'utf8'))
+      )
+    expect(offending).toEqual([])
+  })
+
+  it('catches coloured words however the props wrap, and leaves icons alone', () => {
+    const oldFolderWarning = [
+      '<p className="flex items-center gap-1.5 text-xs text-warning">',
+      '  <WarningIcon className="size-3.5 shrink-0" />',
+      '  This folder is not writable.',
+      '</p>'
+    ].join('\n')
+    expect(toneTextOffenders('folder.tsx', oldFolderWarning)).toEqual([
+      'folder.tsx:1: text-warning'
+    ])
+    const oldCounter =
+      "<span className={cn('text-xs', over ? 'text-destructive' : 'text-subtle')} />"
+    expect(toneTextOffenders('counter.tsx', oldCounter)).toEqual([
+      'counter.tsx:1: text-destructive'
+    ])
+    const icons = [
+      '<>',
+      '  <WarningIcon',
+      '    className="size-4 shrink-0 text-warning"',
+      '  />',
+      "  <MicrophoneIcon className={cn('size-3.5', on ? 'text-success' : 'text-muted-foreground')} />",
+      '  <Alert className="*:[svg]:text-destructive" />',
+      '  <span className="text-warning-foreground" />',
+      '</>'
+    ].join('\n')
+    expect(toneTextOffenders('icons.tsx', icons)).toEqual([])
+    expect(
+      toneTextOffenders('meta.tsx', "const META = { ok: { iconClassName: 'text-success' } }")
+    ).toEqual([])
+  })
+
+  it('sets no text below 11 px in the chrome (F-14, H-17)', () => {
+    // Not words: the caption preview draws the burned-in caption at the
+    // stage's scale (content), and the sidebar account avatar's initials
+    // stand in for a 16 px picture.
+    const CONTENT = new Set([
+      'src/components/captions/captions-controls.tsx',
+      'src/components/account-menu.tsx'
+    ])
+    expect(
+      offenders(
+        /\btext-\[(?:[0-9]|10)(?:\.\d+)?px\]/,
+        (path) => /\.(tsx|ts)$/.test(path) && !CONTENT.has(path)
+      )
+    ).toEqual([])
+  })
+})
+
+/**
+ * Every DialogContent or AlertDialogContent whose className sets its own
+ * width or height, as `path:line: <Tag className=...>` (plan 174 S1.6b,
+ * J1-20): a dialog takes `size`, and DialogBody scrolls.
+ */
+function handSizedDialogs(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: string[] = []
+  const visit = (node: ts.Node): void => {
+    const parts = jsxParts(file, node)
+    if (parts && (parts.tag === 'DialogContent' || parts.tag === 'AlertDialogContent')) {
+      const className = parts.attributes.get('className') ?? ''
+      if (/(?:^|[\s'"`:])max-[wh]-/.test(className)) {
+        const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+        found.push(`${path}:${line + 1}: <${parts.tag} className=${className}>`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+describe('dialog anatomy (plan 174 S1.6b)', () => {
+  it('sizes every dialog with `size`, never a hand-set max width or height', () => {
+    const offending = files
+      .filter(({ path, code }) => path.endsWith('.tsx') && /DialogContent\b/.test(code))
+      .flatMap(({ path }) =>
+        handSizedDialogs(path, readFileSync(join(RENDERER_ROOT, path), 'utf8'))
+      )
+    expect(offending).toEqual([])
+  })
+
+  it('catches a hand-sized dialog however the props wrap', () => {
+    const oldObsDialog =
+      '<DialogContent\n  className="sm:max-w-xl"\n  onKeyDown={() => {}}\n>x</DialogContent>'
+    expect(handSizedDialogs('obs.tsx', oldObsDialog)).toEqual([
+      'obs.tsx:1: <DialogContent className=sm:max-w-xl>'
+    ])
+    expect(handSizedDialogs('ok.tsx', '<DialogContent size="lg" className="gap-4" />')).toEqual([])
+  })
+})
+
 describe('renderer accessible names (plan 174 S0.5)', () => {
   const withControls = files.filter(
     ({ path, code }) =>

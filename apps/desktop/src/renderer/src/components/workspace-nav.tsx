@@ -15,6 +15,7 @@ import {
 import { createContext, useContext } from 'react'
 
 import { BUDDY_TAB_LABEL, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
+import { isLivestreamViewId } from '@/lib/livestream-tabs'
 import { isSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
 import type { WorkspaceNavigation } from '@/lib/workspace-navigation'
 
@@ -140,9 +141,15 @@ export function isWorkspaceTab(value: unknown): value is WorkspaceTab {
  */
 export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | null {
   if (!detail || typeof detail !== 'object') return null
-  const { tab, settingsTab, buddyTab, sessionId } = detail as Record<string, unknown>
+  const { tab, settingsTab, buddyTab, livestreamView, sessionId } = detail as Record<
+    string,
+    unknown
+  >
   if (tab === 'settings') return isSettingsTabId(settingsTab) ? { tab, settingsTab } : { tab }
   if (tab === 'ai') return isBuddyTabId(buddyTab) ? { tab, buddyTab } : { tab }
+  if (tab === 'live') {
+    return isLivestreamViewId(livestreamView) ? { tab, livestreamView } : { tab }
+  }
   if (tab === 'library') return typeof sessionId === 'string' ? { tab, sessionId } : { tab }
   return isWorkspaceTab(tab) ? { tab } : null
 }

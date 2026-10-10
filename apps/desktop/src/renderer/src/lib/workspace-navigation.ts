@@ -1,5 +1,6 @@
 import type { WorkspaceTab } from '@/components/workspace-nav'
 import type { BuddyTabId } from '@/lib/buddy-tabs'
+import type { LivestreamViewId } from '@/lib/livestream-tabs'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 
 // Opening a page from outside React (a toast action, a lib): one typed call
@@ -8,17 +9,18 @@ import type { SettingsTabId } from '@/lib/settings-tabs'
 // called, and its button did nothing). AppShell reads the event back through
 // `readWorkspaceNavigation` in workspace-nav.tsx.
 //
-// Type imports only: buddy-tabs and settings-tabs open their pages through
+// Type imports only: buddy-tabs, livestream-tabs and settings-tabs open their pages through
 // here, so a runtime import back into them would be a cycle.
 
 export const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 
 /** A page with no sub-tab of its own. */
-export type PlainWorkspaceTab = Exclude<WorkspaceTab, 'settings' | 'ai' | 'library'>
+export type PlainWorkspaceTab = Exclude<WorkspaceTab, 'settings' | 'ai' | 'library' | 'live'>
 
 export type WorkspaceNavigation =
   | { tab: 'settings'; settingsTab?: SettingsTabId }
   | { tab: 'ai'; buddyTab?: BuddyTabId }
+  | { tab: 'live'; livestreamView?: LivestreamViewId }
   | {
       tab: 'library'
       /** The session the action is about. The Library does not scroll to it yet. */
@@ -30,6 +32,8 @@ export type WorkspaceNavigation =
 export function openWorkspaceTab(tab: 'settings', settingsTab?: SettingsTabId): void
 /** Opens the Buddy page (id `ai`) on `buddyTab`, or on the tab used last. */
 export function openWorkspaceTab(tab: 'ai', buddyTab?: BuddyTabId): void
+/** Opens Livestream on `livestreamView` (Setup or Upcoming), or on the view used last. */
+export function openWorkspaceTab(tab: 'live', livestreamView?: LivestreamViewId): void
 /** Opens the Library, about `sessionId` when there is one. */
 export function openWorkspaceTab(tab: 'library', sessionId?: string): void
 export function openWorkspaceTab(tab: PlainWorkspaceTab): void
@@ -48,6 +52,8 @@ function workspaceNavigation(tab: WorkspaceTab, subTab: string | undefined): Wor
       return { tab, settingsTab: subTab as SettingsTabId }
     case 'ai':
       return { tab, buddyTab: subTab as BuddyTabId }
+    case 'live':
+      return { tab, livestreamView: subTab as LivestreamViewId }
     case 'library':
       return { tab, sessionId: subTab }
     default:

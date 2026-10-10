@@ -11,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -97,9 +97,9 @@ export function BuddyPersonaSection(): ReactElement | null {
           Start over
         </Button>
         {error ? (
-          <span className="mt-1 text-xs text-destructive" data-slot="buddy-save-error">
+          <FieldError className="mt-1" data-testid="buddy-save-error">
             {error}
-          </span>
+          </FieldError>
         ) : null}
       </div>
 
@@ -151,7 +151,7 @@ export function BuddyPersonaSection(): ReactElement | null {
       {/* The sample is a stream-sized bitmap shown small; zoomed, it is drawn
           again at twice the size so the bubble reads. */}
       <Dialog open={bubbleZoomOpen} onOpenChange={setBubbleZoomOpen}>
-        <DialogContent className="sm:max-w-lg" data-testid="buddy-bubble-zoom-dialog">
+        <DialogContent data-testid="buddy-bubble-zoom-dialog" size="lg">
           <DialogHeader>
             <DialogTitle>Bubble</DialogTitle>
             <DialogDescription>
@@ -265,9 +265,7 @@ function BuddyNameField({
         }}
       />
       {invalid ? (
-        <span className="text-xs text-destructive" data-slot="buddy-name-error">
-          {BUDDY_NAME_REQUIRED}
-        </span>
+        <FieldError data-testid="buddy-name-error">{BUDDY_NAME_REQUIRED}</FieldError>
       ) : null}
     </div>
   )
@@ -323,7 +321,7 @@ function BuddyPersonalityField({
             {example}
           </Button>
         ))}
-        <span className="ml-auto text-xs tabular-nums text-subtle">
+        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
           {[...draft].length}/{BUDDY_PERSONALITY_MAX_CHARS}
         </span>
         {dirty ? (

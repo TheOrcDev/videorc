@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import {
   Select,
   SelectContent,
@@ -153,11 +153,7 @@ export function BuddyMotionSection({
           </div>
         </Field>
       </FieldGroup>
-      {error ? (
-        <p className="text-xs text-destructive" data-testid="buddy-motion-error">
-          {error}
-        </p>
-      ) : null}
+      {error ? <FieldError data-testid="buddy-motion-error">{error}</FieldError> : null}
     </PanelSection>
   )
 }

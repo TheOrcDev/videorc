@@ -41,11 +41,11 @@ import {
 
 const VERDICT_META: Record<
   ObsImportVerdict,
-  { title: string; icon: typeof SuccessIcon; className: string }
+  { title: string; icon: typeof SuccessIcon; iconClassName: string }
 > = {
-  imported: { title: 'Will import', icon: SuccessIcon, className: 'text-success' },
-  approximated: { title: 'Approximated', icon: WarningIcon, className: 'text-warning' },
-  skipped: { title: "Won't import", icon: ErrorIcon, className: 'text-muted-foreground' }
+  imported: { title: 'Will import', icon: SuccessIcon, iconClassName: 'text-success' },
+  approximated: { title: 'Approximated', icon: WarningIcon, iconClassName: 'text-warning' },
+  skipped: { title: "Won't import", icon: ErrorIcon, iconClassName: 'text-muted-foreground' }
 }
 
 /** Why a read failed when OBS's files gave no reason of their own. */
@@ -239,7 +239,7 @@ export function ObsImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !applying && onOpenChange(nextOpen)}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>Import from OBS</DialogTitle>
           <DialogDescription>
@@ -351,7 +351,7 @@ export function ObsImportDialog({
                     return (
                       <div key={verdict} className="flex flex-col gap-1.5">
                         <div className="flex items-center gap-1.5 text-xs font-medium text-subtle">
-                          <Icon className={`size-3.5 ${meta.className}`} weight="fill" />
+                          <Icon className={`size-3.5 ${meta.iconClassName}`} weight="fill" />
                           {meta.title}
                         </div>
                         {lines.map((line) => (

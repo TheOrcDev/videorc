@@ -125,11 +125,11 @@ describe('BuddyPersonaSection', () => {
     await type(nameInput(), '   ')
     await blur(nameInput())
     expect(patchCohostSettings).not.toHaveBeenCalled()
-    expect(document.querySelector('[data-slot="buddy-name-error"]')?.textContent).toBe(
+    expect(document.querySelector('[data-testid="buddy-name-error"]')?.textContent).toBe(
       BUDDY_NAME_REQUIRED
     )
     await type(nameInput(), '  Grum the Goblin ')
-    expect(document.querySelector('[data-slot="buddy-name-error"]')).toBeNull()
+    expect(document.querySelector('[data-testid="buddy-name-error"]')).toBeNull()
     await blur(nameInput())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
       persona: { ...settings().persona, name: 'Grum the Goblin' }

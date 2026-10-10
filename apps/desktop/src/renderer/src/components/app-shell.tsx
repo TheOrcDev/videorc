@@ -35,6 +35,11 @@ import {
 import { displayKeyGlyph } from '@/lib/platform'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { readLastBuddyTab, writeLastBuddyTab, type BuddyTabId } from '@/lib/buddy-tabs'
+import {
+  readLastLivestreamView,
+  writeLastLivestreamView,
+  type LivestreamViewId
+} from '@/lib/livestream-tabs'
 import { readLastSettingsTab, writeLastSettingsTab, type SettingsTabId } from '@/lib/settings-tabs'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 import { isActiveRecordingState } from '@/lib/format'
@@ -287,6 +292,23 @@ export function AppShell(): ReactElement {
     [selectSettingsTab, setActive]
   )
 
+  // Plan 174 S1.6b (A-14): Livestream reopens on the view used last, like
+  // Settings; ⌘K's "Upcoming events" names its view before opening.
+  const [livestreamView, setLivestreamView] = useState<LivestreamViewId>(readLastLivestreamView)
+  const selectLivestreamView = useCallback((view: LivestreamViewId) => {
+    setLivestreamView(view)
+    writeLastLivestreamView(view)
+  }, [])
+  const openLivestream = useCallback(
+    (view?: LivestreamViewId) => {
+      if (view) {
+        selectLivestreamView(view)
+      }
+      setActive('live')
+    },
+    [selectLivestreamView, setActive]
+  )
+
   const completeOnboarding = useCallback(() => {
     localStorage.setItem(STORAGE_KEYS.onboarding, ONBOARDING_DISMISSED_VALUE)
     setOnboardingOpen(false)
@@ -378,11 +400,12 @@ export function AppShell(): ReactElement {
       if (!navigation) return
       if (navigation.tab === 'settings') openSettings(navigation.settingsTab)
       else if (navigation.tab === 'ai') openBuddy(navigation.buddyTab)
+      else if (navigation.tab === 'live') openLivestream(navigation.livestreamView)
       else setActive(navigation.tab)
     }
     window.addEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
     return () => window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
-  }, [openBuddy, openSettings, setActive])
+  }, [openBuddy, openLivestream, openSettings, setActive])
 
   // Plan 170 D18: `videorc://buddy` opens the Buddy tab (main focused the
   // window and synced the library); Make it Alive also opens the creator
@@ -453,18 +476,19 @@ export function AppShell(): ReactElement {
         <main className="flex min-w-0 flex-1 flex-col bg-glass-content">
           <Pane>
             <Toolbar title={workspaceTabLabel(active)} />
-            {/* Library manages its own scroll (pinned header and toolbar,
-                  only the table scrolls), and so do Settings and Buddy (their
-                  tab strips stay pinned, only the tab under it scrolls); every
-                  other tab scrolls as one. */}
-            <PaneBody scroll={active !== 'library' && active !== 'settings' && active !== 'ai'}>
+            {/* A page that owns its scroll says so on its root (pinned tab
+                  strips, Library's pinned header): PaneBody stops scrolling
+                  for it. Every other page scrolls as one. */}
+            <PaneBody>
               <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
                 <Suspense fallback={<WorkspaceTabFallback />}>
                   {active === 'studio' ? <StudioTab /> : null}
                   {active === 'sources' ? <SourcesTab /> : null}
                   {active === 'layouts' ? <LayoutTab /> : null}
                   {active === 'assets' ? <AssetsTab /> : null}
-                  {active === 'live' ? <StreamingTab /> : null}
+                  {active === 'live' ? (
+                    <StreamingTab view={livestreamView} onViewChange={selectLivestreamView} />
+                  ) : null}
                   {active === 'captions' ? <CaptionsTab /> : null}
                   {active === 'recording' ? <RecordingTab /> : null}
                   {active === 'library' ? (

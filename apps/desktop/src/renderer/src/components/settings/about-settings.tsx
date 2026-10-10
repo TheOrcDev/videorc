@@ -1,5 +1,4 @@
 import {
-  BugIcon,
   DownloadIcon,
   RefreshIcon,
   SpinnerIcon,
@@ -10,6 +9,7 @@ import type { ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
 import { PanelSection } from '@/components/panel-section'
+import { SupportBundleButton } from '@/components/support-bundle-button'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
@@ -21,8 +21,6 @@ import { isUpdateInstallable } from '@/lib/update-ui'
 
 /** Settings → About: the version and its updates, and getting help. */
 export function AboutSettings({ onShowWhatsNew }: { onShowWhatsNew: () => void }): ReactElement {
-  const { exportSupportBundle, supportBundleExportPending } = useStudioCore()
-
   return (
     <>
       <AboutAndUpdates onShowWhatsNew={onShowWhatsNew} />
@@ -30,15 +28,7 @@ export function AboutSettings({ onShowWhatsNew }: { onShowWhatsNew: () => void }
       <PanelSection description="Get help or report a problem." title="Support">
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={supportBundleExportPending}
-              size="sm"
-              variant="outline"
-              onClick={() => void exportSupportBundle()}
-            >
-              <BugIcon data-icon="inline-start" />
-              {supportBundleExportPending ? 'Exporting…' : 'Export support bundle'}
-            </Button>
+            <SupportBundleButton />
           </div>
           <p className="text-xs text-muted-foreground">
             Reporting a problem? Export a support bundle (redacted logs + diagnostics) to share with
@@ -189,8 +179,8 @@ function UpdateControl({
     case 'error':
       return (
         <div className="flex flex-col gap-2">
-          <div className="flex items-start gap-1.5 text-xs text-warning-foreground dark:text-warning">
-            <WarningIcon className="size-3.5 shrink-0" weight="fill" />
+          <div className="flex items-start gap-1.5 text-xs text-foreground">
+            <WarningIcon className="mt-px size-3.5 shrink-0 text-warning" weight="fill" />
             <span>Couldn’t check for updates: {status.message}</span>
           </div>
           <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>

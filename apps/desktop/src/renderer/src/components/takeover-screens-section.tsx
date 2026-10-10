@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { StreamScreen } from '@/lib/backend'
+import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
 
 // Takeover-image manager (upload/rename/reorder/delete). Lives on the Assets
@@ -158,9 +159,9 @@ function ScreenTile({
   }
 
   return (
-    <div
+    <MediaCard
       className={cn(
-        'flex min-w-0 flex-col overflow-hidden rounded-row border bg-foreground/[0.04] transition-opacity',
+        'overflow-hidden transition-opacity',
         !disabled && 'cursor-grab active:cursor-grabbing',
         dragging && 'opacity-40',
         dropTarget && 'ring-2 ring-ring'
@@ -248,7 +249,7 @@ function ScreenTile({
           </Button>
         </div>
       </form>
-    </div>
+    </MediaCard>
   )
 }
 

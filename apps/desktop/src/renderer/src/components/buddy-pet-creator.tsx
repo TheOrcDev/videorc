@@ -17,7 +17,7 @@ import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import {
@@ -275,7 +275,7 @@ export function BuddyPetCreator({
           <h2 className="text-sm font-semibold text-foreground">Create an Alive Buddy</h2>
           {gate.allowance ? (
             <span
-              className="ml-auto text-xs tabular-nums text-subtle"
+              className="ml-auto text-xs tabular-nums text-muted-foreground"
               data-testid="buddy-pet-allowance"
             >
               {buddyPetAllowanceCopy(gate.allowance)}
@@ -832,9 +832,9 @@ function ReferenceStep({
             </div>
           ) : null}
           {uploadError || identityError ? (
-            <p className="text-xs text-destructive" data-testid="buddy-pet-reference-error">
+            <FieldError data-testid="buddy-pet-reference-error">
               {uploadError ?? identityError}
-            </p>
+            </FieldError>
           ) : null}
         </div>
       </div>
@@ -962,9 +962,9 @@ function NotesEditor({
         </div>
       </Field>
       {error ? (
-        <p className="px-3 pb-2.5 text-xs text-destructive" data-testid="buddy-pet-notes-error">
+        <FieldError className="px-3 pb-2.5" data-testid="buddy-pet-notes-error">
           {error}
-        </p>
+        </FieldError>
       ) : null}
     </FieldGroup>
   )
@@ -1214,9 +1214,7 @@ function BuildStep({
         {state.problem &&
         !failure &&
         !Object.values(state.sheetErrors).includes(state.problem.message) ? (
-          <p className="text-xs text-destructive" data-testid="buddy-pet-problem">
-            {state.problem.message}
-          </p>
+          <FieldError data-testid="buddy-pet-problem">{state.problem.message}</FieldError>
         ) : null}
       </PanelSection>
     </>
@@ -1447,7 +1445,7 @@ function SaveStep({
           value={name}
           onChange={(event) => onName(event.target.value)}
         />
-        {invalid ? <span className="text-xs text-destructive">The pack needs a name.</span> : null}
+        {invalid ? <FieldError>The pack needs a name.</FieldError> : null}
       </div>
     </PanelSection>
   )

@@ -474,7 +474,7 @@ export function ActivityPane({
                 {items.length
                   ? 'Nothing matches this filter.'
                   : 'Follows, subs, gifts, tips and raids appear here as they happen.'}
-                {note ? <span className="mt-1 block text-subtle">{note}</span> : null}
+                {note ? <span className="mt-1 block text-muted-foreground">{note}</span> : null}
               </EmptyDescription>
               {onShowFollowNames && twitchNeedsFollowNames(platforms, audience) ? (
                 <Button

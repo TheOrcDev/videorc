@@ -15,6 +15,7 @@ import {
   studioModeTogglePreset,
   type LayoutOrientation
 } from '@/lib/capture'
+import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
 
 // Built-in layouts and named visual snapshots share the Scenes surface.
@@ -140,42 +141,47 @@ export function ScenesGallery(): ReactElement {
           const disabled = problems.length > 0
           const active = !activeSavedSceneId && activePreset === preset.id
           return (
-            <button
+            <MediaCard
               key={preset.id}
-              aria-pressed={active}
+              asChild
               className={cn(
-                'group flex flex-col gap-2 rounded-row border p-2 text-left',
-                active ? 'border-primary bg-primary/5' : 'bg-foreground/[0.04] hover:bg-accent',
+                'group gap-2 p-2 text-left',
                 disabled && 'cursor-not-allowed opacity-50'
               )}
-              disabled={disabled}
-              title={problems.length ? problems.join(' ') : undefined}
-              type="button"
-              onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
+              interactive={!active}
+              selected={active}
             >
-              <LayoutThumb
-                framing={captureConfig.layout.verticalScreenFraming}
-                preset={preset.id}
-              />
-              <span className="flex items-center justify-between gap-1.5">
-                <span className="truncate text-sm font-medium">
-                  {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
-                  {settings.globalShortcuts?.layouts?.[preset.id] ? (
-                    <KbdGroup>
-                      {acceleratorDisplayKeys(
-                        settings.globalShortcuts.layouts[preset.id],
-                        runtimeInfo?.platform
-                      ).map((glyph, index) => (
-                        <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-                      ))}
-                    </KbdGroup>
+              <button
+                aria-pressed={active}
+                disabled={disabled}
+                title={problems.length ? problems.join(' ') : undefined}
+                type="button"
+                onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
+              >
+                <LayoutThumb
+                  framing={captureConfig.layout.verticalScreenFraming}
+                  preset={preset.id}
+                />
+                <span className="flex items-center justify-between gap-1.5">
+                  <span className="truncate text-sm font-medium">
+                    {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+                    {settings.globalShortcuts?.layouts?.[preset.id] ? (
+                      <KbdGroup>
+                        {acceleratorDisplayKeys(
+                          settings.globalShortcuts.layouts[preset.id],
+                          runtimeInfo?.platform
+                        ).map((glyph, index) => (
+                          <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
+                        ))}
+                      </KbdGroup>
+                    ) : null}
+                  </span>
+                  {active ? (
+                    <CheckIcon className="size-4 shrink-0 text-primary" weight="bold" />
                   ) : null}
                 </span>
-                {active ? (
-                  <CheckIcon className="size-4 shrink-0 text-primary" weight="bold" />
-                ) : null}
-              </span>
-            </button>
+              </button>
+            </MediaCard>
           )
         })}
       </div>

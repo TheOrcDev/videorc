@@ -4,8 +4,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { Button } from './button'
+import { dialogContentVariants } from './dialog'
 import { Input } from './input'
+import { Switch } from './switch'
 import { Tabs, TabsList, TabsTrigger } from './tabs'
+import { Textarea } from './textarea'
 import { TooltipProvider } from './tooltip'
 
 // Plan 050, D4/D5: one desktop scale, retuned once in components/ui.
@@ -87,6 +90,74 @@ describe('desktop scale', () => {
     expect(read('dialog.tsx')).toContain('rounded-panel border glass-float-dialog p-5')
     // Command always sits inside a Dialog or Popover: it never paints a coat.
     expect(read('command.tsx')).not.toMatch(/\bbg-(popover|card|background)\b/)
+  })
+
+  it('sizes menu, select and context items at 6 px, concentric inside the 4 px inset (J1-14)', () => {
+    for (const name of ['dropdown-menu.tsx', 'context-menu.tsx', 'select.tsx']) {
+      const source = read(name)
+      expect(source, name).not.toMatch(/\brounded-(?:sm|md)\b/)
+      expect(source.match(/min-h-7[^"']*rounded-chip/g)?.length ?? 0, name).toBeGreaterThan(0)
+      // One separator strength in every float: the hairline itself.
+      expect(source, name).not.toContain('bg-border/50')
+    }
+    expect(read('command.tsx')).not.toContain('bg-border/50')
+    expect(read('chart.tsx')).not.toContain('rounded-xl')
+  })
+
+  it('gives dialogs four widths and one height rule, shared with AlertDialog (J1-20)', () => {
+    const widths = {
+      sm: 'sm:max-w-sm',
+      md: 'sm:max-w-md',
+      lg: 'sm:max-w-xl',
+      xl: 'sm:max-w-3xl'
+    } as const
+    for (const [size, width] of Object.entries(widths)) {
+      const classes = dialogContentVariants({ size: size as keyof typeof widths })
+      expect(classes).toContain(width)
+      expect(classes).toContain('max-h-[calc(100vh-2rem)]')
+      expect(classes).toContain('flex-col')
+      expect(classes).toContain('rounded-panel border glass-float-dialog p-5')
+    }
+    expect(dialogContentVariants()).toContain('sm:max-w-md')
+    expect(read('alert-dialog.tsx')).toContain('dialogContentVariants({ size })')
+    expect(read('dialog.tsx')).toContain('data-slot="dialog-body"')
+  })
+
+  it('fades and scales every float from 0.98 in 100 ms, with no slide (plan 174 S1.8, J1-23)', () => {
+    for (const name of [
+      'tooltip.tsx',
+      'hover-card.tsx',
+      'popover.tsx',
+      'dropdown-menu.tsx',
+      'context-menu.tsx',
+      'select.tsx'
+    ]) {
+      const source = read(name)
+      expect(source, name).not.toMatch(/slide-in-from|zoom-(?:in|out)-95/)
+      expect(source, name).toContain('data-open:zoom-in-[0.98]')
+      expect(source, name).toContain('duration-100')
+    }
+    for (const name of ['switch.tsx', 'accordion.tsx']) {
+      expect(read(name), name).not.toContain('transition-all')
+    }
+  })
+
+  it('keeps the switch knob white on its rim in both themes, like the slider (J1-15)', () => {
+    const markup = renderToStaticMarkup(createElement(Switch, { checked: true }))
+    expect(markup).toContain('bg-knob shadow-sm ring-1 ring-knob-ring')
+    expect(markup).not.toMatch(
+      /bg-background|bg-primary-foreground|dark:data-\[state=unchecked\]:bg-foreground/
+    )
+  })
+
+  it('sets inputs and text areas at 14 px at every width, never the mobile 16 px (J1-10)', () => {
+    for (const markup of [
+      renderToStaticMarkup(createElement(Input)),
+      renderToStaticMarkup(createElement(Textarea))
+    ]) {
+      expect(markup).toContain('text-sm')
+      expect(markup).not.toMatch(/text-base|md:text-/)
+    }
   })
 
   it('mounts the tooltip provider with the desktop delay', () => {

@@ -1,6 +1,6 @@
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
-import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon } from '@/components/icons'
+import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
 import { useMemo, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -421,11 +421,15 @@ export function TechnicalDetails({
         {summary ? (
           <span
             className={cn(
-              'truncate text-xs font-normal tabular-nums',
-              attribution === 'healthy' ? 'text-muted-foreground' : 'text-warning'
+              'flex min-w-0 items-center gap-1 text-xs font-normal tabular-nums',
+              attribution === 'healthy' ? 'text-muted-foreground' : 'text-foreground'
             )}
           >
-            {summary}
+            {/* The tone rides on the icon (plan 174 S1.8, D-35). */}
+            {attribution === 'healthy' ? null : (
+              <WarningIcon aria-hidden className="size-3.5 shrink-0 text-warning" weight="fill" />
+            )}
+            <span className="truncate">{summary}</span>
           </span>
         ) : null}
       </CollapsibleTrigger>

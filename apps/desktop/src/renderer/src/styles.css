@@ -85,8 +85,10 @@
   --accent-foreground: oklch(0.17 0.004 286);
   /* Pressed block: black-10%. */
   --accent-pressed: oklch(0 0 0 / 10%);
-  /* Tertiary text tier (section headers, footer hints, disabled). */
-  --subtle: oklch(0.58 0.005 286);
+  /* Tertiary text tier (section labels, hints, disabled). Plan 174 S1.8
+     (D12): 4.85:1 on the porcelain solid and 4.92:1 on a float; it was
+     0.58, 4.11:1. Essential copy uses the secondary tier, never this one. */
+  --subtle: oklch(0.54 0.005 286);
 
   /* The brand red — the logo's LED-glow eyes (same hue family both themes). */
   --destructive: oklch(0.55 0.24 27);
@@ -211,7 +213,9 @@
   --accent-foreground: oklch(0.97 0.001 286);
   /* Pressed block: white-12%. */
   --accent-pressed: oklch(1 0 0 / 12%);
-  --subtle: oklch(0.55 0.008 286);
+  /* Plan 174 S1.8 (D12): 5.32:1 on the black solid and 4.69:1 on a dialog;
+     it was 0.55, 3.99:1. */
+  --subtle: oklch(0.62 0.008 286);
 
   /* The brand red — the logo's LED-glow eyes. Red stays semantic (record,
      live, destructive); it is never chrome. */
@@ -332,13 +336,15 @@
 }
 
 /* Increase Contrast: hairlines strong enough to read on glass, the secondary
-   tier one step closer to the primary, and both covers at 95% (plan 091, D7). */
+   and tertiary tiers one step closer to the primary, and both covers at 95%
+   (plan 091, D7; the tertiary since plan 174 S1.8). */
 @media (prefers-contrast: more) {
   :root,
   :root[data-platform='win32'] {
     --border: oklch(0 0 0 / 28%);
     --input: oklch(0 0 0 / 28%);
     --muted-foreground: oklch(0.38 0.006 286);
+    --subtle: oklch(0.45 0.005 286);
     --glass-cover-sidebar: 0.95;
     --glass-cover-work: 0.95;
     --glass-float-rim: oklch(0 0 0 / 24%);
@@ -350,6 +356,7 @@
     --border: oklch(1 0 0 / 24%);
     --input: oklch(1 0 0 / 24%);
     --muted-foreground: oklch(0.8 0.01 286);
+    --subtle: oklch(0.68 0.008 286);
     --glass-cover-sidebar: 0.95;
     --glass-cover-work: 0.95;
     --glass-float-rim: oklch(1 0 0 / 30%);

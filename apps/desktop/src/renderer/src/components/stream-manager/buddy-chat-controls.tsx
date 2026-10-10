@@ -166,7 +166,7 @@ export function BuddyChatControls({
             </div>
           </DialogHeader>
           {step === 'consent' ? (
-            <p className="text-xs text-subtle">
+            <p className="text-xs text-muted-foreground">
               You land in Suggest: every message is a card here, and one click sends it.
             </p>
           ) : null}

@@ -31,7 +31,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
@@ -63,6 +63,7 @@ import {
   buddyOnboardingCounter
 } from '@/lib/buddy-onboarding-copy'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
+import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
 import {
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
@@ -341,9 +342,7 @@ export function BuddyLibrarySection({
         </LibraryGroup>
 
         {(problem ?? view.error) ? (
-          <p className="text-xs text-destructive" data-testid="buddy-library-error">
-            {problem ?? view.error}
-          </p>
+          <FieldError data-testid="buddy-library-error">{problem ?? view.error}</FieldError>
         ) : null}
       </div>
 
@@ -428,17 +427,14 @@ function BuddyCard({
 }): ReactElement {
   const picture = card.slug ? BUDDY_OFFICIAL_ART[card.slug].idle : card.idleUrl
   return (
-    <div
-      className={cn(
-        'flex min-w-0 flex-col gap-1.5 rounded-row border border-border bg-foreground/[0.04] p-1.5',
-        card.active && 'border-foreground/25 bg-accent',
-        card.busy && 'opacity-70'
-      )}
+    <MediaCard
+      className={cn('gap-1.5 p-1.5', card.busy && 'opacity-70')}
       data-active={card.active || undefined}
       data-busy={card.busy || undefined}
       data-id={card.id}
       data-kind={card.kind}
       data-testid="buddy-library-card"
+      selected={card.active}
       title={card.hint || undefined}
     >
       <div className="relative aspect-square overflow-hidden rounded-chip bg-foreground/[0.04]">
@@ -549,7 +545,7 @@ function BuddyCard({
           </DropdownMenu>
         ) : null}
       </div>
-    </div>
+    </MediaCard>
   )
 }
 
@@ -661,7 +657,7 @@ function EditForm({
   return (
     <DialogContent
       aria-describedby={undefined}
-      className={rename ? 'sm:max-w-sm' : 'sm:max-w-lg'}
+      size={rename ? 'sm' : 'lg'}
       data-testid="buddy-library-edit-dialog"
     >
       <form
@@ -705,7 +701,7 @@ function EditForm({
                 value={personality}
                 onChange={(event) => setPersonality(event.target.value)}
               />
-              <span className="self-end text-xs text-subtle tabular-nums">
+              <span className="self-end text-xs text-muted-foreground tabular-nums">
                 {buddyOnboardingCounter(
                   buddyTextLength(personality),
                   BUDDY_LIBRARY_PERSONALITY_MAX_CHARS
@@ -727,7 +723,7 @@ function EditForm({
                 <FieldDescription className="text-xs">
                   {BUDDY_ONBOARDING_STEP3.aboutHelp}
                 </FieldDescription>
-                <span className="ml-auto text-xs text-subtle tabular-nums">
+                <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                   {buddyOnboardingCounter(
                     buddyTextLength(context),
                     BUDDY_LIBRARY_CONTEXT_MAX_CHARS

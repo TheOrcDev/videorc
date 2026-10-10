@@ -11228,7 +11228,7 @@ async function runSmokePreviewMotionCommand(
                   ...rect(element)
                 }))
             : [];
-        const header = document.querySelector('[data-slot="chat-header"]');
+        const header = document.querySelector('[data-slot="window-header"]');
         const bar = document.querySelector('[data-slot="stats-bar"]');
         const statusBar = document.querySelector('[data-slot="status-bar"]');
         const inlineActions = document.querySelector('[data-slot="stream-manager-actions"]');
@@ -11326,7 +11326,7 @@ async function runSmokePreviewMotionCommand(
           header: box(header),
           headerItems: visibleDescendants(header),
           headerButtons: header ? header.querySelectorAll('button').length : -1,
-          headerTitle: document.querySelector('[data-slot="stream-manager-title"]')?.textContent ?? '',
+          headerTitle: document.querySelector('[data-slot="window-header-title"]')?.textContent ?? '',
           bar: visible(bar) ? box(bar) : null,
           barRule: visible(bar) ? parseFloat(getComputedStyle(bar).borderBottomWidth) || 0 : null,
           stats,
@@ -11341,7 +11341,7 @@ async function runSmokePreviewMotionCommand(
           inlineActions: visible(inlineActions),
           moreMenu: button('More Stream Manager actions'),
           highlightPosition: button('Highlight position'),
-          keepOnTop: button('Keep this window on top'),
+          keepOnTop: button('Keep on top'),
           clearViewVisible: visible(document.querySelector('button[aria-label="Clear view"]')),
           openPreviewVisible: visible(document.querySelector('button[aria-label="Open Preview"]')),
           backToLiveVisible: visible(textButton('Back to live'))
@@ -11375,7 +11375,7 @@ async function runSmokePreviewMotionCommand(
           messageCount: rows.length,
           composerCount: composer ? 1 : 0,
           composerDisabled: composer?.disabled ?? null,
-          headerTitle: document.querySelector('header span')?.textContent ?? '',
+          headerTitle: document.querySelector('[data-slot="window-header-title"]')?.textContent ?? '',
           highlightPositionControl:
             document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('title') ?? null,
           windowFrame: document.querySelector('[data-slot="window-frame"]') !== null,

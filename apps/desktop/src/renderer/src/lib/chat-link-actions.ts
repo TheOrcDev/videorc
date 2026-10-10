@@ -1,3 +1,4 @@
+import { copyText } from '@/lib/copy-text'
 import { toast } from '@/lib/toast'
 
 // Open link and Copy link on a chat row (plan 151, D10). Opening goes through
@@ -21,15 +22,9 @@ export function copyChatLink(href: string): Promise<void> {
 }
 
 /**
- * Copies chat text (a link, a message, an activity line). Success is quiet;
- * a refused write says so, because a silent no-op reads as a broken menu.
+ * Copies chat text (a link, a message, an activity line) through the shared
+ * copyText (plan 174 S1.6b): success is quiet, a refused write says so.
  */
 export async function copyChatText(text: string, failure = "Couldn't copy that."): Promise<void> {
-  try {
-    if (!navigator.clipboard) throw new Error('clipboard unavailable')
-    await navigator.clipboard.writeText(text)
-  } catch (error) {
-    console.warn('[chat-link] copy failed', error)
-    toast.error(failure)
-  }
+  await copyText(text, failure)
 }

@@ -6,12 +6,15 @@ import {
   GaugeIcon,
   HealthIcon,
   HeartbeatIcon,
-  TerminalIcon
+  TerminalIcon,
+  WarningIcon
 } from '@/components/icons'
 import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
+import { SupportBundleButton } from '@/components/support-bundle-button'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -57,9 +60,7 @@ export function DiagnosticsTab(): ReactElement {
     captureConfig,
     deviceList,
     mediaAccess,
-    runtimeInfo,
-    exportSupportBundle,
-    supportBundleExportPending
+    runtimeInfo
   } = useStudioCore()
   const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
@@ -246,12 +247,21 @@ export function DiagnosticsTab(): ReactElement {
               <Badge variant="outline">Target {diagnosticStats.targetFps} FPS</Badge>
             ) : null}
           </div>
+          {/* Section conditions are Alerts: the tone tints the row and its
+              icon, the words stay monochrome (plan 174 S1.8, I-26). */}
           {diagnosticStats.recordingAtRisk ? (
-            <p className="text-sm text-destructive">
-              Recording at risk: {diagnosticStats.recordingRiskReasons.join('; ')}
-            </p>
+            <Alert variant="destructive">
+              <AlertIcon weight="fill" />
+              <AlertTitle>Recording at risk</AlertTitle>
+              <AlertDescription>{diagnosticStats.recordingRiskReasons.join('; ')}</AlertDescription>
+            </Alert>
           ) : null}
-          {qualityWarning ? <p className="text-sm text-warning">{qualityWarning}</p> : null}
+          {qualityWarning ? (
+            <Alert variant="warning">
+              <WarningIcon weight="fill" />
+              <AlertTitle>{qualityWarning}</AlertTitle>
+            </Alert>
+          ) : null}
         </PanelSection>
 
         <PanelSection
@@ -699,14 +709,7 @@ export function DiagnosticsTab(): ReactElement {
               <p className="text-sm font-medium">Redacted diagnostics JSON</p>
               <p className="truncate text-xs text-muted-foreground">Logs, health, sessions.</p>
             </div>
-            <Button
-              size="sm"
-              disabled={supportBundleExportPending}
-              onClick={() => void exportSupportBundle()}
-            >
-              <ExternalLinkIcon className="mr-2 size-4" />
-              {supportBundleExportPending ? 'Exporting' : 'Export'}
-            </Button>
+            <SupportBundleButton className="shrink-0" />
           </div>
         </PanelSection>
 
@@ -738,7 +741,12 @@ export function DiagnosticsTab(): ReactElement {
             {sessionLogsLoading && sessionLogs.length === 0 ? (
               <p className="text-sm text-muted-foreground">Loading session logs…</p>
             ) : sessionLogsError && sessionLogs.length === 0 ? (
-              <p className="text-sm text-destructive">
+              <p className="flex items-center gap-1.5 text-sm text-foreground">
+                <AlertIcon
+                  aria-hidden
+                  className="size-3.5 shrink-0 text-destructive"
+                  weight="fill"
+                />
                 Session logs unavailable: {sessionLogsError}
               </p>
             ) : (

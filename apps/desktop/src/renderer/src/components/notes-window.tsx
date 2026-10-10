@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
-import { AlertIcon, PinIcon } from '@/components/icons'
+import { AlertIcon } from '@/components/icons'
+import { PinWindowButton } from '@/components/pin-window-button'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { useTrafficLightGutter } from '@/components/window-frame'
+import { WindowHeader } from '@/components/window-frame'
 import type { NotesFontScale, NotesWindowState } from '@/lib/backend'
 import { cn } from '@/lib/utils'
 import { MAX_NOTES_TEXT_LENGTH } from '../../../shared/notes-limits'
@@ -24,11 +25,11 @@ export type NotesSaveStatus =
   | 'Pin unavailable'
   | 'Pin failed'
 
-// The md: twins beat the shadcn Textarea's own md:text-sm.
+// The Textarea is plain text-sm (plan 174 S1.8, J1-10), so one size wins.
 const FONT_SIZE_CLASS: Record<NotesFontScale, string> = {
-  sm: 'text-[18px] md:text-[18px]',
-  md: 'text-[24px] md:text-[24px]',
-  lg: 'text-[32px] md:text-[32px]'
+  sm: 'text-[18px]',
+  md: 'text-[24px]',
+  lg: 'text-[32px]'
 }
 
 const FONT_SCALE_LABEL: Record<NotesFontScale, string> = { sm: 'S', md: 'M', lg: 'L' }
@@ -57,7 +58,6 @@ export function NotesWindow({
   const [captureProtected, setCaptureProtected] = useState<boolean | null>(null)
   const [status, setStatus] = useState<NotesSaveStatus>('Saved')
   const [loaded, setLoaded] = useState(false)
-  const trafficLightGutter = useTrafficLightGutter()
   const textRef = useRef(text)
   const fontScaleRef = useRef(fontScale)
   const saveTimerRef = useRef<number | null>(null)
@@ -146,21 +146,12 @@ export function NotesWindow({
     textareaRef.current?.focus()
   }
 
-  const pinLabel = alwaysOnTop ? 'Allow notes behind other apps' : 'Keep notes in front of all apps'
   const words = notesWordCount(text)
   const marker = smokeMarker ? 'bg-[#ff0000] text-white border-[#ff0000]' : ''
 
   return (
     <div className="flex h-full flex-col text-foreground" data-smoke-marker={smokeMarker}>
-      <header
-        className={cn(
-          'flex h-10 shrink-0 items-center gap-2 border-b border-border pr-2 select-none [-webkit-app-region:drag]',
-          trafficLightGutter,
-          marker
-        )}
-      >
-        <span className="text-[13px] font-semibold">Notes</span>
-        <span className="flex-1" />
+      <WindowHeader className={marker} title="Notes">
         {/* Plain Buttons, not ToggleGroup: Radix roving focus would split a
             shared chunk the main window then loads eagerly (asset budget). */}
         <div
@@ -192,23 +183,8 @@ export function NotesWindow({
             </Button>
           ))}
         </div>
-        <Button
-          aria-label={pinLabel}
-          aria-pressed={alwaysOnTop}
-          className={cn(
-            'size-7 [-webkit-app-region:no-drag]',
-            alwaysOnTop && 'text-foreground',
-            marker
-          )}
-          size="icon"
-          title={pinLabel}
-          type="button"
-          variant="ghost"
-          onClick={togglePin}
-        >
-          <PinIcon className="size-4" weight={alwaysOnTop ? 'fill' : 'regular'} />
-        </Button>
-      </header>
+        <PinWindowButton className={marker} pinned={alwaysOnTop} onPinnedChange={togglePin} />
+      </WindowHeader>
       <Textarea
         ref={textareaRef}
         aria-label="Notes for this recording"
@@ -220,8 +196,7 @@ export function NotesWindow({
           FONT_SIZE_CLASS[fontScale],
           // After the size: tailwind-merge lets a later font size drop line-height.
           'leading-[1.45]',
-          smokeMarker &&
-            'bg-[#ff0000] text-[64px] leading-[1.05] font-black text-white uppercase md:text-[64px]'
+          smokeMarker && 'bg-[#ff0000] text-[64px] leading-[1.05] font-black text-white uppercase'
         )}
         maxLength={maxLength}
         placeholder="Notes for this recording…"
@@ -257,7 +232,7 @@ export function NotesWindow({
       ) : null}
       <footer
         className={cn(
-          'flex h-6 shrink-0 items-center gap-3 border-t border-border px-3 text-[11px] text-subtle select-none',
+          'flex h-6 shrink-0 items-center gap-3 border-t border-border px-3 text-[11px] text-muted-foreground select-none',
           marker
         )}
       >

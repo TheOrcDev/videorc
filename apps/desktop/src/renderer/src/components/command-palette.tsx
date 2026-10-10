@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/command'
 import { Kbd } from '@/components/ui/kbd'
 import { BUDDY_TABS } from '@/lib/buddy-tabs'
+import { openLivestreamView } from '@/lib/livestream-tabs'
 import { displayKeyGlyph } from '@/lib/platform'
 import { SETTINGS_TABS } from '@/lib/settings-tabs'
 import {
@@ -121,13 +122,7 @@ export function CommandPalette({
         <CommandGroup heading="Setup">
           <CommandItem
             value="Schedule livestream · Upcoming events"
-            onSelect={() =>
-              run(() => {
-                sessionStorage.setItem('videorc-scheduling-view', 'upcoming')
-                openStudioPanel('live')
-                window.dispatchEvent(new Event('videorc:upcoming'))
-              })
-            }
+            onSelect={() => run(() => openLivestreamView('upcoming'))}
           >
             Schedule livestream · Upcoming events
           </CommandItem>

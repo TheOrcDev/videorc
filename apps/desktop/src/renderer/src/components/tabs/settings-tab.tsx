@@ -7,9 +7,10 @@ import { PermissionsSettings } from '@/components/settings/permissions-settings'
 import { RecordingSettings } from '@/components/settings/recording-settings'
 import { RemoteSettings } from '@/components/settings/remote-settings'
 import { ShortcutsSettings } from '@/components/settings/shortcuts-settings'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { PageTabs } from '@/components/page-tabs'
+import { TabsContent } from '@/components/ui/tabs'
 import { useStudioCore } from '@/hooks/use-studio'
-import { SETTINGS_TABS, isSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
+import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
 
 /**
  * A tab with two sections: side by side at `lg`, stacked below it with a
@@ -23,10 +24,10 @@ const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-
 
 /**
  * Settings (plan 064): six tabs in a segmented strip under the toolbar, one
- * tab's sections below it (Buddy's moved to the Buddy tab, plan 119). The strip never scrolls away: Settings owns its
- * scroll (app-shell turns the pane body's off), and only the region under the
- * strip scrolls. The selected tab lives in app-shell, so links can open a
- * named tab and Settings reopens on the one used last.
+ * tab's sections below it (Buddy's moved to the Buddy tab, plan 119). The
+ * strip never scrolls away (`PageTabs`: the page owns its scroll and only the
+ * region under the strip scrolls). The selected tab lives in app-shell, so
+ * links can open a named tab and Settings reopens on the one used last.
  */
 export function SettingsTab({
   tab,
@@ -50,65 +51,43 @@ export function SettingsTab({
   }, [refreshBackend])
 
   return (
-    <Tabs
-      className="min-h-0 flex-1 gap-0"
+    <PageTabs
+      label="Settings sections"
+      tabs={SETTINGS_TABS}
+      triggerAttribute="data-videorc-settings-tab"
       value={tab}
-      onValueChange={(value) => {
-        if (isSettingsTabId(value)) {
-          onTabChange(value)
-        }
-      }}
+      onValueChange={onTabChange}
     >
-      {/* Built like the Livestream page's Setup / Upcoming strip; the toolbar
-          carries only the title (owner call, 2026-09-23). */}
-      <div className="shrink-0 border-b border-border px-gutter py-2">
-        <TabsList aria-label="Settings sections">
-          {SETTINGS_TABS.map(({ id, label }) => (
-            <TabsTrigger key={id} data-videorc-settings-tab={id} value={id}>
-              {label}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </div>
-      {/* Keyed by tab, so every tab change (a click, the arrow keys, or a link
-          that opens a named tab) starts the new tab at the top. A flex column,
-          so a tab panel can fill the visible height (see SECTION_PAIR). */}
-      <div
-        key={tab}
-        className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain"
-        data-slot="settings-scroll"
-      >
-        <TabsContent className="flex flex-col" value="general">
-          <ConfigGrid className={SECTION_PAIR}>
-            <GeneralSettings />
-          </ConfigGrid>
-        </TabsContent>
-        <TabsContent className="flex flex-col" value="recording">
-          <PageStack>
-            <RecordingSettings />
-          </PageStack>
-        </TabsContent>
-        <TabsContent className="flex flex-col" value="permissions">
-          <PageStack>
-            <PermissionsSettings onOpenPermissionsSetup={onOpenPermissionsSetup} />
-          </PageStack>
-        </TabsContent>
-        <TabsContent className="flex flex-col" value="shortcuts">
-          <ConfigGrid className={SECTION_PAIR}>
-            <ShortcutsSettings />
-          </ConfigGrid>
-        </TabsContent>
-        <TabsContent className="flex flex-col" value="remote">
-          <ConfigGrid className={SECTION_PAIR}>
-            <RemoteSettings />
-          </ConfigGrid>
-        </TabsContent>
-        <TabsContent className="flex flex-col" value="about">
-          <ConfigGrid className={SECTION_PAIR}>
-            <AboutSettings onShowWhatsNew={onShowWhatsNew} />
-          </ConfigGrid>
-        </TabsContent>
-      </div>
-    </Tabs>
+      <TabsContent className="flex flex-col" value="general">
+        <ConfigGrid className={SECTION_PAIR}>
+          <GeneralSettings />
+        </ConfigGrid>
+      </TabsContent>
+      <TabsContent className="flex flex-col" value="recording">
+        <PageStack>
+          <RecordingSettings />
+        </PageStack>
+      </TabsContent>
+      <TabsContent className="flex flex-col" value="permissions">
+        <PageStack>
+          <PermissionsSettings onOpenPermissionsSetup={onOpenPermissionsSetup} />
+        </PageStack>
+      </TabsContent>
+      <TabsContent className="flex flex-col" value="shortcuts">
+        <ConfigGrid className={SECTION_PAIR}>
+          <ShortcutsSettings />
+        </ConfigGrid>
+      </TabsContent>
+      <TabsContent className="flex flex-col" value="remote">
+        <ConfigGrid className={SECTION_PAIR}>
+          <RemoteSettings />
+        </ConfigGrid>
+      </TabsContent>
+      <TabsContent className="flex flex-col" value="about">
+        <ConfigGrid className={SECTION_PAIR}>
+          <AboutSettings onShowWhatsNew={onShowWhatsNew} />
+        </ConfigGrid>
+      </TabsContent>
+    </PageTabs>
   )
 }

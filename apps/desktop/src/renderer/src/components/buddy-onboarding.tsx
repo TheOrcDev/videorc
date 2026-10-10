@@ -34,7 +34,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -90,6 +90,7 @@ import {
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
+import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import {
@@ -330,7 +331,8 @@ export function BuddyOnboarding({
       <DialogContent
         ref={sheetRef}
         aria-describedby={undefined}
-        className="flex h-[min(48rem,calc(100vh-3rem))] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl"
+        className="h-[min(48rem,calc(100vh-2rem))] gap-0 overflow-hidden p-0"
+        size="xl"
         data-step={step}
         data-testid="buddy-onboarding"
         onKeyDown={onKeyDown}
@@ -404,9 +406,9 @@ export function BuddyOnboarding({
             />
           )}
           {actionError ? (
-            <p className="mt-3 text-xs text-destructive" data-testid="buddy-onboarding-error">
+            <FieldError className="mt-3" data-testid="buddy-onboarding-error">
               {actionError}
-            </p>
+            </FieldError>
           ) : null}
         </div>
 
@@ -451,10 +453,12 @@ export function BuddyOnboarding({
               }}
             />
             {step === 1 ? (
-              <span className="text-xs text-subtle">{BUDDY_ONBOARDING_STEP1.premiumNote}</span>
+              <span className="text-xs text-muted-foreground">
+                {BUDDY_ONBOARDING_STEP1.premiumNote}
+              </span>
             ) : null}
             {step === 2 && !canAdvance ? (
-              <span className="text-xs text-subtle" data-testid="buddy-onboarding-hint">
+              <span className="text-xs text-muted-foreground" data-testid="buddy-onboarding-hint">
                 {BUDDY_ONBOARDING_STEP2.nextHint}
               </span>
             ) : null}
@@ -613,15 +617,13 @@ function MeetStep({
           data-testid="buddy-onboarding-gallery"
         >
           {official.map((card) => (
-            <div
+            <MediaCard
               key={card.id}
-              className={cn(
-                'flex flex-col gap-1.5 rounded-row border border-border bg-foreground/[0.04] p-1.5',
-                card.active && 'border-foreground/25 bg-accent'
-              )}
+              className="gap-1.5 p-1.5"
               data-active={card.active || undefined}
               data-id={card.id}
               data-testid="buddy-onboarding-official"
+              selected={card.active}
               title={card.hint}
             >
               <div className="aspect-square overflow-hidden rounded-chip bg-foreground/[0.04]">
@@ -656,7 +658,7 @@ function MeetStep({
                   {BUDDY_ONBOARDING_STEP1.cardAction}
                 </Button>
               )}
-            </div>
+            </MediaCard>
           ))}
         </div>
       </section>
@@ -669,12 +671,16 @@ function MeetStep({
 function Counter({ value, max }: { value: string; max: number }): ReactElement {
   const count = buddyTextLength(value)
   return (
+    // Over the limit, the icon carries the tone (plan 174 S1.8).
     <span
       className={cn(
-        'ml-auto shrink-0 text-xs tabular-nums',
-        count > max ? 'text-destructive' : 'text-subtle'
+        'ml-auto flex shrink-0 items-center gap-1 text-xs tabular-nums',
+        count > max ? 'font-medium text-foreground' : 'text-muted-foreground'
       )}
     >
+      {count > max ? (
+        <AlertIcon aria-hidden className="size-3 text-destructive" weight="fill" />
+      ) : null}
       {buddyOnboardingCounter(count, max)}
     </span>
   )
@@ -837,9 +843,7 @@ function DescribeStep({
           />
         </div>
         {pictureError ? (
-          <p className="text-xs text-destructive" data-testid="buddy-onboarding-picture-error">
-            {pictureError}
-          </p>
+          <FieldError data-testid="buddy-onboarding-picture-error">{pictureError}</FieldError>
         ) : null}
       </Field>
     </FieldGroup>
