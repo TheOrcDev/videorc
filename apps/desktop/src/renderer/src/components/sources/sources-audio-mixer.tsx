@@ -11,9 +11,9 @@ import {
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import { acceleratorDisplayKeys } from '../../../../shared/accelerator'
+import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
-import { SourceSelect } from '@/components/source-select'
 import { SourceControlRow, SourceFacts, SourceItem } from '@/components/sources/source-item'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
@@ -237,15 +237,18 @@ export function SourcesAudioMixer(): ReactElement {
                 muteShortcut={acceleratorDisplayKeys(settings.globalShortcuts?.micToggle, platform)}
                 muted={audio.microphoneMuted}
                 picker={
-                  <SourceSelect
-                    allowNone
+                  <DevicePicker
                     description={<SourceSwitchStatus kind="microphone" />}
                     devices={microphones}
                     disabled={Boolean(sourceSwitchReason('microphone'))}
                     discoveryPending={wsStatus !== 'connected'}
+                    kind="microphone"
                     label="Microphone"
                     labelHidden
+                    noneLabel="Off"
+                    selectedDevice={selectedMicrophone}
                     selectedName={captureConfig.sources.microphoneName}
+                    statusInTrigger={false}
                     value={microphoneId}
                     onChange={(nextId) =>
                       void switchSourceDeviceLive(
@@ -342,7 +345,7 @@ export function MicrophoneChannel({
   onMutedChange,
   onSyncChange
 }: {
-  /** The microphone picker (the page passes `SourceSelect`). */
+  /** The microphone picker (the page passes `DevicePicker`). */
   picker?: ReactNode
   microphoneSelected: boolean
   status: SourceStatus | null

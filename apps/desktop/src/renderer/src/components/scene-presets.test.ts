@@ -125,7 +125,6 @@ describe('scene library controls', () => {
     expect(mocked.core.applySavedScene).not.toHaveBeenCalled()
   })
   it('repairs an unavailable window with exact source selection before dispatch', async () => {
-    await import('./source-select-searchable')
     const scene = saved()
     scene.visual.sources = { windowId: 'closed', testPattern: false }
     mocked.core.savedScenes = [scene]

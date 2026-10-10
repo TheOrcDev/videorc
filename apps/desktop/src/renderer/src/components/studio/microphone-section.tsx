@@ -1,8 +1,9 @@
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 
+import { DevicePicker } from '@/components/device-picker'
 import { PanelSection } from '@/components/panel-section'
-import { SourceSelect } from '@/components/source-select'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
+import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useStudioCore } from '@/hooks/use-studio'
 import { useMicrophoneMeter } from '@/hooks/use-studio-mic-sources'
 import type { Device } from '@/lib/backend'
@@ -19,8 +20,14 @@ import type { AudioMixerMonitorLabel } from '@/lib/mic-visual-gate'
  * renderer analyser fills in where the backend has no standby source.
  */
 export function MicrophoneSection(): ReactElement {
-  const { captureConfig, deviceList, switchSourceDeviceLive, sourceSwitchReason, wsStatus } =
-    useStudioCore()
+  const {
+    captureConfig,
+    deviceList,
+    selectedMicrophone,
+    switchSourceDeviceLive,
+    sourceSwitchReason,
+    wsStatus
+  } = useStudioCore()
   const { meter, monitorLabel } = useMicrophoneMeter()
   const microphones = microphonePickerDevices(deviceList.devices)
 
@@ -31,7 +38,9 @@ export function MicrophoneSection(): ReactElement {
       discoveryPending={wsStatus !== 'connected'}
       meter={meter}
       monitorLabel={monitorLabel}
+      selectedDevice={selectedMicrophone}
       selectedName={captureConfig.sources.microphoneName}
+      switchStatus={<SourceSwitchStatus kind="microphone" />}
       value={captureConfig.sources.microphoneId}
       onChange={(microphoneId) =>
         void switchSourceDeviceLive(
@@ -48,6 +57,8 @@ export function MicrophoneSectionView({
   devices,
   value,
   selectedName,
+  selectedDevice,
+  switchStatus,
   disabled,
   discoveryPending,
   meter,
@@ -57,6 +68,10 @@ export function MicrophoneSectionView({
   devices: Device[]
   value: string | undefined
   selectedName: string | undefined
+  /** The selected microphone from the whole device list. */
+  selectedDevice?: Device
+  /** The live switch status (as Screen and Camera show it), under the picker. */
+  switchStatus?: ReactNode
   disabled: boolean
   discoveryPending: boolean
   meter: MeterInput
@@ -66,13 +81,16 @@ export function MicrophoneSectionView({
   return (
     <PanelSection title="Microphone">
       {/* The section title names the picker; its label stays for screen readers. */}
-      <SourceSelect
-        allowNone
+      <DevicePicker
+        description={switchStatus}
         devices={devices}
         disabled={disabled}
         discoveryPending={discoveryPending}
+        kind="microphone"
         label="Microphone"
         labelHidden
+        noneLabel="Off"
+        selectedDevice={selectedDevice}
         selectedName={selectedName}
         value={value}
         onChange={onChange}

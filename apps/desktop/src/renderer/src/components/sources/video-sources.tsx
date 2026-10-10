@@ -2,8 +2,8 @@ import { CameraIcon, DisplayIcon, UploadIcon, WarningIcon } from '@/components/i
 import type { ReactElement, ReactNode } from 'react'
 
 import { GroupedList } from '@/components/list-row'
+import { DevicePicker } from '@/components/device-picker'
 import { PanelSection } from '@/components/panel-section'
-import { SourceSelect } from '@/components/source-select'
 import { SourceFacts, SourceItem } from '@/components/sources/source-item'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -29,6 +29,8 @@ export interface VideoSourcesViewProps {
     devices: Device[]
     value?: string
     selectedName?: string
+    /** The selected capture device from the whole list (the picker hides some). */
+    selectedDevice?: Device
     allowNone: boolean
     disabled: boolean
     status: SourceStatus | null
@@ -124,16 +126,20 @@ export function VideoSourcesView({
           status={screen.status}
           title="Screen"
         >
-          <SourceSelect
-            allowNone={screen.allowNone}
+          <DevicePicker
             description={screen.switchStatus}
             devices={screen.devices}
             disabled={screen.disabled}
             discoveryPending={discoveryPending}
+            groupByKind
+            kind="capture"
             label="Screen / window"
             labelHidden
+            noneLabel={screen.allowNone ? 'None' : undefined}
             searchable
+            selectedDevice={screen.selectedDevice}
             selectedName={screen.selectedName}
+            statusInTrigger={false}
             value={screen.value}
             onChange={screen.onChange}
           />
@@ -166,16 +172,17 @@ export function VideoSourcesView({
           status={camera.status}
           title="Camera"
         >
-          <SourceSelect
-            allowNone
+          <DevicePicker
             description={camera.switchStatus}
             devices={camera.devices}
             disabled={camera.disabled}
             discoveryPending={discoveryPending}
+            kind="camera"
             label="Camera"
             labelHidden
             noneLabel="Off"
             selectedName={camera.selectedName}
+            statusInTrigger={false}
             value={camera.value}
             onChange={camera.onChange}
           />
@@ -329,6 +336,7 @@ export function VideoSources(): ReactElement {
         devices: captureDevices,
         value: selectedCaptureId,
         selectedName: sources.screenName ?? sources.windowName,
+        selectedDevice: deviceList.devices.find((device) => device.id === selectedCaptureId),
         allowNone: allowCaptureNone,
         disabled: screenLocked || Boolean(sourceSwitchReason('capture') || layoutSwitchPending),
         status: videoSourceStatus({

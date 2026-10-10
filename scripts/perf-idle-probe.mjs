@@ -766,11 +766,13 @@ async function ensureStudioMicVisuals(smoke, { selectDevice = true } = {}) {
         if (!trigger) throw new Error('Studio microphone picker was not found.');
         trigger.click();
         await sleep(250);
+        // The device picker (plan 174 S1.9) lists cmdk options, whose
+        // data-disabled reads "true" or "false"; its no-device item says Off.
         const option = Array.from(document.querySelectorAll('[role="option"]')).find(
           (candidate) =>
             candidate.getAttribute('aria-disabled') !== 'true' &&
-            !candidate.hasAttribute('data-disabled') &&
-            candidate.textContent?.trim() !== 'None'
+            !['', 'true'].includes(candidate.getAttribute('data-disabled')) &&
+            !['None', 'Off'].includes(candidate.textContent?.trim())
         );
         if (!option) throw new Error('No available Studio microphone could be selected.');
         option.click();
