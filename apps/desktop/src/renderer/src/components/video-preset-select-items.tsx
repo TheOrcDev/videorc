@@ -2,6 +2,7 @@ import { LockIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 import { Fragment } from 'react'
 
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SelectGroup, SelectItem, SelectLabel, SelectSeparator } from '@/components/ui/select'
 import type { EntitlementsSnapshot, PerformanceCheckResult } from '@/lib/backend'
 import {
@@ -90,24 +91,27 @@ function VideoPresetSelectItem({
 
   const verdict = outputVerdict(videoPresets[option.value], performanceResult)
 
+  // A locked preset says why on hover (plan 174 J1-2): the select skips it
+  // from the keyboard, so the item itself is described, with no wrapper.
   return (
-    <SelectItem
-      className={option.tone === 'warning' ? 'text-warning' : undefined}
-      disabled={!gate.allowed}
-      title={gate.allowed ? undefined : gate.reason}
-      value={option.value}
-    >
-      {option.label}
-      {!gate.allowed ? (
-        <span className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <LockIcon className="size-3" weight="fill" />
-          {gate.upgradeUrl ? 'Premium' : 'Locked'}
-        </span>
-      ) : verdict !== 'unknown' ? (
-        <span className="ml-auto text-xs text-muted-foreground">
-          {verdict === 'verified' ? 'Verified' : 'Too heavy'}
-        </span>
-      ) : null}
-    </SelectItem>
+    <DisabledReason focusable={false} reason={gate.allowed ? null : gate.reason} side="right">
+      <SelectItem
+        className={option.tone === 'warning' ? 'text-warning' : undefined}
+        disabled={!gate.allowed}
+        value={option.value}
+      >
+        {option.label}
+        {!gate.allowed ? (
+          <span className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <LockIcon className="size-3" weight="fill" />
+            {gate.upgradeUrl ? 'Premium' : 'Locked'}
+          </span>
+        ) : verdict !== 'unknown' ? (
+          <span className="ml-auto text-xs text-muted-foreground">
+            {verdict === 'verified' ? 'Verified' : 'Too heavy'}
+          </span>
+        ) : null}
+      </SelectItem>
+    </DisabledReason>
   )
 }

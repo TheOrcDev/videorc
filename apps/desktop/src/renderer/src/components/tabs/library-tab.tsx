@@ -37,6 +37,7 @@ import { StatusDot } from '@/components/status-dot'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -901,16 +902,22 @@ function RowActions({
 
   return (
     <div className="flex items-center justify-end gap-0.5">
-      <Button
-        aria-label="Play recording"
-        disabled={!filePath || live}
-        size="icon-sm"
-        title={live ? 'Available when the session ends' : 'Play in the default player'}
-        variant="ghost"
-        onClick={() => void playFile()}
+      <DisabledReason
+        reason={
+          live ? 'Available when the recording ends.' : !filePath ? 'No file to play yet.' : null
+        }
       >
-        <PlayIcon weight="fill" />
-      </Button>
+        <Button
+          aria-label="Play recording"
+          disabled={!filePath || live}
+          size="icon-sm"
+          title={!filePath || live ? undefined : 'Play in the default player'}
+          variant="ghost"
+          onClick={() => void playFile()}
+        >
+          <PlayIcon weight="fill" />
+        </Button>
+      </DisabledReason>
       <NoiseCleanupDirectAction
         sessionId={session.id}
         title={session.title || 'Untitled session'}
@@ -1072,7 +1079,7 @@ export function NoiseCleanupDirectAction({
   const button = (
     <Button
       aria-busy={view.busy || undefined}
-      aria-describedby={help ? descriptionId : undefined}
+      aria-describedby={help && view.directAction ? descriptionId : undefined}
       aria-label={ariaLabel}
       className="min-[1280px]:w-auto min-[1280px]:px-2"
       disabled={!view.directAction}
@@ -1110,8 +1117,11 @@ export function NoiseCleanupDirectAction({
       <>
         <Tooltip>
           <TooltipTrigger asChild>{button}</TooltipTrigger>
-          <TooltipContent id={descriptionId}>{help}</TooltipContent>
+          <TooltipContent>{help}</TooltipContent>
         </Tooltip>
+        <span hidden id={descriptionId}>
+          {help}
+        </span>
         {status}
       </>
     )
@@ -1119,19 +1129,9 @@ export function NoiseCleanupDirectAction({
 
   return (
     <>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            aria-describedby={descriptionId}
-            aria-label={ariaLabel}
-            className="inline-flex rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
-            tabIndex={0}
-          >
-            {button}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent id={descriptionId}>{help}</TooltipContent>
-      </Tooltip>
+      <DisabledReason id={descriptionId} label={ariaLabel} reason={help}>
+        {button}
+      </DisabledReason>
       {status}
     </>
   )

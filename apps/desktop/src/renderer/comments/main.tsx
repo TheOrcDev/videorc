@@ -7,6 +7,7 @@ import { AppErrorBoundary } from '@/components/error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
 import { removeMessagesReconnectStarted } from '@/components/stream-manager/remove-messages-reconnect'
 import { WindowFrame } from '@/components/window-frame'
+import { WindowProviders } from '@/components/window-providers'
 import type {
   CohostActionKind,
   CohostBuddyActionCommand,
@@ -44,7 +45,6 @@ import {
   cohostNudgeDismissedFromStorage,
   COHOST_NUDGE_STORAGE_KEY
 } from '@/lib/cohost-view'
-import { Toaster } from '@/components/ui/sonner'
 import {
   createCommentsMarker,
   markerCreateParams,
@@ -837,9 +837,6 @@ function CommentsWindowApp(): ReactElement {
         />
       </ChatGifModeProvider>
       <BuddyConsentDialog open={buddyConsentAsked} onAnswer={answerBuddyConsent} />
-      {/* sonner needs its own host here because this is a separate React root;
-          with no theme provider it follows prefers-color-scheme, like the page. */}
-      <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" visibleToasts={3} />
     </WindowFrame>
   )
 }
@@ -847,7 +844,12 @@ function CommentsWindowApp(): ReactElement {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <CommentsWindowApp />
+      {/* A separate React root: its own tooltips, and toasts above its 32 px
+          status bar. With no theme provider sonner follows
+          prefers-color-scheme, like the page. */}
+      <WindowProviders window="stream-manager">
+        <CommentsWindowApp />
+      </WindowProviders>
     </AppErrorBoundary>
   </React.StrictMode>
 )

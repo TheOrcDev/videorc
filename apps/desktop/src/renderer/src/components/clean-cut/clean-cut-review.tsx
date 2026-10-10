@@ -30,6 +30,7 @@ import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Kbd } from '@/components/ui/kbd'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -666,21 +667,24 @@ export function CleanCutReview({
             Discard
           </Button>
         ) : null}
-        <Button
-          disabled={changes === 0 || saving || !editable}
-          size="sm"
-          title={!editable && changes > 0 ? 'You can save when this cut finishes.' : undefined}
-          type="button"
-          onClick={() => void save()}
+        <DisabledReason
+          reason={!editable && changes > 0 ? 'You can save when this cut finishes.' : null}
         >
-          {saving ? (
-            <SpinnerIcon className="animate-spin" data-icon="inline-start" />
-          ) : (
-            <SaveIcon data-icon="inline-start" />
-          )}
-          Save changes
-          <Kbd className="ml-0.5">{modKey}S</Kbd>
-        </Button>
+          <Button
+            disabled={changes === 0 || saving || !editable}
+            size="sm"
+            type="button"
+            onClick={() => void save()}
+          >
+            {saving ? (
+              <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+            ) : (
+              <SaveIcon data-icon="inline-start" />
+            )}
+            Save changes
+            <Kbd className="ml-0.5">{modKey}S</Kbd>
+          </Button>
+        </DisabledReason>
       </footer>
 
       <ConfirmDialog
@@ -780,30 +784,34 @@ function KindChips({
       }}
     >
       {chips.map((chip) => (
-        <ToggleGroupItem
+        <DisabledReason
           key={chip.group.id}
-          className="h-6 gap-1.5 px-1.5 text-xs"
-          data-chip={chip.group.id}
-          data-state-kind={chip.state}
-          disabled={chip.state === 'empty'}
-          title={
-            chip.state === 'empty'
-              ? `No ${chip.group.label.toLowerCase()} found`
-              : chip.state === 'on'
-                ? `Keep all ${chip.total}`
-                : `Cut all ${chip.total}`
-          }
-          value={chip.group.id}
+          reason={chip.state === 'empty' ? `No ${chip.group.label.toLowerCase()} found.` : null}
         >
-          <span
-            aria-hidden
-            className={cn('size-1.5 shrink-0 rounded-full glass-dot', TONE_DOT[chip.group.tone])}
-          />
-          {chip.group.label}
-          <span className="text-muted-foreground tabular-nums">
-            {chip.state === 'mixed' ? `${chip.cut}/${chip.total}` : chip.total}
-          </span>
-        </ToggleGroupItem>
+          <ToggleGroupItem
+            className="h-6 gap-1.5 px-1.5 text-xs"
+            data-chip={chip.group.id}
+            data-state-kind={chip.state}
+            disabled={chip.state === 'empty'}
+            title={
+              chip.state === 'empty'
+                ? undefined
+                : chip.state === 'on'
+                  ? `Keep all ${chip.total}`
+                  : `Cut all ${chip.total}`
+            }
+            value={chip.group.id}
+          >
+            <span
+              aria-hidden
+              className={cn('size-1.5 shrink-0 rounded-full glass-dot', TONE_DOT[chip.group.tone])}
+            />
+            {chip.group.label}
+            <span className="text-muted-foreground tabular-nums">
+              {chip.state === 'mixed' ? `${chip.cut}/${chip.total}` : chip.total}
+            </span>
+          </ToggleGroupItem>
+        </DisabledReason>
       ))}
     </ToggleGroup>
   )

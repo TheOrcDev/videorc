@@ -126,3 +126,37 @@ describe('SessionTransport (plan 095 S5)', () => {
     expect(text('button')).toContain('Stop recording')
   })
 })
+
+describe('SessionTransport start reasons (plan 174 S1.1, B-9)', () => {
+  it('says why Record is blocked on hover and focus, never in a title', () => {
+    act(() =>
+      root.render(
+        createElement(SessionTransport, {
+          active: false,
+          canStop: false,
+          stopLabel: 'Stop',
+          startRequestPending: false,
+          recordBlockedReason: 'Pick a screen or a camera first.',
+          liveStreamBlockedReason: null,
+          status: null,
+          onRecord: noop,
+          onLiveStream: noop,
+          onStop: noop
+        })
+      )
+    )
+    const buttons = [...container.querySelectorAll('button')]
+    const record = buttons.find((button) => button.textContent?.includes('Record'))
+    const stream = buttons.find((button) => button.textContent?.includes('Stream'))
+    expect(record?.disabled).toBe(true)
+    expect(record?.getAttribute('title')).toBeNull()
+    const wrapper = record?.closest<HTMLElement>('[data-slot="disabled-reason"]')
+    expect(wrapper?.tabIndex).toBe(0)
+    expect(
+      document.getElementById(wrapper?.getAttribute('aria-describedby') ?? '')?.textContent
+    ).toBe('Pick a screen or a camera first.')
+    // Nothing blocks Stream: no wrapper, no extra tab stop.
+    expect(stream?.disabled).toBe(false)
+    expect(stream?.closest('[data-slot="disabled-reason"]')).toBeNull()
+  })
+})

@@ -2,6 +2,7 @@ import { useState, type ReactElement } from 'react'
 
 import { BuddyEmblem } from '@/components/buddy-emblem'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   Dialog,
   DialogContent,
@@ -131,7 +132,8 @@ export function BuddyChatControls({
             disabled={disabled || aiReason !== null}
             id="buddy-answers"
             label="Answers"
-            title={aiReason ?? 'A reply when a viewer asks the Buddy by name.'}
+            reason={aiReason}
+            title="A reply when a viewer asks the Buddy by name."
             onCheckedChange={(answers) => onChange({ answers })}
           />
           <BuddyBehaviourSwitch
@@ -139,7 +141,8 @@ export function BuddyChatControls({
             disabled={disabled || aiReason !== null}
             id="buddy-banter"
             label="Banter"
-            title={aiReason ?? 'A remark on dead air, rarely.'}
+            reason={aiReason}
+            title="A remark on dead air, rarely."
             onCheckedChange={(banter) => onChange({ banter })}
           />
         </div>
@@ -194,6 +197,7 @@ function BuddyBehaviourSwitch({
   id,
   label,
   title,
+  reason = null,
   checked,
   disabled,
   onCheckedChange
@@ -201,19 +205,26 @@ function BuddyBehaviourSwitch({
   id: string
   label: string
   title: string
+  /** Why the switch is off limits (Premium, cloud AI), on hover and focus (plan 174 F-12). */
+  reason?: string | null
   checked: boolean
   disabled: boolean
   onCheckedChange: (checked: boolean) => void
 }): ReactElement {
   return (
-    <div className={cn('flex items-center gap-1.5', disabled && 'opacity-70')} title={title}>
-      <Switch
-        checked={checked}
-        disabled={disabled}
-        id={id}
-        size="sm"
-        onCheckedChange={onCheckedChange}
-      />
+    <div
+      className={cn('flex items-center gap-1.5', disabled && 'opacity-70')}
+      title={disabled && reason ? undefined : title}
+    >
+      <DisabledReason reason={disabled ? reason : null}>
+        <Switch
+          checked={checked}
+          disabled={disabled}
+          id={id}
+          size="sm"
+          onCheckedChange={onCheckedChange}
+        />
+      </DisabledReason>
       <Label className="text-xs font-normal text-muted-foreground" htmlFor={id}>
         {label}
       </Label>

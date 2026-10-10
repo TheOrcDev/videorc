@@ -20,6 +20,7 @@ import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
@@ -102,29 +103,33 @@ export function SessionTransport({
           </Button>
         ) : (
           <>
-            <Button
-              className="flex-1"
-              disabled={Boolean(recordBlockedReason) || startRequestPending}
-              size="lg"
-              title={recordBlockedReason ?? undefined}
-              variant="destructive"
-              onClick={onRecord}
-            >
-              <RecordIcon data-icon="inline-start" weight="fill" />
-              Record
-              <Kbd className="ml-0.5">␣</Kbd>
-            </Button>
-            <Button
-              className="flex-1"
-              disabled={Boolean(liveStreamBlockedReason) || startRequestPending}
-              size="lg"
-              title={liveStreamBlockedReason ?? undefined}
-              variant="outline"
-              onClick={onLiveStream}
-            >
-              <LivestreamIcon data-icon="inline-start" weight="fill" />
-              Stream
-            </Button>
+            {/* Why a start is blocked shows on hover and on keyboard focus
+                (plan 174 S1.1, B-9): a disabled button never shows a title. */}
+            <DisabledReason className="flex-1" reason={recordBlockedReason}>
+              <Button
+                className="flex-1"
+                disabled={Boolean(recordBlockedReason) || startRequestPending}
+                size="lg"
+                variant="destructive"
+                onClick={onRecord}
+              >
+                <RecordIcon data-icon="inline-start" weight="fill" />
+                Record
+                <Kbd className="ml-0.5">␣</Kbd>
+              </Button>
+            </DisabledReason>
+            <DisabledReason className="flex-1" reason={liveStreamBlockedReason}>
+              <Button
+                className="flex-1"
+                disabled={Boolean(liveStreamBlockedReason) || startRequestPending}
+                size="lg"
+                variant="outline"
+                onClick={onLiveStream}
+              >
+                <LivestreamIcon data-icon="inline-start" weight="fill" />
+                Stream
+              </Button>
+            </DisabledReason>
           </>
         )}
       </div>
@@ -384,24 +389,30 @@ export function TakeoverSection(): ReactElement {
             {ready.map((screen) => {
               const isActive = activeScreen?.id === screen.id
               return (
-                <Button
-                  aria-pressed={isActive}
-                  disabled={disconnected}
+                <DisabledReason
                   key={screen.id}
-                  size="sm"
-                  title={
-                    disconnected
-                      ? `Backend socket is ${wsStatus}.`
-                      : isActive
-                        ? `Take ${screen.name} off the output`
-                        : `Put ${screen.name} on the output`
-                  }
-                  variant={isActive ? 'default' : 'outline'}
-                  onClick={() => void (isActive ? clearActiveScreen() : activateScreen(screen.id))}
+                  reason={disconnected ? `Backend socket is ${wsStatus}.` : null}
                 >
-                  <ImageIcon data-icon="inline-start" weight={isActive ? 'fill' : 'duotone'} />
-                  {screen.name}
-                </Button>
+                  <Button
+                    aria-pressed={isActive}
+                    disabled={disconnected}
+                    size="sm"
+                    title={
+                      disconnected
+                        ? undefined
+                        : isActive
+                          ? `Take ${screen.name} off the output`
+                          : `Put ${screen.name} on the output`
+                    }
+                    variant={isActive ? 'default' : 'outline'}
+                    onClick={() =>
+                      void (isActive ? clearActiveScreen() : activateScreen(screen.id))
+                    }
+                  >
+                    <ImageIcon data-icon="inline-start" weight={isActive ? 'fill' : 'duotone'} />
+                    {screen.name}
+                  </Button>
+                </DisabledReason>
               )
             })}
           </div>

@@ -22,7 +22,6 @@ import { Button } from '@/components/ui/button'
 import { MuteToggle } from '@/components/ui/channel-toggle'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Fader, FaderRange, FaderThumb, FaderTrack } from '@/components/ui/fader'
-import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import {
   ParameterSlider,
@@ -35,7 +34,7 @@ import {
   type ParameterChangeReason
 } from '@/components/ui/parameter-slider'
 import { Switch } from '@/components/ui/switch'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { AudioConfigProvider } from '@/hooks/use-audio-config'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -127,40 +126,6 @@ export function applySyncChange(
 export function syncOffsetTag(offsetMs: number, userSet: boolean): string | null {
   if (!userSet || offsetMs === 0) return null
   return `Sync ${offsetMs > 0 ? '+' : '−'}${Math.abs(offsetMs)} ms`
-}
-
-/**
- * A control's tooltip with its global shortcut, when one is bound
- * (keyboard-first, quietly). The trigger is a wrapper: Radix's TooltipTrigger
- * writes `data-state` onto its child, which would replace a Switch's
- * checked/unchecked, the hook its track styles use.
- */
-function ShortcutTooltip({
-  label,
-  keys,
-  children
-}: {
-  label: string
-  keys: readonly string[]
-  children: ReactElement
-}): ReactElement {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex">{children}</span>
-      </TooltipTrigger>
-      <TooltipContent>
-        {label}
-        {keys.length > 0 ? (
-          <KbdGroup>
-            {keys.map((glyph, index) => (
-              <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-            ))}
-          </KbdGroup>
-        ) : null}
-      </TooltipContent>
-    </Tooltip>
-  )
 }
 
 /**

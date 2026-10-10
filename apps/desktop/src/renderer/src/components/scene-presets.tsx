@@ -2,6 +2,7 @@ import { layoutPresetOrientation } from '@/lib/capture'
 import { useState, type ReactElement } from 'react'
 import { useStudioCore } from '@/hooks/use-studio'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   Dialog,
@@ -118,36 +119,40 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                     selected && 'border-primary'
                   )}
                 >
-                  <Button
-                    variant="ghost"
-                    className="h-auto flex-col items-stretch gap-2 p-2"
-                    aria-pressed={selected}
-                    title={
+                  <DisabledReason
+                    className="flex flex-col"
+                    reason={
                       orientationLocked
                         ? 'Stop the recording or stream before switching orientation.'
-                        : undefined
-                    }
-                    disabled={orientationLocked || busy || savedScenePendingId === scene.id}
-                    onClick={() =>
-                      problems.length ? open({ kind: 'repair', scene }) : void apply(scene)
+                        : null
                     }
                   >
-                    <LayoutThumb
-                      preset={scene.visual.layout.layoutPreset}
-                      framing={scene.visual.layout.verticalScreenFraming}
-                    />
-                    <span className="truncate">
-                      {savedScenePendingId === scene.id ? 'Switching…' : scene.name}
-                    </span>
-                    {selected ? (
-                      <span className="text-xs text-muted-foreground">
-                        {savedSceneModified ? 'Modified' : '✓ Applied'}
+                    <Button
+                      variant="ghost"
+                      className="h-auto flex-col items-stretch gap-2 p-2"
+                      aria-pressed={selected}
+                      disabled={orientationLocked || busy || savedScenePendingId === scene.id}
+                      onClick={() =>
+                        problems.length ? open({ kind: 'repair', scene }) : void apply(scene)
+                      }
+                    >
+                      <LayoutThumb
+                        preset={scene.visual.layout.layoutPreset}
+                        framing={scene.visual.layout.verticalScreenFraming}
+                      />
+                      <span className="truncate">
+                        {savedScenePendingId === scene.id ? 'Switching…' : scene.name}
                       </span>
-                    ) : null}
-                    {problems.length ? (
-                      <span className="text-xs text-muted-foreground">Resolve sources</span>
-                    ) : null}
-                  </Button>
+                      {selected ? (
+                        <span className="text-xs text-muted-foreground">
+                          {savedSceneModified ? 'Modified' : '✓ Applied'}
+                        </span>
+                      ) : null}
+                      {problems.length ? (
+                        <span className="text-xs text-muted-foreground">Resolve sources</span>
+                      ) : null}
+                    </Button>
+                  </DisabledReason>
                   <div className="flex justify-end px-1 pb-1">
                     <KebabMenu
                       label={`Actions for ${scene.name}`}

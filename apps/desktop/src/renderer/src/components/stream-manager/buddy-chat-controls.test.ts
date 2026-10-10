@@ -10,6 +10,8 @@ import {
   BUDDY_CONSENT_SENTENCE
 } from '@/lib/buddy-auto-chat-view'
 
+import { TooltipProvider } from '@/components/ui/tooltip'
+
 import { BuddyChatControls } from './buddy-chat-controls'
 
 let root: Root
@@ -41,20 +43,38 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
+/** The disabled reason a switch's focusable wrapper describes, or null when it has none. */
+function reasonFor(id: string): string | null {
+  const wrapper = document.getElementById(id)?.closest<HTMLElement>('[data-slot="disabled-reason"]')
+  if (!wrapper) return null
+  expect(wrapper.tabIndex).toBe(0)
+  return (
+    document.getElementById(wrapper.getAttribute('aria-describedby') ?? '')?.textContent ?? null
+  )
+}
+
 async function render(
   current: CohostAutoChat,
   { allowed = true, consented = true }: { allowed?: boolean; consented?: boolean } = {}
 ): Promise<void> {
   await act(async () =>
     root.render(
-      createElement(BuddyChatControls, {
-        autoChat: current,
-        consented,
-        gate: allowed
-          ? { allowed: true }
-          : { allowed: false, featureId: 'live-cohost', reason: 'Buddy requires Videorc Premium.' },
-        onChange
-      })
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(BuddyChatControls, {
+          autoChat: current,
+          consented,
+          gate: allowed
+            ? { allowed: true }
+            : {
+                allowed: false,
+                featureId: 'live-cohost',
+                reason: 'Buddy requires Videorc Premium.'
+              },
+          onChange
+        })
+      )
     )
   )
 }
@@ -137,9 +157,14 @@ describe('Buddy chat mode (plan 164 S-D6)', () => {
     expect((document.getElementById('buddy-greetings') as HTMLButtonElement).disabled).toBe(false)
     expect((document.getElementById('buddy-answers') as HTMLButtonElement).disabled).toBe(true)
     expect((document.getElementById('buddy-banter') as HTMLButtonElement).disabled).toBe(true)
+    // Plan 174 F-12: the reason is a focusable, described wrapper, not a title.
+    expect(reasonFor('buddy-answers')).toBe('Buddy requires Videorc Premium.')
+    expect(reasonFor('buddy-greetings')).toBeNull()
     await render(autoChat(), { consented: false })
     expect((document.getElementById('buddy-answers') as HTMLButtonElement).disabled).toBe(true)
+    expect(reasonFor('buddy-banter')).toBe('Needs cloud AI.')
     await render(autoChat())
     expect((document.getElementById('buddy-answers') as HTMLButtonElement).disabled).toBe(false)
+    expect(reasonFor('buddy-answers')).toBeNull()
   })
 })

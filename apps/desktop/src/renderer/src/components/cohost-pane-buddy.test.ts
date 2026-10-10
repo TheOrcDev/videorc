@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CohostPane } from '@/components/cohost-pane'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import type { BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
 import type { CohostState, CohostWindowBuddy } from '@/lib/backend'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
@@ -74,17 +75,21 @@ function buddy(overrides: Partial<CohostWindowBuddy> = {}): CohostWindowBuddy {
 async function renderPane(props: Partial<Parameters<typeof CohostPane>[0]> = {}): Promise<void> {
   await act(async () =>
     root.render(
-      createElement(CohostPane, {
-        consented: true,
-        enabled: true,
-        gate: { allowed: true },
-        state: state(),
-        onAnswered: () => undefined,
-        onDismissFlag: () => undefined,
-        onDismissQuestion: () => undefined,
-        onReply: () => undefined,
-        ...props
-      })
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(CohostPane, {
+          consented: true,
+          enabled: true,
+          gate: { allowed: true },
+          state: state(),
+          onAnswered: () => undefined,
+          onDismissFlag: () => undefined,
+          onDismissQuestion: () => undefined,
+          onReply: () => undefined,
+          ...props
+        })
+      )
     )
   )
 }
@@ -241,6 +246,19 @@ describe('CohostPane: the living Buddy header (plan 168 S-D3)', () => {
       ['Wave', true],
       ['Surprised', true],
       ['Proud', false]
+    ])
+    // Plan 174 F-12: an off chip says why on hover and keyboard focus.
+    const reasons = chips().map((chip) => {
+      const wrapper = chip.closest<HTMLElement>('[data-slot="disabled-reason"]')
+      return wrapper
+        ? document.getElementById(wrapper.getAttribute('aria-describedby') ?? '')?.textContent
+        : null
+    })
+    expect(reasons).toEqual([
+      null,
+      'Only an Alive Buddy reacts. Make it Alive on the Buddy page.',
+      'Only an Alive Buddy reacts. Make it Alive on the Buddy page.',
+      null
     ])
     await act(async () => chips()[3]!.click())
     expect(onReact).toHaveBeenCalledWith('proud')

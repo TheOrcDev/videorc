@@ -20,6 +20,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Command, CommandList } from '@/components/ui/command'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Separator } from '@/components/ui/separator'
@@ -39,6 +40,7 @@ import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import {
   BUDDY_HEADER_PREVIEW_PX,
   BUDDY_REACTION_CHIPS,
+  buddyReactionDisabledReason,
   BUDDY_STILL_PACK_ID
 } from '@/lib/buddy-pet-view'
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
@@ -855,20 +857,30 @@ export function BuddyHeader({
         >
           {BUDDY_REACTION_CHIPS.map((chip) => {
             const available = packReactions?.includes(chip.id) ?? false
+            const disabled = !onReact || !available
             return (
-              <Button
+              <DisabledReason
                 key={chip.id}
-                data-reaction={chip.id}
-                data-testid="buddy-reaction-chip"
-                disabled={!onReact || !available}
-                size="xs"
-                title={`${chip.label} on stream`}
-                type="button"
-                variant="outline"
-                onClick={() => react(chip.id)}
+                reason={buddyReactionDisabledReason({
+                  relay: Boolean(onReact),
+                  alive: avatar?.kind === 'alive',
+                  packReactions,
+                  chip
+                })}
               >
-                {chip.label}
-              </Button>
+                <Button
+                  data-reaction={chip.id}
+                  data-testid="buddy-reaction-chip"
+                  disabled={disabled}
+                  size="xs"
+                  title={disabled ? undefined : `${chip.label} on stream`}
+                  type="button"
+                  variant="outline"
+                  onClick={() => react(chip.id)}
+                >
+                  {chip.label}
+                </Button>
+              </DisabledReason>
             )
           })}
         </div>
