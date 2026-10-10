@@ -335,7 +335,6 @@ export function CleanCutCard({
                     data-testid="clean-cut-status"
                     data-status="unavailable"
                     icon={<ClipIcon aria-hidden className="text-muted-foreground" />}
-                    interactive={false}
                     title="Not for this recording"
                     context={<span title={condensed.reason}>{condensed.reason}</span>}
                   />
@@ -378,7 +377,6 @@ export function CleanCutCard({
                     data-testid="clean-cut-status"
                     data-status={status.kind}
                     icon={<StatusGlyph kind={status.kind} />}
-                    interactive={false}
                     title={status.label}
                   >
                     <StatusActions

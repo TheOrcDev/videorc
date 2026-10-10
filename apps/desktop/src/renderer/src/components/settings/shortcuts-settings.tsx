@@ -8,6 +8,7 @@ import {
 import { useSyncExternalStore, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
+import { SectionLabel } from '@/components/section-label'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
 import { FieldGroup, FieldLegend, FieldSet } from '@/components/ui/field'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
@@ -102,8 +103,10 @@ export function ShortcutsSettings(): ReactElement {
             group, flush against its border. */}
         {(['horizontal', 'vertical'] as const).map((orientation) => (
           <FieldSet key={orientation} className="min-w-0 gap-0">
-            <FieldLegend className="mb-1.5 px-1 text-xs text-muted-foreground" variant="label">
-              {orientation === 'horizontal' ? 'Horizontal layouts' : 'Vertical layouts'}
+            <FieldLegend className="mb-1.5 px-1" variant="label">
+              <SectionLabel>
+                {orientation === 'horizontal' ? 'Horizontal layouts' : 'Vertical layouts'}
+              </SectionLabel>
             </FieldLegend>
             <FieldGroup variant="grouped">
               {BUILTIN_LAYOUTS.filter(
@@ -136,7 +139,7 @@ export function ShortcutsSettings(): ReactElement {
         <div className="flex flex-col gap-3">
           {[...shortcutsByGroup().entries()].map(([group, entries]) => (
             <div key={group} className="flex flex-col gap-1">
-              <span className="text-[12.5px] leading-none font-medium text-subtle">{group}</span>
+              <SectionLabel>{group}</SectionLabel>
               {entries.map((entry) => (
                 <div
                   key={entry.id}

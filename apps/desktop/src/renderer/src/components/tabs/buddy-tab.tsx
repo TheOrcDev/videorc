@@ -346,7 +346,7 @@ function BuddyLiveSection(): ReactElement {
           <FieldContent>
             <FieldTitle>{buddyName} joins my streams</FieldTitle>
             <BuddyLiveStatusLine status={view.status} />
-            <FieldDescription className="text-xs" data-testid="buddy-live-pointer">
+            <FieldDescription data-testid="buddy-live-pointer">
               Turn it on in Stream Manager: the Buddy pane&apos;s chat mode, Suggest or Auto.
             </FieldDescription>
           </FieldContent>
@@ -399,7 +399,7 @@ function BuddyLivePowers({
             >
               <FieldContent>
                 <FieldTitle>{power.title}</FieldTitle>
-                <FieldDescription className="text-xs">{power.description}</FieldDescription>
+                <FieldDescription>{power.description}</FieldDescription>
               </FieldContent>
               <Button
                 aria-label={`Open ${label} settings for ${power.title}`}

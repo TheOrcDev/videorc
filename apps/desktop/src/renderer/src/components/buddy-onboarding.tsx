@@ -21,6 +21,7 @@ import { BuddyPoseTiles, type BuddyPoseTilesCopy } from '@/components/buddy-look
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import { BuddyStreamDemo } from '@/components/buddy-stream-demo'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { GroupedList } from '@/components/list-row'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -760,12 +761,10 @@ function DescribeStep({
       </Field>
       <Field>
         <FieldLabel>{BUDDY_ONBOARDING_STEP2.pictureLabel}</FieldLabel>
-        <FieldDescription className="text-xs">
-          {BUDDY_ONBOARDING_STEP2.pictureHelp}
-        </FieldDescription>
+        <FieldDescription>{BUDDY_ONBOARDING_STEP2.pictureHelp}</FieldDescription>
         <div
           className={cn(
-            'flex items-center gap-3 rounded-row border border-border bg-foreground/[0.03] p-2',
+            'flex items-center gap-3 rounded-row border border-border bg-inset p-2',
             dragging && 'bg-accent'
           )}
           data-testid="buddy-onboarding-picture"
@@ -875,7 +874,7 @@ function PersonalityStep({
             }
           }}
         />
-        <FieldDescription className="text-xs">{BUDDY_ONBOARDING_STEP3.nameHelp}</FieldDescription>
+        <FieldDescription>{BUDDY_ONBOARDING_STEP3.nameHelp}</FieldDescription>
       </Field>
       <Field>
         <FieldLabel htmlFor="buddy-onboarding-personality">
@@ -908,9 +907,7 @@ function PersonalityStep({
           onChange={(event) => onPatch({ about: event.target.value })}
         />
         <div className="flex items-center gap-2">
-          <FieldDescription className="text-xs">
-            {BUDDY_ONBOARDING_STEP3.aboutHelp}
-          </FieldDescription>
+          <FieldDescription>{BUDDY_ONBOARDING_STEP3.aboutHelp}</FieldDescription>
           <Counter max={BUDDY_LIBRARY_CONTEXT_MAX_CHARS} value={input.about} />
         </div>
       </Field>
@@ -1000,10 +997,7 @@ function CreateStep({
   return (
     <div className="flex flex-col gap-4" data-view={view}>
       {summary ? (
-        <div
-          className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]"
-          data-testid="buddy-onboarding-summary"
-        >
+        <GroupedList data-testid="buddy-onboarding-summary">
           <SummaryRow
             label={BUDDY_ONBOARDING_STEP4.summaryLook}
             testId="buddy-onboarding-summary-look"
@@ -1033,7 +1027,7 @@ function CreateStep({
             testId="buddy-onboarding-summary-about"
             value={skipped ? '' : input.about}
           />
-        </div>
+        </GroupedList>
       ) : null}
 
       <BuddyPoseTiles
@@ -1058,7 +1052,7 @@ function CreateStep({
         <div className="flex items-center gap-4" data-testid="buddy-onboarding-result">
           {persona && showPreview ? (
             <LazyBuddyPetPreview
-              className="rounded-row border border-border bg-foreground/[0.03]"
+              className="rounded-row border border-border bg-inset"
               label={`${persona.name}, new look`}
               onError={() => setPreviewFailed(previewKey)}
               motion={persona.motion}

@@ -75,7 +75,7 @@ describe('micMeterInput (plan 092)', () => {
 describe('Microphone section (plan 092)', () => {
   it('holds the picker and the level, nothing more', () => {
     const markup = render({ kind: 'value', peakDb: -12 })
-    expect(markup).toContain('>Microphone</h3>')
+    expect(markup).toContain('>Microphone</h2>')
     // The picker keeps its label for screen readers under the section title.
     expect(markup).toMatch(/<label[^>]*class="[^"]*sr-only[^"]*"[^>]*>Microphone<\/label>/)
     // Radix fills the trigger's value on the client; the trigger itself is here.

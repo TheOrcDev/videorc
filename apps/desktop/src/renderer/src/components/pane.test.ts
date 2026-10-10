@@ -75,8 +75,11 @@ describe('flush sections', () => {
     }
     expect(markup).toContain('border-b')
     expect(markup).toContain('p-gutter')
-    expect(markup).toContain('text-[13px] leading-5 font-semibold')
-    expect(markup).toContain('text-xs text-muted-foreground')
+    // The type tokens (plan 174 S1.6a): 13 / 600 header, 12 px description,
+    // and the header is an h2 under the toolbar's h1 (A-24).
+    expect(markup).toContain('text-section font-semibold')
+    expect(markup).toContain('text-meta text-muted-foreground')
+    expect(markup).toMatch(/<h2[^>]*>Recording<\/h2>/)
   })
 
   it('splits the two ConfigGrid columns with a hairline', () => {

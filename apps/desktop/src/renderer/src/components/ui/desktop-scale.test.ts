@@ -30,6 +30,24 @@ describe('desktop scale', () => {
     }
   })
 
+  it('defines the type tokens, the tag radius and the inset fill (plan 174 S1.6a)', () => {
+    for (const token of [
+      '--text-label: 0.6875rem; /* 11px */',
+      '--text-label--font-weight: 600;',
+      '--text-section: 0.8125rem; /* 13px */',
+      '--text-section--font-weight: 600;',
+      '--text-meta: 0.75rem; /* 12px */',
+      '--radius-tag: 7px;',
+      '--color-inset: color-mix(in oklab, var(--foreground) 3%, transparent);'
+    ]) {
+      expect(styles).toContain(token)
+    }
+    // The 3% inset fill has one name now; its ~30 copies moved onto it.
+    expect(read('field.tsx')).toContain('bg-inset')
+    expect(read('field.tsx')).not.toContain('bg-foreground/[0.03]')
+    expect(read('badge.tsx')).toContain('rounded-tag')
+  })
+
   it('makes 28 px the default control height', () => {
     const button = renderToStaticMarkup(createElement(Button, null, 'Save'))
     expect(button).toContain('h-control')

@@ -117,7 +117,6 @@ export function SourceItem({
               weight="duotone"
             />
           }
-          interactive={false}
           title={
             <span
               className="group-data-[disabled]/source-item:text-muted-foreground"

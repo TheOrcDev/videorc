@@ -45,7 +45,7 @@ describe('Badge glass chips', () => {
     expect(classes).toContain('glass-chip')
     expect(classes).toContain('text-muted-foreground')
     expect(classes).toContain('h-5')
-    expect(classes).toContain('rounded-[7px]')
+    expect(classes).toContain('rounded-tag')
     expect(classes).toContain('text-[11px]')
   })
 

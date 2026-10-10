@@ -418,7 +418,7 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
 
   it('splits Chat into Greetings, Replies and Moderation, and leads with one reason when locked', async () => {
     await render({ tab: 'chat' })
-    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
     // Plan 164 S-D5: Greetings lead the Chat tab, above Replies.
@@ -597,7 +597,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
 
   it('puts each phrase over what it does, in two columns (plan 150)', async () => {
     await render({ cohost: settings({ enabled: true }), tab: 'voice' })
-    const titles = [...section().querySelectorAll('[data-slot="panel-section"] h3')].map(
+    const titles = [...section().querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
     expect(titles).toEqual(['Commands', 'Remove messages'])

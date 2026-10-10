@@ -433,7 +433,7 @@ describe('Clean cut card (plan 119 S14)', () => {
 describe('Clean cut tab layout (plan 150 S7)', () => {
   it('sets the settings beside the recordings, in two titled columns', async () => {
     await render()
-    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
     expect(titles).toEqual(['Clean cut', 'Recordings'])

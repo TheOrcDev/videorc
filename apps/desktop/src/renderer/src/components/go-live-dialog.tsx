@@ -149,10 +149,7 @@ export function GoLiveConfirmationDialog({
         <ScrollArea className="max-h-[60vh] pr-3">
           <div className="flex flex-col gap-4">
             {scheduledTargets.map((target) => (
-              <div
-                key={target.id}
-                className="rounded-row border border-border bg-foreground/[0.03] p-3"
-              >
+              <div key={target.id} className="rounded-row border border-border bg-inset p-3">
                 <p className="font-medium">
                   {target.label}:{' '}
                   {preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
@@ -270,7 +267,7 @@ export function GoLiveConfirmationDialog({
                     />
                   ))
                 ) : (
-                  <div className="rounded-row border border-border bg-foreground/[0.03] p-3 text-sm text-muted-foreground">
+                  <div className="rounded-row border border-border bg-inset p-3 text-sm text-muted-foreground">
                     No livestream destinations are enabled.
                   </div>
                 )}
@@ -478,7 +475,7 @@ export function GoLiveCaptionsStatus({
       className={
         blocked
           ? 'flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3'
-          : 'flex flex-col gap-2 rounded-row border border-border bg-foreground/[0.03] p-3'
+          : 'flex flex-col gap-2 rounded-row border border-border bg-inset p-3'
       }
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -527,7 +524,7 @@ function GoLiveDestinationRow({
   onResolveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => void
 }): ReactElement {
   return (
-    <div className="grid gap-2 rounded-row border border-border bg-foreground/[0.03] p-3 sm:grid-cols-[1fr_auto]">
+    <div className="grid gap-2 rounded-row border border-border bg-inset p-3 sm:grid-cols-[1fr_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{destination.label}</span>
@@ -723,7 +720,7 @@ function GoLiveSimulcastAdvisory(): ReactElement | null {
   const mbps = Math.max(1, Math.round(totalKbps / 1000))
   const hasInstagram = enabled.some((target) => target.platform === 'instagram')
   return (
-    <div className="flex flex-col gap-1 rounded-row border border-border bg-foreground/[0.03] p-3">
+    <div className="flex flex-col gap-1 rounded-row border border-border bg-inset p-3">
       <span className="text-sm font-medium">Streaming both orientations</span>
       <span className="text-xs text-muted-foreground">
         The horizontal scene streams to your landscape destinations while the saved vertical scene

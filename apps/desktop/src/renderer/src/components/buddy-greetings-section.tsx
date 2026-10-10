@@ -215,6 +215,7 @@ function GreetingRow({
           never inside a button (plan 174 S0.5, G-8). */}
       <ListRow
         className="relative"
+        interactive
         icon={
           template.platform ? (
             <ChatPlatformIcon decorative platform={template.platform} />

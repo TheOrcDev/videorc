@@ -1,6 +1,7 @@
 import { DisabledIcon, ErrorIcon, LockIcon, RefreshIcon, SuccessIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
+import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
@@ -41,7 +42,7 @@ export function PermissionsSettings({
         </Button>
       }
     >
-      <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
+      <GroupedList>
         {accessRows.map((row) => {
           const action = systemAccessAction({
             pane: row.id,
@@ -109,7 +110,7 @@ export function PermissionsSettings({
             </div>
           )
         })}
-      </div>
+      </GroupedList>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Button size="sm" variant="outline" onClick={onOpenPermissionsSetup}>
           <LockIcon data-icon="inline-start" />

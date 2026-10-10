@@ -408,6 +408,21 @@
   --radius-panel: calc(var(--radius) + 2px); /* 12px */
   --radius-row: calc(var(--radius) - 2px); /* 8px */
   --radius-chip: calc(var(--radius) - 4px); /* 6px */
+  /* Tags (Badge outline: 9:16, counts, Idle) sit between chip and row. */
+  --radius-tag: 7px;
+
+  /* The type tokens (plan 174 S1.6a, J1-12): a section label 11 / 600
+     (text-label, tertiary), a section header 13 / 600 (text-section) and
+     metadata 12 (text-meta). Body stays text-sm (14). Never an arbitrary
+     text-[Npx] where one of these is meant. */
+  --text-label: 0.6875rem; /* 11px */
+  --text-label--line-height: 1rem;
+  --text-label--font-weight: 600;
+  --text-section: 0.8125rem; /* 13px */
+  --text-section--line-height: 1.25rem;
+  --text-section--font-weight: 600;
+  --text-meta: 0.75rem; /* 12px */
+  --text-meta--line-height: 1rem;
 
   /* The desktop scale (plan 050, D4): one toolbar, one status bar, one row,
      and one control height for every screen. */
@@ -430,6 +445,9 @@
   --shadow-glass: var(--shadow-glass-panel);
 
   --color-subtle: var(--subtle);
+  /* The inset fill (plan 174 S1.6a, A-15): grouped lists, read-only fields
+     and in-pane wells, 3% of the text colour over the glass. bg-inset. */
+  --color-inset: color-mix(in oklab, var(--foreground) 3%, transparent);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);

@@ -682,9 +682,7 @@ function EditForm({
               value={name}
               onChange={(event) => setName(event.target.value)}
             />
-            <FieldDescription className="text-xs">
-              {BUDDY_ONBOARDING_STEP3.nameHelp}
-            </FieldDescription>
+            <FieldDescription>{BUDDY_ONBOARDING_STEP3.nameHelp}</FieldDescription>
           </Field>
         ) : (
           <FieldGroup className="gap-5">
@@ -719,9 +717,7 @@ function EditForm({
                 onChange={(event) => setContext(event.target.value)}
               />
               <div className="flex items-center gap-2">
-                <FieldDescription className="text-xs">
-                  {BUDDY_ONBOARDING_STEP3.aboutHelp}
-                </FieldDescription>
+                <FieldDescription>{BUDDY_ONBOARDING_STEP3.aboutHelp}</FieldDescription>
                 <span className="ml-auto text-xs text-subtle tabular-nums">
                   {buddyOnboardingCounter(
                     buddyTextLength(context),

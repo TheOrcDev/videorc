@@ -227,7 +227,7 @@ export function ShortcutRecorderField({
         </InputGroup>
       </div>
       {message ? (
-        <FieldDescription className="text-right text-xs">{message}</FieldDescription>
+        <FieldDescription className="text-right">{message}</FieldDescription>
       ) : registrationFailed && !armed ? (
         <FieldError className="justify-end text-right">
           Another app already uses this shortcut. Pick another.

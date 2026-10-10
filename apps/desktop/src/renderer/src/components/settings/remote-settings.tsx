@@ -88,7 +88,7 @@ export function RemoteSettings(): ReactElement {
               <div className="flex gap-2">
                 <div
                   id="remote-token"
-                  className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-foreground/[0.03] px-2.5 font-mono text-xs text-muted-foreground"
+                  className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-inset px-2.5 font-mono text-xs text-muted-foreground"
                 >
                   {remoteStatus.token
                     ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`

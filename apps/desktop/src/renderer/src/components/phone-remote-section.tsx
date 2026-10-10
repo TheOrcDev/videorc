@@ -113,7 +113,7 @@ function PairingDialog({
             <PairingCode url={pairing.url} />
           ) : (
             <button
-              className="flex size-56 flex-col items-center justify-center gap-2 rounded-row border border-border bg-foreground/[0.03] px-6 text-center text-[13px] text-muted-foreground transition-colors duration-100 hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              className="flex size-56 flex-col items-center justify-center gap-2 rounded-row border border-border bg-inset px-6 text-center text-[13px] text-muted-foreground transition-colors duration-100 hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               type="button"
               onClick={() => setRevealed(true)}
             >
@@ -162,7 +162,7 @@ function PairingDialog({
           ) : null}
 
           {showTrouble ? (
-            <div className="flex w-full gap-2 rounded-row border border-border bg-foreground/[0.03] p-3 text-xs text-muted-foreground">
+            <div className="flex w-full gap-2 rounded-row border border-border bg-inset p-3 text-xs text-muted-foreground">
               <WarningIcon className="mt-0.5 size-4 shrink-0" />
               <p>
                 Nothing connected yet. Check that the phone is on the same Wi-Fi (guest and office

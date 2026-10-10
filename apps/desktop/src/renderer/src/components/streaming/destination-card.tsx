@@ -302,6 +302,7 @@ export function DestinationCard({
           is its sibling, never inside a button (plan 174 S0.5, D-12). */}
       <ListRow
         className="relative h-auto min-h-10 py-1"
+        interactive
         icon={<PlatformGlyph platform={target.platform} />}
         title={
           <ListRowButton aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>

@@ -231,7 +231,6 @@ export function BuddyVoiceCommands({
                   data-platform={row.platform}
                   data-ready={row.ready || undefined}
                   icon={<ChatPlatformIcon decorative platform={row.platform} />}
-                  interactive={false}
                   meta={
                     row.ready ? (
                       <StatusDot label={row.status} tone="good" />

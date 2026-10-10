@@ -10,6 +10,7 @@ import {
 } from '@/components/icons'
 import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
+import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { Badge } from '@/components/ui/badge'
@@ -668,7 +669,7 @@ export function DiagnosticsTab(): ReactElement {
 
         <PanelSection icon={HealthIcon} title="Pipeline">
           {recording.pipeline ? (
-            <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
+            <GroupedList>
               {recording.pipeline.stages.map((stage) => (
                 <div
                   key={stage.stage}
@@ -685,7 +686,7 @@ export function DiagnosticsTab(): ReactElement {
                   <Badge variant={stageBadgeVariant(stage.state)}>{stage.state}</Badge>
                 </div>
               ))}
-            </div>
+            </GroupedList>
           ) : (
             <p className="text-sm text-muted-foreground">No active recording pipeline.</p>
           )}

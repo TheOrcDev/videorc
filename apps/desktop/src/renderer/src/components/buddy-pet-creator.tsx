@@ -1122,7 +1122,6 @@ function BuildStep({
                     <span className="size-1.5 rounded-full bg-subtle" />
                   )
                 }
-                interactive={false}
                 meta={
                   row.phase === 'making'
                     ? 'Making…'
