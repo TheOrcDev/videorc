@@ -136,6 +136,11 @@ export interface StudioHealth {
   detail?: string
 }
 
+/** The degraded preview alert (plan 174 S3.2, B-26): the fact, then the cause and its effect. */
+export const PREVIEW_DEGRADED_TITLE = 'Preview may not match the recording'
+export const PREVIEW_DEGRADED_DETAIL =
+  'Videorc is drawing the picture on the CPU, so it may stutter.'
+
 // Live preview present-latency budget (ms) from the preview/recording parity plan.
 const PREVIEW_PRESENT_BUDGET_P95_MS = 75
 const PREVIEW_PRESENT_BUDGET_P99_MS = 150
@@ -180,12 +185,12 @@ export function studioHealth(
     stats.compositorBackend === 'cpu-fallback' ||
     (active && nativePreviewExpected && stats.compositorCpuFallbackFrames > 0)
   ) {
+    // Plan 174 S3.2 (B-26): what it means and why, in the streamer's words.
+    // The backend's own fallback reason stays in Health, where it is read.
     return {
       tone: 'error',
-      value: 'Degraded',
-      detail: stats.compositorFallbackReason
-        ? `Preview may not match recording: ${stats.compositorFallbackReason}`
-        : 'Preview may not match recording: compositor is on CPU fallback'
+      value: PREVIEW_DEGRADED_TITLE,
+      detail: PREVIEW_DEGRADED_DETAIL
     }
   }
 

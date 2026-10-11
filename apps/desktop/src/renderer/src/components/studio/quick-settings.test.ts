@@ -128,7 +128,10 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       systemAudio
     ])
     // The microphone has one home, the Microphone section above (plan 092).
-    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio', 'Output', 'Captions'])
+    // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
+    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio', 'Output'])
+    expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
+    expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
     expect(markup).toContain('title="Display 2"')
     expect(markup).toContain('title="MacBook Pro Camera"')

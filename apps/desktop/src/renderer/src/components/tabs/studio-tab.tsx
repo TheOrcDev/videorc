@@ -25,6 +25,7 @@ import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import {
   isSessionTransportActive,
   sessionIsLive,
@@ -142,9 +143,11 @@ export function StudioTab(): ReactElement {
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
+      {/* "Not ready" only when nothing can start (B-17): one working button
+          is a ready Studio. */}
       <SessionStatusPill
         recording={recording}
-        startBlocked={Boolean(visibleStartBlockedReason)}
+        startBlocked={Boolean(recordBlockedReason && liveStreamBlockedReason)}
         wsStatus={wsStatus}
       />
     </span>
@@ -175,6 +178,12 @@ export function StudioTab(): ReactElement {
               still records. */}
           <SessionTransport
             active={active}
+            blockedJump={
+              banner?.jumpTo && banner.jumpLabel
+                ? { label: banner.jumpLabel, to: banner.jumpTo, settingsTab: banner.settingsTab }
+                : null
+            }
+            blockedReason={visibleStartBlockedReason}
             canStop={canStop}
             goLivePending={goLiveConfirmationPending}
             liveStreamBlockedReason={liveStreamBlockedReason}
@@ -190,12 +199,7 @@ export function StudioTab(): ReactElement {
           />
           <SessionPanel
             active={active}
-            blockedJump={
-              banner?.jumpTo && banner.jumpLabel
-                ? { label: banner.jumpLabel, to: banner.jumpTo, settingsTab: banner.settingsTab }
-                : null
-            }
-            blockedReason={visibleStartBlockedReason}
+            live={sessionIsLive(recording)}
             runtimeNotice={sessionRuntimeNotice}
             startFailure={sessionStartFailure}
             startRequestPending={startRequestPending}
@@ -262,14 +266,27 @@ function StudioPreviewPanel(): ReactElement {
   const docked =
     nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
 
+  // B-26: the degraded preview says what it means and why, and offers the
+  // two things to do about it: try the preview again, or read Health.
   const healthErrorRow =
     previewHealth.tone === 'error' && previewHealth.detail ? (
       <Alert data-testid="capture-health-alert" variant="destructive">
         <AlertTitle>{previewHealth.value}</AlertTitle>
         <AlertDescription className="min-w-0">
-          <p className="line-clamp-3" title={previewHealth.detail}>
-            {previewHealth.detail}
-          </p>
+          <p className="line-clamp-3">{previewHealth.detail}</p>
+          <div className="flex flex-wrap gap-1 pt-2">
+            <Button size="xs" type="button" variant="ghost" onClick={refreshPreview}>
+              Retry preview
+            </Button>
+            <Button
+              size="xs"
+              type="button"
+              variant="ghost"
+              onClick={() => openWorkspaceTab('diagnostics')}
+            >
+              Open Health
+            </Button>
+          </div>
         </AlertDescription>
       </Alert>
     ) : null
@@ -348,6 +365,7 @@ function StudioPreviewPanel(): ReactElement {
  * start points at Livestream.
  */
 function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
+  title?: string
   jumpTo?: WorkspaceTab | StudioPanel
   /** With `jumpTo: 'settings'`, the Settings tab that owns the fix. */
   settingsTab?: SettingsTabId
@@ -359,7 +377,12 @@ function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
   }
   if (recordBlockedReason) {
     if (health && !health.ffmpeg.available) {
-      return { jumpTo: 'settings', settingsTab: 'recording', jumpLabel: 'Open Settings' }
+      return {
+        title: 'FFmpeg unavailable',
+        jumpTo: 'settings',
+        settingsTab: 'recording',
+        jumpLabel: 'Open Settings'
+      }
     }
     return null
   }

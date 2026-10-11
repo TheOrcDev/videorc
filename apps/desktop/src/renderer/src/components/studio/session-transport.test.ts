@@ -305,3 +305,52 @@ describe('SessionTransport in flight (plan 174 S3.1)', () => {
     expect(text('button')).toContain('Force stop')
   })
 })
+
+// Plan 174 S3.2 (B-9): one inline line under the transport says why whichever
+// button is off is off. Without the shell's navigation the line stands alone.
+describe('SessionTransport reason line (plan 174 S3.2)', () => {
+  it('shows the one reason under the buttons while idle, and never while a session runs', () => {
+    const recording = { state: 'recording', sessionId: 's', startedAt: STARTED_AT } as const
+    const render = (active: boolean): void =>
+      act(() =>
+        root.render(
+          createElement(
+            StudioContextProviders,
+            {
+              core: unused,
+              recordingState: { recording },
+              recording: { recording },
+              preview: unused,
+              diagnostics: unused,
+              chat: unused,
+              audio: unused
+            },
+            createElement(SessionTransport, {
+              active,
+              canStop: active,
+              stopLabel: 'Stop recording',
+              startRequestPending: false,
+              recordBlockedReason: null,
+              liveStreamBlockedReason:
+                'Enable at least one livestream destination before streaming.',
+              blockedReason: 'Enable at least one livestream destination before streaming.',
+              blockedJump: { label: 'Open Livestream', to: 'live' },
+              status: null,
+              onRecord: noop,
+              onLiveStream: noop,
+              onStop: noop
+            })
+          )
+        )
+      )
+    render(false)
+    const line = container.querySelector('[data-slot="session-blocked-reason"]')
+    expect(line?.textContent).toContain(
+      'Enable at least one livestream destination before streaming.'
+    )
+    // No navigation provider here: the jump button is left out, not broken.
+    expect(line?.querySelector('button')).toBeNull()
+    render(true)
+    expect(container.querySelector('[data-slot="session-blocked-reason"]')).toBeNull()
+  })
+})

@@ -38,6 +38,7 @@ import { NO_VALUE } from '@/lib/format'
 import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
 import {
   classifyStreamHealthAttribution,
+  liveProblemLabel,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
 import { cn } from '@/lib/utils'
@@ -566,31 +567,6 @@ export function encoderLabel(value?: string): string | undefined {
     vaapi: 'VA-API'
   }
   return `${names[match[2]] ?? match[2]} · ${match[1]}`
-}
-
-function liveProblemLabel(attribution: StreamHealthAttribution): string {
-  switch (attribution) {
-    case 'device':
-      return 'Capture device lost'
-    case 'audio':
-      return 'Audio dropping'
-    case 'capture':
-      return 'Capture running slow'
-    case 'render':
-      return 'Rendering slow'
-    case 'encoder':
-      return 'Encoder dropping frames'
-    case 'fallback':
-      return 'Encoder fallback'
-    case 'network':
-      return 'Delivery degraded'
-    case 'preview':
-      return 'Preview degraded'
-    case 'healthy':
-      return 'Healthy'
-    default:
-      return 'Checking…'
-  }
 }
 
 function encodeFootnote(plan: ProviderStreamOutputPlan, outputs: StreamOutput[]): string {

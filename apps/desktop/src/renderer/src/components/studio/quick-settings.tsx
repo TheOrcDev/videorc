@@ -10,6 +10,7 @@ import type { ReactElement, ReactNode } from 'react'
 
 import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
+import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
@@ -95,13 +96,12 @@ export function QuickSettings(): ReactElement {
     isSessionActive,
     entitlements,
     captionsStatus,
-    captionsCommandPending,
     wsStatus,
     systemAudioConfirmed,
     systemAudioIssue,
     runtimeInfo
   } = useStudioCore()
-  const { openSettings } = useWorkspaceNav()
+  const { openSettings, openStudioPanel } = useWorkspaceNav()
   const systemAudio = systemAudioSwitchView({
     device: systemAudioDevice(deviceList),
     requested: captureConfig.audio.systemAudioEnabled,
@@ -247,31 +247,20 @@ export function QuickSettings(): ReactElement {
           </Select>
         </InspectorRow>
 
-        {/* CAPTIONS — live-safe premium toggle mirroring the Streaming tab's
-          Live captions section (the config home, incl. the consent copy). */}
-        <InspectorRow icon={CaptionsIcon} label="Captions">
-          <div className="flex h-control items-center justify-end gap-2.5 px-2">
-            <span className="min-w-0 truncate text-sm font-medium">
-              {compactCaptionsStatus(
-                captionsStatus,
-                captionsEnabled,
-                isSessionActive,
-                captionsGate.allowed
-              )}
-            </span>
-            <Switch
-              aria-label="Enable live captions"
-              checked={captionsEnabled}
-              disabled={captionsCommandPending || (!captionsEnabled && !captionsGate.allowed)}
-              onCheckedChange={(enabled) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  captions: { ...current.captions, enabled }
-                }))
-              }
-            />
-          </div>
-        </InspectorRow>
+        {/* CAPTIONS — a door to the Captions page (plan 174 S3.2, B-13), where
+          the switch sits beside its upload disclosure. A switch here turned
+          on cloud audio upload with no word about it. */}
+        <NavigableRow
+          icon={CaptionsIcon}
+          label="Captions"
+          value={compactCaptionsStatus(
+            captionsStatus,
+            captionsEnabled,
+            isSessionActive,
+            captionsGate.allowed
+          )}
+          onNavigate={() => openStudioPanel('captions')}
+        />
       </GroupedList>
     </PanelSection>
   )

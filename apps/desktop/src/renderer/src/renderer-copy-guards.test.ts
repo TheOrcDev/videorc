@@ -117,7 +117,6 @@ const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/lib/native-preview-surface-lifecycle.ts': 1,
   'src/lib/obs-import-map.ts': 3,
   'src/lib/record-latency.ts': 1,
-  'src/lib/studio-health.ts': 1,
   'src/lib/toast.ts': 1
 }
 
