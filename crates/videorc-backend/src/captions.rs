@@ -5808,6 +5808,12 @@ impl StreamingLeases {
         {
             self.spawn_settlement(id, 0.0);
         }
+        self.retire_pending();
+    }
+
+    /// Settle an in-flight handover mint with zero once it lands, so a mint
+    /// the loop stops waiting for never leaves its lease counted in full.
+    fn retire_pending(&mut self) {
         if let Some(pending) = self.pending.take() {
             let Ok(runtime) = tokio::runtime::Handle::try_current() else {
                 pending.abort();
@@ -5895,6 +5901,10 @@ async fn run_streaming_caption_sockets(
     let mut reconnecting = false;
     let mut capture_epoch = session.state.captions.lock().await.capture_epoch;
     let mut socket_index: u64 = 0;
+    // Frames read while a socket drains its finals at a lease handover; the
+    // next socket replays them first, so a handover never stalls the tap.
+    let mut handover_backlog: std::collections::VecDeque<crate::audio::AudioFrame> =
+        std::collections::VecDeque::new();
 
     'reconnect: loop {
         if session.stop.load(Ordering::Relaxed) {
@@ -6035,7 +6045,10 @@ async fn run_streaming_caption_sockets(
         let mut audio_admissions = RealtimeAudioAdmissions::default();
         let mut speech_watchdog_since: Option<tokio::time::Instant> = None;
 
-        let handover_at = connected_at + streaming_handover_after(token.lease_seconds);
+        let mut handover_at = connected_at + streaming_handover_after(token.lease_seconds);
+        // The lease leaves 30 s after the handover; waiting for the pre-mint
+        // never eats into the last 10 s of it.
+        let handover_wait_until = handover_at + std::time::Duration::from_secs(20);
         let premint_at = handover_at
             .checked_sub(STREAMING_HANDOVER_PREMINT)
             .unwrap_or(connected_at)
@@ -6069,7 +6082,7 @@ async fn run_streaming_caption_sockets(
                 return RealtimeOutcome::Ended;
             }
             tokio::select! {
-                maybe_frame = session.receiver.recv() => {
+                maybe_frame = next_streaming_caption_frame(&mut handover_backlog, &mut session.receiver) => {
                     let Some(frame) = maybe_frame else {
                         if let Some(failure) = caption_disconnect_failure(
                             caption_session_expects_audio(session).await,
@@ -6086,7 +6099,13 @@ async fn run_streaming_caption_sockets(
                         // the provider finalizes, then read finals for a
                         // bounded grace.
                         let grace_until = tokio::time::Instant::now() + CAPTION_FINAL_TRANSCRIPT_GRACE;
-                        let mut drained = finish_streaming_socket(&mut ws, grace_until).await;
+                        let mut drained = finish_streaming_socket(
+                            &mut ws,
+                            grace_until,
+                            &mut session.receiver,
+                            &mut handover_backlog,
+                        )
+                        .await;
                         for part in drained.drain(..) {
                             for event in decoder.decode(&part, ms_sent - socket_audio_base_ms) {
                                 match &event {
@@ -6258,9 +6277,13 @@ async fn run_streaming_caption_sockets(
                                 leases.settle_active();
                                 let _ = ws.send(Message::Close(None)).await;
                                 if failure.kind == RealtimeFailureKind::Retryable
-                                    && retry_budget.retry_delay().is_some()
+                                    && let Some(wait) = retry_budget.retry_delay()
                                 {
+                                    // Same backoff as the mint/connect retries: an
+                                    // immediate reconnect would meet the same rate
+                                    // limit and spend the budget in milliseconds.
                                     signal_reconnecting(session, &mut reconnecting, &failure.message).await;
+                                    tokio::time::sleep(wait).await;
                                     continue 'reconnect;
                                 }
                                 return RealtimeOutcome::Fallback(failure.message.clone());
@@ -6300,6 +6323,7 @@ async fn run_streaming_caption_sockets(
                 }
                 _ = tokio::time::sleep_until(premint_at), if !premint_started => {
                     premint_started = true;
+                    leases.retire_pending();
                     let client = session.client.clone();
                     let bearer = session.bearer.clone();
                     let session_client_id = session.session_client_id.clone();
@@ -6312,19 +6336,35 @@ async fn run_streaming_caption_sockets(
                 }
                 _ = tokio::time::sleep_until(handover_at) => {
                     // Lease handover: finish this socket's audio and finals,
-                    // settle it, and continue on the next lease. Frames that
-                    // arrive meanwhile wait in the tap channel.
-                    if let Some(pending) = leases.pending.take() {
-                        match tokio::time::timeout(std::time::Duration::from_secs(5), pending).await {
-                            Ok(Ok(Ok(next))) => leases.spare = Some(next),
-                            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
-                                // The handover mints again synchronously and
-                                // reports any terminal answer there.
-                            }
+                    // settle it, and continue on the next lease. Audio intake
+                    // never blocks: an unfinished pre-mint postpones the
+                    // handover inside the lease's slack, and frames read while
+                    // the finals drain wait in the handover backlog.
+                    if leases.pending.as_ref().is_some_and(|pending| !pending.is_finished())
+                        && tokio::time::Instant::now() < handover_wait_until
+                    {
+                        handover_at = tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+                        continue;
+                    }
+                    if leases.pending.as_ref().is_some_and(|pending| pending.is_finished()) {
+                        if let Some(pending) = leases.pending.take()
+                            && let Ok(Ok(next)) = pending.await
+                        {
+                            leases.spare = Some(next);
                         }
+                    } else {
+                        // Still in flight after the slack: stop waiting; the
+                        // reconnect mints again and reports a terminal answer.
+                        leases.retire_pending();
                     }
                     let grace_until = tokio::time::Instant::now() + CAPTION_FINAL_TRANSCRIPT_GRACE;
-                    let mut drained = finish_streaming_socket(&mut ws, grace_until).await;
+                    let mut drained = finish_streaming_socket(
+                        &mut ws,
+                        grace_until,
+                        &mut session.receiver,
+                        &mut handover_backlog,
+                    )
+                    .await;
                     for part in drained.drain(..) {
                         for event in decoder.decode(&part, ms_sent - socket_audio_base_ms) {
                             match &event {
@@ -6405,10 +6445,14 @@ async fn run_streaming_caption_sockets(
 
 /// End one socket's audio: send `audio-done`, collect every text part until
 /// the provider's `finish`, its close, or the grace deadline, then close.
-/// The caller decodes the parts, so finals still reach the captions.
+/// The caller decodes the parts, so finals still reach the captions. Audio
+/// keeps being read meanwhile into `backlog` (replayed on the next socket),
+/// so draining never lets the bounded tap channel overflow.
 async fn finish_streaming_socket(
     ws: &mut StreamingCaptionSocket,
     grace_until: tokio::time::Instant,
+    receiver: &mut mpsc::Receiver<AudioFrame>,
+    backlog: &mut std::collections::VecDeque<AudioFrame>,
 ) -> Vec<serde_json::Value> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::protocol::Message;
@@ -6422,24 +6466,45 @@ async fn finish_streaming_socket(
     {
         return parts;
     }
-    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(grace_until, ws.next()).await {
-        let Message::Text(text) = message else {
-            if matches!(message, Message::Close(_)) {
-                break;
+    let mut receiver_open = true;
+    loop {
+        tokio::select! {
+            message = tokio::time::timeout_at(grace_until, ws.next()) => {
+                let Ok(Some(Ok(message))) = message else { break };
+                let Message::Text(text) = message else {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                    continue;
+                };
+                let Ok(part) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                let finished = part.get("type").and_then(serde_json::Value::as_str) == Some("finish");
+                parts.push(part);
+                if finished {
+                    break;
+                }
             }
-            continue;
-        };
-        let Ok(part) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let finished = part.get("type").and_then(serde_json::Value::as_str) == Some("finish");
-        parts.push(part);
-        if finished {
-            break;
+            frame = receiver.recv(), if receiver_open => match frame {
+                Some(frame) => backlog.push_back(frame),
+                None => receiver_open = false,
+            },
         }
     }
     let _ = ws.send(Message::Close(None)).await;
     parts
+}
+
+/// The next caption frame: anything buffered during a handover first.
+async fn next_streaming_caption_frame(
+    backlog: &mut std::collections::VecDeque<AudioFrame>,
+    receiver: &mut mpsc::Receiver<AudioFrame>,
+) -> Option<AudioFrame> {
+    if let Some(frame) = backlog.pop_front() {
+        return Some(frame);
+    }
+    receiver.recv().await
 }
 
 async fn signal_reconnecting(session: &CaptionSession, reconnecting: &mut bool, message: &str) {
@@ -9158,6 +9223,26 @@ mod tests {
             classify_realtime_close(1013, "retry later").kind,
             RealtimeFailureKind::Retryable
         );
+    }
+
+    #[tokio::test]
+    async fn handover_backlog_replays_before_live_frames() {
+        let frame = |timestamp_micros| AudioFrame {
+            timestamp_micros,
+            captured_at: std::time::Instant::now(),
+            sample_rate: 48_000,
+            channels: 1,
+            samples: vec![0.0; 960],
+        };
+        let (sender, mut receiver) = mpsc::channel(4);
+        let mut backlog = std::collections::VecDeque::from([frame(1), frame(2)]);
+        sender.try_send(frame(3)).unwrap();
+        drop(sender);
+        let mut order = Vec::new();
+        while let Some(next) = next_streaming_caption_frame(&mut backlog, &mut receiver).await {
+            order.push(next.timestamp_micros);
+        }
+        assert_eq!(order, vec![1, 2, 3]);
     }
 
     #[test]
