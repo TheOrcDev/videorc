@@ -38,10 +38,13 @@ const SURFACE_LABELS = [
     ['USE_FOR_GO_LIVE_LABEL', 'GO_LIVE_LABEL']
   ],
   [['lib', 'shortcuts.ts'], ['RECORD_SHORTCUT_LABEL']],
+  // Settings → Shortcuts names global shortcuts through the one label table
+  // (plan 174 S2.4/S2.3a: `globalShortcutLabel`), which reads the D3 labels.
   [
-    ['components', 'settings', 'shortcuts-settings.tsx'],
+    ['lib', 'global-shortcuts.ts'],
     ['RECORD_SHORTCUT_LABEL', 'GO_LIVE_SHORTCUT_LABEL']
-  ]
+  ],
+  [['components', 'settings', 'shortcuts-settings.tsx'], ['globalShortcutLabel']]
 ]
 
 /** The names D3 retired; none of the surfaces may spell them again. */
