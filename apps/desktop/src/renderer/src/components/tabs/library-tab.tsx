@@ -7,6 +7,7 @@ import {
   EditIcon,
   FolderIcon,
   LockIcon,
+  MarkerIcon,
   BuddyIcon,
   PlayIcon,
   RepairIcon,
@@ -1420,7 +1421,7 @@ function useSessionMenu({
           }
         ]
       : []),
-    { id: 'markers', group: 'open', icon: ClipIcon, label: 'Markers', onSelect: onOpenMarkers },
+    { id: 'markers', group: 'open', icon: MarkerIcon, label: 'Markers', onSelect: onOpenMarkers },
     {
       id: 'reveal',
       group: 'open',

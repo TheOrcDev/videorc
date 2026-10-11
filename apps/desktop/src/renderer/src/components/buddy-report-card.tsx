@@ -1,4 +1,11 @@
-import { AlertIcon, type AppIcon, ChatIcon, ClipIcon, MicrophoneIcon } from '@/components/icons'
+import {
+  AlertIcon,
+  type AppIcon,
+  ChatIcon,
+  ClipIcon,
+  MarkerIcon,
+  MicrophoneIcon
+} from '@/components/icons'
 import { useMemo, useState, lazy, Suspense, type ReactElement, type ReactNode } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -93,7 +100,7 @@ export function BuddyReportCard({
                 variant="ghost"
                 onClick={() => setMarkersOpen(true)}
               >
-                <ClipIcon data-icon="inline-start" />
+                <MarkerIcon data-icon="inline-start" />
                 Markers
               </Button>
             ) : null}
