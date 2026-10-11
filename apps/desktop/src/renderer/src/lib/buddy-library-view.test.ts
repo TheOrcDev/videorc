@@ -244,7 +244,10 @@ describe('buddyLibraryView (plan 170 D16)', () => {
       [localOnly, { ...own, images: {} }, keeps],
       [localOnly, { ...own, libraryAvatarId: MINE }, keeps],
       [localOnly, own, caps(24, { enabled: true, count: 2, limit: 30 })],
-      [localOnly, own, null]
+      [localOnly, own, null],
+      // QA 2026-10-11: while it is being saved, the busy line says so; the
+      // offer used to stay up beside it ("only on this computer").
+      [library({ activeAvatarId: null, busy: { kind: 'import' } }), own, keeps]
     ] as const) {
       expect(buddyLibrarySaveOffer({ library: state, persona, capabilities })).toBeNull()
     }

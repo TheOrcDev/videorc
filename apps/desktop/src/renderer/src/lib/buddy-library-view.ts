@@ -154,8 +154,9 @@ export function buddyLibraryBusyLine(
 /**
  * "Save to my library" (plan 172 D10): the Buddy is one made only on this
  * computer (the library knows it is not linked), the streamer is signed in,
- * the web keeps imports (`buddyLibrary.alive`), and no job runs. Null when
- * it is not offered; otherwise the Buddy's name for the line.
+ * the web keeps imports (`buddyLibrary.alive`), and it is not being saved
+ * already. Null when it is not offered; otherwise the Buddy's name for the
+ * line.
  */
 export function buddyLibrarySaveOffer({
   library,
@@ -167,6 +168,8 @@ export function buddyLibrarySaveOffer({
   capabilities: Pick<AiCapabilities, 'cohost'> | null
 }): { name: string } | null {
   if (!library || !persona || !library.signedIn || library.mine === null) return null
+  // Being saved now: the busy line ("Saving {name} to your library.") says it.
+  if (library.busy?.kind === 'import') return null
   if (library.activeAvatarId !== null || persona.libraryAvatarId) return null
   if (!persona.images.idle) return null
   if (capabilities?.cohost?.buddyLibrary?.alive !== true) return null
