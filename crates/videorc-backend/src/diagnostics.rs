@@ -2280,6 +2280,13 @@ fn runtime_resource_sampler() -> &'static RuntimeResourceSampler {
     RUNTIME_RESOURCE_SAMPLER.get_or_init(RuntimeResourceSampler::start)
 }
 
+/// Cached backend RSS and owned FFmpeg process count for the metrics journal
+/// (plan 166 S1). A read of the sampler's last snapshot: never spawns `ps`.
+pub(crate) fn runtime_resource_counts() -> (Option<u64>, u64) {
+    let snapshot = runtime_resource_sampler().snapshot();
+    (snapshot.backend_rss_bytes, snapshot.active_ffmpeg_processes)
+}
+
 /// Starts the process-wide sampler before request handling begins. Runtime diagnostics then
 /// perform only a cached read: preview-present reports never launch `ps` themselves.
 pub fn start_runtime_resource_sampler() {

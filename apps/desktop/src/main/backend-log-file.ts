@@ -17,6 +17,52 @@ import { stripAnsi } from './backend-crash-log'
 
 export const BACKEND_LOG_FILE_MAX_BYTES = 2 * 1024 * 1024
 export const BACKEND_LOG_FILE_MAX_FILES = 2
+/** Upper bounds for the env overrides below (plan 166 S3): 100 MB x 20. */
+export const BACKEND_LOG_FILE_MAX_BYTES_LIMIT = 100 * 1024 * 1024
+export const BACKEND_LOG_FILE_MAX_FILES_LIMIT = 20
+
+export interface BackendLogFileLimits {
+  maxBytes: number
+  maxFiles: number
+}
+
+function boundedPositiveInteger(
+  raw: string | undefined,
+  fallback: number,
+  ceiling: number
+): number {
+  const text = raw?.trim()
+  if (!text || !/^\d+$/.test(text)) {
+    return fallback
+  }
+  const value = Number(text)
+  if (!Number.isSafeInteger(value) || value < 1) {
+    return fallback
+  }
+  return Math.min(value, ceiling)
+}
+
+/**
+ * Unattended lab runs keep more backend log than the 2 MB x 2 default:
+ * `VIDEORC_BACKEND_LOG_MAX_BYTES` / `VIDEORC_BACKEND_LOG_MAX_FILES`, clamped
+ * to 100 MB x 20. Anything unset, non-numeric or below 1 keeps the default.
+ */
+export function backendLogFileLimitsFromEnv(
+  env: Record<string, string | undefined>
+): BackendLogFileLimits {
+  return {
+    maxBytes: boundedPositiveInteger(
+      env.VIDEORC_BACKEND_LOG_MAX_BYTES,
+      BACKEND_LOG_FILE_MAX_BYTES,
+      BACKEND_LOG_FILE_MAX_BYTES_LIMIT
+    ),
+    maxFiles: boundedPositiveInteger(
+      env.VIDEORC_BACKEND_LOG_MAX_FILES,
+      BACKEND_LOG_FILE_MAX_FILES,
+      BACKEND_LOG_FILE_MAX_FILES_LIMIT
+    )
+  }
+}
 
 export function backendLogFilePath(userDataDir: string): string {
   return join(userDataDir, 'logs', 'backend.log')
