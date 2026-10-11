@@ -455,7 +455,9 @@ function BuddyCard({
         )}
         {card.alive ? (
           <Badge
-            className="absolute top-1.5 left-1.5"
+            // On the art: the opaque floating fill under the glass keeps the
+            // tag readable where the character runs under it (an ear, a hat).
+            className="absolute top-1.5 left-1.5 bg-popover"
             data-testid="buddy-library-alive-tag"
             variant="outline"
           >

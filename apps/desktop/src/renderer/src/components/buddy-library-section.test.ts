@@ -427,6 +427,10 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
       BUDDY_LIBRARY_COPY.alive,
       null
     ])
+    // QA 2026-10-11: the tag sits on the art (Nib's ear ran through it), so
+    // it has the opaque floating fill under its glass, never see-through.
+    const tag = card('official:golem').querySelector('[data-testid="buddy-library-alive-tag"]')!
+    expect(tag.className.split(/\s+/)).toContain('bg-popover')
     // An alive official Buddy has nothing more to offer; one without a pack does.
     expect(card('official:orc').querySelector('[data-testid="buddy-library-more"]')).toBeNull()
     const labels = (items: HTMLElement[]) => items.map((item) => item.textContent?.trim())
