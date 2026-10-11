@@ -630,7 +630,7 @@ export function SystemAudioSettings({
     : view.issue === 'unavailable' && macOS
       ? systemAudioIssueCopy('unavailable')
       : view.issue
-        ? systemAudioIssueCopy(view.issue)
+        ? systemAudioIssueCopy(view.issue, macOS ? 'darwin' : undefined)
         : null
   const issueAction =
     view.permissionRequired || (view.issue === 'unavailable' && macOS) ? (

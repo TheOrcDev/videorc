@@ -10,6 +10,7 @@ import type {
   ResourceSelection,
   SourceSelection
 } from '@/lib/backend'
+import { formatVideoQuality } from '@/lib/format-video'
 
 // OBS import O2 — the mapping core (plan: vault "2026-07-07 - Videorc OBS
 // Import Plan"). Pure: (ObsSetup, Device[]) → a Videorc config patch + the
@@ -212,7 +213,10 @@ export function mapObsSetup(
   report.push({
     verdict: 'imported',
     subject: 'Output',
-    note: `${setup.outputWidth}×${setup.outputHeight} at ${setup.fps} fps`
+    note: formatVideoQuality(
+      { width: setup.outputWidth, height: setup.outputHeight, fps: setup.fps },
+      { size: 'full' }
+    )
   })
   if (setup.recordingDirectory) {
     result.outputDirectory = setup.recordingDirectory

@@ -31,7 +31,8 @@ function renderSidebar(): string {
       onSelectStudioPanel: noop,
       onOpenSettings: noop,
       statusTone: 'good',
-      statusLabel: 'Connected',
+      statusLabel: 'Ready',
+      statusPulse: false,
       live: false,
       onOpenCommand: noop,
       platform: 'win32'

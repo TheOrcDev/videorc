@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useStudioCore } from '@/hooks/use-studio'
 import { renderCaptionCueFramePng } from '@/lib/caption-overlay'
+import { formatResolution } from '@/lib/format-video'
 import { cn } from '@/lib/utils'
 
 type PreviewBackdrop = 'dark' | 'light' | 'motion'
@@ -81,7 +82,7 @@ export function CaptionPreview(): ReactElement {
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{text}</p>
           <p className="text-xs text-muted-foreground">
-            {captureConfig.video.width} × {captureConfig.video.height} ·{' '}
+            {formatResolution(captureConfig.video)} ·{' '}
             {captureConfig.captions.position === 'top' ? 'Top' : 'Bottom'}
           </p>
         </div>

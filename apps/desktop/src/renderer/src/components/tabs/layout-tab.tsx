@@ -62,6 +62,7 @@ import {
   overlayOrientationForCanvas,
   overlaySnapRect
 } from '@/lib/overlay-layout'
+import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
 import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
 
 // The two real-world screen colors; the protocol takes any #RRGGBB so a
@@ -71,20 +72,33 @@ const CHROMA_KEY_BLUE = '#0000FF'
 
 // Mode-scoped like the Scenes gallery: the tab edits the current
 // orientation's scenes; the gallery's header toggle switches modes.
+// Names come from the one layout table (plan 174 S1.4, V-X3).
 const HORIZONTAL_LAYOUT_TAB_PRESETS = [
-  { id: 'screen-camera', label: 'Screen + camera', enabled: true },
-  { id: 'screen-only', label: 'Screen only', enabled: true },
-  { id: 'camera-only', label: 'Camera only', enabled: true },
-  { id: 'side-by-side', label: 'Side-by-side', enabled: true }
+  { id: 'screen-camera', label: LAYOUT_PRESET_LABELS['screen-camera'], enabled: true },
+  { id: 'screen-only', label: LAYOUT_PRESET_LABELS['screen-only'], enabled: true },
+  { id: 'camera-only', label: LAYOUT_PRESET_LABELS['camera-only'], enabled: true },
+  { id: 'side-by-side', label: LAYOUT_PRESET_LABELS['side-by-side'], enabled: true }
 ] as const
 
 const VERTICAL_LAYOUT_TAB_PRESETS = [
-  { id: 'vertical-camera-top', label: 'Camera top', enabled: true },
-  { id: 'vertical-camera-bottom', label: 'Camera bottom', enabled: true },
-  { id: 'vertical-split', label: 'Split', enabled: true },
-  { id: 'vertical-screen-camera', label: 'Screen + camera', enabled: true },
-  { id: 'vertical-screen-only', label: 'Screen only', enabled: true },
-  { id: 'vertical-camera-only', label: 'Camera only', enabled: true }
+  { id: 'vertical-camera-top', label: LAYOUT_PRESET_LABELS['vertical-camera-top'], enabled: true },
+  {
+    id: 'vertical-camera-bottom',
+    label: LAYOUT_PRESET_LABELS['vertical-camera-bottom'],
+    enabled: true
+  },
+  { id: 'vertical-split', label: LAYOUT_PRESET_LABELS['vertical-split'], enabled: true },
+  {
+    id: 'vertical-screen-camera',
+    label: LAYOUT_PRESET_LABELS['vertical-screen-camera'],
+    enabled: true
+  },
+  {
+    id: 'vertical-screen-only',
+    label: LAYOUT_PRESET_LABELS['vertical-screen-only'],
+    enabled: true
+  },
+  { id: 'vertical-camera-only', label: LAYOUT_PRESET_LABELS['vertical-camera-only'], enabled: true }
 ] as const
 
 const OVERLAY_ORIENTATION_OPTIONS: SegmentedControlOption<OverlayOrientation>[] = [
@@ -427,7 +441,7 @@ export function LayoutTab(): ReactElement {
               <p className="text-xs text-muted-foreground">
                 {layoutPresetOrientation(layout.layoutPreset) === 'vertical'
                   ? 'Select a camera in Studio to enable the camera scenes.'
-                  : 'Select a camera in Studio to enable Camera only and Side-by-side.'}
+                  : 'Select a camera in Studio to enable Camera only and Side by side.'}
               </p>
             ) : null}
           </PanelSection>

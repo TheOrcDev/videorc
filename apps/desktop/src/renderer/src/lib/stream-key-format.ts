@@ -4,6 +4,7 @@
 // block a save — platforms change formats, and a warned save is still a save.
 
 import type { StreamPlatform } from '@/lib/backend'
+import { platformLabel } from '@/lib/platform-copy'
 
 // Twitch keys look like `live_123456789_AbCdEf...`.
 const TWITCH_KEY_PATTERN = /^live_\d+_[A-Za-z0-9]+$/
@@ -28,14 +29,6 @@ export function detectStreamKeyPlatform(key: string): StreamPlatform | null {
   return null
 }
 
-const PLATFORM_LABEL: Record<string, string> = {
-  twitch: 'Twitch',
-  youtube: 'YouTube',
-  kick: 'Kick',
-  x: 'X',
-  custom: 'Custom RTMP'
-}
-
 /**
  * A warning when the pasted key confidently looks like it belongs to a
  * different platform than the field it is being saved to, else null.
@@ -48,8 +41,8 @@ export function streamKeyPlatformMismatch(
   if (!detected || detected === fieldPlatform) {
     return null
   }
-  const detectedLabel = PLATFORM_LABEL[detected] ?? detected
-  const fieldLabel = PLATFORM_LABEL[fieldPlatform] ?? fieldPlatform
+  const detectedLabel = platformLabel(detected)
+  const fieldLabel = platformLabel(fieldPlatform)
   return `This looks like a ${detectedLabel} stream key, but you are saving it to ${fieldLabel}.`
 }
 

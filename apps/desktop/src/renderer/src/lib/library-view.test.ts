@@ -5,7 +5,6 @@ import {
   filterLibrarySessions,
   isLiveSession,
   libraryStorageLabel,
-  liveSessionLabel,
   sessionFormatLabel,
   sessionPosterUrl,
   sortLibrarySessions,
@@ -125,21 +124,6 @@ describe('isLiveSession', () => {
     expect(
       isLiveSession({ id: 'live-1', status: 'failed' }, { state: 'recording', sessionId: 'live-1' })
     ).toBe(false)
-  })
-})
-
-describe('liveSessionLabel', () => {
-  it('labels the capture state for the live row', () => {
-    expect(liveSessionLabel({ state: 'recording' })).toBe('Recording')
-    expect(liveSessionLabel({ state: 'starting' })).toBe('Recording')
-    expect(liveSessionLabel({ state: 'streaming' })).toBe('Streaming')
-    expect(liveSessionLabel({ state: 'stopping' })).toBe('Finishing')
-  })
-
-  it('labels Go Live (record+stream, reported as recording) as Streaming (plan 095 S5)', () => {
-    expect(
-      liveSessionLabel({ state: 'recording', streamUrl: 'rtmp://live.twitch.tv/app/***' })
-    ).toBe('Streaming')
   })
 })
 

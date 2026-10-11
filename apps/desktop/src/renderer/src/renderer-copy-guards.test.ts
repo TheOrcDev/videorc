@@ -117,7 +117,7 @@ const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/hooks/use-studio.tsx': 80,
   'src/lib/backend-transport.ts': 3,
   'src/lib/buddy-tab-view.ts': 1,
-  'src/lib/capture.ts': 6,
+  'src/lib/capture.ts': 5,
   'src/lib/clean-cut-view.ts': 1,
   'src/lib/format.ts': 5,
   'src/lib/go-live-output.ts': 1,
@@ -128,7 +128,6 @@ const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/lib/record-latency.ts': 1,
   'src/lib/session-runtime-recovery.ts': 5,
   'src/lib/studio-health.ts': 2,
-  'src/lib/studio-session-view.ts': 1,
   'src/lib/system-permission-orchestration.ts': 1,
   'src/lib/toast.ts': 1
 }

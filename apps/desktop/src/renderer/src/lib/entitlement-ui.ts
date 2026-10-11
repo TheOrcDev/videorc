@@ -5,6 +5,7 @@ import {
   isFeatureEntitled
 } from './entitlements'
 import { streamVideoProfileValidationReason } from './capture'
+import { formatVideoQuality } from './format-video'
 import { isPremiumUpgradeMessage, VIDEORC_PREMIUM_URL } from './premium-upgrade'
 
 export type EntitlementUiGate =
@@ -184,16 +185,20 @@ function streamingMaxDestinations(entitlements: EntitlementsSnapshot | null): nu
 }
 
 function formatVideoProfile(video: VideoSettings): string {
-  return `${video.width}x${video.height} @ ${video.fps} FPS`
+  return formatVideoQuality(video, { size: 'full' })
 }
 
 function formatLimit(
   kind: 'recording' | 'streaming',
   limits: EntitlementsSnapshot['limits']['recording'] | EntitlementsSnapshot['limits']['streaming']
 ): string {
-  const bitrate =
+  const bitrateKbps =
     'maxBitrateKbps' in limits && typeof limits.maxBitrateKbps === 'number'
-      ? ` and ${limits.maxBitrateKbps} kbps`
-      : ''
-  return `Your ${kind} limit is ${limits.maxWidth}x${limits.maxHeight} @ ${limits.maxFps} FPS${bitrate}.`
+      ? limits.maxBitrateKbps
+      : undefined
+  const limit = formatVideoQuality(
+    { width: limits.maxWidth, height: limits.maxHeight, fps: limits.maxFps, bitrateKbps },
+    { size: 'full', bitrate: true }
+  )
+  return `Your ${kind} limit is ${limit}.`
 }

@@ -14,7 +14,8 @@ import {
 } from '@/components/ui/dialog'
 import { Spinner } from '@/components/ui/spinner'
 import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
-import { isWindowsPlatform, osSettingsName } from '@/lib/platform'
+import { isWindowsPlatform } from '@/lib/platform'
+import { platformCopy } from '@/lib/platform-copy'
 import {
   systemAccessAction,
   systemAccessRows,
@@ -61,8 +62,8 @@ export function PermissionsOnboardingDialog({
     (row) => row.state === 'granted' || row.state === 'device-issue'
   )
   const isWindows = isWindowsPlatform(runtimeInfo?.platform)
-  const deviceNoun = isWindows ? 'PC' : 'Mac'
-  const settingsName = osSettingsName(runtimeInfo?.platform)
+  // Plan 174 I-9: "capture your Mac" was said on Linux too.
+  const { deviceNoun, osName, osSettingsName: settingsName } = platformCopy(runtimeInfo?.platform)
 
   const runPermissionAction = async (pane: SystemAccessRow['id']): Promise<void> => {
     setPending(pane)
@@ -84,7 +85,9 @@ export function PermissionsOnboardingDialog({
               <DialogDescription>
                 {isWindows
                   ? `Turn on camera and microphone access in ${settingsName}. You can change any of this later in Settings → Permissions.`
-                  : 'macOS asks once per permission. Grant what you need. You can change any of this later in Settings → Permissions.'}
+                  : osName === 'macOS'
+                    ? 'macOS asks once per permission. Grant what you need. You can change any of this later in Settings → Permissions.'
+                    : 'Grant what you need. You can change any of this later in Settings → Permissions.'}
               </DialogDescription>
             </div>
           </div>

@@ -34,6 +34,8 @@ import {
   videoProfileCompatibility
 } from '@/lib/capture'
 import { destinationSetup, destinationSetupHint } from '@/lib/destination-readiness'
+import { NO_VALUE } from '@/lib/format'
+import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
 import {
   classifyStreamHealthAttribution,
   type StreamHealthAttribution
@@ -399,7 +401,7 @@ export function TechnicalDetails({
   const bitrate = streamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
   const summary = liveOutputActive
     ? attribution === 'healthy'
-      ? [formatMbps(bitrate), formatLiveFps(streamHealth?.fps)].filter(Boolean).join(' · ')
+      ? [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)].filter(Boolean).join(' · ')
       : liveProblemLabel(attribution)
     : null
   const outputs = streamOutputs(providerPlan)
@@ -442,7 +444,7 @@ export function TechnicalDetails({
 
         {liveOutputActive ? (
           <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
-            <OutputMetric label="Frame rate" value={formatLiveFps(streamHealth?.fps) || '-'} />
+            <OutputMetric label="Frame rate" value={formatLiveFps(streamHealth?.fps) || NO_VALUE} />
             <OutputMetric label="Bitrate" value={formatLiveBitrate(bitrate)} />
             <OutputMetric
               label="Encoder speed"
@@ -523,10 +525,9 @@ function streamOutputs(plan: ProviderStreamOutputPlan): StreamOutput[] {
     : [{ video: plan.streamVideo }]
 }
 
-/** "1080p · 30 fps · 6 Mbps"; portrait canvases keep both sides ("1080×1920"). */
-export function formatQuality(video: VideoSettings): string {
-  const size = video.height > video.width ? `${video.width}×${video.height}` : `${video.height}p`
-  return `${size} · ${video.fps} fps · ${formatMbps(video.bitrateKbps)}`
+/** "1080p · 30 fps · 6 Mbps"; portrait canvases keep both sides (plan 174 S1.4). */
+function formatQuality(video: VideoSettings): string {
+  return formatVideoQuality(video, { bitrate: true })
 }
 
 /**
@@ -541,17 +542,11 @@ export function qualitySummary(outputs: StreamOutput[]): { text: string; title?:
     )
   }))
   const distinct = new Set(lines.map((line) => line.quality))
-  if (distinct.size <= 1) return { text: lines[0]?.quality ?? '-' }
+  if (distinct.size <= 1) return { text: lines[0]?.quality ?? NO_VALUE }
   return {
     text: 'Varies by destination',
     title: lines.map((line) => `${line.label ?? 'Stream'}: ${line.quality}`).join('\n')
   }
-}
-
-function formatMbps(kbps?: number): string {
-  if (typeof kbps !== 'number' || !Number.isFinite(kbps)) return ''
-  const mbps = Math.round(kbps / 100) / 10
-  return `${mbps.toLocaleString()} Mbps`
 }
 
 /** "hardware-videotoolbox" → "VideoToolbox · hardware"; unknown values pass through. */
@@ -714,9 +709,9 @@ function DetailRow({
     <div className="flex items-start justify-between gap-3 text-xs">
       <span className="shrink-0 text-muted-foreground">{label}</span>
       {code ? (
-        <code className="min-w-0 text-right break-words text-foreground">{value ?? 'unknown'}</code>
+        <code className="min-w-0 text-right break-words text-foreground">{value ?? NO_VALUE}</code>
       ) : (
-        <span className="min-w-0 text-right break-words text-foreground">{value ?? 'unknown'}</span>
+        <span className="min-w-0 text-right break-words text-foreground">{value ?? NO_VALUE}</span>
       )}
     </div>
   )
@@ -727,23 +722,21 @@ function formatLiveFps(value?: number): string {
 }
 
 function formatLiveBitrate(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? `${Math.round(value).toLocaleString()} kbps`
-    : '-'
+  return formatBitrate(value) || NO_VALUE
 }
 
 function formatEncoderSpeed(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : '-'
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : NO_VALUE
 }
 
 function formatFrameCount(value?: number): string {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.max(0, Math.round(value)).toLocaleString()
-    : '-'
+    : NO_VALUE
 }
 
 function formatEffectiveStreamProfile(video: VideoSettings): string {
-  return `${video.width}×${video.height} @ ${video.fps} fps · ${video.bitrateKbps.toLocaleString()} kbps CBR`
+  return `${formatVideoQuality(video, { size: 'full', bitrate: true })} CBR`
 }
 
 function ChecklistRow({

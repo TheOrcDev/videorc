@@ -16,6 +16,7 @@ import type {
   StreamPlatform
 } from '../../../shared/backend'
 import { isActivityOnlyEvent } from '../../../shared/backend'
+import { platformLabel } from './platform-copy'
 
 /** Platforms that can appear in the unified feed, in display order. */
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'kick', 'x']
@@ -493,14 +494,15 @@ export function visibleMessages(messages: LiveChatMessage[], max: number): LiveC
   return messages.length > max ? messages.slice(messages.length - max) : messages
 }
 
+/** The platforms' names, from the one table (plan 174 S1.4, `platformLabel`). */
 export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
-  youtube: 'YouTube',
-  twitch: 'Twitch',
-  kick: 'Kick',
-  x: 'X',
-  tiktok: 'TikTok',
-  instagram: 'Instagram',
-  custom: 'Custom'
+  youtube: platformLabel('youtube'),
+  twitch: platformLabel('twitch'),
+  kick: platformLabel('kick'),
+  x: platformLabel('x'),
+  tiktok: platformLabel('tiktok'),
+  instagram: platformLabel('instagram'),
+  custom: platformLabel('custom')
 }
 
 export function commentCanHighlight(message: LiveChatMessage): boolean {

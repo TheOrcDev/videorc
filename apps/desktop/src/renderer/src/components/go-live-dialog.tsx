@@ -30,7 +30,6 @@ import type {
   CommentsReadState,
   CommentsWriteState,
   GoLiveDestinationPreflight,
-  StreamPlatform,
   StreamPrivacy,
   VideoSettings
 } from '@/lib/backend'
@@ -39,7 +38,9 @@ import { unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
 import { OVERLAY_ITEM_LABELS, overlayStartNotices } from '@/lib/overlay-layout'
+import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
+import { platformLabel } from '@/lib/platform-copy'
 import { YOUTUBE_STREAM_KEY_LINK_LABEL, YOUTUBE_STREAM_KEY_URL } from '@/lib/youtube-quota-copy'
 
 // The Go Live confirmation flow: review destinations + metadata, resolve any
@@ -454,7 +455,7 @@ export function GoLiveOutputAdvice({
         <AlertTitle>Recording will match the stream</AlertTitle>
         <AlertDescription>
           This computer can&apos;t encode a separate recording while streaming, so both use{' '}
-          {outputLabel(sharedVideo)} at {sharedVideo.bitrateKbps} kbps for this session.
+          {formatVideoQuality(sharedVideo, { bitrate: true })} for this session.
         </AlertDescription>
       </Alert>
     )
@@ -681,25 +682,6 @@ function commentsWriteLabel(state: CommentsWriteState): string {
       return 'Failed'
     case 'unavailable':
       return 'Unavailable'
-  }
-}
-
-function platformLabel(platform: StreamPlatform): string {
-  switch (platform) {
-    case 'youtube':
-      return 'YouTube'
-    case 'twitch':
-      return 'Twitch'
-    case 'kick':
-      return 'Kick'
-    case 'x':
-      return 'X'
-    case 'tiktok':
-      return 'TikTok'
-    case 'instagram':
-      return 'Instagram'
-    case 'custom':
-      return 'Custom RTMP'
   }
 }
 

@@ -30,6 +30,7 @@ import type {
 } from '@/lib/backend'
 import { AvatarCircle } from '@/lib/chat-avatar'
 import { copyChatText } from '@/lib/chat-link-actions'
+import { formatRelativeTime } from '@/lib/format-time'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import {
   ACTIVITY_FILTERS,
@@ -67,17 +68,6 @@ const KIND_ICONS: Record<ActivityKind, AppIcon | null> = {
   redemption: null,
   'destination-failed': null,
   'destination-recovered': null
-}
-
-export function relativeTime(iso: string, nowMs: number): string {
-  const at = Date.parse(iso)
-  if (!Number.isFinite(at)) return ''
-  const seconds = Math.max(0, Math.round((nowMs - at) / 1000))
-  if (seconds < 45) return 'now'
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes}m`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}h ${minutes % 60}m`
 }
 
 /** A row about one named viewer or channel shows who, not what: follows,
@@ -293,7 +283,7 @@ function ActivityRow({
             )}
             dateTime={item.at}
           >
-            {relativeTime(item.at, nowMs)}
+            {formatRelativeTime(item.at, nowMs)}
           </time>
           {/* The platform mark closes the row on the far right (owner call,
               plan 165): 20 px, never shrunk onto the avatar. */}

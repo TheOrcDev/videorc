@@ -3,11 +3,12 @@
 // status strings/tones are shared by the Session rows and the Preview badge.
 
 import { sessionIsLive } from '../../../shared/capture-state'
+import { formatTimecode } from '../../../shared/timecode'
 import { RECORDING_STOPS_TOO } from './session-stop'
+import { statusWordFromValue } from './status-word'
 
 export { sessionIsLive }
 
-export type SessionVideo = { width: number; height: number; fps: number }
 export type SessionTarget = { enabled: boolean; label: string; platform: string }
 export type SessionStatusTone = 'good' | 'warn' | 'error' | 'live' | 'neutral'
 /** The slice of `recording.status` the session chrome reads. */
@@ -25,37 +26,6 @@ export function sessionMode(recordEnabled: boolean, streamEnabled: boolean): str
     return 'Local recording'
   }
   return 'No output'
-}
-
-/** Friendly resolution class from the frame height (2160 → "4K"). */
-export function qualityName(height: number): string {
-  if (height >= 2160) {
-    return '4K'
-  }
-  if (height >= 1440) {
-    return '2K'
-  }
-  if (height >= 1080) {
-    return '1080p'
-  }
-  if (height >= 720) {
-    return '720p'
-  }
-  return `${height}p`
-}
-
-/** "4K · 2160p30" — resolution class + short edge + fps. When the class IS the
- *  resolution ("1080p"), skip the redundant doubling and show "1080p30". */
-export function recordingQuality(video: SessionVideo): string {
-  const resolution = Math.min(video.width, video.height)
-  const name = qualityName(resolution)
-  const detail = `${resolution}p${video.fps}`
-  return name === `${resolution}p` ? detail : `${name} · ${detail}`
-}
-
-/** "3840×2160 · 30fps" — the full output dimensions. */
-export function outputSummary(video: SessionVideo): string {
-  return `${video.width}×${video.height} · ${video.fps}fps`
 }
 
 /** "Disabled" off-air, else the single destination's name or a count. */
@@ -107,20 +77,12 @@ export function sessionElapsedMs(
 }
 
 /**
- * The inspector's session clock (plan 050 S12): m:ss under an hour, h:mm:ss
- * after. Fed by `sessionElapsedMs` while a session runs. Missing reads 0:00.
+ * The inspector's session clock (plan 050 S12): the one timecode, m:ss under
+ * an hour and h:mm:ss after (plan 174 S1.4). Fed by `sessionElapsedMs` while
+ * a session runs. Missing reads 0:00.
  */
 export function sessionClockLabel(durationMs?: number): string {
-  const total =
-    typeof durationMs === 'number' && Number.isFinite(durationMs)
-      ? Math.max(0, Math.floor(durationMs / 1000))
-      : 0
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const seconds = String(total % 60).padStart(2, '0')
-  return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}`
-    : `${minutes}:${seconds}`
+  return formatTimecode(typeof durationMs === 'number' ? durationMs : 0)
 }
 
 /**
@@ -153,59 +115,126 @@ export function sessionStopControl(
 }
 
 /**
- * Idle reads as "Ready" (the mockup's resting state); transitions get an
- * ellipsis. An on-air session reads "Streaming" whether or not it also
- * records: the backend calls record+stream `recording` (plan 095 S5).
+ * One state machine, one word per state (plan 174 S1.3, D4), for every
+ * surface that shows the session: the Studio pill, the status bar, the
+ * account menu's Health row and the Library's live row.
  */
-export function sessionStatusLabel(status: SessionStatusView, wsStatus?: string): string {
+type SessionStatusKind =
+  | 'connecting'
+  | 'reconnecting'
+  | 'ready'
+  | 'not-ready'
+  | 'starting'
+  | 'recording'
+  | 'on-air'
+  | 'stopping'
+  | 'failed'
+
+const SESSION_STATUS_WORDS: Record<SessionStatusKind, { label: string; tone: SessionStatusTone }> =
+  {
+    // Boot-time connecting is calm, not alarming.
+    connecting: { label: 'Connecting…', tone: 'neutral' },
+    // A dropped socket after a backend exit: main restarts it and the
+    // renderer reconnects, so this is attention, not a failure.
+    reconnecting: { label: 'Videorc is reconnecting…', tone: 'warn' },
+    ready: { label: 'Ready', tone: 'good' },
+    'not-ready': { label: 'Not ready', tone: 'neutral' },
+    starting: { label: 'Starting…', tone: 'neutral' },
+    recording: { label: 'Recording', tone: 'live' },
+    'on-air': { label: 'On air', tone: 'live' },
+    stopping: { label: 'Stopping…', tone: 'neutral' },
+    failed: { label: 'Failed', tone: 'error' }
+  }
+
+export interface SessionStatusOptions {
+  /**
+   * Nothing can start right now, and the Session section says why: idle
+   * reads a neutral "Not ready", never a green "Ready" (B-17).
+   */
+  startBlocked?: boolean
+}
+
+function sessionStatusKind(
+  status: SessionStatusView,
+  wsStatus: string | undefined,
+  options: SessionStatusOptions = {}
+): SessionStatusKind | null {
   // F-014: never report Ready over a dead backend socket — the app used to
   // zombie with a green Ready badge after a backend crash. Boot-time
-  // waiting/connecting reads as "Connecting…", real drops as offline.
-  if (wsStatus === 'waiting' || wsStatus === 'connecting') {
-    return 'Connecting…'
-  }
-  if (wsStatus && wsStatus !== 'connected') {
-    return 'Backend offline'
-  }
-  if (sessionIsLive(status)) {
-    return 'Streaming'
-  }
+  // waiting/connecting reads as "Connecting…", real drops as reconnecting.
+  if (wsStatus === 'waiting' || wsStatus === 'connecting') return 'connecting'
+  if (wsStatus && wsStatus !== 'connected') return 'reconnecting'
+  // An on-air session reads "On air" whether or not it also records: the
+  // backend calls record+stream `recording` (plan 095 S5).
+  if (sessionIsLive(status)) return 'on-air'
   switch (status.state) {
     case 'idle':
-      return 'Ready'
+      return options.startBlocked ? 'not-ready' : 'ready'
     case 'starting':
-      return 'Starting…'
+      return 'starting'
     case 'recording':
-      return 'Recording'
+      return 'recording'
     case 'stopping':
-      return 'Stopping…'
+      return 'stopping'
     case 'failed':
-      return 'Failed'
+      return 'failed'
     default:
-      return status.state.charAt(0).toUpperCase() + status.state.slice(1)
+      return null
   }
 }
 
-export function sessionStatusTone(status: SessionStatusView, wsStatus?: string): SessionStatusTone {
-  if (wsStatus === 'waiting' || wsStatus === 'connecting') {
-    return 'warn'
-  }
-  if (wsStatus && wsStatus !== 'connected') {
-    return 'error'
-  }
-  if (sessionIsLive(status)) {
-    return 'live'
-  }
-  switch (status.state) {
-    case 'idle':
-      return 'good'
-    case 'starting':
-    case 'stopping':
-      return 'warn'
+/**
+ * Idle reads as "Ready" ("Not ready" when nothing can start); transitions
+ * get an ellipsis; "On air" only for on air (D4). A state no map names yet
+ * reads as a sentence-case word, never the raw value.
+ */
+export function sessionStatusLabel(
+  status: SessionStatusView,
+  wsStatus?: string,
+  options?: SessionStatusOptions
+): string {
+  const kind = sessionStatusKind(status, wsStatus, options)
+  return kind ? SESSION_STATUS_WORDS[kind].label : statusWordFromValue(status.state)
+}
+
+/**
+ * Record and on air share the live tone, a failure is `error`, a dropped
+ * socket needs attention, and every transition is neutral.
+ */
+export function sessionStatusTone(
+  status: SessionStatusView,
+  wsStatus?: string,
+  options?: SessionStatusOptions
+): SessionStatusTone {
+  const kind = sessionStatusKind(status, wsStatus, options)
+  return kind ? SESSION_STATUS_WORDS[kind].tone : 'neutral'
+}
+
+/** The status dot pulses only while a file is being written or on air (A-4). */
+export function sessionStatusPulses(status: SessionStatusView, wsStatus?: string): boolean {
+  const kind = sessionStatusKind(status, wsStatus)
+  return kind === 'recording' || kind === 'on-air'
+}
+
+/**
+ * The Studio pill's leading icon (B-17), so recording, on air and trouble
+ * no longer read as the same red chip. Null keeps the tone dot.
+ */
+export type SessionStatusGlyph = 'record' | 'live' | 'alert'
+
+export function sessionStatusGlyph(
+  status: SessionStatusView,
+  wsStatus?: string
+): SessionStatusGlyph | null {
+  switch (sessionStatusKind(status, wsStatus)) {
     case 'recording':
+      return 'record'
+    case 'on-air':
+      return 'live'
+    case 'reconnecting':
     case 'failed':
-      return 'error'
+      return 'alert'
     default:
-      return 'neutral'
+      return null
   }
 }

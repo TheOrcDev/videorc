@@ -1,4 +1,6 @@
 import {
+  AlertIcon,
+  type AppIcon,
   FrameIcon,
   ImageIcon,
   InfoIcon,
@@ -29,17 +31,19 @@ import {
   useStudioShell
 } from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
+import { formatVideoQuality } from '@/lib/format-video'
 import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import {
-  outputSummary,
   sessionAlsoRecords,
   sessionClockLabel,
+  sessionStatusGlyph,
   sessionStatusLabel,
   sessionStatusTone,
   streamingSummary,
+  type SessionStatusGlyph,
   type SessionStatusView
 } from '@/lib/studio-session-view'
 
@@ -146,25 +150,40 @@ export function SessionTransport({
   )
 }
 
+/** The pill's leading icon per state (plan 174 B-17): record, on air, trouble. */
+const SESSION_STATUS_ICONS: Record<SessionStatusGlyph, AppIcon> = {
+  record: RecordIcon,
+  live: LivestreamIcon,
+  alert: AlertIcon
+}
+
 /**
- * The session status pill. An on-air session reads "Streaming" in the live
+ * The session status pill. An on-air session reads "On air" in the live
  * tone, and adds a quiet "Rec" when it also records: Go Live is record+stream,
- * which the backend reports as `recording` (plan 095 S5). data hook: the
- * backend-resilience and captions smokes read the pill, never the Rec chip.
+ * which the backend reports as `recording` (plan 095 S5). Recording, on air
+ * and trouble each lead with their own icon, and idle reads "Not ready" when
+ * nothing can start (plan 174 B-17). A polite live region, so a state change
+ * is announced. data hook: the backend-resilience and captions smokes read the
+ * pill, never the Rec chip.
  */
 export function SessionStatusPill({
   recording,
-  wsStatus
+  wsStatus,
+  startBlocked = false
 }: {
   recording: SessionStatusView
   wsStatus: string
+  /** Nothing can start right now; the Session section says why. */
+  startBlocked?: boolean
 }): ReactElement {
+  const glyph = sessionStatusGlyph(recording, wsStatus)
   return (
     <>
-      <span data-videorc-session-status>
+      <span data-videorc-session-status role="status">
         <StatusBadge
-          tone={sessionStatusTone(recording, wsStatus)}
-          value={sessionStatusLabel(recording, wsStatus)}
+          icon={glyph ? SESSION_STATUS_ICONS[glyph] : undefined}
+          tone={sessionStatusTone(recording, wsStatus, { startBlocked })}
+          value={sessionStatusLabel(recording, wsStatus, { startBlocked })}
         />
       </span>
       {wsStatus === 'connected' && sessionAlsoRecords(recording) ? (
@@ -249,7 +268,7 @@ export function SessionPanel({
         <NavigableRow
           icon={FrameIcon}
           label="Output"
-          value={outputSummary(video)}
+          value={formatVideoQuality(video)}
           onNavigate={() => openStudioPanel('recording')}
         />
         {/* Presence W3: while a session runs, whether the co-host is reading

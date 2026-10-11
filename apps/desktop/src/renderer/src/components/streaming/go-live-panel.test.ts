@@ -16,7 +16,6 @@ import { videoPresets, type ProviderStreamOutputPlan } from '@/lib/capture'
 
 import {
   encoderLabel,
-  formatQuality,
   qualitySummary,
   ReadyToGoLive,
   TECHNICAL_DETAILS_STORAGE_KEY,
@@ -183,16 +182,9 @@ describe('qualitySummary', () => {
       { target: target('instagram', 'Instagram'), video: vertical }
     ])
     expect(summary.text).toBe('Varies by destination')
-    expect(summary.title).toContain('TikTok: 1080×1920 · 30 fps · 6 Mbps')
-    expect(summary.title).toContain('Instagram: 1080×1920')
+    expect(summary.title).toContain('TikTok: 1080 × 1920 · 30 fps · 6 Mbps')
+    expect(summary.title).toContain('Instagram: 1080 × 1920')
     expect(summary.title).not.toContain('Custom')
-  })
-
-  it('formats landscape as NNNp and keeps portrait dimensions', () => {
-    expect(formatQuality(stream1080)).toBe('1080p · 30 fps · 6 Mbps')
-    expect(formatQuality({ ...stream1080, width: 1080, height: 1920, bitrateKbps: 4500 })).toBe(
-      '1080×1920 · 30 fps · 4.5 Mbps'
-    )
   })
 })
 

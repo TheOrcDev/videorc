@@ -27,7 +27,7 @@ export function acceleratorInlineLabel(accelerator: string, platform: string | u
 export function shortcutRecorderStep(
   input: AcceleratorKeyInput,
   platform: string | undefined,
-  /** The caller's own refusal, e.g. "Already used by Screen + Cam." */
+  /** The caller's own refusal, e.g. "Already used by Screen + camera." */
   validate: (accelerator: string) => string | null
 ): ShortcutRecorderStep {
   const result = acceleratorFromKeyInput(input, platform)

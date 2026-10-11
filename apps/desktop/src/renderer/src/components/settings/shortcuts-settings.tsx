@@ -16,6 +16,7 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutRegistration } from '@/lib/global-shortcuts'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
+import { layoutPresetLabel } from '@/lib/layout-labels'
 import { shortcutsByGroup } from '@/lib/shortcuts'
 
 const GLOBAL_ACTION_ROWS = [
@@ -111,13 +112,13 @@ export function ShortcutsSettings(): ReactElement {
             <FieldGroup variant="grouped">
               {BUILTIN_LAYOUTS.filter(
                 ({ id }) => id.startsWith('vertical-') === (orientation === 'vertical')
-              ).map(({ id, label }) => {
+              ).map(({ id }) => {
                 const action = `layout:${id}` as const
                 return (
                   <ShortcutRecorderField
                     key={id}
                     id={`global-layout-${id}`}
-                    label={label}
+                    label={layoutPresetLabel(id)}
                     platform={runtimeInfo?.platform}
                     validate={validateGlobalShortcut(action)}
                     registrationFailed={shortcutRegistration[action] === false}

@@ -25,24 +25,25 @@ describe('grantRenewalDelayMs', () => {
 })
 
 describe('formatMediaTime', () => {
-  it('reads mm:ss under an hour and h:mm:ss from an hour on', () => {
+  it('reads m:ss under an hour and h:mm:ss from an hour on (plan 174 S1.4)', () => {
     expect(mediaTimeHasHours(3_599_999)).toBe(false)
     expect(mediaTimeHasHours(3_600_000)).toBe(true)
     expect(mediaTimeHasHours(Number.NaN)).toBe(false)
-    expect(formatMediaTime(0, false)).toBe('00:00')
+    expect(formatMediaTime(0, false)).toBe('0:00')
+    expect(formatMediaTime(125_000, false)).toBe('2:05')
     expect(formatMediaTime(754_900, false)).toBe('12:34')
     expect(formatMediaTime(3_599_999, false)).toBe('59:59')
-    // Without hours a long position keeps counting minutes.
-    expect(formatMediaTime(3_660_000, false)).toBe('61:00')
+    // Past an hour the hours appear even when not asked for.
+    expect(formatMediaTime(3_660_000, false)).toBe('1:01:00')
     expect(formatMediaTime(0, true)).toBe('0:00:00')
     expect(formatMediaTime(3_661_000, true)).toBe('1:01:01')
     expect(formatMediaTime(7_200_000 + 5_000, true)).toBe('2:00:05')
   })
 
   it('shows zero for anything that is not a time', () => {
-    expect(formatMediaTime(-5_000, false)).toBe('00:00')
+    expect(formatMediaTime(-5_000, false)).toBe('0:00')
     expect(formatMediaTime(Number.NaN, true)).toBe('0:00:00')
-    expect(formatMediaTime(Number.POSITIVE_INFINITY, false)).toBe('00:00')
+    expect(formatMediaTime(Number.POSITIVE_INFINITY, false)).toBe('0:00')
   })
 })
 

@@ -115,7 +115,7 @@ describe('saved marker timeline', () => {
   it('retains the titled timestamp and editable metadata for stream-only sessions', async () => {
     await mount({ ...session, mode: 'stream', mp4Path: undefined })
     expect(document.body.textContent).toContain('no local video')
-    expect(document.body.textContent).toContain('00:00:12')
+    expect(document.body.textContent).toContain('0:12')
     expect(document.querySelector('[data-slot="marker-timeline"]')).toBeTruthy()
     expect(mocked.player).not.toHaveBeenCalled()
   })
@@ -179,7 +179,7 @@ describe('saved marker timeline', () => {
   })
   it('shows timestamps without proportional pins when the capture duration is unknown', async () => {
     await mount({ ...session, mode: 'stream', mp4Path: undefined, durationMs: undefined })
-    expect(document.body.textContent).toContain('00:00:12')
+    expect(document.body.textContent).toContain('0:12')
     expect(document.body.textContent).toContain('Shadcn New Library')
     expect(document.querySelector('[data-slot="marker-timeline"]')).toBeNull()
   })

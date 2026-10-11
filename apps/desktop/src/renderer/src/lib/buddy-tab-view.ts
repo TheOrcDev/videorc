@@ -4,6 +4,7 @@ import { COHOST_ERROR_TOAST_MESSAGES, cohostErrorDetail } from './cohost-state'
 import { cohostErrorDetailText, cohostListeningView } from './cohost-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 import type { BuddyTabId } from './buddy-tabs'
+import { platformLabel } from './platform-copy'
 
 // The Buddy tab (plan 119 S2): Videorc's AI tab, under Studio. Everything here
 // is a pure derivation of what the studio provider already holds, so the tab,
@@ -267,10 +268,10 @@ const REMOVE_MESSAGES_PLATFORMS = ['youtube', 'twitch', 'kick', 'x'] as const
 
 const REMOVE_MESSAGES_PLATFORM_LABELS: Record<(typeof REMOVE_MESSAGES_PLATFORMS)[number], string> =
   {
-    youtube: 'YouTube',
-    twitch: 'Twitch',
-    kick: 'Kick',
-    x: 'X'
+    youtube: platformLabel('youtube'),
+    twitch: platformLabel('twitch'),
+    kick: platformLabel('kick'),
+    x: platformLabel('x')
   }
 
 /** The row's short status: the row stays one line, the fix is the button. */

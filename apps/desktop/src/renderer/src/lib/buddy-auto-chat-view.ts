@@ -7,6 +7,7 @@ import type {
   StreamPlatform
 } from '@/lib/backend'
 import { CHAT_SEND_PLATFORM_MAX_CHARS } from '@/lib/chat-send'
+import { platformLabel } from '@/lib/platform-copy'
 
 // Automatic chat (plan 164 Phase D): the pure side of the greetings editor
 // (Buddy tab → Chat) and the Stream Manager's mode control. The backend
@@ -94,10 +95,10 @@ export const BUDDY_TEMPLATE_KIND_PLATFORMS: Record<
 }
 
 export const BUDDY_GREETING_PLATFORM_LABELS: Record<CohostGreetingPlatform, string> = {
-  twitch: 'Twitch',
-  youtube: 'YouTube',
-  kick: 'Kick',
-  x: 'X'
+  twitch: platformLabel('twitch'),
+  youtube: platformLabel('youtube'),
+  kick: platformLabel('kick'),
+  x: platformLabel('x')
 }
 
 /** The braces a template may use, in the order the Fields popover lists them. */

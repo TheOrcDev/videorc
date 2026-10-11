@@ -138,12 +138,66 @@ describe('Kbd and StatusDot', () => {
 
   it('draws the ambient dot as a glass dot with a monochrome label', () => {
     const markup = renderToStaticMarkup(
-      createElement(StatusDot, { tone: 'error', label: 'recording', pulse: true })
+      createElement(StatusDot, { tone: 'live', label: 'Recording', pulse: true })
     )
     expect(markup).toContain('tone-live')
     expect(markup).toContain('glass-dot')
     expect(markup).toContain('motion-safe:animate-ping')
     expect(markup).not.toMatch(TONE_TEXT)
+  })
+
+  it('shares the StatusBadge tones: live is record and on air, error is a failure (plan 174 S1.3)', () => {
+    const dotTone = (tone: StatusTone): string =>
+      renderToStaticMarkup(createElement(StatusDot, { tone }))
+    expect(dotTone('live')).toContain('tone-live')
+    expect(dotTone('error')).toContain('tone-destructive')
+    expect(dotTone('error')).not.toContain('tone-live')
+    expect(dotTone('good')).toContain('tone-success')
+    expect(dotTone('warn')).toContain('tone-warning')
+    expect(dotTone('neutral')).toContain('tone-neutral')
+  })
+})
+
+// Plan 174 S1.3 (A-6): the primitives used to `capitalize` whatever they got,
+// so raw enums read as Title Case chips ("Device-Missing", "Checked On First
+// Use"). They now print the word they are given, and refuse a raw value.
+describe('status words, not enums', () => {
+  it('never recase the word they are given', () => {
+    for (const markup of [
+      renderToStaticMarkup(createElement(StatusBadge, { value: 'Checked on first use' })),
+      renderToStaticMarkup(createElement(StatusDot, { label: 'Needs reconnect' }))
+    ]) {
+      expect(classOf(markup)).not.toContain('capitalize')
+      expect(markup).not.toMatch(/(^|[\s"])(capitalize|uppercase|lowercase)([\s"]|$)/)
+    }
+    expect(
+      renderToStaticMarkup(createElement(StatusBadge, { value: 'Checked on first use' }))
+    ).toContain('>Checked on first use<')
+  })
+
+  it('keep no text-transform class in their source', () => {
+    for (const file of ['./status-badge.tsx', './status-dot.tsx']) {
+      const source = readFileSync(new URL(file, import.meta.url), 'utf8')
+      expect(source).not.toMatch(/\b(capitalize|uppercase|lowercase)\b/)
+    }
+  })
+
+  it('reject a raw machine value', () => {
+    for (const value of ['connected', 'device-missing', 'permission-needed', 'live']) {
+      expect(() => renderToStaticMarkup(createElement(StatusBadge, { value }))).toThrow(
+        /raw status value/
+      )
+      expect(() => renderToStaticMarkup(createElement(StatusDot, { label: value }))).toThrow(
+        /raw status value/
+      )
+    }
+  })
+
+  it('accept words, counts and measurements', () => {
+    for (const value of ['On air', 'Not ready', '2', '30.0 fps', '1/2 live', 'Fallback (JPEG)']) {
+      expect(() => renderToStaticMarkup(createElement(StatusBadge, { value }))).not.toThrow()
+      expect(() => renderToStaticMarkup(createElement(StatusDot, { label: value }))).not.toThrow()
+    }
   })
 })
 

@@ -26,7 +26,7 @@ export function isTransientBackendError(message: string): boolean {
  * Whether an error message should surface a toast at all.
  *
  * A transient transport error while the socket is NOT connected is suppressed
- * outright — the "Connecting…" / "Backend offline" badge covers that window, so
+ * outright — the "Connecting…" / "Videorc is reconnecting…" badge covers that window, so
  * a red card is redundant noise (and stacks). Everything else toasts: genuine
  * RPC errors at any status, and a transient error during a CONNECTED-state blip
  * (surfaced once via a keyed id by the caller).

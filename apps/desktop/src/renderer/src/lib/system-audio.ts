@@ -2,6 +2,7 @@ import { toast } from '@/lib/toast'
 
 import type { Device, DeviceList, DeviceStatus } from '@/lib/backend'
 import type { SystemAudioIssue } from '@/lib/system-audio-session'
+import { platformCopy } from '@/lib/platform-copy'
 
 export {
   confirmedSystemAudioMix,
@@ -115,14 +116,17 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
   }
 }
 
-/** One line of health copy per issue: what happened, and what still works. */
-export function systemAudioIssueCopy(issue: SystemAudioIssue): string {
+/**
+ * One line of health copy per issue: what happened, and what still works.
+ * The echo names the computer it plays on (plan 174 C-30).
+ */
+export function systemAudioIssueCopy(issue: SystemAudioIssue, platform?: string): string {
   return issue === 'lost'
     ? 'System audio stopped. The session keeps going.'
     : issue === 'bypassed'
       ? 'System audio is off for this session because the microphone is on a fallback input.'
       : issue === 'echo'
-        ? 'Paused: your stream is playing on this Mac and coming back as an echo. Mute that tab, then resume.'
+        ? `Paused: your stream is playing on this ${platformCopy(platform).deviceNoun} and coming back as an echo. Mute that tab, then resume.`
         : 'System audio could not start.'
 }
 
