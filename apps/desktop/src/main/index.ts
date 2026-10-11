@@ -1,4 +1,5 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
+import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
   BUDDY_ASSETS_FOLDER,
   importBuddyPetFolder,
@@ -14074,6 +14075,20 @@ async function importBackgroundImageFromPath(
   mkdirSync(directory, { recursive: true })
   const assetPath = join(directory, managedBackgroundFileName(id, sourcePath))
   copyFileSync(sourcePath, assetPath)
+  // A ~480 px copy for the Assets tile (plan 174 C-40); the full file
+  // otherwise, when this image can't be decoded here.
+  let thumbnailFileName: string | null = null
+  try {
+    thumbnailFileName = writeBackgroundThumbnail({
+      id,
+      sourcePath,
+      directory,
+      image: nativeImage.createFromPath(assetPath),
+      write: (path, bytes) => writeFileSync(path, bytes)
+    })
+  } catch (error) {
+    console.warn('[assets] background thumbnail failed', error)
+  }
 
   await requestBackendAdmin('resource.capability.register_background', {
     assetId: id,
@@ -14083,7 +14098,7 @@ async function importBackgroundImageFromPath(
     id,
     name: backgroundAssetNameFromPath(sourcePath),
     assetPath: managedBackgroundAssetUrl(basename(assetPath)),
-    thumbnailPath: managedBackgroundAssetUrl(basename(assetPath)),
+    thumbnailPath: managedBackgroundAssetUrl(thumbnailFileName ?? basename(assetPath)),
     fileName: basename(sourcePath)
   }
 }

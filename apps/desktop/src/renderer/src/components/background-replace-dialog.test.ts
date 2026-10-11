@@ -146,7 +146,7 @@ describe('Assets Import on a fresh profile', () => {
       root.render(createElement(BackgroundAssetsProvider, null, createElement(AssetsTab)))
     )
 
-    await act(async () => button('Import')!.click())
+    await act(async () => button('Import image…')!.click())
     expect(importBackgroundImage).toHaveBeenCalledTimes(1)
     expect(mocked.toast.error).not.toHaveBeenCalled()
     // The last slot is preselected on a profile with no active background.
@@ -169,7 +169,7 @@ describe('Assets Import on a fresh profile', () => {
     await act(async () =>
       root.render(createElement(BackgroundAssetsProvider, null, createElement(AssetsTab)))
     )
-    await act(async () => button('Import')!.click())
+    await act(async () => button('Import image…')!.click())
     expect(radios()).toHaveLength(0)
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEYS.backgroundAssets)!)
     expect(

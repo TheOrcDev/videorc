@@ -1174,6 +1174,8 @@ export type StudioContextValue = {
   sessionDetailsLoading: ReadonlySet<string>
   sessionDetailError: { sessionId: string; message: string } | null
   screens: StreamScreen[]
+  /** The takeover list has arrived once (plan 174 J2-8): "No takeovers yet" waits for it. */
+  screensLoaded: boolean
   activeScreen: StreamScreen | null
   platformAccounts: PlatformAccount[]
   platformAccountValidations: PlatformAccountValidation[]
@@ -1594,6 +1596,9 @@ interface StudioAudioContextValue {
   audioMeterLoading: boolean
   meterLevel: number
 }
+
+/** The takeover list before it loads: one stable empty array. */
+const NO_SCREENS: StreamScreen[] = []
 
 const StudioContext = createContext<StudioCoreContextValue | null>(null)
 const StudioRecordingStateContext = createContext<StudioRecordingStateContextValue | null>(null)
@@ -2310,7 +2315,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [sessionStorageTotals, setSessionStorageTotals] = useState<SessionStorageTotals | null>(
     null
   )
-  const [screens, setScreens] = useState<StreamScreen[]>([])
+  // Null until the backend first answers, so an empty list is never claimed
+  // before it is known (plan 174 J2-8).
+  const [screenList, setScreens] = useState<StreamScreen[] | null>(null)
+  const screens = screenList ?? NO_SCREENS
+  const screensLoaded = screenList !== null
   const [activeScreen, setActiveScreen] = useState<StreamScreen | null>(null)
   const [platformAccounts, setPlatformAccounts] = useState<PlatformAccount[]>([])
   const [platformAccountValidations, setPlatformAccountValidations] = useState<
@@ -10592,7 +10601,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sourceCapability: selection.capabilityId
       })
       setScreens((current) => {
-        const withoutExisting = current.filter((item) => item.id !== screen.id)
+        const withoutExisting = (current ?? []).filter((item) => item.id !== screen.id)
         return [...withoutExisting, screen].sort((a, b) => a.sortOrder - b.sortOrder)
       })
       await refreshScreensForClient(client)
@@ -11716,7 +11725,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         setLastError(null)
         const screen = await client.request<StreamScreen>('screens.rename', { screenId, name })
-        setScreens((current) => current.map((item) => (item.id === screen.id ? screen : item)))
+        setScreens((current) =>
+          (current ?? []).map((item) => (item.id === screen.id ? screen : item))
+        )
       } catch (error) {
         reportError(error, { action: 'rename', object: 'the takeover' })
       }
@@ -15897,6 +15908,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionDetailsLoading,
       sessionDetailError,
       screens,
+      screensLoaded,
       activeScreen,
       platformAccounts,
       platformAccountValidations,
@@ -16141,6 +16153,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionDetailsLoading,
       sessionDetailError,
       screens,
+      screensLoaded,
       activeScreen,
       platformAccounts,
       platformAccountValidations,
