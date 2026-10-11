@@ -34,7 +34,7 @@ import {
   FieldLabel,
   FieldTitle
 } from '@/components/ui/field'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
 import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
@@ -53,7 +53,7 @@ import {
   buddyLiveView,
   type BuddyLiveStatus
 } from '@/lib/buddy-tab-view'
-import { displayKeyGlyph } from '@/lib/platform'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
@@ -315,8 +315,6 @@ function BuddyLiveSection(): ReactElement {
   const { openCommentsWindow } = useStudioShell()
   const view = useBuddyLive()
   const buddyName = cohostSettings?.persona.name ?? 'Buddy'
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
-  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
   return (
     <PanelSection
@@ -348,10 +346,11 @@ function BuddyLiveSection(): ReactElement {
         >
           <ChatIcon data-icon="inline-start" />
           Open Stream Manager
-          <Kbd className="ml-0.5">
-            {shiftKey}
-            {modKey}J
-          </Kbd>
+          <ShortcutKeys
+            accelerator={shortcutAccelerator('comments-window')}
+            className="ml-0.5"
+            platform={runtimeInfo?.platform}
+          />
         </Button>
       ) : null}
 

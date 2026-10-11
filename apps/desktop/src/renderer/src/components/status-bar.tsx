@@ -1,5 +1,6 @@
 import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { cn } from '@/lib/utils'
 
 /**
@@ -43,13 +44,16 @@ export function StatusBar({
  * tertiary. `pressed` marks a window that is open (the action then closes it).
  */
 export function StatusBarHint({
-  keys,
+  accelerator,
+  platform,
   label,
   pressed,
   onClick,
   className
 }: {
-  keys: string
+  /** The shortcut as an Electron accelerator, printed per platform (plan 174 S1.2). */
+  accelerator: string
+  platform?: string
   label: string
   pressed?: boolean
   onClick: () => void
@@ -63,7 +67,12 @@ export function StatusBarHint({
       type="button"
       onClick={onClick}
     >
-      <span className="font-medium text-muted-foreground">{keys}</span>
+      <ShortcutKeys
+        accelerator={accelerator}
+        className="text-muted-foreground"
+        platform={platform}
+        variant="text"
+      />
       {label}
     </button>
   )
@@ -71,7 +80,7 @@ export function StatusBarHint({
 
 /**
  * One action in a status bar (plan 174 S1.6b, H-PAT): an icon, a word, or
- * both, and optionally its keys. `label` is the action's name: what a screen
+ * both, and optionally its shortcut. `label` is the action's name: what a screen
  * reader says, and the hover text of an icon alone. `text` is the visible
  * word when there is room for one ("Mark clip", "Clear"); `hint` is hover
  * text that says more than the name. `pressed` marks a toggle that is on.
@@ -82,7 +91,7 @@ export function StatusBarAction({
   label,
   text,
   hint,
-  keys,
+  accelerator,
   pressed,
   className,
   ...props
@@ -91,7 +100,8 @@ export function StatusBarAction({
   label: string
   text?: ReactNode
   hint?: string
-  keys?: ReactNode
+  /** The shortcut as an Electron accelerator, printed per platform (plan 174 S1.2). */
+  accelerator?: string
   pressed?: boolean
 } & Omit<ComponentProps<'button'>, 'children'>): ReactElement {
   return (
@@ -106,7 +116,13 @@ export function StatusBarAction({
       data-slot="status-bar-action"
     >
       {icon}
-      {keys ? <span className="font-medium text-muted-foreground">{keys}</span> : null}
+      {accelerator ? (
+        <ShortcutKeys
+          accelerator={accelerator}
+          className="font-medium text-muted-foreground"
+          variant="text"
+        />
+      ) : null}
       {text}
     </button>
   )

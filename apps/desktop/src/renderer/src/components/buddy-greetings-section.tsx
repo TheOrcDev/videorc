@@ -6,7 +6,7 @@ import { GroupedList, ListRow, ListRowButton } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Select,
@@ -40,7 +40,11 @@ import {
   newGreetingTemplate,
   resolveGreetingPreview
 } from '@/lib/buddy-auto-chat-view'
+import { shortcutLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
+
+/** A greeting's editor adds a variant from the keyboard too (G-23). */
+const ADD_VARIANT_ACCELERATOR = 'CmdOrCtrl+N'
 
 const STATE_OPTIONS: SegmentedControlOption<CohostUtteranceState>[] = [
   { value: 'talk', label: 'Talk' },
@@ -378,7 +382,7 @@ function GreetingEditor({
         <span className="flex-1" />
         <Button
           size="xs"
-          title="Add variant (⌘N)"
+          title={`Add variant (${shortcutLabel(ADD_VARIANT_ACCELERATOR)})`}
           type="button"
           variant="ghost"
           onClick={() => {
@@ -387,7 +391,7 @@ function GreetingEditor({
           }}
         >
           Add variant
-          <Kbd>⌘N</Kbd>
+          <ShortcutKeys accelerator={ADD_VARIANT_ACCELERATOR} />
         </Button>
         <Button
           aria-label="Remove greeting"

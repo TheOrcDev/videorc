@@ -1,8 +1,15 @@
 // Renderer-side platform awareness. The main process reports the real
 // platform through runtimeInfo.platform ('darwin' | 'win32' | 'linux' | …);
 // components read it to pick OS-correct copy, permission flows, and keyboard
-// glyphs. Defaults to 'darwin' only as a pre-runtimeInfo boot fallback — the
-// value is replaced the moment runtimeInfo arrives.
+// glyphs. Before runtimeInfo arrives (and in the windows that never get it)
+// the platform the theme bootstrap wrote on <html> before the first paint
+// stands in, so nothing flashes "Ctrl" on a Mac (plan 174 S1.2).
+
+import {
+  acceleratorAriaKeyShortcuts,
+  acceleratorLabel,
+  commandModifierHeld
+} from '../../../shared/accelerator-format'
 
 export type AppPlatform = 'darwin' | 'win32' | 'other'
 
@@ -36,10 +43,9 @@ export function osSettingsName(platform: string | undefined): string {
   }
 }
 
-// macOS uses ⌘ (Cmd) as the primary modifier; Windows/Linux use Ctrl. The
-// keydown handlers already accept `metaKey || ctrlKey`, so only the DISPLAYED
-// glyph needs translating. Shortcut data is authored with mac glyphs
-// (shortcuts.ts) and rendered through this map.
+// A glyph authored mac-style, for the platform: ⌘ → Ctrl, ⌥ → Alt, ⇧ → Shift.
+// Shortcuts are authored as accelerators now (lib/shortcuts.ts) and shown
+// through ShortcutKeys / shortcutLabel; this stays for a lone modifier.
 const NON_MAC_KEY_GLYPHS: Record<string, string> = {
   '⌘': 'Ctrl',
   '⌥': 'Alt',
@@ -48,15 +54,10 @@ const NON_MAC_KEY_GLYPHS: Record<string, string> = {
 
 /** Translates a single displayed key glyph for the platform (⌘ → Ctrl, etc.). */
 export function displayKeyGlyph(glyph: string, platform: string | undefined): string {
-  if (appPlatform(platform) === 'darwin') {
+  if (appPlatform(currentPlatform(platform)) === 'darwin') {
     return glyph
   }
   return NON_MAC_KEY_GLYPHS[glyph] ?? glyph
-}
-
-/** Translates every glyph in a key sequence (shortcuts.ts `keys` arrays). */
-export function displayKeyGlyphs(keys: readonly string[], platform: string | undefined): string[] {
-  return keys.map((key) => displayKeyGlyph(key, platform))
 }
 
 // Non-React callers (sonner toasts) cannot read runtimeInfo. Electron's
@@ -71,6 +72,39 @@ function detectedPlatform(): string | undefined {
     return 'darwin'
   }
   return userAgent ? 'linux' : undefined
+}
+
+/**
+ * The platform to print keys for: the one passed (runtimeInfo), else the one
+ * theme-bootstrap.js / window-theme-bootstrap.js set on <html> before the
+ * first paint, else the user agent.
+ */
+export function currentPlatform(platform?: string): string | undefined {
+  if (platform) return platform
+  const bootstrapped =
+    typeof document === 'undefined' ? undefined : document.documentElement?.dataset.platform
+  return bootstrapped || detectedPlatform()
+}
+
+/** A shortcut in running copy and titles: "⇧⌘J" on macOS, "Ctrl+Shift+J" elsewhere. */
+export function shortcutLabel(accelerator: string, platform?: string): string {
+  return acceleratorLabel(accelerator, currentPlatform(platform))
+}
+
+/** `aria-keyshortcuts` for an accelerator: "Meta+K" on macOS, "Control+K" elsewhere. */
+export function shortcutAriaKeys(accelerator: string, platform?: string): string {
+  return acceleratorAriaKeyShortcuts(accelerator, currentPlatform(platform))
+}
+
+/** A shell shortcut's modifier: ⌘ alone on macOS, Ctrl elsewhere (A-17). */
+export function isCommandKey(
+  event: { metaKey: boolean; ctrlKey: boolean },
+  platform?: string
+): boolean {
+  return commandModifierHeld(
+    { meta: event.metaKey, control: event.ctrlKey },
+    currentPlatform(platform)
+  )
 }
 
 /** Label for "reveal this file in the OS file manager" actions. */
@@ -90,18 +124,4 @@ export function revealInFileManagerLabel(
 /** The OS's name for where a deleted file goes: a Library delete moves there (plan 174 E-2). */
 export function trashName(platform: string | undefined = detectedPlatform()): string {
   return appPlatform(platform) === 'win32' ? 'Recycle Bin' : 'Trash'
-}
-
-/** Electron accelerator examples are authored mac-style (`Cmd+Shift+R`). */
-export function displayAccelerator(
-  accelerator: string,
-  platform: string | undefined = detectedPlatform()
-): string {
-  if (appPlatform(platform) === 'darwin') {
-    return accelerator
-  }
-  return accelerator
-    .split('+')
-    .map((part) => (part === 'Cmd' ? 'Ctrl' : part === 'Option' ? 'Alt' : part))
-    .join('+')
 }

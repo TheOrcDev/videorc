@@ -15,6 +15,7 @@ import {
   BUDDY_CREATE_USED_UP,
   BUDDY_REACTION_DEFAULT_VALUE,
   buddyChoosableReactions,
+  buddyReactionDisabledReason,
   buddyPetCapability,
   buddyPetCreateAvailability,
   buddyPetPosesLabel,
@@ -196,5 +197,35 @@ describe('buddy-pet-creator-nav', () => {
     expect(seen).toEqual([false, true, false])
     await act(async () => root.unmount())
     vi.unstubAllGlobals()
+  })
+})
+
+describe('buddyReactionDisabledReason (plan 174 S1.1, F-12)', () => {
+  const wave = { id: 'wave', label: 'Wave' }
+
+  it('gives no reason while the chip plays, or while the whole header is off', () => {
+    expect(
+      buddyReactionDisabledReason({ relay: true, alive: true, packReactions: ['wave'], chip: wave })
+    ).toBeNull()
+    expect(
+      buddyReactionDisabledReason({ relay: false, alive: false, packReactions: null, chip: wave })
+    ).toBeNull()
+  })
+
+  it('says why a chip is off: a still Buddy, a pack still loading, a pack without it', () => {
+    expect(
+      buddyReactionDisabledReason({ relay: true, alive: false, packReactions: [], chip: wave })
+    ).toBe('Only an Alive Buddy reacts. Make it Alive on the Buddy page.')
+    expect(
+      buddyReactionDisabledReason({ relay: true, alive: true, packReactions: null, chip: wave })
+    ).toBe('Reactions are not ready yet.')
+    expect(
+      buddyReactionDisabledReason({
+        relay: true,
+        alive: true,
+        packReactions: ['laugh'],
+        chip: wave
+      })
+    ).toBe('This Buddy has no wave reaction.')
   })
 })

@@ -6,11 +6,12 @@ import { AccountMenu } from '@/components/account-menu'
 import { type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useTrafficLightGutter } from '@/components/window-frame'
 import { useModifierHeld } from '@/hooks/use-modifier-held'
 import { useReducedMotion } from '@/hooks/use-reduced-motion'
-import { displayKeyGlyph } from '@/lib/platform'
+import { shortcutAriaKeys, shortcutLabel } from '@/lib/platform'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { shortcutChipProps } from '@/lib/shortcut-overlay'
 import { useUpdater } from '@/hooks/use-updater'
 import { updateChip } from '@/lib/update-ui'
@@ -32,7 +33,7 @@ function NavRow({
   isActive,
   triggerId,
   shortcutDigit,
-  modKey,
+  platform,
   shortcutVisible,
   shortcutIndex,
   onClick
@@ -42,7 +43,7 @@ function NavRow({
   isActive: boolean
   triggerId: string
   shortcutDigit?: string
-  modKey: string
+  platform?: string
   shortcutVisible: boolean
   shortcutIndex: number
   onClick: () => void
@@ -51,7 +52,9 @@ function NavRow({
     <button
       type="button"
       aria-current={isActive ? 'page' : undefined}
-      aria-keyshortcuts={shortcutDigit ? `Meta+${shortcutDigit}` : undefined}
+      aria-keyshortcuts={
+        shortcutDigit ? shortcutAriaKeys(`CmdOrCtrl+${shortcutDigit}`, platform) : undefined
+      }
       data-videorc-tab-trigger={triggerId}
       onClick={onClick}
       className={cn(
@@ -71,10 +74,11 @@ function NavRow({
         // row from reflowing the instant ⌘ goes down. `aria-keyshortcuts` on
         // the button already tells assistive tech about the shortcut, so the
         // hidden chip is decoration and stays out of the accessibility tree.
-        <Kbd {...shortcutChipProps(shortcutVisible, shortcutIndex)}>
-          {modKey}
-          {shortcutDigit}
-        </Kbd>
+        <ShortcutKeys
+          accelerator={`CmdOrCtrl+${shortcutDigit}`}
+          platform={platform}
+          {...shortcutChipProps(shortcutVisible, shortcutIndex)}
+        />
       ) : null}
     </button>
   )
@@ -169,7 +173,6 @@ export function Sidebar({
 }): ReactElement {
   const tabsIn = (group: string): typeof WORKSPACE_TABS =>
     WORKSPACE_TABS.filter((tab) => tab.group === group)
-  const modKey = displayKeyGlyph('⌘', platform)
   // Chips reveal while the command modifier is held — the shortcut layer
   // surfaces exactly when the user reaches for it (videorc-design keeps the
   // app keyboard-first; this keeps it quiet too).
@@ -201,11 +204,11 @@ export function Sidebar({
           Videorc
         </span>
         <Button
-          aria-keyshortcuts="Meta+K"
-          aria-label={`Search (${modKey}K)`}
+          aria-keyshortcuts={shortcutAriaKeys(shortcutAccelerator('search'), platform)}
+          aria-label="Search"
           className="text-muted-foreground [-webkit-app-region:no-drag]"
           size="icon-sm"
-          title={`Search (${modKey}K)`}
+          title={`Search (${shortcutLabel(shortcutAccelerator('search'), platform)})`}
           type="button"
           variant="ghost"
           onClick={onOpenCommand}
@@ -229,7 +232,7 @@ export function Sidebar({
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
               shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
-              modKey={modKey}
+              platform={platform}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelect(tab.id)}
             />
@@ -247,7 +250,7 @@ export function Sidebar({
               triggerId={panel.legacyTabId}
               shortcutDigit={shortcutDigitFor(panel.id)}
               shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(panel.id)}
-              modKey={modKey}
+              platform={platform}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelectStudioPanel(panel.id)}
             />
@@ -265,7 +268,7 @@ export function Sidebar({
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
               shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
-              modKey={modKey}
+              platform={platform}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelect(tab.id)}
             />
@@ -288,7 +291,7 @@ export function Sidebar({
                 triggerId={tab.id}
                 shortcutDigit={shortcutDigitFor(tab.id)}
                 shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
-                modKey={modKey}
+                platform={platform}
                 shortcutVisible={shortcutVisible}
                 onClick={() => onSelect(tab.id)}
               />

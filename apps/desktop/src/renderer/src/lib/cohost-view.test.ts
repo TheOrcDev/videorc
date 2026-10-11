@@ -599,7 +599,8 @@ describe('cohostQuestionToast', () => {
       nowMs: 1_000
     })
     expect(raised?.message).toContain('Buddy:')
-    expect(raised?.message).toContain('⌘J')
+    // The host's own key (not a Mac in this test): Ctrl+J, never a Mac glyph.
+    expect(raised?.message).toContain('Ctrl+J')
     expect(raised?.atMs).toBe(1_000)
   })
 
@@ -675,15 +676,20 @@ describe('cohostQuestionToast', () => {
 
   it('names how many people are asking', () => {
     expect(
-      cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }))
+      cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }), '⌘J')
     ).toBe('Buddy: 5 people asking: What keyboard is that? · ⌘J')
-    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), '⌘J')).toBe(
       'Buddy: Ada is asking: What keyboard is that? · ⌘J'
     )
   })
 
   it('writes the shortcut the way the platform does (Ctrl+J on Windows)', () => {
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), 'Ctrl+J')).toBe(
+      'Buddy: Ada is asking: What keyboard is that? · Ctrl+J'
+    )
+    // Plan 174 H-22: by default, the platform every shortcut prints for (no
+    // user agent regex); this test runs on a host that is not a Mac.
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
       'Buddy: Ada is asking: What keyboard is that? · Ctrl+J'
     )
   })

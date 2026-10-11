@@ -241,3 +241,26 @@ export const BUDDY_REACTION_CHIPS: readonly { id: string; label: string }[] = [
   { id: 'surprised', label: 'Surprised' },
   { id: 'proud', label: 'Proud' }
 ]
+
+/**
+ * Why a reaction chip is off (plan 174 S1.1, F-12), or null while it plays.
+ * With no relay the whole Buddy header is off and says so itself.
+ */
+export function buddyReactionDisabledReason({
+  relay,
+  alive,
+  packReactions,
+  chip
+}: {
+  relay: boolean
+  /** The worn avatar is Alive (a still Buddy has no motion to play). */
+  alive: boolean
+  /** The loaded pack's reactions; null until it loads (or when it cannot). */
+  packReactions: readonly string[] | null
+  chip: { id: string; label: string }
+}): string | null {
+  if (!relay || packReactions?.includes(chip.id)) return null
+  if (!alive) return 'Only an Alive Buddy reacts. Make it Alive on the Buddy page.'
+  if (packReactions === null) return 'Reactions are not ready yet.'
+  return `This Buddy has no ${chip.label.toLowerCase()} reaction.`
+}

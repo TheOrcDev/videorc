@@ -44,12 +44,15 @@ let container: HTMLDivElement
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // The Mac look: the window bootstrap writes the platform before first paint.
+  document.documentElement.dataset.platform = 'darwin'
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
 })
 
 afterEach(async () => {
+  delete document.documentElement.dataset.platform
   await act(async () => root.unmount())
   container.remove()
   document.body.innerHTML = ''
@@ -109,7 +112,7 @@ describe('RemovalCards (plan 140, S6)', () => {
     ])
     expect(buttons(card)[0].dataset.variant).toBe('destructive')
     expect(buttons(card)[0].textContent).toBe('Remove↵')
-    expect(buttons(card)[1].textContent).toBe('Cancelesc')
+    expect(buttons(card)[1].textContent).toBe('CancelEsc')
     // Cancel is its own button, never inside another one.
     for (const button of buttons(card)) expect(button.querySelector('button')).toBeNull()
   })
@@ -119,7 +122,7 @@ describe('RemovalCards (plan 140, S6)', () => {
     const [card] = cards()
     expect(card.dataset.mode).toBe('countdown')
     expect(card.textContent).toContain('Removing in 4s')
-    expect(buttons(card).map((button) => button.textContent)).toEqual(['Cancelesc', 'Remove now↵'])
+    expect(buttons(card).map((button) => button.textContent)).toEqual(['CancelEsc', 'Remove now↵'])
     expect(buttons(card)[0].dataset.variant).toBe('secondary')
   })
 

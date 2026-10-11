@@ -399,7 +399,13 @@ describe('CohostPane', () => {
     })
     expect(markup).toContain('@container/cohost-pane')
     expect(markup).toMatch(/<div class="[^"]*flex-wrap[^"]*" data-slot="cohost-actions"/)
-    for (const title of ['Reply (R)', 'Show on stream (H)', 'Answered (A)', 'Dismiss (⌫)']) {
+    // Off macOS (this test's host) the keys read as words (plan 174 I-18).
+    for (const title of [
+      'Reply (R)',
+      'Show on stream (H)',
+      'Answered (A)',
+      'Dismiss (Backspace)'
+    ]) {
       expect(markup).toContain(`title="${title}"`)
     }
     // Every key chip carries the narrow-tier class; none is unconditional.

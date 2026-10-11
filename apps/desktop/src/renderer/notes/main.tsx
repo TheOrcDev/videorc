@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client'
 import { AppErrorBoundary } from '@/components/error-boundary'
 import { NotesWindow } from '@/components/notes-window'
 import { WindowFrame } from '@/components/window-frame'
+import { WindowProviders } from '@/components/window-providers'
 import '@/styles.css'
 
 // The recording-invisibility gate paints this window loud red; the sandboxed
@@ -13,9 +14,11 @@ const smokeMarker = new URLSearchParams(window.location.search).get('smokeMarker
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <WindowFrame>
-        <NotesWindow smokeMarker={smokeMarker} />
-      </WindowFrame>
+      <WindowProviders window="notes">
+        <WindowFrame>
+          <NotesWindow smokeMarker={smokeMarker} />
+        </WindowFrame>
+      </WindowProviders>
     </AppErrorBoundary>
   </React.StrictMode>
 )

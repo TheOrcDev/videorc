@@ -30,8 +30,9 @@ import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PaneStrip } from '@/components/pane'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
-import { Kbd } from '@/components/ui/kbd'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Spinner } from '@/components/ui/spinner'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
@@ -78,7 +79,6 @@ import {
   type CleanCutTranscript as CleanCutTranscriptData
 } from '@/lib/clean-cut-view'
 import { isActiveRecordingState } from '@/lib/format'
-import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
@@ -325,7 +325,7 @@ export function CleanCutReview({
     target.sessionId,
     mode === 'clean' ? 'condensed' : 'clean'
   )
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const platform = runtimeInfo?.platform
 
   const select = useCallback(
     (id: string | null, seek: boolean): void => {
@@ -663,17 +663,20 @@ export function CleanCutReview({
             Discard
           </Button>
         ) : null}
-        <Button
-          disabled={changes === 0 || saving || !editable}
-          size="sm"
-          title={!editable && changes > 0 ? 'You can save when this cut finishes.' : undefined}
-          type="button"
-          onClick={() => void save()}
+        <DisabledReason
+          reason={!editable && changes > 0 ? 'You can save when this cut finishes.' : null}
         >
-          {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
-          Save changes
-          <Kbd className="ml-0.5">{modKey}S</Kbd>
-        </Button>
+          <Button
+            disabled={changes === 0 || saving || !editable}
+            size="sm"
+            type="button"
+            onClick={() => void save()}
+          >
+            {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
+            Save changes
+            <ShortcutKeys accelerator="CmdOrCtrl+S" className="ml-0.5" platform={platform} />
+          </Button>
+        </DisabledReason>
       </footer>
 
       <ConfirmDialog
@@ -773,30 +776,34 @@ function KindChips({
       }}
     >
       {chips.map((chip) => (
-        <ToggleGroupItem
+        <DisabledReason
           key={chip.group.id}
-          className="h-6 gap-1.5 px-1.5 text-xs"
-          data-chip={chip.group.id}
-          data-state-kind={chip.state}
-          disabled={chip.state === 'empty'}
-          title={
-            chip.state === 'empty'
-              ? `No ${chip.group.label.toLowerCase()} found`
-              : chip.state === 'on'
-                ? `Keep all ${chip.total}`
-                : `Cut all ${chip.total}`
-          }
-          value={chip.group.id}
+          reason={chip.state === 'empty' ? `No ${chip.group.label.toLowerCase()} found.` : null}
         >
-          <span
-            aria-hidden
-            className={cn('size-1.5 shrink-0 rounded-full glass-dot', TONE_DOT[chip.group.tone])}
-          />
-          {chip.group.label}
-          <span className="text-muted-foreground tabular-nums">
-            {chip.state === 'mixed' ? `${chip.cut}/${chip.total}` : chip.total}
-          </span>
-        </ToggleGroupItem>
+          <ToggleGroupItem
+            className="h-6 gap-1.5 px-1.5 text-xs"
+            data-chip={chip.group.id}
+            data-state-kind={chip.state}
+            disabled={chip.state === 'empty'}
+            title={
+              chip.state === 'empty'
+                ? undefined
+                : chip.state === 'on'
+                  ? `Keep all ${chip.total}`
+                  : `Cut all ${chip.total}`
+            }
+            value={chip.group.id}
+          >
+            <span
+              aria-hidden
+              className={cn('size-1.5 shrink-0 rounded-full glass-dot', TONE_DOT[chip.group.tone])}
+            />
+            {chip.group.label}
+            <span className="text-muted-foreground tabular-nums">
+              {chip.state === 'mixed' ? `${chip.cut}/${chip.total}` : chip.total}
+            </span>
+          </ToggleGroupItem>
+        </DisabledReason>
       ))}
     </ToggleGroup>
   )

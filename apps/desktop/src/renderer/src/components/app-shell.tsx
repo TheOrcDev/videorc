@@ -32,7 +32,8 @@ import {
   type CleanCutOpenRequest,
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
-import { displayKeyGlyph } from '@/lib/platform'
+import { isCommandKey } from '@/lib/platform'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { readLastBuddyTab, writeLastBuddyTab, type BuddyTabId } from '@/lib/buddy-tabs'
 import {
@@ -245,8 +246,6 @@ export function AppShell(): ReactElement {
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const whatsNew = useWhatsNew(runtimeInfo?.version, runtimeInfo?.platform)
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
-  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
   // Keep first paint Studio-only, then warm the three most common setup pages
   // from local app assets once Chromium is idle. Navigation stays instant
@@ -322,11 +321,14 @@ export function AppShell(): ReactElement {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey)) {
+      // ⌘ on macOS, Ctrl elsewhere, never both: ⌃K and ⌃P stay text editing
+      // on a Mac (plan 174 A-17).
+      const command = isCommandKey(event, runtimeInfo?.platform)
+      if (event.key.toLowerCase() === 'k' && command) {
         event.preventDefault()
         setCommandOpen((value) => !value)
       }
-      if (event.key.toLowerCase() === 'p' && (event.metaKey || event.ctrlKey)) {
+      if (event.key.toLowerCase() === 'p' && command) {
         event.preventDefault()
         void togglePreviewWindow()
       }
@@ -334,7 +336,7 @@ export function AppShell(): ReactElement {
         runtimeInfo?.notesWindowEnabled &&
         event.key.toLowerCase() === 'n' &&
         event.shiftKey &&
-        (event.metaKey || event.ctrlKey)
+        command
       ) {
         event.preventDefault()
         if (notesWindowOpen) {
@@ -346,15 +348,11 @@ export function AppShell(): ReactElement {
       // Comments live ONLY in the separate window now (owner call,
       // 2026-08-19) — plain (cmd)J, which used to toggle the in-studio rail,
       // keeps working by toggling the window, same as (cmd)shift-J.
-      if (
-        runtimeInfo?.commentsWindowEnabled &&
-        event.key.toLowerCase() === 'j' &&
-        (event.metaKey || event.ctrlKey)
-      ) {
+      if (runtimeInfo?.commentsWindowEnabled && event.key.toLowerCase() === 'j' && command) {
         event.preventDefault()
         void toggleCommentsWindow()
       }
-      if (event.key.toLowerCase() === 'c' && event.shiftKey && (event.metaKey || event.ctrlKey)) {
+      if (event.key.toLowerCase() === 'c' && event.shiftKey && command) {
         event.preventDefault()
         void toggleCaptionsWindow()
       }
@@ -367,6 +365,7 @@ export function AppShell(): ReactElement {
     openNotesWindow,
     runtimeInfo?.commentsWindowEnabled,
     runtimeInfo?.notesWindowEnabled,
+    runtimeInfo?.platform,
     toggleCommentsWindow,
     toggleCaptionsWindow,
     togglePreviewWindow
@@ -524,12 +523,12 @@ export function AppShell(): ReactElement {
                 keyboard-first, only quieter than the old footer bar. */}
           <StatusBar leading={<StatusDot label={statusLabel} pulse={live} tone={statusTone} />}>
             <StatusBarHint
-              keys={`${modKey}K`}
+              accelerator={shortcutAccelerator('search')}
               label="Search"
               onClick={() => setCommandOpen(true)}
             />
             <StatusBarHint
-              keys={`${modKey}P`}
+              accelerator={shortcutAccelerator('preview-window')}
               label="Preview"
               pressed={previewWindowOpen}
               onClick={() => void togglePreviewWindow()}
@@ -538,7 +537,7 @@ export function AppShell(): ReactElement {
                   enabled keeps the bar at its final width from the first paint. */}
             {runtimeInfo?.notesWindowEnabled !== false ? (
               <StatusBarHint
-                keys={`${shiftKey}${modKey}N`}
+                accelerator={shortcutAccelerator('notes-window')}
                 label="Notes"
                 pressed={notesWindowOpen}
                 onClick={() => (notesWindowOpen ? void closeNotesWindow() : void openNotesWindow())}
@@ -546,7 +545,7 @@ export function AppShell(): ReactElement {
             ) : null}
             {runtimeInfo?.commentsWindowEnabled !== false ? (
               <StatusBarHint
-                keys={`${shiftKey}${modKey}J`}
+                accelerator={shortcutAccelerator('comments-window')}
                 label="Stream Manager"
                 pressed={commentsWindowOpen}
                 onClick={() =>

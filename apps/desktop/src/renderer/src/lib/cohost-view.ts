@@ -18,6 +18,8 @@ import type {
   StreamPlatform
 } from './backend'
 import { chatDraftMaxChars } from './chat-send'
+import { shortcutLabel } from './platform'
+import { shortcutAccelerator } from './shortcuts'
 import { cohostErrorDetail } from './cohost-state'
 import type { EntitlementUiGate } from './entitlement-ui'
 
@@ -57,7 +59,7 @@ export const COHOST_ACTS_ON_ASK_COPY =
 export const COHOST_ACTS_ON_ASK_HINT = 'Posts only in the modes you turn on.'
 
 /** The flag row's "Remove from chat" key (plan 140, S6): ⌫ alone dismisses. */
-export const COHOST_REMOVE_FLAGGED_KEY = '⇧⌫'
+export const COHOST_REMOVE_FLAGGED_KEY = 'Shift+Backspace'
 
 export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} While you're live it also hears you: your microphone audio goes to Videorc's cloud speech-to-text to be turned into text. Videorc servers don't keep it. The transcript is saved with your recording on this computer.`
 
@@ -193,11 +195,10 @@ export type CohostPaneMode =
   | { kind: 'live' }
 
 /**
- * The Buddy tab's key in running copy: ⌘9 on macOS, Ctrl+9 elsewhere. Read
- * from the user agent, as the Stream Manager reads its ⌘J, so this pure view
- * module stays free of lib/platform.ts.
+ * The Buddy tab's key in running copy: ⌘9 on macOS, Ctrl+9 elsewhere, for
+ * the platform every shortcut prints for (plan 174 H-22).
  */
-const BUDDY_TAB_KEY = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘9' : 'Ctrl+9'
+const BUDDY_TAB_KEY = shortcutLabel(shortcutAccelerator('nav-ai'))
 
 /**
  * Which single-line explanation (if any) replaces the pane. Premium is checked
@@ -553,7 +554,10 @@ export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
 const COHOST_QUESTION_TOAST_TEXT_CAP = 64
 
 /** "Buddy: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows). */
-export function cohostQuestionToastMessage(question: CohostQuestion, shortcut = '⌘J'): string {
+export function cohostQuestionToastMessage(
+  question: CohostQuestion,
+  shortcut = shortcutLabel(shortcutAccelerator('cohost-focus'))
+): string {
   const askers = question.askers.length
   const who =
     askers > 1

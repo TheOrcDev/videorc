@@ -22,11 +22,11 @@ import {
   CommandSeparator,
   CommandShortcut
 } from '@/components/ui/command'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { BUDDY_TABS } from '@/lib/buddy-tabs'
 import { openLivestreamView } from '@/lib/livestream-tabs'
-import { displayKeyGlyph } from '@/lib/platform'
 import { SETTINGS_TABS } from '@/lib/settings-tabs'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import {
   STUDIO_PANELS,
   WORKSPACE_TABS,
@@ -57,8 +57,7 @@ export function CommandPalette({
     toggleCaptionsWindow
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
-  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
+  const platform = runtimeInfo?.platform
   const { setTheme } = useTheme()
 
   const run = (action: () => void | Promise<void>): void => {
@@ -106,10 +105,7 @@ export function CommandPalette({
                 {tab.label}
                 {digit ? (
                   <CommandShortcut className="tracking-normal">
-                    <Kbd>
-                      {modKey}
-                      {digit}
-                    </Kbd>
+                    <ShortcutKeys accelerator={`CmdOrCtrl+${digit}`} platform={platform} />
                   </CommandShortcut>
                 ) : null}
               </CommandItem>
@@ -138,10 +134,7 @@ export function CommandPalette({
                 {panel.label}
                 {digit ? (
                   <CommandShortcut className="tracking-normal">
-                    <Kbd>
-                      {modKey}
-                      {digit}
-                    </Kbd>
+                    <ShortcutKeys accelerator={`CmdOrCtrl+${digit}`} platform={platform} />
                   </CommandShortcut>
                 ) : null}
               </CommandItem>
@@ -213,10 +206,10 @@ export function CommandPalette({
               <ChatIcon className="size-4" />
               {commentsWindow.open ? 'Close Stream Manager' : 'Open Stream Manager'}
               <CommandShortcut className="tracking-normal">
-                <Kbd>
-                  {modKey}
-                  {shiftKey}J
-                </Kbd>
+                <ShortcutKeys
+                  accelerator={shortcutAccelerator('comments-window')}
+                  platform={platform}
+                />
               </CommandShortcut>
             </CommandItem>
           ) : null}
@@ -228,10 +221,10 @@ export function CommandPalette({
               <CaptionsIcon className="size-4" />
               {captionsWindow.open ? 'Close captions reader' : 'Open captions reader'}
               <CommandShortcut className="tracking-normal">
-                <Kbd>
-                  {modKey}
-                  {shiftKey}C
-                </Kbd>
+                <ShortcutKeys
+                  accelerator={shortcutAccelerator('captions-window')}
+                  platform={platform}
+                />
               </CommandShortcut>
             </CommandItem>
           ) : null}

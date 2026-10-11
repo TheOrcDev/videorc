@@ -5,22 +5,35 @@ import { Tooltip as TooltipPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
 
+/** True under a TooltipProvider: every window mounts one (WindowProviders). */
+const TooltipProviderPresent = React.createContext(false)
+
 // Desktop tooltips wait for a deliberate hover (plan 050, D6).
 function TooltipProvider({
   delayDuration = 600,
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Provider>) {
   return (
-    <TooltipPrimitive.Provider
-      data-slot="tooltip-provider"
-      delayDuration={delayDuration}
-      {...props}
-    />
+    <TooltipProviderPresent.Provider value={true}>
+      <TooltipPrimitive.Provider
+        data-slot="tooltip-provider"
+        delayDuration={delayDuration}
+        {...props}
+      />
+    </TooltipProviderPresent.Provider>
   )
 }
 
+/**
+ * Under a window's provider, tooltips share its delay group: moving from one
+ * to the next opens at once. A tree rendered outside every window (a test, a
+ * portal root) gets its own provider, as upstream shadcn does, so a Tooltip
+ * never throws for want of one (plan 174 S1.1, J1-6).
+ */
 function Tooltip({ ...props }: React.ComponentProps<typeof TooltipPrimitive.Root>) {
-  return <TooltipPrimitive.Root data-slot="tooltip" {...props} />
+  const root = <TooltipPrimitive.Root data-slot="tooltip" {...props} />
+  if (React.useContext(TooltipProviderPresent)) return root
+  return <TooltipProvider>{root}</TooltipProvider>
 }
 
 function TooltipTrigger({ ...props }: React.ComponentProps<typeof TooltipPrimitive.Trigger>) {

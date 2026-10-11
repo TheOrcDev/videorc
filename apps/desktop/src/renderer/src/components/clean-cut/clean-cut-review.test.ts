@@ -8,6 +8,8 @@ import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import type { CleanCutEdl, CleanCutJob, CleanCutRemoval, CleanCutRemovalKind } from '@/lib/backend'
 import type { CleanCutTranscriptWord } from '@/lib/clean-cut-view'
 
+import { TooltipProvider } from '@/components/ui/tooltip'
+
 import { CleanCutReview } from './clean-cut-review'
 
 const mocked = vi.hoisted(() => ({
@@ -190,7 +192,11 @@ async function render(
   current = cut
   await act(async () =>
     root.render(
-      createElement(CleanCutReview, { client: cut, target, onClose, onOpenLibrarySession })
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(CleanCutReview, { client: cut, target, onClose, onOpenLibrarySession })
+      )
     )
   )
   await settle()

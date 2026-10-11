@@ -20,9 +20,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Command, CommandList } from '@/components/ui/command'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Input } from '@/components/ui/input'
-import { Kbd } from '@/components/ui/kbd'
 import { Separator } from '@/components/ui/separator'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import type {
   CohostFlag,
@@ -39,10 +40,11 @@ import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import {
   BUDDY_HEADER_PREVIEW_PX,
   BUDDY_REACTION_CHIPS,
+  buddyReactionDisabledReason,
   BUDDY_STILL_PACK_ID
 } from '@/lib/buddy-pet-view'
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
-import { displayKeyGlyph } from '@/lib/platform'
+import { shortcutLabel } from '@/lib/platform'
 import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
 import { activeCohostSpotlight } from '@/lib/cohost-marks'
 import { REMOVE_FROM_CHAT_LABEL } from '@/lib/chat-removal-view'
@@ -635,7 +637,7 @@ export function CohostPane({
                   <>
                     <CohostAction
                       disabled={actionPending}
-                      keyLabel="R"
+                      accelerator="R"
                       label="Reply"
                       onClick={() => {
                         const question = questions.find(
@@ -647,7 +649,7 @@ export function CohostPane({
                     {onShowOnStream ? (
                       <CohostAction
                         disabled={actionPending}
-                        keyLabel="H"
+                        accelerator="H"
                         label="Show on stream"
                         onClick={() => {
                           const question = questions.find(
@@ -659,7 +661,7 @@ export function CohostPane({
                     ) : null}
                     <CohostAction
                       disabled={actionPending}
-                      keyLabel="A"
+                      accelerator="A"
                       label="Answered"
                       onClick={() => {
                         const question = questions.find(
@@ -670,7 +672,7 @@ export function CohostPane({
                     />
                     <CohostAction
                       disabled={actionPending}
-                      keyLabel="⌫"
+                      accelerator="Backspace"
                       label="Dismiss"
                       onClick={() => {
                         const question = questions.find(
@@ -684,14 +686,14 @@ export function CohostPane({
                   <>
                     {onJumpToMessage ? (
                       <CohostAction
-                        keyLabel="↵"
+                        accelerator="Enter"
                         label="Jump to message"
                         onClick={() => onJumpToMessage(activeRow.id)}
                       />
                     ) : null}
                     <CohostAction
                       disabled={actionPending}
-                      keyLabel="⌫"
+                      accelerator="Backspace"
                       label="Dismiss"
                       onClick={() => {
                         const flag = flags.find((candidate) => candidate.messageId === activeRow.id)
@@ -700,7 +702,7 @@ export function CohostPane({
                     />
                     {onRemoveFlagged && removableMessageIds?.has(activeRow.id) ? (
                       <CohostAction
-                        keyLabel={COHOST_REMOVE_FLAGGED_KEY}
+                        accelerator={COHOST_REMOVE_FLAGGED_KEY}
                         label={REMOVE_FROM_CHAT_LABEL}
                         variant="destructive"
                         onClick={() => {
@@ -751,7 +753,6 @@ export function BuddyHeader({
   const image = buddyStateImageUrl(buddy.persona, buddy.state)
   const avatar = buddy.persona.avatar
   const packId = avatar?.kind === 'alive' ? avatar.packId : BUDDY_STILL_PACK_ID
-  const modKey = displayKeyGlyph('⌘', undefined)
   const say = (state: CohostUtteranceState): void => {
     const text = draft.trim()
     if (!text || !onSay || sayPending) return
@@ -836,12 +837,12 @@ export function BuddyHeader({
               say(event.metaKey || event.ctrlKey ? 'laugh' : 'talk')
             }}
           />
-          <Kbd className={PANE_NARROW_HIDDEN} title="Say it">
-            ↵
-          </Kbd>
-          <Kbd className={PANE_NARROW_HIDDEN} title="Say it laughing">
-            {modKey}↵
-          </Kbd>
+          <ShortcutKeys accelerator="Enter" className={PANE_NARROW_HIDDEN} title="Say it" />
+          <ShortcutKeys
+            accelerator="CmdOrCtrl+Enter"
+            className={PANE_NARROW_HIDDEN}
+            title="Say it laughing"
+          />
         </div>
         <div
           aria-label="React on stream"
@@ -851,20 +852,30 @@ export function BuddyHeader({
         >
           {BUDDY_REACTION_CHIPS.map((chip) => {
             const available = packReactions?.includes(chip.id) ?? false
+            const disabled = !onReact || !available
             return (
-              <Button
+              <DisabledReason
                 key={chip.id}
-                data-reaction={chip.id}
-                data-testid="buddy-reaction-chip"
-                disabled={!onReact || !available}
-                size="xs"
-                title={`${chip.label} on stream`}
-                type="button"
-                variant="outline"
-                onClick={() => react(chip.id)}
+                reason={buddyReactionDisabledReason({
+                  relay: Boolean(onReact),
+                  alive: avatar?.kind === 'alive',
+                  packReactions,
+                  chip
+                })}
               >
-                {chip.label}
-              </Button>
+                <Button
+                  data-reaction={chip.id}
+                  data-testid="buddy-reaction-chip"
+                  disabled={disabled}
+                  size="xs"
+                  title={disabled ? undefined : `${chip.label} on stream`}
+                  type="button"
+                  variant="outline"
+                  onClick={() => react(chip.id)}
+                >
+                  {chip.label}
+                </Button>
+              </DisabledReason>
             )
           })}
         </div>
@@ -1175,13 +1186,14 @@ function CohostRecapCard({
 
 function CohostAction({
   label,
-  keyLabel,
+  accelerator,
   disabled = false,
   variant = 'ghost',
   onClick
 }: {
   label: string
-  keyLabel: string
+  /** The row action's key, as an accelerator (`R`, `Backspace`, `Shift+Backspace`). */
+  accelerator: string
   disabled?: boolean
   /** Destructive only for Remove from chat: red is information. */
   variant?: 'ghost' | 'destructive'
@@ -1191,13 +1203,13 @@ function CohostAction({
     <Button
       disabled={disabled}
       size="xs"
-      title={`${label} (${keyLabel})`}
+      title={`${label} (${shortcutLabel(accelerator)})`}
       type="button"
       variant={variant}
       onClick={onClick}
     >
       {label}
-      <Kbd className={PANE_NARROW_HIDDEN}>{keyLabel}</Kbd>
+      <ShortcutKeys accelerator={accelerator} className={PANE_NARROW_HIDDEN} />
     </Button>
   )
 }

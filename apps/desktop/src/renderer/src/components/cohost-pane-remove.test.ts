@@ -12,12 +12,15 @@ let container: HTMLDivElement
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // The Mac look: the window bootstrap writes the platform before first paint.
+  document.documentElement.dataset.platform = 'darwin'
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
 })
 
 afterEach(async () => {
+  delete document.documentElement.dataset.platform
   await act(async () => root.unmount())
   container.remove()
   vi.unstubAllGlobals()
@@ -84,6 +87,7 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     expect(remove).toBeTruthy()
     expect(remove!.dataset.variant).toBe('destructive')
     expect(remove!.title).toBe('Remove from chat (⇧⌫)')
+    expect(remove!.querySelector('kbd')?.textContent).toBe('⇧⌫')
     expect(action('Dismiss')?.dataset.variant).toBe('ghost')
     await act(async () => remove!.click())
     expect(onRemoveFlagged).toHaveBeenCalledWith(flag)

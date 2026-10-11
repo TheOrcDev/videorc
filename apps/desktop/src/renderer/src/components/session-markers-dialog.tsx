@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { AlertIcon, DeleteIcon, EditIcon } from '@/components/icons'
 import type { SessionMarker, SessionSummary } from '@/lib/backend'
 import { toast } from '@/lib/toast'
@@ -274,7 +275,8 @@ export function SessionMarkersDialog({
               onChange={(event) => setDraft(event.target.value)}
             />
             <Button type="submit" size="sm" disabled={pending}>
-              Save ↵
+              Save
+              <ShortcutKeys accelerator="Enter" />
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(null)}>
               Cancel

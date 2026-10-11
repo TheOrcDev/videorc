@@ -14,7 +14,7 @@ import {
   FieldLabel,
   FieldTitle
 } from '@/components/ui/field'
-import { Kbd, KbdGroup } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import {
   Select,
   SelectContent,
@@ -41,7 +41,7 @@ import {
 import { simulcastArmed, type CaptionsCaptureSettings } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { unlockActionForGate } from '@/lib/lock-view'
-import { displayKeyGlyph } from '@/lib/platform'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
 
 const LANGUAGES = [
@@ -174,8 +174,6 @@ export function CaptionsControls(): ReactElement {
     captions.enabled &&
     isSessionActive &&
     (captionsStatus.state === 'blocked' || captionsStatus.state === 'error')
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
-  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
   const patchCaptions = (
     patch: Partial<CaptionsCaptureSettings>,
@@ -396,11 +394,11 @@ export function CaptionsControls(): ReactElement {
           >
             <ExternalLinkIcon data-icon="inline-start" />
             {captionsWindow.open ? 'Close reader' : 'Open reader'}
-            <KbdGroup className="ml-1">
-              <Kbd>{modKey}</Kbd>
-              <Kbd>{shiftKey}</Kbd>
-              <Kbd>C</Kbd>
-            </KbdGroup>
+            <ShortcutKeys
+              accelerator={shortcutAccelerator('captions-window')}
+              className="ml-1"
+              platform={runtimeInfo?.platform}
+            />
           </Button>
         </div>
       </FieldGroup>

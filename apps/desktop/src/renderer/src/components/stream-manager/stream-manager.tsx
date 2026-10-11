@@ -96,6 +96,8 @@ import {
   type StreamManagerRightPane
 } from '@/lib/stream-manager-layout'
 import { sendablePlatforms } from '@/lib/chat-send'
+import { shortcutLabel } from '@/lib/platform'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
 import { RemoveMessagesReconnectRows } from '@/components/stream-manager/remove-messages-reconnect'
 import { RemovalCards } from '@/components/stream-manager/removal-cards'
@@ -116,12 +118,10 @@ import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-sc
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 
 /**
- * ⌘J on macOS, Ctrl+J elsewhere; the key handler below accepts both. Electron's
- * user agent names the host OS, as lib/platform.ts reads it for toasts. Read
- * here, not imported: importing that module moves it into the chunk this
- * window shares with the main window and grows the main window's eager bytes.
+ * ⌘J on macOS, Ctrl+J elsewhere (plan 174 H-22): the platform the window's
+ * bootstrap set before the first paint, as every shortcut reads it.
  */
-const BUDDY_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
+const BUDDY_SHORTCUT = shortcutLabel(shortcutAccelerator('cohost-focus'))
 
 const NO_MODERATION_OPERATIONS: readonly ModerationOperation[] = []
 const NO_COHOST_UTTERANCES: readonly CohostUtterance[] = []

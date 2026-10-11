@@ -1,13 +1,27 @@
 // Plan 062: shortcuts are recorded by pressing them, never typed. This module
-// is the one place that turns a key event into an Electron accelerator string,
-// decides whether a combination may become a system-wide binding, and renders
-// a stored accelerator as key chips. Pure and shared: the Settings recorder,
-// the scenes gallery and the main-process registration all read it.
+// is the one place that turns a key event into an Electron accelerator string
+// and decides whether a combination may become a system-wide binding; with
+// accelerator-format.ts it also renders a stored accelerator. Pure and
+// shared: the Settings recorder, the scenes gallery and the main-process
+// registration all read it.
 
+import { MODIFIER_ORDER, parseAccelerator, type AcceleratorModifier } from './accelerator-format'
 import { globalShortcutEntries, type GlobalShortcutAction } from './global-shortcuts'
 import type { GlobalShortcutsConfig } from './backend'
 
-export type AcceleratorModifier = 'Cmd' | 'Ctrl' | 'Alt' | 'Shift' | 'Super'
+// Reading and printing an accelerator lives in accelerator-format.ts (the
+// eager shell prints shortcuts); it is re-exported here for every caller.
+export {
+  acceleratorAriaKeyShortcuts,
+  acceleratorDisplayKeys,
+  acceleratorLabel,
+  acceleratorModifierLabels,
+  acceleratorModifiersLabel,
+  commandModifierHeld,
+  parseAccelerator,
+  type AcceleratorModifier,
+  type ParsedAccelerator
+} from './accelerator-format'
 
 /** The subset of Electron's `Input` (and a DOM KeyboardEvent) the recorder needs. */
 export interface AcceleratorKeyInput {
@@ -35,13 +49,6 @@ export type AcceleratorValidation =
   | { ok: false; reason: 'needs-modifier' | 'system-reserved' }
 
 const isMac = (platform: string | undefined): boolean => platform === 'darwin'
-
-// Saved order. Electron ignores order, but one spelling per binding keeps
-// duplicate detection and diffs honest.
-const MODIFIER_ORDER: readonly AcceleratorModifier[] = ['Cmd', 'Ctrl', 'Alt', 'Shift', 'Super']
-// macOS menus print modifiers as ⌃⌥⇧⌘; Windows prints Ctrl+Alt+Shift+Win.
-const MAC_DISPLAY_ORDER: readonly AcceleratorModifier[] = ['Ctrl', 'Alt', 'Shift', 'Cmd']
-const OTHER_DISPLAY_ORDER: readonly AcceleratorModifier[] = ['Ctrl', 'Alt', 'Shift', 'Super']
 
 const MODIFIER_CODES = new Set([
   'MetaLeft',
@@ -137,81 +144,6 @@ export function acceleratorFromKeyInput(
   return { kind: 'combo', accelerator: [...modifiers, key].join('+'), modifiers }
 }
 
-const KEY_ALIASES: Record<string, string> = {
-  return: 'Enter',
-  enter: 'Enter',
-  esc: 'Escape',
-  escape: 'Escape',
-  up: 'Up',
-  down: 'Down',
-  left: 'Left',
-  right: 'Right',
-  space: 'Space',
-  tab: 'Tab',
-  backspace: 'Backspace',
-  delete: 'Delete',
-  insert: 'Insert',
-  home: 'Home',
-  end: 'End',
-  pageup: 'PageUp',
-  pagedown: 'PageDown',
-  plus: 'Plus'
-}
-
-interface ParsedAccelerator {
-  modifiers: AcceleratorModifier[]
-  key: string
-}
-
-/**
- * Reads any Electron accelerator spelling, including hand-typed values saved
- * before plan 062 (`Command+Shift+R`, `Control+Alt+C`, `CmdOrCtrl+K`).
- * Returns null for an empty value or one without exactly one key.
- */
-export function parseAccelerator(
-  value: string | undefined,
-  platform: string | undefined
-): ParsedAccelerator | null {
-  const parts = (value ?? '')
-    .split('+')
-    .map((part) => part.trim())
-    .filter(Boolean)
-  if (parts.length === 0) return null
-  const held = new Set<AcceleratorModifier>()
-  let key: string | null = null
-  for (const part of parts) {
-    const lower = part.toLowerCase()
-    if (lower === 'command' || lower === 'cmd') {
-      // Electron gives Command no effect off macOS; everything Videorc has
-      // ever displayed there reads it as Ctrl, so that is what it means.
-      held.add(isMac(platform) ? 'Cmd' : 'Ctrl')
-    } else if (lower === 'commandorcontrol' || lower === 'cmdorctrl') {
-      held.add(isMac(platform) ? 'Cmd' : 'Ctrl')
-    } else if (lower === 'control' || lower === 'ctrl') {
-      held.add('Ctrl')
-    } else if (lower === 'alt' || lower === 'option' || lower === 'altgr') {
-      held.add('Alt')
-    } else if (lower === 'shift') {
-      held.add('Shift')
-    } else if (lower === 'super' || lower === 'meta') {
-      held.add(isMac(platform) ? 'Cmd' : 'Super')
-    } else if (key === null) {
-      key = part.length === 1 ? part.toUpperCase() : (KEY_ALIASES[lower] ?? canonicalKey(part))
-    } else {
-      return null
-    }
-  }
-  if (key === null) return null
-  return { modifiers: MODIFIER_ORDER.filter((modifier) => held.has(modifier)), key }
-}
-
-function canonicalKey(part: string): string {
-  const fn = /^f(\d{1,2})$/i.exec(part)
-  if (fn) return `F${Number(fn[1])}`
-  if (/^num/i.test(part)) return part.toLowerCase()
-  return part
-}
-
 /**
  * One spelling per binding for this platform, or null when there is nothing
  * to register. Main registers this form, so a pre-062 `Cmd+Shift+R` on
@@ -290,71 +222,4 @@ export function findAcceleratorOwner(
     }
   }
   return null
-}
-
-const MAC_MODIFIER_GLYPHS: Record<AcceleratorModifier, string> = {
-  Cmd: '⌘',
-  Ctrl: '⌃',
-  Alt: '⌥',
-  Shift: '⇧',
-  Super: '⌘'
-}
-const OTHER_MODIFIER_LABELS: Record<AcceleratorModifier, string> = {
-  Cmd: 'Ctrl',
-  Ctrl: 'Ctrl',
-  Alt: 'Alt',
-  Shift: 'Shift',
-  Super: 'Win'
-}
-const MAC_KEY_GLYPHS: Record<string, string> = {
-  Up: '↑',
-  Down: '↓',
-  Left: '←',
-  Right: '→',
-  Enter: '↩',
-  Backspace: '⌫',
-  Delete: '⌦',
-  Tab: '⇥',
-  Escape: 'Esc',
-  Plus: '+'
-}
-const OTHER_KEY_GLYPHS: Record<string, string> = {
-  Up: '↑',
-  Down: '↓',
-  Left: '←',
-  Right: '→',
-  Escape: 'Esc',
-  Plus: '+'
-}
-
-export function acceleratorModifierLabels(
-  modifiers: readonly AcceleratorModifier[],
-  platform: string | undefined
-): string[] {
-  const order = isMac(platform) ? MAC_DISPLAY_ORDER : OTHER_DISPLAY_ORDER
-  const labels = isMac(platform) ? MAC_MODIFIER_GLYPHS : OTHER_MODIFIER_LABELS
-  const present = new Set(
-    modifiers.map((modifier) =>
-      !isMac(platform) && modifier === 'Cmd'
-        ? 'Ctrl'
-        : isMac(platform) && modifier === 'Super'
-          ? 'Cmd'
-          : modifier
-    )
-  )
-  return order.filter((modifier) => present.has(modifier)).map((modifier) => labels[modifier])
-}
-
-/** Stored accelerator → the key chips to show (`['⌘','⇧','M']`, `['Ctrl','Shift','M']`). */
-export function acceleratorDisplayKeys(
-  accelerator: string | undefined,
-  platform: string | undefined
-): string[] {
-  const parsed = parseAccelerator(accelerator, platform)
-  if (!parsed) return accelerator?.trim() ? [accelerator.trim()] : []
-  const keyGlyphs = isMac(platform) ? MAC_KEY_GLYPHS : OTHER_KEY_GLYPHS
-  return [
-    ...acceleratorModifierLabels(parsed.modifiers, platform),
-    keyGlyphs[parsed.key] ?? parsed.key
-  ]
 }

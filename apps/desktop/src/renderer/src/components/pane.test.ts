@@ -163,7 +163,12 @@ describe('StatusBar', () => {
         createElement(
           StatusBar,
           { leading: createElement('span', null, 'Connected') },
-          createElement(StatusBarHint, { keys: '⌘K', label: 'Search', onClick })
+          createElement(StatusBarHint, {
+            accelerator: 'CmdOrCtrl+K',
+            platform: 'darwin',
+            label: 'Search',
+            onClick
+          })
         )
       )
     )
@@ -218,7 +223,13 @@ describe('StatusBarAction', () => {
       expect(STATUS_BAR_ACTION_CLASS).toContain(token)
     }
     act(() =>
-      root.render(createElement(StatusBarHint, { keys: '⌘K', label: 'Search', onClick: () => {} }))
+      root.render(
+        createElement(StatusBarHint, {
+          accelerator: 'CmdOrCtrl+K',
+          label: 'Search',
+          onClick: () => {}
+        })
+      )
     )
     const hint = container.querySelector('[data-slot=status-bar-hint]')
     expect(hint?.className).toBe(STATUS_BAR_ACTION_CLASS)

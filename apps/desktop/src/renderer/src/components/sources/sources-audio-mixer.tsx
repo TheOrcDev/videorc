@@ -10,7 +10,6 @@ import {
 } from '@/components/icons'
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 
-import { acceleratorDisplayKeys } from '../../../../shared/accelerator'
 import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
@@ -22,7 +21,6 @@ import { Button } from '@/components/ui/button'
 import { MuteToggle } from '@/components/ui/channel-toggle'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Fader, FaderRange, FaderThumb, FaderTrack } from '@/components/ui/fader'
-import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import {
   ParameterSlider,
@@ -35,7 +33,7 @@ import {
   type ParameterChangeReason
 } from '@/components/ui/parameter-slider'
 import { Switch } from '@/components/ui/switch'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { AudioConfigProvider } from '@/hooks/use-audio-config'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -130,40 +128,6 @@ export function syncOffsetTag(offsetMs: number, userSet: boolean): string | null
 }
 
 /**
- * A control's tooltip with its global shortcut, when one is bound
- * (keyboard-first, quietly). The trigger is a wrapper: Radix's TooltipTrigger
- * writes `data-state` onto its child, which would replace a Switch's
- * checked/unchecked, the hook its track styles use.
- */
-function ShortcutTooltip({
-  label,
-  keys,
-  children
-}: {
-  label: string
-  keys: readonly string[]
-  children: ReactElement
-}): ReactElement {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex">{children}</span>
-      </TooltipTrigger>
-      <TooltipContent>
-        {label}
-        {keys.length > 0 ? (
-          <KbdGroup>
-            {keys.map((glyph, index) => (
-              <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-            ))}
-          </KbdGroup>
-        ) : null}
-      </TooltipContent>
-    </Tooltip>
-  )
-}
-
-/**
  * One row of the audiocn Mixer's keyboard map: the Mixer moves focus between
  * `[data-slot=channel-strip]` elements on Cmd+Up/Down (plan 093's VoiceOver
  * checklist), so each SourceItem sits in one.
@@ -234,7 +198,8 @@ export function SourcesAudioMixer(): ReactElement {
                 meter={microphone.meter}
                 microphoneSelected={Boolean(selectedMicrophone)}
                 monitorLabel={microphone.monitorLabel}
-                muteShortcut={acceleratorDisplayKeys(settings.globalShortcuts?.micToggle, platform)}
+                muteShortcut={settings.globalShortcuts?.micToggle}
+                platform={platform}
                 muted={audio.microphoneMuted}
                 picker={
                   <DevicePicker
@@ -295,10 +260,8 @@ export function SourcesAudioMixer(): ReactElement {
                     source: backendLevelSources.systemAudio
                   })}
                   sessionActive={isSessionActive}
-                  toggleShortcut={acceleratorDisplayKeys(
-                    settings.globalShortcuts?.systemAudioToggle,
-                    platform
-                  )}
+                  platform={platform}
+                  toggleShortcut={settings.globalShortcuts?.systemAudioToggle}
                   view={systemAudio}
                   onEchoGuardChange={(systemAudioEchoGuard) =>
                     setAudio((current) => ({ ...current, systemAudioEchoGuard }))
@@ -336,6 +299,7 @@ export function MicrophoneChannel({
   gainDb,
   muted,
   muteShortcut,
+  platform,
   syncOffsetMs,
   syncUserSet,
   sessionActive,
@@ -354,8 +318,9 @@ export function MicrophoneChannel({
   unavailableReason: MicStreamFailureReason | undefined
   gainDb: number
   muted: boolean
-  /** Key chips of the bound global mute shortcut; empty when none is bound. */
-  muteShortcut: readonly string[]
+  /** The bound global mute shortcut (an accelerator); absent when none is bound. */
+  muteShortcut?: string
+  platform?: string
   syncOffsetMs: number
   syncUserSet: boolean
   sessionActive: boolean
@@ -371,7 +336,7 @@ export function MicrophoneChannel({
     <AudioConfigProvider value={{ dimmed: muted || !microphoneSelected }}>
       <SourceItem
         control={
-          <ShortcutTooltip keys={muteShortcut} label="Mute microphone">
+          <ShortcutTooltip accelerator={muteShortcut} label="Mute microphone" platform={platform}>
             <MuteToggle
               aria-label="Mute microphone"
               className="rounded-chip"
@@ -634,6 +599,7 @@ export function SystemAudioSettings({
   meter,
   sessionActive,
   toggleShortcut,
+  platform,
   defaultMoreOpen,
   onEnabledChange,
   onGainChange,
@@ -649,8 +615,9 @@ export function SystemAudioSettings({
   /** The bus level while a session mixes System audio; no reading otherwise. */
   meter: MeterInput
   sessionActive: boolean
-  /** Key chips of the bound global System audio shortcut; empty when none is bound. */
-  toggleShortcut: readonly string[]
+  /** The bound global System audio shortcut (an accelerator); absent when none is bound. */
+  toggleShortcut?: string
+  platform?: string
   defaultMoreOpen?: boolean
   onEnabledChange: (enabled: boolean) => void
   onGainChange: (gainDb: number) => void
@@ -680,7 +647,7 @@ export function SystemAudioSettings({
     <AudioConfigProvider value={{ disabled: view.permissionRequired }}>
       <SourceItem
         control={
-          <ShortcutTooltip keys={toggleShortcut} label="System audio">
+          <ShortcutTooltip accelerator={toggleShortcut} label="System audio" platform={platform}>
             <Switch
               aria-label="System audio"
               checked={view.checked}

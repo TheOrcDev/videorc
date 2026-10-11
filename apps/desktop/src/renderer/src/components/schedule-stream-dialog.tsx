@@ -40,7 +40,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Switch } from '@/components/ui/switch'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { ThumbnailField } from '@/components/streaming/thumbnail-field'
 import type {
@@ -50,7 +50,6 @@ import type {
   ScheduledStreamProvider
 } from '@/lib/backend'
 import type { useScheduledStreams } from '@/hooks/use-scheduled-streams'
-import { displayKeyGlyph } from '@/lib/platform'
 import { scheduledProviderLabel, scheduledProviderNoun } from '@/lib/scheduled-streams'
 
 function localWallTime(date: Date): string {
@@ -115,7 +114,6 @@ export function ScheduleStreamDialog({
       : undefined)
   const providerLabel = scheduledProviderLabel(provider)
   const providerNoun = scheduledProviderNoun(provider)
-  const submitKey = displayKeyGlyph('⌘', document.documentElement.dataset.platform)
   const [metadata, setMetadata] = useState(() => event?.requested ?? freshMetadata(provider))
   const [accountId, setAccountId] = useState(event?.accountId ?? '')
   const [audience, setAudience] = useState(event ? String(event.requested.madeForKids) : '')
@@ -592,7 +590,7 @@ export function ScheduleStreamDialog({
                 : published
                   ? `Update ${providerNoun}`
                   : `Schedule on ${providerLabel}`}
-              <Kbd aria-hidden="true">{submitKey}↵</Kbd>
+              <ShortcutKeys accelerator="CmdOrCtrl+Enter" aria-hidden="true" />
             </Button>
           </DialogFooter>
         </DialogContent>
