@@ -493,7 +493,26 @@ doc has the owner's by-eye verdict; both PRs merged.
 | Recording studio      | `pnpm smoke:recording-studio` or the named block                                                   |
 | Production            | protected-preview canary, owner 60 s real-mic run, reconcile delta                                 |
 
-## As built
+## As built (2026-10-11, desktop `plan-175-streaming-captions`, web `plan-175-streaming-captions-web` / videorc-web #80)
 
-_Empty until executed._ S1 results go here first (per model: first partial,
-partial cadence, final after last byte, usage, warnings; the four facts).
+- **S1 not run.** No gateway key in the executing session. D1 stands on its
+  planning assumption (`spacexai/grok-stt`, interim results, 300 ms
+  endpointing). Owner runs `pnpm probe:caption-stt` before rollout.
+- **S2-S3 (web #80):** as designed, with a separate `ai_caption_leases` table
+  (migration 0021) instead of extra columns, so the month bucket keeps its
+  atomic upsert. The old-desktop transport check runs before any usage read.
+  Capabilities now report the allowance on both transports.
+- **S4-S5:** `GatewayStreamingCaptionTransport` + `StreamingCaptionDecoder`
+  replace the voice adapter. The envelope has no speech-start event, so the
+  first text of an utterance synthesizes it. Lease handover is
+  sequential, not overlapping: a pre-minted token, `audio-done`, a finals drain
+  bounded by the 1.5 s grace, then the next socket. Frames wait in the tap
+  channel, so no audio is lost. Socket errors fall back or reconnect and never
+  end captions. Leases settle in `Drop`, because an explicit stop aborts the task.
+  The contract smoke caught the settle-after-return version.
+- **S6:** the fake speaks the envelope. The contract smoke adds lease handover
+  (6 minted, 6 settled) and voice-dialect fallback.
+- **S7:** the fallback copy says "3-second chunks".
+- **Pre-existing, not this plan:** `smoke:captions-dual-orientation` fails on
+  clean `origin/main` `20d36819` with the same raster geometry (portrait bar
+  792 px on a 720 px canvas).
