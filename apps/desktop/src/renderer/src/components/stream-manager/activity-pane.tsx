@@ -284,14 +284,14 @@ function ActivityRow({
   // The full sentence, when it says more than the short fact.
   const sentence = item.short && item.line !== item.short ? item.line : null
   const problem = highlightProblem(highlight)
-  // One row contract with chat (plan 174 S3.16a, H-19): no hover highlight on
-  // a row that is not a button, the ⋯ waits for the pointer, and the time
-  // does too while live.
+  // One row contract with chat (plan 174 S3.16a, H-19): the ⋯ waits for the
+  // pointer, and the time does too while live. The row keeps its hover fill
+  // over a reward or tip tint (plan 177, the owner's later call).
   const tint = activityRowTint(item, highlight)
   return (
     <li
       className={cn(
-        'group/activity group/kebab-host flex items-start gap-2.5 px-3 py-2',
+        'group/activity group/kebab-host flex items-start gap-2.5 px-3 py-2 hover:bg-accent',
         highlight.phase === 'live' && 'bg-accent',
         tint && ACTIVITY_ROW_TINT_CLASS[tint]
       )}
