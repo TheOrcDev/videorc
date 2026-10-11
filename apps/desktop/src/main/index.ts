@@ -11216,14 +11216,17 @@ async function runSmokePreviewMotionCommand(
           ])),
           theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light',
           // Plan 177: any scroll list whose content is wider than its pane
-          // (Radix's table layout let one long token widen every row).
+          // (Radix's table layout let one long token widen every row). The
+          // viewport's scrollWidth also catches one descendant sticking out
+          // of a wrapper that fits.
           scrollOverflow: Array.from(document.querySelectorAll('[data-slot="scroll-area-viewport"]'))
-            .filter((viewport) => viewport.clientWidth > 0 && viewport.firstElementChild && viewport.firstElementChild.getBoundingClientRect().width > viewport.clientWidth + 1)
+            .filter((viewport) => viewport.clientWidth > 0)
             .map((viewport) => ({
               pane: viewport.closest('[data-pane]')?.getAttribute('data-pane') ?? viewport.closest('[data-slot$="-pane"]')?.getAttribute('data-slot') ?? null,
-              content: Math.round(viewport.firstElementChild.getBoundingClientRect().width),
+              content: Math.round(Math.max(viewport.scrollWidth, viewport.firstElementChild?.getBoundingClientRect().width ?? 0)),
               viewport: viewport.clientWidth
-            })),
+            }))
+            .filter((list) => list.content > list.viewport + 1),
           // Plan 177: each Activity row's tint, and whether its ⋯ sits whole
           // inside the pane and on top (a long reward once pushed it out).
           activityRows: (() => {
