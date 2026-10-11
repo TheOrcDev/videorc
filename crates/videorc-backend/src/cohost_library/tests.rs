@@ -1675,6 +1675,58 @@ async fn buddy_library_mutations_refuse_bad_ids_empty_edits_and_no_library() {
 }
 
 #[tokio::test]
+async fn buddy_library_unread_capability_says_when_the_web_cannot_be_reached() {
+    // QA 2026-10-11: signed in, the app started while videorc.com could not
+    // be reached, so the capability was never read: the tab sync stayed
+    // quiet and My Buddies said "Buddies you create show up here" as if the
+    // library were empty. Now the list is tried and the library says why.
+    let root = temp_root();
+    let mut state = test_state();
+    state.buddy_library = Arc::new(LibraryShared::for_tests(
+        LibraryEnv {
+            root: Some(root.clone()),
+            // Nothing listens on the discard port.
+            api: Some(VideorcApiClient::for_base_url("http://127.0.0.1:9")),
+            token: Some(BEARER.to_string()),
+            ..LibraryEnv::default()
+        },
+        fast_timing(),
+    ));
+    *state.account_session.lock().await = crate::account::complete_mock_sign_in("orc_dev", true);
+    assert!(state.buddy_library.cache().capability.is_none());
+    request_sync(&state, BuddyLibrarySyncReason::Tab);
+    settle(&state, |library| library.error.is_some()).await;
+    let library = get(&state).await;
+    assert_eq!(library.mine, None);
+    let error = library.error.unwrap();
+    assert_eq!(error.code, "network");
+    assert_eq!(
+        error.message,
+        "Could not reach Videorc. Check your connection and try again."
+    );
+
+    // Not read yet but the web answers: the account's Buddies show.
+    let web = spawn_fake_library().await;
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    let state = library_state(&root, &web).await;
+    state.buddy_library.cache().capability = None;
+    request_sync(&state, BuddyLibrarySyncReason::Tab);
+    settle(&state, |library| library.mine.is_some()).await;
+    let library = get(&state).await;
+    assert_eq!(library.error, None);
+    assert_eq!(library.mine.unwrap()[0].name, "Grum");
+
+    // Known off: quiet, and the web is never asked.
+    let quiet = spawn_fake_library().await;
+    let state = library_state(&root, &quiet).await;
+    state.buddy_library.cache().capability = Some(AiCapabilitiesBuddyLibrary::default());
+    request_sync(&state, BuddyLibrarySyncReason::Tab);
+    settle(&state, |_| true).await;
+    assert_eq!(get(&state).await.error, None);
+    assert!(quiet.seen().is_empty());
+}
+
+#[tokio::test]
 async fn buddy_library_turning_on_syncs_and_turning_off_forgets_the_account() {
     let root = temp_root();
     let web = spawn_fake_library().await;
