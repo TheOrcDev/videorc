@@ -28,7 +28,7 @@ function render(overrides: Partial<VideoSourcesViewProps> = {}): string {
       selectedName: 'Display 1',
       allowNone: true,
       disabled: false,
-      status: { label: 'Live', tone: 'good' },
+      status: { label: 'Receiving', tone: 'good' },
       facts: '2560 × 1664',
       onChange: noop
     },
@@ -37,7 +37,7 @@ function render(overrides: Partial<VideoSourcesViewProps> = {}): string {
       value: 'cam:built-in',
       selectedName: 'MacBook Pro Camera',
       disabled: false,
-      status: { label: 'Live', tone: 'good' },
+      status: { label: 'Receiving', tone: 'good' },
       facts: '1920 × 1080 · 30 fps',
       shortfall: null,
       onChange: noop
@@ -73,7 +73,7 @@ describe('Sources Video column (plan 173)', () => {
 
   it('shows each live source’s status and facts', () => {
     const markup = render()
-    expect(markup.match(/>Live</g)).toHaveLength(2)
+    expect(markup.match(/>Receiving</g)).toHaveLength(2)
     expect(markup).toContain('>2560 × 1664<')
     expect(markup).toContain('>1920 × 1080 · 30 fps<')
   })
@@ -84,7 +84,7 @@ describe('Sources Video column (plan 173)', () => {
         devices: cameras,
         value: 'cam:built-in',
         disabled: false,
-        status: { label: 'Live', tone: 'good' },
+        status: { label: 'Receiving', tone: 'good' },
         facts: '3840 × 2160 · 25 fps',
         shortfall: 'This camera only offers 3840×2160 at 25 fps.',
         onChange: noop

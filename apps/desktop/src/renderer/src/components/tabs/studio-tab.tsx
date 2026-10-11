@@ -31,6 +31,8 @@ import {
   sessionStopControl
 } from '@/lib/studio-session-view'
 import { spaceShortcutBlocked } from '@/lib/studio-space-shortcut'
+import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/state-labels'
+import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
@@ -85,16 +87,15 @@ export function StudioTab(): ReactElement {
     recordEnabled: true,
     streamEnabled: false
   })
+  // The start-blocking copy table (plan 174 B-22), shared with the session's own gate.
   const recordBlockedReason =
-    wsStatus !== 'connected'
-      ? `Backend socket is ${wsStatus}.`
-      : recordCompatibility.blockingReason
-        ? recordCompatibility.blockingReason
-        : !health
-          ? 'Checking FFmpeg before starting.'
-          : !health.ffmpeg.available
-            ? (health.ffmpeg.message ?? 'FFmpeg is not available.')
-            : null
+    connectionBlockedReason(wsStatus) ??
+    recordCompatibility.blockingReason ??
+    (!health
+      ? START_BLOCKED_COPY.checkingRecorder
+      : !health.ffmpeg.available
+        ? START_BLOCKED_COPY.recorderMissing
+        : null)
 
   // Two-button start: when the click changes the output mode (record vs go-live),
   // set it and start on the next render so startSession and its blocked-reason
@@ -334,10 +335,12 @@ function StudioPreviewPanel(): ReactElement {
       action={
         <div className="flex items-center gap-1.5">
           {previewWindow.open && previewWindow.mode === 'floating' ? (
+            // One name per action (plan 174 B-23): the same words as the
+            // preview card's buttons.
             <Button
-              aria-label="Stick preview into the app"
+              aria-label="Stick to app"
               size="icon"
-              title="Stick the preview into this panel"
+              title="Stick to app"
               variant="ghost"
               onClick={() => void setPreviewWindowMode('docked')}
             >
@@ -345,9 +348,9 @@ function StudioPreviewPanel(): ReactElement {
             </Button>
           ) : previewWindow.open ? (
             <Button
-              aria-label="Pop preview out into its own window"
+              aria-label="Pop out"
               size="icon"
-              title="Pop the preview out into its own window"
+              title="Pop out"
               variant="ghost"
               onClick={() => void setPreviewWindowMode('floating')}
             >
@@ -355,9 +358,9 @@ function StudioPreviewPanel(): ReactElement {
             </Button>
           ) : (
             <Button
-              aria-label="Open preview window"
+              aria-label={`Open ${WINDOW_NAMES.preview}`}
               size="icon"
-              title="Open preview in its own window"
+              title={`Open ${WINDOW_NAMES.preview}`}
               variant="ghost"
               onClick={() => void openPreviewWindow()}
             >
@@ -385,25 +388,32 @@ function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
     ? goLiveEntitlementGate({ entitlements, streaming: captureConfig.streaming })
     : { allowed: true as const }
 
-  if (wsStatus !== 'connected') {
-    return { title: 'Backend not connected' }
+  // The start-blocking copy (plan 174 B-22): the streamer's words and the
+  // page's real name on every jump.
+  const disconnected = connectionBlockedReason(wsStatus)
+  if (disconnected) {
+    return { title: disconnected }
   }
   if (!outputEnabled) {
-    return { title: 'No output enabled', jumpTo: 'recording', jumpLabel: 'Open Recording' }
+    return { title: 'Nothing to record or stream', jumpTo: 'recording', jumpLabel: 'Open Output' }
   }
   if (captureConfig.streamEnabled && !goLiveEntitlement.allowed) {
     return {
       title: goLiveEntitlement.upgradeUrl ? 'Premium required' : 'Streaming limit reached',
       jumpTo: 'live',
-      jumpLabel: 'Open Live'
+      jumpLabel: 'Open Livestream'
     }
   }
   if (captureConfig.streamEnabled && !streamReady) {
-    return { title: 'Stream target incomplete', jumpTo: 'live', jumpLabel: 'Open Live' }
+    return {
+      title: 'Finish setting up your destination',
+      jumpTo: 'live',
+      jumpLabel: 'Open Livestream'
+    }
   }
   if (health && !health.ffmpeg.available) {
     return {
-      title: 'FFmpeg unavailable',
+      title: "Videorc's recorder isn't available",
       jumpTo: 'settings',
       settingsTab: 'recording',
       jumpLabel: 'Open Settings'

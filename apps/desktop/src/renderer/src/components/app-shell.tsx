@@ -50,6 +50,7 @@ import {
   shouldShowPermissionsOnboarding,
   systemAccessRows
 } from '@/lib/system-access'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // Workspace views are loaded only on first navigation, then retained by the
 // browser module cache. Studio remains the launch surface, but its dashboard and
@@ -524,7 +525,7 @@ export function AppShell(): ReactElement {
             />
             <StatusBarHint
               accelerator={shortcutAccelerator('preview-window')}
-              label="Preview"
+              label={WINDOW_NAMES.preview}
               pressed={previewWindowOpen}
               onClick={() => void togglePreviewWindow()}
             />
@@ -533,7 +534,7 @@ export function AppShell(): ReactElement {
             {runtimeInfo?.notesWindowEnabled !== false ? (
               <StatusBarHint
                 accelerator={shortcutAccelerator('notes-window')}
-                label="Notes"
+                label={WINDOW_NAMES.notes}
                 pressed={notesWindowOpen}
                 onClick={() => (notesWindowOpen ? void closeNotesWindow() : void openNotesWindow())}
               />
@@ -541,7 +542,7 @@ export function AppShell(): ReactElement {
             {runtimeInfo?.commentsWindowEnabled !== false ? (
               <StatusBarHint
                 accelerator={shortcutAccelerator('comments-window')}
-                label="Stream Manager"
+                label={WINDOW_NAMES.streamManager}
                 pressed={commentsWindowOpen}
                 onClick={() =>
                   commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()

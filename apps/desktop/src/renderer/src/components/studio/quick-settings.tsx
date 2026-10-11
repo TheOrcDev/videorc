@@ -34,6 +34,7 @@ import {
   layoutPresetOrientation,
   resolutionOptionsForOrientation
 } from '@/lib/capture'
+import { captionsStatusLabel } from '@/lib/state-labels'
 import {
   systemAudioDevice,
   requestSystemAudioResume,
@@ -52,25 +53,9 @@ function compactCaptionsStatus(
   sessionActive: boolean,
   premiumAllowed: boolean
 ): string {
-  switch (status.state) {
-    case 'starting':
-      return 'Starting…'
-    case 'listening':
-    case 'live':
-      return sessionActive ? 'Live' : 'Waiting for session'
-    case 'reconnecting':
-      return 'Reconnecting…'
-    case 'degraded':
-      return 'Higher delay'
-    case 'blocked':
-      return 'Blocked'
-    case 'error':
-      return 'Error'
-    case 'ready':
-      return 'Ready'
-    default:
-      return enabled ? 'Armed' : premiumAllowed ? 'Off' : 'Premium'
-  }
+  // A locked switch says why; otherwise the one captions vocabulary (plan 174 D-26).
+  if (!enabled && !premiumAllowed) return 'Premium'
+  return captionsStatusLabel(status, { enabled, sessionActive })
 }
 
 /**

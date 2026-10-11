@@ -46,7 +46,7 @@ export function GeneralSettings(): ReactElement {
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <FieldLabel htmlFor="open-stream-manager-on-live">
-                    Open Stream Manager when I go live
+                    Open Stream Manager when you go live
                   </FieldLabel>
                   <p className="text-xs text-muted-foreground">
                     Chat, viewers, followers and activity for the whole stream, in their own window.

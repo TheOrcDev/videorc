@@ -112,7 +112,7 @@ export function ScenesGallery(): ReactElement {
             size="sm"
             title={
               isSessionActive
-                ? 'The canvas is fixed while a session is running. Stop to switch orientation.'
+                ? 'Locked while you’re recording or live. Stop to switch orientation.'
                 : undefined
             }
             value={mode}

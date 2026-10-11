@@ -381,10 +381,12 @@ export function cohostFlagChipLabel(flag: Pick<CohostFlag, 'kind' | 'target' | '
   return parts.join(' · ')
 }
 
+// Videorc can only remove a message, so a suggestion never names a timeout
+// or a ban it cannot carry out (plan 174 H-25).
 const COHOST_FLAG_ACTION_LABELS: Record<CohostFlagAction, string> = {
-  hide: 'Suggests hide',
-  timeout: 'Suggests timeout',
-  ban: 'Suggests ban'
+  hide: 'Suggests removing',
+  timeout: 'Suggests removing',
+  ban: 'Suggests removing'
 }
 
 /** A suggestion LABEL only: Buddy never moderates on its own, and neither

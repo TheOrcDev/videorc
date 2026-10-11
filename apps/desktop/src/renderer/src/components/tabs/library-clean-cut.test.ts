@@ -218,7 +218,7 @@ describe('Library → Clean cut (plan 119 S14)', () => {
     await render()
     const items = await openMenu('cut')
     expect(labels(items)).toContain('Show source recording')
-    expect(labels(items)).not.toContain('Clean noise')
+    expect(labels(items)).not.toContain('Reduce noise')
     await act(async () =>
       items.find((item) => item.textContent?.trim() === 'Show source recording')!.click()
     )

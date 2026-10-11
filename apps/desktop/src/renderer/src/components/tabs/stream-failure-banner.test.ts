@@ -59,6 +59,24 @@ describe('StreamFailureBanner', () => {
     expect(onDismiss).not.toHaveBeenCalled()
   })
 
+  it('says what viewers still see from the count on air, in the destination words (J2-19)', async () => {
+    const props = { onEndLivestream: vi.fn(), onDismiss: vi.fn() }
+    await act(async () =>
+      root.render(createElement(StreamFailureBanner, { problems: [failed], ...props }))
+    )
+    expect(container.textContent).toContain('Some destinations aren’t on air')
+    expect(container.textContent).toContain(
+      'Failed: Twitch. No other destination is streaming, so viewers see nothing.'
+    )
+    expect(container.textContent).not.toContain('Stopped')
+    await act(async () =>
+      root.render(createElement(StreamFailureBanner, { problems: [failed], onAir: 2, ...props }))
+    )
+    expect(container.textContent).toContain(
+      'Failed: Twitch. The other 2 destinations keep streaming.'
+    )
+  })
+
   it('is wired to the failure-banner origin, so a livestream asks first', () => {
     const source = readFileSync(join(__dirname, 'streaming-tab.tsx'), 'utf8')
     expect(source).toContain("requestStopSession('failure-banner')")

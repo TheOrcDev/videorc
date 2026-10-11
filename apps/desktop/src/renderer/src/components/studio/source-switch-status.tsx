@@ -12,10 +12,13 @@ export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): React
     deviceList
   } = useStudioCore()
   const pending = state.snapshot?.pending
+  // A switch to no device turns the source off: "Turning off…", never
+  // "Preparing None…" (plan 174 C-PAT: Off, not None).
+  const turningOff = !state.targetName && pending?.deviceId === null
   const targetName =
     state.targetName ??
     (pending?.deviceId === null
-      ? 'None'
+      ? null
       : (deviceList.devices.find((device) => device.id === pending?.deviceId)?.name ??
         pending?.deviceId))
   const health = state.snapshot?.health.find((item) => item.kind === kind)
@@ -26,7 +29,9 @@ export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): React
       : state.pending === kind || pending?.kind === kind
         ? pending?.stage === 'restoring'
           ? 'Restoring previous source…'
-          : `Preparing ${targetName ?? 'source'}…`
+          : turningOff
+            ? 'Turning off…'
+            : `Preparing ${targetName ?? 'source'}…`
         : health?.health === 'unavailable'
           ? 'Source unavailable. Select it again to retry, or choose another.'
           : state.snapshot?.lastOperation?.kind === kind &&

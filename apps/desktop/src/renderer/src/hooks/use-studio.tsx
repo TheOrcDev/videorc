@@ -1,4 +1,5 @@
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
 import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-loader'
@@ -54,8 +55,9 @@ import {
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
+import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/state-labels'
 import { copyText } from '@/lib/copy-text'
-import { toast } from '@/lib/toast'
+import { registerSupportBundleExport, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
@@ -478,7 +480,8 @@ import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
 import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
-import { findDevice, isActiveRecordingState, mergeStreamHealth } from '@/lib/format'
+import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
+import { revealInFileManagerLabel, trashName } from '@/lib/platform'
 import {
   confirmedSystemAudioMix,
   systemAudioIssueFromHealthEvent,
@@ -2200,7 +2203,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             id,
             duration: 15000,
             action: {
-              label: 'Show in folder',
+              label: revealInFileManagerLabel(),
               onClick: () => {
                 void window.videorc?.revealSession(session.id)
               }
@@ -6744,7 +6747,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             id: `finalization-${event.sessionId}`,
             duration: 15000,
             action: {
-              label: 'Show in folder',
+              label: revealInFileManagerLabel(),
               onClick: () => {
                 void window.videorc?.revealSession(event.sessionId)
               }
@@ -6862,7 +6865,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           clearSessionRuntimeState()
           void refreshSessions(nextClient)
         }
-        // "Open Stream Manager when I go live" (plan 055, decision 6). Go Live
+        // "Open Stream Manager when you go live" (plan 055, decision 6). Go Live
         // is record+stream, which the backend reports as `recording` with a
         // stream URL (plan 095 S5).
         if (
@@ -10214,10 +10217,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeCommentsWindow?.().then(() => {
-      notifyOnce('chat-closed-for-recording', 'warning', 'Chat closed for this recording', {
-        description:
-          'Chat window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
-      })
+      notifyOnce(
+        'chat-closed-for-recording',
+        'warning',
+        `${WINDOW_NAMES.streamManager} closed for this recording`,
+        {
+          description: `${WINDOW_NAMES.streamManager} protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.`
+        }
+      )
     })
   }, [
     commentsWindow.open,
@@ -10455,6 +10462,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSupportBundleExportPending(false)
     }
   }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  // Plan 174 A-20: a toast whose raw details were withheld offers this export
+  // (latest-value hand-off, like the ref mirrors above; idempotent per render).
+  registerSupportBundleExport(() => void exportSupportBundle())
 
   const scheduleHardwareAccelerationRetry = useCallback(async () => {
     if (!window.videorc?.retryHardwareAcceleration) {
@@ -12104,15 +12114,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus
   ])
 
+  // The start-blocking copy table (plan 174 B-22): what to do next, never
+  // "Backend socket is closed." or "Checking FFmpeg…".
   const startBlockedReason = (() => {
-    if (wsStatus !== 'connected') {
-      return `Backend socket is ${wsStatus}.`
+    const disconnected = connectionBlockedReason(wsStatus)
+    if (disconnected) {
+      return disconnected
     }
     if (isSessionActive) {
-      return 'A capture session is already active.'
+      return START_BLOCKED_COPY.sessionRunning
     }
     if (!outputEnabled) {
-      return 'Enable Record MKV, Stream RTMP, or both before starting.'
+      return START_BLOCKED_COPY.noOutput
     }
     if (!recordingProfileEntitlement.allowed) {
       return recordingProfileEntitlement.reason
@@ -12131,14 +12144,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     if (captureConfig.streamEnabled && !streamReady) {
       return captureConfig.streaming.targets.some((target) => target.enabled)
-        ? 'Finish manual livestream destination setup before streaming.'
-        : 'Enable at least one livestream destination before streaming.'
+        ? START_BLOCKED_COPY.destinationSetup
+        : START_BLOCKED_COPY.noDestination
     }
     if (!health) {
-      return 'Checking FFmpeg before starting.'
+      return START_BLOCKED_COPY.checkingRecorder
     }
     if (!health.ffmpeg.available) {
-      return health.ffmpeg.message ?? 'FFmpeg is not available.'
+      return START_BLOCKED_COPY.recorderMissing
     }
     // Only a finished verdict blocks here. A check that is still running or
     // failed is settled when Go Live is pressed: the start waits for it.
@@ -14274,7 +14287,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
       if (failedCount > 0) {
         throw new Error(
-          `${failedCount} file(s) could not be moved to Trash; their sessions were kept.`
+          `${plural(failedCount, "file couldn't", "files couldn't")} be moved to the ${trashName()}, so ${failedCount === 1 ? 'its recording was' : 'their recordings were'} kept.`
         )
       }
     },

@@ -67,7 +67,13 @@ import {
   finalizingBadgeLabel,
   isFinalizingSession
 } from '@/lib/session-finalization'
-import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
+import {
+  dayLabel,
+  durationMsLabel,
+  formatBytes,
+  isActiveRecordingState,
+  plural
+} from '@/lib/format'
 import { cleanCutModeLabel, isCleanCutEligible, type CleanCutSession } from '@/lib/clean-cut-view'
 import { revealInFileManagerLabel, trashName } from '@/lib/platform'
 import { sessionStatusLabel, sessionStatusPulses, sessionStatusTone } from '@/lib/state-labels'
@@ -275,7 +281,7 @@ export function LibraryTab({
     // only the table scrolls (plan 174 S1.6b).
     <div {...PANE_OWNS_SCROLL} className="flex min-h-0 flex-1 flex-col">
       <PageHeader
-        description="Every recording and stream becomes a local session. Files stay on disk."
+        description="Every recording and livestream is saved here. The files stay on your computer."
         title="Library"
       />
 
@@ -322,7 +328,7 @@ export function LibraryTab({
         </Button>
         <Button size="sm" onClick={() => setActive('studio')}>
           <CameraIcon data-icon="inline-start" weight="fill" />
-          New Recording
+          Open Studio
         </Button>
       </PaneStrip>
 
@@ -344,7 +350,7 @@ export function LibraryTab({
           </Button>
           {selectedCleanupActive ? (
             <span className="text-xs text-muted-foreground">
-              Cancel or finish Noise Cleanup before deleting its source.
+              Cancel or finish noise cleanup before you delete its source.
             </span>
           ) : null}
         </div>
@@ -352,9 +358,9 @@ export function LibraryTab({
 
       {sessions.length === 0 ? (
         <Empty className="py-16">
-          <EmptyTitle>No sessions yet</EmptyTitle>
+          <EmptyTitle>No recordings yet</EmptyTitle>
           <EmptyDescription>
-            Record or stream from the Studio tab to populate the library.
+            Record or go live from Studio, and your recordings appear here.
           </EmptyDescription>
         </Empty>
       ) : (
@@ -370,10 +376,10 @@ export function LibraryTab({
               }
             />
             <span>Name</span>
-            <span>Session</span>
+            <span>Details</span>
             <span>Duration</span>
             <span>Size</span>
-            <span />
+            <span>File</span>
             <span className="text-right">Actions</span>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
@@ -423,7 +429,7 @@ export function LibraryTab({
                       totalBytes: sessionStorageTotals.totalBytes,
                       freeBytes
                     })
-                  : `${sessions.length} sessions loaded`}
+                  : `${plural(sessions.length, 'recording')} loaded`}
               </span>
               {sessionsNextCursor ? (
                 <Button

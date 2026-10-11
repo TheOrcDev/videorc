@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { StreamPlatform } from '@/lib/backend'
 
-import { platformCopy, platformLabel } from './platform-copy'
+import { destinationLabel, platformCopy, platformLabel } from './platform-copy'
 
 // Plan 174 S1.4 (D-36, I-9, C-30).
 
@@ -25,6 +25,16 @@ describe('platformLabel', () => {
   it('never says "X / Twitter" or a bare "Custom"', () => {
     expect(platformLabel('x')).not.toMatch(/Twitter/)
     expect(platformLabel('custom')).not.toBe('Custom')
+  })
+})
+
+describe('destinationLabel (plan 174 S2.3a, D-36)', () => {
+  it('reads the retired X default as X, without touching other names', () => {
+    expect(destinationLabel('X / Twitter')).toBe('X')
+    expect(destinationLabel('X')).toBe('X')
+    expect(destinationLabel('YouTube Vertical')).toBe('YouTube Vertical')
+    expect(destinationLabel('My X / Twitter relay')).toBe('My X / Twitter relay')
+    expect(destinationLabel('toString')).toBe('toString')
   })
 })
 

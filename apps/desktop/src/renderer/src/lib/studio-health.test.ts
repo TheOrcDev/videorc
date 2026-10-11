@@ -26,7 +26,7 @@ function stats(overrides: Partial<StudioHealthInput> = {}): StudioHealthInput {
 
 describe('studioHealth', () => {
   it('reports Live on a healthy Metal session while active', () => {
-    expect(studioHealth(stats(), true)).toMatchObject({ tone: 'good', value: 'Live' })
+    expect(studioHealth(stats(), true)).toMatchObject({ tone: 'good', value: 'Running' })
   })
 
   it('reports Ready on a healthy Metal session while idle', () => {
@@ -93,7 +93,7 @@ describe('studioHealth', () => {
   it('never reds an active session whose preview has no transport yet', () => {
     expect(
       studioHealth(stats({ previewTransport: 'unavailable', previewSurfaceBacking: 'none' }), true)
-    ).toMatchObject({ tone: 'good', value: 'Live' })
+    ).toMatchObject({ tone: 'good', value: 'Running' })
   })
 
   it('keeps showing Fallback over Lagging when polling with high latency (no flapping)', () => {
@@ -149,7 +149,7 @@ describe('studioHealth', () => {
         'win32',
         'backend-d3d11-presenter'
       )
-    ).toMatchObject({ tone: 'good', value: 'Live' })
+    ).toMatchObject({ tone: 'good', value: 'Running' })
     expect(
       studioHealth(
         stats({

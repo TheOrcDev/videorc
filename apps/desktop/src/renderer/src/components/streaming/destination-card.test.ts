@@ -315,6 +315,8 @@ describe('DestinationCard signed-in account', () => {
     expect(markup).toContain('Use a stream key instead')
     expect(markup).toContain('X Producer docs')
     expect(markup).not.toContain('Manual RTMP')
+    // A config saved before plan 174 S2.3a keeps "X / Twitter"; it reads "X" (D-36).
+    expect(markup).not.toContain('X / Twitter')
   })
 })
 

@@ -54,6 +54,9 @@ import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 import { unlockActionForReason } from '@/lib/lock-view'
+import { destinationLabel } from '@/lib/platform-copy'
+import { otherDestinationsLine } from '@/lib/stream-target-notices'
+import { destinationStateLabel } from '@/lib/state-labels'
 
 /**
  * Livestream (plan 174 S1.6b, A-14): Setup and Upcoming in a strip pinned
@@ -215,6 +218,7 @@ function StreamingSetup(): ReactElement {
             ) : null}
             {isSessionActive && problems.length > 0 && !dismissed ? (
               <StreamFailureBanner
+                onAir={streamTargets.filter((runtime) => runtime.state === 'live').length}
                 problems={problems}
                 onDismiss={() => setDismissedKey(problemsKey)}
                 onEndLivestream={() => void requestStopSession('failure-banner')}
@@ -225,7 +229,7 @@ function StreamingSetup(): ReactElement {
               <Alert key={`scheduled-${target.id}`}>
                 <AlertDescription className="flex flex-wrap items-center justify-between gap-2 text-foreground">
                   <span className="min-w-0 truncate">
-                    {target.label}: {target.scheduledEventTitle}
+                    {destinationLabel(target.label)}: {target.scheduledEventTitle}
                   </span>
                   <Button
                     size="sm"
@@ -351,10 +355,13 @@ const DESTINATION_PROBLEM_STATES: ReadonlySet<StreamTargetRuntime['state']> = ne
  */
 export function StreamFailureBanner({
   problems,
+  onAir = 0,
   onEndLivestream,
   onDismiss
 }: {
   problems: StreamTargetRuntime[]
+  /** How many destinations are on air beside the problems (J2-19). */
+  onAir?: number
   onEndLivestream: () => void
   onDismiss: () => void
 }): ReactElement {
@@ -362,35 +369,40 @@ export function StreamFailureBanner({
   const reconnecting = problems.filter((target) => target.state === 'reconnecting')
   const notReceiving = problems.filter((target) => target.state === 'warning')
   const skipped = problems.filter((target) => target.state === 'not-configured')
+  const names = (targets: StreamTargetRuntime[]): string =>
+    targets.map((target) => destinationLabel(target.label)).join(', ')
+  // Count-aware (plan 174 J2-19): "keep streaming" only when another one is on air.
+  const stillOnAir =
+    otherDestinationsLine(onAir) ?? 'No other destination is streaming, so viewers see nothing.'
 
   return (
     <Alert variant="warning">
-      <AlertTitle>Some destinations aren’t live</AlertTitle>
+      <AlertTitle>Some destinations aren’t on air</AlertTitle>
       <AlertDescription className="flex flex-col gap-1">
         {failed.length ? (
           <span>
-            Stopped: {failed.map((target) => target.label).join(', ')}. The other destinations keep
-            streaming.
+            {destinationStateLabel('failed')}: {names(failed)}. {stillOnAir}
           </span>
         ) : null}
         {reconnecting.length ? (
           <span>
-            Reconnecting: {reconnecting.map((target) => target.label).join(', ')}. Viewers there see
-            nothing until it is back.
+            Reconnecting: {names(reconnecting)}. Viewers there see nothing until it’s back.
           </span>
         ) : null}
         {notReceiving.length ? (
           <span>
-            Not receiving: {notReceiving.map((target) => target.label).join(', ')}. Videorc is still
-            sending; check the platform’s live dashboard.
+            {destinationStateLabel('warning')}: {names(notReceiving)}. Videorc is still sending;
+            check the platform’s live dashboard.
           </span>
         ) : null}
         {skipped.length ? (
           <span>
-            Skipped:{' '}
+            {destinationStateLabel('not-configured')}:{' '}
             {skipped
               .map((target) =>
-                target.message ? `${target.label} (${target.message})` : target.label
+                target.message
+                  ? `${destinationLabel(target.label)} (${target.message})`
+                  : destinationLabel(target.label)
               )
               .join(', ')}
             .

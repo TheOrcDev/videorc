@@ -16,6 +16,8 @@ import { formatBitrate } from '@/lib/format-video'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { chatActivity, type ActivityTotals } from '@/lib/stream-activity'
 import { formatViewerCount, viewerSampleStale } from '@/lib/viewer-count-view'
+import { destinationLabel } from '@/lib/platform-copy'
+import { destinationStateLabel } from '@/lib/state-labels'
 
 import type { LiveDashboardState } from '../../../shared/live-dashboard'
 
@@ -250,17 +252,6 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
   } satisfies StatItemModel
 }
 
-const TARGET_STATE_LABELS: Record<StreamTargetState, string> = {
-  'not-configured': 'Not set up',
-  ready: 'Ready',
-  connecting: 'Connecting',
-  live: 'Live',
-  warning: 'Not receiving',
-  reconnecting: 'Reconnecting',
-  failed: 'Failed',
-  stopped: 'Stopped'
-}
-
 const TARGET_DOTS: Partial<Record<StreamTargetState, StatDot>> = {
   live: 'good',
   connecting: 'warn',
@@ -283,7 +274,9 @@ function healthReading(
   bitrate: string
 ): { value: string; tone: StatTone } {
   const failed = targets.filter((target) => target.state === 'failed')
-  if (failed.length === 1) return { value: `${failed[0].label} failed`, tone: 'error' }
+  if (failed.length === 1) {
+    return { value: `${destinationLabel(failed[0].label)} failed`, tone: 'error' }
+  }
   if (failed.length > 1) return { value: `${failed.length} failed`, tone: 'error' }
   const down = targets.filter(
     (target) => target.state === 'reconnecting' || target.state === 'warning'
@@ -292,7 +285,7 @@ function healthReading(
   if (down.length === 1) {
     const [target] = down
     return {
-      value: `${target.label} ${target.state === 'reconnecting' ? 'reconnecting' : 'not receiving'}`,
+      value: `${destinationLabel(target.label)} ${target.state === 'reconnecting' ? 'reconnecting' : 'not receiving'}`,
       tone: 'error'
     }
   }
@@ -337,8 +330,8 @@ function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatIt
       ...(fps ? [{ label: 'Frame rate', value: fps }] : []),
       { label: 'Dropped frames', value: dropped },
       ...dashboard.targets.map((target) => ({
-        label: target.label,
-        value: TARGET_STATE_LABELS[target.state],
+        label: destinationLabel(target.label),
+        value: destinationStateLabel(target.state),
         platform: target.platform,
         dot: TARGET_DOTS[target.state] ?? 'neutral',
         ...(target.message ? { note: target.message } : {})

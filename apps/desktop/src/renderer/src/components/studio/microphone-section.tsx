@@ -9,7 +9,7 @@ import { useMicrophoneMeter } from '@/hooks/use-studio-mic-sources'
 import type { Device } from '@/lib/backend'
 import { buildMicrophoneSources, microphonePickerDevices } from '@/lib/capture'
 import type { MeterInput } from '@/lib/mic-meter-input'
-import type { AudioMixerMonitorLabel } from '@/lib/mic-visual-gate'
+import { micSignalLabel, type MicMonitorState } from '@/lib/state-labels'
 
 /**
  * The Studio's Microphone section (plan 092, owner call 2026-10-02): the
@@ -28,7 +28,7 @@ export function MicrophoneSection(): ReactElement {
     sourceSwitchReason,
     wsStatus
   } = useStudioCore()
-  const { meter, monitorLabel } = useMicrophoneMeter()
+  const { meter, monitorState } = useMicrophoneMeter()
   const microphones = microphonePickerDevices(deviceList.devices)
 
   return (
@@ -37,7 +37,7 @@ export function MicrophoneSection(): ReactElement {
       disabled={Boolean(sourceSwitchReason('microphone'))}
       discoveryPending={wsStatus !== 'connected'}
       meter={meter}
-      monitorLabel={monitorLabel}
+      monitorState={monitorState}
       selectedDevice={selectedMicrophone}
       selectedName={captureConfig.sources.microphoneName}
       switchStatus={<SourceSwitchStatus kind="microphone" />}
@@ -62,7 +62,7 @@ export function MicrophoneSectionView({
   disabled,
   discoveryPending,
   meter,
-  monitorLabel,
+  monitorState,
   onChange
 }: {
   devices: Device[]
@@ -75,7 +75,7 @@ export function MicrophoneSectionView({
   disabled: boolean
   discoveryPending: boolean
   meter: MeterInput
-  monitorLabel: AudioMixerMonitorLabel
+  monitorState: MicMonitorState
   onChange: (microphoneId: string | undefined) => void
 }): ReactElement {
   return (
@@ -106,9 +106,9 @@ export function MicrophoneSectionView({
           orientation="horizontal"
           variant="segmented"
         />
-        {/* Live / Muted / Idle for screen readers (and the perf probe), not on screen. */}
-        <span className="sr-only" data-videorc-mic-monitor-state={monitorLabel.toLowerCase()}>
-          {monitorLabel}
+        {/* Receiving / Muted / No signal for screen readers, and its state for the perf probe, off screen. */}
+        <span className="sr-only" data-videorc-mic-monitor-state={monitorState}>
+          {micSignalLabel(monitorState)}
         </span>
       </div>
     </PanelSection>

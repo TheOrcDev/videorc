@@ -59,7 +59,14 @@ vi.mock(
         }
 
         async describe(): Promise<unknown> {
-          return { describe: { layoutPresets: [], takeovers: [] }, state: remote.state }
+          return {
+            describe: {
+              layoutPresets: ['screen-only', 'vertical-split'],
+              layoutLabels: { 'screen-only': 'Screen only', 'vertical-split': 'Vertical split' },
+              takeovers: []
+            },
+            state: remote.state
+          }
         }
 
         async chatSnapshot(): Promise<void> {}
@@ -81,7 +88,7 @@ function client(): FakeClient {
 
 function sessionButton(): HTMLButtonElement {
   const button = page.document.querySelector<HTMLButtonElement>('#deck-main button')!
-  expect(button.querySelector('.name')!.textContent).toMatch(/Stop recording|End stream/)
+  expect(button.querySelector('.name')!.textContent).toMatch(/Stop recording|End livestream/)
   return button
 }
 
@@ -236,7 +243,7 @@ describe('shipping phone remote stop gestures', () => {
     pointer(stop, 'pointerup')
   })
 
-  it('retires an old recording hold when the action changes to End stream', () => {
+  it('retires an old recording hold when the action changes to End livestream', () => {
     const oldStop = sessionButton()
     pointer(oldStop, 'pointerdown')
     vi.advanceTimersByTime(100)
@@ -360,5 +367,29 @@ describe('shipping phone remote stop gestures', () => {
     await vi.advanceTimersByTimeAsync(700)
     expect(page.document.getElementById('snack')!.textContent).toBe('Session already stopping.')
     expect(sessionButton().querySelector('.name')!.textContent).toBe('Stop recording')
+  })
+})
+
+describe('shipping phone remote words (plan 174 I-14)', () => {
+  it('says what the desktop says: Chat, Controls, ON AIR, Take off stream, real layout names', () => {
+    const tabs = [...page.document.querySelectorAll('#tabs button')].map((tab) =>
+      tab.textContent?.trim()
+    )
+    expect(tabs).toEqual(['Chat', 'Controls'])
+    expect(page.document.getElementById('live')!.textContent).toBe('ON AIR')
+    expect(page.document.getElementById('comments-empty')!.textContent).toBe(
+      'Chat appears here when you go live.'
+    )
+    const keys = [...page.document.querySelectorAll('#deck-main .name')].map(
+      (name) => name.textContent
+    )
+    expect(keys).toContain('Take off stream')
+    expect(keys).not.toContain('Clear comment')
+    const scenes = [...page.document.querySelectorAll('#deck-scenes .name')].map(
+      (name) => name.textContent
+    )
+    expect(scenes).toEqual(['Screen only', 'Vertical split'])
+    stateUpdate({ streamEnabled: true, sessionState: 'streaming' })
+    expect(sessionButton().querySelector('.name')!.textContent).toBe('End livestream')
   })
 })

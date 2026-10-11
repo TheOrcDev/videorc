@@ -1,15 +1,17 @@
 import { useEffect, useRef, type CSSProperties, type ReactElement } from 'react'
 
 import { PinWindowButton } from '@/components/pin-window-button'
-import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { StatusDot } from '@/components/status-dot'
 import { WindowHeader } from '@/components/window-frame'
 import type { CaptionStyleId, CaptionsStatus, CaptionsUpdate } from '@/lib/backend'
 import { captionStyleDefinition } from '@/lib/caption-overlay'
 import { latestFinalCaptionText } from '@/lib/captions-ui'
+import { captionsStatusLabel, captionsStatusTone } from '@/lib/state-labels'
 import { cn } from '@/lib/utils'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 /**
- * Big-text caption display for the detached Captions window: a dark glass
+ * Big-text caption display for the detached Captions reader window: a dark glass
  * reader meant for a second monitor — or to be captured into the scene as a
  * caption bar. Minimal chrome (the window header and its pin); the newest
  * line is emphasized.
@@ -43,7 +45,7 @@ export function CaptionsReader({
 
   const recent = lines.slice(-8)
   const latestFinal = latestFinalCaptionText(lines)
-  const statusLabel = readerStatusLabel(status)
+  const statusLabel = captionsStatusLabel(status)
   const latestTextClass = textSize === 's' ? 'text-xl' : textSize === 'l' ? 'text-4xl' : 'text-3xl'
   const readerAppearance = captionReaderAppearance(styleId)
 
@@ -52,8 +54,8 @@ export function CaptionsReader({
       {/* The shared window header (plan 174 S1.6b): the title on the traffic
           lights' line, the state as a status dot, and Keep on top. */}
       <WindowHeader
-        meta={<StatusDot label={statusLabel} tone={captionStatusDotTone(status.state)} />}
-        title="Live captions"
+        meta={<StatusDot label={statusLabel} tone={captionsStatusTone(status)} />}
+        title={WINDOW_NAMES.captions}
       >
         {onToggleAlwaysOnTop ? (
           <PinWindowButton pinned={alwaysOnTop} onPinnedChange={() => onToggleAlwaysOnTop()} />
@@ -70,7 +72,7 @@ export function CaptionsReader({
         {recent.length === 0 ? (
           <p className="text-lg text-muted-foreground">
             Waiting for captions. Turn on Live captions, then record or go live. Captions transcribe
-            your microphone during a session.
+            your microphone while you record or go live.
           </p>
         ) : (
           recent.map((line, index) => {
@@ -134,44 +136,5 @@ export function captionReaderAppearance(styleId: CaptionStyleId): {
           ? `${Math.max(1, definition.strokeWidthFactor * 14)}px ${definition.strokeColor}`
           : undefined
     }
-  }
-}
-
-/** The header dot's tone: colour only where the state means something. */
-export function captionStatusDotTone(state: CaptionsStatus['state']): StatusDotTone {
-  switch (state) {
-    case 'listening':
-    case 'live':
-      return 'good'
-    case 'reconnecting':
-    case 'degraded':
-      return 'warn'
-    case 'blocked':
-    case 'error':
-      return 'error'
-    default:
-      return 'neutral'
-  }
-}
-
-function readerStatusLabel(status: CaptionsStatus): string {
-  switch (status.state) {
-    case 'listening':
-    case 'live':
-      return 'Listening'
-    case 'starting':
-      return 'Starting'
-    case 'reconnecting':
-      return 'Reconnecting'
-    case 'degraded':
-      return 'Higher delay'
-    case 'blocked':
-      return 'Blocked'
-    case 'error':
-      return 'Error'
-    case 'ready':
-      return 'Ready'
-    default:
-      return 'Idle'
   }
 }

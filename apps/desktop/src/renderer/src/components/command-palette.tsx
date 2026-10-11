@@ -34,6 +34,7 @@ import {
   useWorkspaceNav
 } from '@/components/workspace-nav'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 /** ⌘K command palette: jump anywhere + run the core session/theme actions. Open state is
  *  owned by the shell so the sidebar trigger and the global shortcut share it. */
@@ -204,7 +205,9 @@ export function CommandPalette({
               onSelect={() => run(() => toggleCommentsWindow())}
             >
               <ChatIcon className="size-4" />
-              {commentsWindow.open ? 'Close Stream Manager' : 'Open Stream Manager'}
+              {commentsWindow.open
+                ? `Close ${WINDOW_NAMES.streamManager}`
+                : `Open ${WINDOW_NAMES.streamManager}`}
               <CommandShortcut className="tracking-normal">
                 <ShortcutKeys
                   accelerator={shortcutAccelerator('comments-window')}
@@ -215,11 +218,13 @@ export function CommandPalette({
           ) : null}
           {captionsWindow.enabled || captionsWindow.open ? (
             <CommandItem
-              value="Toggle captions reader"
+              value="Toggle Captions reader window"
               onSelect={() => run(() => toggleCaptionsWindow())}
             >
               <CaptionsIcon className="size-4" />
-              {captionsWindow.open ? 'Close captions reader' : 'Open captions reader'}
+              {captionsWindow.open
+                ? `Close ${WINDOW_NAMES.captions}`
+                : `Open ${WINDOW_NAMES.captions}`}
               <CommandShortcut className="tracking-normal">
                 <ShortcutKeys
                   accelerator={shortcutAccelerator('captions-window')}

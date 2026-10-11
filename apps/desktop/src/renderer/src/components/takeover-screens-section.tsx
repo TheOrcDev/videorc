@@ -51,7 +51,7 @@ export function TakeoverScreensSection(): ReactElement {
         }
         description="Full-frame images that cover the output. Flip them on from the Studio session panel. Drag tiles to reorder."
         icon={ImageIcon}
-        title="Takeover screens"
+        title="Takeovers"
       >
         {isSessionActive ? (
           <SessionLockAlert />

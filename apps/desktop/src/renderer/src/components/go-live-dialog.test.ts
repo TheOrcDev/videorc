@@ -24,7 +24,7 @@ describe('Go Live comments status', () => {
 
     expect(markup).toContain('aria-label="Chat read and send status"')
     expect(markup).toContain('Read: After publish')
-    expect(markup).toContain('Send: Receive only')
+    expect(markup).toContain('Send: Read-only')
     expect(markup).toContain('X comments attach after the native broadcast is published')
   })
 
@@ -38,7 +38,7 @@ describe('Go Live comments status', () => {
     )
 
     expect(markup).toContain('Read: Ready')
-    expect(markup).toContain('Send: Reconnect needed')
+    expect(markup).toContain('Send: Reconnect to send')
     expect(markup).toContain('data-variant="success"')
     expect(markup).toContain('data-variant="warning"')
   })

@@ -45,7 +45,7 @@ describe('Settings entry points', () => {
 
   it('sends the FFmpeg blocker to Recording, where FFmpeg status lives', () => {
     const studio = read('./studio-tab.tsx')
-    const ffmpeg = studio.slice(studio.indexOf("title: 'FFmpeg unavailable'"))
+    const ffmpeg = studio.slice(studio.indexOf('title: "Videorc\'s recorder isn\'t available"'))
     expect(ffmpeg.slice(0, ffmpeg.indexOf('}'))).toContain("settingsTab: 'recording'")
 
     const sessionPanel = read('../studio/session-panel.tsx')

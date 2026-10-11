@@ -116,6 +116,7 @@ import {
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
+import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /**
  * ⌘J on macOS, Ctrl+J elsewhere (plan 174 H-22): the platform the window's
@@ -918,7 +919,7 @@ export function StreamManager({
       {/* The title row: the title only (owner call, 2026-09-23). Fixed height:
           the traffic lights are centred on this strip. The stats bar says
           On air, and History has its own bar (plan 057). */}
-      <WindowHeader title="Stream Manager" />
+      <WindowHeader title={WINDOW_NAMES.streamManager} />
 
       {viewMode?.kind === 'history' ? (
         <div

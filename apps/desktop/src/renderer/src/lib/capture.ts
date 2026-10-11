@@ -1,7 +1,7 @@
 import type { GlobalShortcutsConfig } from '../../../shared/backend'
 import { formatBitrate, formatResolution, formatVideoQuality, resolutionName } from './format-video'
 import { normalizeLayoutFramingMemory, type LayoutFramingMemory } from './layout-framing-memory'
-import { platformLabel } from './platform-copy'
+import { destinationLabel, platformLabel } from './platform-copy'
 import type {
   AudioSettings,
   CaptionStyleId,
@@ -559,7 +559,7 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
   { id: 'youtube', platform: 'youtube', label: 'YouTube', serverUrl: rtmpDefaults.youtube },
   { id: 'twitch', platform: 'twitch', label: 'Twitch', serverUrl: rtmpDefaults.twitch },
   { id: 'kick', platform: 'kick', label: 'Kick', serverUrl: rtmpDefaults.kick },
-  { id: 'x', platform: 'x', label: 'X / Twitter', serverUrl: '' },
+  { id: 'x', platform: 'x', label: 'X', serverUrl: '' },
   {
     id: 'youtube-vertical',
     platform: 'youtube',
@@ -2077,7 +2077,7 @@ export function isStreamTargetStartReady(target: StreamTargetSettings): boolean 
 export function readyStreamTargetLabels(streaming: StreamingSettings): string[] {
   return streaming.targets
     .filter((target) => target.enabled && isStreamTargetStartReady(target))
-    .map((target) => target.label)
+    .map((target) => destinationLabel(target.label))
 }
 
 export function areEnabledStreamTargetsStartReady(streaming: StreamingSettings): boolean {

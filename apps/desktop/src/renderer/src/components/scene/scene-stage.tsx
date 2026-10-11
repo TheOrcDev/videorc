@@ -59,6 +59,7 @@ import {
   type StageHandleId,
   type StageRect
 } from './stage-transform'
+import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /** The invisible outline that drags a selected overlay item (CSS px). */
 const OVERLAY_GRAB_STROKE_PX = 10
@@ -178,7 +179,7 @@ export function SceneStage({
   /** Dock-slot reporter ref for the canvas rect (macOS live canvas only). */
   slotRef?: (element: HTMLElement | null) => void
   /** Present only where the live canvas is supported; the footer then offers
-   * Pop out / Show live here instead of the plain open/close toggle. */
+   * Pop out / Show preview here instead of the plain open/close toggle. */
   onPopOut?: () => void
   onShowLive?: () => void
   /** `scene.editor.draft.set` / `.clear` (live canvas only, plan 058 S4). Both
@@ -1079,13 +1080,13 @@ export function SceneStage({
             ) : (
               <Button data-videorc-stage-show-live size="sm" variant="ghost" onClick={onShowLive}>
                 <PreviewIcon data-icon="inline-start" />
-                Show live here
+                Show preview here
               </Button>
             )
           ) : (
             <Button size="sm" variant="ghost" onClick={onTogglePreview}>
               <ExternalLinkIcon data-icon="inline-start" />
-              {previewOpen ? 'Close preview' : 'Open preview'}
+              {previewOpen ? `Close ${WINDOW_NAMES.preview}` : `Open ${WINDOW_NAMES.preview}`}
             </Button>
           )}
         </div>

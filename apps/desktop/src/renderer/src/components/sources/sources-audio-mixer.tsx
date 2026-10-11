@@ -68,7 +68,7 @@ import {
   type MeterInput
 } from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
-import type { AudioMixerMonitorLabel } from '@/lib/mic-visual-gate'
+import type { MicMonitorState } from '@/lib/state-labels'
 import {
   microphoneStatus,
   selectedDeviceStatus,
@@ -197,7 +197,7 @@ export function SourcesAudioMixer(): ReactElement {
                 gainDb={audio.microphoneGainDb}
                 meter={microphone.meter}
                 microphoneSelected={Boolean(selectedMicrophone)}
-                monitorLabel={microphone.monitorLabel}
+                monitorState={microphone.monitorState}
                 muteShortcut={settings.globalShortcuts?.micToggle}
                 platform={platform}
                 muted={audio.microphoneMuted}
@@ -294,7 +294,7 @@ export function MicrophoneChannel({
   microphoneSelected,
   status,
   meter,
-  monitorLabel,
+  monitorState,
   unavailableReason,
   gainDb,
   muted,
@@ -314,7 +314,7 @@ export function MicrophoneChannel({
   microphoneSelected: boolean
   status: SourceStatus | null
   meter: MeterInput
-  monitorLabel: AudioMixerMonitorLabel
+  monitorState: MicMonitorState
   unavailableReason: MicStreamFailureReason | undefined
   gainDb: number
   muted: boolean
@@ -354,7 +354,7 @@ export function MicrophoneChannel({
         }
         data-muted={muted ? '' : undefined}
         data-videorc-mic-channel=""
-        data-videorc-mic-monitor-state={microphoneSelected ? monitorLabel.toLowerCase() : 'none'}
+        data-videorc-mic-monitor-state={microphoneSelected ? monitorState : 'none'}
         defaultMoreOpen={defaultMoreOpen}
         icon={MicrophoneIcon}
         id="microphone"
@@ -588,7 +588,7 @@ export function SyncCalibrationView({
 
 /**
  * The System audio row (plan 069): the On switch in the header; one line on
- * what it captures; while On, its level and the Level fader; then any issue.
+ * what it captures; while On, its level and the Gain fader; then any issue.
  * The echo guard (plan 076) and the three facts people need sit in More.
  */
 export function SystemAudioSettings({
@@ -686,7 +686,7 @@ export function SystemAudioSettings({
                 Your own stream open in a browser tab is captured too. Mute that tab: headphones
                 don&apos;t stop it.
               </li>
-              <li>Use headphones so your mic doesn&apos;t pick up your speakers.</li>
+              <li>Use headphones so your microphone doesn&apos;t pick up your speakers.</li>
               {macOS ? (
                 <li>Your Mac&apos;s volume and mute don&apos;t change what&apos;s recorded.</li>
               ) : null}
@@ -721,7 +721,7 @@ export function SystemAudioSettings({
                 />
               </div>
             )}
-            <SourceControlRow label="Level" value={formatDb(gainDb)}>
+            <SourceControlRow label="Gain" value={formatDb(gainDb)}>
               <Fader
                 aria-label="System audio gain"
                 className="w-full"

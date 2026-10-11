@@ -45,10 +45,10 @@ describe('comments destination status', () => {
         providers,
         sendTargets: ['youtube', 'twitch']
       })
-    ).toBe('X receive-only')
+    ).toBe('X read-only')
   })
 
-  it('distinguishes a missing write scope from a receive-only provider', () => {
+  it('distinguishes a missing write scope from a read-only provider', () => {
     expect(
       commentsDestinationNotes({
         providers: [
@@ -57,7 +57,7 @@ describe('comments destination status', () => {
         ],
         sendTargets: []
       })
-    ).toBe('No writable destinations · Twitch reconnect to send · X receive-only')
+    ).toBe('No writable destinations · Twitch reconnect to send · X read-only')
   })
 
   it('names the bound account so a wrong-channel manual stream is visible', () => {
@@ -114,8 +114,8 @@ describe('comments destination status', () => {
     expect(providerMarkup).toContain('aria-label="Chat destination status"')
     expect(providerMarkup).toContain('YouTube')
     expect(providerMarkup).toContain('Connected')
-    expect(providerMarkup).toContain('Receive-only')
-    expect(composerMarkup).toContain('X receive-only')
+    expect(providerMarkup).toContain('Read-only')
+    expect(composerMarkup).toContain('X read-only')
     expect(composerMarkup).not.toContain('Sends to')
     // A failed send speaks once, with its reason.
     expect(composerMarkup).toContain('Twitch: Token expired')

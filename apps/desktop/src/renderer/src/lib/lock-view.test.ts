@@ -15,7 +15,7 @@ import { VIDEORC_PREMIUM_URL } from './premium-upgrade'
 describe('lock view', () => {
   it('has one wording for a session lock and one for an offline backend', () => {
     expect(SESSION_LOCK_REASON).toBe(
-      "Locked while you're recording or live. Changes apply to your next session."
+      "Locked while you're recording or live. Changes apply the next time you record or go live."
     )
     expect(OFFLINE_LOCK_REASON).toBe(
       'Videorc is reconnecting. These controls come back in a moment.'

@@ -228,5 +228,6 @@ export function studioHealth(
     return { tone: 'neutral', value: 'Idle' }
   }
 
-  return { tone: 'good', value: active ? 'Live' : 'Ready' }
+  // "Running", never "Live" (plan 174 D4): only a livestream is on air.
+  return { tone: 'good', value: active ? 'Running' : 'Ready' }
 }

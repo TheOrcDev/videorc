@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import type { AudienceSnapshot, CommentHighlightAnchor, LiveChatProviderState } from '@/lib/backend'
 import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
+import { chatStateLabel } from '@/lib/state-labels'
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 import { cn } from '@/lib/utils'
 
@@ -51,22 +52,13 @@ function providerTone(provider: LiveChatProviderState): StatusDotTone {
 /**
  * What chat cannot do on this platform right now, in a word or two:
  * "read-only", "reconnect to send", "failed". Empty when it reads and sends,
- * so a healthy platform is just its icon and dot.
+ * so a healthy platform is just its icon and dot. The words are the chat
+ * vocabulary every window shares (`chatStateLabel`, plan 174 H-13), set
+ * inline after the platform's icon.
  */
 export function providerCapabilityLabel(provider: LiveChatProviderState): string {
-  if (provider.state === 'failed') return 'failed'
-  if (provider.state === 'ended') return 'ended'
-  if (provider.read === 'unavailable' || provider.state === 'unsupported') return 'off'
-  if (
-    provider.state === 'connecting' ||
-    provider.state === 'reconnecting' ||
-    provider.state === 'waiting'
-  ) {
-    return provider.state
-  }
-  if (provider.write === 'ready') return ''
-  if (provider.write === 'missing-scope') return 'reconnect to send'
-  return 'read-only'
+  const label = chatStateLabel(provider)
+  return label === 'Connected' ? '' : label.toLowerCase()
 }
 
 /**

@@ -1,4 +1,5 @@
 import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
+import { layoutPresetLabel } from '@/lib/layout-labels'
 import { systemAudioTarget } from '@/lib/system-audio'
 
 /** The state projection deck keys render. Minimal by design and the ONLY
@@ -26,8 +27,26 @@ export interface RemoteSurfaceState {
 
 export interface RemoteSurfaceDescribe {
   layoutPresets: readonly LayoutPreset[]
+  /**
+   * Plan 174 S2.3a (I-14): each preset's name as the desktop shows it
+   * ("Screen + camera", "Vertical split"), so the phone never title-cases an
+   * id. Fixed strings derived from the built-in ids already listed above:
+   * nothing user-made, nothing about the machine. Additive; older clients
+   * ignore it.
+   */
+  layoutLabels: Readonly<Record<string, string>>
   takeovers: { id: string; name: string }[]
   windows: readonly string[]
+}
+
+/** The phone's scene keys read the desktop's layout names (plan 174 I-14). */
+export function remoteLayoutLabels(presets: readonly LayoutPreset[]): Record<string, string> {
+  const bothOrientations =
+    presets.some((preset) => preset.startsWith('vertical-')) &&
+    presets.some((preset) => !preset.startsWith('vertical-'))
+  return Object.fromEntries(
+    presets.map((preset) => [preset, layoutPresetLabel(preset, { bothOrientations })])
+  )
 }
 
 export interface RemoteSurfaceSnapshot {
@@ -68,6 +87,7 @@ function snapshotFromValues(values: RemoteSurfaceValues): RemoteSurfaceSnapshot 
     },
     describe: {
       layoutPresets: values[10],
+      layoutLabels: remoteLayoutLabels(values[10]),
       takeovers: values[11],
       windows: ['notes', 'comments', 'preview']
     }

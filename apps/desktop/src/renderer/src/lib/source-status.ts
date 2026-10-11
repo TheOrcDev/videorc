@@ -1,5 +1,6 @@
 import type { StatusTone } from '@/components/status-badge'
 import type { Device, DeviceStatus, PreviewCameraState, PreviewScreenState } from '@/lib/backend'
+import { SOURCE_RECEIVING_LABEL } from '@/lib/state-labels'
 import type { SystemAudioSwitchView } from '@/lib/system-audio'
 
 // Plan 173: one status vocabulary for the four Sources rows. Each row's header
@@ -79,7 +80,8 @@ export function videoSourceStatus(input: {
         hint: 'No fresh frames. Re-select the source to restart it.'
       }
     }
-    return { label: 'Live', tone: 'good' }
+    // Producing frames reads "Receiving" (plan 174 D4): "On air" is the livestream's alone.
+    return { label: SOURCE_RECEIVING_LABEL, tone: 'good' }
   }
   if (state === 'permission-needed' || input.device === 'permission-required') {
     return { label: 'Needs permission', tone: 'warn', hint: message }
@@ -120,7 +122,7 @@ export function microphoneStatus(input: {
     return notFound('microphone')
   }
   if (input.muted) return { label: 'Muted', tone: 'neutral' }
-  if (input.sessionActive) return { label: 'Live', tone: 'good' }
+  if (input.sessionActive) return { label: SOURCE_RECEIVING_LABEL, tone: 'good' }
   return null
 }
 
@@ -141,7 +143,7 @@ export function systemAudioStatus(
   if (view.pending === 'off') return { label: 'Turning off…', tone: 'neutral' }
   if (!view.checked) return null
   return sessionActive && view.meter
-    ? { label: 'Live', tone: 'good' }
+    ? { label: SOURCE_RECEIVING_LABEL, tone: 'good' }
     : { label: 'On', tone: 'neutral' }
 }
 

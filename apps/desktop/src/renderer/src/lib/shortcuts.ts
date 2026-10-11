@@ -6,6 +6,7 @@
 // accelerators, printed per platform by ShortcutKeys.
 
 import { parseAccelerator } from '../../../shared/accelerator-format'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 export interface ShortcutEntry {
   id: string
@@ -47,30 +48,30 @@ const SHORTCUT_LIST = [
   {
     id: 'preview-window',
     accelerators: ['CmdOrCtrl+P'],
-    label: 'Open preview window',
+    label: `Open ${WINDOW_NAMES.preview}`,
     group: 'Windows'
   },
   {
     id: 'notes-window',
     accelerators: ['CmdOrCtrl+Shift+N'],
-    label: 'Open notes window',
+    label: `Open ${WINDOW_NAMES.notes}`,
     group: 'Windows'
   },
   {
     id: 'comments-window',
     accelerators: ['CmdOrCtrl+Shift+J'],
-    label: 'Open Stream Manager',
+    label: `Open ${WINDOW_NAMES.streamManager}`,
     group: 'Windows'
   },
   {
     id: 'captions-window',
     accelerators: ['CmdOrCtrl+Shift+C'],
-    label: 'Open captions reader',
+    label: `Open ${WINDOW_NAMES.captions}`,
     group: 'Windows'
   },
 
-  // Co-host pane (Comments window). Plain (cmd)J toggles the Comments window
-  // from the main window; inside the window it focuses the co-host pane, and
+  // Buddy pane (Stream Manager). Plain (cmd)J toggles Stream Manager from the
+  // main window; inside the window it focuses the Buddy pane, and
   // the single-key actions apply to the selected row.
   { id: 'cohost-focus', accelerators: ['CmdOrCtrl+J'], label: 'Focus Buddy', group: 'Chat' },
   {
