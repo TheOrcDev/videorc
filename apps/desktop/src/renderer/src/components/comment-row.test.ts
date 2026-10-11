@@ -373,14 +373,21 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
     }
   })
 
-  it('has no menu at all outside a live session', () => {
+  it('keeps Copy and the links outside a live session (plan 174 S3.16a, H-30)', () => {
     expect(
       commentRowMenu({
         message: message(),
-        highlightable: true,
+        highlightable: false,
         highlightPhase: 'idle'
-      })
-    ).toEqual([])
+      }).map((item) => item.id)
+    ).toEqual(['copy'])
+    expect(
+      commentRowMenu({
+        message: message({ messageText: 'see https://videorc.com/docs' }),
+        highlightable: false,
+        highlightPhase: 'idle'
+      }).map((item) => item.id)
+    ).toEqual(['open-link-0', 'copy-link-0', 'copy'])
     // Remove from chat alone still opens the menu, without Reply.
     expect(
       commentRowMenu({

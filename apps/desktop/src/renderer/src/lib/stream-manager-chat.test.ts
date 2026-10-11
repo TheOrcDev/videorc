@@ -281,10 +281,11 @@ describe('Stream Manager chat pane', () => {
           timestamps
         })
       )
-    expect(row('always')).toContain('<time class="ml-auto shrink-0')
-    expect(row('always')).not.toContain('opacity-0')
-    expect(row('hover')).toContain('opacity-0')
-    expect(row('hover')).toContain('group-hover/comment:opacity-100')
+    const time = (markup: string): string => markup.match(/<time class="([^"]*)"/)?.[1] ?? ''
+    expect(time(row('always'))).toContain('ml-auto shrink-0')
+    expect(time(row('always'))).not.toContain('opacity-0')
+    expect(time(row('hover'))).toContain('opacity-0')
+    expect(time(row('hover'))).toContain('group-hover/comment:opacity-100')
   })
 })
 

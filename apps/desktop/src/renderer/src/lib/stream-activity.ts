@@ -490,7 +490,7 @@ function itemsFromFollowerGains(audience: AudienceSnapshot | null | undefined): 
         name: gain.count === 1 ? 'New follower' : `${gain.count.toLocaleString()} new followers`,
         line: `${plural(gain.count, 'new follower', 'new followers')}. ${
           entry.platform === 'twitch'
-            ? 'Show who followed to name them from now on.'
+            ? 'Reconnect Twitch to name them from now on.'
             : "X didn't say who followed."
         }`,
         short: '',

@@ -24,8 +24,8 @@ import {
   CopyIcon,
   DeleteIcon,
   ExternalLinkIcon,
+  LivestreamIcon,
   MicrophoneIcon,
-  PreviewIcon,
   SendIcon,
   SparkleIcon
 } from '@/components/icons'
@@ -50,6 +50,7 @@ import type {
   LiveChatMessageFragment
 } from '@/lib/backend'
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
+import { clickSelectsText } from '@/lib/chat-list-keys'
 import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
 import { isGifFragment, splitGifFragments, useChatGifMode } from '@/lib/chat-gifs'
@@ -196,13 +197,15 @@ function CohostMarks({
     return (
       <span className="flex min-w-0 items-center gap-1" data-slot="cohost-comment-flag">
         <Badge
-          className={cn('max-w-40', flag.severity !== 'high' && 'text-subtle')}
+          className="max-w-40"
           title={cohostFlagDetail(flag)}
           variant={flag.severity === 'high' ? 'destructive' : 'outline'}
         >
           <span className="truncate">{cohostFlagChipLabel(flag)}</span>
         </Badge>
-        {action ? <span className="shrink-0 text-[11px] text-subtle">{action}</span> : null}
+        {action ? (
+          <span className="shrink-0 text-[11px] text-muted-foreground">{action}</span>
+        ) : null}
       </span>
     )
   }
@@ -280,7 +283,7 @@ function AffiliationBadge({
   return (
     <img
       alt={label}
-      className="size-4 shrink-0 rounded-[4px] object-cover"
+      className="size-4 shrink-0 rounded-sm object-cover"
       data-slot="comment-affiliation"
       draggable={false}
       src={localUrl}
@@ -365,7 +368,7 @@ function ChatGif({
     localUrl && mode === 'animated' ? (
       <img
         alt={title}
-        className="h-full w-auto max-w-full rounded-md object-contain"
+        className="h-full w-auto max-w-full rounded-chip object-contain"
         data-slot="comment-gif-image"
         draggable={false}
         src={localUrl}
@@ -420,7 +423,7 @@ function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
   return (
     <canvas
       aria-label={alt}
-      className="h-full w-auto max-w-full rounded-md object-contain"
+      className="h-full w-auto max-w-full rounded-chip object-contain"
       data-slot="comment-gif-still"
       ref={canvasRef}
       role="img"
@@ -775,8 +778,9 @@ function commentLinkMenuItems(message: LiveChatMessage): KebabMenuItem[] {
  * chat" (destructive: it sorts last, below a separator, in the destructive
  * tone). The stream toggle says "Take off
  * stream", never "Remove": only the irreversible item may say remove.
- * Empty without Reply or Remove from chat: a row outside a live session has
- * no menu.
+ * Copy and the links stay in History too (plan 174 S3.16a, H-30); a row the
+ * account cannot remove on its platform keeps the item, disabled with the
+ * fix (H-11).
  */
 export function commentRowMenu({
   message,
@@ -784,7 +788,8 @@ export function commentRowMenu({
   highlightPhase,
   onHighlight,
   onReply,
-  onRemoveFromChat
+  onRemoveFromChat,
+  removeFromChatReason = null
 }: {
   message: LiveChatMessage
   highlightable: boolean
@@ -792,15 +797,16 @@ export function commentRowMenu({
   onHighlight?: (message: LiveChatMessage) => void
   onReply?: (message: LiveChatMessage) => void
   onRemoveFromChat?: (message: LiveChatMessage) => void
+  /** Why the row cannot be removed right now: the item is offered disabled. */
+  removeFromChatReason?: string | null
 }): KebabMenuItem[] {
-  if (!onReply && !onRemoveFromChat) return []
   return [
     ...(highlightable
       ? [
           {
             id: 'show',
             label: highlightPhase === 'live' ? 'Take off stream' : 'Show on stream',
-            icon: PreviewIcon,
+            icon: LivestreamIcon,
             onSelect: () => onHighlight?.(message)
           }
         ]
@@ -815,14 +821,16 @@ export function commentRowMenu({
       icon: CopyIcon,
       onSelect: () => void copyChatText(`${message.authorName}: ${message.messageText}`)
     },
-    ...(onRemoveFromChat
+    ...(onRemoveFromChat || removeFromChatReason
       ? [
           {
             id: 'remove-from-chat',
             label: REMOVE_FROM_CHAT_LABEL,
             icon: DeleteIcon,
             destructive: true,
-            onSelect: () => onRemoveFromChat(message)
+            disabled: !onRemoveFromChat,
+            disabledReason: removeFromChatReason,
+            onSelect: () => onRemoveFromChat?.(message)
           }
         ]
       : [])
@@ -842,6 +850,8 @@ export function CommentRow({
   onHighlight,
   onReply,
   onRemoveFromChat,
+  removeFromChatReason = null,
+  tabIndex = 0,
   ref,
   style,
   index
@@ -867,6 +877,12 @@ export function CommentRow({
   /** ⋯ Remove from chat (plan 140, S6). Pass it only for a row that can be
    * removed now (`removeFromChatAvailable`); the backend re-checks. */
   onRemoveFromChat?: (message: LiveChatMessage) => void
+  /** Why Remove from chat is off for this row (plan 174 H-11): the item
+   * stays, disabled, with the fix on hover. */
+  removeFromChatReason?: string | null
+  /** The list's roving focus (plan 174 S3.16a, H-7): 0 on the active row,
+   * -1 on every other. The row's ⋯ follows it. */
+  tabIndex?: number
   /** Virtualized lists measure and place the row (plan 055, S10). */
   ref?: Ref<HTMLLIElement>
   style?: CSSProperties
@@ -907,15 +923,16 @@ export function CommentRow({
     highlightPhase: highlight.phase,
     onHighlight,
     onReply,
-    onRemoveFromChat
+    onRemoveFromChat,
+    removeFromChatReason
   })
 
   return (
     <li
       ref={ref}
       className={cn(
-        'group/comment group/kebab-host',
-        menu.length > 0 && 'flex items-start gap-0.5'
+        'group/comment group/kebab-host flex items-start gap-0.5',
+        !highlightable && 'rounded-row outline-none focus-visible:ring-2 focus-visible:ring-ring/50'
       )}
       data-highlight-phase={highlight.phase}
       data-index={index}
@@ -925,6 +942,9 @@ export function CommentRow({
       data-row-tint={tint ?? undefined}
       data-spotlight={cohostSpotlight || undefined}
       style={style}
+      // A row with no button of its own still takes the list's focus, so the
+      // arrows pass through it and C copies it.
+      tabIndex={highlightable ? undefined : tabIndex}
     >
       {highlightable ? (
         // One button, and a click on it shows the message on stream or takes
@@ -946,10 +966,18 @@ export function CommentRow({
             'h-auto w-full min-w-0 flex-1 items-start justify-start gap-2 whitespace-normal px-2 py-1.5',
             tint && ROW_TINT_CLASS[tint]
           )}
+          tabIndex={tabIndex}
           title={highlight.phase === 'live' ? 'Take off stream' : 'Show this message on the stream'}
           type="button"
           variant={highlight.phase === 'live' ? 'secondary' : 'ghost'}
-          onClick={() => onHighlight?.(message)}
+          onClick={(event) => {
+            // Only a mouse drag that ends with words selected in this row is
+            // not a click (owner call, D10): copying text never shows it on
+            // stream. A keyboard click (detail 0) never carries a drag.
+            if (event.detail > 0 && clickSelectsText(window.getSelection(), event.currentTarget))
+              return
+            onHighlight?.(message)
+          }}
         >
           {content}
         </Button>
@@ -963,14 +991,13 @@ export function CommentRow({
           {content}
         </div>
       )}
-      {menu.length > 0 ? (
-        <KebabMenu
-          className="mt-1 shrink-0"
-          items={menu}
-          label={`Actions for ${message.authorName}'s message`}
-          reveal="hover"
-        />
-      ) : null}
+      <KebabMenu
+        className="mt-1 shrink-0"
+        items={menu}
+        label={`Actions for ${message.authorName}'s message`}
+        reveal="hover"
+        tabIndex={tabIndex}
+      />
     </li>
   )
 }

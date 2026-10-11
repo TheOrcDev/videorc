@@ -40,8 +40,8 @@ import { cn } from '@/lib/utils'
 // one hover away. Drag a stat to move it; right-click the bar to show or
 // hide stats (plan 057, D2).
 
-/** The right-click menu's names for the stats a streamer can hide. */
-const STAT_NAMES: Record<StatId, string> = {
+/** The stats' names in the right-click menu and the status bar's Customize stats. */
+export const STAT_NAMES: Record<StatId, string> = {
   session: 'Clock',
   viewers: 'Viewers',
   health: 'Stream health',
@@ -149,7 +149,7 @@ function StatCell({
     <span
       aria-label={item.description}
       className={cn(
-        'flex h-8 items-center gap-1.5 rounded-chip whitespace-nowrap',
+        'flex h-8 items-center gap-1.5 rounded-chip whitespace-nowrap outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
         shrinks ? 'min-w-0' : 'shrink-0',
         drag?.dragging && 'opacity-50',
         drag?.dropTarget && 'bg-accent'
@@ -160,6 +160,9 @@ function StatCell({
       data-tone={item.tone}
       draggable={drag ? true : undefined}
       role="img"
+      // The details open on focus too (plan 174 H-15): a stat with a hover
+      // card is a tab stop.
+      tabIndex={item.details.length > 0 ? 0 : undefined}
       onDragEnd={drag?.onDragEnd}
       onDragOver={drag?.onDragOver}
       onDragStart={drag?.onDragStart}

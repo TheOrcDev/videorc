@@ -47,6 +47,7 @@ export function StatusBarHint({
   accelerator,
   platform,
   label,
+  labelClassName,
   pressed,
   onClick,
   className
@@ -55,6 +56,8 @@ export function StatusBarHint({
   accelerator: string
   platform?: string
   label: string
+  /** The label's own classes: `COMPACT_LABEL` keeps the key alone in a narrow window. */
+  labelClassName?: string
   pressed?: boolean
   onClick: () => void
   className?: string
@@ -73,7 +76,7 @@ export function StatusBarHint({
         platform={platform}
         variant="text"
       />
-      {label}
+      {labelClassName ? <span className={labelClassName}>{label}</span> : label}
     </button>
   )
 }

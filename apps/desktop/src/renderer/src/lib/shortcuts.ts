@@ -105,6 +105,35 @@ const SHORTCUT_LIST = [
   { id: 'cohost-answered', accelerators: ['A'], label: 'Mark answered', group: 'Stream Manager' },
   { id: 'cohost-dismiss', accelerators: ['Backspace'], label: 'Dismiss', group: 'Stream Manager' },
 
+  // The chat list (plan 174 S3.16a, H-7): one tab stop with roving focus,
+  // single-key row actions, and the two window chords the status bar hints.
+  {
+    id: 'chat-search',
+    accelerators: ['CmdOrCtrl+F'],
+    label: 'Search chat',
+    group: 'Stream Manager'
+  },
+  {
+    id: 'chat-composer',
+    accelerators: ['CmdOrCtrl+L'],
+    label: 'Write in chat',
+    group: 'Stream Manager'
+  },
+  {
+    id: 'chat-move',
+    accelerators: ['Up', 'Down'],
+    label: 'Move between messages',
+    group: 'Stream Manager'
+  },
+  { id: 'chat-reply', accelerators: ['R'], label: 'Reply to the message', group: 'Stream Manager' },
+  { id: 'chat-copy', accelerators: ['C'], label: 'Copy the message', group: 'Stream Manager' },
+  {
+    id: 'chat-remove',
+    accelerators: ['Shift+Backspace'],
+    label: 'Remove the message from chat',
+    group: 'Stream Manager'
+  },
+
   {
     id: 'theme-toggle',
     accelerators: ['D'],

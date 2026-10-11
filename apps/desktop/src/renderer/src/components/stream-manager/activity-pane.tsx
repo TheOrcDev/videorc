@@ -6,7 +6,13 @@ import {
   commentHighlightPresentationForMessage,
   type CommentHighlightPresentation
 } from '@/components/comment-row'
-import { CopyIcon, PreviewIcon, SendIcon, type AppIcon } from '@/components/icons'
+import {
+  ChevronDownIcon,
+  CopyIcon,
+  LivestreamIcon,
+  SendIcon,
+  type AppIcon
+} from '@/components/icons'
 import {
   AnnouncementIcon,
   FollowIcon,
@@ -17,7 +23,21 @@ import {
 } from '@/components/stream-manager/activity-icons'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { StatusDot } from '@/components/status-dot'
+import {
+  PlatformFilter,
+  PlatformFilterMenuItems
+} from '@/components/stream-manager/platform-filter'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
@@ -31,7 +51,7 @@ import type {
 import { AvatarCircle } from '@/lib/chat-avatar'
 import { copyChatText } from '@/lib/chat-link-actions'
 import { formatRelativeTime } from '@/lib/format-time'
-import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
+import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import {
   ACTIVITY_FILTERS,
   activityFilterCounts,
@@ -131,6 +151,9 @@ export function activityCapabilityNote(
 
 const IDLE: CommentHighlightPresentation = { phase: 'idle' }
 
+/** The one label for every Twitch permission ask in the window (plan 174 H-14). */
+export const TWITCH_RECONNECT_LABEL = 'Reconnect Twitch'
+
 /** What the stream shows for this row (plan 095, S2): the same slot and id as
  * chat, so a row with a chat message behind it reads exactly like that chat
  * row. Rows without one (destinations, counts) are never on stream. */
@@ -176,7 +199,7 @@ export function activityRowActions(
           {
             id: 'show',
             label: highlight.phase === 'live' ? 'Take off stream' : 'Show on stream',
-            icon: PreviewIcon,
+            icon: LivestreamIcon,
             disabled: highlight.phase === 'applying',
             onSelect: () => onShowOnStream(item)
           }
@@ -186,12 +209,13 @@ export function activityRowActions(
       ? [{ id: 'thank', label: 'Thank in chat', icon: SendIcon, onSelect: () => onThank(item) }]
       : []),
     // A Twitch count without names: one click opens the reconnect that
-    // grants the follow permission (plan 071, S2).
+    // grants the follow permission (plan 071, S2), under the one name every
+    // Twitch permission ask carries (plan 174 H-14).
     ...(onShowFollowNames && item.unnamed && item.platform === 'twitch'
       ? [
           {
             id: 'follow-names',
-            label: 'Show who followed',
+            label: TWITCH_RECONNECT_LABEL,
             icon: FollowIcon,
             onSelect: onShowFollowNames
           }
@@ -211,6 +235,7 @@ function ActivityRow({
   item,
   nowMs,
   highlight,
+  timestamps,
   onShowOnStream,
   onThank,
   onShowFollowNames
@@ -218,6 +243,7 @@ function ActivityRow({
   item: ActivityItem
   nowMs: number
   highlight: CommentHighlightPresentation
+  timestamps: 'always' | 'hover'
   onShowOnStream?: (item: ActivityItem) => void
   onThank?: (item: ActivityItem) => void
   onShowFollowNames?: () => void
@@ -230,10 +256,13 @@ function ActivityRow({
     onShowFollowNames
   })
   const status = highlight.phase !== 'idle'
+  // One row contract with chat (plan 174 S3.16a, H-19): no hover highlight on
+  // a row that is not a button, the ⋯ waits for the pointer, and the time
+  // does too while live.
   return (
     <li
       className={cn(
-        'flex items-start gap-2.5 px-3 py-2 hover:bg-accent',
+        'group/activity group/kebab-host flex items-start gap-2.5 px-3 py-2',
         highlight.phase === 'live' && 'bg-accent'
       )}
       data-activity-id={item.id}
@@ -278,8 +307,10 @@ function ActivityRow({
           ) : null}
           <time
             className={cn(
-              'shrink-0 pl-1 text-[11px] text-subtle tabular-nums',
-              !status && 'ml-auto'
+              'shrink-0 pl-1 text-[11px] text-muted-foreground tabular-nums',
+              !status && 'ml-auto',
+              timestamps === 'hover' &&
+                'opacity-0 group-focus-within/activity:opacity-100 group-hover/activity:opacity-100'
             )}
             dateTime={item.at}
           >
@@ -295,7 +326,12 @@ function ActivityRow({
           </span>
         ) : null}
       </span>
-      <KebabMenu className="-mr-1 shrink-0" items={actions} label={`Actions for ${item.name}`} />
+      <KebabMenu
+        className="-mr-1 shrink-0"
+        items={actions}
+        label={`Actions for ${item.name}`}
+        reveal="hover"
+      />
     </li>
   )
 }
@@ -314,7 +350,8 @@ export function ActivityPane({
   onThank,
   onShowFollowNames,
   autoShow = false,
-  onAutoShowChange
+  onAutoShowChange,
+  timestamps = 'always'
 }: {
   items: readonly ActivityItem[]
   audience?: AudienceSnapshot | null
@@ -334,6 +371,8 @@ export function ActivityPane({
   /** Auto-show celebrations on stream (plan 156): the one switch. */
   autoShow?: boolean
   onAutoShowChange?: (on: boolean) => void
+  /** 'hover' keeps a row's time out of sight until the pointer is on it (live). */
+  timestamps?: 'always' | 'hover'
 }): ReactElement {
   const [filter, setFilter] = useState<ActivityFilter | 'all'>('all')
   const [platform, setPlatform] = useState<StreamPlatform | 'all'>('all')
@@ -344,6 +383,10 @@ export function ActivityPane({
   const shown = filterActivity(items, filter, platform)
   // Counts follow the platform pick: a chip says what a click would show.
   const counts = activityFilterCounts(filterActivity(items, 'all', platform))
+  const shownFilters = ACTIVITY_FILTERS.filter(
+    (option) => counts[option.id] > 0 || filter === option.id
+  )
+  const activeFilterCount = Number(filter !== 'all') + Number(platform !== 'all')
   const note = activityCapabilityNote(platforms, audience)
 
   return (
@@ -353,7 +396,7 @@ export function ActivityPane({
       data-slot="activity-pane"
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
-        <div className="flex min-w-0 flex-wrap items-center gap-1">
+        <div className={cn('min-w-0 flex-wrap items-center gap-1', 'flex', ABOVE_NARROW)}>
           <ToggleGroup
             aria-label="Filter activity"
             className="flex-wrap justify-start"
@@ -362,47 +405,79 @@ export function ActivityPane({
             value={filter}
             onValueChange={(value) => setFilter((value || 'all') as ActivityFilter | 'all')}
           >
-            <ToggleGroupItem className="h-6 px-2 text-xs" value="all">
+            <ToggleGroupItem className="text-xs" value="all">
               All
             </ToggleGroupItem>
             {/* A chip shows once it has rows, with its count: the pane's
                 old "This stream: …" sentence, where it can be clicked. */}
-            {ACTIVITY_FILTERS.filter((option) => counts[option.id] > 0 || filter === option.id).map(
-              (option) => (
-                <ToggleGroupItem
-                  key={option.id}
-                  className="h-6 gap-1 px-2 text-xs"
-                  title={option.title}
-                  value={option.id}
-                >
-                  {option.label}
-                  <span className="text-muted-foreground tabular-nums">{counts[option.id]}</span>
-                </ToggleGroupItem>
-              )
-            )}
+            {shownFilters.map((option) => (
+              <ToggleGroupItem
+                key={option.id}
+                className="gap-1 text-xs"
+                title={option.title}
+                value={option.id}
+              >
+                {option.label}
+                <span className="text-muted-foreground tabular-nums">{counts[option.id]}</span>
+              </ToggleGroupItem>
+            ))}
           </ToggleGroup>
-          {platforms.length > 1 ? (
-            <ToggleGroup
-              aria-label="Filter activity by platform"
-              size="sm"
-              type="single"
-              value={platform}
-              onValueChange={(value) => setPlatform((value || 'all') as StreamPlatform | 'all')}
-            >
-              {platforms.map((option) => (
-                <ToggleGroupItem
-                  key={option}
-                  aria-label={CHAT_PLATFORM_LABELS[option]}
-                  className="h-6 min-w-6 px-1.5"
-                  title={`Only ${CHAT_PLATFORM_LABELS[option]}`}
-                  value={option}
-                >
-                  <ChatPlatformIcon decorative platform={option} />
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          ) : null}
+          {/* The same platform filter as chat (plan 174 S3.16a, H-19). */}
+          <PlatformFilter
+            label="Show activity from"
+            platforms={platforms}
+            value={platform}
+            onValueChange={setPlatform}
+          />
         </div>
+        {/* Below 640 px the same filters live in one menu, like chat's. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label="Activity filters"
+              className={cn('h-7 shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              Filters
+              {activeFilterCount > 0 ? (
+                <Badge className="px-1.5" variant="outline">
+                  {activeFilterCount}
+                </Badge>
+              ) : null}
+              <ChevronDownIcon data-icon="inline-end" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-52">
+            <DropdownMenuLabel>Show</DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={filter}
+              onValueChange={(value) => setFilter(value as ActivityFilter | 'all')}
+            >
+              <DropdownMenuRadioItem value="all">Everything</DropdownMenuRadioItem>
+              {shownFilters.map((option) => (
+                <DropdownMenuRadioItem key={option.id} value={option.id}>
+                  {option.label}
+                  <span className="ml-auto text-muted-foreground tabular-nums">
+                    {counts[option.id]}
+                  </span>
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+            {platforms.length > 1 ? (
+              <>
+                <DropdownMenuSeparator />
+                <PlatformFilterMenuItems
+                  label="Show activity from"
+                  platforms={platforms}
+                  value={platform}
+                  onValueChange={setPlatform}
+                />
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
         {/* Auto-show (plan 156): new follows, subs, gifts, tips, rewards,
             raids and streaks pop onto the stream as the highlight card, hands-free.
             Manual picks always win; the switch only feeds an idle slot. */}
@@ -433,7 +508,7 @@ export function ActivityPane({
             Power-ups and channel points need one more Twitch permission.
           </span>
           <Button className="shrink-0" size="xs" variant="outline" onClick={onShowFollowNames}>
-            Reconnect Twitch
+            {TWITCH_RECONNECT_LABEL}
           </Button>
         </div>
       ) : null}
@@ -451,6 +526,7 @@ export function ActivityPane({
                 })}
                 item={item}
                 nowMs={nowMs}
+                timestamps={timestamps}
                 onShowOnStream={onShowOnStream}
                 onThank={onThank}
                 onShowFollowNames={onShowFollowNames}
@@ -474,7 +550,7 @@ export function ActivityPane({
                   variant="outline"
                   onClick={onShowFollowNames}
                 >
-                  Show who followed
+                  {TWITCH_RECONNECT_LABEL}
                 </Button>
               ) : null}
             </EmptyHeader>
