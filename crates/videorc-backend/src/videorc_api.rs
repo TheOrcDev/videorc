@@ -1221,19 +1221,30 @@ impl VideorcApiClient {
         Err(failure)
     }
 
-    /// Mint a short-lived gateway realtime client secret for streaming
-    /// captions. `Terminal` failures end the caption session (auth/premium/
-    /// quota); `Transient` ones mean "fall back to chunked transcription".
+    /// Mint a single-use gateway streaming-transcription client secret plus
+    /// a metered lease (plan 175). The body names the transcription dialect:
+    /// a web deploy that only knows the retired voice dialect answers 503,
+    /// which falls back to chunked like any unavailable stream. `Terminal`
+    /// failures end the caption session (auth/premium/quota); `Transient`
+    /// ones mean "fall back to chunked transcription".
     pub async fn mint_caption_realtime_token(
         &self,
         bearer_token: &str,
         session_client_id: &str,
+        language: Option<&str>,
     ) -> std::result::Result<CaptionRealtimeToken, CaptionChunkFailure> {
+        let mut body = serde_json::json!({
+            "sessionClientId": session_client_id,
+            "transport": CAPTION_STREAMING_TRANSPORT,
+        });
+        if let Some(language) = language {
+            body["language"] = serde_json::Value::String(language.to_string());
+        }
         let response = self
             .http
             .post(self.endpoint("/api/ai/captions/realtime-token"))
             .bearer_auth(bearer_token)
-            .json(&serde_json::json!({ "sessionClientId": session_client_id }))
+            .json(&body)
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
@@ -1287,28 +1298,32 @@ impl VideorcApiClient {
         Ok(Some(token))
     }
 
-    /// Report streamed caption seconds against the monthly allowance.
-    /// Best-effort — accounting failures never interrupt captions.
-    pub async fn report_caption_usage(
+    /// Settle one streaming lease with the audio the provider consumed
+    /// (plan 175 D2). The server reserved the whole lease at mint and refunds
+    /// the unused part; a lease never settled stays fully counted, so this is
+    /// best-effort and accounting failures never interrupt captions.
+    pub async fn settle_caption_lease(
         &self,
         bearer_token: &str,
         session_client_id: &str,
-        seconds: u64,
+        lease_id: &str,
+        duration_seconds: f64,
     ) -> Result<()> {
         let response = self
             .http
             .post(self.endpoint("/api/ai/captions/usage"))
             .bearer_auth(bearer_token)
-            .json(&serde_json::json!({
-                "sessionClientId": session_client_id,
-                "seconds": seconds,
-            }))
+            .json(&caption_lease_settlement_body(
+                session_client_id,
+                lease_id,
+                duration_seconds,
+            ))
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
             .context("Could not reach the caption usage service.")?;
         if !response.status().is_success() {
-            bail!("Caption usage report failed ({}).", response.status());
+            bail!("Caption lease settlement failed ({}).", response.status());
         }
         Ok(())
     }
@@ -1582,16 +1597,86 @@ pub struct CaptionChunkResponse {
     pub segments: Vec<crate::captions::CaptionSegment>,
 }
 
+/// The only streaming dialect this desktop speaks (plan 175): the gateway's
+/// transcription-only WebSocket envelope. Sent in the mint body and expected
+/// back in the token.
+pub const CAPTION_STREAMING_TRANSPORT: &str = "transcription";
+
+/// A minted streaming-transcription session. Deserialize-only: every optional
+/// field tolerates absence and `null`, and nothing here reaches the renderer.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptionRealtimeToken {
     pub token: String,
     pub url: String,
-    #[serde(default)]
-    pub expires_at: Option<u64>,
     pub model: String,
     #[serde(default)]
     pub remaining_seconds: Option<u64>,
+    /// `transcription` for the streaming envelope. Absent means a web deploy
+    /// that still mints the retired voice-model socket.
+    #[serde(default)]
+    pub transport: Option<String>,
+    /// WebSocket subprotocols, auth included, in the server's order.
+    #[serde(default)]
+    pub subprotocols: Vec<String>,
+    #[serde(default)]
+    pub input_audio_format: Option<CaptionInputAudioFormat>,
+    /// Opaque provider tuning + gateway attribution, echoed into the start
+    /// frame unchanged: the server owns model options.
+    #[serde(default)]
+    pub provider_options: Option<serde_json::Value>,
+    #[serde(default)]
+    pub lease_id: Option<String>,
+    #[serde(default)]
+    pub lease_seconds: Option<u64>,
+}
+
+impl CaptionRealtimeToken {
+    pub fn speaks_streaming_transcription(&self) -> bool {
+        self.transport.as_deref() == Some(CAPTION_STREAMING_TRANSPORT)
+    }
+
+    /// PCM s16le mono rate the provider expects; 16 kHz when unspecified.
+    pub fn input_rate(&self) -> u32 {
+        self.input_audio_format
+            .as_ref()
+            .and_then(|format| format.rate)
+            .unwrap_or(16_000)
+    }
+
+    /// The only encoding the desktop sends is raw PCM (`audio/pcm`).
+    pub fn input_is_pcm(&self) -> bool {
+        self.input_audio_format
+            .as_ref()
+            .is_none_or(|format| format.kind == "audio/pcm")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionInputAudioFormat {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub rate: Option<u32>,
+}
+
+/// Settlement body: whole seconds, rounded up, never negative or non-finite.
+pub(crate) fn caption_lease_settlement_body(
+    session_client_id: &str,
+    lease_id: &str,
+    duration_seconds: f64,
+) -> serde_json::Value {
+    let seconds = if duration_seconds.is_finite() {
+        duration_seconds.max(0.0).ceil()
+    } else {
+        0.0
+    };
+    serde_json::json!({
+        "sessionClientId": session_client_id,
+        "leaseId": lease_id,
+        "durationSeconds": seconds as u64,
+    })
 }
 
 /// Which allowance one transcription chunk is metered against (plan 068 D5).
@@ -2018,6 +2103,72 @@ mod tests {
             CaptionChunkFailure::Transient { code: Some(code), .. }
                 if code == "captions-realtime-disabled"
         ));
+    }
+
+    #[test]
+    fn streaming_token_parses_the_transcription_contract() {
+        let token: CaptionRealtimeToken = serde_json::from_value(serde_json::json!({
+            "token": "vcst_test",
+            "url": "wss://gateway.test/v4/ai/transcription-model?ai-model-id=spacexai%2Fgrok-stt",
+            "model": "spacexai/grok-stt",
+            "expiresAt": null,
+            "quotaEnforced": true,
+            "remainingSeconds": 1200,
+            "transport": "transcription",
+            "subprotocols": ["ai-gateway-transcription.v1", "ai-gateway-auth.vcst_test"],
+            "inputAudioFormat": { "type": "audio/pcm", "rate": 24000 },
+            "providerOptions": { "openai": { "streaming": { "delay": "low" } } },
+            "leaseId": "lease-1",
+            "leaseSeconds": 600
+        }))
+        .expect("streaming token");
+        assert!(token.speaks_streaming_transcription());
+        assert_eq!(token.input_rate(), 24_000);
+        assert!(token.input_is_pcm());
+        assert_eq!(token.subprotocols.len(), 2);
+        assert_eq!(token.lease_id.as_deref(), Some("lease-1"));
+        assert_eq!(token.lease_seconds, Some(600));
+        assert_eq!(
+            token.provider_options.as_ref().unwrap()["openai"]["streaming"]["delay"],
+            "low"
+        );
+    }
+
+    #[test]
+    fn voice_dialect_token_is_not_a_streaming_transcription_token() {
+        let token: CaptionRealtimeToken = serde_json::from_value(serde_json::json!({
+            "token": "secret",
+            "url": "wss://gateway.test/v4/ai/realtime-model?ai-model-id=x",
+            "model": "xai/grok-voice-think-fast-1.0",
+            "expiresAt": 1
+        }))
+        .expect("legacy token");
+        assert!(!token.speaks_streaming_transcription());
+        assert_eq!(token.input_rate(), 16_000);
+        assert!(token.input_is_pcm());
+        let mulaw: CaptionRealtimeToken = serde_json::from_value(serde_json::json!({
+            "token": "t", "url": "u", "model": "m", "transport": "transcription",
+            "inputAudioFormat": { "type": "audio/pcmu", "rate": 8000 }
+        }))
+        .unwrap();
+        assert!(!mulaw.input_is_pcm());
+        assert!(token.lease_id.is_none());
+    }
+
+    #[test]
+    fn lease_settlement_rounds_up_and_never_goes_negative() {
+        let body = caption_lease_settlement_body("session-12345678", "lease-1", 12.2);
+        assert_eq!(body["durationSeconds"], 13);
+        assert_eq!(body["leaseId"], "lease-1");
+        assert_eq!(body["sessionClientId"], "session-12345678");
+        assert_eq!(
+            caption_lease_settlement_body("s", "l", -4.0)["durationSeconds"],
+            0
+        );
+        assert_eq!(
+            caption_lease_settlement_body("s", "l", f64::NAN)["durationSeconds"],
+            0
+        );
     }
 
     #[test]

@@ -154,6 +154,7 @@
     "smoke:command-lanes": "node scripts/smoke-command-lanes.mjs",
     "smoke:live-control-recycle": "node scripts/smoke-live-control-recycle.mjs",
     "probe:ffmpeg-capture-clock": "node scripts/ffmpeg-capture-clock.mjs",
+    "probe:caption-stt": "node scripts/probe-caption-stt-latency.mjs",
     "smoke:live-source-switch": "node scripts/smoke-live-source-switch-app.mjs",
     "smoke:youtube-quota": "node scripts/smoke-youtube-quota-app.mjs",
     "smoke:captions-contract": "cargo build -p videorc-backend && node scripts/smoke-captions-contract.mjs",
