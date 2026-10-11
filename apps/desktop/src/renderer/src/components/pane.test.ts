@@ -8,7 +8,8 @@ import { GroupedList, ListRow } from './list-row'
 import { ConfigGrid, PageHeader } from './page'
 import { PANE_OWNS_SCROLL, Pane, PaneBody, PaneStrip, Toolbar, WINDOW_TITLE_CLASS } from './pane'
 import { PanelSection } from './panel-section'
-import { STATUS_BAR_ACTION_CLASS, StatusBar, StatusBarAction, StatusBarHint } from './status-bar'
+import { STATUS_BAR_ACTION_CLASS, StatusBar, StatusBarHint } from './status-bar'
+import { StatusBarAction } from './status-bar-action'
 
 // Plan 050, D4: panes, toolbars, flush sections, grouped lists, status bar.
 

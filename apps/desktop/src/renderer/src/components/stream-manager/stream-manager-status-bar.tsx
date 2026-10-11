@@ -6,7 +6,8 @@ import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/co
 import { providerBadgeTitle } from '@/components/comments-destination-status'
 import { ClipIcon, FrameIcon, MoreIcon, PreviewIcon } from '@/components/icons'
 import { PIN_WINDOW_LABEL, PinWindowButton } from '@/components/pin-window-button'
-import { StatusBar, StatusBarAction, StatusBarHint } from '@/components/status-bar'
+import { StatusBar, StatusBarHint } from '@/components/status-bar'
+import { StatusBarAction } from '@/components/status-bar-action'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import {
