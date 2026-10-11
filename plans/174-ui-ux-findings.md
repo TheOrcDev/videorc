@@ -446,7 +446,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-3** · P0 · Slider thumb has no accessible name; player scrubber announces raw ms — fixed in #647 (S0.5 `e0140afc`)
   - Evidence: ui/slider.tsx:20-45 (aria-label on Root), session-player.tsx:483
   - Fix: forward aria-label/valuetext to Thumb (4 call sites)
-- **E-4** · P1 · Library unaware of Clean cut jobs (no status, actions enabled then backend refuses)
+- **E-4** · P1 · Library unaware of Clean cut jobs (no status, actions enabled then backend refuses) — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:796 fileActionsBusy
   - Fix: activeCleanCutSourceIds; status chip
 - **E-5** · P1 · Unsaved Clean cut edits lost on tab/page switch; review not re-keyed on target change
@@ -455,19 +455,19 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-6** · P1 · "Allow it under Customize." points to nonexistent tab (also Buddy Live string) — fixed in #647 (S2.3b `21073ea6`)
   - Evidence: clean-cut-view.ts:87-88; buddy-tab-view.ts:120-121
   - Fix: Alert with "Allow cloud AI" action
-- **E-7** · P1 · Marker pins not on scrubber axis; pile at 100% while loading
+- **E-7** · P1 · Marker pins not on scrubber axis; pile at 100% while loading — fixed in #647 (S3.12 `e4f8da11`)
   - Evidence: marker-pins.tsx:26; session-player.tsx:364-370
   - Fix: overlay pins on track; render when duration>0
-- **E-8** · P1 · Marker delete instant, irreversible, can't be recreated — fixed in #647 (S0.3 `1aeee1f1`; the deferred delete runs when the Markers dialog closes)
+- **E-8** · P1 · Marker delete instant, irreversible, can't be recreated — fixed in #647 (S0.3 `1aeee1f1`; the deferred delete runs when the Markers dialog closes); fixed in #647 (S0.3 `1aeee1f1`; S3.12 `e4f8da11` made the deferred delete follow the toast)
   - Evidence: session-markers-dialog.tsx:195-203
   - Fix: undo toast (marker-toast pattern)
-- **E-9** · P2 · Markers list hand-rolled; selection invisible; raw "voice/manual"; rename form detached; no maxLength
+- **E-9** · P2 · Markers list hand-rolled; selection invisible; raw "voice/manual"; rename form detached; no maxLength — fixed in #647 (S3.12 `e4f8da11`)
   - Evidence: session-markers-dialog.tsx:167-235
   - Fix: GroupedList/ListRow; inline rename
-- **E-10** · P2 · Markers dialog overflows short windows
+- **E-10** · P2 · Markers dialog overflows short windows — fixed in #647 (S3.12 `e4f8da11`)
   - Evidence: session-markers-dialog.tsx:135 max-h-[90vh] grid
   - Fix: flex col + ScrollArea
-- **E-11** · P2 · Markers dialog uses stale session snapshot (playability never re-checked)
+- **E-11** · P2 · Markers dialog uses stale session snapshot (playability never re-checked) — fixed in #647 (S3.12 `e4f8da11`)
   - Evidence: library-tab.tsx:147,409
   - Fix: pass id, read live row
 - **E-12** · P2 · Library→Clean cut→Library round trip has no way back; "Clean cut" noun as action; same ClipIcon for Markers
@@ -482,22 +482,22 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-15** · P2 · Transcript a11y: role=button spans unfocusable; no live region
   - Evidence: clean-cut-transcript.tsx:332-414
   - Fix: live region; role=status
-- **E-16** · P2 · Library rows not desktop-like (no arrows/click select/dbl-click/context menu); 3-4 tab stops/row
+- **E-16** · P2 · Library rows not desktop-like (no arrows/click select/dbl-click/context menu); 3-4 tab stops/row — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:571-588
   - Fix: roving focus + ContextMenu
-- **E-17** · P2 · Search/sort/filter only over loaded 50 rows; "Oldest" reverses page
+- **E-17** · P2 · Search/sort/filter only over loaded 50 rows; "Oldest" reverses page — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: use-studio.tsx:575; library-view.ts:34-48
   - Fix: backend params or partial notice
-- **E-18** · P2 · Bulk delete includes hidden selected rows; confirm names none; no indeterminate
+- **E-18** · P2 · Bulk delete includes hidden selected rows; confirm names none; no indeterminate — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:144,340,496
   - Fix: prune; name titles
-- **E-19** · P2 · Background noise-cleanup completion resets user filter/search
+- **E-19** · P2 · Background noise-cleanup completion resets user filter/search — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:156-160,228-241
   - Fix: only when no filter
 - **E-20** · P2 · Four time formats (02:05 / 1 hour and 2 minutes / 00:02:05 / 2:05) — fixed in #647 (S1.4 `215e6585`)
   - Evidence: format.ts:48; session-player-view.ts:32; session-markers.ts:233; clip-marks.ts:4
   - Fix: one formatTimecode
-- **E-21** · P2 · "MP4" painted as green success chip
+- **E-21** · P2 · "MP4" painted as green success chip — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:639
   - Fix: outline tag
 - **E-22** · P2 · Library toast discipline (queued toast duplicates row; import no feedback; rename error toast while dialog open) — fixed in #647 (S2.4 `4929496f`)
@@ -515,15 +515,15 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-26** · P2 · Library filter Select unnamed — fixed in #647 (S0.5 `e0140afc`)
   - Evidence: library-tab.tsx:287
   - Fix: aria-label
-- **E-27** · P3 · Library row hover/selected off-token (accent/50, /60, ring, transition); paddings px-3/px-gutter/px-4; text-muted-foreground/50
+- **E-27** · P3 · Library row hover/selected off-token (accent/50, /60, ring, transition); paddings px-3/px-gutter/px-4; text-muted-foreground/50 — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:575,334,709
   - Fix: tokens
-- **E-28** · P3 · session vs recording; Noise Cleanup/cleanup case; "Clean noise" vs "Clean cut"; "New Recording" navigates; blank column header
+- **E-28** · P3 · session vs recording; Noise Cleanup/cleanup case; "Clean noise" vs "Clean cut"; "New Recording" navigates; blank column header — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:281,315,328,361
   - Fix: vocabulary
 - **E-29** · P3 · Clean cut copy nits (loading ellipsis, "Make one from the Buddy tab" inside Buddy, back label)
   - Evidence: clean-cut-review.tsx:493,548,759,769 |
-- **E-30** · P3 · Player: no click-to-play, J/K/L, Home/End, mute; refusal copy without action
+- **E-30** · P3 · Player: no click-to-play, J/K/L, Home/End, mute; refusal copy without action — fixed in #647 (S3.12 `e4f8da11`)
   - Evidence: session-player-view.ts:58; session-player.tsx:333 |
 - **E-31** · P3 · Clean cut lock placement differs from Chat/Voice
   - Evidence: clean-cut-card.tsx:276-297 vs buddy-tab.tsx:326
@@ -947,9 +947,9 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J1-20** · P2 · DialogContent no size variants (7 widths, 5 height recipes); OBS dialog max-w-xl loses to sm:max-w-md (renders 448 not 576) — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: ui/dialog.tsx:59; obs-import-dialog.tsx:210
   - Fix: size prop + DialogBody
-- **J1-21** · P2 · No Spinner/Progress/Table: 19 ad-hoc spinners w/o role=status; 2 progress bars; Library CSS-grid table w/o semantics; native datetime-local; loading copy drift — partly fixed in #647 (S1.5 `905ea8fe`, Spinner and Progress); table semantics in S3.11
+- **J1-21** · P2 · No Spinner/Progress/Table: 19 ad-hoc spinners w/o role=status; 2 progress bars; Library CSS-grid table w/o semantics; native datetime-local; loading copy drift — partly fixed in #647 (S1.5 `905ea8fe`, Spinner and Progress); table semantics in S3.11; fixed in #647 (S1.5 `905ea8fe`, S3.11 `3c129b55`)
   - Evidence: | install Spinner/Progress; Table semantics; copy rule
-- **J1-22** · P3 · ClipIcon (scissors) = Clean cut AND Markers AND Mark clip; unused licence slots (VerifiedIcon, BrainIcon, FastIcon); inline status icons 14 vs 16; ⋯ triggers 24/28 bold/regular
+- **J1-22** · P3 · ClipIcon (scissors) = Clean cut AND Markers AND Mark clip; unused licence slots (VerifiedIcon, BrainIcon, FastIcon); inline status icons 14 vs 16; ⋯ triggers 24/28 bold/regular — partly fixed in #647 (S3.12 `e4f8da11`, MarkerIcon); inline icon sizes open
   - Evidence: icons.tsx:178,265,267; library-tab.tsx:965,970
   - Fix: MarkerIcon; remove dead slots
 - **J1-23** · P3 · Float motion zoom-in-95 + slide vs skill 0.98; smooth scroll ignores reduced motion; transition-all; duration-200 — fixed in #647 (S1.8 `df1a6513`)
@@ -986,7 +986,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-7** · P1 · 97 raw error.message passthroughs; ipcErrorMessage in 3 places; Stream Manager toasts show "Error invoking remote method 'comments-window:…'"; generic "Import failed." etc. — fixed in #647 (S2.4 `4929496f`)
   - Evidence: use-studio.tsx (31); comments/main.tsx (12); library-tab.tsx (8); preload/index.ts:17
   - Fix: userErrorMessage(error,{action,object}); strip IPC prefix in guardToastText
-- **J2-8** · P1 · Library/Takeovers claim "No sessions yet"/"No takeovers yet" before data loads or while offline (sessions starts [])
+- **J2-8** · P1 · Library/Takeovers claim "No sessions yet"/"No takeovers yet" before data loads or while offline (sessions starts []) — partly fixed in #647 (S3.11 `3c129b55`, sessions); takeovers in S3.10
   - Evidence: library-tab.tsx:356; use-studio.tsx:2145; takeover-screens-section.tsx:50; session-panel.tsx:363
   - Fix: sessionsLoaded/screensLoaded; Skeleton; offline Alert
 - **J2-9** · P1 · ~85% of 333 disabled controls show no reason; 7 wordings/4 styles of "locked while live" — partly fixed in #647 (S1.5 `905ea8fe`, SessionLockAlert); per-control reasons in S1.10, toasts in S2.4
