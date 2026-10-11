@@ -5,6 +5,7 @@ import { toastUserError } from '@/lib/user-error'
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Field,
@@ -38,6 +39,7 @@ import {
   captionsStatusIsActive,
   latestFinalCaptionText
 } from '@/lib/captions-ui'
+import { livestreamCaptionsBlockerFor } from '@/lib/captions-preflight'
 import { simulcastArmed, type CaptionsCaptureSettings } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { unlockActionForGate } from '@/lib/lock-view'
@@ -164,6 +166,9 @@ export function CaptionsControls(): ReactElement {
   // A vertical destination shares the recording's picture with the
   // horizontal stream, so livestream captions land in the recording too.
   const verticalLegArmed = simulcastArmed(captureConfig)
+  // The rule a livestream would break today, said here before Go Live does
+  // (plan 174 S3.4, D-9).
+  const livestreamBlocker = captions.enabled ? livestreamCaptionsBlockerFor(captureConfig) : null
   const canEnable = gate.allowed || captions.enabled
   const showRetry =
     captions.enabled &&
@@ -205,7 +210,7 @@ export function CaptionsControls(): ReactElement {
   return (
     <PanelSection
       action={<StatusBadge tone={status.tone} value={status.value} />}
-      description="Transcribe your microphone during a recording or livestream."
+      description="Transcribe your microphone during a recording or livestream. On a livestream, captions need 30 fps or less, and one stream quality when you also record."
       icon={CaptionsIcon}
       title="Live captions"
     >
@@ -229,6 +234,12 @@ export function CaptionsControls(): ReactElement {
             onCheckedChange={(enabled) => patchCaptions({ enabled })}
           />
         </Field>
+        {livestreamBlocker ? (
+          <Alert data-testid="captions-livestream-blocker" variant="warning">
+            <AlertTitle>Captions can&apos;t go out on your next livestream</AlertTitle>
+            <AlertDescription>{livestreamBlocker.description}</AlertDescription>
+          </Alert>
+        ) : null}
 
         <div className="flex flex-col gap-3 rounded-row border border-border bg-inset p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">

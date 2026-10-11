@@ -27,7 +27,9 @@ function render(
       discoveryPending: false,
       meter,
       monitorState: 'live',
+      muted: false,
       onChange: noop,
+      onMutedChange: noop,
       ...overrides
     })
   )
@@ -73,7 +75,7 @@ describe('micMeterInput (plan 092)', () => {
 })
 
 describe('Microphone section (plan 092)', () => {
-  it('holds the picker and the level, nothing more', () => {
+  it('holds the picker, the level and the mute (D16), nothing more', () => {
     const markup = render({ kind: 'value', peakDb: -12 })
     expect(markup).toContain('>Microphone</h2>')
     // The picker keeps its label for screen readers under the section title.
@@ -83,9 +85,37 @@ describe('Microphone section (plan 092)', () => {
     expect(markup).toMatch(
       /role="meter"[^>]*data-videorc-mic-visualizer=""|data-videorc-mic-visualizer=""[^>]*role="meter"/
     )
-    for (const gone of ['Check level', 'Mute microphone', 'System audio', 'Mix', 'Idle']) {
+    for (const gone of ['Check level', 'System audio', 'Mix', 'Idle', '>Muted<']) {
       expect(markup).not.toContain(gone)
     }
+    // The mute sits in the section header, after the title (plan 174 S3.3).
+    const mute = /<button[^>]*aria-label="Mute microphone"[^>]*>/.exec(markup)?.[0]
+    expect(mute).toBeDefined()
+    expect(mute).toContain('aria-pressed="false"')
+    expect(markup.indexOf('>Microphone</h2>')).toBeLessThan(markup.indexOf('Mute microphone'))
+    expect(markup.indexOf('Mute microphone')).toBeLessThan(markup.indexOf('role="combobox"'))
+  })
+
+  it('says Muted in words and dims the meter, so a mute never reads as silence (D16)', () => {
+    const markup = render({ kind: 'value', peakDb: Number.NEGATIVE_INFINITY }, { muted: true })
+    expect(markup).toContain('>Muted</span>')
+    expect(/<button[^>]*aria-label="Mute microphone"[^>]*>/.exec(markup)?.[0]).toContain(
+      'aria-pressed="true"'
+    )
+    expect(markup).toMatch(
+      /class="[^"]*opacity-50[^"]*"[^>]*data-muted=""[^>]*data-videorc-mic-level/
+    )
+    expect(render({ kind: 'value', peakDb: -12 })).not.toContain('data-muted')
+  })
+
+  it('shows the mute hotkey as a key chip only when one is bound', () => {
+    expect(render({ kind: 'value', peakDb: -12 })).not.toContain('data-accelerator')
+    const bound = render(
+      { kind: 'value', peakDb: -12 },
+      { muteShortcut: 'CmdOrCtrl+Shift+M', platform: 'darwin' }
+    )
+    expect(bound).toContain('data-accelerator="CmdOrCtrl+Shift+M"')
+    expect(bound).toContain('⇧⌘M')
   })
 
   it('turns the microphone Off in words, and shows the live switch status (S1.9)', () => {

@@ -2,7 +2,6 @@ import { layoutPresetOrientation } from '@/lib/capture'
 import { useState, type ReactElement } from 'react'
 import { useStudioCore } from '@/hooks/use-studio'
 import { Button } from '@/components/ui/button'
-import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   Dialog,
@@ -16,6 +15,7 @@ import { Field, FieldLabel, FieldDescription } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { KebabMenu } from '@/components/kebab-menu'
 import { DevicePicker } from '@/components/device-picker'
+import { SceneCard } from '@/components/studio/scene-card'
 import { LayoutThumb } from '@/components/studio/scenes-gallery'
 import {
   sceneNameError,
@@ -23,7 +23,6 @@ import {
   type SavedScene,
   type SceneVisual
 } from '@/lib/scene-presets'
-import { cn } from '@/lib/utils'
 
 type DialogAction = { kind: 'save' | 'rename' | 'delete' | 'repair'; scene?: SavedScene }
 export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }): ReactElement {
@@ -138,51 +137,23 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                 studio.isSessionActive &&
                 layoutPresetOrientation(studio.captureConfig.layout.layoutPreset) !==
                   layoutPresetOrientation(scene.visual.layout.layoutPreset)
+              // One SceneCard for every scene (plan 174 S3.3, B-20): the
+              // selected look and its check replace "✓ Applied".
               return (
-                <div
+                <SceneCard
                   key={scene.id}
-                  className={cn(
-                    'relative flex flex-col rounded-row border',
-                    selected && 'border-primary'
-                  )}
-                >
-                  <DisabledReason
-                    className="flex flex-col"
-                    reason={
-                      orientationLocked
-                        ? 'Stop the recording or stream before switching orientation.'
-                        : null
-                    }
-                  >
-                    <Button
-                      variant="ghost"
-                      className="h-auto flex-col items-stretch gap-2 p-2"
-                      aria-pressed={selected}
-                      disabled={orientationLocked || busy || savedScenePendingId === scene.id}
-                      onClick={() =>
-                        problems.length ? open({ kind: 'repair', scene }) : void apply(scene)
-                      }
-                    >
-                      <LayoutThumb
-                        preset={scene.visual.layout.layoutPreset}
-                        framing={scene.visual.layout.verticalScreenFraming}
-                      />
-                      <span className="truncate">
-                        {savedScenePendingId === scene.id ? 'Switching…' : scene.name}
-                      </span>
-                      {selected ? (
-                        <span className="text-xs text-muted-foreground">
-                          {savedSceneModified ? 'Modified' : '✓ Applied'}
-                        </span>
-                      ) : null}
-                      {problems.length ? (
-                        <span className="text-xs text-muted-foreground">Resolve sources</span>
-                      ) : null}
-                    </Button>
-                  </DisabledReason>
-                  <div className="flex justify-end px-1 pb-1">
+                  data-saved-scene={scene.id}
+                  disabled={orientationLocked || busy || savedScenePendingId === scene.id}
+                  disabledReason={
+                    orientationLocked
+                      ? 'Stop the recording or stream before switching orientation.'
+                      : null
+                  }
+                  label={savedScenePendingId === scene.id ? 'Switching…' : scene.name}
+                  menu={
                     <KebabMenu
                       label={`Actions for ${scene.name}`}
+                      reveal="hover"
                       items={[
                         {
                           id: 'update',
@@ -214,8 +185,25 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                         }
                       ]}
                     />
-                  </div>
-                </div>
+                  }
+                  meta={
+                    problems.length
+                      ? 'Resolve sources'
+                      : selected && savedSceneModified
+                        ? 'Modified'
+                        : undefined
+                  }
+                  selected={selected}
+                  thumb={
+                    <LayoutThumb
+                      framing={scene.visual.layout.verticalScreenFraming}
+                      preset={scene.visual.layout.layoutPreset}
+                    />
+                  }
+                  onSelect={() =>
+                    problems.length ? open({ kind: 'repair', scene }) : void apply(scene)
+                  }
+                />
               )
             })}
           </div>
