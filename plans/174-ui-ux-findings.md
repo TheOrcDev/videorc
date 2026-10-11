@@ -449,7 +449,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-4** · P1 · Library unaware of Clean cut jobs (no status, actions enabled then backend refuses) — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:796 fileActionsBusy
   - Fix: activeCleanCutSourceIds; status chip
-- **E-5** · P1 · Unsaved Clean cut edits lost on tab/page switch; review not re-keyed on target change
+- **E-5** · P1 · Unsaved Clean cut edits lost on tab/page switch; review not re-keyed on target change — fixed in #647 (S3.13 `e0c3763a`)
   - Evidence: buddy-tab.tsx:183-186 key={current}; clean-cut-review.tsx:165
   - Fix: leave guard on all exits; per-job draft store; key by target
 - **E-6** · P1 · "Allow it under Customize." points to nonexistent tab (also Buddy Live string) — fixed in #647 (S2.3b `21073ea6`)
@@ -470,16 +470,16 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-11** · P2 · Markers dialog uses stale session snapshot (playability never re-checked) — fixed in #647 (S3.12 `e4f8da11`)
   - Evidence: library-tab.tsx:147,409
   - Fix: pass id, read live row
-- **E-12** · P2 · Library→Clean cut→Library round trip has no way back; "Clean cut" noun as action; same ClipIcon for Markers
+- **E-12** · P2 · Library→Clean cut→Library round trip has no way back; "Clean cut" noun as action; same ClipIcon for Markers — fixed in #647 (S3.13 `e0c3763a`)
   - Evidence: library-tab.tsx:962-970; clean-cut-review.tsx:491
   - Fix: origin:'library'; "Make a clean cut…"
 - **E-13** · P2 · Clean cut consent dialog lists 5 Buddy bullets; retention in text-subtle — fixed in #647 (S2.3b `21073ea6`)
   - Evidence: clean-cut-consent-dialog.tsx:46-60
   - Fix: reframe copy
-- **E-14** · P2 · Transcript lacks follow-playback, cut-selection, undo
+- **E-14** · P2 · Transcript lacks follow-playback, cut-selection, undo — fixed in #647 (S3.13 E-14 `936c8fa0`; cut selection in Clean mode only)
   - Evidence: clean-cut-transcript.tsx:120; clean-cut-review.ts:226
   - Fix: L
-- **E-15** · P2 · Transcript a11y: role=button spans unfocusable; no live region
+- **E-15** · P2 · Transcript a11y: role=button spans unfocusable; no live region — fixed in #647 (S3.13 `e0c3763a`)
   - Evidence: clean-cut-transcript.tsx:332-414
   - Fix: live region; role=status
 - **E-16** · P2 · Library rows not desktop-like (no arrows/click select/dbl-click/context menu); 3-4 tab stops/row — fixed in #647 (S3.11 `3c129b55`)
@@ -506,10 +506,10 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-23** · P2 · title= tooltips for failure reasons / disabled reasons / shortcuts
   - Evidence: library-tab.tsx:635,303,922; clean-cut-\*
   - Fix: Tooltip+Kbd; visible failure line
-- **E-24** · P2 · Review footer shows only "Failed"
+- **E-24** · P2 · Review footer shows only "Failed" — fixed in #647 (S3.13 `e0c3763a`)
   - Evidence: clean-cut-review.tsx:642
   - Fix: detail + Retry
-- **E-25** · P2 · Auto clean cut silently skips; toast action "Open Buddy"
+- **E-25** · P2 · Auto clean cut silently skips; toast action "Open Buddy" — fixed in #647 (S3.13 `e0c3763a`)
   - Evidence: clean-cut-auto.ts:149-185
   - Fix: warning toast per recording
 - **E-26** · P2 · Library filter Select unnamed — fixed in #647 (S0.5 `e0140afc`)
@@ -521,11 +521,11 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-28** · P3 · session vs recording; Noise Cleanup/cleanup case; "Clean noise" vs "Clean cut"; "New Recording" navigates; blank column header — fixed in #647 (S3.11 `3c129b55`); fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: library-tab.tsx:281,315,328,361
   - Fix: vocabulary
-- **E-29** · P3 · Clean cut copy nits (loading ellipsis, "Make one from the Buddy tab" inside Buddy, back label)
+- **E-29** · P3 · Clean cut copy nits (loading ellipsis, "Make one from the Buddy tab" inside Buddy, back label) — fixed in #647 (S3.13 `e0c3763a`)
   - Evidence: clean-cut-review.tsx:493,548,759,769 |
 - **E-30** · P3 · Player: no click-to-play, J/K/L, Home/End, mute; refusal copy without action — fixed in #647 (S3.12 `e4f8da11`)
   - Evidence: session-player-view.ts:58; session-player.tsx:333 |
-- **E-31** · P3 · Clean cut lock placement differs from Chat/Voice
+- **E-31** · P3 · Clean cut lock placement differs from Chat/Voice — fixed in #647 (S3.13 `e0c3763a`)
   - Evidence: clean-cut-card.tsx:276-297 vs buddy-tab.tsx:326
   - Fix: lock strip
 
