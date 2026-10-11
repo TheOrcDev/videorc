@@ -206,6 +206,9 @@ Colour
 - `--member`: a muted violet for paid membership (YouTube member, Twitch,
   Kick or X subscriber). It paints only the member row tint in chat
   (plan 154); never a chip tone, never text.
+- `--reward`: a muted teal for Twitch channel point rewards. It paints only
+  the reward row tint in Activity (`bg-reward/8`, plan 177); never a chip
+  tone, never text.
 - Use them through the tone utilities (`tone-success`, `tone-warning`,
   `tone-destructive`, `tone-live`, `tone-neutral`) and the chip utilities.
   Never as text colour on status copy: the status colour guard fails on a
@@ -486,7 +489,14 @@ made it chat first: one thin stats bar and fewer words.
   short fact on one line ("Resub · 14 months"), the time, and the 20 px
   platform mark closing that line on the far right (owner call, plan 165).
   The viewer's words follow, and a ⋯ menu reveals on hover. Filter chips
-  carry their counts.
+  carry their counts. One tint per row, like chat (plan 177): a channel point
+  reward paints `bg-reward/8`, a tip (bits, Power-ups, KICKs, Super Chats
+  and Stickers) chat's paid fill `bg-warning/10` without its ring (the rows
+  are flush, split by hairlines); on stream, `bg-accent` wins, and hover
+  paints over either. A long fact truncates and every ⋯ stays in the pane.
+- **ScrollArea content is a block** (plan 177): `ui/scroll-area.tsx`
+  overrides Radix's `display: table` wrapper, which let one long unbreakable
+  row widen every row past the pane. Never reintroduce it per call site.
 - **The Buddy pane** has one header: Buddy's identity (the living preview at
   32 px, the name, the bubble while one is up), the Alpha tag, listening,
   the status and the **Buddy Live** switch. Under it, "Chat posting" is a

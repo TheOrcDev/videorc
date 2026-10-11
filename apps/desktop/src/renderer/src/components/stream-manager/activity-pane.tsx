@@ -234,6 +234,28 @@ export function activityRowActions(
   ]
 }
 
+export type ActivityRowTint = 'reward' | 'paid'
+
+/** A row's one background (plan 177, as chat's plan 154): a channel point
+ * reward paints the reward tint and a tip (bits, Power-ups, KICKs, Super
+ * Chats and Stickers) chat's paid tint, unless it is on stream, where the
+ * on-stream fill wins. Hover still paints over it. */
+export function activityRowTint(
+  item: ActivityItem,
+  highlight: CommentHighlightPresentation
+): ActivityRowTint | null {
+  if (highlight.phase === 'live') return null
+  if (item.kind === 'redemption') return 'reward'
+  return item.filter === 'tips' ? 'paid' : null
+}
+
+/** Flush rows split by hairlines, so the paid tint is chat's fill without its
+ * ring. */
+const ACTIVITY_ROW_TINT_CLASS: Record<ActivityRowTint, string> = {
+  reward: 'bg-reward/8',
+  paid: 'bg-warning/10'
+}
+
 function ActivityRow({
   item,
   nowMs,
@@ -265,15 +287,18 @@ function ActivityRow({
   // One row contract with chat (plan 174 S3.16a, H-19): no hover highlight on
   // a row that is not a button, the ⋯ waits for the pointer, and the time
   // does too while live.
+  const tint = activityRowTint(item, highlight)
   return (
     <li
       className={cn(
         'group/activity group/kebab-host flex items-start gap-2.5 px-3 py-2',
-        highlight.phase === 'live' && 'bg-accent'
+        highlight.phase === 'live' && 'bg-accent',
+        tint && ACTIVITY_ROW_TINT_CLASS[tint]
       )}
       data-activity-id={item.id}
       data-highlight-phase={item.messageId ? highlight.phase : undefined}
       data-kind={item.kind}
+      data-row-tint={tint ?? undefined}
       data-slot="activity-row"
     >
       <span

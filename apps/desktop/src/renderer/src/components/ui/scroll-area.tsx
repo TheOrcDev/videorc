@@ -25,10 +25,13 @@ function ScrollArea({
       type={type}
       {...props}
     >
+      {/* Radix lays the viewport's content out as a table, which lets one long
+          unbreakable row widen every row past the pane (plan 177: Activity's
+          ⋯ menus). A block keeps content to the viewport's width. */}
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
         className={cn(
-          'size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1',
+          'size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 [&>div]:block!',
           viewportClassName
         )}
       >
