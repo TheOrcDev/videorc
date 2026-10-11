@@ -6,9 +6,11 @@ import { BuddyMotionSection } from '@/components/buddy-motion-section'
 import type { BuddyPetPreviewHandle, BuddyPetPreviewInfo } from '@/components/buddy-pet-preview'
 import { BuddyReactionsSection } from '@/components/buddy-reactions-section'
 import { ConfigGrid } from '@/components/page'
+import { useBuddyLibrary } from '@/hooks/use-buddy-library'
+import { useBuddyLookClient } from '@/hooks/use-buddy-look'
 import { useBuddyPets, type BuddyPets } from '@/hooks/use-buddy-pets'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { CohostPersona, BuddyPetImportResult } from '@/lib/backend'
+import type { BuddyLibraryState, CohostPersona, BuddyPetImportResult } from '@/lib/backend'
 import { BUDDY_STILL_PACK_ID, buddyFirstPack } from '@/lib/buddy-pet-view'
 import { BUDDY_STILL_REACTION_IDS, type BuddyMotionSettings } from '../../../shared/buddy-pet'
 
@@ -20,16 +22,30 @@ import { BUDDY_STILL_REACTION_IDS, type BuddyMotionSettings } from '../../../sha
  */
 export function BuddyPetSettings({
   pets: injectedPets,
+  library: injectedLibrary,
   importFolder
 }: {
   /** Tests inject the pack list; the app reads `cohost.pet.list`. */
   pets?: BuddyPets
+  /** Tests inject the account library; the app shares the Buddy tab's client. */
+  library?: BuddyLibraryState | null
   importFolder?: (personaId: string) => Promise<BuddyPetImportResult | null>
 }): ReactElement | null {
   const { cohostSettings, patchCohostSettings } = useStudioCore()
   const connectedPets = useBuddyPets()
   const pets = injectedPets ?? connectedPets
+  const libraryClient = useBuddyLookClient()
+  const { state: libraryState } = useBuddyLibrary(
+    injectedLibrary === undefined ? libraryClient : null
+  )
+  const library = injectedLibrary === undefined ? libraryState.library : injectedLibrary
   const persona = cohostSettings?.persona ?? null
+  // The pack the account keeps for the linked Buddy (plan 172 D10): removing
+  // it here removes it there too, and the confirm says so.
+  const accountPackId =
+    (persona?.libraryAvatarId &&
+      library?.mine?.find((entry) => entry.id === persona.libraryAvatarId)?.alive?.packId) ||
+    null
   const previewRef = useRef<BuddyPetPreviewHandle>(null)
   // Alive picked with nothing to wear yet: the empty state, unsaved (the
   // wire's Alive always names a pack).
@@ -86,6 +102,7 @@ export function BuddyPetSettings({
   return (
     <>
       <BuddyAvatarSection
+        accountPackId={accountPackId}
         importFolder={importFolder}
         motion={motionDraft ?? persona.motion}
         persona={persona}
