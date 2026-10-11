@@ -410,7 +410,6 @@ function BuddyLiveStatusLine({ status }: { status: BuddyLiveStatus }): ReactElem
       className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground"
       data-slot="buddy-live-status"
       data-status={status.kind}
-      title={status.detail ?? undefined}
     >
       <span
         aria-hidden
@@ -422,6 +421,13 @@ function BuddyLiveStatusLine({ status }: { status: BuddyLiveStatus }): ReactElem
           <span aria-hidden>·</span>
           <span>{status.reason}</span>
         </>
+      ) : null}
+      {/* The server's own words for a failed pass: visible, never hover
+          text (plan 174 S1.10). */}
+      {status.detail ? (
+        <span className="basis-full" data-slot="buddy-live-status-detail">
+          {status.detail}
+        </span>
       ) : null}
     </p>
   )

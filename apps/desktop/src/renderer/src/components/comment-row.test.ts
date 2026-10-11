@@ -8,8 +8,11 @@ import {
   RemovalStatus,
   commentCanHighlight,
   commentHighlightPresentationForMessage,
+  commentRowDescription,
   commentRowMenu,
   formatCommentTime,
+  highlightProblem,
+  removalOutcomeLine,
   type CommentHighlightPresentation
 } from '@/components/comment-row'
 import type { LiveChatMessage } from '@/lib/backend'
@@ -428,8 +431,10 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
     )
     const chip = /<span[^>]*data-testid="removal-status"[^>]*>([^<]*)<\/span>/.exec(markup)
     expect(chip?.[0]).toContain('data-removal="hidden"')
-    expect(chip?.[0]).toContain(
-      'title="Hidden in Videorc. Viewers on YouTube still see it. YouTube quota is paused."'
+    // The outcome is the row's own line, never hover text (plan 174 S1.10).
+    expect(chip?.[0]).not.toContain('title=')
+    expect(markup).toContain(
+      'data-testid="removal-outcome">Hidden in Videorc. Viewers on YouTube still see it. YouTube quota is paused.<'
     )
     expect(chip?.[1]).toBe('Hidden in Videorc')
     // The body keeps its muted line-through; the chip is not inside it.
@@ -497,5 +502,67 @@ describe("CommentRow: a Twitch notice's own words (plan 151, D3)", () => {
 
   it('goes on stream as an activity event', () => {
     expect(commentCanHighlight(streak)).toBe(true)
+  })
+})
+
+// Plan 174 S1.10 (H-16): outcomes are the row's own lines, never hover text.
+describe('CommentRow outcome lines', () => {
+  it('says why a highlight failed, or why its action failed on stream', () => {
+    expect(highlightProblem({ phase: 'idle' })).toBeNull()
+    expect(highlightProblem({ phase: 'applying' })).toBeNull()
+    expect(highlightProblem({ phase: 'failed', reason: ' The stream is not live. ' })).toBe(
+      'The stream is not live.'
+    )
+    expect(highlightProblem({ phase: 'failed' })).toBeNull()
+    expect(highlightProblem({ phase: 'live', commandError: 'The card did not update.' })).toBe(
+      'The card did not update.'
+    )
+    expect(highlightProblem({ phase: 'live' })).toBeNull()
+  })
+
+  it('says what a removal did unless it simply removed', () => {
+    const view = (kind: 'removing' | 'removed' | 'hidden' | 'failed' | 'unknown') => ({
+      kind,
+      label: kind,
+      detail: 'What happened.'
+    })
+    expect(removalOutcomeLine(null)).toBeNull()
+    expect(removalOutcomeLine(view('removing'))).toBeNull()
+    expect(removalOutcomeLine(view('removed'))).toBeNull()
+    for (const kind of ['hidden', 'failed', 'unknown'] as const) {
+      expect(removalOutcomeLine(view(kind))).toBe('What happened.')
+    }
+    expect(removalOutcomeLine({ kind: 'failed', label: 'Not removed', detail: null })).toBeNull()
+  })
+
+  it("adds the row's outcome lines to the button's description", () => {
+    expect(commentRowDescription({ phase: 'idle' }, null, false)).toBe('Shows it on stream')
+    expect(commentRowDescription({ phase: 'idle' }, null, true)).toBe(
+      'Shows it on stream. Buddy suggests it'
+    )
+    expect(
+      commentRowDescription({ phase: 'failed', reason: 'The stream is not live.' }, null, false)
+    ).toBe('Shows it on stream. The stream is not live.')
+    expect(
+      commentRowDescription(
+        { phase: 'live', commandError: 'The card did not update.' },
+        { kind: 'hidden', label: 'Hidden in Videorc', detail: 'Viewers may still see it.' },
+        false
+      )
+    ).toBe('Takes it off the stream. The card did not update. Viewers may still see it.')
+  })
+
+  it('shows a failed highlight reason under the text, with no title on the badge', () => {
+    const markup = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message(),
+        highlight: { phase: 'failed', reason: 'The stream is not live.' },
+        onHighlight: () => undefined
+      })
+    )
+    expect(markup).toMatch(/data-testid="highlight-failed"[^>]*>Failed</)
+    expect(markup).toContain('data-testid="highlight-failed-reason">The stream is not live.<')
+    expect(markup).not.toMatch(/<button[^>]*title=/)
+    expect(markup).toContain('aria-description="Shows it on stream. The stream is not live."')
   })
 })

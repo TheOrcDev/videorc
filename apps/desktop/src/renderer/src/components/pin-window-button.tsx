@@ -32,38 +32,39 @@ export function PinWindowButton({
 }): ReactElement {
   const icon = <PinIcon aria-hidden weight={pinned ? 'fill' : 'regular'} />
   const toggle = (): void => onPinnedChange(!pinned)
+  if (variant === 'status-bar') {
+    // A StatusBarAction names an icon alone in its own tooltip.
+    return (
+      <StatusBarAction
+        className={className}
+        data-testid="pin-window-button"
+        icon={icon}
+        label={PIN_WINDOW_LABEL}
+        pressed={pinned}
+        onClick={toggle}
+      />
+    )
+  }
   return (
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
-          {variant === 'status-bar' ? (
-            <StatusBarAction
-              className={className}
-              data-testid="pin-window-button"
-              icon={icon}
-              label={PIN_WINDOW_LABEL}
-              pressed={pinned}
-              title={undefined}
-              onClick={toggle}
-            />
-          ) : (
-            <Button
-              aria-label={PIN_WINDOW_LABEL}
-              aria-pressed={pinned}
-              className={cn(
-                '[-webkit-app-region:no-drag]',
-                pinned ? 'text-foreground' : 'text-muted-foreground',
-                className
-              )}
-              data-testid="pin-window-button"
-              size="icon"
-              type="button"
-              variant="ghost"
-              onClick={toggle}
-            >
-              {icon}
-            </Button>
-          )}
+          <Button
+            aria-label={PIN_WINDOW_LABEL}
+            aria-pressed={pinned}
+            className={cn(
+              '[-webkit-app-region:no-drag]',
+              pinned ? 'text-foreground' : 'text-muted-foreground',
+              className
+            )}
+            data-testid="pin-window-button"
+            size="icon"
+            type="button"
+            variant="ghost"
+            onClick={toggle}
+          >
+            {icon}
+          </Button>
         </TooltipTrigger>
         <TooltipContent>{PIN_WINDOW_LABEL}</TooltipContent>
       </Tooltip>

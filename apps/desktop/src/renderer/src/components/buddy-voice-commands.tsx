@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { SegmentedControl } from '@/components/ui/segmented-control'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
 import type { CohostSettingsPatch, RemoveConfirmMode } from '@/lib/backend'
 import { COHOST_ACTS_ON_ASK_COPY } from '@/lib/cohost-view'
@@ -240,17 +241,21 @@ export function BuddyVoiceCommands({
                   {row.action ? (
                     // The fix as a sentence stays on the button (its name and
                     // tooltip); the row itself says only the short status.
-                    <Button
-                      aria-label={row.message}
-                      disabled={pending !== null}
-                      size="xs"
-                      title={row.message}
-                      type="button"
-                      variant="outline"
-                      onClick={() => fix(row)}
-                    >
-                      {row.action.label}
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          aria-label={row.message}
+                          disabled={pending !== null}
+                          size="xs"
+                          type="button"
+                          variant="outline"
+                          onClick={() => fix(row)}
+                        >
+                          {row.action.label}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{row.message}</TooltipContent>
+                    </Tooltip>
                   ) : null}
                 </ListRow>
               ))

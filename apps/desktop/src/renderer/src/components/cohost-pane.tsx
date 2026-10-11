@@ -23,6 +23,8 @@ import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Switch } from '@/components/ui/switch'
 import type {
   CohostFlag,
@@ -43,7 +45,6 @@ import {
   BUDDY_STILL_PACK_ID
 } from '@/lib/buddy-pet-view'
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
-import { shortcutLabel } from '@/lib/platform'
 import { cohostEmptyStateCopy, cohostPresenceView } from '@/lib/cohost-presence'
 import { activeCohostSpotlight } from '@/lib/cohost-marks'
 import { REMOVE_FROM_CHAT_LABEL } from '@/lib/chat-removal-view'
@@ -511,16 +512,17 @@ export function CohostPane({
             className="flex flex-wrap items-center justify-end gap-1 px-2 py-1"
             data-slot="cohost-actions"
           >
-            <span
-              className={cn(
-                'min-w-0 flex-1 truncate text-[11px] text-muted-foreground',
-                PANE_NARROW_HIDDEN
-              )}
-              data-slot="cohost-acts-on-ask"
-              title={COHOST_ACTS_ON_ASK_COPY}
-            >
-              {COHOST_ACTS_ON_ASK_HINT}
-            </span>
+            <HoverHint hint={COHOST_ACTS_ON_ASK_COPY}>
+              <span
+                className={cn(
+                  'min-w-0 flex-1 truncate text-[11px] text-muted-foreground',
+                  PANE_NARROW_HIDDEN
+                )}
+                data-slot="cohost-acts-on-ask"
+              >
+                {COHOST_ACTS_ON_ASK_HINT}
+              </span>
+            </HoverHint>
             {activeRow.kind === 'question' ? (
               <>
                 <CohostAction
@@ -739,12 +741,12 @@ export function BuddySayFooter({
               say(event.metaKey || event.ctrlKey ? 'laugh' : 'talk')
             }}
           />
-          <ShortcutKeys accelerator="Enter" className={HEADER_NARROW_HIDDEN} title="Say it" />
-          <ShortcutKeys
-            accelerator="CmdOrCtrl+Enter"
-            className={HEADER_NARROW_HIDDEN}
-            title="Say it laughing"
-          />
+          <HoverHint hint="Say it">
+            <ShortcutKeys accelerator="Enter" className={HEADER_NARROW_HIDDEN} />
+          </HoverHint>
+          <HoverHint hint="Say it laughing">
+            <ShortcutKeys accelerator="CmdOrCtrl+Enter" className={HEADER_NARROW_HIDDEN} />
+          </HoverHint>
         </div>
         {sayPostsToChat ? (
           // Plan 174 F-6: Auto posts the line to every chat as you, so the box
@@ -772,6 +774,22 @@ export function BuddySayFooter({
           role="group"
         >
           {BUDDY_REACTION_CHIPS.map((chip) => {
+            const reactionChip = (
+              entry: (typeof BUDDY_REACTION_CHIPS)[number],
+              off: boolean
+            ): ReactElement => (
+              <Button
+                data-reaction={entry.id}
+                data-testid="buddy-reaction-chip"
+                disabled={off}
+                size="xs"
+                type="button"
+                variant="outline"
+                onClick={() => react(entry.id)}
+              >
+                {entry.label}
+              </Button>
+            )
             const available = packReactions?.includes(chip.id) ?? false
             const disabled = !onReact || !available
             return (
@@ -784,18 +802,13 @@ export function BuddySayFooter({
                   chip
                 })}
               >
-                <Button
-                  data-reaction={chip.id}
-                  data-testid="buddy-reaction-chip"
-                  disabled={disabled}
-                  size="xs"
-                  title={disabled ? undefined : `${chip.label} on stream`}
-                  type="button"
-                  variant="outline"
-                  onClick={() => react(chip.id)}
-                >
-                  {chip.label}
-                </Button>
+                {disabled ? (
+                  reactionChip(chip, true)
+                ) : (
+                  <ShortcutTooltip label={`${chip.label} on stream`}>
+                    {reactionChip(chip, false)}
+                  </ShortcutTooltip>
+                )}
               </DisabledReason>
             )
           })}
@@ -1021,12 +1034,9 @@ function CohostSayHiList({
   return (
     <div data-slot="cohost-say-hi">
       <Separator />
-      <p
-        className="px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-subtle"
-        title="First time in your chat. Say their name and Buddy takes them off."
-      >
-        Say hi
-      </p>
+      <HoverHint hint="First time in your chat. Say their name and Buddy takes them off.">
+        <p className="px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-subtle">Say hi</p>
+      </HoverHint>
       {items.map((entry) => {
         const age = cohostAgeLabel(entry.firstSeenAt, nowMs)
         return (
@@ -1130,17 +1140,13 @@ function CohostAction({
   onClick: () => void
 }): ReactElement {
   return (
-    <Button
-      disabled={disabled}
-      size="xs"
-      title={`${label} (${shortcutLabel(accelerator)})`}
-      type="button"
-      variant={variant}
-      onClick={onClick}
-    >
-      {label}
-      <ShortcutKeys accelerator={accelerator} className={PANE_NARROW_HIDDEN} />
-    </Button>
+    // The key chip folds in a narrow pane; the tooltip still names it.
+    <ShortcutTooltip accelerator={accelerator} label={label}>
+      <Button disabled={disabled} size="xs" type="button" variant={variant} onClick={onClick}>
+        {label}
+        <ShortcutKeys accelerator={accelerator} className={PANE_NARROW_HIDDEN} />
+      </Button>
+    </ShortcutTooltip>
   )
 }
 
@@ -1154,3 +1160,16 @@ const PANE_NARROW_HIDDEN = '@max-[400px]/cohost-pane:hidden'
 // The Buddy header is its own container (plan 174 F-27): a class that names
 // the pane's container never applied there, so it names its own.
 const HEADER_NARROW_HIDDEN = '@max-[400px]/buddy-header:hidden'
+
+/**
+ * A hint on hover (plan 174 S1.10): a key chip's action, a short line's full
+ * sentence, a label's explanation. Never a native `title`.
+ */
+function HoverHint({ hint, children }: { hint: string; children: ReactElement }): ReactElement {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{hint}</TooltipContent>
+    </Tooltip>
+  )
+}

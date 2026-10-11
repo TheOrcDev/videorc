@@ -17,6 +17,7 @@ import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/c
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { SegmentedControl } from '@/components/ui/segmented-control'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostBubbleStyle, CohostPersona } from '@/lib/backend'
 import {
@@ -148,17 +149,21 @@ export function BuddyPersonaSection(): ReactElement | null {
               >
                 <BuddyBubbleSample persona={persona} style={persona.bubbleStyle} />
               </Button>
-              <Button
-                aria-label="Zoom in on the bubble"
-                data-testid="buddy-bubble-zoom"
-                size="icon-sm"
-                title="Zoom in"
-                type="button"
-                variant="ghost"
-                onClick={() => setBubbleZoomOpen(true)}
-              >
-                <ZoomInIcon />
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    aria-label="Zoom in on the bubble"
+                    data-testid="buddy-bubble-zoom"
+                    size="icon-sm"
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setBubbleZoomOpen(true)}
+                  >
+                    <ZoomInIcon />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Zoom in</TooltipContent>
+              </Tooltip>
             </div>
           </div>
         </Field>

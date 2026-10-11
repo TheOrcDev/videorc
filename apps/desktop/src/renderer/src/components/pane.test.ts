@@ -196,7 +196,9 @@ describe('StatusBarAction', () => {
     )
     const action = container.querySelector<HTMLButtonElement>('[data-slot=status-bar-action]')
     expect(action?.getAttribute('aria-label')).toBe('Open Preview')
-    expect(action?.getAttribute('title')).toBe('Open Preview')
+    // Named on hover by a tooltip, never a native title (plan 174 S1.10).
+    expect(action?.hasAttribute('title')).toBe(false)
+    expect(action?.getAttribute('data-state')).toBe('closed')
     expect(action?.getAttribute('type')).toBe('button')
     expect(action?.className).toContain(STATUS_BAR_ACTION_CLASS)
     act(() => action?.click())
@@ -214,7 +216,9 @@ describe('StatusBarAction', () => {
     )
     expect(markup).toContain('aria-label="Clear view"')
     expect(markup).toContain('aria-pressed="true"')
-    expect(markup).toContain('title="Clear view (keeps Library history)"')
+    // The hint is the tooltip and the description, never a title (S1.10).
+    expect(markup).toContain('aria-description="Clear view (keeps Library history)"')
+    expect(markup).not.toContain('title=')
     expect(markup).toContain('>Clear</button>')
   })
 

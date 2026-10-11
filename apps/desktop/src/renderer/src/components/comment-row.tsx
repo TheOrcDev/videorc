@@ -41,6 +41,7 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import { Spinner } from '@/components/ui/spinner'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type {
   CohostFlag,
   CommentHighlightState,
@@ -111,7 +112,80 @@ export function formatCommentTime(iso: string): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-/** The on-stream badge, shared by chat and Activity rows (plan 095, S2). */
+/**
+ * A chip's explanation, on hover (plan 174 S1.10): never a native `title`.
+ * The chip stays plain text inside its row; the words it stands for are the
+ * tooltip.
+ */
+function ChipHint({ hint, children }: { hint: string; children: ReactElement }): ReactElement {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{hint}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/**
+ * Why a highlight did not land, in words (plan 174 S1.10, H-16): a failed
+ * show's reason, or the failed action on a message already on stream. It is
+ * the row's visible secondary line while the badge says Failed, never hover
+ * text. Null when nothing failed or no reason came back.
+ */
+export function highlightProblem(status: CommentHighlightPresentation): string | null {
+  if (status.phase === 'failed') return status.reason?.trim() || null
+  if (status.phase === 'live') return status.commandError?.trim() || null
+  return null
+}
+
+/**
+ * What a removal did when it did not simply remove (plan 174 S1.10, H-16):
+ * hidden only in Videorc, not removed, or unconfirmed, as the row's visible
+ * secondary line. A plain removal says "Removed" and keeps its outcome on
+ * the chip's hover.
+ */
+export function removalOutcomeLine(status: RemovalStatusView | null | undefined): string | null {
+  if (!status || status.kind === 'removing' || status.kind === 'removed') return null
+  return status.detail?.trim() || null
+}
+
+/** A row's outcome lines under its text: a failed highlight, then a removal. */
+function RowOutcomes({
+  highlight,
+  removal
+}: {
+  highlight: CommentHighlightPresentation
+  removal?: RemovalStatusView | null
+}): ReactElement | null {
+  const problem = highlightProblem(highlight)
+  const removed = removalOutcomeLine(removal)
+  if (!problem && !removed) return null
+  return (
+    <>
+      {problem ? (
+        <span
+          className="text-left text-xs text-muted-foreground"
+          data-slot="highlight-problem"
+          data-testid="highlight-failed-reason"
+        >
+          {problem}
+        </span>
+      ) : null}
+      {removed ? (
+        <span
+          className="text-left text-xs text-muted-foreground"
+          data-slot="removal-outcome"
+          data-testid="removal-outcome"
+        >
+          {removed}
+        </span>
+      ) : null}
+    </>
+  )
+}
+
+/** The on-stream badge, shared by chat and Activity rows (plan 095, S2). The
+ * reason for a failure is the row's own line (`highlightProblem`). */
 export function HighlightStatus({
   status
 }: {
@@ -124,16 +198,12 @@ export function HighlightStatus({
       return (
         <span className="flex items-center gap-1">
           <Badge variant="success">On stream</Badge>
-          {status.commandError ? (
-            <Badge title={status.commandError} variant="destructive">
-              Action failed
-            </Badge>
-          ) : null}
+          {status.commandError ? <Badge variant="destructive">Action failed</Badge> : null}
         </span>
       )
     case 'failed':
       return (
-        <Badge data-testid="highlight-failed" title={status.reason} variant="destructive">
+        <Badge data-testid="highlight-failed" variant="destructive">
           Failed
         </Badge>
       )
@@ -144,9 +214,10 @@ export function HighlightStatus({
 
 /**
  * A removal's state on its row (plan 140, S6): "Removing…" while it runs,
- * then "Removed" or "Hidden in Videorc" (whose tooltip says viewers may still
- * see it, and why), or a quiet "Not removed" / "Unconfirmed" with the
- * outcome on hover. Outside the struck-through text, so it stays readable.
+ * then "Removed" or "Hidden in Videorc", or a quiet "Not removed" /
+ * "Unconfirmed". Anything but a plain removal says what happened on the row's
+ * own line (`removalOutcomeLine`); "Removed" keeps its outcome on hover.
+ * Outside the struck-through text, so it stays readable.
  */
 export function RemovalStatus({
   status
@@ -162,16 +233,20 @@ export function RemovalStatus({
       </Badge>
     )
   }
-  return (
+  const chip = (
     <Badge
       className="shrink-0"
       data-removal={status.kind}
       data-testid="removal-status"
-      title={status.detail ?? undefined}
       variant="outline"
     >
       {status.label}
     </Badge>
+  )
+  return status.kind === 'removed' && status.detail ? (
+    <ChipHint hint={status.detail}>{chip}</ChipHint>
+  ) : (
+    chip
   )
 }
 
@@ -196,13 +271,14 @@ function CohostMarks({
     const action = cohostFlagActionLabel(flag)
     return (
       <span className="flex min-w-0 items-center gap-1" data-slot="cohost-comment-flag">
-        <Badge
-          className="max-w-40"
-          title={cohostFlagDetail(flag)}
-          variant={flag.severity === 'high' ? 'destructive' : 'outline'}
-        >
-          <span className="truncate">{cohostFlagChipLabel(flag)}</span>
-        </Badge>
+        <ChipHint hint={cohostFlagDetail(flag)}>
+          <Badge
+            className="max-w-40"
+            variant={flag.severity === 'high' ? 'destructive' : 'outline'}
+          >
+            <span className="truncate">{cohostFlagChipLabel(flag)}</span>
+          </Badge>
+        </ChipHint>
         {action ? (
           <span className="shrink-0 text-[11px] text-muted-foreground">{action}</span>
         ) : null}
@@ -212,26 +288,22 @@ function CohostMarks({
   if (spotlight) {
     // Pull-up (plan 060): private to the streamer, never on stream by itself.
     return (
-      <Badge
-        data-testid="cohost-comment-spotlight"
-        title="Buddy heard you talking about this message"
-        variant="outline"
-      >
-        <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
-        Talking about this
-      </Badge>
+      <ChipHint hint="Buddy heard you talking about this message">
+        <Badge data-testid="cohost-comment-spotlight" variant="outline">
+          <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
+          Talking about this
+        </Badge>
+      </ChipHint>
     )
   }
   if (!suggested) return null
   return (
-    <Badge
-      data-testid="cohost-comment-suggested"
-      title="Buddy suggests showing this message on the stream"
-      variant="outline"
-    >
-      <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
-      Suggested
-    </Badge>
+    <ChipHint hint="Buddy suggests showing this message on the stream">
+      <Badge data-testid="cohost-comment-suggested" variant="outline">
+        <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
+        Suggested
+      </Badge>
+    </ChipHint>
   )
 }
 
@@ -281,14 +353,15 @@ function AffiliationBadge({
   if (!localUrl) return null
   const label = affiliation.description ?? 'Affiliated organization'
   return (
-    <img
-      alt={label}
-      className="size-4 shrink-0 rounded-sm object-cover"
-      data-slot="comment-affiliation"
-      draggable={false}
-      src={localUrl}
-      title={label}
-    />
+    <ChipHint hint={label}>
+      <img
+        alt={label}
+        className="size-4 shrink-0 rounded-sm object-cover"
+        data-slot="comment-affiliation"
+        draggable={false}
+        src={localUrl}
+      />
+    </ChipHint>
   )
 }
 
@@ -300,15 +373,16 @@ function AffiliationBadge({
 function VerifiedCheck({ verified }: { verified: LiveChatAuthorVerified }): ReactElement {
   const label = X_VERIFIED_LABEL[verified]
   return (
-    <img
-      alt={label}
-      className="size-4 shrink-0"
-      data-slot="comment-verified"
-      data-verified={verified}
-      draggable={false}
-      src={X_VERIFIED_URL[verified]}
-      title={label}
-    />
+    <ChipHint hint={label}>
+      <img
+        alt={label}
+        className="size-4 shrink-0"
+        data-slot="comment-verified"
+        data-verified={verified}
+        draggable={false}
+        src={X_VERIFIED_URL[verified]}
+      />
+    </ChipHint>
   )
 }
 
@@ -678,14 +752,11 @@ function CommentContent({
             </Badge>
           ) : null}
           {mentioned ? (
-            <Badge
-              className="shrink-0"
-              data-testid="comment-mention"
-              title="Mentions you"
-              variant="secondary"
-            >
-              @you
-            </Badge>
+            <ChipHint hint="Mentions you">
+              <Badge className="shrink-0" data-testid="comment-mention" variant="secondary">
+                @you
+              </Badge>
+            </ChipHint>
           ) : null}
           <span className="flex-1" />
           <EventStatus message={message} />
@@ -739,9 +810,30 @@ function CommentContent({
         >
           <MessageBody density={density} message={message} noticeWords={noticeWords} />
         </span>
+        <RowOutcomes highlight={highlight} removal={removal} />
       </span>
     </>
   )
+}
+
+/**
+ * What a highlightable row's button does, then any outcome its own lines
+ * show (plan 174 S1.10): the visible lines sit inside the button, whose name
+ * is only who said what, so a screen reader hears them here.
+ */
+export function commentRowDescription(
+  highlight: CommentHighlightPresentation,
+  removal: RemovalStatusView | null | undefined,
+  suggested: boolean
+): string {
+  const action =
+    highlight.phase === 'live'
+      ? 'Takes it off the stream'
+      : suggested
+        ? 'Shows it on stream. Buddy suggests it'
+        : 'Shows it on stream'
+  const outcomes = [highlightProblem(highlight), removalOutcomeLine(removal)].filter(Boolean)
+  return outcomes.length > 0 ? `${action}. ${outcomes.join(' ')}` : action
 }
 
 /** The most links one row's ⋯ menu offers (plan 151, D12). */
@@ -952,13 +1044,7 @@ export function CommentRow({
         // so a screen reader reads the chat (S0.5, H-2): author, platform,
         // message. aria-pressed says on stream; the action is the description.
         <Button
-          aria-description={
-            highlight.phase === 'live'
-              ? 'Takes it off the stream'
-              : suggested
-                ? 'Shows it on stream. Buddy suggests it'
-                : 'Shows it on stream'
-          }
+          aria-description={commentRowDescription(highlight, removal, suggested)}
           aria-labelledby={`${nameIds.author} ${nameIds.platform} ${nameIds.text}`}
           aria-pressed={highlight.phase === 'live'}
           disabled={highlight.phase === 'applying'}
@@ -967,7 +1053,6 @@ export function CommentRow({
             tint && ROW_TINT_CLASS[tint]
           )}
           tabIndex={tabIndex}
-          title={highlight.phase === 'live' ? 'Take off stream' : 'Show this message on the stream'}
           type="button"
           variant={highlight.phase === 'live' ? 'secondary' : 'ghost'}
           onClick={(event) => {

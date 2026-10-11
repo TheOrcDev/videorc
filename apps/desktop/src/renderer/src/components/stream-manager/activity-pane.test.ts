@@ -57,7 +57,9 @@ describe('ActivityPane', () => {
 
   it('shows the short fact beside the name, with the sentence on hover', () => {
     expect(markup).toContain('>Resub · 14 months<')
-    expect(markup).toContain('title="Resubscribed for 14 months at Tier 1"')
+    // The sentence is the fact's tooltip and what a screen reader hears.
+    expect(markup).not.toContain('title=')
+    expect(markup).toContain('data-slot="activity-sentence">Resubscribed for 14 months at Tier 1<')
     expect(markup).toContain('that transition was clean')
   })
 
@@ -362,8 +364,10 @@ describe('ActivityPane on stream', () => {
       highlightFailure: { messageId: 'm-follow', reason: 'The stream is not live.' }
     })
     expect(rowOf(failed, 'follow')).toContain('data-highlight-phase="failed"')
-    expect(rowOf(failed, 'follow')).toMatch(
-      /data-variant="destructive"[^>]*title="The stream is not live\."[^>]*>Failed</
+    expect(rowOf(failed, 'follow')).toMatch(/data-variant="destructive"[^>]*>Failed</)
+    // The reason is the row's own line, never hover text (plan 174 H-16).
+    expect(rowOf(failed, 'follow')).toContain(
+      'data-testid="highlight-failed-reason">The stream is not live.<'
     )
     expect(rowOf(failed, 'sub')).not.toContain('Failed<')
     // A failed row is not a selected row.

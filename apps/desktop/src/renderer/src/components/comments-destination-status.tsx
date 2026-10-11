@@ -118,7 +118,6 @@ export function CommentsDestinationStatus({
               <Badge
                 key={`${failure.destinationId}:${failure.reason}`}
                 className="h-auto max-w-full justify-start whitespace-normal text-left"
-                title={failure.reason}
                 variant="destructive"
               >
                 {/* A Badge forces its icons to 12 px: YouTube's mark may not
@@ -135,25 +134,38 @@ export function CommentsDestinationStatus({
     )
   }
 
+  // What each badge cannot say (a paused chat's resume time, the account
+  // chat reads as) is visible text under the badges, never hover text (plan
+  // 174 S1.10, H-16).
+  const details = providers
+    .map((provider) => ({ provider, detail: providerBadgeTitle(provider) }))
+    .filter((entry) => entry.detail)
   return (
     <div
       aria-label="Chat destination status"
-      className="flex flex-wrap items-center gap-1"
+      className="flex flex-col items-center gap-1.5"
       data-slot="comments-destination-status"
     >
-      {providers.map((provider) => (
-        <Badge
+      <div className="flex flex-wrap items-center justify-center gap-1">
+        {providers.map((provider) => (
+          <Badge key={provider.id} variant={providerBadgeVariant(provider.state)}>
+            {provider.platform === 'youtube' ? null : (
+              <ChatPlatformIcon decorative platform={provider.platform} />
+            )}
+            {CHAT_PLATFORM_LABELS[provider.platform]}
+            <span aria-hidden>·</span>
+            {chatStateLabel(provider)}
+          </Badge>
+        ))}
+      </div>
+      {details.map(({ provider, detail }) => (
+        <p
           key={provider.id}
-          title={providerBadgeTitle(provider)}
-          variant={providerBadgeVariant(provider.state)}
+          className="max-w-full text-center text-xs text-muted-foreground"
+          data-slot="comments-destination-detail"
         >
-          {provider.platform === 'youtube' ? null : (
-            <ChatPlatformIcon decorative platform={provider.platform} />
-          )}
-          {CHAT_PLATFORM_LABELS[provider.platform]}
-          <span aria-hidden>·</span>
-          {chatStateLabel(provider)}
-        </Badge>
+          {CHAT_PLATFORM_LABELS[provider.platform]}: {detail}
+        </p>
       ))}
     </div>
   )

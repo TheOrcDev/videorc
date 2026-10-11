@@ -6,6 +6,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem
 } from '@/components/ui/dropdown-menu'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { StreamPlatform } from '@/lib/backend'
 
@@ -41,14 +42,11 @@ export function PlatformFilter({
         All
       </ToggleGroupItem>
       {platforms.map((platform) => (
-        <ToggleGroupItem
-          key={platform}
-          aria-label={CHAT_PLATFORM_LABELS[platform]}
-          title={`Only ${CHAT_PLATFORM_LABELS[platform]}`}
-          value={platform}
-        >
-          <ChatPlatformIcon decorative platform={platform} />
-        </ToggleGroupItem>
+        <ShortcutTooltip key={platform} label={`Only ${CHAT_PLATFORM_LABELS[platform]}`}>
+          <ToggleGroupItem aria-label={CHAT_PLATFORM_LABELS[platform]} value={platform}>
+            <ChatPlatformIcon decorative platform={platform} />
+          </ToggleGroupItem>
+        </ShortcutTooltip>
       ))}
     </ToggleGroup>
   )

@@ -75,7 +75,9 @@ describe('X mark surfaces', () => {
       const check = /<img[^>]*data-slot="comment-verified"[^>]*>/.exec(markup)?.[0] ?? ''
       expect(check, verified).toContain(`src="${escaped(X_VERIFIED_URL[verified])}"`)
       expect(check).toContain(`alt="${X_VERIFIED_LABEL[verified]}"`)
-      expect(check).toContain(`title="${X_VERIFIED_LABEL[verified]}"`)
+      // Named on hover by a tooltip, never a native title (plan 174 S1.10).
+      expect(check).not.toContain('title=')
+      expect(check).toContain('data-state="closed"')
       expect(check).toContain('size-4')
       expect(markup.indexOf('data-slot="comment-verified"')).toBeGreaterThan(
         markup.indexOf('>Dom<')

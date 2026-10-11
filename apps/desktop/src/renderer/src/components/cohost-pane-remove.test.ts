@@ -86,7 +86,9 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     const remove = action('Remove from chat')
     expect(remove).toBeTruthy()
     expect(remove!.dataset.variant).toBe('destructive')
-    expect(remove!.title).toBe('Remove from chat (⇧⌫)')
+    // The key is the chip and the tooltip's, never a native title (plan 174 S1.10).
+    expect(remove!.hasAttribute('title')).toBe(false)
+    expect(remove!.parentElement?.getAttribute('data-state')).toBe('closed')
     expect(remove!.querySelector('kbd')?.textContent).toBe('⇧⌫')
     expect(action('Dismiss')?.dataset.variant).toBe('ghost')
     await act(async () => remove!.click())
@@ -123,8 +125,8 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     await renderPane()
     const hint = container.querySelector<HTMLElement>('[data-slot="cohost-acts-on-ask"]')
     expect(hint?.textContent).toBe('Posts only in the modes you turn on.')
-    expect(hint?.title).toBe(
-      'Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
-    )
+    // The whole sentence is the line's tooltip (plan 174 S1.10).
+    expect(hint?.hasAttribute('title')).toBe(false)
+    expect(hint?.getAttribute('data-state')).toBe('closed')
   })
 })

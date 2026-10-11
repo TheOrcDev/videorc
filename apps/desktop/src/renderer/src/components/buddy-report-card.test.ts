@@ -214,7 +214,9 @@ describe('Buddy report card (plan 119 S3)', () => {
     expect(stream).toContain('1:30:00')
     expect(stream).toContain('84 chat messages')
     expect(
-      document.querySelector('[data-slot="buddy-report-stream"] [title="Twitch: 60 messages"]')
+      document.querySelector(
+        '[data-slot="buddy-report-stream"] [role="img"][aria-label="Twitch: 60 messages"]'
+      )
     ).toBeTruthy()
 
     expect(stat('questions')).toBe('2')

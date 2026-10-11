@@ -187,12 +187,14 @@ export function BuddyUtteranceCards({
               key={utterance.id}
               className="flex h-6 min-w-0 items-center gap-1.5 text-[11px]"
               data-status={utterance.status}
-              title={utterance.text}
             >
               <Badge className="shrink-0" variant="outline">
                 {BUDDY_UTTERANCE_TRIGGER_LABELS[utterance.trigger.kind]}
               </Badge>
-              <span className="min-w-0 flex-1 truncate text-muted-foreground">
+              <span
+                className="min-w-0 flex-1 truncate text-muted-foreground"
+                title={utterance.text}
+              >
                 {utterance.text}
               </span>
               {/* Plan 174 F-13: a failed post reads as failed, in the dot's

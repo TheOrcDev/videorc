@@ -24,6 +24,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -217,20 +218,24 @@ export function BuddyLibrarySection({
                 >
                   {BUDDY_LIBRARY_COPY.invitationAction}
                 </Button>
-                <Button
-                  aria-label="Dismiss"
-                  data-testid="buddy-library-invitation-dismiss"
-                  size="icon-xs"
-                  title="Dismiss"
-                  type="button"
-                  variant="ghost"
-                  onClick={() => {
-                    writeBuddyInvitationDismissed()
-                    setDismissed(true)
-                  }}
-                >
-                  <CloseIcon />
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label="Dismiss"
+                      data-testid="buddy-library-invitation-dismiss"
+                      size="icon-xs"
+                      type="button"
+                      variant="ghost"
+                      onClick={() => {
+                        writeBuddyInvitationDismissed()
+                        setDismissed(true)
+                      }}
+                    >
+                      <CloseIcon />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Dismiss</TooltipContent>
+                </Tooltip>
               </div>
             </div>
           </Alert>

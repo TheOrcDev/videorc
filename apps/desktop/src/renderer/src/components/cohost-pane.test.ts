@@ -392,8 +392,10 @@ describe('CohostPane', () => {
     // it posts only in the modes you turn on.
     expect(markup).not.toContain('Nothing sends without you.')
     expect(markup).toContain('Posts only in the modes you turn on.')
-    expect(markup).toContain(
-      'title="Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to."'
+    // The whole sentence is the line's tooltip, never a native title (S1.10).
+    expect(markup).not.toContain('title="Buddy posts only')
+    expect(markup).toMatch(
+      /<span(?=[^>]*data-slot="cohost-acts-on-ask")(?=[^>]*data-state="closed")/
     )
   })
 
@@ -405,14 +407,18 @@ describe('CohostPane', () => {
     expect(markup).toContain('@container/cohost-pane')
     expect(markup).toMatch(/<div class="[^"]*flex-wrap[^"]*" data-slot="cohost-actions"/)
     // Off macOS (this test's host) the keys read as words (plan 174 I-18).
-    for (const title of [
-      'Reply (R)',
-      'Show on stream (H)',
-      'Answered (A)',
-      'Dismiss (Backspace)'
+    // Each action is a ShortcutTooltip trigger, never a native title (S1.10).
+    for (const [label, key] of [
+      ['Reply', 'R'],
+      ['Show on stream', 'H'],
+      ['Answered', 'A'],
+      ['Dismiss', 'Backspace']
     ]) {
-      expect(markup).toContain(`title="${title}"`)
+      expect(markup).toMatch(
+        new RegExp(`<span[^>]*data-state="closed"[^>]*><button[^>]*>${label}<kbd[^>]*>${key}</kbd>`)
+      )
     }
+    expect(markup).not.toContain('title="Reply')
     // Every key chip carries the narrow-tier class; none is unconditional.
     const chips = markup.match(/<kbd[^>]*>/g) ?? []
     expect(chips.length).toBeGreaterThan(0)
