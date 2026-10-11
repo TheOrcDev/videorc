@@ -33,6 +33,10 @@ const LINK_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-link`
 const MEMBER_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:youtube:probe-member`
 // Plan 177: a long channel point reward, the row that once pushed its ⋯ out.
 const REWARD_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-reward`
+// Plan 177: a tip paints the paid tint in Activity, as it does in chat.
+const TIP_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-tip`
+// Plan 177: one unbroken token, the content that once widened a whole list.
+const LONG_LINK = `https://videorc.com/download?ref=${'orc'.repeat(40)}`
 const HISTORY_SESSION_ID = 'comments-window-probe-history'
 const HISTORY_MODE = {
   kind: 'history',
@@ -720,32 +724,45 @@ async function probeLinksAndStreaks() {
     'member: a member row paints the member tint and a plain row paints none',
     JSON.stringify(tinted.last?.rowTints)
   )
-  // Plan 177: a reward row paints the reward tint, a streak row paints none,
-  // and every Activity row's ⋯ stays whole inside the pane, however long the
-  // reward, in both tiers that show Activity beside chat.
-  for (const width of [1280, 1040]) {
-    await layoutAt(width)
-    const activity = await waitFor(
-      () => smokeCommand('comments-window-reader-state'),
-      (s) => s.activityRows?.some((row) => row.id === REWARD_MESSAGE_ID),
-      5000
-    )
-    const rows = activity.last?.activityRows ?? []
-    const reward = rows.find((row) => row.id === REWARD_MESSAGE_ID)
-    const streak = rows.find((row) => row.kind === 'watch-streak')
-    assertProbe(
-      activity.ok && reward?.rowTint === 'reward' && streak && streak.rowTint === null,
-      `reward ${width}px: a reward row paints the reward tint and a streak row paints none`,
-      JSON.stringify(rows)
-    )
-    const cut = rows.filter((row) => !row.menuInside || !row.menuOnTop)
-    assertProbe(
-      activity.ok && rows.length > 0 && cut.length === 0,
-      `reward ${width}px: every Activity row's ⋯ sits whole inside the pane`,
-      JSON.stringify(cut.length ? cut : rows)
-    )
+  // Plan 177: a reward row paints the reward tint, a tip the paid tint, a
+  // streak row none; every Activity row's ⋯ stays whole inside the pane, and
+  // no list's content is wider than its pane (one long token once widened
+  // every row), in both tiers that show Activity beside chat and both themes.
+  for (const theme of ['light', 'dark']) {
+    await smokeCommand('comments-window-set-theme', { theme })
+    for (const width of [1280, 1040]) {
+      await layoutAt(width)
+      const tag = `rows ${theme} ${width}px`
+      const state = await waitFor(
+        () => smokeCommand('comments-window-reader-state'),
+        (s) => s.theme === theme && s.activityRows?.some((row) => row.id === REWARD_MESSAGE_ID),
+        5000
+      )
+      const rows = state.last?.activityRows ?? []
+      const tintOf = (match) => rows.find(match)?.rowTint
+      assertProbe(
+        state.ok &&
+          tintOf((row) => row.id === REWARD_MESSAGE_ID) === 'reward' &&
+          tintOf((row) => row.id === TIP_MESSAGE_ID) === 'paid' &&
+          tintOf((row) => row.kind === 'watch-streak') === null,
+        `${tag}: a reward paints the reward tint, a tip the paid tint, a streak none`,
+        JSON.stringify(rows)
+      )
+      const cut = rows.filter((row) => !row.menuInside || !row.menuOnTop)
+      assertProbe(
+        state.ok && rows.length > 0 && cut.length === 0,
+        `${tag}: every Activity row's ⋯ sits whole inside the pane`,
+        JSON.stringify(cut.length ? cut : rows)
+      )
+      assertProbe(
+        state.ok && state.last.scrollOverflow?.length === 0,
+        `${tag}: no list is wider than its pane`,
+        JSON.stringify(state.last?.scrollOverflow)
+      )
+    }
+    await layoutAt(1280)
+    await captureState(`activity-rows-${theme}`, `Activity rows, ${theme}`, 1280, 720)
   }
-  await layoutAt(1280)
   const menu = await smokeCommand('comments-window-context-click-link', {
     messageId: LINK_MESSAGE_ID
   })
@@ -1349,10 +1366,30 @@ function linksAndStreakSnapshot() {
           title: 'Hydrate the Orc before the raid',
           pointsName: 'Orc Gold'
         }
-      }
+      },
+      {
+        ...messageFixture({
+          id: TIP_MESSAGE_ID,
+          platform: 'twitch',
+          sessionId: NEXT_LIVE_SESSION_ID,
+          authorName: 'sarzdotmd',
+          messageText: 'Cheer500 that transition was clean',
+          at: '2026-07-10T10:00:07Z'
+        }),
+        eventType: 'paid',
+        details: { kind: 'cheer', bits: 500 }
+      },
+      messageFixture({
+        id: `${NEXT_LIVE_SESSION_ID}:twitch:probe-long-link`,
+        platform: 'twitch',
+        sessionId: NEXT_LIVE_SESSION_ID,
+        authorName: 'Long Link',
+        messageText: LONG_LINK,
+        at: '2026-07-10T10:00:08Z'
+      })
     ],
     unreadCount: 4,
-    updatedAt: '2026-07-10T10:00:07Z'
+    updatedAt: '2026-07-10T10:00:09Z'
   }
 }
 

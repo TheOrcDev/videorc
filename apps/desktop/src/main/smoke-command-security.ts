@@ -51,6 +51,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-seed-viewers',
   'comments-window-set-bounds',
   'comments-window-set-command-fixture',
+  'comments-window-set-theme',
   'comments-window-set-highlight-anchor',
   'comments-window-set-auto-show-activity',
   'comments-window-set-view-mode',

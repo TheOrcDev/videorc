@@ -217,14 +217,26 @@ export function activityRowActions(
   ]
 }
 
+export type ActivityRowTint = 'reward' | 'paid'
+
 /** A row's one background (plan 177, as chat's plan 154): a channel point
- * reward paints the reward tint, unless it is on stream, where the on-stream
- * fill wins. Hover still paints over it. */
+ * reward paints the reward tint and a tip (bits, Power-ups, KICKs, Super
+ * Chats and Stickers) chat's paid tint, unless it is on stream, where the
+ * on-stream fill wins. Hover still paints over it. */
 export function activityRowTint(
   item: ActivityItem,
   highlight: CommentHighlightPresentation
-): 'reward' | null {
-  return item.kind === 'redemption' && highlight.phase !== 'live' ? 'reward' : null
+): ActivityRowTint | null {
+  if (highlight.phase === 'live') return null
+  if (item.kind === 'redemption') return 'reward'
+  return item.filter === 'tips' ? 'paid' : null
+}
+
+/** Flush rows split by hairlines, so the paid tint is chat's fill without its
+ * ring. */
+const ACTIVITY_ROW_TINT_CLASS: Record<ActivityRowTint, string> = {
+  reward: 'bg-reward/8',
+  paid: 'bg-warning/10'
 }
 
 function ActivityRow({
@@ -256,7 +268,7 @@ function ActivityRow({
       className={cn(
         'flex items-start gap-2.5 px-3 py-2 hover:bg-accent',
         highlight.phase === 'live' && 'bg-accent',
-        tint === 'reward' && 'bg-reward/8'
+        tint && ACTIVITY_ROW_TINT_CLASS[tint]
       )}
       data-activity-id={item.id}
       data-highlight-phase={item.messageId ? highlight.phase : undefined}
@@ -460,13 +472,7 @@ export function ActivityPane({
           </Button>
         </div>
       ) : null}
-      {/* Radix lays the viewport's content out as a table, which lets one long
-          reward widen every row and push each ⋯ out of the pane (plan 177);
-          a block keeps rows to the pane width, so the fact truncates. */}
-      <ScrollArea
-        className="min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
-        type="scroll"
-      >
+      <ScrollArea className="min-h-0 flex-1" type="scroll">
         {shown.length ? (
           <ol aria-label="Activity" className="flex flex-col divide-y divide-border">
             {shown.map((item) => (

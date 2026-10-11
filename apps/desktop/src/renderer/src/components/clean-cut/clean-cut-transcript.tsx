@@ -133,13 +133,7 @@ export function CleanCutTranscript({
   }
 
   return (
-    // Radix lays the viewport's content out as a table, which lets one long
-    // unbreakable row widen every row; a block keeps rows to the pane width.
-    <ScrollArea
-      ref={rootRef}
-      className={cn('min-h-0 [&_[data-slot=scroll-area-viewport]>div]:block!', className)}
-      data-clean-cut="transcript"
-    >
+    <ScrollArea ref={rootRef} className={cn('min-h-0', className)} data-clean-cut="transcript">
       <div
         className="relative w-full"
         style={{ height: virtualizer.getTotalSize() }}

@@ -29,6 +29,18 @@
   four new probe checks pass at 1280 and 1040. In the dark capture the
   reward row reads `#10181a` on the pane's `#0a0a0c` (chat's member row:
   `#16151d`). Light theme and hover are left to the owner's by-eye.
+  Follow-ups, same day, on the owner's "do those follow-ups as well":
+  D2 moved the block override into `ui/scroll-area.tsx` (Activity's and
+  Clean cut's own overrides removed); D3 paints tips `bg-warning/10`. The
+  probe gained `comments-window-set-theme` (the renderer toggle's own
+  `applyNativeTheme`), a tip and an unbroken-link fixture, a "no list wider
+  than its pane" check, and runs every row check in light and dark at 1280
+  and 1040, with a capture per theme. Light: reward `#c8d0d2`, tip
+  `#d6d2c9` on the pane's `#d7d7d7` (member `#cecdd3`). Dark: reward
+  `#10181a`, tip `#221b13` on `#0a0a0c`. Chat already wrapped the unbroken
+  link (no red there); a scratch run confirmed Diagnostics' two log lists
+  are blocks at their pane width at 900 and 1400 px. The Go Live, Schedule
+  and Markers dialogs and the takeover screens list were not rendered.
 - **Route**: UI/Product Design, fit 9. Model lane `opus-4.8` (scoped,
   user-facing taste work). Read `.claude/skills/videorc-design/SKILL.md`
   before S2.
@@ -105,11 +117,12 @@ edge where the viewport clips it. Short rows look fine because the table's
     serde-null trap), and a fallback for automatic rewards. Arbitrary
     streamer colours break "chrome is monochrome" and need light-mode
     contrast handling. Adds a backend slice; not recommended.
-- **D2: scope of the ScrollArea fix.** Recommended: fix Activity only now
+- **D2: scope of the ScrollArea fix.** (Executed: moved into the primitive
+  on the owner's word.) Recommended: fix Activity only now
   (S1), matching the Clean cut precedent. Moving `block!` into the shared
   primitive would fix every pane (chat, Go Live, Diagnostics…) but changes
   layout for eight call sites; that is a follow-up plan if wanted.
-- **D3: other paid events (out of scope unless the owner says so).** Tips,
+- **D3: other paid events.** (Executed: tips paint `bg-warning/10`.) Tips,
   bits, Power-ups and Super Chats keep no tint in Activity. If the owner
   wants them to match chat's paid tint, that is a one-line follow-up after
   S2.

@@ -274,10 +274,14 @@ made it chat first: one thin stats bar and fewer words.
   `components/stream-manager/activity-icons.tsx`). Either way the platform
   icon sits bottom-right. Then comes the name and a short fact on one line
   ("Resub · 14 months"), the viewer's words, and a ⋯ menu. Filter chips carry
-  their counts. A channel point reward row paints `bg-reward/8` (plan 177);
-  on stream, `bg-accent` wins, and hover paints over it. The list's
-  ScrollArea lays rows out as a block, never Radix's table, so a long fact
-  truncates and every ⋯ stays in the pane.
+  their counts. One tint per row, like chat (plan 177): a channel point
+  reward paints `bg-reward/8`, a tip (bits, Power-ups, KICKs, Super Chats
+  and Stickers) chat's paid fill `bg-warning/10` without its ring (the rows
+  are flush, split by hairlines); on stream, `bg-accent` wins, and hover
+  paints over either. A long fact truncates and every ⋯ stays in the pane.
+- **ScrollArea content is a block** (plan 177): `ui/scroll-area.tsx`
+  overrides Radix's `display: table` wrapper, which let one long unbreakable
+  row widen every row past the pane. Never reintroduce it per call site.
 - **Proof.** `pnpm probe:comments-window` sweeps 320/480/640/800/1040/1280.
   It fails on any overflow, a stats bar taller than one row, main stats
   apart or clipped, a stat cut at the bar's edge, a hidden viewer count, a
