@@ -5,6 +5,7 @@ import {
   isFeatureEntitled
 } from './entitlements'
 import { streamVideoProfileValidationReason } from './capture'
+import { formatVideoQuality } from './format-video'
 import { isPremiumUpgradeMessage, VIDEORC_PREMIUM_URL } from './premium-upgrade'
 
 export type EntitlementUiGate =
@@ -54,6 +55,29 @@ export function streamingDestinationEnableGate({
   }
 
   return destinationsLimitGate(maxDestinations)
+}
+
+/**
+ * The destination cap in the Livestream page's words (plan 174 S3.5a, D-14):
+ * the rule for the section description, and the one notice above the list
+ * while every allowed destination is on. Never Premium: the cap is a shared
+ * pipeline limit, like `destinationsLimitGate`.
+ */
+export function streamingDestinationCap(
+  entitlements: EntitlementsSnapshot | null,
+  streaming: Pick<StreamingSettings, 'enabledTargetIds'>
+): { max: number; atCap: boolean; rule: string; notice: string | null } {
+  const max = streamingMaxDestinations(entitlements)
+  const atCap =
+    isFeatureEntitled(entitlements, 'livestreaming') && streaming.enabledTargetIds.length >= max
+  return {
+    max,
+    atCap,
+    rule: `Stream to up to ${max} at once.`,
+    notice: atCap
+      ? `${max} destinations are on, the most at once. Turn one off to add another.`
+      : null
+  }
 }
 
 export function goLiveEntitlementGate({
@@ -147,7 +171,7 @@ function featureGate(
 
   return lockedGate(
     featureId,
-    entitlementDisabledReason(entitlements, featureId) ?? 'This Videorc feature is not enabled.'
+    entitlementDisabledReason(entitlements, featureId) ?? "This Videorc feature isn't enabled."
   )
 }
 
@@ -184,16 +208,20 @@ function streamingMaxDestinations(entitlements: EntitlementsSnapshot | null): nu
 }
 
 function formatVideoProfile(video: VideoSettings): string {
-  return `${video.width}x${video.height} @ ${video.fps} FPS`
+  return formatVideoQuality(video, { size: 'full' })
 }
 
 function formatLimit(
   kind: 'recording' | 'streaming',
   limits: EntitlementsSnapshot['limits']['recording'] | EntitlementsSnapshot['limits']['streaming']
 ): string {
-  const bitrate =
+  const bitrateKbps =
     'maxBitrateKbps' in limits && typeof limits.maxBitrateKbps === 'number'
-      ? ` and ${limits.maxBitrateKbps} kbps`
-      : ''
-  return `Your ${kind} limit is ${limits.maxWidth}x${limits.maxHeight} @ ${limits.maxFps} FPS${bitrate}.`
+      ? limits.maxBitrateKbps
+      : undefined
+  const limit = formatVideoQuality(
+    { width: limits.maxWidth, height: limits.maxHeight, fps: limits.maxFps, bitrateKbps },
+    { size: 'full', bitrate: true }
+  )
+  return `Your ${kind} limit is ${limit}.`
 }

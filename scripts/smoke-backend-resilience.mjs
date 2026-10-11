@@ -1,6 +1,6 @@
 // F-014 gate: a dead backend must never leave the app a zombie that reports
 // Ready. Kills the backend mid-run and asserts the Session badge flips to
-// "Backend offline", the supervisor restarts the process, and the badge heals
+// "Videorc is reconnecting…", the supervisor restarts the process, and the badge heals
 // back to Ready with a working socket.
 //
 // Live-feedback batch 3 (B1): the crash must also leave durable evidence —
@@ -50,8 +50,8 @@ try {
   process.kill(backend.pid, 'SIGKILL')
   console.log('Backend resilience: sent SIGKILL to the backend.')
 
-  await waitForBadge(smoke, 'Backend offline', 'offline badge after backend death')
-  console.log('Backend resilience: Session badge reports Backend offline.')
+  await waitForBadge(smoke, 'Videorc is reconnecting…', 'reconnecting badge after backend death')
+  console.log('Backend resilience: Session badge reports "Videorc is reconnecting…".')
 
   await waitForBadge(smoke, 'Ready', 'Ready badge after supervisor restart', 60_000)
   console.log('Backend resilience: supervisor restarted, badge healed to Ready.')

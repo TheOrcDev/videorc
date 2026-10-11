@@ -8,10 +8,12 @@ import type {
   SessionSummary
 } from './backend'
 import type { EntitlementUiGate } from './entitlement-ui'
+import { SESSION_MODES } from './session-modes'
+import { userErrorMessage } from './user-error'
 import { VIDEORC_PREMIUM_URL } from './videorc-web-links'
 import { formatClipMarkClock } from '../../../shared/clip-marks'
 
-// Clean cut in the Orcle tab (plan 119 S14, S15, S19): "Stop recording, and
+// Clean cut in the Buddy tab (plan 119 S14, S15, S19): "Stop recording, and
 // the edited version is already there." Everything here is a pure derivation
 // of the job snapshots, the Library rows and the capability block, so the
 // card, the review, the ready toast and their tests cannot disagree.
@@ -84,8 +86,8 @@ export const CLEAN_CUT_AUTO_LABEL = 'Make a clean cut of every recording'
 
 export const CLEAN_CUT_SIGNED_OUT_REASON = 'Sign in to use Clean cut, part of Videorc Premium.'
 
-export const CLEAN_CUT_CONSENT_OFF_REASON =
-  "Cloud AI is off, so Clean cut can't run. Allow it under Customize."
+/** Its fix is the status line's "Allow cloud AI…" (plan 174 E-6). */
+export const CLEAN_CUT_CONSENT_OFF_REASON = "Cloud AI isn't allowed, so Clean cut can't run."
 
 export const CLEAN_CUT_NO_RECORDINGS =
   'Record something, and its clean cut shows up here when you stop.'
@@ -104,7 +106,10 @@ export const CONDENSED_DEFAULT_TARGET_MINUTES = 15
 /** Recordings the picker offers, newest first. */
 export const CLEAN_CUT_PICKER_LIMIT = 20
 
-const CLEAN_CUT_SOURCE_MODES: ReadonlySet<string> = new Set(['record', 'record+stream'])
+const CLEAN_CUT_SOURCE_MODES: ReadonlySet<string> = new Set([
+  SESSION_MODES.record,
+  SESSION_MODES.recordAndStream
+])
 
 export type CleanCutEligibility = { eligible: true } | { eligible: false; reason: string }
 
@@ -131,7 +136,7 @@ export function cleanCutEligibility(session: EligibilityRow): CleanCutEligibilit
   if (session.status !== 'completed' || session.finalizationState === 'finalizing') {
     return refuse('Clean cut is available once the recording has finished.')
   }
-  if (session.mode === 'imported') return refuse('Imported videos are not supported yet.')
+  if (session.mode === 'imported') return refuse("Imported videos aren't supported yet.")
   if (session.derivedFromSessionId || session.processingKind || session.cleanCutOfSessionId) {
     return refuse("A cleaned or cut copy can't be cut again.")
   }
@@ -196,15 +201,8 @@ export function cleanCutJobEditable(job: Pick<CleanCutJob, 'state'>): boolean {
   return job.state === 'ready' || job.state === 'completed' || job.state === 'failed'
 }
 
-/** One entry per job id; a snapshot older than the one held is ignored. */
-export function upsertCleanCutJob(jobs: readonly CleanCutJob[], job: CleanCutJob): CleanCutJob[] {
-  const index = jobs.findIndex((entry) => entry.id === job.id)
-  if (index === -1) return [job, ...jobs]
-  if (jobs[index].updatedAt.localeCompare(job.updatedAt) > 0) return [...jobs]
-  const next = [...jobs]
-  next[index] = job
-  return next
-}
+/** One entry per job id (lib/clean-cut-jobs.ts, which the Studio provider shares). */
+export { upsertCleanCutJob } from './clean-cut-jobs'
 
 /** The newest job for one recording and mode. */
 export function latestCleanCutJob(
@@ -365,7 +363,7 @@ export function cleanCutStatusView(
         retry: hasCutList ? 'render' : 'start'
       }
     case 'cancelled':
-      return { ...base, kind: 'cancelled', label: 'Cancelled', retry: 'start' }
+      return { ...base, kind: 'cancelled', label: 'Canceled', retry: 'start' }
   }
 }
 
@@ -379,11 +377,11 @@ const FAILURE_COPY: Readonly<Record<string, string>> = {
   'signed-out': 'Sign in to Videorc, then retry.',
   network: "Videorc couldn't be reached. Retry when you're online.",
   'source-changed': 'The recording changed while it was being cut. Retry to start over.',
-  'insufficient-space': 'There is not enough free disk space for the cut copy.',
+  'insufficient-space': "There isn't enough free disk space for the cut copy.",
   'render-invalid': "The cut didn't pass its checks, so it wasn't saved. Retry to cut again.",
   'ffmpeg-unsupported': "This computer's video encoder couldn't make the cut.",
   'file-missing': 'The recording file is missing.',
-  'no-speech': 'No speech found, so there is nothing to cut.',
+  'no-speech': "No speech found, so there's nothing to cut.",
   'no-audio': 'This recording has no audio to transcribe.'
 }
 
@@ -396,9 +394,30 @@ export function cleanCutFailureCopy(code: string | undefined, message: string | 
   return text || 'Clean cut stopped before it finished.'
 }
 
+const UNKNOWN_CLEAN_CUT_FAILURE = cleanCutFailureCopy(undefined, undefined)
+
+/**
+ * Plan 174 S2.4: a failed call in plain words. Clean cut's own codes keep
+ * their sentence; anything else gets the generic next step, never raw text
+ * (the raw text goes to the console).
+ */
+export function cleanCutErrorReason(error: unknown): string {
+  const code =
+    typeof error === 'object' &&
+    error !== null &&
+    typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : undefined
+  const known = code ? cleanCutFailureCopy(code, undefined) : UNKNOWN_CLEAN_CUT_FAILURE
+  if (known !== UNKNOWN_CLEAN_CUT_FAILURE) return known
+  const copy = userErrorMessage(error)
+  console.warn('[clean-cut] request failed:', copy.raw)
+  return copy.description
+}
+
 const UNAVAILABLE_COPY: Readonly<Record<string, string>> = {
   disabled: "Clean cut is paused on Videorc's side. Try again later.",
-  blocked: 'Cloud AI is not available for this account.',
+  blocked: "Cloud AI isn't available for this account.",
   'premium-required': 'Clean cut is part of Videorc Premium.',
   'provider-unconfigured': "Clean cut isn't set up on Videorc's side yet. Try again later.",
   'quota-exhausted': "This month's Clean cut minutes are used up."
@@ -459,6 +478,8 @@ export interface CleanCutAutoStatus {
   kind: CleanCutAutoStatusKind
   label: string
   reason: string | null
+  /** The one fix the line offers: cloud AI consent, asked in its dialog. */
+  fix?: 'allow-cloud-ai'
 }
 
 /** The status line under "Make a clean cut of every recording". */
@@ -476,7 +497,12 @@ export function cleanCutAutoStatus({
   if (!on) return { kind: 'off', label: 'Off', reason: null }
   if (unlock) return { kind: 'attention', label: 'Needs attention', reason: unlock.reason }
   if (!consented) {
-    return { kind: 'attention', label: 'Needs attention', reason: CLEAN_CUT_CONSENT_OFF_REASON }
+    return {
+      kind: 'attention',
+      label: 'Needs attention',
+      reason: CLEAN_CUT_CONSENT_OFF_REASON,
+      fix: 'allow-cloud-ai'
+    }
   }
   return {
     kind: 'on',

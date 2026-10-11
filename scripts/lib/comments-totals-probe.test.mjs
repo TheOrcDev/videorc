@@ -11,7 +11,7 @@ import {
 // ordered currency rows and every accounting value remain unchanged.
 function fakeActivityWireTotals() {
   return JSON.parse(
-    '{"bits":1800,"chatters":7,"follows":2,"messageCount":16,"raids":1,"status":"available","supporters":7,"tips":[{"amountMicros":5000000,"currency":"USD"},{"amountMicros":2000000,"currency":"EUR"}]}'
+    '{"bits":1800,"chatters":8,"follows":2,"messageCount":17,"raids":1,"status":"available","supporters":7,"tips":[{"amountMicros":5000000,"currency":"USD"},{"amountMicros":2000000,"currency":"EUR"}]}'
   )
 }
 
@@ -182,6 +182,8 @@ function activityReceipts(sessionId = 'owned-activity') {
     ['twitch', 'fake-0'],
     ['youtube', 'fake-0'],
     ['kick', 'fake-0'],
+    // The Twitch GIF Keyboard row (plan 155): a chat message, not an event.
+    ['twitch', 'fake-gif'],
     ['twitch', 'fake-event-resub', 'subscription'],
     ['twitch', 'fake-event-community-sub-gift', 'subscription'],
     ['twitch', 'fake-event-cheer', 'cheer'],
@@ -281,7 +283,7 @@ for (const substitute of [
 ]) {
   test(`fake activity receipts keep totals pending with the last follow ${substitute}`, async () => {
     const rows = activityReceipts()
-    const initial = rows.slice(0, 15)
+    const initial = rows.slice(0, 16)
     if (substitute === 'foreign-session') initial.push(activityReceipts('foreign-activity').at(-1))
     if (substitute === 'duplicate-id') initial.push({ ...initial[0] })
     if (substitute === 'missing-id') initial.push({ ...initial[0], id: undefined })
@@ -302,7 +304,7 @@ for (const substitute of [
       new Set(
         finished.rows.map((row) => row.id).filter((id) => typeof id === 'string' && id.length > 0)
       ).size,
-      16
+      17
     )
     assert.ok(finished.rows.every((row) => row.sessionId === 'owned-activity'))
     assert.equal(finished.admissions, 1)
@@ -364,7 +366,7 @@ test('sixteen distinct owned receipts still require every original activity kind
     finished = await fixture.finish()
   }
   assert.equal(finished.producerJoined && finished.ownerJoined, true)
-  assert.equal(new Set(rows.map((row) => row.id)).size, 16)
+  assert.equal(new Set(rows.map((row) => row.id)).size, 17)
   assert.deepEqual(observed, { pending: true, admissions: 0 })
   assert.equal(finished.error, deadlineError)
   assert.equal(finished.admissions, 0)
@@ -381,7 +383,7 @@ test('complete activity receipts still reject incorrect settled accounting', asy
   }
   assert.equal(finished.producerJoined && finished.ownerJoined, true)
   assert.equal(finished.error, undefined)
-  assert.equal(finished.rows.length, 16)
+  assert.equal(finished.rows.length, 17)
   const incorrect = fakeActivityWireTotals()
   incorrect.messageCount = 15
   assert.throws(() => assertFakeActivityTotals(incorrect), /accounting disagreed/)

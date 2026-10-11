@@ -1,4 +1,5 @@
 import type {
+  AutomaticSourceFallbackEvent,
   BackendLifecycleEvent,
   HealthEvent,
   OAuthCallbackResult,
@@ -7,19 +8,26 @@ import type {
   XPlaybackEvent
 } from '@/lib/backend'
 import {
+  activityIsLive,
+  activitySavesRecording,
   sessionRuntimeNoticeTitle,
   type SessionRuntimeActivity,
   type SessionRuntimeNotice
 } from '@/lib/session-runtime-notice'
+import { sessionActivity, sessionIsLive } from '../../../shared/capture-state'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { recordingStartupHealthToast } from '@/lib/studio-health'
 import { requestSystemAudioResume, SYSTEM_AUDIO_ECHO_TOAST_ID } from '@/lib/system-audio'
-import { isTransientBackendError, shouldToastBackendError } from '@/lib/backend-transport'
+import { shouldToastBackendError } from '@/lib/backend-transport'
+import { ipcErrorMessage } from '@/lib/ipc-error-message'
+import { OFFLINE_TOAST_ID, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifyOnce } from '@/lib/notify-once'
-import { toast } from '@/lib/toast'
+import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { openHealthToastAction } from '@/lib/health-door'
 import type { StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
 import {
   youtubeBroadcastToast,
@@ -59,7 +67,6 @@ export function showYouTubeBudgetStep(
   })
 }
 
-const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
 const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
 
@@ -101,11 +108,7 @@ export function sessionRuntimeContinuationIsCurrent(
 }
 
 function openLibrary(sessionId?: string): void {
-  window.dispatchEvent(
-    new CustomEvent(WORKSPACE_NAVIGATE_EVENT, {
-      detail: { tab: 'library', sessionId: sessionId ?? null }
-    })
-  )
+  openWorkspaceTab('library', sessionId)
 }
 
 export function recordingFailurePresentation({
@@ -124,9 +127,9 @@ export function recordingFailurePresentation({
   if (currentDedupeKey === dedupeKey) return null
   const message =
     status.message ??
-    (activity === 'live-stream'
-      ? 'Videorc could not finish this live session.'
-      : 'Videorc could not finish this recording.')
+    (activityIsLive(activity)
+      ? "Videorc couldn't finish this livestream."
+      : "Videorc couldn't finish this recording.")
   return {
     dedupeKey,
     notice: {
@@ -148,15 +151,15 @@ export function showRecordingFailure({ notice }: RecordingFailurePresentation): 
     id: RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID,
     description: notice.message,
     duration: Infinity,
-    ...(notice.activity === 'recording'
+    ...(activitySavesRecording(notice.activity)
       ? {
           action: {
-            label: 'Open Library',
+            label: 'Open in Library',
             onClick: () => openLibrary(sessionId)
           }
         }
       : {}),
-    ...(notice.activity === 'recording' && sessionId && notice.outputPath && revealSession
+    ...(activitySavesRecording(notice.activity) && sessionId && notice.outputPath && revealSession
       ? {
           cancel: {
             label: revealInFileManagerLabel(),
@@ -206,12 +209,8 @@ export function microphoneLossPresentation({
     return null
   const audioIssues = [...previousIssues, { code: event.code, message: event.message }]
 
-  const activity: SessionRuntimeActivity =
-    recording.state === 'streaming'
-      ? 'live-stream'
-      : recording.state === 'recording'
-        ? 'recording'
-        : lastActivity
+  // Go Live reports `recording` with a stream URL: still a live session.
+  const activity: SessionRuntimeActivity = active ? sessionActivity(recording) : lastActivity
   return {
     dedupeKey,
     activity,
@@ -239,50 +238,69 @@ export function showMicrophoneLoss({ notice }: MicrophoneLossPresentation): void
 
 export function showBackendLifecycle(event: BackendLifecycleEvent): void {
   if (event.state === 'restarting') {
-    toast.warning('Backend crashed', {
+    toast.warning('Videorc is recovering', {
       id: 'backend-lifecycle',
       description: `Restarting automatically (attempt ${event.attempt ?? 1})…`
     })
   } else if (event.state === 'failed') {
-    toast.error('Backend crashed repeatedly', {
+    toast.error("Videorc can't recover on its own", {
       id: 'backend-lifecycle',
-      description: 'Automatic restarts stopped. Restart Videorc to recover.',
+      description: 'Quit and reopen Videorc.',
       duration: Infinity
     })
   } else if (event.state === 'lost') {
-    toast.error('Backend shutdown could not be confirmed', {
+    toast.error('Videorc needs a restart', {
       id: 'backend-lifecycle',
-      description: 'A replacement was not started. Quit and reopen Videorc to recover safely.',
+      description: 'Quit and reopen Videorc.',
       duration: Infinity
     })
   }
 }
 
-export function showBackendError(message: string, status: WsStatus): void {
+export function showBackendError(
+  error: unknown,
+  status: WsStatus,
+  context?: UserErrorContext
+): void {
+  const message = ipcErrorMessage(error)
   // Permission grants intentionally restart the backend. During that brief
   // reconnect window the Session badge already explains the state, so avoid a
   // wall of duplicate transport errors. A connected-state blip stays visible.
   if (!shouldToastBackendError(message, status)) return
-  if (isTransientBackendError(message)) {
-    toast.error(message, { id: 'backend-transport' })
+  // Plan 174 S2.4: what failed and what to do, never the raw text; that goes
+  // to the console and the support bundle.
+  const copy = userErrorMessage(error, context)
+  if (copy.kind === 'canceled') return
+  console.warn(`[backend-error] ${copy.title}:`, message)
+  if (copy.kind === 'offline') {
+    const show = copy.tone === 'warning' ? toast.warning : toast.error
+    show(copy.title, { id: OFFLINE_TOAST_ID, description: copy.description })
   } else {
-    notifyOnce(`backend-error:${message}`, 'error', message)
+    // A failure Videorc can't explain says to look at Health (plan 174 D9),
+    // so its toast opens it. The door keeps the toast's timed life: a
+    // door is not a fix, so it never pins the toast open.
+    notifyOnce(`backend-error:${copy.title}:${message}`, copy.tone, copy.title, {
+      description: copy.description,
+      ...(copy.kind === 'unknown'
+        ? { action: openHealthToastAction(), duration: TOAST_WITH_DESCRIPTION_MS }
+        : {})
+    })
   }
 }
 
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
   // One toast per playback state: the backend re-checks on a timer.
   if (event.status === 'verified') {
-    notifyOnce('x-playback', 'success', 'Viewers can watch your X broadcast.', {
+    notifyOnce('x-playback', 'success', 'Viewers can watch your X broadcast', {
       description: event.shareUrl
     })
   } else if (event.status === 'pending') {
-    notifyOnce('x-playback', 'warning', 'X is still provisioning playback.', {
+    notifyOnce('x-playback', 'warning', 'X is still preparing your stream', {
       description:
         'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
     })
   } else {
-    notifyOnce('x-playback', 'error', 'X never produced playback for this broadcast.', {
+    notifyOnce('x-playback', 'error', 'X never showed your stream', {
       description:
         'Viewers saw a loading spinner. Your local recording is unaffected; the next Go Live uses a replacement source if this repeats.'
     })
@@ -308,26 +326,30 @@ export function showOAuthCallbackResult(result: OAuthCallbackResult): void {
   const id = oauthCallbackToastId(result.platform)
   const platformName = result.platform ? CHAT_PLATFORM_LABELS[result.platform] : 'the account'
   if (result.status === 'success' && result.accountConnected) {
-    toast.success('Account connected.', { id })
+    toast.success(result.platform ? `Connected ${platformName}` : 'Account connected', { id })
   } else if (result.status === 'success' && result.platform === 'x' && result.tokenStored) {
-    toast.success(result.message ?? 'X live authorization complete.', { id })
+    toast.success('X Live is on', { id })
   } else if (result.status === 'success') {
-    toast.success('OAuth callback received.', { id })
+    // Plan 174 S2.4 (J2-11): a step on the way, not news. The approve toast
+    // goes; the connected one follows.
+    toast.dismiss(id)
   } else {
     const description =
       result.reason === 'youtube-quota' && result.retryAt
         ? youtubeConnectPausedMessage(result.retryAt)
-        : (result.message ?? result.status ?? 'Connection could not be completed.')
-    toast.error(`Couldn't finish connecting ${platformName}.`, { id, description })
+        : (result.message ?? result.status ?? "Connection couldn't be completed.")
+    toast.error(`Couldn't finish connecting ${platformName}`, { id, description })
   }
 }
 
 /** The renderer gave up retrying a provider callback (same id as the results). */
 export function showOAuthCallbackExhausted(): void {
-  toast.error(`Couldn't finish connecting ${platformLabelOrAccount(lastOAuthCallbackPlatform)}.`, {
+  const platformName = platformLabelOrAccount(lastOAuthCallbackPlatform)
+  console.warn('[oauth] callback retries exhausted; kept unacknowledged')
+  toast.error(`Couldn't finish connecting ${platformName}`, {
     id: oauthCallbackToastId(lastOAuthCallbackPlatform),
-    description:
-      'OAuth completion is still unavailable. Videorc kept the callback without acknowledging it.'
+    description: `Connect ${platformName} again from Livestream → Setup.`,
+    action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
   })
 }
 
@@ -359,7 +381,7 @@ export function showSessionFinished({
       duration: Infinity
     })
   }
-  if (activity !== 'recording') return
+  if (!activitySavesRecording(activity)) return
 
   const sessionId = status.sessionId ?? lastSessionId
   const openFinishedRecording = (): void => {
@@ -396,10 +418,10 @@ export function showSessionHealthEvent(
     if (event.code !== 'recording-quality-not-100' || event.level !== 'warn') return null
     const dedupeKey = event.sessionId ?? event.message
     if (qualityToastAlreadyShown) return null
-    toast.warning('Recording is not 100%', {
+    toast.warning('This recording has dropped frames', {
       description: event.message,
       duration: 15_000,
-      action: { label: 'Open Library', onClick: () => openLibrary(event.sessionId ?? undefined) }
+      action: { label: 'Open in Library', onClick: () => openLibrary(event.sessionId ?? undefined) }
     })
     return dedupeKey
   }
@@ -494,7 +516,7 @@ function showSessionAudioNews(event: HealthEvent): void {
 export function showNoiseCleanupCompleted(jobId: string, outputSessionId: string): void {
   toast.success('Noise cleanup complete', {
     id: `noise-cleanup-completed-${jobId}`,
-    description: 'A separate cleaned copy is ready. The original was not changed.',
+    description: "A separate cleaned copy is ready. The original wasn't changed.",
     duration: 15_000,
     action: {
       label: 'Play',
@@ -502,7 +524,7 @@ export function showNoiseCleanupCompleted(jobId: string, outputSessionId: string
         const openSession = window.videorc?.openSession
         if (!openSession) return
         void openSession(outputSessionId).then((problem) => {
-          if (problem) toast.error(problem)
+          if (problem) showPlaybackProblem(outputSessionId, problem)
         })
       }
     },
@@ -522,20 +544,57 @@ export function showPremiumUpgrade(title: string, description?: string): void {
     }
     window.open(VIDEORC_PREMIUM_URL, '_blank', 'noopener,noreferrer')
   }
-  toast.error(title, {
+  // Plan 174 S2.4: a plan limit is news about Premium, not a failure.
+  toast.info(title, {
     description,
     duration: 15_000,
     action: { label: 'View Premium', onClick: openPremiumUpgradePage }
   })
 }
 
-export function showSourceFallbackActiveSession(state: RecordingStatus['state']): void {
-  toast.warning(
-    state === 'streaming'
-      ? 'Source changed while streaming. Check the output before continuing.'
-      : 'Source changed while recording. Check the output before continuing.',
-    { duration: 10_000, id: 'source-reconciliation:active-session' }
-  )
+/** "Couldn't play this recording": the reason, and where the file is. */
+export function showPlaybackProblem(sessionId: string, problem: string): void {
+  const revealSession = window.videorc?.revealSession
+  toast.error("Couldn't play this recording", {
+    id: `playback-problem:${sessionId}`,
+    description: problem,
+    ...(revealSession
+      ? {
+          action: {
+            label: revealInFileManagerLabel(),
+            onClick: () => void revealSession(sessionId)
+          }
+        }
+      : {})
+  })
+}
+
+const SOURCE_FALLBACK_NOUNS: Record<AutomaticSourceFallbackEvent['sourceKind'], string> = {
+  capture: 'Screen',
+  camera: 'Camera',
+  microphone: 'Microphone'
+}
+
+/** Pure. "Camera switched to FaceTime HD Camera", or "Camera turned off". */
+export function sourceFallbackTitle(event: AutomaticSourceFallbackEvent | undefined): string {
+  if (!event) return 'A source changed'
+  const noun = SOURCE_FALLBACK_NOUNS[event.sourceKind] ?? 'A source'
+  const name = event.nextName?.trim()
+  if (name) return `${noun} switched to ${name}`
+  return event.nextId ? `${noun} switched` : `${noun} turned off`
+}
+
+export function showSourceFallbackActiveSession(
+  session: Pick<RecordingStatus, 'state' | 'streamUrl'>,
+  event?: AutomaticSourceFallbackEvent
+): void {
+  toast.warning(sourceFallbackTitle(event), {
+    description: sessionIsLive(session)
+      ? 'Your stream uses it now. Check the output before you continue.'
+      : 'Your recording uses it now. Check the output before you continue.',
+    duration: 10_000,
+    id: 'source-reconciliation:active-session'
+  })
 }
 
 function latestMatchingEvent(
@@ -595,16 +654,30 @@ export function sessionRuntimeRecoveryPlan({
   }
 }
 
+/**
+ * A stored session's mode as what the session was doing: `record`, Go Live's
+ * default `record+stream` and `stream`, older rows' `recording` and
+ * `streaming`, and `imported`.
+ */
+export function sessionModeActivity(mode: string): SessionRuntimeActivity {
+  const value = mode.toLowerCase()
+  if (!value.includes('stream')) return 'recording'
+  return value.includes('record') ? 'record+stream' : 'live-stream'
+}
+
 export function completeSessionRuntimeRecovery({
   plan,
   recording,
   events,
-  priorSessionState
+  priorSessionState,
+  priorSessionActivity
 }: {
   plan: SessionRuntimeRecoveryPlan
   recording: RecordingStatus
   events: HealthEvent[]
   priorSessionState: RecordingStatus['state']
+  /** What the Studio last saw the prior session do (`sessionActivity`), if it was running. */
+  priorSessionActivity?: SessionRuntimeActivity
 }): SessionRuntimeRecovery {
   if (plan.failureSessionId) {
     const latestFailure = latestMatchingEvent(events, (event) => event.level === 'error')
@@ -619,11 +692,13 @@ export function completeSessionRuntimeRecovery({
         ...(outputPath ? { outputPath } : {}),
         ...(message ? { message } : {})
       },
-      activity: ['stream', 'streaming'].includes(plan.failureSummary?.mode.toLowerCase() ?? '')
-        ? 'live-stream'
-        : plan.failureSummary || priorSessionState !== 'streaming'
-          ? 'recording'
-          : 'live-stream'
+      // The stored mode says what the session did. Without a summary, the
+      // Studio's last sighting does: the state alone reads Go Live as a
+      // recording (plan 174 B-6).
+      activity: plan.failureSummary
+        ? sessionModeActivity(plan.failureSummary.mode)
+        : (priorSessionActivity ??
+          (priorSessionState === 'streaming' ? 'live-stream' : 'recording'))
     }
   }
 
@@ -653,12 +728,14 @@ export async function recoverSessionRuntime({
   sessions,
   priorSessionId,
   priorSessionState,
+  priorSessionActivity,
   loadHealthEvents
 }: {
   recording: RecordingStatus
   sessions: SessionSummary[]
   priorSessionId?: string
   priorSessionState: RecordingStatus['state']
+  priorSessionActivity?: SessionRuntimeActivity
   loadHealthEvents: (sessionId: string) => Promise<HealthEvent[]>
 }): Promise<SessionRuntimeRecovery> {
   const plan = sessionRuntimeRecoveryPlan({
@@ -670,7 +747,13 @@ export async function recoverSessionRuntime({
   const events = plan.healthSessionId
     ? await loadHealthEvents(plan.healthSessionId).catch(() => [])
     : []
-  return completeSessionRuntimeRecovery({ plan, recording, events, priorSessionState })
+  return completeSessionRuntimeRecovery({
+    plan,
+    recording,
+    events,
+    priorSessionState,
+    ...(priorSessionActivity ? { priorSessionActivity } : {})
+  })
 }
 
 export function isSessionAudioLossCode(code: string): boolean {

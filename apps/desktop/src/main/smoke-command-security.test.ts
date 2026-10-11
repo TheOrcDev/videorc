@@ -180,6 +180,7 @@ describe('smoke command security', () => {
         'audio.test.inject-pcm',
         'captions.test.inject-audio',
         'captions.test.snapshot',
+        'cohost.pet.import',
         'compositor.scene.update',
         'encoder_bridge.synthetic_record',
         'recording.start_test'

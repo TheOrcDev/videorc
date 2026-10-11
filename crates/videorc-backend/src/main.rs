@@ -11,6 +11,12 @@ mod audience;
 mod audio;
 mod audio_capture_adapter;
 mod backend_authority;
+mod buddy_animator;
+mod buddy_motion;
+mod buddy_overlay;
+mod buddy_pet;
+mod buddy_pet_store;
+mod buddy_sprite;
 mod camera_capture;
 mod captions;
 mod capture_health;
@@ -21,7 +27,12 @@ mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
+mod cohost_auto_chat;
+mod cohost_avatar;
 mod cohost_command;
+mod cohost_greetings;
+mod cohost_library;
+mod cohost_throttle;
 mod color;
 mod comment_highlight;
 mod compositor;
@@ -36,6 +47,9 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+// Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
+mod buddy_pet_build;
+mod buddy_pet_create;
 mod h264_profile;
 mod host_pressure;
 mod kick;
@@ -64,6 +78,7 @@ mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
 mod oauth_callback_page;
+mod overlay_layout;
 mod panic_hook;
 mod performance_check;
 mod pipeline;
@@ -5349,9 +5364,37 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.recap.draft"
         | "cohost.author.greeted"
         | "cohost.settings.set"
+        | "overlays.layout.set"
+        | "overlays.layout.migrate_highlight_anchor"
+        // Plan 169 D9: create and redo answer at once; the web call runs on
+        // its own task and reports by event. Discard removes one folder.
+        | "cohost.avatar.create"
+        | "cohost.avatar.redo"
+        | "cohost.avatar.discard"
+        // Plan 170 D12, D13: the library mutations answer at once; the web
+        // calls run on their own task and report `cohost.library.changed`.
+        | "cohost.library.sync"
+        | "cohost.library.use"
+        | "cohost.library.update"
+        | "cohost.library.delete"
+        | "cohost.library.saveToLibrary"
+        | "buddy.overlay.set"
+        | "buddy.overlay.clear"
+        | "cohost.pet.import"
+        | "cohost.pet.remove"
+        | "cohost.pet.react"
+        // Plan 168 S-F4: each answers at once; the web calls and the build
+        // run on their own task and report by event.
+        | "cohost.pet.identity"
+        | "cohost.pet.sheet.generate"
+        | "cohost.pet.build"
+        | "cohost.pet.creation.cancel"
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
+        | "cohost.utterance.approve"
+        | "cohost.utterance.dismiss"
+        | "cohost.utterance.say"
         | "clip.mark"
         | "session.marker.voice.configure"
         | "session.marker.create"
@@ -5448,6 +5491,21 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
+        // Plan 169 D8: a keep moves the draft's pictures and saves the persona.
+        "cohost.avatar.keep" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        // Plan 168 S-F4: a save decodes the built atlas once and moves the pack.
+        "cohost.pet.save" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        // Plan 168 S-F4: opening a build session waits on the web (15 s).
+        "cohost.pet.creation.start" => Some(Mutation {
+            max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
         "account.complete_sign_in"
         | "account.refresh"
         | "account.windows_pilot_update_token"
@@ -5522,8 +5580,14 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "captions.test.snapshot"
         | "comments.highlight.status"
         | "comments.highlight.canvases"
+        | "overlays.layout.get"
         | "cohost.status"
         | "cohost.settings.get"
+        | "cohost.buddy.status"
+        | "cohost.pet.list"
+        | "cohost.pet.creation.status"
+        | "cohost.avatar.draft.get"
+        | "cohost.library.get"
         | "cohost.report.get"
         | "cohost.report.latest"
         | "ai.capabilities.get"
@@ -8901,7 +8965,7 @@ async fn handle_text_message_with_role(
                             tokio::spawn(async move {
                                 refresh_account_entitlements(&entitlement_state).await
                             });
-                            // Orcle stopped listening at sign-out; a session
+                            // Buddy stopped listening at sign-out; a session
                             // still running with listening on resumes now.
                             let listen_state = state.clone();
                             tokio::spawn(async move {
@@ -9130,6 +9194,44 @@ async fn handle_text_message_with_role(
             command.id,
             comment_highlight::comment_highlight_canvases(state).await,
         ),
+        "overlays.layout.get" => ServerResponse::ok(
+            command.id,
+            overlay_layout::load_overlay_layout(&state.database),
+        ),
+        "overlays.layout.set" => {
+            match serde_json::from_value::<overlay_layout::OverlayLayout>(command.params) {
+                Ok(layout) => match overlay_layout::set_overlay_layout(state, layout).await {
+                    Ok(saved) => ServerResponse::ok(command.id, saved),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "overlay-layout-invalid",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "overlays.layout.migrate_highlight_anchor" => {
+            match serde_json::from_value::<overlay_layout::MigrateHighlightAnchorParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    match overlay_layout::migrate_highlight_anchor(&state.database, params) {
+                        Ok(layout) => ServerResponse::ok(command.id, layout),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "overlay-layout-storage",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "comments.highlight.set" => {
             match serde_json::from_value::<comment_highlight::SetCommentHighlightParams>(
                 command.params,
@@ -9317,9 +9419,353 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 164 Phase D: the Stream Manager's answers to the Buddy's
+        // proposed cards, and the Say box. Never routed by the LAN listener.
+        "cohost.utterance.approve" => {
+            match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
+                Ok(params) => match cohost::approve_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.utterance.dismiss" => {
+            match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
+                Ok(params) => match cohost::dismiss_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.utterance.say" => {
+            match serde_json::from_value::<protocol::CohostSayParams>(command.params) {
+                Ok(params) => match cohost::say_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
         }
+        // --- Buddy overlay (plan 164 Phase C) ---
+        "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
+        "buddy.overlay.set" => {
+            match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
+                Ok(params) => {
+                    match buddy_overlay::set_buddy_overlay(&state.buddy_overlay, params).await {
+                        Ok(info) => ServerResponse::ok(command.id, info),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "buddy-overlay-invalid",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- Buddy pets (plan 168, Phase B) ---
+        "buddy.overlay.clear" => {
+            match serde_json::from_value::<buddy_overlay::ClearBuddyOverlayParams>(command.params) {
+                Ok(params) => {
+                    match buddy_overlay::clear_buddy_overlay(&state.buddy_overlay, params) {
+                        Ok(info) => ServerResponse::ok(command.id, info),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "buddy-overlay-invalid",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Buddy pets (plan 168, Phase B) ---
+        // --- end Buddy overlay ---
+        // --- Buddy look (plan 169 Phase B) ---
+        "cohost.avatar.create" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarCreateParams>(command.params)
+            {
+                Ok(params) => match cohost_avatar::create(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.redo" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRedoParams>(command.params) {
+                Ok(params) => match cohost_avatar::redo(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.keep" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRequestIdParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_avatar::keep(state, params).await {
+                    Ok(settings) => ServerResponse::ok(command.id, settings),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.discard" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRequestIdParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_avatar::discard(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.draft.get" => match cohost_avatar::draft_status(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
+        },
+        // --- end Buddy look (plan 169 Phase B) ---
+        // --- Buddy library (plan 170 D12, D13) ---
+        "cohost.library.get" => {
+            if rpc_params_are_empty(&command.params) {
+                ServerResponse::ok(command.id, cohost_library::get(state).await)
+            } else {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "cohost.library.get does not accept parameters.",
+                )
+            }
+        }
+        "cohost.library.sync" => {
+            match serde_json::from_value::<cohost_library::CohostLibrarySyncParams>(command.params)
+            {
+                Ok(params) => match cohost_library::sync(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.use" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryAvatarParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::use_avatar(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.update" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryUpdateParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::update(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.delete" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryAvatarParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::delete(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 172 D10: a Buddy made only here joins the library.
+        "cohost.library.saveToLibrary" => {
+            if rpc_params_are_empty(&command.params) {
+                match cohost_library::save_to_library(state).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                }
+            } else {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "cohost.library.saveToLibrary does not accept parameters.",
+                )
+            }
+        }
+        // --- end Buddy library (plan 170) ---
+        // --- Buddy pets (plan 168, Phase A) ---
+        "cohost.pet.list" => match buddy_pet_store::list(state).await {
+            Ok(packs) => ServerResponse::ok(command.id, packs),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.import" => {
+            match serde_json::from_value::<buddy_pet_store::CohostPetImportParams>(command.params) {
+                Ok(params) => match buddy_pet_store::import(state, params).await {
+                    Ok(summary) => ServerResponse::ok(command.id, summary),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.remove" => {
+            match serde_json::from_value::<buddy_pet_store::CohostPetRemoveParams>(command.params) {
+                Ok(params) => match buddy_pet_store::remove(state, params).await {
+                    Ok(removed) => ServerResponse::ok(command.id, removed),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.react" => {
+            match serde_json::from_value::<buddy_pet_store::CohostPetReactParams>(command.params) {
+                Ok(params) => {
+                    match buddy_pet_store::request_reaction(state, &params.reaction).await {
+                        Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                        Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Buddy pets (plan 168, Phase A) ---
+        // --- Buddy pets (plan 168, Phase F) ---
+        "cohost.pet.creation.start" => match buddy_pet_create::start(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.creation.status" => match buddy_pet_create::status(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.creation.cancel" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetBuildIdParams>(command.params)
+            {
+                Ok(params) => match buddy_pet_create::cancel(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.identity" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetIdentityParams>(
+                command.params,
+            ) {
+                Ok(params) => match buddy_pet_create::identity(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.sheet.generate" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetSheetGenerateParams>(
+                command.params,
+            ) {
+                Ok(params) => match buddy_pet_create::generate_sheet(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.build" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetBuildIdParams>(command.params)
+            {
+                Ok(params) => match buddy_pet_create::build(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.save" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetSaveParams>(command.params) {
+                Ok(params) => match buddy_pet_create::save(state, params).await {
+                    Ok(saved) => ServerResponse::ok(command.id, saved),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Buddy pets (plan 168, Phase F) ---
         "cohost.settings.set" => {
             match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
                 Ok(patch) => match cohost::set_cohost_settings(state, patch).await {
@@ -10369,7 +10815,7 @@ async fn handle_text_message_with_role(
             }
         }
         "session.stop" => {
-            // Orcle's listen task drains with this capture (plan 068 review).
+            // Buddy's listen task drains with this capture (plan 068 review).
             live_chat::stop_live_chat_for_capture_end(state).await;
             // Older renderers send no params; the click timestamp is telemetry
             // only, so a malformed payload degrades to "no timestamp".
@@ -12471,10 +12917,15 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Phase 3: compare+hydrate+persist atomically with sign-in/sign-out. A
     // newer refresh generation also wins for the same token/account.
     let transition = state.account_auth_transition.lock().await;
-    // Plan 140 S8: the same read turns Orcle's cloud command parser on or
+    // Plan 140 S8: the same read turns Buddy's cloud command parser on or
     // off (applied below, outside this lock). Signed out reads as off; a
     // failed read keeps the last answer.
     let mut command_parser = None;
+    // Plan 164 S-D3: the same read tells the Buddy which tick contract the
+    // web speaks (4 adds the persona). Signed out reads as unknown.
+    let mut tick_version: Option<Option<u32>> = None;
+    // Plan 170 D9: the same read turns the account Buddy library on or off.
+    let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -12483,6 +12934,23 @@ async fn refresh_account_entitlements(state: &AppState) {
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
                         Some(capabilities.features.cohost_command_enabled)
                     }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                tick_version = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.tick))
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                buddy_library = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => Some(
+                        capabilities
+                            .cohost
+                            .as_ref()
+                            .and_then(|cohost| cohost.buddy_library.clone()),
+                    ),
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
                 apply_prepared_account_entitlement_refresh(prepared.outcome)
@@ -12504,10 +12972,16 @@ async fn refresh_account_entitlements(state: &AppState) {
     if let Some(enabled) = command_parser {
         cohost::set_command_parser_capability(state, enabled).await;
     }
+    if let Some(tick) = tick_version {
+        cohost::set_tick_capability(state, tick).await;
+    }
+    if let Some(library) = buddy_library {
+        cohost_library::set_capability(state, library).await;
+    }
 }
 
 /// Every `entitlements.updated` goes out through here (plan 140 S1): publish
-/// the effective snapshot, then let Orcle react to it. A session running
+/// the effective snapshot, then let Buddy react to it. A session running
 /// without `LiveCohost` stops through its normal stop path, with its report
 /// saved. The stop runs on its own task: two of the three emitters call from a
 /// synchronous closure under `account_auth_transition`, and the stop takes the
@@ -12518,7 +12992,7 @@ fn publish_entitlements_updated(state: &AppState) {
     state.emit_event("entitlements.updated", entitlements::current_entitlements());
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(
-            "Entitlements changed outside the runtime; Orcle re-checks on its next start."
+            "Entitlements changed outside the runtime; Buddy re-checks on its next start."
         );
         return;
     };
@@ -19058,6 +19532,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;

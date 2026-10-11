@@ -10,9 +10,14 @@ import type {
   ViewerSample,
   SessionChatTotals
 } from '@/lib/backend'
+import { NO_VALUE, plural } from '@/lib/format'
+import { formatTimecode } from '@/lib/format-time'
+import { formatBitrate } from '@/lib/format-video'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { chatActivity, type ActivityTotals } from '@/lib/stream-activity'
 import { formatViewerCount, viewerSampleStale } from '@/lib/viewer-count-view'
+import { destinationLabel } from '@/lib/platform-copy'
+import { destinationStateLabel } from '@/lib/state-labels'
 
 import type { LiveDashboardState } from '../../../shared/live-dashboard'
 
@@ -79,21 +84,6 @@ function confirmedTotals(input: StatsInput): SessionChatTotals | null {
   return totals && totals.sessionId === owner ? totals : null
 }
 
-function missingTotal(id: 'supporters' | 'tips', input: StatsInput): StatItemModel {
-  const reason =
-    confirmedTotals(input)?.status === 'legacy-unavailable'
-      ? 'This earlier session has no complete total.'
-      : 'Session total not available yet.'
-  return {
-    id,
-    label: id === 'supporters' ? 'Supporters this stream' : 'Tips this stream',
-    value: '–',
-    tone: 'subtle',
-    details: [{ label: 'This stream', value: 'Not available', note: reason }],
-    description: reason
-  }
-}
-
 /** The bar's order when the streamer has not rearranged it (plan 057, D2). */
 export const DEFAULT_STAT_ORDER: readonly StatId[] = [
   'session',
@@ -108,21 +98,13 @@ export const DEFAULT_STAT_ORDER: readonly StatId[] = [
 const TIP_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube'])
 const VIEWER_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube', 'kick', 'x'])
 
+/** The ON AIR clock: the one timecode (plan 174 S1.4). */
 export function formatClock(elapsedMs: number): string {
-  const total = Math.max(0, Math.floor(elapsedMs / 1000))
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const seconds = total % 60
-  const pad = (value: number): string => String(value).padStart(2, '0')
-  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+  return formatTimecode(elapsedMs)
 }
 
 function signed(delta: number): string {
   return `${delta > 0 ? '+' : '−'}${Math.abs(delta).toLocaleString()}`
-}
-
-function plural(count: number, one: string, many: string): string {
-  return `${count.toLocaleString()} ${count === 1 ? one : many}`
 }
 
 /** "$20" for a whole amount, "$4.99" otherwise. */
@@ -147,13 +129,18 @@ function timeOfDay(iso: string): string {
     : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/** A finished session's day, the one spelling the window uses (plan 174 H-30). */
+export function formatHistoryDate(iso: string): string {
+  const started = new Date(iso)
+  return Number.isNaN(started.getTime())
+    ? 'History'
+    : started.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
 function sessionItem(input: StatsInput): StatItemModel {
   const session = input.dashboard?.session
   if (input.history) {
-    const started = new Date(input.history.startedAt)
-    const date = Number.isNaN(started.getTime())
-      ? 'History'
-      : started.toLocaleDateString([], { month: 'short', day: 'numeric' })
+    const date = formatHistoryDate(input.history.startedAt)
     return {
       id: 'session',
       label: 'Session',
@@ -210,7 +197,7 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
         { label: 'Peak', value: formatViewerCount(peak) },
         { label: 'Average', value: formatViewerCount(average) }
       ],
-      description: `Peak ${formatViewerCount(peak)} viewers, average ${formatViewerCount(average)}`
+      description: `Peak ${formatViewerCount(peak)} ${peak === 1 ? 'viewer' : 'viewers'}, average ${formatViewerCount(average)}`
     } satisfies StatItemModel
   }
   const live = input.dashboard?.session.state === 'live'
@@ -243,27 +230,16 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
       })),
       ...waiting.map((platform) => ({
         label: CHAT_PLATFORM_LABELS[platform],
-        value: 'waiting',
+        value: 'Waiting',
         platform
       })),
       ...(peak !== null ? [{ label: 'Peak', value: formatViewerCount(peak) }] : []),
       ...(latest && stale ? [{ label: 'Updated', value: 'over a minute ago' }] : [])
     ],
     description: latest
-      ? `${count} viewers${peak !== null ? `, peak ${formatViewerCount(peak)}` : ''}`
+      ? `${count} ${latest.total === 1 ? 'viewer' : 'viewers'}${peak !== null ? `, peak ${formatViewerCount(peak)}` : ''}`
       : 'No viewer count yet'
   } satisfies StatItemModel
-}
-
-const TARGET_STATE_LABELS: Record<StreamTargetState, string> = {
-  'not-configured': 'Not set up',
-  ready: 'Ready',
-  connecting: 'Connecting',
-  live: 'Live',
-  warning: 'Not receiving',
-  reconnecting: 'Reconnecting',
-  failed: 'Failed',
-  stopped: 'Stopped'
 }
 
 const TARGET_DOTS: Partial<Record<StreamTargetState, StatDot>> = {
@@ -288,7 +264,9 @@ function healthReading(
   bitrate: string
 ): { value: string; tone: StatTone } {
   const failed = targets.filter((target) => target.state === 'failed')
-  if (failed.length === 1) return { value: `${failed[0].label} failed`, tone: 'error' }
+  if (failed.length === 1) {
+    return { value: `${destinationLabel(failed[0].label)} failed`, tone: 'error' }
+  }
   if (failed.length > 1) return { value: `${failed.length} failed`, tone: 'error' }
   const down = targets.filter(
     (target) => target.state === 'reconnecting' || target.state === 'warning'
@@ -297,7 +275,7 @@ function healthReading(
   if (down.length === 1) {
     const [target] = down
     return {
-      value: `${target.label} ${target.state === 'reconnecting' ? 'reconnecting' : 'not receiving'}`,
+      value: `${destinationLabel(target.label)} ${target.state === 'reconnecting' ? 'reconnecting' : 'not receiving'}`,
       tone: 'error'
     }
   }
@@ -306,7 +284,7 @@ function healthReading(
   if (targets.some((target) => target.state === 'connecting')) {
     return { value: 'Connecting', tone: 'warning' }
   }
-  return { value: bitrate, tone: bitrate === '–' ? 'neutral' : 'good' }
+  return { value: bitrate, tone: bitrate === NO_VALUE ? 'neutral' : 'good' }
 }
 
 function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatItemModel | null {
@@ -325,7 +303,9 @@ function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatIt
     : 0
   const kbps = latest?.bitrateKbps
   const sagging = typeof kbps === 'number' && typical > 0 && kbps < typical * 0.7
-  const bitrate = typeof kbps === 'number' ? `${Math.round(kbps).toLocaleString()} kbps` : '–'
+  // One bitrate spelling (plan 174 S1.4), and a placeholder that says why (H-10).
+  const bitrate = formatBitrate(kbps) || NO_VALUE
+  const bitrateReason = bitrate === NO_VALUE ? 'Not reported yet' : undefined
   const reading = healthReading(dashboard.targets, droppedLastMinute, sagging, bitrate)
   const fps = typeof latest?.fps === 'number' ? `${Math.round(latest.fps)} fps` : null
   const dropped = droppedLastMinute > 0 ? `${droppedLastMinute} in the last minute` : 'None'
@@ -336,12 +316,12 @@ function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatIt
     tone: reading.tone,
     spark: points.map((point) => point.kbps),
     details: [
-      { label: 'Bitrate', value: bitrate },
+      { label: 'Bitrate', value: bitrate, ...(bitrateReason ? { note: bitrateReason } : {}) },
       ...(fps ? [{ label: 'Frame rate', value: fps }] : []),
       { label: 'Dropped frames', value: dropped },
       ...dashboard.targets.map((target) => ({
-        label: target.label,
-        value: TARGET_STATE_LABELS[target.state],
+        label: destinationLabel(target.label),
+        value: destinationStateLabel(target.state),
         platform: target.platform,
         dot: TARGET_DOTS[target.state] ?? 'neutral',
         ...(target.message ? { note: target.message } : {})
@@ -349,7 +329,9 @@ function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatIt
     ],
     description:
       reading.value === bitrate
-        ? `Stream health: ${[bitrate, fps, droppedLastMinute > 0 ? `${dropped} dropped` : 'no dropped frames'].filter(Boolean).join(', ')}`
+        ? bitrateReason
+          ? `Stream health: bitrate ${bitrateReason.toLowerCase()}`
+          : `Stream health: ${[bitrate, fps, droppedLastMinute > 0 ? `${dropped} dropped` : 'no dropped frames'].filter(Boolean).join(', ')}`
         : `Stream health: ${reading.value}`
   }
 }
@@ -510,6 +492,22 @@ function chatItem(input: StatsInput): StatItemModel {
         : 'Session chat total not available'
     }
   }
+  // No platform reads chat right now, so the pace is not a measured zero
+  // (H-10): one placeholder, with the reason.
+  if (
+    input.providers.length > 0 &&
+    !input.providers.some((provider) => provider.state === 'connected')
+  ) {
+    const reason = "Chat isn't connected"
+    return {
+      id: 'chat',
+      label: 'Chat',
+      value: NO_VALUE,
+      tone: 'subtle',
+      details: [{ label: 'Messages in the last minute', value: NO_VALUE, note: reason }, chatters],
+      description: reason
+    }
+  }
   return {
     id: 'chat',
     label: 'Chat',
@@ -548,13 +546,11 @@ export function statItems(input: StatsInput): StatItemModel[] {
       input.history ? (input.history.stats?.audience ?? null) : (dashboard?.audience ?? null)
     )
   ]
-  if ([...chatPlatforms].some((platform) => TIP_PLATFORMS.has(platform))) {
-    items.push(
-      totals
-        ? supportersItem(totals, chatPlatforms, dashboard?.audience ?? null)
-        : missingTotal('supporters', input),
-      totals ? tipsItem(totals) : missingTotal('tips', input)
-    )
+  // Subs and tips exist once their total is measured (plan 174 V-8): until
+  // the session's totals arrive the bar shows nothing for them, never a run
+  // of placeholders.
+  if (totals && [...chatPlatforms].some((platform) => TIP_PLATFORMS.has(platform))) {
+    items.push(supportersItem(totals, chatPlatforms, dashboard?.audience ?? null), tipsItem(totals))
   }
   if (input.providers.length > 0 || input.messages.length > 0 || (totals?.messageCount ?? 0) > 0)
     items.push(chatItem(input))

@@ -5,10 +5,17 @@ import { cn } from '@/lib/utils'
 
 function ScrollArea({
   className,
+  viewportClassName,
   children,
   type = 'scroll',
   ...props
-}: React.ComponentProps<typeof ScrollAreaPrimitive.Root>) {
+}: React.ComponentProps<typeof ScrollAreaPrimitive.Root> & {
+  /**
+   * Classes for the viewport, the element that scrolls: a cap (`max-h-64`)
+   * goes here, since the root's height follows its content (plan 174 S3.14c).
+   */
+  viewportClassName?: string
+}) {
   // type="scroll": the thumb shows while scrolling, like the macOS overlay
   // scrollbars (plan 050, D6).
   return (
@@ -23,7 +30,10 @@ function ScrollArea({
           ⋯ menus). A block keeps content to the viewport's width. */}
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
-        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 [&>div]:block!"
+        className={cn(
+          'size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 [&>div]:block!',
+          viewportClassName
+        )}
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

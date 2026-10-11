@@ -1,23 +1,57 @@
-import { DeleteIcon, ImageBrokenIcon, ImageIcon, SaveIcon, UploadIcon } from '@/components/icons'
-import { useEffect, useState, type DragEvent, type ReactElement } from 'react'
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  DeleteIcon,
+  FrameIcon,
+  ImageBrokenIcon,
+  ImageIcon,
+  SaveIcon
+} from '@/components/icons'
+import { useEffect, useState, type DragEvent, type KeyboardEvent, type ReactElement } from 'react'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
+import { OfflineAlert, SessionLockAlert } from '@/components/lock-alert'
 import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { StreamScreen } from '@/lib/backend'
+import { MediaCard } from '@/components/media-card'
+import {
+  MOVE_EARLIER_ACCELERATOR,
+  MOVE_LATER_ACCELERATOR,
+  takeoverMoveKeyStep,
+  takeoverMoveTarget
+} from '@/lib/takeover-order'
+import { shortcutAriaKeys } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
-// Takeover-image manager (upload/rename/reorder/delete). Lives on the Assets
+/**
+ * The one "in use" look for a picture on Assets (plan 174 C-25): a rim and a
+ * neutral chip, the same for the background on the scene and the takeover on
+ * the output. Never a colour: in use is not a status.
+ */
+export const IN_USE_RING = 'ring-2 ring-foreground/60'
+
+export function InUseChip({ className }: { className?: string }): ReactElement {
+  return (
+    <Badge className={className} data-videorc-in-use="">
+      In use
+    </Badge>
+  )
+}
+
+// Takeover-image manager (import/rename/reorder/delete). Lives on the Assets
 // page: the active takeover is global session state, not scene content — it
 // replaces the output regardless of scene, so the old Scene-page home was wrong
-// on its own terms. Ordering is drag-and-drop (owner request 2026-07-13): drag
-// a tile onto another to take its position — the backend applies the full
-// order atomically via screens.reorder.
+// on its own terms. Ordering is drag-and-drop (owner request 2026-07-13) and,
+// since plan 174 S3.10, Move earlier / Move later and Alt+← / Alt+→: the
+// backend applies the full order atomically via screens.reorder.
 export function TakeoverScreensSection(): ReactElement {
   const {
     activeScreen,
@@ -26,100 +60,145 @@ export function TakeoverScreensSection(): ReactElement {
     isSessionActive,
     reorderScreen,
     renameScreen,
+    runtimeInfo,
     screenImportPending,
     screens,
+    screensLoaded,
     wsStatus
   } = useStudioCore()
-  const managementDisabled = isSessionActive || wsStatus !== 'connected'
-  const uploadDisabled = managementDisabled || screenImportPending
+  const offline = wsStatus !== 'connected'
+  const managementDisabled = isSessionActive || offline
+  const importDisabled = managementDisabled || screenImportPending
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
+  // Plan 174 S0.3 (C-1): a delete removes the image file too, so it asks.
+  const [deleting, setDeleting] = useState<StreamScreen | null>(null)
 
   return (
-    <PanelSection
-      action={
-        <Button disabled={uploadDisabled} onClick={() => void importScreenImage()}>
-          <UploadIcon data-icon="inline-start" weight="bold" />
-          {screenImportPending ? 'Importing' : 'Upload'}
-        </Button>
-      }
-      description="Full-frame images that cover the output. Flip them on from the Studio session panel. Drag tiles to reorder. Management is locked while a session is live."
-      icon={ImageIcon}
-      title="Takeover screens"
-    >
-      {screens.length === 0 ? (
-        <Empty className="py-12">
-          <EmptyMedia variant="icon">
-            <ImageIcon weight="duotone" />
-          </EmptyMedia>
-          <EmptyTitle>No takeovers yet</EmptyTitle>
-          <EmptyDescription>
-            Upload a PNG, JPEG, or WebP image to create the first takeover.
-          </EmptyDescription>
-        </Empty>
-      ) : (
-        // Bounded section: the grid scrolls inside the Assets page stack.
-        <ScrollArea className="max-h-[28rem] overflow-y-auto pr-3">
-          <Gallery className="gap-3">
-            {screens.map((screen, index) => (
-              <ScreenTile
-                active={activeScreen?.id === screen.id}
-                disabled={managementDisabled}
-                dragging={draggingId === screen.id}
-                dropTarget={dropIndex === index && draggingId !== screen.id}
-                key={screen.id}
-                screen={screen}
-                onDelete={() => void deleteScreen(screen.id)}
-                onDragEnd={() => {
-                  setDraggingId(null)
-                  setDropIndex(null)
-                }}
-                onDragEnter={() => {
-                  if (draggingId && draggingId !== screen.id) {
-                    setDropIndex(index)
-                  }
-                }}
-                onDragStart={() => setDraggingId(screen.id)}
-                onDrop={() => {
-                  if (draggingId && draggingId !== screen.id) {
-                    void reorderScreen(draggingId, index)
-                  }
-                  setDraggingId(null)
-                  setDropIndex(null)
-                }}
-                onRename={(name) => void renameScreen(screen.id, name)}
-              />
-            ))}
-          </Gallery>
-        </ScrollArea>
-      )}
-    </PanelSection>
+    <>
+      <PanelSection
+        action={
+          <Button
+            disabled={importDisabled}
+            variant="outline"
+            onClick={() => void importScreenImage()}
+          >
+            <ImageIcon data-icon="inline-start" />
+            {screenImportPending ? 'Importing…' : 'Import image…'}
+          </Button>
+        }
+        description="Full-frame images that cover the output, turned on from the Studio. Turning one on mutes your microphone until you turn it off."
+        icon={FrameIcon}
+        title="Takeovers"
+      >
+        {isSessionActive ? <SessionLockAlert /> : offline ? <OfflineAlert /> : null}
+        {screens.length > 0 ? (
+          // Bounded section: the grid scrolls inside the Assets page stack.
+          // The padding keeps the in-use rim inside the scroll area's clip.
+          <ScrollArea className="max-h-[28rem] overflow-y-auto pr-3">
+            <Gallery className="gap-3 p-0.5">
+              {screens.map((screen, index) => (
+                <ScreenTile
+                  active={activeScreen?.id === screen.id}
+                  canMoveEarlier={takeoverMoveTarget(index, -1, screens.length) !== null}
+                  canMoveLater={takeoverMoveTarget(index, 1, screens.length) !== null}
+                  disabled={managementDisabled}
+                  dragging={draggingId === screen.id}
+                  dropTarget={dropIndex === index && draggingId !== screen.id}
+                  key={screen.id}
+                  platform={runtimeInfo?.platform}
+                  screen={screen}
+                  onDelete={() => setDeleting(screen)}
+                  onDragEnd={() => {
+                    setDraggingId(null)
+                    setDropIndex(null)
+                  }}
+                  onDragEnter={() => {
+                    if (draggingId && draggingId !== screen.id) {
+                      setDropIndex(index)
+                    }
+                  }}
+                  onDragStart={() => setDraggingId(screen.id)}
+                  onDrop={() => {
+                    if (draggingId && draggingId !== screen.id) {
+                      void reorderScreen(draggingId, index)
+                    }
+                    setDraggingId(null)
+                    setDropIndex(null)
+                  }}
+                  onMove={(step) => {
+                    const target = takeoverMoveTarget(index, step, screens.length)
+                    if (target !== null) void reorderScreen(screen.id, target)
+                  }}
+                  onRename={(name) => void renameScreen(screen.id, name)}
+                />
+              ))}
+            </Gallery>
+          </ScrollArea>
+        ) : !screensLoaded ? (
+          // Never "No takeovers yet" before the list is known (J2-8). Offline,
+          // the alert above already says why.
+          offline ? null : (
+            <Empty className="py-12" data-videorc-takeovers-loading="">
+              <EmptyTitle>Loading takeovers…</EmptyTitle>
+            </Empty>
+          )
+        ) : (
+          <Empty className="py-12">
+            <EmptyTitle>No takeovers yet</EmptyTitle>
+            <EmptyDescription>
+              Import a PNG, JPEG or WebP image to make the first one.
+            </EmptyDescription>
+          </Empty>
+        )}
+      </PanelSection>
+      <ConfirmDialog
+        confirmLabel="Delete takeover"
+        description="Its image file is deleted from this computer."
+        open={deleting !== null}
+        testId="takeover-delete"
+        title={`Delete ${deleting?.name ?? 'takeover'}?`}
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          if (deleting) void deleteScreen(deleting.id)
+          setDeleting(null)
+        }}
+      />
+    </>
   )
 }
 
 function ScreenTile({
   screen,
   active,
+  canMoveEarlier,
+  canMoveLater,
   disabled,
   dragging,
   dropTarget,
+  platform,
   onDelete,
   onDragEnd,
   onDragEnter,
   onDragStart,
   onDrop,
+  onMove,
   onRename
 }: {
   screen: StreamScreen
   active: boolean
+  canMoveEarlier: boolean
+  canMoveLater: boolean
   disabled: boolean
   dragging: boolean
   dropTarget: boolean
+  platform?: string
   onDelete: () => void
   onDragEnd: () => void
   onDragEnter: () => void
   onDragStart: () => void
   onDrop: () => void
+  onMove: (step: -1 | 1) => void
   onRename: (name: string) => void
 }): ReactElement {
   const [imageFailed, setImageFailed] = useState(false)
@@ -140,15 +219,34 @@ function ScreenTile({
     onRename(nextName)
   }
 
+  const moveFromKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (disabled) return
+    const target = event.target as HTMLElement
+    const step = takeoverMoveKeyStep({
+      key: event.key,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+      inTextField: target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+    })
+    if (step === null || (step < 0 ? !canMoveEarlier : !canMoveLater)) return
+    event.preventDefault()
+    onMove(step)
+  }
+
   return (
-    <div
+    <MediaCard
       className={cn(
-        'flex min-w-0 flex-col overflow-hidden rounded-row border bg-foreground/[0.04] transition-opacity',
+        'overflow-hidden transition-opacity',
         !disabled && 'cursor-grab active:cursor-grabbing',
         dragging && 'opacity-40',
+        active && IN_USE_RING,
         dropTarget && 'ring-2 ring-ring'
       )}
+      data-videorc-takeover-tile={screen.id}
       draggable={!disabled}
+      selected={active}
       onDragEnd={onDragEnd}
       onDragEnter={onDragEnter}
       onDragOver={(event: DragEvent<HTMLDivElement>) => {
@@ -163,8 +261,10 @@ function ScreenTile({
         event.preventDefault()
         onDrop()
       }}
+      onKeyDown={moveFromKeyboard}
     >
-      <div className="relative aspect-[4/3] bg-muted">
+      {/* The output's own shape (C-25): a 16:9 preview, not 4:3. */}
+      <div className="relative aspect-video bg-muted">
         {!missing ? (
           <img
             alt=""
@@ -178,14 +278,13 @@ function ScreenTile({
             <ImageBrokenIcon className="size-8" weight="duotone" />
           </div>
         )}
-        <Badge className="absolute right-2 top-2" variant={missing ? 'destructive' : 'success'}>
-          {missing ? 'Missing' : 'Ready'}
-        </Badge>
-        {active ? (
-          <Badge className="absolute left-2 top-2" variant="warning">
-            Active
+        {/* Only news earns a badge: a healthy tile says nothing (C-25). */}
+        {missing ? (
+          <Badge className="absolute top-2 right-2" variant="warning">
+            Missing
           </Badge>
         ) : null}
+        {active ? <InUseChip className="absolute top-2 left-2" /> : null}
       </div>
       <form
         className="flex min-w-0 flex-col gap-2 p-3"
@@ -201,37 +300,72 @@ function ScreenTile({
             value={nameDraft}
             onChange={(event) => setNameDraft(event.target.value)}
           />
-          <Button
-            aria-label="Save takeover name"
-            disabled={disabled || !nameChanged || !nameDraft.trim()}
-            size="icon"
-            title="Save takeover name"
-            type="submit"
-            variant="outline"
-          >
-            <SaveIcon />
-          </Button>
+          <ShortcutTooltip label="Save takeover name" platform={platform}>
+            <Button
+              aria-label="Save takeover name"
+              disabled={disabled || !nameChanged || !nameDraft.trim()}
+              size="icon"
+              type="submit"
+              variant="outline"
+            >
+              <SaveIcon />
+            </Button>
+          </ShortcutTooltip>
         </div>
-        <span className="truncate text-xs text-muted-foreground">{screen.imagePath}</span>
         {/* Activation lives in the Studio session panel (one home per control);
-            tiles are management only — the Active badge still reports state.
-            Ordering is drag-and-drop on the tile itself. */}
-        <div className="flex min-w-0 items-center">
-          <Button
-            aria-label="Delete takeover"
-            className="ml-auto"
-            disabled={disabled}
-            size="icon-sm"
-            title="Delete takeover"
-            type="button"
-            variant="destructive"
-            onClick={onDelete}
+            tiles are management only. The order moves by drag, by these
+            buttons, or by Alt+arrow while the tile holds focus. */}
+        <div className="flex min-w-0 items-center gap-1">
+          <ShortcutTooltip
+            accelerator={MOVE_EARLIER_ACCELERATOR}
+            label="Move earlier"
+            platform={platform}
           >
-            <DeleteIcon />
-          </Button>
+            <Button
+              aria-keyshortcuts={shortcutAriaKeys(MOVE_EARLIER_ACCELERATOR, platform)}
+              aria-label="Move earlier"
+              disabled={disabled || !canMoveEarlier}
+              size="icon"
+              type="button"
+              variant="ghost"
+              onClick={() => onMove(-1)}
+            >
+              <ArrowLeftIcon />
+            </Button>
+          </ShortcutTooltip>
+          <ShortcutTooltip
+            accelerator={MOVE_LATER_ACCELERATOR}
+            label="Move later"
+            platform={platform}
+          >
+            <Button
+              aria-keyshortcuts={shortcutAriaKeys(MOVE_LATER_ACCELERATOR, platform)}
+              aria-label="Move later"
+              disabled={disabled || !canMoveLater}
+              size="icon"
+              type="button"
+              variant="ghost"
+              onClick={() => onMove(1)}
+            >
+              <ArrowRightIcon />
+            </Button>
+          </ShortcutTooltip>
+          <ShortcutTooltip label="Delete takeover" platform={platform}>
+            <Button
+              aria-label="Delete takeover"
+              className="ml-auto"
+              disabled={disabled}
+              size="icon"
+              type="button"
+              variant="destructive"
+              onClick={onDelete}
+            >
+              <DeleteIcon />
+            </Button>
+          </ShortcutTooltip>
         </div>
       </form>
-    </div>
+    </MediaCard>
   )
 }
 

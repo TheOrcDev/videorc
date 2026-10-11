@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import { WORKSPACE_SHORTCUTS } from '@/components/workspace-nav'
 
+import { parseAccelerator } from '../../../shared/accelerator-format'
+
 import { SHORTCUTS, navShortcutDigit, shortcutsByGroup } from './shortcuts'
 
 describe('SHORTCUTS registry', () => {
@@ -17,35 +19,50 @@ describe('SHORTCUTS registry', () => {
         : entry.id.startsWith('nav-')
     )
     expect(
-      navEntries.filter(
-        (entry) => /^[1-9]$/.test(entry.keys.at(-1) ?? '') || entry.keys.at(-1) === ','
-      ).length
+      navEntries.filter((entry) => /^CmdOrCtrl\+([1-9]|,)$/.test(entry.accelerators[0])).length
     ).toBe(WORKSPACE_SHORTCUTS.length)
   })
 
-  it('labels ⌘9 Orcle (plan 119)', () => {
+  it('labels ⌘9 Buddy (plan 119)', () => {
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
-      keys: ['⌘', '9'],
-      label: 'Orcle'
+      accelerators: ['CmdOrCtrl+9'],
+      label: 'Buddy'
     })
   })
 
-  it('has unique ids and non-empty key lists', () => {
+  it('has unique ids and accelerators that parse on every platform', () => {
     const ids = SHORTCUTS.map((entry) => entry.id)
     expect(new Set(ids).size).toBe(ids.length)
     for (const entry of SHORTCUTS) {
-      expect(entry.keys.length).toBeGreaterThan(0)
+      expect(entry.accelerators.length).toBeGreaterThan(0)
+      for (const accelerator of entry.accelerators) {
+        // Plan 174 S1.2: authored as accelerators, never as Mac glyphs.
+        expect(accelerator, entry.id).not.toMatch(/[⌘⇧⌥⌃␣⌫↵]/)
+        for (const platform of ['darwin', 'win32', 'linux']) {
+          expect(parseAccelerator(accelerator, platform), `${entry.id} ${platform}`).not.toBeNull()
+        }
+      }
     }
   })
 
-  it('groups cover Navigation, Session, Windows, Chat, and Appearance', () => {
+  // Plan 174 S2.2 (I-32): a group names where its keys work, and copy never
+  // says "session": Space works on Studio, the Buddy keys in Stream Manager.
+  it('groups cover Navigation, Studio, Windows, Stream Manager, and Appearance', () => {
     expect([...shortcutsByGroup().keys()]).toEqual([
       'Navigation',
-      'Session',
+      'Studio',
       'Windows',
-      'Chat',
+      'Stream Manager',
       'Appearance'
     ])
+  })
+
+  it('labels Space in the transport words (plan 174 D3)', () => {
+    expect(SHORTCUTS.find((entry) => entry.id === 'record-toggle')).toMatchObject({
+      accelerators: ['Space'],
+      label: 'Record / stop recording',
+      group: 'Studio'
+    })
   })
 
   // S2 (Live Chat Co-host): the pane advertises these chips, so the registry
@@ -59,10 +76,24 @@ describe('SHORTCUTS registry', () => {
       'cohost-reply',
       'cohost-highlight',
       'cohost-answered',
-      'cohost-dismiss'
+      'cohost-dismiss',
+      'cohost-remove-flagged'
     ])
-    expect(cohost.every((entry) => entry.group === 'Chat')).toBe(true)
-    expect(cohost.find((entry) => entry.id === 'cohost-focus')?.keys).toEqual(['⌘', 'J'])
-    expect(cohost.find((entry) => entry.id === 'cohost-dismiss')?.keys).toEqual(['⌫'])
+    expect(cohost.every((entry) => entry.group === 'Stream Manager')).toBe(true)
+    // Plan 174 F-27: the Suggest cards' and the Say box's keys are listed too.
+    const buddy = SHORTCUTS.filter((entry) => entry.id.startsWith('buddy-'))
+    expect(buddy.map((entry) => [entry.id, entry.accelerators[0]])).toEqual([
+      ['buddy-card-send', 'Enter'],
+      ['buddy-card-dismiss', 'Escape'],
+      ['buddy-say', 'Enter'],
+      ['buddy-say-laugh', 'CmdOrCtrl+Enter']
+    ])
+    expect(buddy.every((entry) => entry.group === 'Stream Manager')).toBe(true)
+    expect(cohost.find((entry) => entry.id === 'cohost-focus')?.accelerators).toEqual([
+      'CmdOrCtrl+J'
+    ])
+    expect(cohost.find((entry) => entry.id === 'cohost-dismiss')?.accelerators).toEqual([
+      'Backspace'
+    ])
   })
 })

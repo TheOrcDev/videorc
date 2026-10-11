@@ -1,4 +1,4 @@
-import type { ReactElement, ReactNode } from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 
@@ -22,7 +22,7 @@ import { cn } from '@/lib/utils'
  * A page's intro: the toolbar already names the page, so the title is for
  * assistive tech; the description is a flush intro line, with any action at
  * its end (never in the toolbar's corner). `media` leads the line: a page
- * with its own mark (the Orcle tab's emblem, plan 149) puts it there.
+ * with its own mark (the Buddy tab's emblem, plan 149) puts it there.
  */
 export function PageHeader({
   title,
@@ -75,25 +75,35 @@ export function ConfigGrid({
 /**
  * A config grid of exactly two sections that fills the visible height at
  * `lg`, so the column hairline runs the full height however short the tab
- * is (Settings' tabs, plan 064; the Orcle tab's, plan 150). Stacked, the rows
+ * is (Settings' tabs, plan 064; the Buddy tab's, plan 150). Stacked, the rows
  * keep their content height.
  */
 export const CONFIG_GRID_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
 
-/** Gallery archetype: picture cards that fill by available width. */
+/**
+ * Gallery archetype: picture cards that fill by available width. `dense`
+ * packs smaller cards (10 rem), for a picker inside a dialog (plan 174
+ * S3.15b: the Buddy onboarding's official five).
+ */
 export function Gallery({
   children,
-  className
-}: {
+  className,
+  dense = false,
+  ...props
+}: ComponentProps<'div'> & {
   children: ReactNode
-  className?: string
+  dense?: boolean
 }): ReactElement {
   return (
     <div
       className={cn(
-        'grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]',
+        'grid gap-3',
+        dense
+          ? '[grid-template-columns:repeat(auto-fill,minmax(10rem,1fr))]'
+          : '[grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]',
         className
       )}
+      {...props}
     >
       {children}
     </div>

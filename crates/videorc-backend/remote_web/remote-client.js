@@ -132,7 +132,7 @@ export class RemoteClient {
     }
     ws.onclose = () => {
       if (this.ws !== ws) return
-      this.failPending(new Error('Connection lost.'))
+      this.failPending(new Error('The connection to Videorc dropped. Try again.'))
       if (this.closed || this.status === 'unpaired') return
       if (!this.reconnect) {
         this.setStatus('idle')
@@ -194,7 +194,7 @@ export class RemoteClient {
         mac(session.deviceKey, ['ready', session.clientNonce, session.serverNonce])
       )
       if (!macEquals(expected, String(message.mac))) {
-        this.fatal('bad-server', 'This is not your Videorc. Scan a new code.')
+        this.fatal('bad-server', 'This isn’t your Videorc. Scan a new code.')
         return
       }
       session.key = mac(session.deviceKey, ['session', session.serverNonce, session.clientNonce])
@@ -303,7 +303,8 @@ export class RemoteClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error(`${method} timed out.`))
+        // Plain words (plan 174 I-11): the phone shows this message as is.
+        reject(Object.assign(new Error('Videorc didn’t answer. Try again.'), { code: 'timeout' }))
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer })
       session.seq += 1
@@ -343,7 +344,10 @@ export class RemoteClient {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.acks.delete(ticket.intentId)
-        resolve({ ok: false, message: 'Videorc did not answer. Is its window still open?' })
+        resolve({
+          ok: false,
+          message: 'Videorc didn’t answer. Check that it’s open on your computer.'
+        })
       }, ACK_TIMEOUT_MS)
       this.acks.set(ticket.intentId, { resolve, timer })
     })

@@ -13,7 +13,7 @@ import {
   type CleanCutCapabilities
 } from '@/lib/clean-cut-view'
 import { DEFAULT_BASIC_ENTITLEMENTS } from '@/lib/entitlements'
-import { CLOUD_AI_USES } from '@/lib/orcle-tab-view'
+import { CLOUD_AI_CLEAN_CUT_USE, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 
 import { CleanCutCard, type CleanCutFocus } from './clean-cut-card'
 
@@ -27,6 +27,11 @@ vi.mock('@/hooks/use-studio', () => ({
 }))
 const signIn = vi.fn()
 vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => ({ signIn }) }))
+// The lock's Sign in (plan 174 S1.5, LockAlert) starts the same sign-in.
+vi.mock('@/lib/videorc-web-links', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/videorc-web-links')>()),
+  beginVideorcSignIn: () => signIn()
+}))
 
 const MIN = 60_000
 const PREMIUM = {
@@ -165,21 +170,20 @@ function button(label: string): HTMLButtonElement {
 }
 
 function statusRow(): HTMLElement {
-  return document.querySelector('[data-slot="clean-cut-status"]') as HTMLElement
+  return document.querySelector('[data-testid="clean-cut-status"]') as HTMLElement
 }
 
 function autoSwitch(): HTMLButtonElement {
   return document.getElementById('clean-cut-auto-switch') as HTMLButtonElement
 }
 
+/** Kind of cut is a segmented control (plan 174 S1.7): a radio per kind. */
 async function chooseTab(label: string): Promise<void> {
-  const tab = [...document.querySelectorAll('[role="tab"]')].find(
+  const option = [...document.querySelectorAll('[role="radio"]')].find(
     (candidate) => candidate.textContent === label
   ) as HTMLElement
-  expect(tab, label).toBeTruthy()
-  await act(async () => {
-    tab.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-  })
+  expect(option, label).toBeTruthy()
+  await act(async () => option.click())
 }
 
 beforeEach(() => {
@@ -208,7 +212,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(text).toContain('Clean cut')
     expect(text).toContain(CLEAN_CUT_DESCRIPTION)
     expect(text).toContain('Make a clean cut of every recording')
-    expect(document.querySelector('[data-slot="clean-cut-minutes"]')?.textContent).toBe(
+    expect(document.querySelector('[data-testid="clean-cut-minutes"]')?.textContent).toBe(
       '1,066 min left this month'
     )
     expect(autoSwitch().getAttribute('data-state')).toBe('unchecked')
@@ -234,9 +238,11 @@ describe('Clean cut card (plan 119 S14)', () => {
     await act(async () => autoSwitch().click())
     const dialog = document.querySelector('[role="dialog"]')
     expect(dialog?.textContent).toContain('Turn on Clean cut?')
-    expect(dialog?.textContent).toContain(
-      "Clean cut uploads your recording's audio, never the video"
+    // Plan 174 E-13: Clean cut's own line leads, then every other use.
+    expect(dialog?.querySelector('[data-slot="dialog-description"]')?.textContent).toBe(
+      CLOUD_AI_CLEAN_CUT_USE
     )
+    expect(dialog?.textContent).toContain('Allowing cloud AI also covers Buddy:')
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     await act(async () => button('Not now').click())
     expect(setAiConsent).not.toHaveBeenCalled()
@@ -248,11 +254,36 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
   })
 
+  it('offers "Allow cloud AI…" when every recording is on but cloud AI was revoked (plan 174 E-6)', async () => {
+    localStorage.setItem(CLEAN_CUT_AUTO_STORAGE_KEY, '1')
+    await render({ consented: false })
+    const status = document.querySelector('[data-slot="clean-cut-auto-status"]')
+    expect(status?.getAttribute('data-status')).toBe('attention')
+    expect(status?.textContent).toContain("Cloud AI isn't allowed, so Clean cut can't run.")
+    expect(status?.textContent).not.toMatch(/Customize/)
+    const allow = document.querySelector(
+      '[data-testid="clean-cut-allow-cloud-ai"]'
+    ) as HTMLButtonElement | null
+    expect(allow?.textContent).toBe('Allow cloud AI…')
+    await act(async () => allow!.click())
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Turn on Clean cut?')
+    await act(async () => button('Allow and turn on').click())
+    expect(setAiConsent).toHaveBeenCalledWith(true)
+    expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
+  })
+
   it('asks a signed-out streamer to sign in and offers nothing to start', async () => {
     await render({ signedIn: false, entitlements: null, cut: client({ capabilities: null }) })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       'Sign in to use Clean cut, part of Videorc Premium.'
     )
+    // The same lock strip Chat and Voice lead with, above both columns (E-31).
+    const strip = document.querySelector('[data-slot="buddy-tab-lock"]')
+    expect(strip?.querySelector('[data-testid="clean-cut-unlock"]')).toBeTruthy()
+    expect(
+      strip!.compareDocumentPosition(document.querySelector('[data-slot="config-grid"]')!) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
     expect(autoSwitch().disabled).toBe(true)
     expect(button('Make a clean cut').disabled).toBe(true)
     await act(async () => button('Sign in').click())
@@ -271,10 +302,10 @@ describe('Clean cut card (plan 119 S14)', () => {
         }
       })
     })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       "This month's Clean cut minutes are used up."
     )
-    expect(document.querySelector('[data-slot="clean-cut-minutes"]')?.textContent).toBe(
+    expect(document.querySelector('[data-testid="clean-cut-minutes"]')?.textContent).toBe(
       'No minutes left this month'
     )
     expect(button('Review').disabled).toBe(false)
@@ -428,7 +459,7 @@ describe('Clean cut card (plan 119 S14)', () => {
 describe('Clean cut tab layout (plan 150 S7)', () => {
   it('sets the settings beside the recordings, in two titled columns', async () => {
     await render()
-    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
     expect(titles).toEqual(['Clean cut', 'Recordings'])
@@ -445,7 +476,7 @@ describe('Clean cut tab layout (plan 150 S7)', () => {
         capabilities: { ...AVAILABLE, available: false, reasonCode: 'provider-unconfigured' }
       })
     })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       "Clean cut isn't set up on Videorc's side yet."
     )
     expect(autoSwitch().disabled).toBe(true)

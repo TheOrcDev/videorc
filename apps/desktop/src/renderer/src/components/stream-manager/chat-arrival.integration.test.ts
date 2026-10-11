@@ -160,7 +160,7 @@ const newButton = () =>
 const badge = (label: string) =>
   [...container.querySelectorAll('[data-slot="pane-tabs-narrow"] button')]
     .find((button) => button.textContent?.startsWith(label))
-    ?.querySelector('[data-slot="pane-unseen"]')?.textContent ?? '0'
+    ?.querySelector('[data-testid="pane-unseen"]')?.textContent ?? '0'
 
 for (const [owner, append] of [
   ['provider', applyLiveChatMessage],
@@ -316,9 +316,9 @@ it('counts a new open question identity when it replaces an equal-count question
     )
   }
   await render('q1')
-  expect(badge('Orcle')).toBe('0')
+  expect(badge('Buddy')).toBe('0')
   await render('q2')
-  expect(badge('Orcle')).toBe('1')
+  expect(badge('Buddy')).toBe('1')
 })
 
 it('keeps duplicate, tombstone, hydration and emote refreshes from manufacturing unread; resets on clear and session change', async () => {

@@ -2,14 +2,9 @@
 
 import { useTheme } from 'next-themes'
 import { Toaster as Sonner, type ToasterProps } from 'sonner'
-import {
-  CloseIcon,
-  ErrorIcon,
-  InfoIcon,
-  SpinnerIcon,
-  SuccessIcon,
-  WarningIcon
-} from '@/components/icons'
+import { CloseIcon, ErrorIcon, InfoIcon, SuccessIcon, WarningIcon } from '@/components/icons'
+import { Spinner } from '@/components/ui/spinner'
+
 const Toaster = ({ closeButton = true, toastOptions, ...props }: ToasterProps) => {
   const { theme = 'system' } = useTheme()
 
@@ -23,7 +18,7 @@ const Toaster = ({ closeButton = true, toastOptions, ...props }: ToasterProps) =
         info: <InfoIcon className="size-4" />,
         warning: <WarningIcon className="size-4" />,
         error: <ErrorIcon className="size-4" />,
-        loading: <SpinnerIcon className="size-4 animate-spin" />,
+        loading: <Spinner aria-hidden className="size-4" />,
         close: <CloseIcon className="size-3.5" />
       }}
       toastOptions={{
@@ -34,7 +29,7 @@ const Toaster = ({ closeButton = true, toastOptions, ...props }: ToasterProps) =
           // Toasts are floating surfaces (plan 072): the float glass and the
           // typed tints live in styles.css (the sonner block), because sonner
           // injects unlayered CSS that a layered utility cannot beat.
-          toast: ['cn-toast', toastOptions?.classNames?.toast].filter(Boolean).join(' ')
+          toast: toastOptions?.classNames?.toast
         }
       }}
       {...props}

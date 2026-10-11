@@ -58,7 +58,9 @@ describe('ActivityPane', () => {
 
   it('shows the short fact beside the name, with the sentence on hover', () => {
     expect(markup).toContain('>Resub · 14 months<')
-    expect(markup).toContain('title="Resubscribed for 14 months at Tier 1"')
+    // The sentence is the fact's tooltip and what a screen reader hears.
+    expect(markup).not.toContain('title=')
+    expect(markup).toContain('data-slot="activity-sentence">Resubscribed for 14 months at Tier 1<')
     expect(markup).toContain('that transition was clean')
   })
 
@@ -72,7 +74,7 @@ describe('ActivityPane', () => {
   })
 
   it('renders no Auto-show switch without a handler', () => {
-    expect(markup).not.toContain('data-slot="activity-auto-show"')
+    expect(markup).not.toContain('data-testid="activity-auto-show"')
   })
 })
 
@@ -91,7 +93,7 @@ describe('ActivityPane Auto-show switch', () => {
 
   it('renders in the header and reflects the setting', () => {
     const off = render(false)
-    expect(off).toContain('data-slot="activity-auto-show"')
+    expect(off).toContain('data-testid="activity-auto-show"')
     expect(off).toContain('Auto-show')
     expect(off).toContain('data-state="unchecked"')
     expect(render(true)).toContain('data-state="checked"')
@@ -201,7 +203,7 @@ describe('ActivityPane Show who followed', () => {
 
   it('offers the reconnect while Twitch lacks the follow permission', () => {
     const markup = render(false, true)
-    expect(markup).toContain('data-slot="activity-follow-names"')
+    expect(markup).toContain('data-testid="activity-follow-names"')
     expect(markup).toContain('Twitch names each follower once you allow it.')
     expect(markup).not.toContain('Livestream → Setup')
   })
@@ -356,15 +358,17 @@ describe('ActivityPane on stream', () => {
   it('shows Applying… and Failed (with the reason on hover) on the matching row', () => {
     const applying = render({ highlightApplyingId: 'm-sub' })
     expect(rowOf(applying, 'sub')).toContain('data-highlight-phase="applying"')
-    expect(rowOf(applying, 'sub')).toMatch(/data-variant="secondary"[^>]*>Applying…</)
+    expect(rowOf(applying, 'sub')).toMatch(/data-variant="default"[^>]*>Applying…</)
     expect(rowOf(applying, 'follow')).not.toContain('Applying')
 
     const failed = render({
       highlightFailure: { messageId: 'm-follow', reason: 'The stream is not live.' }
     })
     expect(rowOf(failed, 'follow')).toContain('data-highlight-phase="failed"')
-    expect(rowOf(failed, 'follow')).toMatch(
-      /data-variant="destructive"[^>]*title="The stream is not live\."[^>]*>Failed</
+    expect(rowOf(failed, 'follow')).toMatch(/data-variant="destructive"[^>]*>Failed</)
+    // The reason is the row's own line, never hover text (plan 174 H-16).
+    expect(rowOf(failed, 'follow')).toContain(
+      'data-testid="highlight-failed-reason">The stream is not live.<'
     )
     expect(rowOf(failed, 'sub')).not.toContain('Failed<')
     // A failed row is not a selected row.

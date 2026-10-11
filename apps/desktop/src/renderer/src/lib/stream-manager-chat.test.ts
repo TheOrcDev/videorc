@@ -123,16 +123,20 @@ describe('Stream Manager chat pane', () => {
         })
       })
     )
-    expect(markup).toContain('data-slot="comment-first-message"')
+    expect(markup).toContain('data-testid="comment-first-message"')
     expect(markup).toContain('First chat')
     // Plan 057, D3: the arrow says reply; the chip says mention in four
     // characters, with the words on hover.
     expect(markup).toContain('↳ @ph4se_on3: which mic is that?')
     expect(markup).not.toContain('Replying to')
-    expect(markup).toContain('data-slot="comment-mention"')
+    expect(markup).toContain('data-testid="comment-mention"')
     expect(markup).toContain('@you')
-    expect(markup).toContain('title="Mentions you"')
-    expect(markup).toContain('data-slot="comment-role"')
+    // "Mentions you" is the chip's tooltip, never a native title (S1.10).
+    expect(markup).not.toContain('title="Mentions you"')
+    expect(markup).toMatch(
+      /<span(?=[^>]*data-testid="comment-mention")(?=[^>]*data-state="closed")/
+    )
+    expect(markup).toContain('data-testid="comment-role"')
     expect(markup).toContain('VIP')
   })
 
@@ -281,10 +285,11 @@ describe('Stream Manager chat pane', () => {
           timestamps
         })
       )
-    expect(row('always')).toContain('<time class="ml-auto shrink-0')
-    expect(row('always')).not.toContain('opacity-0')
-    expect(row('hover')).toContain('opacity-0')
-    expect(row('hover')).toContain('group-hover/comment:opacity-100')
+    const time = (markup: string): string => markup.match(/<time class="([^"]*)"/)?.[1] ?? ''
+    expect(time(row('always'))).toContain('ml-auto shrink-0')
+    expect(time(row('always'))).not.toContain('opacity-0')
+    expect(time(row('hover'))).toContain('opacity-0')
+    expect(time(row('hover'))).toContain('group-hover/comment:opacity-100')
   })
 })
 

@@ -13,7 +13,7 @@ type ContentProtectionWindow = Pick<BrowserWindow, 'setContentProtection'>
 export type WindowCaptureProtectionResult =
   | { state: 'protected' | 'already-protected'; protected: true }
   | { state: 'not-required'; protected: false }
-  | { state: 'failed'; protected: false; reason: string }
+  | { state: 'failed' | 'unsupported'; protected: false; reason: string }
 
 const protectedWindows = new WeakSet<object>()
 
@@ -47,6 +47,20 @@ export function videorcWindowRequiresCaptureProtection(
 }
 
 /**
+ * Electron implements BrowserWindow content protection on macOS and Windows
+ * only; elsewhere `setContentProtection` returns without doing anything. The
+ * Notes window says "Hidden from recordings and streams" when protection
+ * holds, so a platform without it must report the window as visible (plan
+ * 174 I-2).
+ */
+export function platformSupportsCaptureProtection(platform: NodeJS.Platform): boolean {
+  return platform === 'darwin' || platform === 'win32'
+}
+
+export const CAPTURE_PROTECTION_UNSUPPORTED_REASON =
+  'This system cannot hide a window from screen capture.'
+
+/**
  * Applies Electron's exact BrowserWindow capture exclusion once per window
  * instance. Re-created windows are distinct instances and are protected
  * independently; no title, process-name, or broad PID matching is involved.
@@ -65,6 +79,10 @@ export function applyVideorcWindowCaptureProtection(
   }
   if (protectedWindows.has(window)) {
     return { state: 'already-protected', protected: true }
+  }
+  if (!platformSupportsCaptureProtection(platform)) {
+    options.onFailure?.(CAPTURE_PROTECTION_UNSUPPORTED_REASON)
+    return { state: 'unsupported', protected: false, reason: CAPTURE_PROTECTION_UNSUPPORTED_REASON }
   }
 
   try {

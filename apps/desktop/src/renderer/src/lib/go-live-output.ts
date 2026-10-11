@@ -25,6 +25,7 @@ import {
   type CaptureConfig,
   type ProviderStreamOutputPlanOptions
 } from './capture'
+import { formatVideoQuality } from './format-video'
 import { isUntrustedPerformanceCheckResult, outputLabel, outputVerdict } from './performance-check'
 
 // Everything a livestream start decides about its own output (plan 090):
@@ -271,9 +272,7 @@ async function probeForSession(
   }
   const result = await deps.request(params)
   if (!streamOutputTopologyResultMatchesRequest(result, params)) {
-    throw new Error(
-      'Backend returned a livestream output verdict for a different output configuration.'
-    )
+    throw new Error('The livestream check came back for different settings. Check again.')
   }
   deps.sessionResults.set(requestKey, result)
   return result
@@ -322,7 +321,7 @@ export async function settleGoLiveSessionOutput(
       }
       return blocked(
         `Livestream output check failed: ${
-          error instanceof Error ? error.message : 'the output path could not be verified.'
+          error instanceof Error ? error.message : "the output path couldn't be verified."
         }`
       )
     }
@@ -346,7 +345,7 @@ export async function settleGoLiveSessionOutput(
       Math.min(deps.captureConfig.video.width, deps.captureConfig.video.height) >= 2160
     ) {
       return blocked(
-        'This computer cannot preserve the selected 4K recording while streaming. Choose Full HD recording or turn off streaming.'
+        "This computer can't preserve the selected 4K recording while streaming. Choose 1080p recording or turn off streaming."
       )
     }
     if (advice?.kind === 'step-down' && !steppedDown) {
@@ -410,7 +409,7 @@ export async function settleGoLiveSessionOutput(
       belowFloor: advice?.kind === 'below-floor' ? advice.floor : null
     }
   }
-  return blocked('Livestream output check did not settle. Try Go Live again.')
+  return blocked("Livestream output check didn't settle. Try Go Live again.")
 }
 
 /** The one notice a session shows when its output differs from the saved settings. */
@@ -419,7 +418,7 @@ export function goLiveSessionOutputNotice(
 ): { title: string; description: string } | null {
   if (output.steppedDown) {
     return {
-      title: `Streaming at ${outputLabel(output.steppedDown.video)}.`,
+      title: `Streaming at ${outputLabel(output.steppedDown.video)}`,
       description: `This computer can't encode ${outputLabel(output.steppedDown.requested)} in real time, so this session uses the largest output that held steady in its performance check.`
     }
   }
@@ -427,7 +426,7 @@ export function goLiveSessionOutputNotice(
     const shared = output.sharedFallbackVideo
     return {
       title: 'Recording will match the stream.',
-      description: `This computer can't encode a separate recording while streaming, so both use ${shared.width}×${shared.height}, ${shared.fps} fps, ${shared.bitrateKbps} kbps.`
+      description: `This computer can't encode a separate recording while streaming, so both use ${formatVideoQuality(shared, { bitrate: true })}.`
     }
   }
   return null

@@ -6,8 +6,10 @@ import {
   deviceActivityLabel,
   formatCountdown,
   pairingSecondsLeft,
+  phoneDisplayNames,
   phoneRemoteSummary,
-  qrCodePath
+  qrCodePath,
+  renamedPhoneName
 } from './phone-remote-view'
 
 const NOW = Date.parse('2026-09-18T10:00:00Z')
@@ -70,5 +72,29 @@ describe('phone remote view', () => {
         devices: [{ id: 'a', name: 'iPhone', createdAt: '', connected: true }]
       }).text
     ).toBe('1 phone connected · 192.168.1.20:7420')
+  })
+})
+
+describe('phone names (plan 174 I-28)', () => {
+  it('saves a trimmed, changed, non-empty name only', () => {
+    expect(renamedPhoneName('iPhone · Safari', '  Desk phone ')).toBe('Desk phone')
+    expect(renamedPhoneName('iPhone · Safari', 'iPhone · Safari')).toBeNull()
+    expect(renamedPhoneName('iPhone · Safari', '   ')).toBeNull()
+    expect(renamedPhoneName('a', 'x'.repeat(50))).toHaveLength(40)
+  })
+
+  it('numbers repeated names in list order', () => {
+    const names = phoneDisplayNames([
+      { id: 'a', name: 'iPhone · Safari' },
+      { id: 'b', name: 'Pixel' },
+      { id: 'c', name: 'iPhone · Safari' },
+      { id: 'd', name: 'iPhone · Safari' }
+    ])
+    expect([...names.values()]).toEqual([
+      'iPhone · Safari',
+      'Pixel',
+      'iPhone · Safari 2',
+      'iPhone · Safari 3'
+    ])
   })
 })

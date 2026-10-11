@@ -433,7 +433,7 @@ describe('renderer security policy', () => {
     expect(result.slice(0, 400)).toContain('event.sender.id !== mainWindow.webContents.id')
   })
 
-  it('lets only the Chat window answer Orcle, checked by sender (plan 140, S6 part B)', () => {
+  it('lets only the Chat window answer Buddy, checked by sender (plan 140, S6 part B)', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:cohost-command')).toBe(true)
     expect(roleCanInvokeChannel('notes', 'comments-window:cohost-command')).toBe(false)
     expect(roleCanInvokeChannel('captions', 'comments-window:cohost-command')).toBe(false)
@@ -553,7 +553,11 @@ describe('renderer security policy', () => {
   it('routes denied X documentation popups through the validated external opener', () => {
     // Plan 080 S5 moved the destination card (and its X block) out of the tab.
     const destinationCard = source('../renderer/src/components/streaming/destination-card.tsx')
-    expect(destinationCard).toContain('openExternalUrl(xNativeCapability.docsUrl)')
-    expect(destinationCard).toContain('openExternalUrl(xNativeCapability.apiOverviewUrl)')
+    // Plan 174 S3.5a: every external link on the card is one ExternalLinkButton,
+    // which opens through the validated opener; none is a raw target=_blank link.
+    expect(destinationCard).toContain('<ExternalLinkButton url={xNativeCapability.docsUrl}>')
+    expect(destinationCard).toContain('<ExternalLinkButton url={xNativeCapability.apiOverviewUrl}>')
+    expect(destinationCard).toContain('onClick={() => openExternalUrl(url)}')
+    expect(destinationCard).not.toContain('target="_blank"')
   })
 })

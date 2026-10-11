@@ -54,6 +54,11 @@ import {
   managedAvatarFileName
 } from './chat-avatar-bytes'
 import { TWITCH_GIF_MODES, twitchGifAssetUrl, type TwitchGifMode } from './chat-gif'
+import {
+  BUDDY_IMAGE_MAX_BYTES,
+  BUDDY_PET_FILE_MAX_BYTES,
+  BUDDY_PET_SKIPPED_FILES_MAX
+} from './buddy-assets'
 import { openableChatLink } from './chat-link'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
@@ -91,9 +96,15 @@ export const electronInvokeApiMethods = {
   'app:get-runtime-info': 'getRuntimeInfo',
   'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
+  'app:exit': 'exitApp',
   'screens:pick-image': 'pickScreenImage',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
+  'buddy-assets:remove': 'removeBuddyPersona',
+  'buddy-assets:read-image': 'readBuddyImage',
+  'buddy-pets:read': 'readBuddyPetFile',
+  'buddy-pets:import-folder': 'importBuddyPetFolder',
+  'buddy-pets:read-creation': 'readBuddyCreationFile',
   'backgrounds:asset-exists': 'backgroundAssetExists',
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
@@ -167,6 +178,7 @@ export const electronInvokeApiMethods = {
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
+  'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
   'comments-window:moderation': 'moderateFromCommentsWindow',
   'comments-window:moderation-result-push': 'pushModerationResult',
   'comments-window:viewers-push': 'pushViewerSample',
@@ -198,6 +210,7 @@ export const electronInvokeApiMethods = {
   'resource:authorize-output-directory': 'authorizeOutputDirectory',
   'resource:reveal-session': 'revealSession',
   'resource:reveal-background': 'revealBackgroundAsset',
+  'resource:reveal-support-bundle': 'revealSupportBundle',
   'resource:open-session': 'openSession',
   'media:grant-session': 'grantSessionMedia',
   'resource:trash-session-deletion': 'trashSessionDeletion',
@@ -227,6 +240,17 @@ export type ElectronInvokeResult<TChannel extends ElectronInvokeChannel> =
 /** OS-global shortcut actions (registered via globalShortcut, work with the
  * app unfocused — Stream Deck's native Hotkey action drives these). */
 export type { GlobalShortcutAction } from './global-shortcuts'
+
+/** Plan 170 D18: what a `videorc://buddy` link asks the main window to show. */
+export interface BuddyDeepLinkNavigation {
+  openCreator: boolean
+  /**
+   * The Buddy page's tab to open (plan 174 S3.14a): the Stream Manager's
+   * behaviour chips ask for `chat`. Absent opens the first tab. The shell
+   * validates the id; main only bounds it.
+   */
+  tab?: string
+}
 
 export interface ElectronIpcEventMap {
   'account:callback': AccountCallbackEnvelope
@@ -260,6 +284,7 @@ export interface ElectronIpcEventMap {
   'captions-window:lines': CaptionsUpdate[]
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
+  'buddy:deep-link': BuddyDeepLinkNavigation
   'shortcut:modifier': boolean
   'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
@@ -268,6 +293,8 @@ export interface ElectronIpcEventMap {
   'preview-surface:pump-mode': boolean
   'preview-surface:resync-scene': undefined
   'app:update-status': UpdateStatus
+  /** Plan 174 S3.1 (D2): a quit or a main-window close while on air asks the renderer first. */
+  'app:exit-request': 'quit' | 'close'
 }
 
 export type ElectronEventChannel = keyof ElectronIpcEventMap
@@ -304,6 +331,7 @@ export const electronEventChannels = [
   'captions-window:lines',
   'oauth:callback-url',
   'shortcut:navigate',
+  'buddy:deep-link',
   'shortcut:modifier',
   'window:visible',
   'global-shortcuts:triggered',
@@ -311,7 +339,8 @@ export const electronEventChannels = [
   'shortcut-recorder:disarmed',
   'preview-surface:pump-mode',
   'preview-surface:resync-scene',
-  'app:update-status'
+  'app:update-status',
+  'app:exit-request'
 ] as const satisfies readonly ElectronEventChannel[]
 
 type MissingElectronEventChannel = Exclude<
@@ -453,6 +482,45 @@ const chatAvatarBytesSchema = runtimeSchema<Uint8Array | null>(
       throw new RuntimeSchemaError(
         path,
         `null or image bytes of at most ${CHAT_AVATAR_MAX_BYTES} bytes`
+      )
+    }
+    return value
+  }
+)
+/** One persona image as bytes (plan 164 S-C2): the Studio renderer decodes
+ * it for the Buddy overlay raster, as the highlight card does with avatars.
+ * Null when the path names no stored file; never over the 4 MB import cap. */
+const buddyImageBytesSchema = runtimeSchema<Uint8Array | null>(
+  `null or image bytes of at most ${BUDDY_IMAGE_MAX_BYTES} bytes`,
+  (value, path) => {
+    if (value === null) return null
+    if (
+      !(value instanceof Uint8Array) ||
+      value.byteLength === 0 ||
+      value.byteLength > BUDDY_IMAGE_MAX_BYTES
+    ) {
+      throw new RuntimeSchemaError(
+        path,
+        `null or image bytes of at most ${BUDDY_IMAGE_MAX_BYTES} bytes`
+      )
+    }
+    return value
+  }
+)
+/** One pet pack file as bytes (plan 168): the renderer preview decodes it.
+ * Null when the pack has no such file; never over page-pet's 32 MB cap. */
+const buddyPetFileBytesSchema = runtimeSchema<Uint8Array | null>(
+  `null or pack file bytes of at most ${BUDDY_PET_FILE_MAX_BYTES} bytes`,
+  (value, path) => {
+    if (value === null) return null
+    if (
+      !(value instanceof Uint8Array) ||
+      value.byteLength === 0 ||
+      value.byteLength > BUDDY_PET_FILE_MAX_BYTES
+    ) {
+      throw new RuntimeSchemaError(
+        path,
+        `null or pack file bytes of at most ${BUDDY_PET_FILE_MAX_BYTES} bytes`
       )
     }
     return value
@@ -1107,6 +1175,7 @@ const moderationOperationIpcSchema = boundedSemanticValue(
       operationId: boundedIdentifier,
       sessionId: boundedIdentifier,
       messageId: boundedIdentifier,
+      // A saved wire value (plan 170 D22): never rename 'orcle-voice'.
       source: enumSchema(['manual', 'orcle-voice']),
       phase: enumSchema(MODERATION_PHASES)
     },
@@ -1116,7 +1185,7 @@ const moderationOperationIpcSchema = boundedSemanticValue(
 const relayedModerationOperationsSchema = arraySchema(moderationOperationIpcSchema, {
   maxLength: MAX_RELAYED_MODERATION_OPERATIONS
 })
-// Answers to Orcle's voice command cards (plan 140, S6 part B): a command id
+// Answers to Buddy's voice command cards (plan 140, S6 part B): a command id
 // and, for the chooser, an index. Nothing else crosses.
 const cohostCommandIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
 const cohostCommandRelaySchema = unionSchema([
@@ -1247,6 +1316,17 @@ const specificRuntimeInvokeContracts = {
     ]),
     booleanSchema
   ),
+  // Plan 174 S3.14a: the window names a Buddy tab and nothing else; the shell
+  // decides whether the id is one of its tabs.
+  'comments-window:open-buddy-tab': invokeContract(
+    tupleSchema([
+      objectSchema(
+        { requestId: boundedIdentifier, tab: stringSchema({ minLength: 1, maxLength: 32 }) },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
+  ),
   // Plan 140, S6: one manual removal or one card answer, relayed to Studio.
   'comments-window:moderation': invokeContract(
     tupleSchema([commentsModerationCommandSchema]),
@@ -1266,7 +1346,7 @@ const specificRuntimeInvokeContracts = {
     ]),
     booleanSchema
   ),
-  // Plan 140, S6 part B: one answer to Orcle's open voice command.
+  // Plan 140, S6 part B: one answer to Buddy's open voice command.
   'comments-window:cohost-command': invokeContract(tupleSchema([cohostCommandRelaySchema])),
   'comments-window:cohost-command-result-push': invokeContract(
     tupleSchema([
@@ -1322,6 +1402,7 @@ const specificRuntimeInvokeContracts = {
   'resource:authorize-output-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-background': invokeContract(tupleSchema([boundedIdentifier])),
+  'resource:reveal-support-bundle': invokeContract(tupleSchema([pathSchema])),
   'resource:open-session': invokeContract(tupleSchema([boundedIdentifier])),
   'media:grant-session': invokeContract(
     tupleSchema([boundedIdentifier]),
@@ -1330,13 +1411,73 @@ const specificRuntimeInvokeContracts = {
   'resource:trash-session-deletion': invokeContract(tupleSchema([boundedIdentifier])),
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
+  'buddy-assets:remove': invokeContract(
+    tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),
+    undefinedSchema
+  ),
+  'buddy-assets:read-image': invokeContract(
+    tupleSchema([stringSchema({ minLength: 1, maxLength: 256 })]),
+    buddyImageBytesSchema
+  ),
+  // Plan 168 S-A3: a plain persona id in; the stored pack's summary and the
+  // names of the files that were not copied out, or null when cancelled.
+  'buddy-pets:import-folder': invokeContract(
+    tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),
+    nullableSchema(
+      objectSchema(
+        {
+          pack: objectSchema(
+            {
+              packId: stringSchema({ minLength: 1, maxLength: 64 }),
+              name: stringSchema({ minLength: 1, maxLength: 64 }),
+              cellSize: numberSchema({ integer: true, min: 128, max: 1024 }),
+              gazeCount: numberSchema({ integer: true, min: 1, max: 64 }),
+              reactions: arraySchema(stringSchema({ minLength: 1, maxLength: 64 }), {
+                maxLength: 64
+              }),
+              source: enumSchema(['videorc-creator', 'page-pet-import', 'still']),
+              hasTalk: booleanSchema
+            },
+            { allowUnknown: false }
+          ),
+          skippedFiles: arraySchema(stringSchema({ minLength: 1, maxLength: 512 }), {
+            maxLength: BUDDY_PET_SKIPPED_FILES_MAX
+          })
+        },
+        { allowUnknown: false }
+      )
+    )
+  ),
+  // Plan 168: persona id, pack id (uuid or `bundled:<name>`), and a file
+  // relative to the pack folder; main checks each against the store rules.
+  'buddy-pets:read': invokeContract(
+    tupleSchema([
+      stringSchema({ minLength: 1, maxLength: 128 }),
+      stringSchema({ minLength: 1, maxLength: 64 }),
+      stringSchema({ minLength: 1, maxLength: 128 })
+    ]),
+    buddyPetFileBytesSchema
+  ),
+  // Plan 168 S-F5: persona id, creation id (a uuid) and a creation file
+  // (`sources/<sheet>-v<n>.png`, `pack/mascot.webp`, `pack/manifest.json`).
+  'buddy-pets:read-creation': invokeContract(
+    tupleSchema([
+      stringSchema({ minLength: 1, maxLength: 128 }),
+      stringSchema({ minLength: 1, maxLength: 64 }),
+      stringSchema({ minLength: 1, maxLength: 128 })
+    ]),
+    buddyPetFileBytesSchema
+  ),
   'avatars:read': invokeContract(tupleSchema([boundedIdentifier]), chatAvatarBytesSchema),
   'global-shortcuts:set': invokeContract(tupleSchema([globalShortcutsSchema])),
   'shortcut-recorder:set-armed': invokeContract(
     tupleSchema([booleanSchema]),
     objectSchema({ armed: booleanSchema })
   ),
-  'updates:install': invokeContract(noArgs, undefinedSchema)
+  'updates:install': invokeContract(noArgs, undefinedSchema),
+  // Plan 174 S3.1 (D2): the renderer's answer after the livestream ended,
+  // one of two words, nothing else.
+  'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema)
 } satisfies Partial<Record<ElectronInvokeChannel, IpcRuntimeContract>>
 
 /** Channels deliberately using structural bounds instead of a semantic schema.
@@ -1486,6 +1627,19 @@ const specificRuntimeEventSchemas = {
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
+  // Plan 174 S3.1 (D2): which exit is waiting on the End livestream question.
+  'app:exit-request': enumSchema(['quit', 'close']),
+  // Plan 170 D18: `videorc://buddy` opens the Buddy tab; `openCreator` also
+  // opens the creator once the "Make it Alive" avatar is worn. Plan 174
+  // S3.14a: `tab` names the Buddy page's tab to open (the Stream Manager's
+  // behaviour chips ask for Chat).
+  'buddy:deep-link': objectSchema(
+    {
+      openCreator: booleanSchema,
+      tab: optionalSchema(stringSchema({ minLength: 1, maxLength: 32 }))
+    },
+    { allowUnknown: false }
+  ),
   // Whether the command modifier is physically down. Main is the only place
   // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
   // never receives those chords — nor, in practice, the keyup that ends them.

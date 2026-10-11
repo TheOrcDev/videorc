@@ -1,5 +1,12 @@
-import type { CaptionStyleId, CaptionsStatus, CaptionsUpdate } from '@/lib/backend'
+import type {
+  CaptionStyleId,
+  CaptionsStatus,
+  CaptionsUpdate,
+  OverlayItemLayout,
+  OverlayRect
+} from '@/lib/backend'
 import type { CaptionBurnTarget } from '@/lib/capture'
+import { overlayOrientationForCanvas } from './overlay-layout'
 
 /** Lines kept for the captions strip / detached window. */
 export const MAX_CAPTION_LINES = 50
@@ -124,6 +131,9 @@ export interface CaptionOverlayTargetPlan {
   outputLeg: 'recording' | 'stream'
   canvasWidth: number
   canvasHeight: number
+  /** The captions rect for this canvas's orientation (plan 164); the bar is
+   *  rasterized to its width and blitted inside it. */
+  rect?: OverlayRect
 }
 
 /** Map user-facing outputs to the backend's session-stable compositor roles. */
@@ -134,6 +144,28 @@ export function captionOverlayTargetPlan(input: {
   recordingVideo: { width: number; height: number }
   streamVideo: { width: number; height: number }
   /** Portrait canvas of the armed dual-orientation vertical leg. */
+  verticalLeg?: { width: number; height: number }
+  /** The streamer's captions placement (plan 164); omitted keeps the legacy bar. */
+  captionsLayout?: OverlayItemLayout
+}): CaptionOverlayTargetPlan[] {
+  return captionOverlayTargets(input).map((output) =>
+    input.captionsLayout
+      ? {
+          ...output,
+          rect: input.captionsLayout[
+            overlayOrientationForCanvas(output.canvasWidth, output.canvasHeight)
+          ]
+        }
+      : output
+  )
+}
+
+function captionOverlayTargets(input: {
+  burnTarget: CaptionBurnTarget
+  recordEnabled: boolean
+  streamEnabled: boolean
+  recordingVideo: { width: number; height: number }
+  streamVideo: { width: number; height: number }
   verticalLeg?: { width: number; height: number }
 }): CaptionOverlayTargetPlan[] {
   const streamRequested =

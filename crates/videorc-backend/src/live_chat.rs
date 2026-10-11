@@ -1287,6 +1287,12 @@ impl LiveChatCoordinator {
     /// True once a session has been started (or left a transcript) — drives whether
     /// `current_status` returns the live view versus the setup-time capability snapshot.
     /// The active chat session id, if a session is running.
+    /// The session's destinations as last installed (plan 164 Phase D reads
+    /// their write state).
+    pub(crate) fn providers(&self) -> &[LiveChatProviderState] {
+        &self.providers
+    }
+
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
@@ -2708,10 +2714,14 @@ async fn execute_send_live_chat_message(
         .save_chat_send_operation(&operation)
         .map_err(|error| format!("Could not persist send result: {error}"))?;
     state.emit_event("liveChat.sendOperation", operation.clone());
+    // Plan 164 D10: a Buddy send is the streamer's account, so its echo is
+    // theirs (noted above), but it is never "the streamer replied": no
+    // question closes and nobody is greeted by it.
     if matches!(
         operation.phase,
         CommentsSendOperationPhase::Sent | CommentsSendOperationPhase::Partial
-    ) {
+    ) && !crate::cohost::is_buddy_operation(state, &operation.id).await
+    {
         crate::cohost::note_own_send_delivered(
             state,
             &operation.session_id,
@@ -2941,7 +2951,7 @@ pub async fn stop_live_chat(state: &AppState) -> LiveChatSnapshot {
     .await
 }
 
-/// `session.stop`: the chat session ends with the capture. Orcle stops too,
+/// `session.stop`: the chat session ends with the capture. Buddy stops too,
 /// but a listen-only transcription task drains with the capture so the
 /// stream's last words still reach its SRT and Clip that (plan 068 review).
 pub async fn stop_live_chat_for_capture_end(state: &AppState) -> LiveChatSnapshot {
@@ -3235,7 +3245,7 @@ async fn mark_first_time_chatters(
 }
 
 /// Turn 7TV emote names into image fragments (plan 089) before the buffer,
-/// SQLite, the renderer, the phone and Orcle see the message, so they all
+/// SQLite, the renderer, the phone and Buddy see the message, so they all
 /// agree. A pure lookup in the session's loaded index, outside every fence;
 /// it never touches the network.
 async fn decorate_seventv_emotes(
@@ -3638,6 +3648,16 @@ async fn run_fake_connector(
         "Live chat ended.",
     )
     .await;
+}
+
+/// The fake activity rows for the greeting tests (plan 164 S-D1).
+#[cfg(test)]
+pub(crate) fn fake_events_for_tests(
+    session_id: &str,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+) -> Vec<LiveChatMessage> {
+    fake_events(session_id, platform, target_id)
 }
 
 /// Build one deterministic fake message. Shared by the fake connector and the unit tests.
@@ -7292,12 +7312,12 @@ mod tests {
         );
     }
 
-    /// Plan 068 review, finding 2: `session.stop` retires chat and Orcle, but
+    /// Plan 068 review, finding 2: `session.stop` retires chat and Buddy, but
     /// a listen-only transcription task drains with the capture (its last
     /// words reach the SRT and Clip that); with no capture running, or on an
     /// explicit `liveChat.stop`, it ends at once.
     #[tokio::test]
-    async fn session_stop_lets_orcles_listen_task_drain_with_the_capture() {
+    async fn session_stop_lets_the_buddy_listen_task_drain_with_the_capture() {
         let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         *state.recording.lock().await =

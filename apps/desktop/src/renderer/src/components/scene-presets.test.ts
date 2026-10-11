@@ -75,9 +75,29 @@ async function menu(action: string): Promise<void> {
   await act(async () => (item as HTMLElement).click())
 }
 describe('scene library controls', () => {
+  // Plan 174 S3.9 (C-23, V-10): the Scene page's section actions.
+  it('offers Update “{name}” beside Save scene once the applied saved scene drifts', async () => {
+    mocked.core.savedScenes = [saved()]
+    mocked.core.activeSavedSceneId = 'scene-a'
+    mocked.core.savedSceneModified = false
+    await act(async () => root.render(createElement(ScenePresetControls, { toolbar: true })))
+    const labels = () => [...container.querySelectorAll('button')].map((b) => b.textContent)
+    expect(labels()).toEqual(['Save scene…'])
+    // The name and its state belong to the section's description now.
+    expect(container.textContent).not.toContain('Modified')
+
+    mocked.core = { ...mocked.core, savedSceneModified: true }
+    await act(async () => root.render(createElement(ScenePresetControls, { toolbar: true })))
+    expect(labels()).toEqual(['Update “Presentation”…', 'Save scene…'])
+    await click('Update “Presentation”…')
+    expect(document.body.textContent).toContain('Update saved scene')
+    await click('Save')
+    expect(mocked.core.saveScene).toHaveBeenCalledExactlyOnceWith('Presentation', 'scene-a')
+  })
+
   it('validates names inline and saves only explicitly', async () => {
     await render()
-    await click('Save scene')
+    await click('Save scene…')
     await click('Save')
     expect(document.body.textContent).toContain('between 1 and 80')
     expect(mocked.core.saveScene).not.toHaveBeenCalled()
@@ -125,7 +145,6 @@ describe('scene library controls', () => {
     expect(mocked.core.applySavedScene).not.toHaveBeenCalled()
   })
   it('repairs an unavailable window with exact source selection before dispatch', async () => {
-    await import('./source-select-searchable')
     const scene = saved()
     scene.visual.sources = { windowId: 'closed', testPattern: false }
     mocked.core.savedScenes = [scene]

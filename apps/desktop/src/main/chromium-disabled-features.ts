@@ -1,7 +1,7 @@
 // Chromium features the Electron main process disables at startup.
 //
 // Plan 069 (system audio), decision 9 as amended by the S0 spike: on macOS,
-// Chromium plays renderer audio (Library playback, Orcle's voice, UI sounds)
+// Chromium plays renderer audio (Library playback, Buddy's voice, UI sounds)
 // from an out-of-process audio service helper that ScreenCaptureKit neither
 // lists nor attributes to Videorc, so the backend's own-app exclusion cannot
 // keep that audio out of recordings. Disabling AudioServiceOutOfProcess moves

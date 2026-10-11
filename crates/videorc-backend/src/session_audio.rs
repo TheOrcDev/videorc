@@ -5034,7 +5034,7 @@ fn run_bus_owned(
                 return Err(error);
             }
         };
-        // The microphone tap (captions, Orcle voice activity, the mic meter)
+        // The microphone tap (captions, Buddy voice activity, the mic meter)
         // is the processed microphone chunk as written, before any sum
         // (decision 5). Without a system slot it is the written chunk itself.
         // Plan 092 Phase C: the written chunk is what the recording and the

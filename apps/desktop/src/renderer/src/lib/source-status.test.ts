@@ -4,7 +4,7 @@ import {
   microphoneStatus,
   selectedDeviceStatus,
   systemAudioStatus,
-  uncoveredDeviceWarnings,
+  unknownDeviceWarnings,
   videoSourceStatus
 } from '@/lib/source-status'
 
@@ -40,7 +40,7 @@ describe('videoSourceStatus', () => {
 
   it('says Live for a delivering source', () => {
     expect(videoSourceStatus({ ...base, preview: { state: 'live', frameAgeMs: 40 } })).toEqual({
-      label: 'Live',
+      label: 'Receiving',
       tone: 'good'
     })
   })
@@ -49,24 +49,24 @@ describe('videoSourceStatus', () => {
     expect(videoSourceStatus({ ...base, preview: { state: 'live', frameAgeMs: 4200 } })).toEqual({
       label: 'Stale 4s',
       tone: 'warn',
-      hint: 'No fresh frames. Re-select the source to restart it.'
+      hint: 'No fresh frames. Choose it again to restart it.'
     })
     expect(
       videoSourceStatus({ ...base, kind: 'screen', preview: { state: 'live', frameAgeMs: 60000 } })
-    ).toEqual({ label: 'Live', tone: 'good' })
+    ).toEqual({ label: 'Receiving', tone: 'good' })
   })
 
   it('trusts a live preview over a lagging device list', () => {
     expect(videoSourceStatus({ ...base, device: 'missing', preview: { state: 'live' } })).toEqual({
-      label: 'Live',
+      label: 'Receiving',
       tone: 'good'
     })
   })
 
-  it('says Needs permission from either the preview or the device list', () => {
+  it('says Needs permission from either the preview or the device list, leaving the fix to the page alert', () => {
     expect(
       videoSourceStatus({ ...base, preview: { state: 'permission-needed', message: 'Grant it.' } })
-    ).toEqual({ label: 'Needs permission', tone: 'warn', hint: 'Grant it.' })
+    ).toEqual({ label: 'Needs permission', tone: 'warn' })
     expect(videoSourceStatus({ ...base, device: 'permission-required' })?.label).toBe(
       'Needs permission'
     )
@@ -76,12 +76,12 @@ describe('videoSourceStatus', () => {
     expect(videoSourceStatus({ ...base, device: 'missing' })).toEqual({
       label: 'Not found',
       tone: 'warn',
-      hint: 'It is not connected. Reconnect it, or pick another.'
+      hint: "It isn't connected. Reconnect it, or choose another."
     })
     expect(videoSourceStatus({ ...base, kind: 'screen', device: 'missing' })).toEqual({
       label: 'Not found',
       tone: 'warn',
-      hint: 'That screen or window is gone. Pick another.'
+      hint: 'That screen or window is gone. Choose another.'
     })
     expect(videoSourceStatus({ ...base, device: 'unavailable' })?.label).toBe('Not found')
   })
@@ -102,7 +102,7 @@ describe('videoSourceStatus', () => {
     ).toBeNull()
   })
 
-  it('says Starting, then Failed with the backend message or a retry hint', () => {
+  it('says Starting, then Failed with a retry hint, never the raw backend message', () => {
     expect(videoSourceStatus({ ...base, preview: { state: 'starting' } })).toEqual({
       label: 'Starting',
       tone: 'warn'
@@ -110,11 +110,8 @@ describe('videoSourceStatus', () => {
     expect(videoSourceStatus({ ...base, preview: { state: 'failed', message: 'Busy.' } })).toEqual({
       label: 'Failed',
       tone: 'error',
-      hint: 'Busy.'
+      hint: "Couldn't start it. Choose it again to retry."
     })
-    expect(videoSourceStatus({ ...base, preview: { state: 'failed' } })?.hint).toBe(
-      'Re-select the source to retry.'
-    )
   })
 
   it('shows no chip before the preview reports', () => {
@@ -131,7 +128,7 @@ describe('microphoneStatus', () => {
 
   it('says Live during a session and Muted while muted', () => {
     expect(microphoneStatus({ ...base, sessionActive: true })).toEqual({
-      label: 'Live',
+      label: 'Receiving',
       tone: 'good'
     })
     expect(microphoneStatus({ ...base, sessionActive: true, muted: true })).toEqual({
@@ -172,7 +169,7 @@ describe('systemAudioStatus', () => {
       tone: 'neutral'
     })
     expect(systemAudioStatus({ ...off, checked: true, meter: true }, true)).toEqual({
-      label: 'Live',
+      label: 'Receiving',
       tone: 'good'
     })
   })
@@ -182,34 +179,33 @@ describe('systemAudioStatus', () => {
       'Turning on…'
     )
     expect(systemAudioStatus({ ...off, pending: 'off' }, true)?.label).toBe('Turning off…')
+    // The row's own issue alert says what happened, so the chip has no hint.
     expect(systemAudioStatus({ ...off, checked: true, issue: 'echo' }, true)).toEqual({
       label: 'Paused',
-      tone: 'warn',
-      hint: 'Your stream came back as an echo.'
+      tone: 'warn'
     })
     expect(systemAudioStatus({ ...off, checked: true, issue: 'lost' }, true)?.label).toBe('Stopped')
   })
 
-  it('says Needs permission without Screen Recording', () => {
-    expect(systemAudioStatus({ ...off, permissionRequired: true }, false)?.label).toBe(
-      'Needs permission'
-    )
+  it('says Needs permission without Screen Recording, and points at the page alert', () => {
+    expect(systemAudioStatus({ ...off, permissionRequired: true }, false)).toEqual({
+      label: 'Needs permission',
+      tone: 'warn',
+      hint: 'Uses the Screen Recording permission. Turn it on above.'
+    })
   })
 })
 
-describe('uncoveredDeviceWarnings', () => {
+describe('unknownDeviceWarnings', () => {
   const warnings = [
     'Camera permission has not been granted yet. Open Camera privacy settings if preview shows black frames.',
     'macOS Screen Recording permission is not granted for /x/videorc-backend. Grant Screen Recording permission to this capture helper, then quit and relaunch Videorc.',
+    'AVFoundation did not return cameras. Camera permission may be missing.',
     'MediaFoundation camera discovery failed: busy'
   ]
 
-  it('drops only the permission warnings a column alert already covers', () => {
-    expect(uncoveredDeviceWarnings(warnings, { camera: true, screen: false })).toEqual([
-      warnings[1],
-      warnings[2]
-    ])
-    expect(uncoveredDeviceWarnings(warnings, { camera: true, screen: true })).toEqual([warnings[2]])
-    expect(uncoveredDeviceWarnings(warnings, { camera: false, screen: false })).toEqual(warnings)
+  it('drops every permission warning: the curated alerts own those (C-8)', () => {
+    expect(unknownDeviceWarnings(warnings)).toEqual([warnings[3]])
+    expect(unknownDeviceWarnings([])).toEqual([])
   })
 })

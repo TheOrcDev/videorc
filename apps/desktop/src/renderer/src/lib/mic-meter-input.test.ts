@@ -38,7 +38,9 @@ describe('micLevelUnavailableCopy (plan 080 S3)', () => {
     for (const reason of REASONS.filter((reason) => reason !== 'permission-denied')) {
       expect(micLevelUnavailableCopy(reason)).toContain('Recording still works.')
     }
-    expect(micLevelUnavailableCopy('device-busy')).toContain('Another app is using this mic.')
+    expect(micLevelUnavailableCopy('device-busy')).toContain(
+      'Another app is using this microphone.'
+    )
   })
 })
 

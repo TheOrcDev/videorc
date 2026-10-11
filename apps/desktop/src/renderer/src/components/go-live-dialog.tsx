@@ -1,28 +1,25 @@
-import { AlertIcon, CaptionsIcon, LivestreamIcon, SuccessIcon } from '@/components/icons'
-import type { ReactElement } from 'react'
+import { CaptionsIcon, LivestreamIcon } from '@/components/icons'
+import { useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 
+import { ListRow, GroupedList } from '@/components/list-row'
+import { LockAlert } from '@/components/lock-alert'
+import { PlatformGlyph } from '@/components/platform-glyph'
+import { SectionLabel } from '@/components/section-label'
+import { StatusBadge, type StatusTone } from '@/components/status-badge'
+import { BroadcastInfoFields } from '@/components/streaming/broadcast-info-fields'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
 import { simulcastArmed } from '@/lib/capture'
 import type {
@@ -30,163 +27,303 @@ import type {
   CommentsWriteState,
   GoLiveDestinationPreflight,
   StreamPlatform,
-  StreamPrivacy,
+  StreamTargetSettings,
+  StreamingSettings,
   VideoSettings
 } from '@/lib/backend'
+import { broadcastInfoIssues } from '@/lib/broadcast-info'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
+import { unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
+import { GO_LIVE_DIALOG_TITLE, goLiveConfirmLabel, goLiveOnReadyLabel } from '@/lib/go-live-copy'
+import {
+  goLiveDialogView,
+  goLivePendingLabel,
+  type GoLiveDestinationView,
+  type GoLivePhase
+} from '@/lib/go-live-dialog-view'
+import { streamingWithoutTargets } from '@/lib/go-live-exclusions'
 import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
+import { OVERLAY_ITEM_LABELS, overlayStartNotices } from '@/lib/overlay-layout'
+import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
+import { isCommandKey, shortcutAriaKeys } from '@/lib/platform'
+import { destinationLabel, platformLabel } from '@/lib/platform-copy'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { YOUTUBE_STREAM_KEY_LINK_LABEL, YOUTUBE_STREAM_KEY_URL } from '@/lib/youtube-quota-copy'
 
-// The Go Live confirmation flow: review destinations + metadata, resolve any
-// error-severity blockers, then start the livestream. Extracted from StudioTab
-// so the flagship Studio surface stays focused; the dialog rides the studio
-// state machine (no second one) through the props StudioTab threads in.
+/** Why the primary waits: the dialog lists what blocks it above the button. */
+const GO_LIVE_BLOCKED_REASON = 'Fix the items above, then go live.'
+
+/** The note under a destination left out of this livestream (B-8). */
+export const GO_LIVE_EXCLUDED_NOTE = 'Only for this livestream. Your destination stays on.'
+
+/** Platforms whose destinations sign in, so a Reconnect can fix them. */
+const SIGN_IN_PLATFORMS: ReadonlySet<StreamPlatform> = new Set(['youtube', 'twitch', 'kick', 'x'])
+
+export type GoLiveResolution = 'exclude' | 'include' | 'manual-rtmp'
+
+// The Go Live dialog (plan 174 S3.4): stream details, then the destinations
+// as one grouped list, then one Alert per kind of callout (destructive for
+// what blocks, warning for limits, default for advice). ⌘↵ goes live; the
+// first focus is the title (or the primary); the pending primary names the
+// phase. The dialog rides the studio state machine (no second one) through
+// the props GoLiveDialogHost threads in.
 export function GoLiveConfirmationDialog({
   open,
   pending,
+  phase = null,
   partialSetup,
   preflight,
   entitlementGate,
   draft,
   captionsReadiness,
+  excludedTargets = [],
+  platform,
   onPatchDraft,
   onCancel,
   onConfirm,
   onContinuePartial,
   onContinueWithoutCaptions,
-  onResolveBlocker
+  onResolveBlocker,
+  onReconnect,
+  onRecheck
 }: {
   open: boolean
   pending: boolean
+  /** Where a confirmed Go Live is, for the pending label. */
+  phase?: GoLivePhase | null
   partialSetup: ReturnType<typeof useStudioCore>['goLivePartialSetup']
   preflight: ReturnType<typeof useStudioCore>['goLivePreflight']
   entitlementGate: EntitlementUiGate
   draft: ReturnType<typeof useStudioCore>['streamMetadataDraft']
   captionsReadiness: GoLiveCaptionsReadiness
+  /** Saved destinations left out of this livestream only. */
+  excludedTargets?: readonly StreamTargetSettings[]
+  platform?: string
   onPatchDraft: ReturnType<typeof useStudioCore>['patchStreamMetadataDraft']
   onCancel: () => void
   onConfirm: () => void
   onContinuePartial: () => void
   onContinueWithoutCaptions: () => void
-  onResolveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => void
+  onResolveBlocker: (targetId: string, resolution: GoLiveResolution) => void
+  /** Signs the platform in again (opens the browser). */
+  onReconnect?: (platform: StreamPlatform) => void
+  /** Runs the check again, after a Reconnect. */
+  onRecheck?: () => void
 }): ReactElement {
   const {
     captureConfig,
     performanceCheck,
     streamOutputTopologyPreflight,
-    streamSharedEncodeFallbackVideo
+    streamSharedEncodeFallbackVideo,
+    overlayLayout
   } = useStudioCore()
+  const titleRef = useRef<HTMLInputElement>(null)
+  const primaryRef = useRef<HTMLButtonElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  // Destinations the streamer sent to sign in again: their row offers "Check
+  // again" once they are back. Cleared when the dialog closes.
+  const [reconnected, setReconnected] = useState<readonly string[]>([])
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (!open) setReconnected([])
+  }
+
+  // The livestream this Go Live sends: the saved destinations minus the ones
+  // left out of it (B-8). The advice below describes this one, so a left-out
+  // vertical or Instagram destination is never mentioned.
+  const excludedIds = excludedTargets.map((target) => target.id)
+  const sentStreaming = streamingWithoutTargets(captureConfig.streaming, excludedIds)
+  const sentCapture =
+    sentStreaming === captureConfig.streaming
+      ? captureConfig
+      : { ...captureConfig, streaming: sentStreaming }
+  const simulcast = simulcastArmed(sentCapture)
+
+  // D13 (plan 164): every overlay switch pair this session cannot honour,
+  // said before start. The auxiliary leg is the topology's, never an
+  // overlay's: the vertical leg when simulcast is armed, a split stream leg
+  // when the output check proved one, else the one shared encode.
+  const overlayNotices = overlayStartNotices(
+    {
+      recordEnabled: captureConfig.recordEnabled,
+      streamEnabled: true,
+      auxLeg: simulcast
+        ? 'vertical-simulcast'
+        : captureConfig.recordEnabled &&
+            !streamSharedEncodeFallbackVideo &&
+            (streamOutputTopologyPreflight.state !== 'ready' ||
+              streamOutputTopologyPreflight.result.outputRoles.includes('stream'))
+          ? 'stream'
+          : 'none'
+    },
+    overlayLayout
+  )
   // What the finished check and this computer's measurement say about the
   // stream as configured, before anything starts.
   const streamPerformanceAdvice =
-    streamOutputTopologyPreflight.state === 'ready' && !simulcastArmed(captureConfig)
+    streamOutputTopologyPreflight.state === 'ready' && !simulcast
       ? softwareStreamAdvice({
           streamVideo: streamOutputTopologyPreflight.result.streamProfile,
           encodeBackend: streamOutputTopologyPreflight.result.effectiveEncodeBackend,
           state: performanceCheck
         })
       : null
-  const scheduledTargets = captureConfig.streaming.targets.filter(
-    (target) => target.enabled && target.scheduledEventId
+  const sentTargets = sentStreaming.targets.filter((target) => target.enabled)
+  const hasScheduledTargets = sentTargets.some((target) => target.scheduledEventId)
+  // The instant draft's details apply to every destination not tied to a
+  // saved event; privacy reaches YouTube only.
+  const hasInstantTargets = sentTargets.some((target) => !target.scheduledEventId)
+  const instantYouTube = sentTargets.some(
+    (target) => !target.scheduledEventId && target.platform === 'youtube'
   )
+  const titleIssues =
+    hasInstantTargets && draft ? broadcastInfoIssues(draft, { titleRequired: true }) : null
+  const view = goLiveDialogView(preflight, {
+    titleField: hasInstantTargets,
+    titleMissing: hasInstantTargets && (!draft || draft.title.trim() === '')
+  })
   const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
-  const entitlementUpgradeUrl = entitlementBlocker?.upgradeUrl
-  const errorIssues = preflight?.issues.filter((issue) => issue.severity === 'error') ?? []
-  const warningIssues = preflight?.issues.filter((issue) => issue.severity === 'warning') ?? []
-  const errorCount = errorIssues.length
-  const entitlementIssueCount =
-    entitlementBlocker &&
-    !preflight?.issues.some((issue) => issue.message === entitlementBlocker.reason)
-      ? 1
-      : 0
-  const captionsIssueCount = captionsReadiness.blocksStart ? 1 : 0
-  const issueCount = errorCount + entitlementIssueCount + captionsIssueCount
-  // "Resolve before going live" means exactly that: error-severity issues keep
-  // the confirm button locked until resolved (disable the destination, switch
-  // it to Manual RTMP, or fix it in the Streaming tab).
-  const hasInstantTargets = captureConfig.streaming.targets.some(
-    (target) => target.enabled && !target.scheduledEventId
-  )
   const blocked =
     Boolean(entitlementBlocker) ||
     captionsReadiness.blocksStart ||
-    (preflight ? !preflight.valid : false)
+    Boolean(titleIssues?.title || titleIssues?.description) ||
+    (hasInstantTargets && !draft) ||
+    !view.destinationsReady
+  const canConfirm = !pending && Boolean(preflight) && !blocked
+  const canContinuePartial =
+    !pending && !entitlementBlocker && !captionsReadiness.blocksStart && Boolean(partialSetup)
+  const confirmAccelerator = shortcutAccelerator('go-live-confirm')
+
+  // ⌘↵ is the primary, wherever focus is in the dialog (B-14).
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'Enter' || !isCommandKey(event, platform)) return
+    event.preventDefault()
+    if (event.repeat) return
+    if (partialSetup) {
+      if (canContinuePartial) onContinuePartial()
+    } else if (canConfirm) {
+      onConfirm()
+    }
+  }
+
+  // The first focus is the title, else the primary, never a button that
+  // changes a destination (B-14).
+  const focusFirst = (event: Event): void => {
+    event.preventDefault()
+    for (const element of [titleRef.current, primaryRef.current, cancelRef.current]) {
+      if (element && !element.disabled) {
+        element.focus()
+        return
+      }
+    }
+  }
+
+  const reconnect = (destination: GoLiveDestinationPreflight): void => {
+    onReconnect?.(destination.platform)
+    setReconnected((current) =>
+      current.includes(destination.targetId) ? current : [...current, destination.targetId]
+    )
+  }
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
-      <DialogContent className="max-h-[88vh] gap-4 overflow-hidden sm:max-w-3xl">
+      <DialogContent
+        className="gap-4"
+        data-testid="go-live-dialog"
+        size="xl"
+        onKeyDown={onKeyDown}
+        onOpenAutoFocus={focusFirst}
+      >
         <DialogHeader>
-          <DialogTitle>Confirm Go Live</DialogTitle>
+          <DialogTitle>{GO_LIVE_DIALOG_TITLE}</DialogTitle>
           <DialogDescription>
-            Review destinations and metadata before Videorc starts the livestream.
+            Check your destinations and stream details before Videorc starts the livestream.
           </DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[60vh] pr-3">
-          <div className="flex flex-col gap-4">
-            {scheduledTargets.map((target) => (
-              <div
-                key={target.id}
-                className="rounded-row border border-border bg-foreground/[0.03] p-3"
-              >
-                <p className="font-medium">
-                  {target.label}:{' '}
-                  {preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
-                    ?.title ?? target.scheduledEventTitle}
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  {[
-                    platformLabel(target.platform),
-                    target.accountLabel,
-                    // X broadcasts carry no visibility; only YouTube shows one.
-                    target.platform === 'youtube'
-                      ? (preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
-                          ?.privacy ?? target.scheduledPrivacy)
-                      : undefined,
-                    (preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
-                      ?.startUtc ?? target.scheduledStartUtc)
-                      ? new Date(
-                          preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
-                            ?.startUtc ?? target.scheduledStartUtc!
-                        ).toLocaleString()
-                      : undefined
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </p>
-                <p className="text-sm">
-                  This starts the saved event now, even if its scheduled time is earlier or later.
-                  {hasInstantTargets &&
-                    'The instant-stream metadata below applies to other destinations.'}
-                </p>
-              </div>
-            ))}
+        <DialogBody>
+          <div className="flex flex-col gap-5">
+            {hasInstantTargets ? (
+              <section aria-label="Stream details" className="flex flex-col gap-2">
+                <SectionLabel as="h3">Stream details</SectionLabel>
+                <BroadcastInfoFields
+                  disabled={pending || !draft}
+                  idPrefix="go-live"
+                  privacyNote="Twitch, Kick and X are always public."
+                  titleRef={titleRef}
+                  titleRequired
+                  value={{
+                    title: draft?.title ?? '',
+                    description: draft?.description ?? '',
+                    privacy: instantYouTube ? (draft?.defaultPrivacy ?? 'private') : undefined
+                  }}
+                  onChange={(patch) =>
+                    onPatchDraft({
+                      ...(patch.title !== undefined ? { title: patch.title } : {}),
+                      ...(patch.description !== undefined
+                        ? { description: patch.description }
+                        : {}),
+                      ...(patch.privacy !== undefined ? { defaultPrivacy: patch.privacy } : {})
+                    })
+                  }
+                />
+              </section>
+            ) : null}
 
-            {hasInstantTargets && (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field>
-                  <FieldLabel htmlFor="go-live-title">Title</FieldLabel>
-                  <Input
-                    id="go-live-title"
-                    disabled={pending || !draft}
-                    value={draft?.title ?? ''}
-                    onChange={(event) => onPatchDraft({ title: event.target.value })}
+            <section aria-label="Destinations" className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-3">
+                <SectionLabel as="h3">Destinations</SectionLabel>
+                {view.summary ? (
+                  <StatusBadge
+                    tone={view.destinationsReady ? 'good' : 'warn'}
+                    value={view.summary}
                   />
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="go-live-description">Description</FieldLabel>
-                  <Textarea
-                    className="min-h-20"
-                    disabled={pending || !draft}
-                    id="go-live-description"
-                    value={draft?.description ?? ''}
-                    onChange={(event) => onPatchDraft({ description: event.target.value })}
-                  />
-                </Field>
+                ) : null}
               </div>
-            )}
+              {hasScheduledTargets ? (
+                <Alert>
+                  <AlertDescription>
+                    A scheduled event starts now, even if its time is earlier or later.
+                    {hasInstantTargets
+                      ? ' The stream details above go to the other destinations.'
+                      : ''}
+                  </AlertDescription>
+                </Alert>
+              ) : null}
+              {view.destinations.length || excludedTargets.length ? (
+                <GroupedList data-testid="go-live-destinations">
+                  {view.destinations.map((row) => (
+                    <GoLiveDestinationRow
+                      key={row.destination.targetId}
+                      pending={pending}
+                      reconnected={reconnected.includes(row.destination.targetId)}
+                      scheduledFallback={sentTargets.find(
+                        (target) => target.id === row.destination.targetId
+                      )}
+                      view={row}
+                      onRecheck={onRecheck}
+                      onReconnect={onReconnect ? reconnect : undefined}
+                      onResolveBlocker={onResolveBlocker}
+                    />
+                  ))}
+                  {excludedTargets.map((target) => (
+                    <GoLiveExcludedRow
+                      key={target.id}
+                      pending={pending}
+                      target={target}
+                      onInclude={() => onResolveBlocker(target.id, 'include')}
+                    />
+                  ))}
+                </GroupedList>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No destination is on. Turn one on in Livestream → Setup.
+                </p>
+              )}
+            </section>
 
             {captionsReadiness.kind !== 'disabled' ? (
               <GoLiveCaptionsStatus
@@ -196,120 +333,40 @@ export function GoLiveConfirmationDialog({
               />
             ) : null}
 
-            {hasInstantTargets && (
-              <Field>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <FieldLabel>Default privacy</FieldLabel>
-                  {draft?.defaultPrivacy && draft.defaultPrivacy !== 'public' ? (
-                    <Badge variant="warning">Not public</Badge>
-                  ) : null}
-                </div>
-                <Select
-                  disabled={pending || !draft}
-                  value={draft?.defaultPrivacy ?? 'private'}
-                  onValueChange={(value) =>
-                    onPatchDraft({ defaultPrivacy: value as StreamPrivacy })
-                  }
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="private">Private</SelectItem>
-                    <SelectItem value="unlisted">Unlisted</SelectItem>
-                    <SelectItem value="public">Public</SelectItem>
-                  </SelectContent>
-                </Select>
-                <FieldDescription>
-                  {draft?.defaultPrivacy === 'public'
-                    ? 'YouTube will be discoverable from the channel while live. '
-                    : 'YouTube will not be discoverable from the channel while live. '}
-                  Twitch and X broadcasts are always public.
-                </FieldDescription>
-              </Field>
-            )}
-
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-sm font-medium">Destinations</span>
-                <GoLiveDestinationSummary
-                  issueCount={issueCount}
-                  warningCount={warningIssues.length}
-                />
-              </div>
-              <div className="grid gap-2">
-                {preflight?.destinations.length ? (
-                  preflight.destinations.map((destination) => (
-                    <GoLiveDestinationRow
-                      destination={destination}
-                      key={destination.targetId}
-                      pending={pending}
-                      onResolveBlocker={onResolveBlocker}
-                    />
-                  ))
-                ) : (
-                  <div className="rounded-row border border-border bg-foreground/[0.03] p-3 text-sm text-muted-foreground">
-                    No livestream destinations are enabled.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <GoLiveSimulcastAdvisory />
-
             {entitlementBlocker ? (
-              <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-warning-foreground dark:text-warning">
-                  <AlertIcon className="size-4" weight="fill" />
-                  {entitlementUpgradeUrl ? 'Premium issue' : 'Streaming entitlement issue'}
-                </div>
-                <p className="text-sm text-muted-foreground">{entitlementBlocker.reason}</p>
-                {entitlementUpgradeUrl ? (
-                  <Button
-                    className="w-fit"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => openExternalUrl(entitlementUpgradeUrl)}
-                  >
-                    View Premium
-                  </Button>
-                ) : null}
-              </div>
+              <LockAlert
+                action={unlockActionForGate(entitlementBlocker)}
+                reason={entitlementBlocker.reason}
+              />
             ) : null}
 
-            {errorIssues.length ? (
-              <div className="flex flex-col gap-2 rounded-row border border-destructive/25 bg-destructive/5 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-destructive">
-                  <AlertIcon className="size-4" weight="fill" />
-                  Resolve before going live
-                </div>
-                <ul className="grid gap-1.5 text-sm text-muted-foreground">
-                  {errorIssues.map((issue, index) => (
-                    <li key={`${issue.platform ?? 'global'}-${issue.targetId ?? 'all'}-${index}`}>
-                      {issue.platform ? `${platformLabel(issue.platform)}: ` : ''}
-                      {issue.message}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+            {view.generalErrors.length ? (
+              <Alert data-testid="go-live-blockers" variant="destructive">
+                <AlertTitle>Fix before going live</AlertTitle>
+                <AlertDescription>
+                  <ul className="grid gap-1">
+                    {view.generalErrors.map((message) => (
+                      <li key={message}>{message}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
             ) : null}
 
-            {warningIssues.length ? (
-              <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <AlertIcon className="size-4 text-warning" weight="fill" />
-                  Chat limitations
-                </div>
-                <ul className="grid gap-1.5 text-sm text-muted-foreground">
-                  {warningIssues.map((issue, index) => (
-                    <li key={`${issue.platform ?? 'global'}-${issue.targetId ?? 'all'}-${index}`}>
-                      {issue.platform ? `${platformLabel(issue.platform)}: ` : ''}
-                      {issue.message}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+            {view.warnings.length ? (
+              <Alert data-testid="go-live-limits" variant="warning">
+                <AlertTitle>Chat limits</AlertTitle>
+                <AlertDescription>
+                  <ul className="grid gap-1">
+                    {view.warnings.map((message) => (
+                      <li key={message}>{message}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
             ) : null}
+
+            {simulcast ? <GoLiveSimulcastAdvisory streaming={sentStreaming} /> : null}
 
             <GoLiveOutputAdvice
               advice={streamPerformanceAdvice}
@@ -317,69 +374,112 @@ export function GoLiveConfirmationDialog({
               sharedVideo={streamSharedEncodeFallbackVideo}
             />
 
-            {partialSetup ? (
-              <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <AlertIcon className="size-4 text-warning" weight="fill" />
-                  Some destinations failed setup
-                </div>
-                <ul className="grid gap-1.5 text-sm text-muted-foreground">
-                  {partialSetup.failures.map((failure) => (
-                    <li key={failure.targetId} className="flex flex-col gap-1.5">
-                      <span>
-                        {platformLabel(failure.platform)}: {failure.label} - {failure.message}
-                      </span>
-                      {failure.fallback === 'manual-rtmp' ? (
-                        // Plan 094 (G5): YouTube's API is paused, so the key path
-                        // is the way to go live. The destination flips to its
-                        // stream key; the key itself comes from YouTube Studio.
-                        <span className="flex flex-wrap items-center gap-2">
-                          <Button
-                            disabled={pending}
-                            size="sm"
-                            variant="outline"
-                            onClick={() => onResolveBlocker(failure.targetId, 'manual-rtmp')}
-                          >
-                            Use stream key
-                          </Button>
-                          <Button
-                            className="h-auto p-0 text-xs"
-                            size="sm"
-                            variant="link"
-                            onClick={() => openExternalUrl(YOUTUBE_STREAM_KEY_URL)}
-                          >
-                            {YOUTUBE_STREAM_KEY_LINK_LABEL}
-                          </Button>
+            {overlayNotices.length ? (
+              <Alert data-videorc-go-live-overlay-notices="">
+                <AlertTitle>Overlays this time</AlertTitle>
+                <AlertDescription>
+                  <ul className="grid gap-1">
+                    {overlayNotices.map((notice) => (
+                      <li key={notice.item} data-videorc-go-live-overlay-notice={notice.item}>
+                        <span className="font-medium text-foreground">
+                          {OVERLAY_ITEM_LABELS[notice.item]}
                         </span>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-                <p className="text-xs text-muted-foreground">
-                  Ready: {partialSetup.readyLabels.join(', ')}
-                </p>
-              </div>
+                        {' · '}
+                        {notice.notice}
+                      </li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {partialSetup ? (
+              <Alert data-testid="go-live-partial-setup" variant="warning">
+                <AlertTitle>Some destinations couldn&apos;t be set up</AlertTitle>
+                <AlertDescription className="flex flex-col gap-2">
+                  <ul className="grid gap-1.5">
+                    {partialSetup.failures.map((failure) => (
+                      <li key={failure.targetId} className="flex flex-col gap-1.5">
+                        <span>
+                          {platformLabel(failure.platform)}: {failure.label}. {failure.message}
+                        </span>
+                        {failure.fallback === 'manual-rtmp' ? (
+                          // Plan 094 (G5): YouTube's API is paused, so the key path
+                          // is the way to go live. The destination flips to its
+                          // stream key, a saved change; the key itself comes
+                          // from YouTube Studio.
+                          <span className="flex flex-wrap items-center gap-2">
+                            <Button
+                              disabled={pending}
+                              variant="outline"
+                              onClick={() => onResolveBlocker(failure.targetId, 'manual-rtmp')}
+                            >
+                              Use stream key
+                            </Button>
+                            <Button
+                              className="h-auto p-0 text-xs"
+                              variant="link"
+                              onClick={() => openExternalUrl(YOUTUBE_STREAM_KEY_URL)}
+                            >
+                              {YOUTUBE_STREAM_KEY_LINK_LABEL}
+                            </Button>
+                          </span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-xs">Ready: {partialSetup.readyLabels.join(', ')}</p>
+                </AlertDescription>
+              </Alert>
             ) : null}
           </div>
-        </ScrollArea>
+        </DialogBody>
 
         <DialogFooter>
-          <Button disabled={pending} variant="outline" onClick={onCancel}>
+          <Button ref={cancelRef} disabled={pending} variant="ghost" onClick={onCancel}>
             Cancel
           </Button>
           {partialSetup ? (
             <Button
-              disabled={pending || Boolean(entitlementBlocker) || captionsReadiness.blocksStart}
+              ref={primaryRef}
+              aria-keyshortcuts={shortcutAriaKeys(confirmAccelerator, platform)}
+              disabled={!canContinuePartial}
               onClick={onContinuePartial}
             >
               <LivestreamIcon data-icon="inline-start" weight="fill" />
-              {pending ? 'Starting…' : 'Continue With Ready'}
+              {pending ? goLivePendingLabel(phase) : goLiveOnReadyLabel(partialSetup.readyLabels)}
+              {pending ? null : (
+                <ShortcutKeys
+                  accelerator={confirmAccelerator}
+                  className="ml-1"
+                  platform={platform}
+                />
+              )}
             </Button>
           ) : (
-            <Button disabled={pending || !preflight || blocked} onClick={onConfirm}>
-              <LivestreamIcon data-icon="inline-start" weight="fill" />
-              {pending ? 'Checking…' : blocked ? 'Resolve Blockers First' : 'Confirm Go Live'}
-            </Button>
+            // The primary always says what it does (D3); while something above
+            // blocks it, the reason rides on hover and focus, never as its label.
+            <DisabledReason reason={!pending && blocked ? GO_LIVE_BLOCKED_REASON : null}>
+              <Button
+                ref={primaryRef}
+                aria-keyshortcuts={shortcutAriaKeys(confirmAccelerator, platform)}
+                data-testid="go-live-confirm"
+                disabled={!canConfirm}
+                onClick={onConfirm}
+              >
+                <LivestreamIcon data-icon="inline-start" weight="fill" />
+                {pending
+                  ? goLivePendingLabel(phase)
+                  : goLiveConfirmLabel(preflight?.destinations.length ?? 0)}
+                {pending ? null : (
+                  <ShortcutKeys
+                    accelerator={confirmAccelerator}
+                    className="ml-1"
+                    platform={platform}
+                  />
+                )}
+              </Button>
+            </DisabledReason>
           )}
         </DialogFooter>
       </DialogContent>
@@ -404,12 +504,10 @@ export function GoLiveOutputAdvice({
   if (advice?.kind === 'below-floor') {
     return (
       <Alert variant="warning">
-        <AlertIcon weight="fill" />
         <AlertTitle>This computer may not keep up</AlertTitle>
         <AlertDescription>
           Nothing held steady in its performance check, not even {outputLabel(advice.floor)}.
-          Viewers will likely see a stuttering picture. Close other apps, or check again in
-          Recording → Output.
+          Viewers will likely see a stuttering picture. Close other apps, or check again in Output.
         </AlertDescription>
       </Alert>
     )
@@ -417,7 +515,6 @@ export function GoLiveOutputAdvice({
   if (advice?.kind === 'step-down') {
     return (
       <Alert>
-        <AlertIcon weight="fill" />
         <AlertTitle>Streaming at {outputLabel(advice.video)}</AlertTitle>
         <AlertDescription>
           This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
@@ -430,11 +527,10 @@ export function GoLiveOutputAdvice({
   if (sharedVideo && recordEnabled) {
     return (
       <Alert>
-        <AlertIcon weight="fill" />
         <AlertTitle>Recording will match the stream</AlertTitle>
         <AlertDescription>
           This computer can&apos;t encode a separate recording while streaming, so both use{' '}
-          {outputLabel(sharedVideo)} at {sharedVideo.bitrateKbps} kbps for this session.
+          {formatVideoQuality(sharedVideo, { bitrate: true })} for this session.
         </AlertDescription>
       </Alert>
     )
@@ -442,6 +538,10 @@ export function GoLiveOutputAdvice({
   return null
 }
 
+/**
+ * Captions for this livestream: a quiet row when ready, advice when skipped
+ * for this livestream, and a blocker with its one-livestream way out.
+ */
 export function GoLiveCaptionsStatus({
   readiness,
   pending,
@@ -451,39 +551,40 @@ export function GoLiveCaptionsStatus({
   pending: boolean
   onContinueWithoutCaptions: () => void
 }): ReactElement {
-  const blocked = readiness.kind === 'blocked'
-  const ready = readiness.kind === 'ready'
+  if (readiness.kind === 'blocked') {
+    return (
+      <Alert data-testid="go-live-captions" variant="destructive">
+        <AlertTitle>Captions can&apos;t start</AlertTitle>
+        <AlertDescription className="flex flex-col items-start gap-2">
+          <span>{readiness.description}</span>
+          <Button disabled={pending} variant="outline" onClick={onContinueWithoutCaptions}>
+            Go live without captions
+          </Button>
+        </AlertDescription>
+      </Alert>
+    )
+  }
+  if (readiness.kind === 'skipped') {
+    return (
+      <Alert data-testid="go-live-captions">
+        <AlertTitle>No captions this time</AlertTitle>
+        <AlertDescription>{readiness.description}</AlertDescription>
+      </Alert>
+    )
+  }
   return (
-    <div
-      className={
-        blocked
-          ? 'flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3'
-          : 'flex flex-col gap-2 rounded-row border border-border bg-foreground/[0.03] p-3'
-      }
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <CaptionsIcon className="size-4 text-muted-foreground" weight="duotone" />
-          Captions
-        </div>
-        <Badge variant={ready ? 'success' : blocked ? 'warning' : 'secondary'}>
-          {ready ? <SuccessIcon data-icon="inline-start" weight="fill" /> : null}
-          {readiness.title.replace(/^Captions\s*/i, '')}
-        </Badge>
-      </div>
-      <p className="text-sm text-muted-foreground">{readiness.description}</p>
-      {blocked ? (
-        <Button
-          className="w-fit"
-          disabled={pending}
-          size="sm"
-          variant="outline"
-          onClick={onContinueWithoutCaptions}
+    <GroupedList data-testid="go-live-captions">
+      <section className="flex flex-col">
+        <ListRow
+          className="h-auto min-h-10 py-1.5"
+          icon={<CaptionsIcon className="size-4 text-muted-foreground" weight="duotone" />}
+          title="Captions"
         >
-          Continue without captions
-        </Button>
-      ) : null}
-    </div>
+          <StatusBadge tone={readiness.kind === 'ready' ? 'good' : 'neutral'} value="Ready" />
+        </ListRow>
+        <p className="pr-3 pb-3 pl-10.5 text-xs text-muted-foreground">{readiness.description}</p>
+      </section>
+    </GroupedList>
   )
 }
 
@@ -497,73 +598,179 @@ function openExternalUrl(url: string): void {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-function GoLiveDestinationRow({
-  destination,
+/**
+ * One destination (plan 174 S3.4, B-12 and D-7): the platform tile, its
+ * name, the account (or "Stream key") as context, one status chip; under it
+ * the scheduled event, what it needs, its chat, and its fixes. "Go live
+ * without {name}" is for this livestream only (B-8); "Use stream key" (S2.2's
+ * one name for that fix) is a saved change; "Reconnect {platform}…" signs in
+ * again, then "Check again" asks the backend once more.
+ */
+export function GoLiveDestinationRow({
+  view,
   pending,
-  onResolveBlocker
+  reconnected = false,
+  scheduledFallback,
+  onResolveBlocker,
+  onReconnect,
+  onRecheck
 }: {
-  destination: GoLiveDestinationPreflight
+  view: GoLiveDestinationView
   pending: boolean
-  onResolveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => void
+  /** The streamer was sent to sign in again: offer "Check again". */
+  reconnected?: boolean
+  /** The saved target, for a scheduled event the preflight didn't echo. */
+  scheduledFallback?: StreamTargetSettings
+  onResolveBlocker: (targetId: string, resolution: GoLiveResolution) => void
+  onReconnect?: (destination: GoLiveDestinationPreflight) => void
+  onRecheck?: () => void
 }): ReactElement {
+  const { destination, ready, problem } = view
+  const titleId = useId()
+  const oauth = destination.authMode === 'oauth'
+  const scheduledTitle = destination.scheduled?.title ?? scheduledFallback?.scheduledEventTitle
+  const scheduledStart = destination.scheduled?.startUtc ?? scheduledFallback?.scheduledStartUtc
+  // X broadcasts carry no visibility; only YouTube shows one.
+  const scheduledPrivacy =
+    destination.platform === 'youtube'
+      ? (destination.scheduled?.privacy ?? scheduledFallback?.scheduledPrivacy)
+      : undefined
+  const scheduled =
+    destination.scheduled || scheduledFallback?.scheduledEventId
+      ? [
+          scheduledTitle ? `Scheduled: ${scheduledTitle}` : 'Scheduled event',
+          scheduledPrivacy ? capitalize(scheduledPrivacy) : undefined,
+          scheduledStart ? new Date(scheduledStart).toLocaleString() : undefined
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : null
+  const canSignIn = oauth && SIGN_IN_PLATFORMS.has(destination.platform)
+
   return (
-    <div className="grid gap-2 rounded-row border border-border bg-foreground/[0.03] p-3 sm:grid-cols-[1fr_auto]">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{destination.label}</span>
-          <Badge variant={destination.ready ? 'success' : 'destructive'}>
-            {destination.ready ? (
-              <SuccessIcon data-icon="inline-start" weight="fill" />
-            ) : (
-              <AlertIcon data-icon="inline-start" weight="fill" />
-            )}
-            {destination.ready ? 'Ready' : 'Blocked'}
-          </Badge>
-          <Badge variant="outline">
-            {destination.authMode === 'oauth' ? 'OAuth' : 'Manual RTMP'}
-          </Badge>
-        </div>
-        <p className="mt-1 truncate text-sm text-muted-foreground">
-          {destination.title || 'Untitled'}
-        </p>
-        {destination.accountLabel ? (
-          <p className="mt-0.5 text-xs text-muted-foreground">{destination.accountLabel}</p>
-        ) : null}
+    <section
+      aria-labelledby={titleId}
+      className="flex flex-col"
+      data-ready={ready}
+      data-slot="go-live-destination"
+      data-target-id={destination.targetId}
+    >
+      <ListRow
+        className="h-auto min-h-10 py-1.5"
+        // How it connects, in the Livestream page's words: the account it
+        // signs in with, or its stream key (plan 174 S2.2, D-7).
+        context={oauth ? (destination.accountLabel ?? 'Sign in') : 'Stream key'}
+        icon={<PlatformGlyph platform={destination.platform} />}
+        title={<span id={titleId}>{destinationLabel(destination.label)}</span>}
+      >
+        <StatusBadge tone={ready ? 'good' : 'warn'} value={ready ? 'Ready' : 'Needs attention'} />
+      </ListRow>
+      <div
+        className="flex min-w-0 flex-col gap-2 pr-3 pb-3 pl-13"
+        data-slot="go-live-destination-body"
+      >
+        {scheduled ? <p className="text-xs text-muted-foreground">{scheduled}</p> : null}
+        {!ready && problem ? <p className="text-xs text-foreground">{problem}</p> : null}
         <GoLiveCommentsStatus
           message={destination.chatMessage}
           read={destination.chatRead}
           write={destination.chatWrite}
         />
-        {!destination.ready ? (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {destination.authMode === 'oauth' ? (
+        {!ready ? (
+          <div className="flex flex-wrap gap-2">
+            {canSignIn && onReconnect ? (
+              reconnected && onRecheck ? (
+                <Button disabled={pending} variant="outline" onClick={onRecheck}>
+                  Check again
+                </Button>
+              ) : (
+                <Button
+                  disabled={pending}
+                  variant="outline"
+                  onClick={() => onReconnect(destination)}
+                >
+                  {destination.accountLabel ? 'Reconnect' : 'Connect'}{' '}
+                  {platformLabel(destination.platform)}…
+                </Button>
+              )
+            ) : null}
+            {oauth ? (
               <Button
                 disabled={pending}
-                size="sm"
                 variant="outline"
                 onClick={() => onResolveBlocker(destination.targetId, 'manual-rtmp')}
               >
-                Switch to Manual RTMP
+                Use stream key
               </Button>
             ) : null}
             <Button
               disabled={pending}
-              size="sm"
               variant="outline"
-              onClick={() => onResolveBlocker(destination.targetId, 'disable')}
+              onClick={() => onResolveBlocker(destination.targetId, 'exclude')}
             >
-              Go live without {destination.label}
+              Go live without {destinationLabel(destination.label)}
             </Button>
           </div>
         ) : null}
       </div>
-      <p className="text-xs text-muted-foreground sm:max-w-64 sm:text-right">
-        {destination.message}
-      </p>
-    </div>
+    </section>
   )
 }
 
+/** A destination left out of this livestream (B-8): it stays on in Livestream. */
+export function GoLiveExcludedRow({
+  target,
+  pending,
+  onInclude
+}: {
+  target: StreamTargetSettings
+  pending: boolean
+  onInclude: () => void
+}): ReactElement {
+  const titleId = useId()
+  return (
+    <section
+      aria-labelledby={titleId}
+      className="flex flex-col"
+      data-slot="go-live-excluded"
+      data-target-id={target.id}
+    >
+      <ListRow
+        className="h-auto min-h-10 py-1.5"
+        context={target.authMode === 'oauth' ? (target.accountLabel ?? 'Sign in') : 'Stream key'}
+        icon={<PlatformGlyph platform={target.platform} />}
+        title={<span id={titleId}>{target.label}</span>}
+      >
+        <StatusBadge tone="neutral" value="Left out" />
+      </ListRow>
+      <div className="flex min-w-0 flex-wrap items-center gap-2 pr-3 pb-3 pl-13">
+        <p className="min-w-0 flex-1 text-xs text-muted-foreground">{GO_LIVE_EXCLUDED_NOTE}</p>
+        <Button disabled={pending} variant="outline" onClick={onInclude}>
+          Add back
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+const READ_TONE: Record<CommentsReadState, StatusTone> = {
+  ready: 'good',
+  connecting: 'neutral',
+  'waiting-for-broadcast-context': 'neutral',
+  ended: 'neutral',
+  failed: 'error',
+  unavailable: 'neutral'
+}
+
+const WRITE_TONE: Record<CommentsWriteState, StatusTone> = {
+  ready: 'good',
+  'missing-scope': 'warn',
+  'read-only': 'neutral',
+  failed: 'error',
+  unavailable: 'neutral'
+}
+
+/** What chat can do on a destination: read, send, and why not. */
 export function GoLiveCommentsStatus({
   read,
   write,
@@ -574,62 +781,14 @@ export function GoLiveCommentsStatus({
   message: string
 }): ReactElement {
   return (
-    <div className="mt-2 flex flex-col gap-1.5">
-      <div aria-label="Chat read and send status" className="flex flex-wrap gap-1.5">
-        <Badge
-          variant={
-            read === 'ready'
-              ? 'success'
-              : read === 'failed'
-                ? 'destructive'
-                : read === 'connecting' || read === 'waiting-for-broadcast-context'
-                  ? 'warning'
-                  : 'outline'
-          }
-        >
-          Read: {commentsReadLabel(read)}
-        </Badge>
-        <Badge
-          variant={
-            write === 'ready'
-              ? 'success'
-              : write === 'failed'
-                ? 'destructive'
-                : write === 'missing-scope'
-                  ? 'warning'
-                  : 'outline'
-          }
-        >
-          Send: {commentsWriteLabel(write)}
-        </Badge>
+    <div className="flex flex-col gap-1.5">
+      <div aria-label="Chat read and send status" className="flex flex-wrap gap-1.5" role="group">
+        <StatusBadge label="Read" tone={READ_TONE[read]} value={commentsReadLabel(read)} />
+        <StatusBadge label="Send" tone={WRITE_TONE[write]} value={commentsWriteLabel(write)} />
       </div>
-      <p className="text-xs text-muted-foreground">{message}</p>
+      {message ? <p className="text-xs text-muted-foreground">{message}</p> : null}
     </div>
   )
-}
-
-export function GoLiveDestinationSummary({
-  issueCount,
-  warningCount
-}: {
-  issueCount: number
-  warningCount: number
-}): ReactElement {
-  if (issueCount > 0) {
-    return (
-      <Badge variant="destructive">
-        {issueCount} issue{issueCount === 1 ? '' : 's'}
-      </Badge>
-    )
-  }
-  if (warningCount > 0) {
-    return (
-      <Badge variant="warning">
-        Ready · {warningCount} chat limitation{warningCount === 1 ? '' : 's'}
-      </Badge>
-    )
-  }
-  return <Badge variant="success">Ready</Badge>
 }
 
 function commentsReadLabel(state: CommentsReadState): string {
@@ -654,9 +813,9 @@ function commentsWriteLabel(state: CommentsWriteState): string {
     case 'ready':
       return 'Ready'
     case 'missing-scope':
-      return 'Reconnect needed'
+      return 'Reconnect to send'
     case 'read-only':
-      return 'Receive only'
+      return 'Read-only'
     case 'failed':
       return 'Failed'
     case 'unavailable':
@@ -664,35 +823,16 @@ function commentsWriteLabel(state: CommentsWriteState): string {
   }
 }
 
-function platformLabel(platform: StreamPlatform): string {
-  switch (platform) {
-    case 'youtube':
-      return 'YouTube'
-    case 'twitch':
-      return 'Twitch'
-    case 'kick':
-      return 'Kick'
-    case 'x':
-      return 'X'
-    case 'tiktok':
-      return 'TikTok'
-    case 'instagram':
-      return 'Instagram'
-    case 'custom':
-      return 'Custom RTMP'
-  }
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1)
 }
 
 // Dual-orientation sessions double the encode count and the upstream
-// bandwidth — an ADVISORY, never a block (per-target dropped-frame status is
-// the honest live signal). Instagram's manual publish step lives here because
-// it happens AT Go Live time, not while configuring the card.
-function GoLiveSimulcastAdvisory(): ReactElement | null {
-  const { captureConfig } = useStudioCore()
-  if (!simulcastArmed(captureConfig)) {
-    return null
-  }
-  const { streaming } = captureConfig
+// bandwidth: advice, never a block (per-target dropped-frame status is the
+// honest live signal). Instagram's manual publish step lives here because it
+// happens AT Go Live time, not while configuring the card. `streaming` is
+// what this Go Live sends (left-out destinations already off).
+function GoLiveSimulcastAdvisory({ streaming }: { streaming: StreamingSettings }): ReactElement {
   const enabled = streaming.targets.filter(
     (target) => target.enabled && streaming.enabledTargetIds.includes(target.id)
   )
@@ -703,18 +843,20 @@ function GoLiveSimulcastAdvisory(): ReactElement | null {
   const mbps = Math.max(1, Math.round(totalKbps / 1000))
   const hasInstagram = enabled.some((target) => target.platform === 'instagram')
   return (
-    <div className="flex flex-col gap-1 rounded-row border border-border bg-foreground/[0.03] p-3">
-      <span className="text-sm font-medium">Streaming both orientations</span>
-      <span className="text-xs text-muted-foreground">
-        The horizontal scene streams to your landscape destinations while the saved vertical scene
-        streams to the vertical ones, about {mbps} Mbps upstream across all legs.
-      </span>
-      {hasInstagram ? (
-        <span className="text-xs text-muted-foreground">
-          Instagram: once Videorc starts sending, press “Go live” in Instagram Live Producer to
-          publish the stream to your profile.
+    <Alert>
+      <AlertTitle>Streaming both orientations</AlertTitle>
+      <AlertDescription className="flex flex-col gap-1">
+        <span>
+          The horizontal scene streams to your landscape destinations while the saved vertical scene
+          streams to the vertical ones, about {mbps} Mbps upstream across all legs.
         </span>
-      ) : null}
-    </div>
+        {hasInstagram ? (
+          <span>
+            Instagram: once Videorc starts sending, press “Go live” in Instagram Live Producer to
+            publish the stream to your profile.
+          </span>
+        ) : null}
+      </AlertDescription>
+    </Alert>
   )
 }

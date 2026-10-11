@@ -1,4 +1,5 @@
 import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
+import { layoutPresetLabel } from '@/lib/layout-labels'
 import { systemAudioTarget } from '@/lib/system-audio'
 
 /** The state projection deck keys render. Minimal by design and the ONLY
@@ -26,8 +27,26 @@ export interface RemoteSurfaceState {
 
 export interface RemoteSurfaceDescribe {
   layoutPresets: readonly LayoutPreset[]
+  /**
+   * Plan 174 S2.3a (I-14): each preset's name as the desktop shows it
+   * ("Screen + camera", "Vertical split"), so the phone never title-cases an
+   * id. Fixed strings derived from the built-in ids already listed above:
+   * nothing user-made, nothing about the machine. Additive; older clients
+   * ignore it.
+   */
+  layoutLabels: Readonly<Record<string, string>>
   takeovers: { id: string; name: string }[]
   windows: readonly string[]
+}
+
+/** The phone's scene keys read the desktop's layout names (plan 174 I-14). */
+export function remoteLayoutLabels(presets: readonly LayoutPreset[]): Record<string, string> {
+  const bothOrientations =
+    presets.some((preset) => preset.startsWith('vertical-')) &&
+    presets.some((preset) => !preset.startsWith('vertical-'))
+  return Object.fromEntries(
+    presets.map((preset) => [preset, layoutPresetLabel(preset, { bothOrientations })])
+  )
 }
 
 export interface RemoteSurfaceSnapshot {
@@ -68,6 +87,7 @@ function snapshotFromValues(values: RemoteSurfaceValues): RemoteSurfaceSnapshot 
     },
     describe: {
       layoutPresets: values[10],
+      layoutLabels: remoteLayoutLabels(values[10]),
       takeovers: values[11],
       windows: ['notes', 'comments', 'preview']
     }
@@ -81,8 +101,18 @@ interface RemoteSurfaceClient {
 export interface RemoteIntentContext {
   client: RemoteSurfaceClient
   sessionActive: boolean
-  streamEnabled: boolean
-  startSession: () => Promise<boolean>
+  /**
+   * The Studio's two explicit starts (plan 174 S3.1): `recordStart` records
+   * and `streamStart` goes live, whatever mode was saved last. The start
+   * itself refuses (and says so in the Studio); the reason it cannot run
+   * right now rides on the failed ack, so a deck key can say why.
+   */
+  recordBlockedReason: string | null
+  liveStreamBlockedReason: string | null
+  startRecording: () => Promise<boolean>
+  startLivestream: () => Promise<boolean>
+  /** Every stop goes through the provider's stop decision (S0.1): a remote
+   * intent is a deliberate device action, so it stops at once. */
   stopSession: () => Promise<boolean>
   setMicrophoneMuted: (mode: 'mute' | 'unmute' | 'toggle') => Promise<boolean>
   /** Plan 069 S6: the system-audio device status and the state the remotes
@@ -214,6 +244,27 @@ export class RemoteSurfacePublisher {
   }
 }
 
+/** What a phone or a deck reads when Videorc refuses a key (plan 174 I-11). */
+export const REMOTE_INTENT_COPY = {
+  recordDidNotStart: "Recording didn't start. Check Studio on your computer.",
+  notRunning: "You're not recording or live.",
+  didNotStop: "Couldn't stop. Check Studio on your computer.",
+  toggleFailed: "That didn't work. Check Studio on your computer.",
+  streamNotSetUp: 'Use Go Live… on your computer first.',
+  streamDidNotStart: "The livestream didn't start. Finish going live on your computer.",
+  microphone: "Couldn't change the microphone.",
+  systemAudio: "System audio isn't available.",
+  sceneMissing: "That scene isn't available anymore.",
+  sceneFailed: "Couldn't switch the scene.",
+  takeoverMissing: "That takeover isn't available anymore.",
+  takeoverShow: "Couldn't show the takeover.",
+  takeoverHide: "Couldn't hide the takeover.",
+  windowMissing: "That window isn't available.",
+  messageMissing: 'Choose a message to put on stream.',
+  unsupported: "This version of Videorc can't do that. Update Videorc.",
+  failed: 'Something went wrong. Check Studio on your computer.'
+} as const
+
 /** Executes a remote intent through the Studio's existing action handlers. */
 export async function executeRemoteIntent(
   payload: unknown,
@@ -239,37 +290,39 @@ export async function executeRemoteIntent(
     }
   }
 
+  // Plan 174 I-11: phones and decks show these words as they are, so they
+  // are plain copy (docs/ui-copy.md): no ids, no "session", one next step.
+  const alreadyRunning = "You're already recording or live."
   try {
     switch (intent.kind) {
       case 'recordStart':
-        if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
-        return void ((await context.startSession())
+        if (context.sessionActive) return void (await ack(false, alreadyRunning))
+        return void ((await context.startRecording())
           ? await ack(true)
-          : await ack(false, 'The capture session did not start. Check Studio for details.'))
+          : await ack(false, context.recordBlockedReason ?? REMOTE_INTENT_COPY.recordDidNotStart))
       case 'recordStop':
       case 'streamStop':
-        if (!context.sessionActive) return void (await ack(false, 'No active session.'))
+        if (!context.sessionActive) return void (await ack(false, REMOTE_INTENT_COPY.notRunning))
         return void ((await context.stopSession())
           ? await ack(true)
-          : await ack(false, 'The active session did not stop. Check Studio for details.'))
+          : await ack(false, REMOTE_INTENT_COPY.didNotStop))
       case 'recordToggle': {
-        const committed = context.sessionActive
-          ? await context.stopSession()
-          : await context.startSession()
+        const stopping = context.sessionActive
+        const committed = stopping ? await context.stopSession() : await context.startRecording()
         return void (committed
-          ? await ack(true)
-          : await ack(false, 'The session toggle was not committed. Check Studio for details.'))
-      }
-      case 'streamStart':
-        if (!context.streamEnabled) {
-          return void (await ack(false, 'Enable streaming in the Studio first.'))
-        }
-        if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
-        return void ((await context.startSession())
           ? await ack(true)
           : await ack(
               false,
-              'The stream did not start. Complete any required confirmation in Studio.'
+              (!stopping && context.recordBlockedReason) || REMOTE_INTENT_COPY.toggleFailed
+            ))
+      }
+      case 'streamStart':
+        if (context.sessionActive) return void (await ack(false, alreadyRunning))
+        return void ((await context.startLivestream())
+          ? await ack(true)
+          : await ack(
+              false,
+              context.liveStreamBlockedReason ?? REMOTE_INTENT_COPY.streamDidNotStart
             ))
       case 'micMute':
       case 'micUnmute':
@@ -278,7 +331,7 @@ export async function executeRemoteIntent(
           intent.kind === 'micToggle' ? 'toggle' : intent.kind === 'micMute' ? 'mute' : 'unmute'
         )
         if (!applied) {
-          return void (await ack(false, 'The microphone change was not applied.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.microphone))
         }
         return void (await ack(true))
       }
@@ -295,7 +348,7 @@ export async function executeRemoteIntent(
           status,
           shown
         )
-        if (target === null) return void (await ack(false, 'System audio is not available.'))
+        if (target === null) return void (await ack(false, REMOTE_INTENT_COPY.systemAudio))
         // Accepted = requested. The key renders the confirmed mix from
         // remote.state, which follows once the session reports it.
         context.setSystemAudioEnabled(target)
@@ -303,46 +356,46 @@ export async function executeRemoteIntent(
       }
       case 'sceneApply': {
         const layoutPreset = intent.layoutPreset as LayoutPreset | undefined
-        if (!layoutPreset) {
-          return void (await ack(false, 'Only layoutPreset scene switches are supported.'))
-        }
-        if (!(context.knownLayoutPresets as readonly string[]).includes(layoutPreset)) {
-          return void (await ack(false, `Unknown layout preset "${layoutPreset}".`))
+        if (
+          !layoutPreset ||
+          !(context.knownLayoutPresets as readonly string[]).includes(layoutPreset)
+        ) {
+          return void (await ack(false, REMOTE_INTENT_COPY.sceneMissing))
         }
         const committed = await context.applyLayoutPreset(layoutPreset)
         if (!committed) {
-          return void (await ack(false, 'The layout change was not committed.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.sceneFailed))
         }
         return void (await ack(true))
       }
       case 'takeoverShow': {
         const assetId = intent.assetId as string | undefined
         if (!assetId || !context.hasTakeover(assetId)) {
-          return void (await ack(false, 'No takeover with that id.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.takeoverMissing))
         }
         const activated = await context.activateTakeover(assetId)
         if (!activated) {
-          return void (await ack(false, 'The takeover was not activated.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.takeoverShow))
         }
         return void (await ack(true))
       }
       case 'takeoverHide': {
         const cleared = await context.clearTakeover()
         if (!cleared) {
-          return void (await ack(false, 'The takeover was not cleared.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.takeoverHide))
         }
         return void (await ack(true))
       }
       case 'windowFront': {
         const windowName = intent.window as string | undefined
         if (!windowName || !(await context.openWindow(windowName))) {
-          return void (await ack(false, `Unknown window "${windowName}".`))
+          return void (await ack(false, REMOTE_INTENT_COPY.windowMissing))
         }
         return void (await ack(true))
       }
       case 'commentHighlight': {
         const messageId = intent.messageId as string | undefined
-        if (!messageId) return void (await ack(false, 'commentHighlight needs a messageId.'))
+        if (!messageId) return void (await ack(false, REMOTE_INTENT_COPY.messageMissing))
         const outcome = await context.showCommentHighlight(messageId)
         return void (await ack(outcome.ok, outcome.message))
       }
@@ -351,14 +404,16 @@ export async function executeRemoteIntent(
         return void (await ack(outcome.ok, outcome.message))
       }
       case 'clipMark': {
-        if (!context.sessionActive) return void (await ack(false, 'No active session.'))
+        if (!context.sessionActive) return void (await ack(false, REMOTE_INTENT_COPY.notRunning))
         const outcome = await context.markClip()
         return void (await ack(outcome.ok, outcome.message))
       }
       default:
-        return void (await ack(false, `Unsupported intent "${intent.kind}".`))
+        return void (await ack(false, REMOTE_INTENT_COPY.unsupported))
     }
   } catch (error) {
-    await ack(false, error instanceof Error ? error.message : 'Intent failed.')
+    // The raw error is for the console, never the phone (docs/ui-copy.md).
+    console.error('[remote-control] intent failed', intent.kind, error)
+    await ack(false, REMOTE_INTENT_COPY.failed)
   }
 }

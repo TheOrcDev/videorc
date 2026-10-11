@@ -1,7 +1,25 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
+import { writeBackgroundThumbnail } from './background-thumbnail'
+import {
+  BUDDY_ASSETS_FOLDER,
+  importBuddyPetFolder,
+  moveLegacyBuddyAssets,
+  readBuddyImage,
+  readBuddyPetFile,
+  readBuddyCreationFile,
+  removeBuddyPersona,
+  type BuddyPetRoots
+} from './buddy-assets'
+import {
+  BUDDY_REACTION_NONE,
+  isBuddyReactionId,
+  type BuddyPetImportResult,
+  type BuddyPetSummary
+} from '../shared/buddy-pet'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
-import { normalizeAccelerator } from '../shared/accelerator'
+import { commandModifierHeld, normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
+import { WINDOW_NAMES } from '../shared/window-names'
 import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
@@ -258,6 +276,16 @@ import {
   type DeferredPermissionRestartState
 } from './deferred-permission-restart'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
+import { supportBundleRevealPath } from './support-bundle-reveal'
+import {
+  BUDDY_LIBRARY_CACHE_DIR,
+  isBuddyPersonaId,
+  parseBuddyAssetPath,
+  parseBuddyDraftPath,
+  parseBuddyLibraryPosePath
+} from '../shared/buddy-assets'
+import type { BuddyDeepLinkNavigation } from '../shared/electron-ipc-contract'
+import { parseBuddyDeepLink, runBuddyDeepLink, type BuddyDeepLink } from './buddy-deep-link'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -301,6 +329,13 @@ import {
   type TwitchGifMode
 } from '../shared/chat-gif'
 import { installContextMenu } from './context-menu'
+import { installAppMenu } from './app-menu'
+import { LiveExitGuard, type AppExitKind } from './exit-guard'
+import {
+  appMenuReleaseNotesUrl,
+  type AppMenuPageKey,
+  type AppMenuWindowId
+} from '../shared/app-menu-items'
 import {
   DARK_GLASS_COATS,
   DARK_WINDOW_PALETTE,
@@ -465,6 +500,9 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
+  CohostBuddyActionCommand,
+  CohostSessionActionCommand,
+  CohostAutoChatRelayPatch,
   CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostState,
@@ -785,6 +823,9 @@ let backendAdminConnection: BackendConnection | null = null
 let backendAuthorityReady: Promise<void> = Promise.resolve()
 const mainResourceCapabilities = new MainResourceCapabilityRegistry()
 let mainCaptureState: MainCaptureState = 'unknown'
+// Plan 174 S3.1 (D2): a quit or a main-window close while on air waits for
+// the renderer's End livestream question (exit-guard.ts).
+const liveExitGuard = new LiveExitGuard()
 let deferredPermissionRestartState: DeferredPermissionRestartState =
   idleDeferredPermissionRestartState
 let smokePreviewMotionServer: HttpServer | null = null
@@ -1095,7 +1136,7 @@ if (shouldDisableOcclusionThrottling(process.platform, electronBackgroundPolicy)
 // Plan 069 (system audio): on macOS, play renderer audio from the main process
 // instead of Chromium's out-of-process audio service. ScreenCaptureKit cannot
 // attribute that helper's audio to Videorc, so without this Library playback
-// and Orcle's voice would leak into recordings with System audio on. Merged,
+// and Buddy's voice would leak into recordings with System audio on. Merged,
 // never overwritten: Chromium honours a single disable-features value.
 const disabledChromiumFeatures = mergeDisabledFeatures(
   app.commandLine.getSwitchValue(DISABLE_FEATURES_SWITCH),
@@ -1940,6 +1981,9 @@ function installMainWindowRecovery(window: BrowserWindow, loadMainDocument: () =
       .then(({ response }) => {
         asking = false
         if (response === 1) {
+          // A native Quit chosen over a renderer that keeps failing: that
+          // renderer cannot ask the End livestream question, so do not wait.
+          liveExitGuard.allow('quit')
           app.quit()
           return
         }
@@ -2175,7 +2219,9 @@ function createWindow(): void {
     // below), and in practice it never sees the keyup that ends one either —
     // which left the sidebar's shortcut chips stuck on after every ⌘1–⌘9.
     // before-input-event still receives every keyUp, so main stays truthful.
-    publishShortcutModifier(input.meta || input.control)
+    // ⌘ on macOS, Ctrl elsewhere (plan 174 A-17): the same key the renderer's
+    // shell takes, so ⌃ never raises the chips or steals a page digit on a Mac.
+    publishShortcutModifier(commandModifierHeld(input, process.platform))
 
     if (globalShortcutGate.isArmed) {
       // Swallow every key (page handlers and menu accelerators alike) and hand
@@ -2198,7 +2244,7 @@ function createWindow(): void {
     if (input.type !== 'keyDown' || input.alt || input.shift) {
       return
     }
-    if (!(input.meta || input.control)) {
+    if (!commandModifierHeld(input, process.platform)) {
       return
     }
     const isDigit = input.key >= '1' && input.key <= '9'
@@ -2208,6 +2254,18 @@ function createWindow(): void {
         sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', input.key)
       }
     }
+  })
+
+  // Closing the main window while on air (⌘W, the red button) asks first
+  // (plan 174 S3.1, D2): the renderer puts up "End livestream and close?"
+  // and answers through app:exit. A quit closes the window on its own way
+  // out, after its own question.
+  mainWindow.on('close', (event) => {
+    if (appIsQuitting || !liveExitGuard.shouldAsk('close', mainRendererCanAnswer())) {
+      return
+    }
+    event.preventDefault()
+    askRendererBeforeExit('close')
   })
 
   // Focus leaving the window means the modifier can be released without any
@@ -2697,7 +2755,7 @@ function saveNotesDocument(patch: Partial<NotesDocument>): NotesDocument {
 // the aux windows. Nothing else is intercepted (typing in Notes stays untouched).
 function attachAuxWindowShortcuts(window: BrowserWindow): void {
   window.webContents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown' || input.alt || !(input.meta || input.control)) {
+    if (input.type !== 'keyDown' || input.alt || !commandModifierHeld(input, process.platform)) {
       return
     }
     if (input.shift) {
@@ -2769,7 +2827,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 360,
     minHeight: 240,
-    title: 'Videorc Notes',
+    title: WINDOW_NAMES.notes,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -2926,7 +2984,7 @@ function restoreNotesWindowOnLaunch(): void {
 
 // --- Stream Manager window (code name: comments) ------------------------------
 // The live dashboard in its own OS window (plan 055): chat, activity, stats
-// and Orcle, relayed from the main renderer. Plain BrowserWindow with no
+// and Buddy, relayed from the main renderer. Plain BrowserWindow with no
 // native surface. It is NOT capture-protected (owner call, 2026-08-19: only
 // Notes is), so Studio closes it during a recording that would capture it.
 type CommentsWindowPrefs = {
@@ -2967,6 +3025,36 @@ function saveCommentsWindowPrefs(patch: CommentsWindowPrefs): void {
   }
 }
 
+// Plan 164 (S-B1): the highlight corner now lives in the backend-owned
+// overlay layout (`overlays.layout`). The old comments-window pref is sent
+// to the backend once after the update and then deleted, so a corner the
+// streamer picked before the update survives as the highlight rect.
+async function migrateCommentsHighlightAnchorPref(): Promise<void> {
+  const prefs = loadCommentsWindowPrefs()
+  if (!('highlightAnchor' in prefs) || process.env.VIDEORC_SMOKE_OUTPUT_DIR) {
+    return
+  }
+  const anchor = normalizeCommentHighlightAnchor(prefs.highlightAnchor)
+  try {
+    await requestBackendAdmin('overlays.layout.migrate_highlight_anchor', { anchor })
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Highlight corner migration did not reach the backend; it will retry next launch (${
+        error instanceof Error ? error.message : String(error)
+      }).`
+    )
+    return
+  }
+  try {
+    const { highlightAnchor: _migrated, ...rest } = loadCommentsWindowPrefs()
+    writeFileSync(commentsWindowPrefsPath(), JSON.stringify(rest))
+  } catch {
+    // A failed preference write must never break startup; the migration is
+    // idempotent and runs again next launch.
+  }
+}
+
 function commentsWindowAlwaysOnTopPreference(prefs: CommentsWindowPrefs): boolean {
   return prefs.alwaysOnTopPreferenceVersion === 1 && prefs.alwaysOnTop === true
 }
@@ -2982,9 +3070,12 @@ function commentsHighlightAnchor(): CommentHighlightAnchor {
   return commentsHighlightAnchorValue
 }
 
+// Plan 164: the corner is a snap into the backend-owned overlay layout, which
+// the Studio renderer writes when this state reaches it. Main keeps the pick
+// in memory for the menu only and never persists it again (the one-time
+// migration above moved the last saved pick into the layout).
 function setCommentsWindowHighlightAnchor(anchor: unknown): CommentsWindowState {
   commentsHighlightAnchorValue = normalizeCommentHighlightAnchor(anchor)
-  saveCommentsWindowPrefs({ highlightAnchor: commentsHighlightAnchorValue })
   emitCommentsWindowState()
   return commentsWindowState()
 }
@@ -3061,6 +3152,61 @@ function currentCommentsView(): CommentsViewSnapshot | null {
   return cached ? { ...cached, mode } : null
 }
 
+/**
+ * The Buddy's own relayed actions (plan 164 S-C4), checked here before they
+ * reach Studio: null when `value` is not one, an Error when it is one with a
+ * bad shape, else the command to relay.
+ */
+function buddyActionCommand(
+  requestId: string,
+  value: unknown
+): CohostBuddyActionCommand | Error | null {
+  if (!value || typeof value !== 'object' || !('kind' in value)) return null
+  const { kind } = value as { kind: unknown }
+  if (kind === 'buddy-say') {
+    const { text, state, sessionId } = value as {
+      text?: unknown
+      state?: unknown
+      sessionId?: unknown
+    }
+    const trimmed = typeof text === 'string' ? text.trim() : ''
+    if (!trimmed || [...trimmed].length > 200) {
+      return new Error('Say something between 1 and 200 characters.')
+    }
+    if (state !== 'talk' && state !== 'laugh' && state !== 'think') {
+      return new Error('Buddy say needs a state: talk, laugh or think.')
+    }
+    if (sessionId === undefined) {
+      return { requestId, kind, text: trimmed, state }
+    }
+    // D7: a named session must be the selected live one, like any chat
+    // command; the line may be posted there per the chat mode.
+    try {
+      assertLiveCommentsCommandSession(sessionId)
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error))
+    }
+    return { requestId, kind, text: trimmed, state, sessionId }
+  }
+  if (kind === 'buddy-show-on-stream') {
+    const { showOnStream } = value as { showOnStream?: unknown }
+    if (typeof showOnStream !== 'boolean') {
+      return new Error('Show on stream needs true or false.')
+    }
+    return { requestId, kind, showOnStream }
+  }
+  // Plan 168 S-D3: a reaction chip. Like the Say box it needs no live
+  // session; the backend checks the id against the worn pack.
+  if (kind === 'buddy-react') {
+    const { reaction } = value as { reaction?: unknown }
+    if (!isBuddyReactionId(reaction) || reaction === BUDDY_REACTION_NONE) {
+      return new Error('Buddy react needs a reaction id.')
+    }
+    return { requestId, kind, reaction }
+  }
+  return null
+}
+
 function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId is string {
   if (
     !liveCommentsCommandAllowed({
@@ -3071,6 +3217,28 @@ function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId
   ) {
     throw new Error('Chat commands are available only for the selected live session.')
   }
+}
+
+/**
+ * The Stream Manager's `autoChat` relay block (plan 164 S-D6): a partial of
+ * the mode and the three switches. `undefined` when absent, `false` when
+ * malformed, else the validated block.
+ */
+function cohostAutoChatRelayPatch(value: unknown): CohostAutoChatRelayPatch | undefined | false {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const block = value as Record<string, unknown>
+  const patch: CohostAutoChatRelayPatch = {}
+  if (block.mode !== undefined) {
+    if (block.mode !== 'off' && block.mode !== 'suggest' && block.mode !== 'auto') return false
+    patch.mode = block.mode
+  }
+  for (const key of ['greetings', 'answers', 'banter'] as const) {
+    if (block[key] === undefined) continue
+    if (typeof block[key] !== 'boolean') return false
+    patch[key] = block[key]
+  }
+  return patch
 }
 
 function commentsCommandRequestId(value: unknown): string {
@@ -3505,7 +3673,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 320,
     minHeight: 360,
-    title: 'Videorc Stream Manager',
+    title: WINDOW_NAMES.streamManager,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -3724,7 +3892,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 360,
     minHeight: 200,
-    title: 'Videorc Captions',
+    title: WINDOW_NAMES.captions,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -4173,7 +4341,7 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
 </style></head><body>
   <div class="hint"><div class="title">${PREVIEW_WAIT_TITLE}</div>
   <div id="videorc-wait-detail">${PREVIEW_WAIT_DETAIL_DEFAULT}</div></div>
-  <div class="drag-bar"><span class="label">Preview</span></div>
+  <div class="drag-bar"><span class="label">${WINDOW_NAMES.preview}</span></div>
 </body></html>`
 
 async function openPreviewWindow(): Promise<PreviewWindowState> {
@@ -4224,7 +4392,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: docked ? 1 : 320,
     minHeight: docked ? 1 : 208,
-    title: 'Videorc Preview',
+    title: WINDOW_NAMES.preview,
     // window-glass.ts: real material pinned dark and the traffic lights centred
     // on the 28px strip on macOS; off macOS the standard frame and solid base
     // keep the window draggable without renderer drag regions.
@@ -8199,10 +8367,53 @@ function sendOAuthCallback(envelope: OAuthCallbackEnvelope): void {
   sendElectronEvent(mainWindow.webContents, 'oauth:callback-url', envelope)
 }
 
+// --- Buddy deep link (plan 170 D18) ----------------------------------------
+// The shell opens the Buddy tab (and the creator) on `buddy:deep-link`; main
+// focuses the window and drives the library over its admin channel.
+let pendingBuddyNavigation: BuddyDeepLinkNavigation | null = null
+
+function sendBuddyNavigation(navigation: BuddyDeepLinkNavigation): void {
+  if (
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    mainWindow.webContents.isDestroyed() ||
+    mainWindow.webContents.isLoading()
+  ) {
+    // Before the shell loaded: it is sent once it has (an open-creator ask
+    // wins over a plain open).
+    if (navigation.openCreator || !pendingBuddyNavigation) pendingBuddyNavigation = navigation
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+  sendElectronEvent(mainWindow.webContents, 'buddy:deep-link', navigation)
+}
+
+function flushBuddyNavigation(): void {
+  const navigation = pendingBuddyNavigation
+  if (!navigation) return
+  pendingBuddyNavigation = null
+  // The shell subscribes as it mounts, just after the page loaded.
+  setTimeout(() => sendBuddyNavigation(navigation), 1_500)
+}
+
+function handleBuddyDeepLink(link: BuddyDeepLink): void {
+  void runBuddyDeepLink(link, {
+    showBuddyTab: (openCreator) => sendBuddyNavigation({ openCreator }),
+    request: (method, params) => requestBackendAdmin(method, params, 30_000),
+    sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+    log: (message) => logBackend('info', message)
+  }).catch((error) => {
+    logBackend('warn', `Buddy deep link failed: ${errorMessage(error)}`)
+  })
+}
+
 function flushOAuthCallbackUrls(): void {
   if (!mainWindow || mainWindow.webContents.isDestroyed()) {
     return
   }
+  flushBuddyNavigation()
 
   try {
     for (const envelope of providerOAuthCallbackCoordinator().pending()) {
@@ -8221,6 +8432,12 @@ function flushOAuthCallbackUrls(): void {
 }
 
 function dispatchOAuthCallbackUrl(rawUrl: string): void {
+  // Plan 170 D18: `videorc://buddy` (Open in Videorc, Make it Alive).
+  const buddyLink = parseBuddyDeepLink(rawUrl, OAUTH_CALLBACK_PROTOCOL)
+  if (buddyLink) {
+    handleBuddyDeepLink(buddyLink)
+    return
+  }
   let parsed: URL
   try {
     parsed = new URL(rawUrl)
@@ -8869,6 +9086,11 @@ function startBackendWithRegistryLock(): void {
         : '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
+      // The Buddy's avatar images (plan 164 S-A3): uploads land here through
+      // main, generated images through the backend (S-A6). The first root is
+      // the write root; the second is the read-only bundled pet root (plan
+      // 168 D3).
+      VIDEORC_MANAGED_BUDDY_ROOTS: managedBuddyRoots().join(delimiter),
       // Debug smoke/test RPCs are a second, explicit capability boundary in
       // addition to the admin backend credential. Release builds compile the
       // handlers out regardless of this value.
@@ -9014,6 +9236,7 @@ function disconnectBackendEventSocket(): void {
   backendEventSocket = null
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
+  liveExitGuard.transportLost()
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -9048,6 +9271,7 @@ function retireBackendEventSocket(
   backendEventSocket = null
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
+  liveExitGuard.transportLost()
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -9230,6 +9454,13 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_screen_path',
   'resource.admin.resolve_background_path',
   'resource.admin.preview_surface_bounds',
+  'overlays.layout.migrate_highlight_anchor',
+  // Plan 168 S-A3: register a pet pack folder main just copied.
+  'cohost.pet.import',
+  // Plan 170 D18: the videorc://buddy deep link syncs, uses and polls.
+  'cohost.library.get',
+  'cohost.library.sync',
+  'cohost.library.use',
   'preview.surface.take_native_host_commands',
   'sessions.comments.list',
   'sessions.comments.totals',
@@ -9585,7 +9816,8 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
         const adminConnection = backendAdminConnection
         backendAuthorityReady = Promise.all([
           rehydrateManagedBackgroundAssets(),
-          rehydrateScheduledThumbnails()
+          rehydrateScheduledThumbnails(),
+          migrateCommentsHighlightAnchorPref()
         ])
           .then(() => undefined)
           .catch(() => {
@@ -9843,6 +10075,8 @@ async function runSmokePreviewMotionCommand(
   params: Record<string, unknown>
 ): Promise<unknown> {
   if (command === 'app-quit') {
+    // A harness's quit is never the person's: it must not wait on a question.
+    liveExitGuard.allow('quit')
     setImmediate(() => app.quit())
     return { quitting: true }
   }
@@ -10863,7 +11097,7 @@ async function runSmokePreviewMotionCommand(
       }
       await new Promise((resolve) => setTimeout(resolve, 250))
       const open = await window.webContents.executeJavaScript(
-        `Boolean(document.querySelector('[data-slot="comment-link-menu"]'))`,
+        `Boolean(document.querySelector('[data-testid="comment-link-menu"]'))`,
         true
       )
       return { closed: open === false }
@@ -10874,7 +11108,7 @@ async function runSmokePreviewMotionCommand(
     if (params.action === 'copy') {
       const item = (await window.webContents.executeJavaScript(
         `(() => {
-          const item = Array.from(document.querySelectorAll('[data-slot="comment-link-menu"] [data-slot="context-menu-item"]'))
+          const item = Array.from(document.querySelectorAll('[data-testid="comment-link-menu"] [data-slot="context-menu-item"]'))
             .find((candidate) => candidate.textContent === 'Copy link');
           if (!item) return null;
           const box = item.getBoundingClientRect();
@@ -10943,7 +11177,7 @@ async function runSmokePreviewMotionCommand(
     }
     const menu = (await window.webContents.executeJavaScript(
       `(() => {
-        const menu = document.querySelector('[data-slot="comment-link-menu"]');
+        const menu = document.querySelector('[data-testid="comment-link-menu"]');
         if (!menu) return null;
         return {
           label: menu.querySelector('[data-slot="context-menu-label"]')?.textContent ?? null,
@@ -11003,7 +11237,7 @@ async function runSmokePreviewMotionCommand(
     return { cohost: latestCohostWindowState }
   }
 
-  // Narrow-width proof (plan 047): real geometry of the header and the Orcle
+  // Narrow-width proof (plan 047): real geometry of the header and the Buddy
   // action bar, so the probe can assert nothing overflows or clips.
   if (command === 'comments-window-layout-metrics') {
     const window = commentsWindow
@@ -11048,7 +11282,7 @@ async function runSmokePreviewMotionCommand(
                   ...rect(element)
                 }))
             : [];
-        const header = document.querySelector('[data-slot="chat-header"]');
+        const header = document.querySelector('[data-slot="window-header"]');
         const bar = document.querySelector('[data-slot="stats-bar"]');
         const statusBar = document.querySelector('[data-slot="status-bar"]');
         const inlineActions = document.querySelector('[data-slot="stream-manager-actions"]');
@@ -11083,7 +11317,7 @@ async function runSmokePreviewMotionCommand(
             (element) => (element.textContent ?? '').trim() === text
           );
         const panes = Object.fromEntries(
-          ['chat', 'activity', 'orcle'].map((pane) => [
+          ['chat', 'activity', 'buddy'].map((pane) => [
             pane,
             visible(document.querySelector('[data-pane="' + pane + '"]'))
           ])
@@ -11118,7 +11352,7 @@ async function runSmokePreviewMotionCommand(
         // Plan 057, D2: right-click a stat and read the bar's own menu.
         let statsMenuItems = null;
         if (${JSON.stringify(openStatsMenu)}) {
-          const statsMenu = () => document.querySelector('[data-slot="stats-bar-menu"]');
+          const statsMenu = () => document.querySelector('[data-testid="stats-bar-menu"]');
           const target =
             document.querySelector('[data-stat="followers"]') ??
             document.querySelector('[data-slot="stats-bar"]');
@@ -11146,7 +11380,7 @@ async function runSmokePreviewMotionCommand(
           header: box(header),
           headerItems: visibleDescendants(header),
           headerButtons: header ? header.querySelectorAll('button').length : -1,
-          headerTitle: document.querySelector('[data-slot="stream-manager-title"]')?.textContent ?? '',
+          headerTitle: document.querySelector('[data-slot="window-header-title"]')?.textContent ?? '',
           bar: visible(bar) ? box(bar) : null,
           barRule: visible(bar) ? parseFloat(getComputedStyle(bar).borderBottomWidth) || 0 : null,
           stats,
@@ -11161,7 +11395,7 @@ async function runSmokePreviewMotionCommand(
           inlineActions: visible(inlineActions),
           moreMenu: button('More Stream Manager actions'),
           highlightPosition: button('Highlight position'),
-          keepOnTop: button('Keep this window on top'),
+          keepOnTop: button('Keep on top'),
           clearViewVisible: visible(document.querySelector('button[aria-label="Clear view"]')),
           openPreviewVisible: visible(document.querySelector('button[aria-label="Open Preview"]')),
           backToLiveVisible: visible(textButton('Back to live'))
@@ -11190,16 +11424,16 @@ async function runSmokePreviewMotionCommand(
           pausedChat: document.querySelector('button[aria-label^="Chat paused:"]')?.textContent ?? null,
           lastMessageId: rows.at(-1)?.getAttribute('data-message-id') ?? null,
           chatAtBottom: viewport ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 64 : null,
-          paneBadges: Object.fromEntries(Array.from(document.querySelectorAll('[data-slot="pane-tabs-narrow"] button')).map((button) => [button.textContent?.split(/(?=New|[0-9])/)[0]?.trim(), button.querySelector('[data-slot="pane-unseen"]')?.textContent ?? null])),
+          paneBadges: Object.fromEntries(Array.from(document.querySelectorAll('[data-slot="pane-tabs-narrow"] button')).map((button) => [button.textContent?.split(/(?=New|[0-9])/)[0]?.trim(), button.querySelector('[data-testid="pane-unseen"]')?.textContent ?? null])),
           text: document.body.innerText,
           messageCount: rows.length,
           composerCount: composer ? 1 : 0,
           composerDisabled: composer?.disabled ?? null,
-          headerTitle: document.querySelector('header span')?.textContent ?? '',
+          headerTitle: document.querySelector('[data-slot="window-header-title"]')?.textContent ?? '',
           highlightPositionControl:
-            document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('title') ?? null,
+            document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('aria-description') ?? null,
           windowFrame: document.querySelector('[data-slot="window-frame"]') !== null,
-          highlightActionCount: document.querySelectorAll('button[aria-label^="Show "][aria-label$=" on the stream"]').length,
+          highlightActionCount: document.querySelectorAll('[data-message-id] button[aria-description^="Shows it on stream"]').length,
           destinationStatus: document.querySelector('[data-slot="comments-destination-status"]')?.textContent ?? '',
           deliveryStatus: document.querySelector('[aria-label="Latest message delivery"]')?.textContent ?? '',
           highlightPhases: Object.fromEntries(rows.map((row) => [
@@ -11212,7 +11446,7 @@ async function runSmokePreviewMotionCommand(
           ])),
           highlightReasons: Object.fromEntries(rows.map((row) => [
             row.getAttribute('data-message-id'),
-            row.querySelector('[data-slot="badge"][title]')?.getAttribute('title') ?? null
+            row.querySelector('[data-testid="highlight-failed-reason"]')?.textContent ?? null
           ])),
           theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light',
           // Plan 177: any scroll list whose content is wider than its pane
@@ -12375,7 +12609,8 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
           if (!orientationButton || orientationButton.disabled) {
             throw new Error('Could not switch Studio orientation for layout preset ' + preset);
           }
-          if (orientationButton.getAttribute('aria-pressed') !== 'true') {
+          // Segmented options are radios (plan 174 S1.7): aria-checked, not aria-pressed.
+          if (orientationButton.getAttribute('aria-checked') !== 'true') {
             orientationButton.click();
           }
           await openTab('layout', '[data-videorc-layout-preset]');
@@ -12395,7 +12630,10 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         }
         button.click();
         while (Date.now() < deadline) {
-          if (button.getAttribute('aria-pressed') === 'true') {
+          if (
+            button.getAttribute('aria-checked') === 'true' ||
+            button.getAttribute('aria-pressed') === 'true'
+          ) {
             await sleep(Number(params.settleMs ?? 600));
             return {
               preset,
@@ -13017,6 +13255,7 @@ async function runPermissionBackendRestart(reason: string): Promise<MediaAccessR
 function updateMainCaptureState(payload: unknown): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
+  liveExitGuard.observeRecordingStatus(payload)
   const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
   deferredPermissionRestartState = decision.state
   if (decision.runReason) {
@@ -13189,6 +13428,14 @@ async function grantSessionMedia(
   }
   const issued = sessionMediaGrants.issue(ownerId, sessionId as string, inspection.file)
   return { url: issued.url, expiresAt: issued.expiresAt }
+}
+
+// Show in Finder for an exported support bundle (plan 174 S3.18). The
+// backend's admin health reply names its database, and bundles live in
+// `support-bundles` beside it; anything else is refused.
+async function revealSupportBundle(path: unknown): Promise<void> {
+  const health = await requestBackendAdmin<{ databasePath?: unknown }>('health.ping', {}, 10_000)
+  shell.showItemInFolder(supportBundleRevealPath(path, health?.databasePath))
 }
 
 async function revealManagedBackground(assetId: unknown): Promise<void> {
@@ -13408,6 +13655,119 @@ function resolveManagedBackgroundFile(fileName: string): string | null {
   return null
 }
 
+// --- Buddy avatar images (plan 164 S-A3) --------------------------------------
+// `userData/buddy-assets/<personaId>/<state>.<ext>`, served under the `buddy`
+// host by the relative path the persona stores. Exactly one folder and one
+// file; anything else is not found.
+function managedBuddyRoot(): string {
+  return join(app.getPath('userData'), BUDDY_ASSETS_FOLDER)
+}
+
+// Plan 171 D3: dev builds of plans 164 to 170 wrote `golem-assets/`; move it
+// once, before the asset protocol and the backend read the root.
+function moveLegacyBuddyAssetsOnce(): void {
+  const outcome = moveLegacyBuddyAssets(app.getPath('userData'))
+  if (outcome.kind === 'moved') {
+    logBackend('info', 'Moved the Buddy files from golem-assets to buddy-assets (plan 171).')
+  } else if (outcome.kind === 'both-exist') {
+    logBackend(
+      'warn',
+      'Both golem-assets and buddy-assets exist; the old golem-assets folder was left as it is.'
+    )
+  } else if (outcome.kind === 'failed') {
+    logBackend('warn', `The golem-assets folder could not move to buddy-assets: ${outcome.message}`)
+  }
+}
+
+// Plan 168 D3: shipped pet packs (`bundled:<name>`) live in a read-only second
+// buddy root, `buddy-assets/bundled` in the packaged app (electron-builder.yml)
+// and the source tree in dev, the backgrounds precedent.
+function bundledBuddyDirectory(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'buddy-assets', 'bundled')
+    : resolve(workspaceRoot(), 'apps/desktop/resources/buddy')
+}
+
+/** Write root first (uploads, generation, imported packs), bundled root second. */
+function managedBuddyRoots(): string[] {
+  return [managedBuddyRoot(), bundledBuddyDirectory()]
+}
+
+function buddyPetRoots(): BuddyPetRoots {
+  return { write: managedBuddyRoot(), bundled: bundledBuddyDirectory() }
+}
+
+// Plan 168 S-A3: Import pack… picks a page-pet folder; main sizes and copies
+// its pack files into the persona's `pets/<uuid>/`, then the backend
+// validates and decodes it (`cohost.pet.import`). A refusal removes the copy
+// and reaches the Buddy tab as the backend's reason.
+async function pickBuddyPetFolder(personaId: unknown): Promise<BuddyPetImportResult | null> {
+  if (!isBuddyPersonaId(personaId)) throw new Error('Buddy pack import needs a persona id.')
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose a page-pet pack folder',
+    buttonLabel: 'Import',
+    properties: ['openDirectory']
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled || !result.filePaths[0]) return null
+  const imported = await importBuddyPetFolder(
+    result.filePaths[0],
+    managedBuddyRoot(),
+    personaId,
+    (folderToken) =>
+      requestBackendAdmin<BuddyPetSummary>('cohost.pet.import', { folderToken }, 60_000)
+  )
+  if (imported.skippedFiles.length > 0) {
+    logBackend(
+      'info',
+      `Buddy pack import skipped ${imported.skippedFiles.length} file(s) that are not pack files.`
+    )
+  }
+  return imported
+}
+
+function resolveManagedBuddyFile(relativePath: string): string | null {
+  const parsed = parseBuddyAssetPath(relativePath)
+  if (parsed) {
+    return resolveRegularFileInsideRoot(join(managedBuddyRoot(), parsed.personaId), parsed.file)
+  }
+  // Plan 170 D12: a cached account library picture,
+  // `library/<avatarId>/<state>-<tag>.png`, shown in My Buddies. The file must
+  // resolve inside the buddy root itself.
+  const libraryPose = parseBuddyLibraryPosePath(relativePath)
+  if (libraryPose) {
+    const resolved = resolveRegularFileInsideRoot(
+      join(managedBuddyRoot(), BUDDY_LIBRARY_CACHE_DIR, libraryPose.avatarId),
+      libraryPose.file
+    )
+    try {
+      return resolved && isPathInsideAnyRoot(resolved, [realpathSync(managedBuddyRoot())])
+        ? resolved
+        : null
+    } catch {
+      return null
+    }
+  }
+  // Plan 169 D8: a draft look's picture, `<personaId>/drafts/<requestId>/<state>.png`,
+  // shown in the look panel's tiles and preview before it is kept. The file
+  // must still resolve inside the buddy root itself.
+  const draft = parseBuddyDraftPath(relativePath)
+  if (!draft) return null
+  const resolved = resolveRegularFileInsideRoot(
+    join(managedBuddyRoot(), draft.personaId, 'drafts', draft.requestId),
+    `${draft.state}.png`
+  )
+  try {
+    return resolved && isPathInsideAnyRoot(resolved, [realpathSync(managedBuddyRoot())])
+      ? resolved
+      : null
+  } catch {
+    return null
+  }
+}
+
 // --- Chat avatar cache (Comments window upgrade S1) ----------------------------
 // Renderers never hot-link platform CDNs: main fetches each avatar once from
 // an allowlisted host (avatar-cache.ts policy), stores it here, and serves it
@@ -13614,6 +13974,17 @@ function resolveManagedScreenFile(fileName: string): string | null {
   return resolveRegularFileInsideRoot(join(app.getPath('userData'), 'Screens'), fileName)
 }
 
+async function withBuddyCorsHeader(pending: Promise<Response>): Promise<Response> {
+  const response = await pending
+  const headers = new Headers(response.headers)
+  headers.set('Access-Control-Allow-Origin', '*')
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  })
+}
+
 function registerManagedAssetProtocol(): void {
   protocol.handle(MANAGED_ASSET_SCHEME, (request) => {
     try {
@@ -13641,9 +14012,17 @@ function registerManagedAssetProtocol(): void {
               ? resolveManagedAvatarFile(fileName)
               : url.host === 'screen'
                 ? resolveManagedScreenFile(fileName)
-                : null
+                : url.host === 'buddy'
+                  ? resolveManagedBuddyFile(fileName)
+                  : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
+      }
+      if (url.host === 'buddy') {
+        // Buddy pictures (persona looks, drafts, the library cache) are read
+        // back on a canvas by the living preview, so they allow CORS reads.
+        // Only files inside the managed Buddy roots reach this branch.
+        return withBuddyCorsHeader(net.fetch(pathToFileURL(resolved).toString()))
       }
       return net.fetch(pathToFileURL(resolved).toString())
     } catch {
@@ -13777,6 +14156,20 @@ async function importBackgroundImageFromPath(
   mkdirSync(directory, { recursive: true })
   const assetPath = join(directory, managedBackgroundFileName(id, sourcePath))
   copyFileSync(sourcePath, assetPath)
+  // A ~480 px copy for the Assets tile (plan 174 C-40); the full file
+  // otherwise, when this image can't be decoded here.
+  let thumbnailFileName: string | null = null
+  try {
+    thumbnailFileName = writeBackgroundThumbnail({
+      id,
+      sourcePath,
+      directory,
+      image: nativeImage.createFromPath(assetPath),
+      write: (path, bytes) => writeFileSync(path, bytes)
+    })
+  } catch (error) {
+    console.warn('[assets] background thumbnail failed', error)
+  }
 
   await requestBackendAdmin('resource.capability.register_background', {
     assetId: id,
@@ -13786,7 +14179,7 @@ async function importBackgroundImageFromPath(
     id,
     name: backgroundAssetNameFromPath(sourcePath),
     assetPath: managedBackgroundAssetUrl(basename(assetPath)),
-    thumbnailPath: managedBackgroundAssetUrl(basename(assetPath)),
+    thumbnailPath: managedBackgroundAssetUrl(thumbnailFileName ?? basename(assetPath)),
     fileName: basename(sourcePath)
   }
 }
@@ -13962,7 +14355,17 @@ async function openOAuthUrl(authUrl: string): Promise<void> {
 protocol.registerSchemesAsPrivileged([
   {
     scheme: MANAGED_ASSET_SCHEME,
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true }
+    // `corsEnabled` lets the Buddy host answer CORS reads (see the handler):
+    // the living preview measures a still picture's pixels on a canvas, which a
+    // cross-origin image without CORS taints. Plain <img>/<video> loads are
+    // no-cors and unchanged.
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true
+    }
   }
 ])
 
@@ -14007,6 +14410,116 @@ app.on('open-url', (event, url) => {
   }
 })
 
+// The application menu (plan 174 S0.6, app-menu.ts). A page item sends the key
+// ⌘1–⌘9 or ⌘, forwards, so the renderer's own gates (onboarding, What's New)
+// still apply; a window item runs the toggle its shortcut runs.
+//
+// The macOS app outlives its main window, and every other window closes with
+// it. With no main window, a menu pick reopens it, as the Dock does, and
+// opens nothing that would run without the Studio behind it.
+function appMenuMainWindowOpen(): boolean {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return true
+  }
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
+  }
+  return false
+}
+
+function showMainWindowPage(key: AppMenuPageKey): void {
+  if (!appMenuMainWindowOpen() || !mainWindow) {
+    return
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+  mainWindow.show()
+  mainWindow.focus()
+  sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', key)
+}
+
+// Plan 174 S3.1 (D2): the app leaving while on air. Main holds the quit or
+// the close and asks the renderer to put up the End livestream question; the
+// renderer ends the livestream on a yes and answers through app:exit. Only a
+// renderer that can show the question is asked (exit-guard.ts).
+function mainRendererCanAnswer(): boolean {
+  return Boolean(
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    !mainWindow.webContents.isDestroyed() &&
+    !mainWindow.webContents.isCrashed()
+  )
+}
+
+function askRendererBeforeExit(kind: AppExitKind): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+  mainWindow.show()
+  mainWindow.focus()
+  sendElectronEvent(mainWindow.webContents, 'app:exit-request', kind)
+}
+
+function exitAfterLivestreamEnded(kind: AppExitKind): void {
+  liveExitGuard.allow(kind)
+  if (kind === 'quit') {
+    app.quit()
+    return
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close()
+  }
+}
+
+function toggleAppMenuWindow(id: AppMenuWindowId): void {
+  if (!appMenuMainWindowOpen()) {
+    return
+  }
+  const failed = (error: unknown): void =>
+    safeConsole.warn(`Window menu: could not toggle the ${id} window:`, error)
+  if (id === 'preview') {
+    void togglePreviewWindow().catch(failed)
+  } else if (id === 'notes') {
+    if (notesWindowIsOpen()) {
+      closeNotesWindow()
+    } else {
+      void openNotesWindow().catch(failed)
+    }
+  } else if (id === 'stream-manager') {
+    void toggleCommentsWindow().catch(failed)
+  } else {
+    void toggleCaptionsWindow().catch(failed)
+  }
+}
+
+function installApplicationMenu(): void {
+  installAppMenu({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    windowsEnabled: {
+      preview: true,
+      notes: notesWindowFeatureEnabled,
+      'stream-manager': commentsWindowFeatureEnabled,
+      captions: captionsWindowFeatureEnabled
+    },
+    actions: {
+      showPage: showMainWindowPage,
+      toggleWindow: toggleAppMenuWindow,
+      openReleaseNotes: () => {
+        void shell
+          .openExternal(appMenuReleaseNotesUrl(app.getVersion()))
+          .catch((error: unknown) =>
+            safeConsole.warn('Help menu: could not open release notes:', error)
+          )
+      }
+    }
+  })
+}
+
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) {
     return
@@ -14031,6 +14544,7 @@ app.whenReady().then(async () => {
   }
 
   installRendererSessionPermissions(session.defaultSession)
+  moveLegacyBuddyAssetsOnce()
 
   registerOAuthCallbackProtocol()
   const initialCallbackUrl = process.argv.find((argument) =>
@@ -14099,6 +14613,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('app:get-runtime-info', () => runtimeInfo())
   secureIpcHandle('app:retry-hardware-acceleration', () => retryHardwareAcceleration())
+  secureIpcHandle('app:exit', (_event, kind: AppExitKind) => {
+    exitAfterLivestreamEnded(kind)
+  })
   secureIpcHandle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
   )
@@ -14125,6 +14642,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('resource:reveal-background', (_event, assetId: unknown) =>
     revealManagedBackground(assetId)
   )
+  secureIpcHandle('resource:reveal-support-bundle', (_event, path: unknown) =>
+    revealSupportBundle(path)
+  )
   // OBS setup import (O1): read-only discovery over OBS Studio's config files.
   // The stream key never rides these payloads — obs:read strips it; the apply
   // flow requests it exactly once via obs:read-stream-key.
@@ -14150,6 +14670,30 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('backgrounds:import-image', () => importBackgroundImage())
   secureIpcHandle('scheduled-streams:import-thumbnail', () => pickScheduledThumbnail())
+  // The Buddy's avatar images (plan 164 S-A3): Start over removes the
+  // persona's folder. The look is generated by the backend (plan 169).
+  secureIpcHandle('buddy-assets:remove', async (_event, personaId: unknown) => {
+    if (!isBuddyPersonaId(personaId)) throw new Error('Buddy removal needs a persona id.')
+    await removeBuddyPersona(managedBuddyRoot(), personaId)
+  })
+  // The overlay raster decodes the persona's own files from bytes (S-C2).
+  secureIpcHandle('buddy-assets:read-image', (_event, relativePath: unknown) =>
+    readBuddyImage(managedBuddyRoot(), relativePath)
+  )
+  secureIpcHandle('buddy-pets:import-folder', (_event, personaId: unknown) =>
+    pickBuddyPetFolder(personaId)
+  )
+  // Plan 168: one pet pack file for the in-app preview (Phase D), from the
+  // persona's packs or the bundled root; null for anything else.
+  secureIpcHandle('buddy-pets:read', (_event, personaId: unknown, packId: unknown, file: unknown) =>
+    readBuddyPetFile(buddyPetRoots(), personaId, packId, file)
+  )
+  // Plan 168 S-F5: one file of the persona's creation for the creator wizard.
+  secureIpcHandle(
+    'buddy-pets:read-creation',
+    (_event, personaId: unknown, buildId: unknown, file: unknown) =>
+      readBuddyCreationFile(managedBuddyRoot(), personaId, buildId, file)
+  )
   secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>
     backgroundAssetFileExists(assetId)
@@ -14394,9 +14938,26 @@ app.whenReady().then(async () => {
     'comments-window:cohost-action',
     (event, value: unknown): Promise<CohostState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can send Orcle actions.'))
+        return Promise.reject(new Error('Only the Chat window can send Buddy actions.'))
       }
       const requestId = commentsCommandRequestId(value)
+      const relay = (command: CohostActionCommand): Promise<CohostState> =>
+        commentsCommandBroker.request(requestId, () => {
+          if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+          sendElectronEvent(
+            mainWindow.webContents,
+            'comments-window:cohost-action-request',
+            command
+          )
+          return true
+        })
+      // The Buddy's own actions (plan 164 S-C4) are not chat commands: the
+      // bubble goes to the overlay and the switch to the overlay layout, so
+      // they need no live session. Main checks the shape before relaying.
+      const buddy = buddyActionCommand(requestId, value)
+      if (buddy !== null) {
+        return buddy instanceof Error ? Promise.reject(buddy) : relay(buddy)
+      }
       if (
         !value ||
         typeof value !== 'object' ||
@@ -14404,22 +14965,33 @@ app.whenReady().then(async () => {
         !('kind' in value) ||
         !('targetId' in value)
       ) {
-        return Promise.reject(new Error('Orcle action requires a session, kind, and target.'))
+        return Promise.reject(new Error('Buddy action requires a session, kind, and target.'))
       }
-      const command = value as CohostActionCommand
+      const command = value as CohostSessionActionCommand
       if (
         !COHOST_ACTION_KINDS.includes(command.kind) ||
         typeof command.targetId !== 'string' ||
         !command.targetId.trim()
       ) {
-        return Promise.reject(new Error('Orcle action requires a known kind and target id.'))
+        return Promise.reject(new Error('Buddy action requires a known kind and target id.'))
+      }
+      // Plan 164 D7: the Say box carries its line; nothing else may.
+      if (command.kind === 'say-utterance') {
+        if (
+          typeof command.text !== 'string' ||
+          !command.text.trim() ||
+          command.text.trim().length > 200
+        ) {
+          return Promise.reject(new Error('Buddy say requires 1 to 200 characters.'))
+        }
+        if (command.state !== undefined && !['talk', 'laugh', 'think'].includes(command.state)) {
+          return Promise.reject(new Error('Buddy say requires a known avatar state.'))
+        }
+      } else if (command.text !== undefined || command.state !== undefined) {
+        return Promise.reject(new Error('Only Buddy say carries text.'))
       }
       assertLiveCommentsCommandSession(command.sessionId)
-      return commentsCommandBroker.request(requestId, () => {
-        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
-        sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-action-request', command)
-        return true
-      })
+      return relay(command)
     }
   )
   secureIpcHandle(
@@ -14429,14 +15001,14 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.resolve(resolution)
     }
   )
-  // Answers to Orcle's voice command cards (plan 140, S6 part B), relayed like
-  // the Orcle actions above: the window names the command and its answer,
+  // Answers to Buddy's voice command cards (plan 140, S6 part B), relayed like
+  // the Buddy actions above: the window names the command and its answer,
   // the MAIN renderer makes the cohost.command.* call.
   secureIpcHandle(
     'comments-window:cohost-command',
     (event, value: unknown): Promise<CohostState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can answer Orcle.'))
+        return Promise.reject(new Error('Only the Chat window can answer Buddy.'))
       }
       const requestId = commentsCommandRequestId(value)
       const command = value as CohostCommandRelayCommand
@@ -14462,21 +15034,29 @@ app.whenReady().then(async () => {
     'comments-window:cohost-enable',
     (event, value: unknown): Promise<CohostWindowState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can change Orcle settings.'))
+        return Promise.reject(new Error('Only the Chat window can change Buddy settings.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (!value || typeof value !== 'object' || !('enabled' in value)) {
-        return Promise.reject(new Error('Orcle enable requires an enabled flag.'))
+        return Promise.reject(new Error('Buddy enable requires an enabled flag.'))
       }
       const command = value as CohostEnableCommand
       if (typeof command.enabled !== 'boolean') {
-        return Promise.reject(new Error('Orcle enable requires a boolean enabled flag.'))
+        return Promise.reject(new Error('Buddy enable requires a boolean enabled flag.'))
       }
       if (command.grantConsent !== undefined && typeof command.grantConsent !== 'boolean') {
-        return Promise.reject(new Error('Orcle consent grant must be a boolean.'))
+        return Promise.reject(new Error('Buddy consent grant must be a boolean.'))
       }
       if (command.listen !== undefined && typeof command.listen !== 'boolean') {
-        return Promise.reject(new Error('Orcle listening must be a boolean.'))
+        return Promise.reject(new Error('Buddy listening must be a boolean.'))
+      }
+      if (command.grantListen !== undefined && typeof command.grantListen !== 'boolean') {
+        return Promise.reject(new Error('Buddy listening grant must be a boolean.'))
+      }
+      // Plan 164 S-D6: the mode and the three switches, nothing else.
+      const autoChat = cohostAutoChatRelayPatch(command.autoChat)
+      if (autoChat === false) {
+        return Promise.reject(new Error('Buddy chat mode must be off, suggest or auto.'))
       }
       return commentsCommandBroker.request(requestId, () => {
         if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
@@ -14484,10 +15064,30 @@ app.whenReady().then(async () => {
           requestId,
           enabled: command.enabled,
           ...(command.grantConsent === true ? { grantConsent: true } : {}),
-          ...(typeof command.listen === 'boolean' ? { listen: command.listen } : {})
+          ...(typeof command.listen === 'boolean' ? { listen: command.listen } : {}),
+          ...(command.grantListen === true ? { grantListen: true } : {}),
+          ...(autoChat ? { autoChat } : {})
         })
         return true
       })
+    }
+  )
+  // Plan 174 S3.14a: the Buddy pane's read-only behaviour chips link to their
+  // one home, Buddy → Chat in the main window. The same door as a
+  // `videorc://buddy` link: main shows the window, the shell opens the tab.
+  secureIpcHandle(
+    'comments-window:open-buddy-tab',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can open a Buddy tab.')
+      }
+      commentsCommandRequestId(value)
+      const tab = (value as { tab?: unknown }).tab
+      if (typeof tab !== 'string' || !tab.trim()) {
+        throw new Error('Opening a Buddy tab requires its id.')
+      }
+      sendBuddyNavigation({ openCreator: false, tab })
+      return true
     }
   )
   secureIpcHandle(
@@ -14682,7 +15282,7 @@ app.whenReady().then(async () => {
       return startScopeReconnect('twitch')
     }
   )
-  // "Reconnect Twitch to let Orcle remove messages" (plan 140, S5). The
+  // "Reconnect Twitch to let Buddy remove messages" (plan 140, S5). The
   // runtime contract already admits only {requestId, platform: twitch | kick};
   // the checks below keep the handler safe on its own.
   secureIpcHandle(
@@ -14839,6 +15439,7 @@ app.whenReady().then(async () => {
     })
   )
 
+  installApplicationMenu()
   createWindow()
   setDockIcon()
   await primeScreenCapturePermission()
@@ -14864,6 +15465,8 @@ app.on('window-all-closed', () => {
 // restoring Node's default immediate process termination while export runs.
 installPersistentBackendShutdownSignalHandlers(process, (signal) => {
   logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
+  // A signal is never the person's quit: it must not wait on a question.
+  liveExitGuard.allow('quit')
   app.quit()
 })
 
@@ -14872,6 +15475,15 @@ previewLifecycleEvidence.bindBeforeQuit(app, {
     safeConsole.warn('Ignored app quit while the preview lifecycle probe owns the app.')
   },
   onAllowed: (event) => {
+    // Plan 174 S3.1 (D2): quitting while on air asks first. The renderer
+    // ends the livestream on a yes and quits again through app:exit; a no
+    // leaves the app running as it was. A recording quits as before: the
+    // backend shutdown below drains its finalization.
+    if (!appIsQuitting && liveExitGuard.shouldAsk('quit', mainRendererCanAnswer())) {
+      event.preventDefault()
+      askRendererBeforeExit('quit')
+      return
+    }
     appIsQuitting = true
     accountSignInTransactions?.dispose()
     providerOAuthCallbacks?.dispose()

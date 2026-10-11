@@ -75,7 +75,7 @@ describe('systemAudioIssueFromHealthEvent', () => {
       'bypassed'
     )
     expect(systemAudioIssueCopy('bypassed')).toBe(
-      'System audio is off for this session because the microphone is on a fallback input.'
+      'System audio is off until you stop, because the microphone is on a fallback input.'
     )
     expect(systemAudioIssueFromHealthEvent({ code: 'microphone-input-lost' })).toBeNull()
   })
@@ -83,9 +83,12 @@ describe('systemAudioIssueFromHealthEvent', () => {
   it('maps the echo guard pause, and a recovery is not an issue (plan 076)', () => {
     expect(systemAudioIssueFromHealthEvent({ code: 'system-audio-echo-paused' })).toBe('echo')
     expect(systemAudioIssueFromHealthEvent({ code: 'system-audio-recovered' })).toBeNull()
-    expect(systemAudioIssueCopy('echo')).toBe(
+    expect(systemAudioIssueCopy('echo', 'darwin')).toBe(
       'Paused: your stream is playing on this Mac and coming back as an echo. Mute that tab, then resume.'
     )
+    // Plan 174 C-30: a Windows PC is never "this Mac".
+    expect(systemAudioIssueCopy('echo', 'win32')).toContain('playing on this PC')
+    expect(systemAudioIssueCopy('echo', 'linux')).toContain('playing on this computer')
   })
 
   it('names the event the Studio listens to for Resume', () => {

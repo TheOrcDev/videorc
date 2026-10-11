@@ -2,7 +2,8 @@
 // (/api/changelog, fed by videorc changelog/ on each release) and decides
 // when the post-update dialog should appear.
 
-import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
+import { toast } from '@/lib/toast'
+import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
 export const WHATS_NEW_STORAGE_KEY = 'videorc.whatsNewLastSeenVersion'
 
@@ -158,6 +159,86 @@ export function filterChangelogEntriesByPlatform(
   platform: ChangelogPlatform
 ): ChangelogEntry[] {
   return entries.filter((entry) => entry.platforms.includes(platform))
+}
+
+export interface WhatsNewResult {
+  /** The newest release since the last seen one. */
+  entry: ChangelogEntry
+  /** The releases between the last seen one and `entry`, newest first (plan 174 A-19). */
+  skippedVersions: string[]
+}
+
+type LastSeenStore = Pick<Storage, 'getItem' | 'setItem'>
+
+/** The last seen version advances on a good answer or a dismissal, never on a failed fetch. */
+export function markWhatsNewSeen(version: string, store: LastSeenStore = localStorage): void {
+  store.setItem(WHATS_NEW_STORAGE_KEY, version)
+}
+
+/**
+ * The post-update check (the hook's work, loaded on demand: plan 174
+ * S3.21): nothing to show on an unchanged version; the first run with the
+ * feature initializes silently; otherwise the entries published since the
+ * last seen version, newest first, or null when the fetch failed (it retries
+ * on the next launch).
+ */
+export async function checkWhatsNew({
+  version,
+  runtimePlatform,
+  store = localStorage,
+  fetchImpl
+}: {
+  version: string
+  runtimePlatform: string | undefined
+  store?: LastSeenStore
+  fetchImpl?: typeof fetch
+}): Promise<WhatsNewResult | null> {
+  const lastSeen = store.getItem(WHATS_NEW_STORAGE_KEY)
+  const action = resolveWhatsNewAction({ version, lastSeen })
+  if (action === 'idle') {
+    return null
+  }
+  if (action === 'initialize') {
+    markWhatsNewSeen(version, store)
+    return null
+  }
+  const platform = changelogPlatformForRuntime(runtimePlatform)
+  if (!platform) {
+    return null
+  }
+  const entries = await fetchChangelogEntries({ platform, since: lastSeen ?? undefined, fetchImpl })
+  if (entries === null) {
+    return null
+  }
+  if (entries.length === 0) {
+    markWhatsNewSeen(version, store)
+    return null
+  }
+  return { entry: entries[0], skippedVersions: entries.slice(1).map((entry) => entry.version) }
+}
+
+/** No notes in the app, so the way out is the website (plan 174 S2.4). */
+function showReleaseNotesUnavailable(): void {
+  toast.info("Release notes aren't available in Videorc right now", {
+    id: 'whats-new-unavailable',
+    action: {
+      label: 'Open changelog',
+      onClick: () => openVideorcWebLink(VIDEORC_WEB_LINKS.changelog)
+    }
+  })
+}
+
+/** The latest release for Settings → About, whatever was seen; a toast says when there is none. */
+export async function latestWhatsNew(
+  runtimePlatform: string | undefined
+): Promise<WhatsNewResult | null> {
+  const platform = changelogPlatformForRuntime(runtimePlatform)
+  const entries = platform ? await fetchChangelogEntries({ platform }) : null
+  if (!entries || entries.length === 0) {
+    showReleaseNotesUnavailable()
+    return null
+  }
+  return { entry: entries[0], skippedVersions: [] }
 }
 
 // "0.9.2-beta.1" -> "0.9.2 Beta 1", for the dialog title.

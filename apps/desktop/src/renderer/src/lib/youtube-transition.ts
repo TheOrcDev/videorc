@@ -10,6 +10,6 @@ export function assertYouTubeTransitionConfirmed(
 
   const current = result.lifecycleStatus ?? 'unknown'
   throw new Error(
-    `YouTube did not confirm ${expectedStatus}; current broadcast status is ${current}.`
+    `YouTube didn't confirm ${expectedStatus}; current broadcast status is ${current}.`
   )
 }

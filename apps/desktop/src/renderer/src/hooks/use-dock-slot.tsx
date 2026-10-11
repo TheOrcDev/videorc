@@ -5,11 +5,37 @@ import {
   DOCK_BLOCKING_POPPER_SELECTOR,
   DOCK_BLOCKING_SCRIM_SELECTOR,
   buildDockSlotReport,
+  clipRectOf,
   dockSlotReportChanged,
   measureDockSlot,
   overlaysOccludeSlot,
   type SlotRect
 } from '@/lib/dock-slot'
+
+/**
+ * The rect every scroll container above the slot still shows, in viewport
+ * CSS pixels: the pane that scrolls (overflow auto), and any overflow-hidden
+ * box on the way. A slot scrolled under the pane's top edge is clipped by it
+ * while still inside the window; only this keeps the native surface, which
+ * no DOM clips, from painting over the toolbar.
+ */
+function clippingAncestorsRect(element: HTMLElement): SlotRect | null {
+  const rects: SlotRect[] = []
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    const style = getComputedStyle(node)
+    if (style.overflowY === 'visible' && style.overflowX === 'visible') {
+      continue
+    }
+    const { x, y, width, height } = node.getBoundingClientRect()
+    rects.push({ x, y, width, height })
+  }
+  if (rects.length === 0) {
+    return null
+  }
+  // Ancestors that share no area show nothing of the slot: an empty clip,
+  // never "unclipped".
+  return clipRectOf(rects) ?? { x: 0, y: 0, width: 0, height: 0 }
+}
 
 // Reports a dock slot (the Studio preview card or the Scene canvas) to main
 // while the preview is docked.
@@ -68,10 +94,14 @@ export function useDockSlotReporter(
       width: domRect.width,
       height: domRect.height
     }
-    const measurement = measureDockSlot(rect, {
-      width: window.innerWidth,
-      height: window.innerHeight
-    })
+    const measurement = measureDockSlot(
+      rect,
+      {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      clippingAncestorsRect(element)
+    )
     send(buildDockSlotReport(epochRef.current, slotRef.current, measurement, true))
 
     const scrims = document.querySelectorAll(DOCK_BLOCKING_SCRIM_SELECTOR).length

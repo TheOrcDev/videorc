@@ -1,12 +1,14 @@
 import { useCallback, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 
 import type { AcceleratorKeyInput, AcceleratorModifier } from '../../../shared/accelerator'
-import { acceleratorDisplayKeys, acceleratorModifierLabels } from '../../../shared/accelerator'
+import { acceleratorModifiersLabel } from '../../../shared/accelerator'
 import { CloseIcon } from '@/components/icons'
-import { Field, FieldDescription, FieldError, FieldLabel } from '@/components/ui/field'
+import { SettingsRow } from '@/components/ui/field'
+import { useFieldControlId, useFieldDescribedBy } from '@/components/ui/field-context'
 import { InputGroup, InputGroupAddon, InputGroupButton } from '@/components/ui/input-group'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
-import { shortcutRecorderStep } from '@/lib/shortcut-recorder'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { shortcutRecorderName, shortcutRecorderStep } from '@/lib/shortcut-recorder'
 import { cn } from '@/lib/utils'
 
 interface ShortcutRecorderFieldProps {
@@ -39,19 +41,57 @@ function domKeyInput(event: KeyboardEvent, type: 'keyDown' | 'keyUp'): Accelerat
  * arms the field; main then owns key capture (see `setShortcutRecorderArmed`)
  * so a combination that is already bound, ⌘1–9 or the studio's Space key
  * reach the field instead of firing. Esc cancels, Backspace clears.
+ *
+ * Plan 174 S3.17 (I-7, I-17): one SettingsRow. The field's name carries the
+ * binding it holds, and a refusal or a failed registration is the row's
+ * FieldError, which a screen reader announces when it appears.
  */
-export function ShortcutRecorderField({
+export function ShortcutRecorderField(props: ShortcutRecorderFieldProps): ReactElement {
+  const { label, registrationFailed = false } = props
+  const [message, setMessage] = useState<string | null>(null)
+  const [armed, setArmed] = useState(false)
+  return (
+    <SettingsRow
+      error={
+        message ??
+        (registrationFailed && !armed
+          ? 'Another app already uses this shortcut. Pick another.'
+          : null)
+      }
+      label={label}
+    >
+      <ShortcutRecorderControl
+        {...props}
+        armed={armed}
+        onArmedChange={setArmed}
+        onMessageChange={setMessage}
+      />
+    </SettingsRow>
+  )
+}
+
+/** The recorder itself, inside its row's Field so the label names it. */
+function ShortcutRecorderControl({
   id,
   label,
   value,
   platform,
   validate,
   onChange,
-  registrationFailed = false
-}: ShortcutRecorderFieldProps): ReactElement {
-  const [armed, setArmed] = useState(false)
+  registrationFailed = false,
+  armed,
+  onArmedChange: setArmed,
+  onMessageChange: setMessage
+}: ShortcutRecorderFieldProps & {
+  armed: boolean
+  onArmedChange: (armed: boolean) => void
+  onMessageChange: (message: string | null) => void
+}): ReactElement {
   const [held, setHeld] = useState<AcceleratorModifier[]>([])
-  const [message, setMessage] = useState<string | null>(null)
+  // Registered with the row's Field: its label points here, and its
+  // description (none today) would describe the field.
+  const controlId = useFieldControlId(id)
+  const describedBy = useFieldDescribedBy(undefined)
   // Tears down the current capture (IPC subscriptions + main's arm). Also
   // identifies it: a late arm reply for an older capture is ignored.
   const teardownRef = useRef<(() => void) | null>(null)
@@ -62,7 +102,7 @@ export function ShortcutRecorderField({
     teardown?.()
     setArmed(false)
     setHeld([])
-  }, [])
+  }, [setArmed])
 
   const handleKey = (input: AcceleratorKeyInput): void => {
     const step = shortcutRecorderStep(input, platform, validate)
@@ -158,81 +198,61 @@ export function ShortcutRecorderField({
     handleKey(domKeyInput(event, 'keyUp'))
   }
 
-  const keys = acceleratorDisplayKeys(value, platform)
-  const heldLabels = acceleratorModifierLabels(held, platform)
+  const heldLabel = acceleratorModifiersLabel(held, platform)
 
   return (
-    <Field>
-      <div className="flex items-center justify-between gap-3">
-        <FieldLabel htmlFor={id}>{label}</FieldLabel>
-        <InputGroup
-          className={cn(
-            'w-44 shrink-0',
-            armed && 'border-ring ring-3 ring-ring/30',
-            registrationFailed && !armed && 'border-destructive'
-          )}
-        >
-          <button
-            ref={lifecycleRef}
-            aria-invalid={registrationFailed || undefined}
-            aria-label={
-              armed ? `${label}: press the new shortcut` : `${label}: click to record a shortcut`
-            }
-            className="flex h-full min-w-0 flex-1 cursor-default items-center gap-1 rounded-chip px-2.5 text-left text-xs outline-none"
-            data-slot="input-group-control"
-            id={id}
-            type="button"
-            onBlur={() => {
-              if (teardownRef.current) disarm()
+    <InputGroup
+      className={cn(
+        'w-44 shrink-0',
+        armed && 'border-ring ring-3 ring-ring/30',
+        registrationFailed && !armed && 'border-destructive'
+      )}
+    >
+      <button
+        ref={lifecycleRef}
+        aria-describedby={describedBy}
+        aria-invalid={registrationFailed || undefined}
+        aria-label={shortcutRecorderName({ label, value, armed, platform })}
+        className="flex h-full min-w-0 flex-1 cursor-default items-center gap-1 rounded-chip px-2.5 text-left text-xs outline-none"
+        data-slot="input-group-control"
+        id={controlId}
+        type="button"
+        onBlur={() => {
+          if (teardownRef.current) disarm()
+        }}
+        onClick={arm}
+        onKeyDown={onKeyDown}
+        onKeyUp={onKeyUp}
+      >
+        {armed ? (
+          heldLabel ? (
+            <KbdGroup>
+              <Kbd>{heldLabel}</Kbd>
+              <span className="text-muted-foreground">…</span>
+            </KbdGroup>
+          ) : (
+            <span className="truncate text-muted-foreground">Press shortcut…</span>
+          )
+        ) : value ? (
+          <ShortcutKeys accelerator={value} platform={platform} />
+        ) : (
+          <span className="truncate text-muted-foreground">Unassigned</span>
+        )}
+      </button>
+      {value && !armed ? (
+        <InputGroupAddon align="inline-end">
+          <InputGroupButton
+            aria-label={`Clear the ${label} shortcut`}
+            size="icon-xs"
+            onClick={() => {
+              setMessage(null)
+              onChange('')
             }}
-            onClick={arm}
-            onKeyDown={onKeyDown}
-            onKeyUp={onKeyUp}
           >
-            {armed ? (
-              heldLabels.length > 0 ? (
-                <KbdGroup>
-                  {heldLabels.map((glyph) => (
-                    <Kbd key={glyph}>{glyph}</Kbd>
-                  ))}
-                  <span className="text-muted-foreground">…</span>
-                </KbdGroup>
-              ) : (
-                <span className="truncate text-muted-foreground">Press shortcut…</span>
-              )
-            ) : keys.length > 0 ? (
-              <KbdGroup>
-                {keys.map((glyph, index) => (
-                  <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-                ))}
-              </KbdGroup>
-            ) : (
-              <span className="truncate text-muted-foreground">Unassigned</span>
-            )}
-          </button>
-          {value && !armed ? (
-            <InputGroupAddon align="inline-end">
-              <InputGroupButton
-                aria-label={`Clear the ${label} shortcut`}
-                size="icon-xs"
-                onClick={() => {
-                  setMessage(null)
-                  onChange('')
-                }}
-              >
-                <CloseIcon />
-              </InputGroupButton>
-            </InputGroupAddon>
-          ) : null}
-        </InputGroup>
-      </div>
-      {message ? (
-        <FieldDescription className="text-right text-xs">{message}</FieldDescription>
-      ) : registrationFailed && !armed ? (
-        <FieldError className="text-right text-xs">
-          Another app already uses this shortcut. Pick another.
-        </FieldError>
+            <CloseIcon />
+          </InputGroupButton>
+        </InputGroupAddon>
       ) : null}
-    </Field>
+    </InputGroup>
   )
 }

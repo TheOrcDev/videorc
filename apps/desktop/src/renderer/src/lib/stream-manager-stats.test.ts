@@ -184,8 +184,33 @@ describe('stats bar items (plan 057)', () => {
       tone: 'subtle',
       description: 'No viewer count yet'
     })
-    // No sample yet: health holds its place with a dash, not a zero.
-    expect(find(items, 'health')).toMatchObject({ value: '–', tone: 'neutral' })
+    // No sample yet: health holds its place with a dash, not a zero, and says
+    // why (plan 174 H-10).
+    expect(find(items, 'health')).toMatchObject({
+      value: '–',
+      tone: 'neutral',
+      description: 'Stream health: bitrate not reported yet'
+    })
+    expect(find(items, 'health')?.details).toContainEqual({
+      label: 'Bitrate',
+      value: '–',
+      note: 'Not reported yet'
+    })
+  })
+
+  it('shows no chat pace while no platform reads chat, with the reason (plan 174 H-10)', () => {
+    const offline = { ...provider('twitch'), state: 'reconnecting' as const }
+    const items = statItems({
+      dashboard: live(),
+      viewerSample: null,
+      messages: [],
+      providers: [offline],
+      nowMs: T0 + 5_000
+    })
+    const chat = find(items, 'chat')
+    expect(chat).toMatchObject({ value: '–', tone: 'subtle', description: "Chat isn't connected" })
+    expect(chat?.unit).toBeUndefined()
+    expect(chat?.value).not.toBe('0')
   })
 
   it('reports viewers with the peak on hover, greyed once stale', () => {
@@ -242,7 +267,7 @@ describe('stats bar items (plan 057)', () => {
     expect(viewers?.value).toBe('12')
     expect(viewers?.details).toEqual([
       { label: 'Twitch', value: '12', platform: 'twitch' },
-      { label: 'Kick', value: 'waiting', platform: 'kick' },
+      { label: 'Kick', value: 'Waiting', platform: 'kick' },
       { label: 'Peak', value: '12' }
     ])
   })
@@ -259,16 +284,16 @@ describe('stats bar items (plan 057)', () => {
       'health'
     )
     expect(health).toMatchObject({
-      value: '6,012 kbps',
+      value: '6 Mbps',
       tone: 'good',
-      description: 'Stream health: 6,012 kbps, 60 fps, no dropped frames'
+      description: 'Stream health: 6 Mbps, 60 fps, no dropped frames'
     })
     expect(health?.details).toEqual([
-      { label: 'Bitrate', value: '6,012 kbps' },
+      { label: 'Bitrate', value: '6 Mbps' },
       { label: 'Frame rate', value: '60 fps' },
       { label: 'Dropped frames', value: 'None' },
-      { label: 'Twitch', value: 'Live', platform: 'twitch', dot: 'good' },
-      { label: 'X', value: 'Live', platform: 'x', dot: 'good' }
+      { label: 'Twitch', value: 'On air', platform: 'twitch', dot: 'good' },
+      { label: 'X', value: 'On air', platform: 'x', dot: 'good' }
     ])
   })
 
@@ -341,7 +366,7 @@ describe('stats bar items (plan 057)', () => {
     })
     expect(
       reading(reconnecting)?.details.find((detail) => detail.label === 'YouTube')
-    ).toMatchObject({ value: 'Reconnecting', dot: 'error' })
+    ).toMatchObject({ value: 'Reconnecting…', dot: 'error' })
     const notReceiving = withTargets(healthy(), [
       { targetId: 'yt', platform: 'youtube', label: 'YouTube', state: 'warning' }
     ])
@@ -673,8 +698,10 @@ describe('stats bar items (plan 057)', () => {
         providers: [provider('twitch')],
         nowMs: T0
       })
-      expect(find(items, 'supporters')).toMatchObject({ value: '–' })
-      expect(find(items, 'tips')).toMatchObject({ value: '–' })
+      // Unmeasured subs and tips are not in the bar at all (plan 174 V-8):
+      // never a run of placeholders, and never a retained row's count.
+      expect(find(items, 'supporters')).toBeUndefined()
+      expect(find(items, 'tips')).toBeUndefined()
       expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '–' })
     }
   })
@@ -737,7 +764,7 @@ describe('stats bar items (plan 057)', () => {
       description: 'On air for 12:03'
     })
     expect(find(items, 'viewers')).toMatchObject({ value: '–' })
-    expect(find(items, 'health')).toMatchObject({ value: '6,000 kbps', tone: 'good' })
+    expect(find(items, 'health')).toMatchObject({ value: '6 Mbps', tone: 'good' })
   })
 
   it('summarises a finished session in History', () => {

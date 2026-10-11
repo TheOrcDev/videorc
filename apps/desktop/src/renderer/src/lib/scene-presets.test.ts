@@ -6,7 +6,9 @@ import {
   normalizeSceneVisual,
   resolveSavedBackground,
   sameSceneVisual,
+  sceneGalleryReason,
   sceneNameError,
+  sceneSourceGaps,
   sceneSourceProblems,
   snapshotBackground,
   sourceVisibilityFromScene
@@ -241,7 +243,7 @@ describe('scene presets', () => {
     })
     expect(missing.sources.cameraOff).toBe(false)
     expect(sceneSourceProblems(missing, devices)).toEqual([
-      'Camera unavailable. Choose a replacement.'
+      'Camera unavailable. Choose a replacement in Sources.'
     ])
     expect(reconcileSourceSelection(missing.sources, devices).cameraId).toBe('cam')
   })
@@ -289,5 +291,58 @@ describe('scene presets', () => {
     target.sources.windowId = undefined
     target.sources.screenId = 'missing-screen'
     expect(sceneSourceProblems(target, devices)).toHaveLength(1)
+  })
+})
+
+describe('scene gallery reason line (plan 174 S3.3, B-20)', () => {
+  const screen = {
+    id: 'screen',
+    name: 'Display',
+    kind: 'screen' as const,
+    status: 'available' as const
+  }
+  const cam = { id: 'cam', name: 'Camera', kind: 'camera' as const, status: 'available' as const }
+
+  it('tells a camera turned off from a camera that is gone', () => {
+    const off = visual()
+    off.layout.layoutPreset = 'camera-only'
+    off.sources.cameraId = undefined
+    expect(sceneSourceGaps(off, [screen, cam])).toEqual([{ source: 'camera', state: 'off' }])
+    const gone = visual()
+    gone.layout.layoutPreset = 'camera-only'
+    expect(sceneSourceGaps(gone, [screen])).toEqual([{ source: 'camera', state: 'unavailable' }])
+    const fine = visual()
+    fine.layout.layoutPreset = 'screen-camera'
+    expect(sceneSourceGaps(fine, [screen, cam])).toEqual([])
+  })
+
+  it('says why in one line, naming the scenes each missing source blocks', () => {
+    const cameraOff = [{ source: 'camera', state: 'off' }] as const
+    expect(sceneGalleryReason([])).toBeNull()
+    expect(
+      sceneGalleryReason([
+        { label: 'Screen + camera', gaps: cameraOff },
+        { label: 'Camera only', gaps: cameraOff },
+        { label: 'Side by side', gaps: cameraOff }
+      ])
+    ).toBe(
+      'Camera is off. Choose one in Sources to use Screen + camera, Camera only, and Side by side.'
+    )
+    expect(
+      sceneGalleryReason([
+        { label: 'Camera only', gaps: [{ source: 'camera', state: 'unavailable' }] },
+        { label: 'Screen only', gaps: [{ source: 'screen', state: 'off' }] }
+      ])
+    ).toBe(
+      "Your camera isn't available. Choose another in Sources to use Camera only. No screen is chosen. Choose one in Sources to use Screen only."
+    )
+  })
+
+  it('never says a camera turned off is unavailable', () => {
+    const line = sceneGalleryReason([
+      { label: 'Camera only', gaps: [{ source: 'camera', state: 'off' }] }
+    ])
+    expect(line).not.toContain('unavailable')
+    expect(line).not.toContain('replacement')
   })
 })

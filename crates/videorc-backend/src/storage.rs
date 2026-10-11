@@ -72,7 +72,7 @@ pub struct SessionCloneFacts {
 }
 
 /// When a session started and how long it ran, for readers that place events
-/// on its timeline (plan 119: moments, the Orcle report).
+/// on its timeline (plan 119: moments, the Buddy report).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTiming {
     pub started_at: String,
@@ -5642,8 +5642,8 @@ impl Database {
             .map_err(Into::into)
     }
 
-    /// Orcle report (plan 119 S1): save one session's report, folding it into
-    /// the report already there when the same session comes back (Orcle off
+    /// Buddy report (plan 119 S1): save one session's report, folding it into
+    /// the report already there when the same session comes back (Buddy off
     /// and on mid-stream), in one transaction. `Ok(false)` when the session
     /// row is gone: a report without its session is skipped, never an error.
     /// A stored report this build cannot read is replaced.
@@ -5693,7 +5693,19 @@ impl Database {
         Ok(true)
     }
 
-    /// The saved Orcle report of a session; `None` when there is none or it
+    /// Plan 164 D10: fold one automatic send into the session's report as it
+    /// lands, so the report says what the Buddy posted even when the tick
+    /// session never ran (greetings are free). Same session-row rule as
+    /// `upsert_cohost_report`: `false` when the session row is gone.
+    pub fn append_cohost_report_post(
+        &self,
+        session_id: &str,
+        post: crate::protocol::CohostReportPost,
+    ) -> Result<bool> {
+        self.upsert_cohost_report(&CohostSessionReport::post_only(session_id, post))
+    }
+
+    /// The saved Buddy report of a session; `None` when there is none or it
     /// was written in a format this build does not read.
     pub fn get_cohost_report(&self, session_id: &str) -> Result<Option<CohostSessionReport>> {
         let conn = self.lock()?;
@@ -5709,7 +5721,7 @@ impl Database {
             .and_then(CohostSessionReport::from_stored_json))
     }
 
-    /// The newest Library session that has an Orcle report.
+    /// The newest Library session that has a Buddy report.
     pub fn latest_cohost_report_session_id(&self) -> Result<Option<String>> {
         let conn = self.lock()?;
         conn.query_row(
@@ -9492,6 +9504,7 @@ mod tests {
             started_at: started_at.to_string(),
             ended_at: ended_at.to_string(),
             segments: 1,
+            posts: Vec::new(),
             stream_title: Some("Rust night".to_string()),
             messages_seen: 10,
             shown_on_stream: 1,
@@ -9556,7 +9569,7 @@ mod tests {
         );
         assert_eq!(database.get_cohost_report("s-2").unwrap(), None);
 
-        // Orcle came back mid-stream: the second report folds into the first.
+        // Buddy came back mid-stream: the second report folds into the first.
         let mut second =
             sample_cohost_report("s-1", "2026-10-04T10:31:00Z", "2026-10-04T11:00:00Z");
         second.questions.total = 1;

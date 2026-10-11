@@ -1,13 +1,9 @@
 import type { ClipMarkedEvent } from './backend'
+import { formatTimecode } from './timecode'
 
-/** Recording-file time as m:ss, or h:mm:ss from one hour (plan 068 D6). */
+/** Recording-file time as the one timecode: m:ss, or h:mm:ss from one hour (plan 068 D6, plan 174 S1.4). */
 export function formatClipMarkClock(atSeconds: number): string {
-  const total = Math.max(0, Math.floor(atSeconds))
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const seconds = total % 60
-  const mmss = `${hours > 0 ? String(minutes).padStart(2, '0') : minutes}:${String(seconds).padStart(2, '0')}`
-  return hours > 0 ? `${hours}:${mmss}` : mmss
+  return formatTimecode(atSeconds * 1000)
 }
 
 export interface ClipMarkedToast {
@@ -16,8 +12,8 @@ export interface ClipMarkedToast {
   description?: string
 }
 
-/** Where a saved mark shows up: the stream's report in the Orcle tab (plan 119 S3). */
-export const CLIP_MARK_IN_REPORT = "It's in your stream report in Orcle."
+/** Where a saved mark shows up: the stream's report in the Buddy tab (plan 119 S3). */
+export const CLIP_MARK_IN_REPORT = "It's in your stream report in Buddy."
 
 /**
  * The toast for a `clip.marked` event: where the mark landed, or why the
@@ -39,6 +35,6 @@ export function clipMarkedToast(
   return {
     kind: 'warning',
     title: "Recording is off, so this clip can't be saved.",
-    description: 'Turn on Record in the Studio to keep clips from a stream.'
+    description: 'Turn on Save local recording on the Output page.'
   }
 }

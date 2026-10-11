@@ -1,0 +1,175 @@
+import type {
+  OverlayItem,
+  OverlayItemLayout,
+  OverlayLayout,
+  OverlayOrientation,
+  OverlayRect
+} from '@/lib/backend'
+import { OVERLAY_ITEMS } from '@/lib/backend'
+import type { WsStatus } from '@/lib/capture'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
+import {
+  OVERLAY_ITEM_LABELS,
+  clampOverlayRect,
+  cloneOverlayLayout,
+  overlayItemOutputBadge
+} from '@/lib/overlay-layout'
+
+import type { StageRect } from './stage-transform'
+
+// Overlay items on the Live Scene canvas (plan 164, D15). The stage draws the
+// highlight card, the caption bar and the Buddy as labelled dashed rects that
+// drag and resize like sources; a released gesture is ONE
+// `overlays.layout.set` with the clamped rect (never the scene transaction
+// policy). Pure helpers and the commit serializer live here, unit-tested.
+
+const OVERLAY_STAGE_ID_PREFIX = 'overlay:'
+
+/** The stage-local id an overlay item uses in gestures and drafts. It never
+ * names a scene source, so a chrome-only draft for it draws the frame on the
+ * live picture without moving anything. */
+export function overlayStageId(item: OverlayItem): string {
+  return `${OVERLAY_STAGE_ID_PREFIX}${item}`
+}
+
+export function overlayItemFromStageId(id: string | null | undefined): OverlayItem | null {
+  if (!id || !id.startsWith(OVERLAY_STAGE_ID_PREFIX)) return null
+  const item = id.slice(OVERLAY_STAGE_ID_PREFIX.length)
+  return (OVERLAY_ITEMS as readonly string[]).includes(item) ? (item as OverlayItem) : null
+}
+
+export function overlayRectToStage(rect: OverlayRect): StageRect {
+  return { x: rect.x, y: rect.y, width: rect.w, height: rect.h }
+}
+
+/** A stage rect becomes a wire rect: clamped inside the canvas and no smaller
+ * than the backend accepts, so a gesture can never be rejected. */
+export function stageRectToOverlay(rect: StageRect): OverlayRect {
+  return clampOverlayRect({ x: rect.x, y: rect.y, w: rect.width, h: rect.height })
+}
+
+export interface OverlayStageItem {
+  item: OverlayItem
+  stageId: string
+  label: string
+  rect: StageRect
+  /** What the chip says after the name: off, or which output alone shows it. */
+  badge: 'off' | 'stream only' | 'recording only' | null
+  /** Both output switches are off: the stage draws the item dimmed (plan 174, C-13). */
+  off: boolean
+}
+
+/** An item neither output shows. */
+export function overlayItemOff(item: OverlayItemLayout): boolean {
+  return !item.showOnStream && !item.showInRecording
+}
+
+export function overlayStageItems(
+  layout: OverlayLayout,
+  orientation: OverlayOrientation
+): OverlayStageItem[] {
+  return OVERLAY_ITEMS.map((item) => {
+    const off = overlayItemOff(layout[item])
+    return {
+      item,
+      stageId: overlayStageId(item),
+      label: OVERLAY_ITEM_LABELS[item],
+      rect: overlayRectToStage(layout[item][orientation]),
+      badge: off ? 'off' : overlayItemOutputBadge(layout[item]),
+      off
+    }
+  })
+}
+
+/** The whole layout with one item's rect replaced on one orientation. */
+export function withOverlayRect(
+  layout: OverlayLayout,
+  item: OverlayItem,
+  orientation: OverlayOrientation,
+  rect: OverlayRect
+): OverlayLayout {
+  const next = cloneOverlayLayout(layout)
+  next[item] = { ...next[item], [orientation]: rect }
+  return next
+}
+
+export interface OverlayDraft {
+  item: OverlayItem
+  orientation: OverlayOrientation
+  rect: StageRect
+}
+
+export type OverlayCommit = (layout: OverlayLayout) => Promise<void>
+
+/** How a failed overlay change reaches the streamer (the Studio's reportError). */
+export type OverlayFailure = (error: unknown) => void
+
+/** The one reason the overlay controls are off: they need the backend
+ * (plan 174, C-6), in the app's one offline wording (S1.5). Null while it is
+ * connected. */
+export function overlayEditsBlockedReason(wsStatus: WsStatus): string | null {
+  return wsStatus === 'connected' ? null : OFFLINE_LOCK_REASON
+}
+
+/** Serializes released overlay gestures: exactly one commit per gesture, the
+ * released rect shown until the committed layout arrives (or the commit
+ * fails, which drops the draft so the canvas shows the truth again and reports
+ * the failure: a silent drop let a streamer believe an overlay had moved). */
+export class OverlayEdits {
+  draft: OverlayDraft | null = null
+  private epoch = 0
+  private tail: Promise<void> = Promise.resolve()
+  constructor(
+    private commit: OverlayCommit,
+    private changed: () => void,
+    private failed: OverlayFailure = () => {}
+  ) {}
+  configure(commit: OverlayCommit, failed?: OverlayFailure): void {
+    this.commit = commit
+    if (failed) this.failed = failed
+  }
+  /** The committed layout caught up with the draft (or moved on): drop it. */
+  observe(layout: OverlayLayout): void {
+    const draft = this.draft
+    if (!draft) return
+    const committed = layout[draft.item][draft.orientation]
+    const expected = stageRectToOverlay(draft.rect)
+    if (
+      committed.x === expected.x &&
+      committed.y === expected.y &&
+      committed.w === expected.w &&
+      committed.h === expected.h
+    ) {
+      this.draft = null
+      this.changed()
+    }
+  }
+  invalidate(): void {
+    this.epoch++
+    this.draft = null
+    this.changed()
+  }
+  submit(
+    layout: OverlayLayout,
+    item: OverlayItem,
+    orientation: OverlayOrientation,
+    rect: StageRect
+  ): void {
+    const clamped = stageRectToOverlay(rect)
+    this.draft = { item, orientation, rect: overlayRectToStage(clamped) }
+    const epoch = this.epoch
+    const commit = this.commit
+    this.changed()
+    this.tail = this.tail.then(async () => {
+      if (epoch !== this.epoch) return
+      try {
+        await commit(withOverlayRect(layout, item, orientation, clamped))
+      } catch (error) {
+        // A newer intent superseded this gesture: its failure is not news.
+        if (epoch !== this.epoch) return
+        this.invalidate()
+        this.failed(error)
+      }
+    })
+  }
+}

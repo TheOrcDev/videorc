@@ -328,12 +328,49 @@ export function createImportedAsset(input: {
   }
 }
 
-// Link an imported asset into a slot, marking it ready. Replacing a slot's asset
-// drops the previous record so the registry can't leak orphaned assets.
 export function firstEmptySlotId(registry: BackgroundAssetRegistry): string | null {
   return registry.slots.find((slot) => slot.status === 'empty')?.id ?? null
 }
 
+/**
+ * Where Assets' Import puts a new image (plan 174, C-2 and D14): the first
+ * empty slot, or, with all ten in use (every fresh profile), the slot the
+ * streamer picks under "Replace which background?", starting from the
+ * active background, else the last slot.
+ */
+export type BackgroundImportTarget =
+  | { kind: 'slot'; slotId: string }
+  | { kind: 'replace'; preselectedSlotId: string }
+
+export function backgroundImportTarget(
+  registry: BackgroundAssetRegistry
+): BackgroundImportTarget | null {
+  const empty = firstEmptySlotId(registry)
+  if (empty) return { kind: 'slot', slotId: empty }
+  const active = registry.slots.find((slot) => slot.id === registry.activeSlotId)
+  const preselected = active ?? registry.slots.at(-1)
+  return preselected ? { kind: 'replace', preselectedSlotId: preselected.id } : null
+}
+
+/**
+ * Where an import nobody is asked about goes (the OBS import, C-7): the first
+ * empty slot, else the last slot holding a built-in preset (Remove, then
+ * Restore default, brings it back), else the last slot. `replaces` names the
+ * background it takes the place of, so the report can say so before apply.
+ */
+export function unattendedImportSlot(
+  registry: BackgroundAssetRegistry
+): { slotId: string; replaces: string | null } | null {
+  const empty = firstEmptySlotId(registry)
+  if (empty) return { slotId: empty, replaces: null }
+  const slot =
+    [...registry.slots].reverse().find((entry) => slotAsset(entry, registry)?.kind === 'builtin') ??
+    registry.slots.at(-1)
+  return slot ? { slotId: slot.id, replaces: slotName(slot, registry) } : null
+}
+
+// Link an imported asset into a slot, marking it ready. Replacing a slot's asset
+// drops the previous record so the registry can't leak orphaned assets.
 export function importIntoSlot(
   registry: BackgroundAssetRegistry,
   slotId: string,
@@ -392,6 +429,24 @@ export function setAssetStyle(
       [assetId]: { ...asset, styleDefaults: { ...asset.styleDefaults, ...patch } }
     }
   }
+}
+
+/**
+ * Whether removing a slot's background asks first (plan 174 S0.3, C-12): when
+ * it leaves the scene (the slot is active, or its asset is the scene's
+ * background), or when it is an imported file (pruned on the next load, so
+ * gone for good). Emptying a built-in slot is reversible (Restore default).
+ */
+export function removeSlotNeedsConfirm(
+  registry: BackgroundAssetRegistry,
+  slotId: string,
+  sceneBackgroundAssetId: string | null | undefined
+): boolean {
+  const slot = registry.slots.find((entry) => entry.id === slotId)
+  if (!slot) return false
+  if (registry.activeSlotId === slotId) return true
+  if (slot.assetId !== null && slot.assetId === sceneBackgroundAssetId) return true
+  return slotAsset(slot, registry)?.kind === 'imported'
 }
 
 // Removing a library entry never deletes its managed file or saved-scene references.
@@ -548,12 +603,27 @@ function normalizeAsset(raw: unknown): BackgroundAsset | null {
   }
 }
 
+/** A built-in asset with the name and style a stored record carries, if any. */
+function withStoredBuiltinEdits(builtin: BackgroundAsset, raw: unknown): BackgroundAsset {
+  if (!raw || typeof raw !== 'object') return builtin
+  const stored = raw as Partial<Record<'name' | 'styleDefaults', unknown>>
+  return {
+    ...builtin,
+    name: typeof stored.name === 'string' && stored.name.trim() !== '' ? stored.name : builtin.name,
+    styleDefaults:
+      stored.styleDefaults && typeof stored.styleDefaults === 'object'
+        ? normalizeStyle(stored.styleDefaults)
+        : builtin.styleDefaults
+  }
+}
+
 // Rebuild a trustworthy registry from whatever localStorage held. The canonical
 // ten slots always come from code (ids + labels), so a stale or partial store
 // can never drop a slot or resurrect a renamed one; only the mutable overlay
-// (imported assets, per-slot link, active selection) is restored, validated, and
-// pruned of orphans. Imported slots reload as 'ready'; a missing managed file is
-// re-detected at runtime (the tile <img> onError), not persisted.
+// (imported assets, per-slot link, active selection, a built-in's name and
+// style) is restored, validated, and pruned of orphans. Imported slots reload
+// as 'ready'; a missing managed file is re-detected at runtime (the tile <img>
+// onError), not persisted.
 export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
   const base = createDefaultRegistry()
   if (!loaded || typeof loaded !== 'object') {
@@ -570,8 +640,14 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
   const assets: Record<string, BackgroundAsset> = { ...base.assets }
   if (data.assets && typeof data.assets === 'object') {
     for (const [id, raw] of Object.entries(data.assets as Record<string, unknown>)) {
+      const builtin = base.assets[id]
+      if (builtin) {
+        // Built-in assets come from this build so hashed bundle URLs stay
+        // fresh; the streamer's rename and style edits survive (plan 174, C-3).
+        assets[id] = withStoredBuiltinEdits(builtin, raw)
+        continue
+      }
       const asset = normalizeAsset(raw)
-      // Built-in assets always come from this build so hashed bundle URLs stay fresh.
       if (asset && asset.id === id && asset.kind !== 'builtin') {
         assets[id] = asset
       }

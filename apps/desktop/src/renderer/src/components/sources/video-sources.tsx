@@ -1,13 +1,12 @@
-import { CameraIcon, DisplayIcon, UploadIcon, WarningIcon } from '@/components/icons'
+import { CameraIcon, DisplayIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { GroupedList } from '@/components/list-row'
+import { DevicePicker } from '@/components/device-picker'
 import { PanelSection } from '@/components/panel-section'
-import { SourceSelect } from '@/components/source-select'
 import { SourceFacts, SourceItem } from '@/components/sources/source-item'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
 import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
@@ -15,12 +14,14 @@ import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camer
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
 import { selectedDeviceStatus, videoSourceStatus, type SourceStatus } from '@/lib/source-status'
-import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { systemAccessRows } from '@/lib/system-access'
 
 // Plan 173: the Sources page's Video column, Screen and Camera, each one
 // SourceItem in one grouped list. What the column says about a source comes
-// from the preview pipeline right now (status chip, facts line); a missing
-// permission leads the column with its one fix and disables what it locks.
+// from the preview pipeline right now (status chip, facts line). A missing
+// permission is the page's alert with its fix (plan 174 S3.8,
+// `source-permission-alerts.tsx`); the screen picker stays locked while
+// nothing can be captured at all.
 
 export interface VideoSourcesViewProps {
   sessionActive: boolean
@@ -29,6 +30,8 @@ export interface VideoSourcesViewProps {
     devices: Device[]
     value?: string
     selectedName?: string
+    /** The selected capture device from the whole list (the picker hides some). */
+    selectedDevice?: Device
     allowNone: boolean
     disabled: boolean
     status: SourceStatus | null
@@ -43,20 +46,11 @@ export interface VideoSourcesViewProps {
     disabled: boolean
     status: SourceStatus | null
     facts: string | null
-    /** The format shortfall message (plan 024 S5); replaces the facts line. */
+    /** The format shortfall message (plan 024 S5): an Alert in place of the facts line. */
     shortfall: string | null
     switchStatus?: ReactNode
     onChange: (cameraId: string | undefined) => void
   }
-  /** Screen Recording is missing: the column's first alert, with its fixes. */
-  screenPermission: { targetName: string; onOpen: () => void; onReveal: () => void } | null
-  /** Camera access is missing: the alert names the platform's own action. */
-  cameraPermission: {
-    targetName: string
-    actionLabel: string | null
-    onOpen: () => void
-    onReveal: () => void
-  } | null
   /** Development builds only: the deterministic synthetic screen. */
   synthetic: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } | null
 }
@@ -67,8 +61,6 @@ export function VideoSourcesView({
   discoveryPending,
   screen,
   camera,
-  screenPermission,
-  cameraPermission,
   synthetic
 }: VideoSourcesViewProps): ReactElement {
   return (
@@ -80,42 +72,6 @@ export function VideoSourcesView({
       }
       title="Video"
     >
-      {screenPermission ? (
-        <Alert variant="warning">
-          <WarningIcon weight="fill" />
-          <AlertTitle>
-            Screen Recording permission is required for {screenPermission.targetName}.
-          </AlertTitle>
-          <AlertDescription className="flex flex-wrap gap-2 pt-2">
-            <Button size="sm" variant="outline" onClick={screenPermission.onOpen}>
-              <DisplayIcon data-icon="inline-start" />
-              Open Screen Recording
-            </Button>
-            <Button size="sm" variant="ghost" onClick={screenPermission.onReveal}>
-              <UploadIcon data-icon="inline-start" />
-              Show Capture Helper
-            </Button>
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      {cameraPermission ? (
-        <Alert variant="warning">
-          <WarningIcon weight="fill" />
-          <AlertTitle>Camera permission is required for {cameraPermission.targetName}.</AlertTitle>
-          <AlertDescription className="flex flex-wrap gap-2 pt-2">
-            {cameraPermission.actionLabel ? (
-              <Button size="sm" variant="outline" onClick={cameraPermission.onOpen}>
-                <CameraIcon data-icon="inline-start" />
-                {cameraPermission.actionLabel}
-              </Button>
-            ) : null}
-            <Button size="sm" variant="ghost" onClick={cameraPermission.onReveal}>
-              <UploadIcon data-icon="inline-start" />
-              Show Capture Helper
-            </Button>
-          </AlertDescription>
-        </Alert>
-      ) : null}
       <GroupedList>
         <SourceItem
           disabled={screen.disabled}
@@ -124,16 +80,20 @@ export function VideoSourcesView({
           status={screen.status}
           title="Screen"
         >
-          <SourceSelect
-            allowNone={screen.allowNone}
+          <DevicePicker
             description={screen.switchStatus}
             devices={screen.devices}
             disabled={screen.disabled}
             discoveryPending={discoveryPending}
+            groupByKind
+            kind="capture"
             label="Screen / window"
             labelHidden
+            noneLabel={screen.allowNone ? 'None' : undefined}
             searchable
+            selectedDevice={screen.selectedDevice}
             selectedName={screen.selectedName}
+            statusInTrigger={false}
             value={screen.value}
             onChange={screen.onChange}
           />
@@ -166,16 +126,17 @@ export function VideoSourcesView({
           status={camera.status}
           title="Camera"
         >
-          <SourceSelect
-            allowNone
+          <DevicePicker
             description={camera.switchStatus}
             devices={camera.devices}
             disabled={camera.disabled}
             discoveryPending={discoveryPending}
+            kind="camera"
             label="Camera"
             labelHidden
             noneLabel="Off"
             selectedName={camera.selectedName}
+            statusInTrigger={false}
             value={camera.value}
             onChange={camera.onChange}
           />
@@ -183,7 +144,9 @@ export function VideoSourcesView({
               only format can't meet the requested rate used to fall back
               silently; the mismatch replaces the facts line. */}
           {camera.shortfall ? (
-            <SourceFacts tone="warning">{camera.shortfall}</SourceFacts>
+            <Alert data-videorc-camera-shortfall="" variant="warning">
+              <AlertTitle>{camera.shortfall}</AlertTitle>
+            </Alert>
           ) : camera.facts ? (
             <SourceFacts>{camera.facts}</SourceFacts>
           ) : null}
@@ -194,8 +157,9 @@ export function VideoSourcesView({
 }
 
 /**
- * What the Video column's permission alerts say and lock. The page frame
- * reads it too, to drop the device-list warnings these alerts already cover.
+ * What a missing permission means for the Video column: the screen picker
+ * locks while nothing can be captured, and the camera's chip says it needs
+ * permission. The page's alerts (`source-permission-alerts.tsx`) read it too.
  */
 export function videoPermissionState({
   deviceList,
@@ -209,8 +173,6 @@ export function videoPermissionState({
   screenPermissionRequired: boolean
   screenLocked: boolean
   cameraPermissionRequired: boolean
-  cameraPermissionAction: ReturnType<typeof systemAccessAction>
-  cameraLocked: boolean
 } {
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameraAccess = systemAccessRows({
@@ -228,17 +190,11 @@ export function videoPermissionState({
     screenLocked:
       captureDevices.length > 0 &&
       captureDevices.every((device) => device.status === 'permission-required'),
+    // The camera picker never locks (plan 174 S3.8): choosing a camera is
+    // one way the system asks, Off must stay reachable, and the alert for a
+    // chosen camera carries the fix.
     cameraPermissionRequired:
-      cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted',
-    cameraPermissionAction: systemAccessAction({
-      pane: 'camera',
-      state: cameraAccess?.state,
-      platform,
-      mediaAccessStatus: mediaAccess?.camera
-    }),
-    // Denied locks the picker; first use stays open, because picking a camera
-    // is one way the system asks.
-    cameraLocked: cameraAccess?.state === 'not-granted'
+      cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted'
   }
 }
 
@@ -254,8 +210,6 @@ export function VideoSources(): ReactElement {
     switchSourceDeviceLive,
     sourceSwitchReason,
     allowCaptureNone,
-    handleSystemPermission,
-    revealPermissionTarget,
     runtimeInfo,
     mediaAccess,
     wsStatus
@@ -266,16 +220,12 @@ export function VideoSources(): ReactElement {
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
   const selectedCaptureId = sources.screenId ?? sources.windowId
-  const targetName =
-    runtimeInfo?.capturePermissionTargetName ?? runtimeInfo?.permissionTargetName ?? 'Videorc'
 
-  const {
-    screenPermissionRequired,
-    screenLocked,
-    cameraPermissionRequired,
-    cameraPermissionAction,
-    cameraLocked
-  } = videoPermissionState({ deviceList, platform: runtimeInfo?.platform, mediaAccess })
+  const { screenLocked, cameraPermissionRequired } = videoPermissionState({
+    deviceList,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  })
 
   const shortfall = sources.cameraId ? cameraFormatShortfall(diagnosticStats) : null
 
@@ -293,7 +243,7 @@ export function VideoSources(): ReactElement {
         devices: cameras,
         value: sources.cameraId,
         selectedName: sources.cameraName,
-        disabled: cameraLocked || Boolean(sourceSwitchReason('camera') || layoutSwitchPending),
+        disabled: Boolean(sourceSwitchReason('camera') || layoutSwitchPending),
         status: videoSourceStatus({
           kind: 'camera',
           selected: Boolean(sources.cameraId),
@@ -310,25 +260,12 @@ export function VideoSources(): ReactElement {
         switchStatus: <SourceSwitchStatus kind="camera" />,
         onChange: switchCamera
       }}
-      cameraPermission={
-        cameraPermissionRequired
-          ? {
-              targetName,
-              actionLabel: cameraPermissionAction
-                ? cameraPermissionAction === 'request-media-access'
-                  ? 'Enable Camera'
-                  : 'Open Camera Settings'
-                : null,
-              onOpen: () => void handleSystemPermission('camera'),
-              onReveal: () => void revealPermissionTarget()
-            }
-          : null
-      }
       discoveryPending={wsStatus !== 'connected'}
       screen={{
         devices: captureDevices,
         value: selectedCaptureId,
         selectedName: sources.screenName ?? sources.windowName,
+        selectedDevice: deviceList.devices.find((device) => device.id === selectedCaptureId),
         allowNone: allowCaptureNone,
         disabled: screenLocked || Boolean(sourceSwitchReason('capture') || layoutSwitchPending),
         status: videoSourceStatus({
@@ -344,15 +281,6 @@ export function VideoSources(): ReactElement {
         switchStatus: <SourceSwitchStatus kind="capture" />,
         onChange: switchCapture
       }}
-      screenPermission={
-        screenPermissionRequired
-          ? {
-              targetName,
-              onOpen: () => void handleSystemPermission('screen-recording'),
-              onReveal: () => void revealPermissionTarget()
-            }
-          : null
-      }
       sessionActive={isSessionActive}
       synthetic={
         import.meta.env.DEV

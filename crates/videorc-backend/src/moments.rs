@@ -4,7 +4,7 @@
 //! pressing Mark clip (plan 068 D6), or one of the top chat-activity peaks,
 //! each snapped to the live-captions `.srt` cues with an excerpt. Everything
 //! is ranked LOCALLY from data the app already has, computed when a report is
-//! read and never stored: the Orcle report shows them, and Clean cut review
+//! read and never stored: the Buddy report shows them, and Clean cut review
 //! pins them.
 
 use std::path::PathBuf;

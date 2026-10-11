@@ -128,7 +128,13 @@ function render(props: {
 
 /** Visible text only: a raw provider message may live in a title, never inline. */
 function visibleText(markup: string): string {
-  return markup.replace(/<[^>]*>/g, ' ')
+  // A hidden description (a tooltip's text) is not on screen.
+  return markup.replace(/<span[^>]*\shidden=""[^>]*>[^<]*<\/span>/g, ' ').replace(/<[^>]*>/g, ' ')
+}
+
+/** The hover-and-focus explanation of a chip (InfoTooltip, plan 174 S1.10). */
+function explanation(markup: string): string | undefined {
+  return /data-slot="info-tooltip-text"[^>]*>([^<]*)</.exec(markup)?.[1]
 }
 
 afterEach(() => {
@@ -138,8 +144,13 @@ afterEach(() => {
 describe('DestinationCard header', () => {
   it('is a keyboard-reachable row that says Stream key in key mode', () => {
     const markup = render({ target: target('kick', { authMode: 'manual-rtmp' }), expanded: false })
-    expect(markup).toContain('tabindex="0"')
-    expect(markup).toContain('aria-expanded="false"')
+    // Its title is a real button and the enable switch its sibling (plan 174
+    // S0.5, D-12), never a role="button" row around the switch.
+    expect(markup).toMatch(
+      /<button[^>]*data-slot="list-row-button"[^>]*aria-expanded="false"[^>]*>kick</
+    )
+    expect(markup).not.toContain('role="button"')
+    expect(markup).toMatch(/<button[^>]*role="switch"[^>]*aria-label="Enable kick"/)
     expect(markup).toContain('>Stream key<')
   })
 
@@ -169,7 +180,8 @@ describe('DestinationCard connection mode', () => {
     expect(markup).toContain('Connect with')
     expect(markup).toContain('>Sign in<')
     expect(markup).toContain('>Stream key<')
-    expect(markup).toContain('data-slot="tabs-list"')
+    expect(markup).toContain('data-slot="segmented-control"')
+    expect(markup).toContain('role="radiogroup"')
     expect(markup).not.toContain('Auth mode')
     expect(markup).not.toContain('OAuth')
     expect(markup).not.toContain('Manual RTMP')
@@ -222,7 +234,8 @@ describe('DestinationCard signed-in account', () => {
     for (const scope of TWITCH_ALL_SCOPES) expect(markup).not.toContain(scope)
     expect(markup).not.toContain('Validated')
     expect(visibleText(markup)).not.toContain('Account access is valid.')
-    expect(markup).toContain('title="Account access is valid."')
+    expect(explanation(markup)).toBe('Account access is valid.')
+    expect(markup).not.toContain('title="Account access is valid."')
     expect(markup).toContain('aria-label="Connected"')
     expect(visibleText(markup)).toContain('Disconnect')
     expect(markup).not.toContain('Needs reconnect')
@@ -254,7 +267,7 @@ describe('DestinationCard signed-in account', () => {
     )
     expect(markup).toContain('>Reconnect<')
     expect(visibleText(markup)).not.toContain('invalid_grant')
-    expect(markup).toContain('invalid_grant')
+    expect(explanation(markup)).toBe(raw)
   })
 
   it('shows no status dot before the account was checked', () => {
@@ -309,6 +322,8 @@ describe('DestinationCard signed-in account', () => {
     expect(markup).toContain('Use a stream key instead')
     expect(markup).toContain('X Producer docs')
     expect(markup).not.toContain('Manual RTMP')
+    // A config saved before plan 174 S2.3a keeps "X / Twitter"; it reads "X" (D-36).
+    expect(markup).not.toContain('X / Twitter')
   })
 })
 
@@ -318,7 +333,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
     return start === -1 ? '' : visibleText(markup.slice(start, markup.indexOf('</div>', start)))
   }
 
-  it('asks a Twitch account without the moderation scope to reconnect, naming Orcle', () => {
+  it('asks a Twitch account without the moderation scope to reconnect, naming Buddy', () => {
     const markup = render({
       target: target('twitch'),
       account: account('twitch', {
@@ -327,7 +342,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
       validation: validation('twitch', 'valid')
     })
     const row = permissions(markup)
-    expect(row).toContain('Reconnect Twitch to let Orcle remove messages.')
+    expect(row).toContain('Reconnect Twitch to let Buddy remove messages.')
     expect(row).not.toContain('Follow alerts')
     expect(markup).toMatch(/data-slot="destination-permissions"[\s\S]*?>Reconnect<\/button>/)
     // One row, one button, never the raw scope.
@@ -341,7 +356,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
       account: account('twitch', { scopes: [...TWITCH_SCOPES, ...TWITCH_BITS_POINTS] })
     })
     expect(permissions(markup)).toContain(
-      'Reconnect Twitch to let Orcle remove messages. Follow alerts and the sub count need it too.'
+      'Reconnect Twitch to let Buddy remove messages. Follow alerts and the sub count need it too.'
     )
     expect(markup.match(/data-slot="destination-permissions"/g)).toHaveLength(1)
   })
@@ -351,7 +366,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
       target: target('kick'),
       account: account('kick', { scopes: KICK_SCOPES })
     })
-    expect(permissions(markup)).toContain('Reconnect Kick to let Orcle remove messages.')
+    expect(permissions(markup)).toContain('Reconnect Kick to let Buddy remove messages.')
     expect(markup).not.toContain(KICK_MODERATION)
     expect(
       render({
@@ -398,11 +413,11 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
       missingPermissionsRow('twitch', { status: 'connected', scopes })
     expect(twitch([...TWITCH_SCOPES, ...TWITCH_BITS_POINTS])).toEqual({
       message:
-        'Reconnect Twitch to let Orcle remove messages. Follow alerts and the sub count need it too.',
+        'Reconnect Twitch to let Buddy remove messages. Follow alerts and the sub count need it too.',
       action: 'Reconnect'
     })
     expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE, ...TWITCH_BITS_POINTS])).toEqual({
-      message: 'Reconnect Twitch to let Orcle remove messages.',
+      message: 'Reconnect Twitch to let Buddy remove messages.',
       action: 'Reconnect'
     })
     expect(twitch([...TWITCH_SCOPES, TWITCH_MODERATION, ...TWITCH_BITS_POINTS])).toEqual({
@@ -412,12 +427,12 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
     // Plan 162: Power-ups and channel points ride the same single row.
     expect(twitch(TWITCH_SCOPES)).toEqual({
       message:
-        'Reconnect Twitch to let Orcle remove messages. Follow alerts, the sub count, Power-ups and channel points need it too.',
+        'Reconnect Twitch to let Buddy remove messages. Follow alerts, the sub count, Power-ups and channel points need it too.',
       action: 'Reconnect'
     })
     expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE])).toEqual({
       message:
-        'Reconnect Twitch to let Orcle remove messages. Power-ups and channel points need it too.',
+        'Reconnect Twitch to let Buddy remove messages. Power-ups and channel points need it too.',
       action: 'Reconnect'
     })
     expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE, TWITCH_MODERATION])).toEqual({
@@ -426,7 +441,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
     })
     expect(twitch(TWITCH_ALL_SCOPES)).toBeNull()
     expect(missingPermissionsRow('kick', { status: 'connected', scopes: KICK_SCOPES })).toEqual({
-      message: 'Reconnect Kick to let Orcle remove messages.',
+      message: 'Reconnect Kick to let Buddy remove messages.',
       action: 'Reconnect'
     })
     for (const platform of ['youtube', 'x', 'tiktok', 'instagram', 'custom'] as const) {

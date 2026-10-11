@@ -72,7 +72,12 @@ export interface HighlightMetrics {
  * the same type size as its 1920x1080 horizontal twin instead of shrinking to
  * a width-based size that is unreadable on a phone. `canvasHeight` omitted
  * means landscape. */
-export function highlightMetrics(canvasWidth: number, canvasHeight?: number): HighlightMetrics {
+export function highlightMetrics(
+  canvasWidth: number,
+  canvasHeight?: number,
+  /** The placed rect's width in pixels (plan 164); omitted keeps the fraction. */
+  maxCardWidthPx?: number
+): HighlightMetrics {
   const portrait = canvasHeight !== undefined && canvasHeight > canvasWidth
   const longEdge = portrait ? canvasHeight : canvasWidth
   const textFontPx = Math.max(20, Math.round(longEdge / 48))
@@ -80,7 +85,11 @@ export function highlightMetrics(canvasWidth: number, canvasHeight?: number): Hi
   const avatarPx = Math.round(textFontPx * 1.5)
   const identityGapPx = Math.round(textFontPx * 0.5)
   const widthFraction = portrait ? MAX_PORTRAIT_CARD_WIDTH_FRACTION : MAX_CARD_WIDTH_FRACTION
-  const maxTextWidthPx = Math.floor(canvasWidth * widthFraction) - paddingPx * 2
+  const maxCardPx =
+    maxCardWidthPx !== undefined && Number.isFinite(maxCardWidthPx) && maxCardWidthPx > 0
+      ? Math.floor(Math.min(maxCardWidthPx, canvasWidth))
+      : Math.floor(canvasWidth * widthFraction)
+  const maxTextWidthPx = maxCardPx - paddingPx * 2
   return {
     nameFontPx: Math.round(textFontPx * 0.95),
     textFontPx,
@@ -216,10 +225,11 @@ export function layoutCommentHighlight(params: {
   text: string
   canvasWidth: number
   canvasHeight?: number
+  maxCardWidthPx?: number
   platform?: StreamPlatform
   measure: HighlightTextMeasurer
 }): HighlightLayout | null {
-  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight)
+  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight, params.maxCardWidthPx)
   if (metrics.maxTextWidthPx <= 0) {
     return null
   }

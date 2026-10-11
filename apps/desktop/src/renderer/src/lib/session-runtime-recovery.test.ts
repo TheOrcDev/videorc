@@ -12,12 +12,19 @@ import { sessionRuntimeNoticeTitle } from '@/lib/session-runtime-notice'
 import {
   completeSessionRuntimeRecovery,
   microphoneLossPresentation,
+  recordingFailurePresentation,
+  sessionModeActivity,
   sessionRuntimeContinuationIsCurrent,
   sessionRuntimeRecoveryPlan,
+  showBackendError,
   showOAuthCallbackExhausted,
   showOAuthCallbackResult,
+  showRecordingFailure,
+  showSessionFinished,
   showSessionHealthEvent,
-  showXPlaybackEvent
+  showSourceFallbackActiveSession,
+  showXPlaybackEvent,
+  sourceFallbackTitle
 } from '@/lib/session-runtime-recovery'
 
 function failedSession(mode: string): SessionSummary {
@@ -49,14 +56,37 @@ describe('session runtime recovery', () => {
       priorSessionState: 'recording'
     })
 
-    expect(
-      completeSessionRuntimeRecovery({
-        plan,
-        recording,
-        events: [],
-        priorSessionState: 'recording'
+    const recovery = completeSessionRuntimeRecovery({
+      plan,
+      recording,
+      events: [],
+      priorSessionState: 'recording'
+    })
+    // Plan 174 B-6: on air, so the notice says "livestream"; it saved a
+    // file, so it keeps Open Library and the reveal.
+    expect(recovery).toMatchObject({ kind: 'recording-failed', activity: 'record+stream' })
+    if (recovery?.kind !== 'recording-failed') throw new Error('Missing recovered failure')
+    const presentation = recordingFailurePresentation({
+      status: recovery.status,
+      activity: recovery.activity,
+      currentDedupeKey: null
+    })!
+    expect(presentation.notice.message).toBe("Videorc couldn't finish this livestream.")
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe('Livestream stopped unexpectedly')
+
+    vi.stubGlobal('window', { videorc: { revealSession: vi.fn() } })
+    try {
+      showRecordingFailure(presentation)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Livestream stopped unexpectedly',
+      expect.objectContaining({
+        action: expect.objectContaining({ label: 'Open in Library' }),
+        cancel: expect.objectContaining({ onClick: expect.any(Function) })
       })
-    ).toMatchObject({ kind: 'recording-failed', activity: 'recording' })
+    )
   })
 
   it('rejects lazy continuations from an old epoch or a different session', () => {
@@ -136,12 +166,13 @@ describe('session runtime recovery', () => {
     })
 
     // No platform on the result: the generic words and the shared fallback id.
-    expect(toastSpies.success).toHaveBeenCalledWith('Account connected.', {
+    expect(toastSpies.success).toHaveBeenCalledWith('Account connected', {
       id: 'oauth-callback:provider'
     })
-    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't finish connecting the account.", {
+    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't finish connecting the account", {
       id: 'oauth-callback:provider',
-      description: 'Authorization was declined.'
+      description: 'Authorization was declined.',
+      duration: 8_000
     })
   })
 
@@ -179,11 +210,11 @@ describe('session runtime recovery', () => {
     expect(toastSpies.error).toHaveBeenCalledTimes(4)
     const ids = new Set(toastSpies.error.mock.calls.map((call) => (call[1] as { id: string }).id))
     expect([...ids]).toEqual(['oauth-callback:youtube'])
-    expect(toastSpies.error.mock.calls[2][0]).toBe("Couldn't finish connecting YouTube.")
+    expect(toastSpies.error.mock.calls[2][0]).toBe("Couldn't finish connecting YouTube")
     expect(toastSpies.error.mock.calls[2][1]).toMatchObject({
       description: `Couldn't finish connecting YouTube. Videorc's daily YouTube API limit is used up. Try again after ${dayLabel}${retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.`
     })
-    expect(toastSpies.error.mock.calls[3][0]).toBe("Couldn't finish connecting YouTube.")
+    expect(toastSpies.error.mock.calls[3][0]).toBe("Couldn't finish connecting YouTube")
   })
 })
 
@@ -234,7 +265,7 @@ describe('audio-loss provenance', () => {
       currentDedupeKey: null
     })!
     expect(sessionRuntimeNoticeTitle(result.notice)).toBe(
-      'Microphone audio could not be recorded: saved session has missing audio'
+      "Microphone audio couldn't be recorded: saved session has missing audio"
     )
   })
 })
@@ -383,5 +414,171 @@ describe('session audio news (plan 076)', () => {
       'This computer is overloaded',
       expect.objectContaining({ id: 'host-overloaded', description: 'host-overloaded message' })
     )
+  })
+})
+
+// Plan 174 B-6: Go Live leaves recording on, and the backend reports that
+// record+stream session as `recording` with a stream URL. Its notices speak of
+// the livestream (the audience lost something) and keep the saved file's
+// actions (it recorded too).
+describe('record+stream notices (plan 174 B-6)', () => {
+  const goLive = {
+    state: 'recording' as const,
+    sessionId: 'go-live',
+    streamUrl: 'rtmp://127.0.0.1/live/***'
+  }
+  const microphoneLost: HealthEvent = {
+    id: 'mic-lost',
+    code: 'microphone-input-lost',
+    message: 'The selected microphone stopped providing audio.',
+    sessionId: 'go-live',
+    level: 'warn',
+    createdAt: '2026-10-10T10:00:00Z'
+  }
+
+  beforeEach(() => vi.clearAllMocks())
+
+  it('says a microphone dropout during Go Live leaves the livestream silent', () => {
+    const presentation = microphoneLossPresentation({
+      event: microphoneLost,
+      recording: goLive,
+      lastActivity: 'recording',
+      currentDedupeKey: null
+    })!
+    expect(presentation.activity).toBe('record+stream')
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe(
+      'Microphone stopped: livestream continues with silence'
+    )
+
+    const recordingOnly = microphoneLossPresentation({
+      event: microphoneLost,
+      recording: { state: 'recording', sessionId: 'go-live' },
+      lastActivity: 'record+stream',
+      currentDedupeKey: null
+    })!
+    expect(sessionRuntimeNoticeTitle(recordingOnly.notice)).toBe(
+      'Microphone stopped: recording continues with silence'
+    )
+  })
+
+  it('reads each stored session mode as what the session did', () => {
+    expect(sessionModeActivity('record')).toBe('recording')
+    expect(sessionModeActivity('imported')).toBe('recording')
+    expect(sessionModeActivity('record+stream')).toBe('record+stream')
+    expect(sessionModeActivity('stream')).toBe('live-stream')
+    expect(sessionModeActivity('Streaming')).toBe('live-stream')
+  })
+
+  it('recovers a Go Live failure with no stored summary from the last status the Studio saw', () => {
+    const recording = { state: 'failed' as const, sessionId: 'go-live' }
+    const plan = { failureSessionId: 'go-live' }
+    expect(
+      completeSessionRuntimeRecovery({
+        plan,
+        recording,
+        events: [],
+        priorSessionState: 'recording',
+        priorSessionActivity: 'record+stream'
+      })
+    ).toMatchObject({ kind: 'recording-failed', activity: 'record+stream' })
+    // Without the sighting, the state alone still decides, as before.
+    expect(
+      completeSessionRuntimeRecovery({
+        plan,
+        recording,
+        events: [],
+        priorSessionState: 'recording'
+      })
+    ).toMatchObject({ activity: 'recording' })
+  })
+
+  it('still announces the saved recording when Go Live ends, and never for stream-only', () => {
+    const replaceNotice = vi.fn()
+    const ended = { state: 'idle' as const, sessionId: 'go-live' }
+    showSessionFinished({
+      status: ended,
+      activity: 'record+stream',
+      currentNotice: null,
+      replaceNotice
+    })
+    expect(toastSpies.success).toHaveBeenCalledWith('Recording saved', expect.anything())
+
+    vi.clearAllMocks()
+    showSessionFinished({
+      status: ended,
+      activity: 'live-stream',
+      currentNotice: null,
+      replaceNotice
+    })
+    expect(toastSpies.success).not.toHaveBeenCalled()
+  })
+
+  it('says a source changed while streaming during Go Live, naming the device', () => {
+    showSourceFallbackActiveSession(goLive, {
+      kind: 'automatic-source-fallback',
+      sourceKind: 'camera',
+      reason: 'unavailable-selected',
+      previousName: 'Studio Cam',
+      nextId: 'cam-2',
+      nextName: 'FaceTime HD Camera'
+    })
+    expect(toastSpies.warning).toHaveBeenLastCalledWith(
+      'Camera switched to FaceTime HD Camera',
+      expect.objectContaining({
+        id: 'source-reconciliation:active-session',
+        description: 'Your stream uses it now. Check the output before you continue.'
+      })
+    )
+    showSourceFallbackActiveSession({ state: 'recording' })
+    expect(toastSpies.warning).toHaveBeenLastCalledWith(
+      'A source changed',
+      expect.objectContaining({
+        description: 'Your recording uses it now. Check the output before you continue.'
+      })
+    )
+  })
+
+  it('names the source a fallback turned off (plan 174 S2.4)', () => {
+    expect(
+      sourceFallbackTitle({
+        kind: 'automatic-source-fallback',
+        sourceKind: 'microphone',
+        reason: 'unavailable-cleared',
+        previousName: 'USB Mic'
+      })
+    ).toBe('Microphone turned off')
+  })
+})
+
+// Plan 174 S3.18 (D9): a failure Videorc can't explain says "export a support
+// bundle from Health", so its toast opens Health; a known cause doesn't.
+describe('backend error toasts', () => {
+  beforeEach(() => vi.clearAllMocks())
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('gives an unexplained failure an Open Health door on a timed toast', () => {
+    const dispatchEvent = vi.fn()
+    vi.stubGlobal('window', { dispatchEvent })
+    showBackendError(new Error('engine said no'), 'connected', {
+      action: 'save',
+      object: 'the scene'
+    })
+    expect(toastSpies.error).toHaveBeenCalledOnce()
+    const [title, options] = toastSpies.error.mock.calls[0]
+    expect(title).toBe("Couldn't save the scene")
+    expect(options).toMatchObject({
+      description: 'Try again. If it keeps happening, export a support bundle from Health.',
+      duration: 8_000,
+      action: { label: 'Open Health' }
+    })
+    options.action.onClick()
+    expect(dispatchEvent.mock.calls[0][0].detail).toEqual({ tab: 'diagnostics' })
+  })
+
+  it('keeps a known cause without the door', () => {
+    const error = Object.assign(new Error('busy'), { code: 'command-lane-full' })
+    showBackendError(error, 'connected', { action: 'save', object: 'the scene' })
+    const [, options] = toastSpies.warning.mock.calls[0]
+    expect(options.action).toBeUndefined()
   })
 })

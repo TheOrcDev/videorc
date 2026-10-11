@@ -1,6 +1,6 @@
 # Clean cut
 
-Clean cut is the second power of the Orcle tab (plan 119): "Stop recording,
+Clean cut is the second power of the Buddy tab (plan 119): "Stop recording,
 and the edited version is already there." After a recording finishes,
 Videorc makes an edited copy next to it, with the dead air, the "um"s, the
 false starts and the retakes taken out. The original is never touched.
@@ -17,7 +17,7 @@ lives in the web repo, and the two must change together.
 - **Condensed** keeps a target length (10, 15, 20 or 30 minutes, default 15)
   of a long recording or stream: the cloud picks the beats worth keeping,
   always the opening hook and the close, and every "clip that" mark and chat
-  peak from the Orcle report. The Clean removals still apply inside what is
+  peak from the Buddy report. The Clean removals still apply inside what is
   kept. The renderer offers it for recordings of at least 25 minutes.
 
 Each mode makes its own derived session:
@@ -32,16 +32,16 @@ caption.
 
 ## Where you use it
 
-- **The Clean cut card** in the Orcle tab (⌘9). "Make a clean cut of every
+- **The Clean cut card** in the Buddy tab (⌘9). "Make a clean cut of every
   recording" is the opt-in switch for running it after every Stop; it asks
-  for sign-in, Premium and Cloud AI consent the same way Orcle Live does. The
+  for sign-in, Premium and Cloud AI consent the same way Buddy Live does. The
   card shows the latest recording's status (waiting, transcribing, cutting,
   ready with the old and new length, or failed with Retry), "Make a clean
   cut" for any eligible recording, and the minutes left this month.
 - **The review.** A player on top previews the cut by skipping every removal
   that is on. The transcript below strikes through what is removed, coloured
   by kind. Chips per kind (Silences, Ums, Retakes, Start and end) turn a whole
-  kind on or off, a click on a span restores or removes it, and Orcle report
+  kind on or off, a click on a span restores or removes it, and Buddy report
   moments show as pins. "Save changes" sends the edit and renders again.
   Space plays, ← and → seek, Enter toggles the selected span.
 - **Library.** A recording's row menu has "Clean cut". A derived copy wears a
@@ -198,8 +198,8 @@ filters (`scripts/lib/clean-cut-ffmpeg-filters.mjs`).
 
 ## Privacy and consent
 
-Clean cut uses the same Cloud AI consent as Orcle Live, with one home in the
-Orcle tab (`videorc.aiConsent`). Its copy names what Clean cut sends:
+Clean cut uses the same Cloud AI consent as Buddy Live, with one home in the
+Buddy tab (`videorc.aiConsent`). Its copy names what Clean cut sends:
 
 - **The recording's audio**, in chunks of at most two minutes, for
   word-by-word transcription. The server passes each chunk to the

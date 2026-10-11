@@ -12,8 +12,8 @@ function view(overrides: Partial<NoiseCleanupView> = {}): NoiseCleanupView {
   return {
     directAction: 'start',
     menuAction: 'start',
-    directLabel: 'Clean noise',
-    menuLabel: 'Clean noise',
+    directLabel: 'Reduce noise',
+    menuLabel: 'Reduce noise',
     disabledReason: null,
     detail: null,
     statusAnnouncement: null,
@@ -50,19 +50,23 @@ describe('Library Noise Cleanup direct action', () => {
     const rowActions = source.slice(source.indexOf('function RowActions'))
     const play = rowActions.indexOf('aria-label="Play recording"')
     const cleanup = rowActions.indexOf('<NoiseCleanupDirectAction')
-    const menu = rowActions.indexOf('aria-label="Session actions"')
+    // The ⋯ menu is the shared KebabMenu (plan 174 S1.6b, E-PAT).
+    const menu = rowActions.indexOf('<KebabMenu')
+    const items = rowActions.indexOf('const sessionMenu')
 
     expect(play).toBeGreaterThan(-1)
     expect(cleanup).toBeGreaterThan(play)
     expect(menu).toBeGreaterThan(cleanup)
-    // The menu's "Orcle report" and "Clean cut" open the Orcle tab (plan 119).
-    const menuPlay = rowActions.indexOf('Play\n', menu)
-    const orcleReport = rowActions.indexOf('Orcle report', menu)
-    const cleanCut = rowActions.indexOf('Clean cut\n', menu)
-    const reveal = rowActions.indexOf('revealInFileManagerLabel()', menu)
-    expect(menuPlay).toBeGreaterThan(menu)
-    expect(orcleReport).toBeGreaterThan(menuPlay)
-    expect(cleanCut).toBeGreaterThan(orcleReport)
+    expect(rowActions.slice(menu)).toContain('label="Session actions"')
+    // The menu's "Buddy report" and "Make a clean cut…" open the Buddy tab (plan 119).
+    const menuPlay = rowActions.indexOf("label: 'Play'", items)
+    const buddyReport = rowActions.indexOf("label: 'Buddy report'", items)
+    const cleanCut = rowActions.indexOf("label: 'Make a clean cut…'", items)
+    const reveal = rowActions.indexOf('revealInFileManagerLabel()', items)
+    expect(items).toBeGreaterThan(-1)
+    expect(menuPlay).toBeGreaterThan(items)
+    expect(buddyReport).toBeGreaterThan(menuPlay)
+    expect(cleanCut).toBeGreaterThan(buddyReport)
     expect(reveal).toBeGreaterThan(cleanCut)
   })
 
@@ -71,7 +75,7 @@ describe('Library Noise Cleanup direct action', () => {
 
     expect(markup).toContain('<button')
     expect(markup).toContain('aria-label="Clean up noise in Weekly update"')
-    expect(markup).toContain('Clean noise')
+    expect(markup).toContain('Reduce noise')
     expect(markup).not.toContain('disabled=""')
     expect(markup).toContain('min-[1280px]:inline')
   })
@@ -82,7 +86,7 @@ describe('Library Noise Cleanup direct action', () => {
       view({
         directAction: 'upgrade',
         menuAction: 'upgrade',
-        detail: 'Noise Cleanup requires Videorc Premium.',
+        detail: 'Noise cleanup is part of Videorc Premium.',
         premiumLocked: true
       })
     )
@@ -96,7 +100,7 @@ describe('Library Noise Cleanup direct action', () => {
     const locked = view({
       directAction: 'upgrade',
       menuAction: 'upgrade',
-      detail: 'Noise Cleanup requires Videorc Premium.',
+      detail: 'Noise cleanup is part of Videorc Premium.',
       premiumLocked: true
     })
     const first = renderAction('Same title', locked, 'session-one')
@@ -115,8 +119,8 @@ describe('Library Noise Cleanup direct action', () => {
         menuAction: 'cancel',
         directLabel: 'Cleaning 42%',
         menuLabel: 'Cancel cleanup · 42%',
-        detail: 'Cleaning noise: 42% complete.',
-        statusAnnouncement: 'Cleaning noise, 40 percent.',
+        detail: 'Reducing noise: 42% complete.',
+        statusAnnouncement: 'Reducing noise, 40 percent.',
         busy: true,
         conflictsWithFileActions: true
       })
@@ -126,7 +130,7 @@ describe('Library Noise Cleanup direct action', () => {
     expect(markup).toContain('disabled=""')
     expect(markup).toContain('aria-busy="true"')
     expect(markup).toContain('aria-live="polite"')
-    expect(markup).toContain('Cleaning noise, 40 percent.')
+    expect(markup).toContain('Reducing noise, 40 percent.')
   })
 
   it('keeps a reconnect-disabled action focusable with a described reason', () => {

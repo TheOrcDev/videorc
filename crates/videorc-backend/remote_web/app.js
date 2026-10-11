@@ -9,6 +9,13 @@ const STORAGE_KEY = 'videorc.remote.device'
 const MAX_ROWS = 300
 const STICK_TO_BOTTOM_PX = 96
 const HOLD_TO_STOP_MS = 700
+/** Plan 174 I-11: past this, "Reconnecting…" becomes "Can't reach Videorc…". */
+const UNREACHABLE_AFTER_MS = 10_000
+
+const PAIR_TEXT =
+  'In Videorc on your computer, open Settings → Remote and click “Pair a phone…”. Then scan the code with this phone’s camera.'
+const UNREACHABLE_TEXT =
+  'Check that this phone is on the same Wi-Fi as your computer, and that Videorc is open with Phone remote on.'
 
 const $ = (id) => document.getElementById(id)
 const el = (tag, className, text) => {
@@ -49,15 +56,20 @@ function forgetCredentials() {
   history.replaceState(null, '', location.pathname)
 }
 
-function deviceName() {
+function deviceKind() {
   const agent = navigator.userAgent
-  const device = /iPhone/.test(agent)
+  return /iPhone/.test(agent)
     ? 'iPhone'
     : /iPad|Macintosh.*Mobile/.test(agent)
       ? 'iPad'
       : /Android/.test(agent)
         ? 'Android'
         : 'Browser'
+}
+
+function deviceName() {
+  const agent = navigator.userAgent
+  const device = deviceKind()
   const browser = /CriOS|Chrome/.test(agent)
     ? 'Chrome'
     : /FxiOS|Firefox/.test(agent)
@@ -70,6 +82,27 @@ function deviceName() {
 
 // --- chrome -------------------------------------------------------------
 
+// Plan 174 I-11: a refusal reads as plain words. The desktop's own refusals
+// are already copy; the backend's debounce and the transport are not.
+function plainMessage(message, fallback) {
+  if (typeof message !== 'string' || message === '') return fallback
+  if (message.startsWith('Debounced')) return 'Tap again in a moment.'
+  return message
+}
+
+// Plan 174 I-34: a phone that locks drops off the network, so the first
+// pairing says how to keep it awake.
+function autoLockTip() {
+  const kind = deviceKind()
+  if (kind === 'iPhone' || kind === 'iPad') {
+    return `Keep this ${kind} awake while you stream: turn off Auto-Lock in Settings → Display & Brightness.`
+  }
+  if (kind === 'Android') {
+    return 'Keep this phone awake while you stream: choose a longer Screen timeout in Settings → Display.'
+  }
+  return 'Keep this screen awake while you stream. If it sleeps, the remote reconnects when it wakes.'
+}
+
 let snackTimer = null
 function snack(message) {
   const node = $('snack')
@@ -79,10 +112,11 @@ function snack(message) {
   snackTimer = setTimeout(() => (node.hidden = true), 3500)
 }
 
-function showGate(title, text) {
+function showGate(title, text, { actions = false } = {}) {
   cancelHolds()
   $('gate-title').textContent = title
   $('gate-text').textContent = text
+  $('gate-actions').hidden = !actions
   $('view-gate').hidden = false
   $('view-comments').hidden = true
   $('view-deck').hidden = true
@@ -106,9 +140,51 @@ function showView(view) {
 const STATUS_TEXT = {
   connecting: 'Connecting…',
   reconnecting: 'Reconnecting…',
+  unreachable: 'Can’t reach Videorc…',
   connected: 'Connected',
   unpaired: 'Not paired',
   idle: 'Offline'
+}
+
+// --- connection ---------------------------------------------------------
+
+let everConnected = false
+let unreachable = false
+let unreachableTimer = null
+
+function isConnected() {
+  return client?.status === 'connected'
+}
+
+/**
+ * Offline honesty (plan 174 I-11): every control is disabled while the phone
+ * is not connected, the first connection shows a connecting screen instead of
+ * a blank page, and after 10 s the words change to "Can't reach Videorc…".
+ */
+function paintConnection(status) {
+  const trying = status === 'connecting' || status === 'reconnecting'
+  if (!trying) {
+    clearTimeout(unreachableTimer)
+    unreachableTimer = null
+    unreachable = false
+  } else if (unreachableTimer === null && !unreachable) {
+    unreachableTimer = setTimeout(() => {
+      unreachableTimer = null
+      unreachable = true
+      paintConnection(client?.status ?? 'idle')
+    }, UNREACHABLE_AFTER_MS)
+  }
+  const shown = trying && unreachable ? 'unreachable' : status
+  $('status').dataset.status = shown
+  $('status').textContent = STATUS_TEXT[shown] ?? STATUS_TEXT.idle
+  $('offline-text').textContent = UNREACHABLE_TEXT
+  $('offline').hidden = !(everConnected && trying && unreachable)
+  if (!everConnected && trying) {
+    if (unreachable) showGate('Can’t reach Videorc…', UNREACHABLE_TEXT, { actions: true })
+    else showGate('Connecting to Videorc…', 'This takes a moment.')
+  }
+  const offline = status !== 'connected'
+  for (const row of rows.values()) row.disabled = offline
 }
 
 // --- comments -----------------------------------------------------------
@@ -212,7 +288,7 @@ function verifiedCheck(verified) {
 function buildRow(message) {
   const row = el('button', 'comment')
   row.type = 'button'
-  row.setAttribute('role', 'listitem')
+  row.disabled = !isConnected()
   row.dataset.id = message.id
   row.dataset.kind = message.eventType ?? 'message'
   const glyph = platformGlyph(message.platform)
@@ -236,12 +312,15 @@ function upsertMessage(message, { scroll = true } = {}) {
   const stick = nearBottom()
   const existing = rows.get(message.id)
   const row = buildRow(message)
-  if (existing) existing.replaceWith(row)
-  else commentsList.append(row)
+  // Real list semantics (plan 174 I-12): each button sits in its own item.
+  const item = el('li')
+  item.append(row)
+  if (existing) existing.parentElement.replaceWith(item)
+  else commentsList.append(item)
   rows.set(message.id, row)
   while (rows.size > MAX_ROWS) {
     const [oldestId, oldest] = rows.entries().next().value
-    oldest.remove()
+    oldest.parentElement.remove()
     rows.delete(oldestId)
   }
   $('comments-empty').hidden = true
@@ -268,7 +347,7 @@ function paintHighlight() {
   const msLeft = highlight.expiresAt ? Date.parse(highlight.expiresAt) - Date.now() : null
   // The backend's clear event is authoritative. If it was missed (a network
   // blip at the wrong moment) the card is gone from the stream anyway — never
-  // leave a stale "ON STREAM" badge behind.
+  // leave a stale "On stream" badge behind.
   if (highlight.phase === 'live' && msLeft !== null && msLeft < -1500) {
     highlight = { phase: 'idle' }
     renderDeck()
@@ -278,12 +357,14 @@ function paintHighlight() {
   for (const [id, row] of rows) {
     const isLive = id === liveId
     row.dataset.live = String(isLive)
+    row.setAttribute('aria-pressed', String(isLive))
     row.dataset.pending = String(id === pendingId && !isLive)
     const meta = row.querySelector('.meta')
     let badge = meta.querySelector('.onstream')
     if (isLive) {
       if (!badge) meta.append((badge = el('span', 'onstream')))
-      badge.textContent = secondsLeft === null ? 'ON STREAM' : `ON STREAM ${secondsLeft}s`
+      // The desktop's words (plan 174 I-14): "On stream", like Stream Manager.
+      badge.textContent = secondsLeft === null ? 'On stream' : `On stream ${secondsLeft}s`
     } else badge?.remove()
   }
   clearInterval(highlightTimer)
@@ -326,15 +407,23 @@ function updateKeys(container, nodes) {
   })
 }
 
-function prettyPreset(id) {
-  return id.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+// The desktop sends each layout's name with describe (plan 174 I-14); an
+// older desktop without it still gets a readable key.
+function presetName(id) {
+  const label = describe?.layoutLabels?.[id]
+  if (typeof label === 'string' && label) return label
+  const words = id.replace(/[-_]/g, ' ')
+  return words.charAt(0).toUpperCase() + words.slice(1)
 }
 
-function key({ name, hint, on = false, accent, disabled = false, onTap, onHold }) {
+function key({ name, hint, on = false, toggle = false, accent, disabled = false, onTap, onHold }) {
   const node = el('button', 'key')
   node.type = 'button'
-  node.disabled = disabled
+  node.disabled = disabled || !isConnected()
   node.dataset.on = String(on)
+  // A key that stays on (a scene, a takeover, system audio) says so to a
+  // screen reader too (plan 174 I-12).
+  if (toggle) node.setAttribute('aria-pressed', String(on))
   if (accent) node.dataset.accent = accent
   node.append(el('span', 'name', name))
   if (hint) node.append(el('span', 'hint', hint))
@@ -391,13 +480,16 @@ function key({ name, hint, on = false, accent, disabled = false, onTap, onHold }
 
 async function send(intent) {
   const result = await client.intent(intent)
-  if (!result.ok) snack(result.message ?? 'Videorc refused that.')
+  if (!result.ok) snack(plainMessage(result.message, 'That didn’t work. Try again.'))
 }
 
 function renderDeck() {
   if (!describe || !state) return
   const streaming = state.streamEnabled
   $('live').hidden = !(state.sessionActive && streaming)
+  // Plan 174 I-34: recording without a livestream shows REC.
+  $('rec').hidden = !(state.sessionActive && !streaming)
+  const connected = isConnected()
 
   const action = streaming
     ? state.sessionActive
@@ -406,30 +498,34 @@ function renderDeck() {
     : state.sessionActive
       ? 'recordStop'
       : 'recordStart'
-  if (sessionControl?.action !== action || sessionControl?.sessionState !== state.sessionState) {
+  if (
+    sessionControl?.action !== action ||
+    sessionControl?.sessionState !== state.sessionState ||
+    sessionControl?.connected !== connected
+  ) {
     retireSessionControl()
   }
   const session = state.sessionActive
     ? (sessionControl?.node ??
       key({
-        name: streaming ? 'End stream' : 'Stop recording',
+        name: streaming ? 'End livestream' : 'Stop recording',
         hint: 'Hold to stop',
         on: true,
         accent: 'red',
         onHold: () => send({ kind: action })
       }))
     : key({
-        name: streaming ? 'Go live' : 'Record',
+        name: streaming ? 'Go Live' : 'Record',
         hint: streaming && state.recordEnabled ? 'Stream + record' : 'Tap to start',
         accent: 'red',
         onTap: () => send({ kind: action })
       })
-  sessionControl = { action, sessionState: state.sessionState, node: session }
+  sessionControl = { action, sessionState: state.sessionState, connected, node: session }
+  // Plan 174 I-13: the key names the state, and a muted microphone never
+  // lights up red (red means recording or on air).
   const mic = key({
-    name: 'Microphone',
-    hint: state.micMuted ? 'Muted' : 'On',
-    on: state.micMuted,
-    accent: 'red',
+    name: state.micMuted ? 'Mic muted' : 'Mic on',
+    hint: state.micMuted ? 'Tap to unmute' : 'Tap to mute',
     onTap: () => send({ kind: 'micToggle' })
   })
   // Plan 069: only while the desktop can capture it, like the Studio row. The
@@ -439,11 +535,12 @@ function renderDeck() {
         name: 'System audio',
         hint: state.systemAudioOn ? 'On' : 'Off',
         on: state.systemAudioOn,
+        toggle: true,
         onTap: () => send({ kind: 'systemAudioToggle' })
       })
     : null
   const comments = key({
-    name: 'Clear comment',
+    name: 'Take off stream',
     hint: highlight.phase === 'live' ? 'On stream now' : 'Nothing on stream',
     disabled: highlight.phase !== 'live',
     onTap: () => send({ kind: 'commentHighlightClear' })
@@ -458,8 +555,9 @@ function renderDeck() {
   $('deck-scenes').replaceChildren(
     ...presets.map((layoutPreset) =>
       key({
-        name: prettyPreset(layoutPreset),
+        name: presetName(layoutPreset),
         on: state.layoutPreset === layoutPreset,
+        toggle: true,
         onTap: () => send({ kind: 'sceneApply', layoutPreset })
       })
     )
@@ -474,6 +572,7 @@ function renderDeck() {
         name: takeover.name,
         hint: on ? 'Showing. Tap to hide' : undefined,
         on,
+        toggle: true,
         onTap: () =>
           send(on ? { kind: 'takeoverHide' } : { kind: 'takeoverShow', assetId: takeover.id })
       })
@@ -503,13 +602,33 @@ async function loadDescribe(attempt = 0) {
 
 let client = null
 
+/**
+ * "Forget this computer" (plan 174 I-34): drops this phone's key for Videorc.
+ * The computer still lists the phone until it is removed there, which the
+ * confirmation says; the phone has no way to remove itself.
+ */
+function forgetComputer() {
+  const confirmed = window.confirm(
+    'Forget this computer? This phone stops controlling Videorc until you pair it again. To remove it from Videorc too, open Settings → Remote on your computer.'
+  )
+  if (!confirmed) return
+  const current = client
+  client = null
+  current?.close()
+  forgetCredentials()
+  everConnected = false
+  paintConnection('unpaired')
+  $('offline').hidden = true
+  $('tip').hidden = true
+  $('live').hidden = true
+  $('rec').hidden = true
+  showGate('Pair this phone', PAIR_TEXT)
+}
+
 function start() {
   const credentials = parseFragment(location.hash) ?? storedCredentials()
   if (!credentials) {
-    showGate(
-      'Pair this phone',
-      'In Videorc on your computer, open Settings → Phone remote → Pair a phone, then scan the code with this phone’s camera.'
-    )
+    showGate('Pair this phone', PAIR_TEXT)
     $('status').dataset.status = 'unpaired'
     $('status').textContent = STATUS_TEXT.unpaired
     return
@@ -519,45 +638,73 @@ function start() {
     history.replaceState(null, '', location.pathname)
   }
 
-  client = new RemoteClient({
+  const current = new RemoteClient({
     url: `ws://${location.host}/ws`,
     credentials,
     deviceName: deviceName()
   })
-  client.on('paired', rememberCredentials)
-  client.on('status', ({ status, detail }) => {
-    if (status !== 'connected') retireSessionControl()
-    $('status').dataset.status = status
-    $('status').textContent = STATUS_TEXT[status] ?? status
-    if (status === 'connected') {
-      showView(activeView)
-      void loadDescribe()
-      void client.chatSnapshot().catch(() => {})
-    } else if (status === 'unpaired') {
-      forgetCredentials()
-      showGate('Scan a new code', detail?.message ?? 'This phone is no longer paired.')
+  client = current
+  // Events from a client this page has forgotten change nothing.
+  const own =
+    (listener) =>
+    (...args) => {
+      if (client === current) listener(...args)
     }
-  })
-  client.on('state', (next) => {
-    state = next
-    if (!describe) void loadDescribe()
-    renderDeck()
-  })
-  client.on('chat.message', (message) => upsertMessage(message))
-  client.on('chat.reset', resetMessages)
-  client.on('highlight', (next) => {
-    highlight = next ?? { phase: 'idle' }
-    if (highlight.phase !== 'idle') pendingId = null
-    if (highlight.phase === 'failed' && highlight.reason) snack(highlight.reason)
-    paintHighlight()
-    renderDeck()
-  })
-  client.connect().catch(() => {})
+  current.on(
+    'paired',
+    own((paired) => {
+      rememberCredentials(paired)
+      $('tip-text').textContent = autoLockTip()
+      $('tip').hidden = false
+    })
+  )
+  current.on(
+    'status',
+    own(({ status, detail }) => {
+      if (status !== 'connected') retireSessionControl()
+      if (status === 'connected') everConnected = true
+      paintConnection(status)
+      renderDeck()
+      if (status === 'connected') {
+        showView(activeView)
+        void loadDescribe()
+        void current.chatSnapshot().catch(() => {})
+      } else if (status === 'unpaired') {
+        forgetCredentials()
+        everConnected = false
+        showGate('Scan a new code', detail?.message ?? 'This phone is no longer paired.')
+      }
+    })
+  )
+  current.on(
+    'state',
+    own((next) => {
+      state = next
+      if (!describe) void loadDescribe()
+      renderDeck()
+    })
+  )
+  current.on(
+    'chat.message',
+    own((message) => upsertMessage(message))
+  )
+  current.on('chat.reset', own(resetMessages))
+  current.on(
+    'highlight',
+    own((next) => {
+      highlight = next ?? { phase: 'idle' }
+      if (highlight.phase !== 'idle') pendingId = null
+      if (highlight.phase === 'failed' && highlight.reason) snack(highlight.reason)
+      paintHighlight()
+      renderDeck()
+    })
+  )
+  current.connect().catch(() => {})
 }
 
 commentsList.addEventListener('click', async (event) => {
   const row = event.target.closest('.comment')
-  if (!row || !client) return
+  if (!row || row.disabled || !isConnected()) return
   const id = row.dataset.id
   const isLive = highlight.phase === 'live' && highlight.messageId === id
   pendingId = isLive ? null : id
@@ -566,7 +713,7 @@ commentsList.addEventListener('click', async (event) => {
     isLive ? { kind: 'commentHighlightClear' } : { kind: 'commentHighlight', messageId: id }
   )
   if (pendingId === id) pendingId = null
-  if (!result.ok) snack(result.message ?? 'Could not show that comment.')
+  if (!result.ok) snack(plainMessage(result.message, 'Couldn’t put that message on stream.'))
   paintHighlight()
 })
 
@@ -577,6 +724,20 @@ commentsView.addEventListener('scroll', () => {
   }
 })
 $('jump').addEventListener('click', scrollToBottom)
+$('tip-dismiss').addEventListener('click', () => ($('tip').hidden = true))
+// Try again and Forget this computer sit in the offline banner, the
+// can't-reach screen and the Controls footer.
+document.addEventListener('click', (event) => {
+  const action = event.target.closest?.('[data-action]')?.dataset.action
+  if (action === 'retry') {
+    // Back to "Reconnecting…" for another 10 s, so the tap visibly does something.
+    clearTimeout(unreachableTimer)
+    unreachableTimer = null
+    unreachable = false
+    client?.reconnectNow()
+    if (client) paintConnection(client.status)
+  } else if (action === 'forget') forgetComputer()
+})
 $('tabs').addEventListener('click', (event) => {
   const view = event.target.closest('button')?.dataset.view
   if (view) showView(view)

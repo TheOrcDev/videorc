@@ -1,7 +1,5 @@
-import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
-import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useEffectEvent, type ReactElement } from 'react'
 
-import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { QuickSettings } from '@/components/studio/quick-settings'
@@ -12,8 +10,9 @@ import {
   SessionTransport,
   TakeoverSection
 } from '@/components/studio/session-panel'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
   useStudioCore,
@@ -21,12 +20,26 @@ import {
   useStudioPreview,
   useStudioRecordingState
 } from '@/hooks/use-studio'
-import { videoProfileCompatibility } from '@/lib/capture'
+import { areEnabledStreamTargetsStartReady } from '@/lib/capture'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
-import { entitlementDisabledReason } from '@/lib/entitlements'
+import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
+import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
-import { isSessionTransportActive, sessionStopControl } from '@/lib/studio-session-view'
+import {
+  STUDIO_CONTAINER,
+  STUDIO_GRID,
+  STUDIO_INSPECTOR,
+  STUDIO_PREVIEW_COLUMN,
+  studioTransportRowClass
+} from '@/lib/studio-layout'
+import {
+  isSessionTransportActive,
+  sessionIsLive,
+  sessionStopControl
+} from '@/lib/studio-session-view'
+import { spaceShortcutBlocked } from '@/lib/studio-space-shortcut'
+import { connectionBlockedReason } from '@/lib/state-labels'
 
 const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
@@ -44,27 +57,18 @@ export function StudioTab(): ReactElement {
     canStop,
     startRequestPending,
     stopRequestPending,
+    goLiveConfirmationPending,
     visibleStartBlockedReason,
-    startSession,
-    stopSession,
+    recordBlockedReason,
+    liveStreamBlockedReason,
+    sessionStartIntent,
+    sessionStopOverrun,
+    startRecording,
+    startLivestream,
+    requestStopSession,
     noteRecordClick,
     captureConfig,
-    setCaptureConfig,
-    entitlements,
     wsStatus,
-    health,
-    goLiveConfirmationOpen,
-    goLiveConfirmationPending,
-    goLivePartialSetup,
-    goLivePreflight,
-    goLiveCaptionsReadiness,
-    streamMetadataDraft,
-    patchStreamMetadataDraft,
-    cancelGoLiveConfirmation,
-    confirmGoLive,
-    continueGoLiveWithReadyDestinations,
-    continueGoLiveWithoutCaptions,
-    resolveGoLiveBlocker,
     sessionStartFailure,
     dismissSessionStartFailure,
     sessionRuntimeNotice,
@@ -74,80 +78,68 @@ export function StudioTab(): ReactElement {
 
   const active = isSessionTransportActive(recording.state)
   const banner = studioBlocker(studio)
-  const liveStreamCompatibility = videoProfileCompatibility({
-    ...captureConfig,
-    streamEnabled: true
-  })
-  const liveStreamEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
-  const goLiveEntitlement = goLiveEntitlementGate({
-    entitlements,
-    streaming: captureConfig.streaming
-  })
-  const goLiveEntitlementBlocker = goLiveEntitlement.allowed ? null : goLiveEntitlement
-  const liveStreamBlockedReason =
-    liveStreamEntitlementReason ??
-    goLiveEntitlementBlocker?.reason ??
-    liveStreamCompatibility.blockingReason
-  const recordCompatibility = videoProfileCompatibility({
-    ...captureConfig,
-    recordEnabled: true,
-    streamEnabled: false
-  })
-  const recordBlockedReason =
-    wsStatus !== 'connected'
-      ? `Backend socket is ${wsStatus}.`
-      : recordCompatibility.blockingReason
-        ? recordCompatibility.blockingReason
-        : !health
-          ? 'Checking FFmpeg before starting.'
-          : !health.ffmpeg.available
-            ? (health.ffmpeg.message ?? 'FFmpeg is not available.')
-            : null
+  // A Go Live in flight owns the transport (plan 174 S3.1, the Phase 0
+  // review): while its preflight runs or a start is in flight, Record,
+  // Space and a second Go Live click do nothing.
+  const startsBusy = shouldIgnoreGoLiveAction({ goLiveConfirmationPending, startRequestPending })
 
-  // Two-button start: when the click changes the output mode (record vs go-live),
-  // set it and start on the next render so startSession and its blocked-reason
-  // gate see the updated streamEnabled instead of a stale closure value. When the
-  // config already matches the button, start in the same task — the extra
-  // render+commit of the whole Studio provider was a measurable slice of the
-  // Record click → recording path.
-  const [pendingStart, setPendingStart] = useState(false)
-  useEffect(() => {
-    if (!pendingStart) {
-      return
-    }
-    setPendingStart(false)
-    void startSession()
-  }, [pendingStart, startSession])
-
+  // Two-button start (plan 174 D3): Record and Go Live…, the same two starts
+  // ⌘K offers, so the provider owns them, and the reasons each is off come
+  // from the provider's one function (S3.1). The latency clock arms on the
+  // click.
   const handleRecord = (): void => {
-    noteRecordClick('start')
-    if (captureConfig.recordEnabled && !captureConfig.streamEnabled) {
-      void startSession()
+    if (startsBusy || recordBlockedReason) {
       return
     }
-    setCaptureConfig((current) => ({ ...current, recordEnabled: true, streamEnabled: false }))
-    setPendingStart(true)
+    noteRecordClick('start')
+    void startRecording()
   }
   const handleLiveStream = (): void => {
-    if (liveStreamBlockedReason) {
+    if (startsBusy || liveStreamBlockedReason) {
       return
     }
     noteRecordClick('start')
-    if (captureConfig.streamEnabled) {
-      void startSession()
-      return
-    }
-    setCaptureConfig((current) => ({ ...current, streamEnabled: true }))
-    setPendingStart(true)
+    void startLivestream()
   }
-  const handleStop = (): void => {
-    noteRecordClick('stop')
-    void stopSession()
+  // Every stop goes through the provider's decision (plan 174 S0.1, D2): a
+  // recording stops at once, a livestream asks first. The latency clock arms
+  // on the click that stops; while live that is the dialog's confirm, not
+  // the click that only asks.
+  const handleStop = (origin: 'button' | 'space' = 'button'): void => {
+    if (!sessionIsLive(recording)) noteRecordClick('stop')
+    void requestStopSession(origin)
   }
 
+  // Space (D1): Record when idle, Stop recording while recording, the End
+  // livestream question while live. It exists only on this page, and yields
+  // to a dialog, a menu, a focused control or widget, and a stage gesture.
+  const onSpace = useEffectEvent((event: KeyboardEvent): void => {
+    if (spaceShortcutBlocked(event, document)) return
+    event.preventDefault()
+    if (active) {
+      if (canStop) handleStop('space')
+      return
+    }
+    handleRecord()
+  })
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.code === 'Space') onSpace(event)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
   // Go Live is record+stream, which the backend reports as `recording`: the
-  // stream URL is what makes it on air (plan 095 S5).
-  const stopControl = sessionStopControl(recording, stopRequestPending)
+  // stream URL is what makes it on air (plan 095 S5). While it starts, the
+  // control cancels the livestream rather than "stopping a recording" (B-16).
+  // The start's own intent says which it is (S3.1); a session this renderer
+  // did not start falls back to the saved mode.
+  const stopControl = sessionStopControl(
+    recording,
+    stopRequestPending,
+    sessionStartIntent?.stream ?? captureConfig.streamEnabled
+  )
 
   // The status pill rides the inspector's transport block, so it exists in
   // every preview mode, docked included, and the mic sliver shares its one
@@ -159,35 +151,36 @@ export function StudioTab(): ReactElement {
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
-      <SessionStatusPill recording={recording} wsStatus={wsStatus} />
+      {/* "Not ready" only when nothing can start (B-17): one working button
+          is a ready Studio. */}
+      <SessionStatusPill
+        recording={recording}
+        startBlocked={Boolean(recordBlockedReason && liveStreamBlockedReason)}
+        wsStatus={wsStatus}
+      />
     </span>
   )
 
-  return (
-    <>
-      <GoLiveConfirmationDialog
-        draft={streamMetadataDraft}
-        captionsReadiness={goLiveCaptionsReadiness}
-        entitlementGate={goLiveEntitlement}
-        open={goLiveConfirmationOpen}
-        pending={goLiveConfirmationPending || startRequestPending}
-        preflight={goLivePreflight}
-        partialSetup={goLivePartialSetup}
-        onCancel={cancelGoLiveConfirmation}
-        onConfirm={() => void confirmGoLive()}
-        onContinuePartial={() => void continueGoLiveWithReadyDestinations()}
-        onContinueWithoutCaptions={continueGoLiveWithoutCaptions}
-        onPatchDraft={patchStreamMetadataDraft}
-        onResolveBlocker={(targetId, resolution) => void resolveGoLiveBlocker(targetId, resolution)}
-      />
+  // The docked preview is a native surface glued over its slot: a pinned
+  // transport row would scroll under it (lib/studio-layout.ts).
+  const previewDocked =
+    studio.nativePreviewSurfaceEnabled &&
+    studio.previewWindow.open &&
+    studio.previewWindow.mode === 'docked'
 
+  // The Go Live confirmation is the shell's (GoLiveDialogGate), so it opens
+  // over every page, not only this one (plan 174 S0.6, B-5).
+  return (
+    <div className={STUDIO_CONTAINER}>
       {/* The Studio bench: the preview pane leads, and the inspector (the
-          transport, session facts, microphone, inputs, takeover) sits beside
-          it, split by a hairline. Hard
+          transport, session facts, microphone, sources, takeover) sits beside
+          it, split by a hairline, from 720 px of content (a container query,
+          so the smallest window keeps Stop in view; plan 174 S3.3, B-10).
+          Narrower, the transport row leads the page above the preview. Hard
           blocks surface inside the Session section, never as a yellow top
           banner (post-0.9.4 fix batch F8). */}
-      <div className="grid min-h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
-        <div className="min-w-0 lg:border-r">
+      <div className={STUDIO_GRID}>
+        <div className={STUDIO_PREVIEW_COLUMN}>
           <StudioPreviewPanel />
           {/* Scenes and the vertical leg: deferred so the launch surface
               paints its preview and transport first. */}
@@ -196,24 +189,11 @@ export function StudioTab(): ReactElement {
           </Suspense>
         </div>
 
-        <aside aria-label="Session inspector" className="min-w-0 border-t lg:border-t-0">
-          {/* Record, Stream, and the clock sit at the top of the inspector,
-              right above Session (owner call, 2026-09-23); Space still
-              records. */}
+        <div className={studioTransportRowClass(previewDocked)}>
+          {/* Record, Go Live…, and the clock sit at the top of the
+              inspector, right above Session (owner call, 2026-09-23); Space
+              still records. */}
           <SessionTransport
-            active={active}
-            canStop={canStop}
-            liveStreamBlockedReason={liveStreamBlockedReason}
-            recordBlockedReason={recordBlockedReason}
-            startRequestPending={startRequestPending}
-            status={sessionStatus}
-            stopLabel={stopControl.label}
-            stopTitle={stopControl.title}
-            onLiveStream={handleLiveStream}
-            onRecord={handleRecord}
-            onStop={handleStop}
-          />
-          <SessionPanel
             active={active}
             blockedJump={
               banner?.jumpTo && banner.jumpLabel
@@ -221,6 +201,25 @@ export function StudioTab(): ReactElement {
                 : null
             }
             blockedReason={visibleStartBlockedReason}
+            canStop={canStop}
+            goLivePending={goLiveConfirmationPending}
+            liveStreamBlockedReason={liveStreamBlockedReason}
+            recordBlockedReason={recordBlockedReason}
+            startRequestPending={startRequestPending}
+            status={sessionStatus}
+            stopLabel={stopControl.label}
+            stopNote={stopControl.note}
+            stopOverrun={sessionStopOverrun}
+            onLiveStream={handleLiveStream}
+            onRecord={handleRecord}
+            onStop={() => handleStop('button')}
+          />
+        </div>
+
+        <aside aria-label="Session inspector" className={STUDIO_INSPECTOR}>
+          <SessionPanel
+            active={active}
+            live={sessionIsLive(recording)}
             runtimeNotice={sessionRuntimeNotice}
             startFailure={sessionStartFailure}
             startRequestPending={startRequestPending}
@@ -233,14 +232,14 @@ export function StudioTab(): ReactElement {
           <Suspense fallback={<MicrophoneSectionFallback />}>
             <MicrophoneSection />
           </Suspense>
-          {/* Inputs: compact mirrors of Screen / Camera / System audio / Output
-              / Captions, each editing the same captureConfig and deep-linking
-              to its page. */}
+          {/* Sources (Screen, Camera, System audio) and Captions: compact
+              mirrors editing the same captureConfig, each with a way to its
+              page. Output is the Session row above (plan 174 S3.3, B-15). */}
           <QuickSettings />
           <TakeoverSection />
         </aside>
       </div>
-    </>
+    </div>
   )
 }
 
@@ -248,7 +247,7 @@ function StudioDashboardBottomRowFallback(): ReactElement {
   return (
     <div className="flex flex-col" aria-label="Loading Studio controls">
       <PanelSection title="Scenes">
-        <div className="h-24 rounded-row bg-foreground/[0.04]" />
+        <Skeleton className="h-24" />
       </PanelSection>
     </div>
   )
@@ -258,8 +257,8 @@ function StudioDashboardBottomRowFallback(): ReactElement {
 function MicrophoneSectionFallback(): ReactElement {
   return (
     <PanelSection title="Microphone">
-      <div className="h-control rounded-chip bg-foreground/[0.04]" />
-      <div className="h-4 rounded-chip bg-foreground/[0.04]" />
+      <Skeleton className="h-control rounded-chip" />
+      <Skeleton className="h-4 rounded-chip" />
     </PanelSection>
   )
 }
@@ -268,11 +267,9 @@ function StudioPreviewPanel(): ReactElement {
   const {
     nativePreviewSurfaceEnabled,
     handleSystemPermission,
-    openPreviewWindow,
     previewWindow,
     refreshPreview,
-    runtimeInfo,
-    setPreviewWindowMode
+    runtimeInfo
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const { previewLiveStatus } = useStudioPreview()
@@ -287,16 +284,26 @@ function StudioPreviewPanel(): ReactElement {
   const docked =
     nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
 
+  // B-26: the degraded preview says what it means and why, and offers the
+  // two things to do about it: try the preview again, or read Health.
   const healthErrorRow =
     previewHealth.tone === 'error' && previewHealth.detail ? (
       <Alert data-testid="capture-health-alert" variant="destructive">
-        <AlertIcon weight="fill" />
         <AlertTitle>{previewHealth.value}</AlertTitle>
         <AlertDescription className="min-w-0">
-          <p className="line-clamp-3" title={previewHealth.detail}>
-            {previewHealth.detail}
-          </p>
+          <p className="line-clamp-3">{previewHealth.detail}</p>
+          <div className="flex flex-wrap gap-1 pt-2">
+            <Button size="xs" type="button" variant="ghost" onClick={refreshPreview}>
+              Retry preview
+            </Button>
+          </div>
         </AlertDescription>
+        {/* The door to Health (plan 174 D9): the details live there. */}
+        <AlertAction>
+          <Button size="xs" type="button" variant="outline" onClick={openHealth}>
+            {OPEN_HEALTH_LABEL}
+          </Button>
+        </AlertAction>
       </Alert>
     ) : null
 
@@ -322,86 +329,61 @@ function StudioPreviewPanel(): ReactElement {
     )
   }
 
+  // The stage itself offers Open, Stick, Pop out and Close: no header icons
+  // repeating them in other words (plan 174 S3.3, B-23).
   return (
-    <PanelSection
-      title="Preview"
-      action={
-        <div className="flex items-center gap-1.5">
-          {previewWindow.open && previewWindow.mode === 'floating' ? (
-            <Button
-              aria-label="Stick preview into the app"
-              size="icon"
-              title="Stick the preview into this panel"
-              variant="ghost"
-              onClick={() => void setPreviewWindowMode('docked')}
-            >
-              <PinIcon className="size-4" />
-            </Button>
-          ) : previewWindow.open ? (
-            <Button
-              aria-label="Pop preview out into its own window"
-              size="icon"
-              title="Pop the preview out into its own window"
-              variant="ghost"
-              onClick={() => void setPreviewWindowMode('floating')}
-            >
-              <ExternalLinkIcon className="size-4" />
-            </Button>
-          ) : (
-            <Button
-              aria-label="Open preview window"
-              size="icon"
-              title="Open preview in its own window"
-              variant="ghost"
-              onClick={() => void openPreviewWindow()}
-            >
-              <ExternalLinkIcon className="size-4" />
-            </Button>
-          )}
-        </div>
-      }
-    >
+    <PanelSection title="Preview">
       {previewStage}
       {healthErrorRow}
     </PanelSection>
   )
 }
 
+/**
+ * Where the shown blocked reason is fixed (plan 174 S3.1): the reason line
+ * follows the record intent first, then Go Live, so the jump does too. A
+ * Record that cannot start points at what records; a Go Live that cannot
+ * start points at Livestream.
+ */
 function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
-  title: string
+  title?: string
   jumpTo?: WorkspaceTab | StudioPanel
   /** With `jumpTo: 'settings'`, the Settings tab that owns the fix. */
   settingsTab?: SettingsTabId
   jumpLabel?: string
 } | null {
-  const { wsStatus, outputEnabled, captureConfig, streamReady, health, entitlements } = studio
-  const goLiveEntitlement = captureConfig.streamEnabled
-    ? goLiveEntitlementGate({ entitlements, streaming: captureConfig.streaming })
-    : { allowed: true as const }
-
-  if (wsStatus !== 'connected') {
-    return { title: 'Backend not connected' }
+  const { wsStatus, recordBlockedReason, captureConfig, health, entitlements } = studio
+  if (connectionBlockedReason(wsStatus)) {
+    return null
   }
-  if (!outputEnabled) {
-    return { title: 'No output enabled', jumpTo: 'recording', jumpLabel: 'Open Recording' }
+  if (recordBlockedReason) {
+    if (health && !health.ffmpeg.available) {
+      return {
+        title: "Videorc's recorder isn't available",
+        // Health says why and what to do (plan 174 S3.6: Settings → Recording is gone).
+        jumpTo: 'diagnostics',
+        jumpLabel: OPEN_HEALTH_LABEL
+      }
+    }
+    return null
   }
-  if (captureConfig.streamEnabled && !goLiveEntitlement.allowed) {
+  const goLiveEntitlement = goLiveEntitlementGate({
+    entitlements,
+    streaming: captureConfig.streaming
+  })
+  if (!goLiveEntitlement.allowed) {
     return {
       title: goLiveEntitlement.upgradeUrl ? 'Premium required' : 'Streaming limit reached',
       jumpTo: 'live',
-      jumpLabel: 'Open Live'
+      jumpLabel: 'Open Livestream'
     }
   }
-  if (captureConfig.streamEnabled && !streamReady) {
-    return { title: 'Stream target incomplete', jumpTo: 'live', jumpLabel: 'Open Live' }
-  }
-  if (health && !health.ffmpeg.available) {
+  if (!areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
     return {
-      title: 'FFmpeg unavailable',
-      jumpTo: 'settings',
-      settingsTab: 'recording',
-      jumpLabel: 'Open Settings'
+      title: 'Finish setting up your destination',
+      jumpTo: 'live',
+      jumpLabel: 'Open Livestream'
     }
   }
-  return { title: 'Finish setup to start' }
+  return null
 }

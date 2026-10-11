@@ -1,4 +1,5 @@
 import type { DiagnosticStats } from '@/lib/backend'
+import { formatFrameRate, formatResolution } from '@/lib/format-video'
 
 // Camera format shortfall detection (plan 024 S5).
 //
@@ -91,18 +92,19 @@ function requestedCameraFps(stats: DiagnosticStats): number | null {
 
 /** Actionable one-line guidance for a detected shortfall. */
 export function cameraFormatShortfallMessage(shortfall: CameraFormatShortfall): string {
-  const selected = `${shortfall.selectedWidth}×${shortfall.selectedHeight} at ${Math.round(
-    shortfall.selectedMaxFps
-  )} fps`
+  const selected = `${formatResolution({
+    width: shortfall.selectedWidth,
+    height: shortfall.selectedHeight
+  })} at ${formatFrameRate(Math.round(shortfall.selectedMaxFps))}`
   if (shortfall.fpsUnmet && shortfall.singleFormat) {
-    return `This camera only offers ${selected}, so it can't reach ${shortfall.requestedFps} fps. If it's a capture device, set the connected HDMI source to a 60Hz/30Hz (NTSC) mode.`
+    return `This camera only offers ${selected}, so it can't reach ${formatFrameRate(shortfall.requestedFps)}. If it's a capture device, set the connected HDMI source to a 60Hz/30Hz (NTSC) mode.`
   }
   if (shortfall.fpsUnmet) {
-    return `This camera's closest format is ${selected}, below the requested ${shortfall.requestedFps} fps. Recording will run at ${Math.round(shortfall.selectedMaxFps)} fps.`
+    return `This camera's closest format is ${selected}, below the requested ${formatFrameRate(shortfall.requestedFps)}. Recording will run at ${formatFrameRate(Math.round(shortfall.selectedMaxFps))}.`
   }
   // Name the consequence, not just the mismatch: a resolution shortfall means
   // every frame is enlarged to fill the canvas, which is what the user
   // actually sees. Saying only "below the requested 3840×2160" left people
   // believing they were recording 4K because the OUTPUT is 4K.
-  return `This camera's closest format is ${selected}, so the image is upscaled to fill the ${shortfall.requestedWidth}×${shortfall.requestedHeight} canvas.`
+  return `This camera's closest format is ${selected}, so the image is upscaled to fill the ${formatResolution({ width: shortfall.requestedWidth, height: shortfall.requestedHeight })} canvas.`
 }

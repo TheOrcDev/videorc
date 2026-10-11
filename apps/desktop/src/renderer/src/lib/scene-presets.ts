@@ -229,7 +229,7 @@ export function hydrateSceneLibrary(raw: unknown): {
     readOnly: false,
     error:
       scenes.length !== (Array.isArray(data.scenes) ? data.scenes.length : 0)
-        ? 'Some invalid saved scenes could not be loaded.'
+        ? "Some invalid saved scenes couldn't be loaded."
         : null
   }
 }
@@ -251,32 +251,90 @@ export function hydrateWorkingScene(raw: unknown): WorkingScene | null {
 export function sameSceneVisual(a: SceneVisual, b: SceneVisual): boolean {
   return JSON.stringify(normalizeSceneVisual(a)) === JSON.stringify(normalizeSceneVisual(b))
 }
-export function sceneSourceProblems(visual: SceneVisual, devices: readonly Device[]): string[] {
-  const problems: string[] = []
-  const requireSource = (id: string | undefined, kind: Device['kind'], label: string): void => {
-    if (
-      !id ||
+/** A source a scene needs that isn't usable now: turned off, or chosen but gone. */
+export type SceneSourceGap = {
+  source: 'camera' | 'screen'
+  state: 'off' | 'unavailable'
+}
+
+/**
+ * The sources a scene needs that can't be used now (plan 174 S3.3, B-20): the
+ * camera when its layout shows one, the screen or window when its layout
+ * shows one (a test pattern stands in for no screen). Freeform needs what it
+ * has. `off` is nothing chosen; `unavailable` is chosen but not listed as
+ * available.
+ */
+export function sceneSourceGaps(visual: SceneVisual, devices: readonly Device[]): SceneSourceGap[] {
+  const gaps: SceneSourceGap[] = []
+  const check = (
+    id: string | undefined,
+    kind: Device['kind'],
+    source: SceneSourceGap['source']
+  ) => {
+    if (!id) gaps.push({ source, state: 'off' })
+    else if (
       !devices.some(
         (device) => device.id === id && device.kind === kind && device.status === 'available'
       )
     )
-      problems.push(`${label} unavailable. Choose a replacement.`)
+      gaps.push({ source, state: 'unavailable' })
   }
   if (
     visual.layout.arrangementMode === 'freeform'
       ? Boolean(visual.sources.cameraId)
       : layoutPresetNeedsCamera(visual.layout.layoutPreset)
   )
-    requireSource(visual.sources.cameraId, 'camera', 'Camera')
+    check(visual.sources.cameraId, 'camera', 'camera')
   const baseId = visual.sources.windowId ?? visual.sources.screenId
   if (
     (visual.layout.arrangementMode === 'freeform' ||
       layoutPresetNeedsScreen(visual.layout.layoutPreset)) &&
     (!visual.sources.testPattern || baseId)
   ) {
-    requireSource(baseId, visual.sources.windowId ? 'window' : 'screen', 'Screen or window')
+    check(baseId, visual.sources.windowId ? 'window' : 'screen', 'screen')
   }
-  return problems
+  return gaps
+}
+
+export function sceneSourceProblems(visual: SceneVisual, devices: readonly Device[]): string[] {
+  return sceneSourceGaps(visual, devices).map(({ source }) =>
+    source === 'camera'
+      ? 'Camera unavailable. Choose a replacement in Sources.'
+      : 'Screen or window unavailable. Choose a replacement in Sources.'
+  )
+}
+
+const SCENE_LIST = new Intl.ListFormat('en-US', { style: 'long', type: 'conjunction' })
+
+/**
+ * The one line under a scene gallery that says why some scenes can't be
+ * chosen (plan 174 S3.3, B-20), instead of a per-card title that said
+ * "unavailable. Choose a replacement." even when the camera was simply Off.
+ * One sentence per missing source, naming the scenes it blocks. Null when
+ * every scene can be chosen.
+ */
+export function sceneGalleryReason(
+  blocked: readonly { label: string; gaps: readonly SceneSourceGap[] }[]
+): string | null {
+  const sentences: string[] = []
+  for (const source of ['camera', 'screen'] as const) {
+    const scenes = blocked.filter((scene) => scene.gaps.some((gap) => gap.source === source))
+    if (scenes.length === 0) continue
+    const labels = SCENE_LIST.format([...new Set(scenes.map((scene) => scene.label))])
+    const off = scenes.some((scene) =>
+      scene.gaps.some((gap) => gap.source === source && gap.state === 'off')
+    )
+    sentences.push(
+      source === 'camera'
+        ? off
+          ? `Camera is off. Choose one in Sources to use ${labels}.`
+          : `Your camera isn't available. Choose another in Sources to use ${labels}.`
+        : off
+          ? `No screen is chosen. Choose one in Sources to use ${labels}.`
+          : `Your screen isn't available. Choose another in Sources to use ${labels}.`
+    )
+  }
+  return sentences.length > 0 ? sentences.join(' ') : null
 }
 
 /** Acknowledged roles only; never infer visibility from absence or device IDs. */

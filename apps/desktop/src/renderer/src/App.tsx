@@ -2,8 +2,7 @@ import { ThemeProvider, useTheme } from 'next-themes'
 import { useEffect, type ReactElement } from 'react'
 
 import { AppShell } from '@/components/app-shell'
-import { Toaster } from '@/components/ui/sonner'
-import { TooltipProvider } from '@/components/ui/tooltip'
+import { WindowProviders } from '@/components/window-providers'
 import { BackgroundAssetsProvider } from '@/hooks/use-background-assets'
 import { StudioProvider } from '@/hooks/use-studio'
 import { STORAGE_KEYS } from '@/lib/capture'
@@ -34,21 +33,15 @@ export function App(): ReactElement {
       storageKey={STORAGE_KEYS.theme}
     >
       <NativeThemeSync />
-      <TooltipProvider>
+      {/* Tooltips, and toasts inset above the 26 px status bar so they never
+          cover its Search/Preview/Notes/Stream Manager hints (plan 174 S1.1). */}
+      <WindowProviders window="main">
         <BackgroundAssetsProvider>
           <StudioProvider>
             <AppShell />
-            {/* Inset above the 26 px status bar: toasts must never cover its
-                Search/Preview/Notes/Chat hints (plan 022 Q3, plan 050 S11). */}
-            <Toaster
-              offset={{ bottom: 38, right: 16 }}
-              position="bottom-right"
-              richColors
-              visibleToasts={3}
-            />
           </StudioProvider>
         </BackgroundAssetsProvider>
-      </TooltipProvider>
+      </WindowProviders>
     </ThemeProvider>
   )
 }

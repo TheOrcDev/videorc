@@ -1,6 +1,15 @@
 import type { ReactElement, ReactNode } from 'react'
 
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { cn } from '@/lib/utils'
+
+/**
+ * Every clickable thing in a status bar (plan 174 S1.6b, H-PAT): 20 px, 11 px
+ * tertiary text that brightens on hover, a pressed state for a toggle, 14 px
+ * icons. StatusBarHint and StatusBarAction (`status-bar-action.tsx`) share it.
+ */
+export const STATUS_BAR_ACTION_CLASS =
+  'flex h-5 shrink-0 items-center gap-1 rounded-chip px-1.5 text-[11px] text-subtle transition-colors duration-100 hover:bg-accent hover:text-foreground aria-pressed:text-foreground [&_svg]:size-3.5'
 
 /**
  * The window's status bar (plan 050, D4): 26 px, state on the left and quiet
@@ -35,14 +44,20 @@ export function StatusBar({
  * tertiary. `pressed` marks a window that is open (the action then closes it).
  */
 export function StatusBarHint({
-  keys,
+  accelerator,
+  platform,
   label,
+  labelClassName,
   pressed,
   onClick,
   className
 }: {
-  keys: string
+  /** The shortcut as an Electron accelerator, printed per platform (plan 174 S1.2). */
+  accelerator: string
+  platform?: string
   label: string
+  /** The label's own classes: `COMPACT_LABEL` keeps the key alone in a narrow window. */
+  labelClassName?: string
   pressed?: boolean
   onClick: () => void
   className?: string
@@ -50,16 +65,18 @@ export function StatusBarHint({
   return (
     <button
       aria-pressed={pressed}
-      className={cn(
-        'flex h-5 shrink-0 items-center gap-1 rounded-chip px-1.5 text-[11px] text-subtle transition-colors duration-100 hover:bg-accent hover:text-foreground aria-pressed:text-foreground',
-        className
-      )}
+      className={cn(STATUS_BAR_ACTION_CLASS, className)}
       data-slot="status-bar-hint"
       type="button"
       onClick={onClick}
     >
-      <span className="font-medium text-muted-foreground">{keys}</span>
-      {label}
+      <ShortcutKeys
+        accelerator={accelerator}
+        className="text-muted-foreground"
+        platform={platform}
+        variant="text"
+      />
+      {labelClassName ? <span className={labelClassName}>{label}</span> : label}
     </button>
   )
 }

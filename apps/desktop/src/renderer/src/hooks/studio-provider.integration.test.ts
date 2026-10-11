@@ -4,7 +4,11 @@ import {
   hydrateCommentsSnapshot,
   reconcileBrokerCommentsSnapshot
 } from '../../../shared/comments-snapshot-delta'
-import type { CommentsSnapshotDelta, CommentsViewSnapshot } from '../../../shared/backend'
+import type {
+  CommentsSnapshotDelta,
+  CommentsViewSnapshot,
+  OverlayLayout
+} from '../../../shared/backend'
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
 import { act, createElement, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -16,6 +20,7 @@ const toastSpies = vi.hoisted(() => ({
   error: vi.fn(),
   info: vi.fn(),
   loading: vi.fn(),
+  message: vi.fn(),
   success: vi.fn(),
   warning: vi.fn()
 }))
@@ -79,11 +84,13 @@ import type {
   SessionChatTotals,
   StreamOutputTopologyProbeResult,
   StreamScreen,
+  StreamingSettings,
   VideorcAccountRefreshResult,
   VideorcAccountSnapshot,
   VideorcApi
 } from '../../../shared/backend'
 import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
+import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
 import { useStudioMicVisualSource } from './use-studio-mic-sources'
@@ -101,10 +108,12 @@ import {
   useStudioCore,
   useStudioDiagnostics,
   useStudioRecording,
+  useStudioShell,
   type StudioCoreContextValue,
   type StudioRecordingContextValue
 } from './use-studio'
 import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlements'
+import type { SessionStopOrigin } from '../lib/session-stop'
 import {
   buildCameraSources,
   defaultCaptureConfig,
@@ -443,6 +452,7 @@ class StudioBackend {
   sessionListNextCursor: string | undefined
   sessionHealthEvents: HealthEvent[] = []
   sessionLogs: SessionLogEntry[] = []
+  overlayLayout: OverlayLayout = DEFAULT_OVERLAY_LAYOUT
   cohostSettings: CohostSettings = {
     enabled: true,
     tone: 'friendly',
@@ -452,7 +462,24 @@ class StudioBackend {
     rules: [],
     listen: false,
     wakeWordRequired: false,
-    removeConfirm: 'confirm'
+    removeConfirm: 'confirm',
+    persona: {
+      id: 'default',
+      name: 'Buddy',
+      personality: '',
+      bubbleStyle: 'speech',
+      images: {},
+      source: 'default',
+      avatar: { kind: 'still' },
+      motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+      reactions: {}
+    },
+    autoChat: {
+      mode: 'off',
+      greetings: { enabled: false, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    }
   }
   cohostState: CohostState = {
     sessionId: null,
@@ -618,6 +645,11 @@ class StudioBackend {
         return signedInAccount
       case 'account.sign_out':
         return { status: 'signed-out' }
+      case 'overlays.layout.get':
+        return this.overlayLayout
+      case 'overlays.layout.set':
+        this.overlayLayout = params as OverlayLayout
+        return this.overlayLayout
       case 'cohost.settings.get':
         return this.cohostSettings
       case 'cohost.settings.set':
@@ -1449,6 +1481,19 @@ class StudioBackend {
       case 'performance.check.get':
         // Measured and current: the provider must not start a check on mount.
         return this.performanceCheck
+      case 'diagnostics.supportBundle.export':
+        return {
+          path: 'C:\\Videorc\\support-bundles\\videorc-support-bundle-20261011-093000Z.json',
+          includedSections: [],
+          redactionSummary: {
+            secretValues: 0,
+            databasePaths: 0,
+            mediaPaths: 0,
+            homePaths: 0,
+            urlCredentials: 0,
+            aiArtifactBodies: 0
+          }
+        }
       case 'encoder.preference.get':
         return { preference: 'auto', quickSyncAvailable: false, envOverride: false }
       case 'encoder.preference.set':
@@ -3145,6 +3190,44 @@ describe('real StudioProvider lifecycle', () => {
     expect(releaseWrites.slice(0, 2)).toEqual(['unmuted config', 'ownership removed'])
   })
 
+  // Plan 174 S3.18 (I-1): the bundle lands in a folder Finder hides, so the
+  // export toast reveals it, through main, by the path the export returned.
+  it('offers to show an exported support bundle in the file manager', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const revealSupportBundle = vi.fn(async (_path: string) => {})
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      revealSupportBundle
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      await observations.at(-1)!.core.exportSupportBundle()
+    })
+    const exported = toastSpies.success.mock.calls.find(
+      ([title]) => title === 'Support bundle exported'
+    )
+    expect(exported?.[1]).toMatchObject({
+      description: 'videorc-support-bundle-20261011-093000Z.json',
+      action: { label: 'Show in Explorer' }
+    })
+    await act(async () => exported![1].action.onClick())
+    expect(revealSupportBundle).toHaveBeenCalledExactlyOnceWith(
+      'C:\\Videorc\\support-bundles\\videorc-support-bundle-20261011-093000Z.json'
+    )
+  })
+
   it('shows one persistent recovery error when an active recording fails', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
@@ -3274,7 +3357,7 @@ describe('real StudioProvider lifecycle', () => {
         id: 'recording-stopped-unexpectedly',
         description: failedStatus.message,
         duration: Infinity,
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -3516,7 +3599,7 @@ describe('real StudioProvider lifecycle', () => {
         id: 'recording-stopped-unexpectedly',
         description: failureEvent.message,
         duration: Infinity,
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -3594,18 +3677,21 @@ describe('real StudioProvider lifecycle', () => {
       () => latest()?.core.sessionRuntimeNotice?.sessionId === 'session-failed-snapshot'
     )
 
+    // A record+stream (Go Live) session was on air: its failure is a live
+    // session's, and it keeps the saved file's actions (plan 174 B-6).
     expect(latest()?.recording.recording.state).toBe('failed')
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
       kind: 'recording-failed',
-      activity: 'recording',
+      activity: 'record+stream',
       sessionId: 'session-failed-snapshot',
       outputPath: 'C:\\recordings\\session-failed-snapshot.mkv',
       message: failedSnapshotEvent.message
     })
     expect(toastSpies.error).toHaveBeenCalledWith(
-      'Recording stopped unexpectedly',
+      'Livestream stopped unexpectedly',
       expect.objectContaining({
         description: failedSnapshotEvent.message,
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -4040,7 +4126,7 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped: live session continues with silence',
+      'Microphone stopped: livestream continues with silence',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
@@ -4067,7 +4153,7 @@ describe('real StudioProvider lifecycle', () => {
 
     expect(toastSpies.success).not.toHaveBeenCalled()
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Microphone stopped during the live session',
+      'Microphone stopped during the livestream',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
@@ -4127,7 +4213,7 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped during the live session',
+      'Microphone stopped during the livestream',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
@@ -4224,6 +4310,468 @@ describe('real StudioProvider lifecycle', () => {
       'Recording saved',
       expect.objectContaining({ duration: 12000 })
     )
+  })
+
+  // Plan 174 B-6: the runtime notices read that `recording` + stream URL
+  // session as live. A microphone dropout tells the streamer the live session
+  // goes on silent (the audience hears it), and the saved file is still
+  // announced when it ends.
+  it('reports a microphone loss during Go Live (record+stream) as a live-session notice', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const push = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        await Promise.resolve()
+      })
+    }
+    await push('recording.status', {
+      state: 'recording',
+      sessionId: 'go-live-silent',
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    } satisfies RecordingStatus)
+    await waitForObservation(() => latest()?.recording.recording.sessionId === 'go-live-silent')
+    await push('health.event', {
+      id: 'go-live-microphone-lost',
+      sessionId: 'go-live-silent',
+      level: 'warn',
+      code: 'microphone-input-lost',
+      message: 'The selected microphone stopped providing audio.',
+      permissionPane: null,
+      createdAt: now
+    } satisfies HealthEvent)
+    await waitForObservation(
+      () => latest()?.core.sessionRuntimeNotice?.kind === 'microphone-input-lost'
+    )
+
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone stopped: livestream continues with silence',
+      expect.objectContaining({ id: 'microphone-input-lost' })
+    )
+    expect(toastSpies.warning).not.toHaveBeenCalledWith(
+      'Microphone stopped: recording continues with silence',
+      expect.anything()
+    )
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'microphone-input-lost',
+      activity: 'record+stream',
+      phase: 'active',
+      sessionId: 'go-live-silent'
+    })
+
+    await push('recording.status', {
+      state: 'idle',
+      sessionId: 'go-live-silent',
+      outputPath: '/recordings/go-live-silent.mp4',
+      durationMs: 65_000,
+      message: 'Saved.'
+    } satisfies RecordingStatus)
+    await waitForObservation(() => toastSpies.success.mock.calls.length === 1)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Recording saved',
+      expect.objectContaining({ duration: 12000 })
+    )
+    expect(toastSpies.warning).toHaveBeenLastCalledWith(
+      'Microphone stopped during the livestream',
+      expect.objectContaining({ id: 'microphone-input-lost' })
+    )
+  })
+
+  // Plan 174 S0.1 (D2): every stop path asks through requestStopSession. While
+  // live, an in-app origin opens the End livestream question (the shell hosts
+  // it), a global hotkey arms for a second press, and the device intents keep
+  // their contract. A recording that is not live stops at once.
+  it('asks before ending a livestream, arms a hotkey, and keeps the device contract', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(now))
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          enabledTargetIds: ['twitch'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) =>
+            target.id === 'twitch' ? { ...target, enabled: true, authMode: 'manual-rtmp' } : target
+          )
+        }
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const pushStatus = async (status: RecordingStatus): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'recording.status', payload: status })
+        })
+        await Promise.resolve()
+      })
+    }
+    const goLive = (sessionId: string): RecordingStatus => ({
+      state: 'recording',
+      sessionId,
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    })
+    const stopsSent = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'session.stop').length
+    const request = async (origin: SessionStopOrigin): Promise<boolean> => {
+      let outcome = false
+      await act(async () => {
+        outcome = await latest().core.requestStopSession(origin)
+      })
+      return outcome
+    }
+
+    await pushStatus(goLive('go-live-1'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-1')
+
+    // Every in-app origin asks first, naming the session and its audience.
+    for (const origin of ['button', 'space', 'palette', 'failure-banner'] as const) {
+      expect(await request(origin)).toBe(false)
+      await waitForObservation(() => shell?.stopConfirmation?.origin === origin)
+      expect(stopsSent()).toBe(0)
+    }
+    expect(shell?.stopConfirmation).toMatchObject({
+      sessionId: 'go-live-1',
+      platforms: ['Twitch'],
+      alsoRecords: true
+    })
+    // Keep streaming: nothing is sent, the question goes away.
+    await act(async () => shell!.cancelStopSession())
+    await waitForObservation(() => shell?.stopConfirmation === null)
+    expect(stopsSent()).toBe(0)
+
+    // A global hotkey arms with one plain keyed toast; an expired arm starts
+    // over; a second press within the window ends the livestream.
+    expect(await request('global-hotkey')).toBe(false)
+    expect(toastSpies.message).toHaveBeenCalledExactlyOnceWith(
+      'Press again to end the livestream',
+      expect.objectContaining({ id: 'end-livestream-armed', duration: 2000 })
+    )
+    expect(shell?.stopConfirmation).toBeNull()
+    expect(stopsSent()).toBe(0)
+    vi.setSystemTime(new Date(Date.parse(now) + 2001))
+    expect(await request('global-hotkey')).toBe(false)
+    expect(toastSpies.message).toHaveBeenCalledTimes(2)
+    expect(stopsSent()).toBe(0)
+    vi.setSystemTime(new Date(Date.parse(now) + 3000))
+    expect(await request('global-hotkey')).toBe(true)
+    expect(stopsSent()).toBe(1)
+    expect(toastSpies.dismiss).toHaveBeenCalledWith('end-livestream-armed')
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // Stream Deck and phone intents are deliberate: they stop at once.
+    await pushStatus(goLive('go-live-2'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-2')
+    expect(await request('remote-control')).toBe(true)
+    expect(stopsSent()).toBe(2)
+    expect(shell?.stopConfirmation).toBeNull()
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // The confirm button is the stop.
+    await pushStatus(goLive('go-live-3'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-3')
+    expect(await request('palette')).toBe(false)
+    await waitForObservation(() => shell?.stopConfirmation?.sessionId === 'go-live-3')
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() => stopsSent() === 3)
+    await waitForObservation(() => shell?.stopConfirmation === null)
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // A recording that is not live never asks.
+    await pushStatus({
+      state: 'recording',
+      sessionId: 'rec-1',
+      startedAt: now,
+      message: 'Recording.'
+    })
+    await waitForObservation(() => latest().recording.recording.sessionId === 'rec-1')
+    expect(await request('button')).toBe(true)
+    expect(stopsSent()).toBe(4)
+    expect(shell?.stopConfirmation).toBeNull()
+    expect(toastSpies.message).toHaveBeenCalledTimes(2)
+  })
+
+  // Plan 174 S3.1 (the Phase 0 review): a remote's stop goes through the one
+  // stop door, where a Stream Deck intent is a deliberate device action that
+  // stops at once; whatever ends the session clears an armed hotkey press;
+  // and recordStart records, whatever mode the Studio saved last (B-3).
+  it('routes remote intents through the stop door and the explicit starts', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(now))
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          enabledTargetIds: ['twitch'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) =>
+            target.id === 'twitch' ? { ...target, enabled: true, authMode: 'manual-rtmp' } : target
+          )
+        }
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const pushEvent = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        await Promise.resolve()
+      })
+    }
+    const goLive = (sessionId: string): RecordingStatus => ({
+      state: 'recording',
+      sessionId,
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    })
+    const acks = (): Array<{ intentId?: string; ok?: boolean; message?: string }> =>
+      backend.sentCommands
+        .filter((command) => command.method === 'remote.intent.ack')
+        .map((command) => command.params as { intentId?: string; ok?: boolean; message?: string })
+    const stopsSent = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'session.stop').length
+
+    // A global hotkey arms; the remote's stop then stops at once and clears it.
+    await pushEvent('recording.status', goLive('go-live-1'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-1')
+    await act(async () => {
+      expect(await latest().core.requestStopSession('global-hotkey')).toBe(false)
+    })
+    expect(toastSpies.message).toHaveBeenCalledTimes(1)
+    await pushEvent('remote.intent', { intentId: 'stop-1', intent: { kind: 'recordStop' } })
+    await waitForObservation(() => acks().some((ack) => ack.intentId === 'stop-1'))
+    expect(acks().find((ack) => ack.intentId === 'stop-1')).toEqual({
+      intentId: 'stop-1',
+      ok: true
+    })
+    expect(stopsSent()).toBe(1)
+    expect(toastSpies.dismiss).toHaveBeenCalledWith('end-livestream-armed')
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // The backend ending the session clears the arm too: the next press on a
+    // later livestream arms again instead of ending it.
+    await pushEvent('recording.status', goLive('go-live-2'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-2')
+    vi.clearAllMocks()
+    await act(async () => {
+      expect(await latest().core.requestStopSession('global-hotkey')).toBe(false)
+    })
+    expect(toastSpies.message).toHaveBeenCalledTimes(1)
+    await pushEvent('recording.status', {
+      state: 'idle',
+      sessionId: 'go-live-2',
+      message: 'Ended.'
+    })
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+    expect(toastSpies.dismiss).toHaveBeenCalledWith('end-livestream-armed')
+    await pushEvent('recording.status', goLive('go-live-3'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-3')
+    vi.clearAllMocks()
+    await act(async () => {
+      expect(await latest().core.requestStopSession('global-hotkey')).toBe(false)
+    })
+    expect(stopsSent()).toBe(1)
+    expect(toastSpies.message).toHaveBeenCalledTimes(1)
+    await pushEvent('recording.status', {
+      state: 'idle',
+      sessionId: 'go-live-3',
+      message: 'Ended.'
+    })
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // recordStart records, even though the saved mode is Go Live (B-3): the
+    // dialog never opens, the file is written, the saved mode is untouched.
+    await pushEvent('remote.intent', { intentId: 'rec-1', intent: { kind: 'recordStart' } })
+    await waitForObservation(() => acks().some((ack) => ack.intentId === 'rec-1'))
+    expect(acks().find((ack) => ack.intentId === 'rec-1')).toEqual({ intentId: 'rec-1', ok: true })
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(start?.params).toMatchObject({ output: { recordEnabled: true, streamEnabled: false } })
+    expect(latest().core.goLiveConfirmationOpen).toBe(false)
+    expect(latest().core.captureConfig.streamEnabled).toBe(true)
+    await waitForObservation(() => latest().recording.recording.state === 'recording')
+    await act(async () => {
+      await latest().core.stopSession()
+    })
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+  })
+
+  // Plan 174 S3.1 (D2): main holds a quit or a main-window close while on air
+  // and asks the renderer. Not live, the exit goes through at once; live, the
+  // End livestream question names the exit, "Keep streaming" leaves the app as
+  // it was, and the yes ends the livestream and then lets the app go.
+  it('asks before a quit or a window close ends a livestream, then lets the app go', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
+    })
+    const exitApp = vi.fn(async (_kind: 'quit' | 'close') => undefined)
+    ;(api as unknown as { exitApp: typeof exitApp }).exitApp = exitApp
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          enabledTargetIds: ['twitch'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) =>
+            target.id === 'twitch' ? { ...target, enabled: true, authMode: 'manual-rtmp' } : target
+          )
+        }
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    const pushStatus = async (status: RecordingStatus): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'recording.status', payload: status })
+        })
+        await Promise.resolve()
+      })
+    }
+    const stopsSent = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'session.stop').length
+
+    // Not live: nothing to protect, main may go.
+    await act(async () => emit('onExitRequest', 'quit'))
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('quit')
+    expect(shell?.stopConfirmation).toBeNull()
+
+    // Live: the question, titled for the exit. Keep streaming changes nothing.
+    await pushStatus({
+      state: 'recording',
+      sessionId: 'go-live-1',
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    })
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-1')
+    exitApp.mockClear()
+    await act(async () => emit('onExitRequest', 'quit'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'quit')
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(stopsSent()).toBe(0)
+    await act(async () => shell!.cancelStopSession())
+    await waitForObservation(() => shell?.stopConfirmation === null)
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(latest().recording.recording.sessionId).toBe('go-live-1')
+
+    // A window close asks the same way; yes ends the livestream, then the window goes.
+    await act(async () => emit('onExitRequest', 'close'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'close-window')
+    expect(exitApp).not.toHaveBeenCalled()
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() => stopsSent() === 1)
+    await waitForObservation(() => exitApp.mock.calls.length === 1)
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('close')
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
   })
 
   it('returns a fully cloneable development scene-preset state with evaluated source diagnostics', async () => {
@@ -4361,6 +4909,39 @@ describe('real StudioProvider lifecycle', () => {
       () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
     )
     expect(latest().captureConfig.layout.cameraZoom).toBe(175)
+  })
+
+  it('refreshes only the device list from Sources, and keeps it when other reads would fail (C-32)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        { id: 'camera:plugged', name: 'Plugged Camera', kind: 'camera', status: 'available' },
+        ...backend.deviceList.devices
+      ]
+    }
+    const sentBefore = backend.sentCommands.length
+    await act(async () => latest().refreshDevices())
+    const sent = backend.sentCommands.slice(sentBefore).map((command) => command.method)
+    expect(sent).toEqual(['devices.list'])
+    expect(latest().deviceList.devices.some((device) => device.id === 'camera:plugged')).toBe(true)
   })
 
   it('restores saved Camera Off after On through device discovery and a finished session', async () => {
@@ -5285,7 +5866,7 @@ describe('real StudioProvider lifecycle', () => {
         // validates discovery before admitting its layout to the backend.
         expect(button(unavailable).disabled).toBe(false)
         await act(async () => button(unavailable).click())
-        await waitForObservation(() => toastSpies.error.mock.calls.length > 0)
+        await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
       }
       expect(
         backend.sentCommands.filter((command) => command.method === 'scene.layout.apply_live')
@@ -5516,14 +6097,16 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(await latest().applySavedScene(saved.id)).toBe(true)
     })
-    await waitForObservation(
-      () => latest().canSaveScene && toastSpies.warning.mock.calls.length > 0
-    )
+    // Plan 174 S2.4: a lagging preview is neutral news, so info.
+    await waitForObservation(() => latest().canSaveScene && toastSpies.info.mock.calls.length > 0)
     expect(latest().activeSavedSceneId).toBe(saved.id)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
     expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(saved.id)
-    expect(toastSpies.warning).toHaveBeenCalled()
+    expect(toastSpies.info).toHaveBeenCalledWith(
+      'The preview may be behind',
+      expect.objectContaining({ id: expect.stringContaining('layout-preview-proof-lag') })
+    )
     showPreview = false
     api.getNativePreviewSurfaceStatus = async () => nativePreviewStatus()
     await act(async () => {
@@ -5826,8 +6409,10 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(latest()?.core.captureConfig.sources.screenId).toBe(sources.screenId)
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
-    expect(toastSpies.error).toHaveBeenCalledWith('The selected display is unavailable.', {
-      id: expect.stringContaining('source-switch-')
+    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't switch the screen", {
+      id: expect.stringContaining('source-switch-'),
+      description: 'The selected display is unavailable. Choose it again in Sources.',
+      duration: 8_000
     })
     expect(toastSpies.success).not.toHaveBeenCalled()
   }, 10_000)
@@ -7400,7 +7985,7 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual({
       intentId: 'ri-test-mic-rejected',
       ok: false,
-      message: 'The microphone change was not applied.'
+      message: "Couldn't change the microphone."
     })
     expect(
       backend.sentCommands
@@ -7467,7 +8052,7 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual({
       intentId: 'ri-test-scene-rejected',
       ok: false,
-      message: 'The layout change was not committed.'
+      message: "Couldn't switch the scene."
     })
   })
 
@@ -7577,7 +8162,7 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual({
       intentId: 'ri-test-takeover-definite-failure',
       ok: false,
-      message: 'The takeover was not activated.'
+      message: "Couldn't show the takeover."
     })
     expect(backend.activeScreen).toBeNull()
 
@@ -7628,7 +8213,7 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual({
       intentId: 'ri-test-takeover-clear-outcome-unknown',
       ok: false,
-      message: 'The takeover was not cleared.'
+      message: "Couldn't hide the takeover."
     })
     expect(backend.activeScreen?.id).toBe(takeoverScreen.id)
   })
@@ -7801,7 +8386,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('applies cloud-AI preference flips to the same active Orcle session from backend replies', async () => {
+  it('applies cloud-AI preference flips to the same active Buddy session from backend replies', async () => {
     const backend = new StudioBackend()
     backend.entitlements = premiumEntitlements
     backend.cohostSettings.listen = true
@@ -7973,10 +8558,11 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.chat.cohostState?.status).toBe('paused')
   }, 15_000)
 
-  // Plan 119 S2: Orcle Live is one switch. On asks for cloud-AI consent first
-  // (the Orcle tab's dialog), then writes chat AND listening in ONE save; off
-  // writes `enabled` alone. Cloud AI is its own choice and never rewrites them.
-  async function mountOrcleLiveProvider(consent: '0' | '1'): Promise<{
+  // Plan 174 S3.14a (D7): the Buddy Live switch writes `enabled` and nothing
+  // else. On asks for cloud-AI consent first (the Buddy page's dialog) and
+  // never grants the microphone in the same click: listening keeps its own
+  // switch. Cloud AI is its own choice and never rewrites them.
+  async function mountBuddyLiveProvider(consent: '0' | '1'): Promise<{
     backend: StudioBackend
     latest: () => StudioObservation | undefined
     settingsWrites: () => unknown[]
@@ -8022,39 +8608,42 @@ describe('real StudioProvider lifecycle', () => {
     }
   }
 
-  it('turns Orcle Live on only through the consent dialog, then in one save with listening', async () => {
-    const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
+  it('turns Buddy Live on only through the consent dialog, never the microphone with it', async () => {
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
-    await act(async () => latest()!.core.setOrcleLive(true))
-    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
     // Asking writes nothing: no consent and no settings until the answer.
     expect(settingsWrites()).toEqual([])
     expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
 
-    await act(async () => latest()!.core.answerOrcleConsent(true))
+    await act(async () => latest()!.core.answerBuddyConsent(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
-    expect(latest()!.core.orcleConsentRequested).toBe(false)
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
     expect(latest()!.core.aiConsent).toBe(true)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
-    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
+    // One click never grants consent and listening at once (the Phase 0 review).
+    expect(settingsWrites()).toEqual([{ enabled: true }])
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
 
     // Off is `enabled` alone: listening and consent stay as they were.
-    await act(async () => latest()!.core.setOrcleLive(false))
+    await act(async () => latest()!.core.patchCohostSettings({ listen: true }))
+    await waitForObservation(() => latest()?.core.cohostSettings?.listen === true)
+    await act(async () => latest()!.core.setBuddyLive(false))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === false)
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }, { enabled: false }])
+    expect(settingsWrites()).toEqual([{ enabled: true }, { listen: true }, { enabled: false }])
     expect(latest()!.core.cohostSettings?.listen).toBe(true)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('changes nothing when the Orcle Live consent dialog is declined', async () => {
-    const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
+  it('changes nothing when the Buddy Live consent dialog is declined', async () => {
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
-    await act(async () => latest()!.core.setOrcleLive(true))
-    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
-    await act(async () => latest()!.core.answerOrcleConsent(false))
-    await waitForObservation(() => latest()?.core.orcleConsentRequested === false)
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
+    await act(async () => latest()!.core.answerBuddyConsent(false))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === false)
 
     expect(latest()!.core.aiConsent).toBe(false)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
@@ -8062,74 +8651,152 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()!.core.cohostSettings?.enabled).toBe(false)
   }, 15_000)
 
-  it('turns Orcle Live on without a dialog once cloud AI is allowed', async () => {
-    const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
+  it('turns Buddy Live on without a dialog once cloud AI is allowed', async () => {
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('1')
 
-    await act(async () => latest()!.core.setOrcleLive(true))
+    await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
-    expect(latest()!.core.orcleConsentRequested).toBe(false)
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
+    expect(settingsWrites()).toEqual([{ enabled: true }])
   }, 15_000)
 
-  it('revokes cloud AI without rewriting Orcle settings, and asks again on the next on', async () => {
-    const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
-    await act(async () => latest()!.core.setOrcleLive(true))
+  it('revokes cloud AI without rewriting Buddy settings, and asks again on the next on', async () => {
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('1')
+    await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
 
     await act(async () => latest()!.core.setAiConsent(false))
     await waitForObservation(() => latest()?.core.aiConsent === false)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(settingsWrites()).toEqual([{ enabled: true }])
     expect(latest()!.core.cohostSettings?.enabled).toBe(true)
 
-    await act(async () => latest()!.core.setOrcleLive(true))
-    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
+    expect(settingsWrites()).toEqual([{ enabled: true }])
   }, 15_000)
 
-  it('applies the same Orcle Live save to every Comments-window way on', async () => {
+  // Plan 174 S0.2: a Comments-window command saves only what it names. The
+  // relay never adds listening on its own, so consent and the microphone are
+  // never one click.
+  it('saves only what a Comments-window command names: consent without listening', async () => {
     const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
-      await mountOrcleLiveProvider('0')
+      await mountBuddyLiveProvider('0')
 
-    // The consent CTA: grant consent and turn on in the same click.
+    // The consent dialog's Allow: consent and Buddy on, nothing about the mic.
     await act(async () => {
-      emitApi('onCohostEnableRequest', {
-        requestId: 'enable-1',
-        enabled: true,
-        grantConsent: true,
-        listen: true
-      })
+      emitApi('onCohostEnableRequest', { requestId: 'enable-1', enabled: true, grantConsent: true })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(settingsWrites()).toEqual([{ enabled: true }])
     expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
       requestId: 'enable-1',
       ok: true,
-      value: expect.objectContaining({ consented: true, enabled: true, listen: true })
+      value: expect.objectContaining({ consented: true, enabled: true, listen: false })
     })
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
 
-    // The status popover's switch, off: `enabled` alone.
+    // A later `listen` with Buddy already on is dropped unless the listening
+    // card grants it (plan 174 S3.14a): nothing is saved, the state answers.
     await act(async () => {
-      emitApi('onCohostEnableRequest', { requestId: 'enable-2', enabled: false })
+      emitApi('onCohostEnableRequest', { requestId: 'enable-2', enabled: true, listen: true })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
-    expect(settingsWrites().at(-1)).toEqual({ enabled: false })
+    expect(settingsWrites()).toEqual([{ enabled: true }])
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
 
-    // An `enabled`-only on (the nudge's old shape) still turns listening on.
+    // The listening card's own Turn on: `listen` alone.
     await act(async () => {
-      emitApi('onCohostEnableRequest', { requestId: 'enable-3', enabled: true })
+      emitApi('onCohostEnableRequest', {
+        requestId: 'enable-2b',
+        enabled: true,
+        listen: true,
+        grantListen: true
+      })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
-    expect(settingsWrites().at(-1)).toEqual({ enabled: true, listen: true })
+    expect(settingsWrites().at(-1)).toEqual({ listen: true })
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
-    expect(latest()!.core.orcleConsentRequested).toBe(false)
+
+    // The Buddy Live switch, off: `enabled` alone; listening stays.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'enable-3', enabled: false })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 4)
+    expect(settingsWrites().at(-1)).toEqual({ enabled: false })
+    expect(latest()!.core.cohostSettings?.listen).toBe(true)
+
+    // The Buddy Live switch on again (the header, the nudge): `enabled`
+    // alone, the same save as the Buddy page's switch.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'enable-4', enabled: true })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 5)
+    expect(settingsWrites().at(-1)).toEqual({ enabled: true })
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
+  }, 15_000)
+
+  it('keeps listening off when a Greetings switch rides the relay', async () => {
+    const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
+      await mountBuddyLiveProvider('1')
+
+    // Buddy on without listening (a mode change the window sent no `listen` for).
+    await act(async () => {
+      emitApi('onCohostEnableRequest', {
+        requestId: 'mode-1',
+        enabled: true,
+        autoChat: { mode: 'suggest' }
+      })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
+    expect(settingsWrites().at(-1)).toEqual({
+      enabled: true,
+      autoChat: expect.objectContaining({ mode: 'suggest' })
+    })
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
+
+    // Greetings on: `{autoChat}` alone, the templates and cooldowns kept.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', {
+        requestId: 'greetings-1',
+        enabled: true,
+        autoChat: { greetings: true }
+      })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
+    expect(settingsWrites().at(-1)).toEqual({
+      autoChat: {
+        mode: 'suggest',
+        greetings: { enabled: true, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
+    })
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
+    expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
+      requestId: 'greetings-1',
+      ok: true,
+      value: expect.objectContaining({ enabled: true, listen: false })
+    })
+
+    // A command that changes nothing saves nothing, and still answers.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'same-1', enabled: true })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
+    expect(settingsWrites()).toHaveLength(2)
+    expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
+      requestId: 'same-1',
+      ok: true,
+      value: expect.objectContaining({ enabled: true, listen: false })
+    })
   }, 15_000)
 
   // Stop never starts a cloud job on its own: a streamed, recorded session
-  // Orcle heard finalizes with its transcript, and only the cloud-AI
+  // Buddy heard finalizes with its transcript, and only the cloud-AI
   // readiness reads go out.
-  it('starts no cloud job when a streamed recording Orcle heard finalizes', async () => {
+  it('starts no cloud job when a streamed recording Buddy heard finalizes', async () => {
     // Cloud AI reads ready, so only a missing trigger keeps a job from going out.
     class CloudReadyBackend extends StudioBackend {
       override response(command: BackendCommand): unknown {
@@ -8201,7 +8868,7 @@ describe('real StudioProvider lifecycle', () => {
         await Promise.resolve()
       })
     }
-    // Everything a post-recording job could key on: Orcle heard the stream,
+    // Everything a post-recording job could key on: Buddy heard the stream,
     // the transcript landed, and the MP4 finalized.
     await emit('liveChat.snapshot', {
       sessionId: 'pack-1',
@@ -8503,8 +9170,9 @@ describe('real StudioProvider lifecycle', () => {
 
     expect(requestMediaAccess).not.toHaveBeenCalled()
     expect(openSystemPermissions).not.toHaveBeenCalled()
-    expect(toastSpies.error).toHaveBeenCalledWith('Could not check Camera permission.', {
-      description: 'Try again before changing access.'
+    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't check Camera permission", {
+      description: 'Try again before changing access.',
+      duration: 8_000
     })
   })
 
@@ -9594,7 +10262,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(ack('ri-sa-on')).toEqual({
       intentId: 'ri-sa-on',
       ok: false,
-      message: 'System audio is not available.'
+      message: "System audio isn't available."
     })
     await act(async () => {
       emit('onGlobalShortcut', 'system-audio-toggle')
@@ -10269,6 +10937,167 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
   })
 
+  // Plan 174 S2.2 (D3) and S3.1 (B-3): the Studio transport and ⌘K share the
+  // provider's two starts, and each is an explicit intent. Go Live… opens the
+  // Go Live dialog and starts nothing on its own; Record starts a local take
+  // at once. Neither writes the saved output mode: the Output page's "Save
+  // local recording" and the Livestream page's destinations stay as they are.
+  it('starts Go Live… and Record through the shared provider starts', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...youtubeOauthStreamCaptureConfig(),
+        recordEnabled: true,
+        streamEnabled: false
+      })
+    })
+    await waitForObservation(() => latest()?.core.startBlockedReason === null)
+    // Both reasons come from one function (S3.1): with a ready destination
+    // and a saved record-only mode, both starts can run.
+    expect(latest()!.core.recordBlockedReason).toBeNull()
+    expect(latest()!.core.liveStreamBlockedReason).toBeNull()
+
+    let goLive!: Promise<boolean>
+    await act(async () => {
+      goLive = latest()!.core.startLivestream()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    // Opening the dialog is not a started stream, and the saved mode is untouched.
+    expect(await goLive).toBe(false)
+    expect(latest()!.core.captureConfig).toMatchObject({
+      recordEnabled: true,
+      streamEnabled: false
+    })
+    expect(backend.commands.some((command) => command.method === 'session.start')).toBe(false)
+
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === false)
+
+    // Record while "Save local recording" is OFF still records: Record is a
+    // take, and the Output switch only decides whether a Go Live records too.
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...latest()!.core.captureConfig,
+        recordEnabled: false
+      })
+    })
+    await waitForObservation(() => latest()?.core.captureConfig.recordEnabled === false)
+    let recorded!: Promise<boolean>
+    await act(async () => {
+      recorded = latest()!.core.startRecording()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(await recorded).toBe(true)
+    expect(latest()!.core.sessionStartIntent).toEqual({ record: true, stream: false })
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(start?.params).toMatchObject({ output: { recordEnabled: true, streamEnabled: false } })
+    expect(latest()!.core.captureConfig).toMatchObject({
+      recordEnabled: false,
+      streamEnabled: false
+    })
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(false)
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    expect(latest()!.core.sessionStartIntent).toBeNull()
+  })
+
+  // Plan 174 S3.1 (the Phase 0 review): a Go Live preflight that is still
+  // pending owns the transport, so Record (the button, Space, a hotkey, ⌘K,
+  // a remote) cannot start a record-only take underneath it.
+  it('ignores Record while the Go Live preflight is pending', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      latest()!.core.setCaptureConfig(youtubeOauthStreamCaptureConfig())
+    })
+    await waitForObservation(() => latest()?.core.liveStreamBlockedReason === null)
+
+    const releasePreflight = backend.deferResponse('streamTargets.confirmation.validate', {
+      valid: true,
+      destinations: [],
+      issues: []
+    })
+    let goLive!: Promise<boolean>
+    await act(async () => {
+      goLive = latest()!.core.startLivestream()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationPending === true)
+    // "Checking…" is on, the dialog is not yet in the DOM, and Record is held.
+    expect(latest()!.core.goLiveConfirmationOpen).toBe(false)
+    let recorded: boolean | undefined
+    await act(async () => {
+      recorded = await latest()!.core.startRecording()
+    })
+    expect(recorded).toBe(false)
+    expect(backend.commands.some((command) => command.method === 'session.start')).toBe(false)
+    // A second Go Live click joins the first instead of running a second preflight.
+    let secondGoLive!: Promise<boolean>
+    await act(async () => {
+      secondGoLive = latest()!.core.startLivestream()
+    })
+    await act(async () => {
+      releasePreflight()
+      await Promise.all([goLive, secondGoLive])
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(
+      backend.sentCommands.filter(
+        (command) => command.method === 'streamTargets.confirmation.validate'
+      )
+    ).toHaveLength(1)
+    expect(backend.commands.some((command) => command.method === 'session.start')).toBe(false)
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+  })
+
   // Plan 094 (bug 1): the owner's failed `complete` on quota was retained and
   // every later Record retried it ("Finish cleaning up the previous livestream
   // providers before starting again") until midnight Pacific. YouTube ends the
@@ -10336,6 +11165,96 @@ describe('real StudioProvider lifecycle', () => {
     expect(
       backend.sentCommands.filter((command) => command.method === 'session.start')
     ).toHaveLength(2)
+  })
+
+  // Plan 174 S3.4 (B-8): "Go live without X" used to switch X off in the
+  // saved settings, so every later Go Live skipped it too.
+  it('leaves a destination out of one Go Live only, and never saves it', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const savedX = () =>
+      latest()!.core.captureConfig.streaming.targets.find((target) => target.id === 'x')
+    const lastValidation = () =>
+      backend.sentCommands
+        .filter((command) => command.method === 'streamTargets.confirmation.validate')
+        .at(-1)?.params as { streaming: StreamingSettings } | undefined
+
+    // Left out, then brought back, then left out again: the saved X stays on.
+    await openYouTubeAndXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual(['x'])
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'include')
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual([])
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube', 'x'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    expect(savedX()?.enabled).toBe(true)
+    expect(latest()!.core.captureConfig.streaming.enabledTargetIds).toContain('x')
+
+    // Cancelling forgets it.
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual([])
+
+    // Going live without X: X is never prepared or started, and stays saved on.
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube', 'x'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect((start?.params as { streaming: StreamingSettings }).streaming.enabledTargetIds).toEqual([
+      'youtube'
+    ])
+    expect(backend.xPrepareCount).toBe(0)
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(savedX()?.enabled).toBe(true)
+
+    // The attempt over, the next Go Live starts from the saved destinations.
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.state === 'idle' &&
+        latest()?.core.goLiveExcludedTargetIds.length === 0
+    )
+    expect(savedX()?.enabled).toBe(true)
   })
 
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {
@@ -13481,6 +14400,7 @@ function createVideorcApi(options: {
   acknowledgeProvider: (id: string) => Promise<boolean>
   openSession?: (sessionId: string) => Promise<string>
   revealSession?: (sessionId: string) => Promise<void>
+  revealSupportBundle?: VideorcApi['revealSupportBundle']
   setPreviewAspectRatio?: (width: number, height: number) => Promise<void>
   nativePreview?: {
     getWindowState: () => PreviewWindowState
@@ -13588,6 +14508,7 @@ function createVideorcApi(options: {
       getCaptionLines: async () => null,
       openSession: options.openSession ?? (async () => ''),
       revealSession: options.revealSession ?? (async () => {}),
+      revealSupportBundle: options.revealSupportBundle ?? (async () => {}),
       getUpdateStatus: async () => ({ phase: 'unsupported' }),
       onBackendConnection: (callback: (value: unknown) => void) =>
         subscribe('backend:connection', callback),

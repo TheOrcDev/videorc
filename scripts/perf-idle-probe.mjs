@@ -766,11 +766,13 @@ async function ensureStudioMicVisuals(smoke, { selectDevice = true } = {}) {
         if (!trigger) throw new Error('Studio microphone picker was not found.');
         trigger.click();
         await sleep(250);
+        // The device picker (plan 174 S1.9) lists cmdk options, whose
+        // data-disabled reads "true" or "false"; its no-device item says Off.
         const option = Array.from(document.querySelectorAll('[role="option"]')).find(
           (candidate) =>
             candidate.getAttribute('aria-disabled') !== 'true' &&
-            !candidate.hasAttribute('data-disabled') &&
-            candidate.textContent?.trim() !== 'None'
+            !['', 'true'].includes(candidate.getAttribute('data-disabled')) &&
+            !['None', 'Off'].includes(candidate.textContent?.trim())
         );
         if (!option) throw new Error('No available Studio microphone could be selected.');
         option.click();
@@ -780,9 +782,9 @@ async function ensureStudioMicVisuals(smoke, { selectDevice = true } = {}) {
       const deadline = Date.now() + 10000;
       while (Date.now() < deadline) {
         const visualizer = document.querySelector('[data-videorc-mic-visualizer]');
-        const live = Array.from(document.querySelectorAll('span')).some(
-          (candidate) => candidate.textContent?.trim() === 'Live'
-        );
+        // The meter's state attribute, not its words: plan 174 C-38 says
+        // "Receiving" where it once said "Live".
+        const live = Boolean(document.querySelector('[data-videorc-mic-monitor-state="live"]'));
         if (visualizer && live) return { mounted: true, live: true };
         await sleep(100);
       }

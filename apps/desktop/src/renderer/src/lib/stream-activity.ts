@@ -7,6 +7,7 @@ import type {
 } from '@/lib/backend'
 
 import { noticeViewerWords } from '@/lib/chat-notice'
+import { plural } from '@/lib/format'
 
 import type { DestinationEvent } from '../../../shared/live-dashboard'
 
@@ -109,10 +110,6 @@ const TIER_LABELS: Record<string, string> = {
 export function subscriptionTierLabel(tier: string | undefined, isPrime: boolean): string {
   if (isPrime) return 'Prime'
   return (tier && TIER_LABELS[tier]) ?? 'a sub'
-}
-
-function plural(count: number, one: string, many: string): string {
-  return `${count.toLocaleString()} ${count === 1 ? one : many}`
 }
 
 export function formatMicros(amountMicros: number, currency: string): string {
@@ -493,7 +490,7 @@ function itemsFromFollowerGains(audience: AudienceSnapshot | null | undefined): 
         name: gain.count === 1 ? 'New follower' : `${gain.count.toLocaleString()} new followers`,
         line: `${plural(gain.count, 'new follower', 'new followers')}. ${
           entry.platform === 'twitch'
-            ? 'Show who followed to name them from now on.'
+            ? 'Reconnect Twitch to name them from now on.'
             : "X didn't say who followed."
         }`,
         short: '',

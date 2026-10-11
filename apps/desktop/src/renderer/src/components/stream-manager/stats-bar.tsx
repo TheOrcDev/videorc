@@ -40,8 +40,8 @@ import { cn } from '@/lib/utils'
 // one hover away. Drag a stat to move it; right-click the bar to show or
 // hide stats (plan 057, D2).
 
-/** The right-click menu's names for the stats a streamer can hide. */
-const STAT_NAMES: Record<StatId, string> = {
+/** The stats' names in the right-click menu and the status bar's Customize stats. */
+export const STAT_NAMES: Record<StatId, string> = {
   session: 'Clock',
   viewers: 'Viewers',
   health: 'Stream health',
@@ -73,14 +73,14 @@ function SessionChip({ badge }: { badge: StatItemModel['badge'] }): ReactElement
     case 'live':
       // Broadcast convention (owner call, 2026-09-24): the live chip is ON AIR.
       return (
-        <Badge data-slot="session-on-air" variant="live">
+        <Badge data-testid="session-on-air" variant="live">
           ON AIR
         </Badge>
       )
     case 'recording':
-      return <Badge variant="secondary">Recording</Badge>
+      return <Badge>Recording</Badge>
     case 'history':
-      return <Badge variant="secondary">History</Badge>
+      return <Badge>History</Badge>
     default:
       return null
   }
@@ -101,7 +101,7 @@ function StatLead({ item }: { item: StatItemModel }): ReactElement | null {
 
 function StatDetails({ item }: { item: StatItemModel }): ReactElement {
   return (
-    <HoverCardContent align="start" className="w-64 p-2" data-slot="stat-details">
+    <HoverCardContent align="start" className="w-64 p-2" data-testid="stat-details">
       <div className="px-1 pb-1 text-[11px] font-semibold text-subtle">{item.label}</div>
       <div className="flex flex-col">
         {item.details.map((row, index) => (
@@ -117,7 +117,10 @@ function StatDetails({ item }: { item: StatItemModel }): ReactElement {
                 {row.value}
               </span>
               {row.note ? (
-                <span className="max-w-40 truncate text-[11px] text-subtle" title={row.note}>
+                <span
+                  className="max-w-40 truncate text-[11px] text-muted-foreground"
+                  title={row.note}
+                >
                   {row.note}
                 </span>
               ) : null}
@@ -146,7 +149,7 @@ function StatCell({
     <span
       aria-label={item.description}
       className={cn(
-        'flex h-8 items-center gap-1.5 rounded-chip whitespace-nowrap',
+        'flex h-8 items-center gap-1.5 rounded-chip whitespace-nowrap outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
         shrinks ? 'min-w-0' : 'shrink-0',
         drag?.dragging && 'opacity-50',
         drag?.dropTarget && 'bg-accent'
@@ -157,6 +160,9 @@ function StatCell({
       data-tone={item.tone}
       draggable={drag ? true : undefined}
       role="img"
+      // The details open on focus too (plan 174 H-15): a stat with a hover
+      // card is a tab stop.
+      tabIndex={item.details.length > 0 ? 0 : undefined}
       onDragEnd={drag?.onDragEnd}
       onDragOver={drag?.onDragOver}
       onDragStart={drag?.onDragStart}
@@ -319,7 +325,7 @@ export function StatsBar({
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{bar}</ContextMenuTrigger>
-      <ContextMenuContent className="w-52" data-slot="stats-bar-menu">
+      <ContextMenuContent className="w-52" data-testid="stats-bar-menu">
         <ContextMenuLabel>Stats</ContextMenuLabel>
         {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
           <ContextMenuCheckboxItem

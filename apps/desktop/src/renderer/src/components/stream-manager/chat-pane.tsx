@@ -11,6 +11,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactElement
 } from 'react'
 
@@ -21,7 +22,11 @@ import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platfo
 import { CohostNudge } from '@/components/cohost-nudge'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
-import { ChatIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
+import {
+  PlatformFilter,
+  PlatformFilterMenuItems
+} from '@/components/stream-manager/platform-filter'
+import { AlertIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -31,32 +36,42 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupButton,
   InputGroupInput
 } from '@/components/ui/input-group'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type {
   CohostFlag,
   CommentHighlightState,
   CommentsSendOperation,
   LiveChatMessage,
   LiveChatProviderState,
-  ModerationOperation,
-  StreamPlatform
+  ModerationOperation
 } from '@/lib/backend'
-import { removalStatusView, removeFromChatAvailable } from '@/lib/chat-removal-view'
-import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
+import { copyChatText } from '@/lib/chat-link-actions'
+import { chatRowAfterMove, chatRowKeyCommand } from '@/lib/chat-list-keys'
+import {
+  removalStatusView,
+  removeFromChatAvailable,
+  removeFromChatBlockedReason
+} from '@/lib/chat-removal-view'
+import {
+  chatDraftMaxChars,
+  chatSendRetryPlan,
+  validateChatDraft,
+  type ChatSendFailure
+} from '@/lib/chat-send'
 import {
   chatPaneMessages,
   followChatOnResize,
@@ -75,7 +90,7 @@ const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home
 export interface ChatPrefill {
   seq: number
   text: string
-  /** A reply to an Orcle question: a real send marks it answered. */
+  /** A reply to a Buddy question: a real send marks it answered. */
   questionId?: string
 }
 
@@ -116,7 +131,8 @@ export function ChatPane({
   onCohostNudgeTurnOn,
   onCohostNudgeDismiss,
   jumpTo = null,
-  searchFocusSignal = 0
+  searchFocusSignal = 0,
+  composerFocusSignal = 0
 }: {
   delivery?: ChatDelivery
   arrivalKey?: string
@@ -133,7 +149,7 @@ export function ChatPane({
   cohostSuggested?: ReadonlySet<string>
   /** The message the streamer is talking about: marked, and pulled into view. */
   cohostSpotlight?: string | null
-  /** Messages behind Orcle's open questions (the Questions filter). */
+  /** Messages behind Buddy's open questions (the Questions filter). */
   questionMessageIds: ReadonlySet<string>
   /** The streamer's own account names (the Mentions filter). */
   mentionNames: readonly string[]
@@ -155,10 +171,12 @@ export function ChatPane({
   cohostNudge?: boolean
   onCohostNudgeTurnOn?: () => void
   onCohostNudgeDismiss?: () => void
-  /** Orcle "jump to message": scroll there and stop following new chat. */
+  /** Buddy "jump to message": scroll there and stop following new chat. */
   jumpTo?: { messageId: string; seq: number } | null
   /** Bumped by ⌘F in the window. */
   searchFocusSignal?: number
+  /** Bumped by ⌘L in the window (plan 174 S3.16a). */
+  composerFocusSignal?: number
 }): ReactElement {
   const [filter, setFilter] = useState<ChatPaneFilter>({
     platform: 'all',
@@ -166,7 +184,7 @@ export function ChatPane({
     mentions: false,
     search: ''
   })
-  // One prefill stream for the composer: the window's (Orcle Reply, Thank in
+  // One prefill stream for the composer: the window's (Buddy Reply, Thank in
   // chat) and a row's ⋯ Reply, in the order they were asked for.
   const [composerPrefill, setComposerPrefill] = useState<ChatPrefill | null>(null)
   const prefillSeqRef = useRef(0)
@@ -301,7 +319,7 @@ export function ChatPane({
     if (shown.length > 0) virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
   }, [shown.length, virtualizer])
 
-  // Orcle's "jump to message": clear filters that hide it, then scroll there.
+  // Buddy's "jump to message": clear filters that hide it, then scroll there.
   const handledJumpSeqRef = useRef<number | null>(null)
   useEffect(() => {
     if (!jumpTo || handledJumpSeqRef.current === jumpTo.seq) return
@@ -320,7 +338,7 @@ export function ChatPane({
     virtualizer.scrollToIndex(index, { align: 'center' })
   }, [filtering, jumpTo, shown, virtualizer])
 
-  // Orcle's pull-up: scroll the comment being talked about into view once per
+  // Buddy's pull-up: scroll the comment being talked about into view once per
   // spotlight, unless the streamer is reading back (spotlightScrollAllowed).
   // If it took them away from the latest, they go back there when it ends,
   // unless they scrolled in the meantime.
@@ -360,6 +378,96 @@ export function ChatPane({
   }, [searchFocusSignal])
 
   const composerVisible = Boolean(onSend) && (live || Boolean(markerContext))
+  // Esc on a row returns to the composer; ⌘L comes from the window.
+  const [composerFocus, setComposerFocus] = useState(0)
+
+  // One tab stop with roving focus (plan 174 S3.16a, H-7): the active row
+  // (the newest until one is chosen) holds tabIndex 0, every other -1. A
+  // focused row answers ↑/↓, Home, End, R, C, ⇧⌫ and Esc; Enter and Space
+  // are its button's own click. A row that has scrolled out of the
+  // virtualized window is focused once it is rendered again.
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const activeIndex = useMemo(() => {
+    const index = activeId ? shown.findIndex((message) => message.id === activeId) : -1
+    return index >= 0 ? index : shown.length - 1
+  }, [activeId, shown])
+  const pendingFocusRef = useRef<string | null>(null)
+  const focusPendingRow = useCallback((): void => {
+    const id = pendingFocusRef.current
+    if (!id || typeof CSS === 'undefined') return
+    const row = rootRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
+    const target = row?.matches('[tabindex]')
+      ? row
+      : row?.querySelector<HTMLElement>(':scope > button')
+    if (!target) return
+    pendingFocusRef.current = null
+    target.focus({ preventScroll: true })
+  }, [])
+  useEffect(focusPendingRow)
+  const focusRow = (index: number): void => {
+    const message = shown[index]
+    if (!message) return
+    setActiveId(message.id)
+    pendingFocusRef.current = message.id
+    virtualizer.scrollToIndex(index, { align: 'auto' })
+    focusPendingRow()
+  }
+  /** The row's Remove from chat: the action, or why it is off (H-11). */
+  const rowRemoval = (
+    message: LiveChatMessage
+  ): { onRemove: ((message: LiveChatMessage) => void) | undefined; reason: string | null } => {
+    const available =
+      live &&
+      onRemoveFromChat &&
+      removeFromChatAvailable(
+        message,
+        removals?.get(message.id),
+        removalRequestIds?.has(message.id) ?? false
+      )
+    if (!available) return { onRemove: undefined, reason: null }
+    const reason = removeFromChatBlockedReason(message, providers)
+    return { onRemove: reason ? undefined : onRemoveFromChat, reason }
+  }
+  const handleListKeyDown = (event: ReactKeyboardEvent<HTMLOListElement>): void => {
+    const row = event.target instanceof Element ? event.target.closest('[data-message-id]') : null
+    const command = chatRowKeyCommand(event.nativeEvent, row)
+    if (!command || !row) return
+    const id = row.getAttribute('data-message-id')
+    const index = shown.findIndex((message) => message.id === id)
+    const message = shown[index]
+    if (!message) return
+    switch (command.kind) {
+      case 'move': {
+        const next = chatRowAfterMove(shown.length, index, command.move)
+        if (next === null) return
+        event.preventDefault()
+        focusRow(next)
+        return
+      }
+      case 'reply':
+        if (!composerVisible || (message.eventType !== 'message' && message.eventType !== 'paid'))
+          return
+        event.preventDefault()
+        pushPrefill(`@${message.authorName} `)
+        return
+      case 'copy':
+        event.preventDefault()
+        void copyChatText(`${message.authorName}: ${message.messageText}`)
+        return
+      case 'remove': {
+        const { onRemove } = rowRemoval(message)
+        if (!onRemove) return
+        event.preventDefault()
+        onRemove(message)
+        return
+      }
+      case 'composer':
+        if (!composerVisible) return
+        event.preventDefault()
+        setComposerFocus((value) => value + 1)
+        return
+    }
+  }
 
   return (
     <section
@@ -372,38 +480,14 @@ export function ChatPane({
         data-slot="chat-filters"
       >
         <div className={cn('flex-wrap items-center gap-1.5', 'flex', ABOVE_NARROW)}>
-          {platforms.length > 1 ? (
-            <ToggleGroup
-              aria-label="Show chat from"
-              size="sm"
-              type="single"
-              value={filter.platform}
-              onValueChange={(value) =>
-                setFilter((current) => ({
-                  ...current,
-                  platform: (value || 'all') as StreamPlatform | 'all'
-                }))
-              }
-            >
-              <ToggleGroupItem className="h-6 px-2 text-xs" value="all">
-                All
-              </ToggleGroupItem>
-              {platforms.map((platform) => (
-                <ToggleGroupItem
-                  key={platform}
-                  aria-label={CHAT_PLATFORM_LABELS[platform]}
-                  className="h-6 min-w-6 px-1.5"
-                  title={`Only ${CHAT_PLATFORM_LABELS[platform]}`}
-                  value={platform}
-                >
-                  <ChatPlatformIcon decorative platform={platform} />
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          ) : null}
+          <PlatformFilter
+            label="Show chat from"
+            platforms={platforms}
+            value={filter.platform}
+            onValueChange={(platform) => setFilter((current) => ({ ...current, platform }))}
+          />
           <ToggleGroup
             aria-label="Chat filters"
-            size="sm"
             type="multiple"
             value={[
               ...(filter.questions ? ['questions'] : []),
@@ -417,20 +501,18 @@ export function ChatPane({
               }))
             }
           >
-            <ToggleGroupItem
-              className="h-6 px-2 text-xs"
-              title="Messages behind Orcle's open questions"
-              value="questions"
-            >
-              Questions
-            </ToggleGroupItem>
-            <ToggleGroupItem
-              className="h-6 px-2 text-xs"
-              title="Messages that @mention your channel"
-              value="mentions"
-            >
-              Mentions
-            </ToggleGroupItem>
+            {questionMessageIds.size > 0 || filter.questions ? (
+              <ShortcutTooltip label="Messages behind Buddy's open questions">
+                <ToggleGroupItem className="text-xs" value="questions">
+                  Questions
+                </ToggleGroupItem>
+              </ShortcutTooltip>
+            ) : null}
+            <ShortcutTooltip label="Messages that @mention your channel">
+              <ToggleGroupItem className="text-xs" value="mentions">
+                Mentions
+              </ToggleGroupItem>
+            </ShortcutTooltip>
           </ToggleGroup>
         </div>
         {/* Below 640 px the same filters live in one menu. */}
@@ -438,14 +520,13 @@ export function ChatPane({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label="Chat filters"
-              className={cn('h-7 shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
-              size="sm"
+              className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
               type="button"
               variant="ghost"
             >
               Filters
               {activeFilterCount > 0 ? (
-                <Badge className="h-4 px-1.5 text-[10px]" variant="outline">
+                <Badge className="px-1.5" variant="outline">
                   {activeFilterCount}
                 </Badge>
               ) : null}
@@ -455,36 +536,26 @@ export function ChatPane({
           <DropdownMenuContent align="start" className="w-52">
             {platforms.length > 1 ? (
               <>
-                <DropdownMenuLabel>Show chat from</DropdownMenuLabel>
-                <DropdownMenuRadioGroup
+                <PlatformFilterMenuItems
+                  label="Show chat from"
+                  platforms={platforms}
                   value={filter.platform}
-                  onValueChange={(value) =>
-                    setFilter((current) => ({
-                      ...current,
-                      platform: value as StreamPlatform | 'all'
-                    }))
-                  }
-                >
-                  <DropdownMenuRadioItem value="all">Every platform</DropdownMenuRadioItem>
-                  {platforms.map((platform) => (
-                    <DropdownMenuRadioItem key={platform} value={platform}>
-                      <ChatPlatformIcon decorative platform={platform} />
-                      {CHAT_PLATFORM_LABELS[platform]}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
+                  onValueChange={(platform) => setFilter((current) => ({ ...current, platform }))}
+                />
                 <DropdownMenuSeparator />
               </>
             ) : null}
             <DropdownMenuGroup>
-              <DropdownMenuCheckboxItem
-                checked={filter.questions}
-                onCheckedChange={(checked) =>
-                  setFilter((current) => ({ ...current, questions: checked === true }))
-                }
-              >
-                Questions
-              </DropdownMenuCheckboxItem>
+              {questionMessageIds.size > 0 || filter.questions ? (
+                <DropdownMenuCheckboxItem
+                  checked={filter.questions}
+                  onCheckedChange={(checked) =>
+                    setFilter((current) => ({ ...current, questions: checked === true }))
+                  }
+                >
+                  Questions
+                </DropdownMenuCheckboxItem>
+              ) : null}
               <DropdownMenuCheckboxItem
                 checked={filter.mentions}
                 onCheckedChange={(checked) =>
@@ -496,14 +567,14 @@ export function ChatPane({
             </DropdownMenuGroup>
           </DropdownMenuContent>
         </DropdownMenu>
-        <InputGroup className="h-7 min-w-28 flex-1 basis-40" data-slot="chat-search">
+        <InputGroup className="h-7 min-w-28 flex-1 basis-40" data-testid="chat-search">
           <InputGroupAddon>
             <SearchIcon />
           </InputGroupAddon>
           <InputGroupInput
             ref={searchRef}
             aria-label="Search chat"
-            placeholder="Search"
+            placeholder="Search chat…"
             value={filter.search}
             onChange={(event) =>
               setFilter((current) => ({ ...current, search: event.target.value }))
@@ -516,7 +587,7 @@ export function ChatPane({
             }}
           />
           <InputGroupAddon align="inline-end">
-            <Kbd>⌘F</Kbd>
+            <ShortcutKeys accelerator="CmdOrCtrl+F" />
           </InputGroupAddon>
         </InputGroup>
       </div>
@@ -525,25 +596,34 @@ export function ChatPane({
         <ScrollArea ref={rootRef} className="min-h-0 flex-1 px-2 py-1">
           {shown.length === 0 ? (
             filtering ? (
-              <Empty className="h-full border-0 p-6">
+              <Empty className="h-full">
                 <EmptyHeader>
                   <EmptyDescription>No messages match these filters.</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             ) : (
-              <OffAir providers={providers} />
+              <OffAir live={live} providers={providers} />
             )
           ) : (
             <ol
               aria-label="Chat messages"
               className="relative w-full"
               style={{ height: virtualizer.getTotalSize() }}
+              onFocusCapture={(event) => {
+                // A click or a Tab onto a row makes it the active one.
+                const id = event.target
+                  .closest('[data-message-id]')
+                  ?.getAttribute('data-message-id')
+                if (id) setActiveId(id)
+              }}
+              onKeyDown={handleListKeyDown}
             >
               {virtualizer.getVirtualItems().map((item) => {
                 const message = shown[item.index]
                 if (!message) return null
                 const removal = removals?.get(message.id)
                 const requesting = removalRequestIds?.has(message.id) ?? false
+                const { onRemove, reason } = rowRemoval(message)
                 return (
                   <CommentRow
                     key={item.key}
@@ -564,6 +644,8 @@ export function ChatPane({
                     mentionNames={mentionNames}
                     message={message}
                     removal={removalStatusView(message, removal, requesting)}
+                    removeFromChatReason={reason}
+                    tabIndex={item.index === activeIndex ? 0 : -1}
                     style={{
                       position: 'absolute',
                       top: 0,
@@ -573,13 +655,7 @@ export function ChatPane({
                       paddingBottom: 4
                     }}
                     onHighlight={live ? onHighlight : undefined}
-                    onRemoveFromChat={
-                      live &&
-                      onRemoveFromChat &&
-                      removeFromChatAvailable(message, removal, requesting)
-                        ? onRemoveFromChat
-                        : undefined
-                    }
+                    onRemoveFromChat={onRemove}
                     onReply={
                       composerVisible
                         ? (target) => pushPrefill(`@${target.authorName} `)
@@ -592,17 +668,18 @@ export function ChatPane({
           )}
         </ScrollArea>
         {!pinned && (unread > 0 || incomplete) ? (
-          <Button
-            aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
-            className="absolute inset-x-0 bottom-2 mx-auto h-6 w-fit rounded-full px-2.5 text-xs text-foreground glass-chip hover:text-foreground"
-            data-slot="chat-paused"
-            size="sm"
-            type="button"
-            variant="ghost"
-            onClick={jumpToLatest}
-          >
-            {incomplete ? 'New chat' : `${unread} new`} ↓
-          </Button>
+          // A glass chip, not an ad-hoc pill (plan 174 H-17): the Badge is
+          // the button.
+          <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto">
+            <button
+              aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
+              data-testid="chat-paused"
+              type="button"
+              onClick={jumpToLatest}
+            >
+              {incomplete ? 'New chat' : `${unread} new`} ↓
+            </button>
+          </Badge>
         ) : null}
       </div>
 
@@ -613,6 +690,7 @@ export function ChatPane({
           onUndoMarker={onUndoMarker}
           cohostNudge={cohostNudge}
           failures={sendFailures}
+          focusSignal={composerFocusSignal + composerFocus}
           operation={sendOperation}
           pending={sendPending}
           prefill={composerPrefill}
@@ -632,6 +710,7 @@ export function Composer({
   failures,
   operation,
   prefill,
+  focusSignal = 0,
   cohostNudge,
   onCohostNudgeTurnOn,
   onCohostNudgeDismiss,
@@ -648,6 +727,8 @@ export function Composer({
   failures: ChatSendFailure[]
   operation: CommentsSendOperation | null
   prefill: ChatPrefill | null
+  /** Bumped to put the caret in the composer (⌘L, Esc on a row). */
+  focusSignal?: number
   cohostNudge: boolean
   onCohostNudgeTurnOn?: () => void
   onCohostNudgeDismiss?: () => void
@@ -714,6 +795,35 @@ export function Composer({
     setReplyToQuestionId(prefill.questionId ?? null)
     inputRef.current?.focus()
   }, [prefill])
+  useEffect(() => {
+    if (focusSignal > 0) inputRef.current?.focus()
+  }, [focusSignal])
+
+  // A failed send keeps the draft and offers Retry (plan 174 S3.16a, H-26):
+  // the words come back into the composer when nobody got them, and Retry
+  // re-sends only where it failed after a partial send.
+  const [lastSend, setLastSend] = useState<{ text: string; options?: ChatSendOptions } | null>(null)
+  const retry = pending || !lastSend ? null : chatSendRetryPlan(operation, failures)
+  const failureKey = retry
+    ? failures.map((failure) => `${failure.destinationId}:${failure.reason}`).join('|')
+    : null
+  const restoreDraft = retry?.restoreDraft ?? false
+  const handledFailureRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!failureKey || !restoreDraft || !lastSend) return
+    if (handledFailureRef.current === failureKey) return
+    handledFailureRef.current = failureKey
+    setDraft((current) => (current.trim() === '' ? lastSend.text : current))
+  }, [failureKey, lastSend, restoreDraft])
+  const retrySend = (): void => {
+    if (!retry || !lastSend) return
+    const options = {
+      ...lastSend.options,
+      ...(retry.destinationIds ? { destinationIds: retry.destinationIds } : {})
+    }
+    onSend(lastSend.text, options)
+    if (draftRef.current === lastSend.text) setDraft('')
+  }
 
   const submit = (): void => {
     if (localPendingRef.current) return
@@ -747,7 +857,7 @@ export function Composer({
         })
         .catch((error) =>
           setNotice(
-            error instanceof Error ? error.message : 'Could not save marker. Retry this command.'
+            error instanceof Error ? error.message : "Couldn't save marker. Retry this command."
           )
         )
         .finally(() => {
@@ -758,10 +868,12 @@ export function Composer({
     }
     const text = validateChatDraft(command.text, maxChars)
     if (!text || !canSend) return
-    onSend(text, {
+    const options: ChatSendOptions = {
       ...(replyToQuestionId ? { inReplyToQuestionId: replyToQuestionId } : {}),
       ...(picked ? { destinationIds: targets.map((provider) => provider.id) } : {})
-    })
+    }
+    onSend(text, options)
+    setLastSend({ text, options })
     setDraft('')
     setReplyToQuestionId(null)
   }
@@ -774,8 +886,9 @@ export function Composer({
         : targets.map((provider) => CHAT_PLATFORM_LABELS[provider.platform]).join(', ')
 
   return (
-    <div className="shrink-0 px-2 pt-1 pb-2" data-slot="chat-composer">
-      <div className="flex flex-col rounded-panel border border-border bg-foreground/[0.04] p-2">
+    // A flush region under a hairline (plan 174 H-18): no box, no card inside.
+    <div className="shrink-0 border-t border-border px-2 py-2" data-slot="chat-composer">
+      <div className="flex flex-col">
         <InputGroup>
           {local ? (
             <InputGroupAddon>
@@ -789,7 +902,7 @@ export function Composer({
                 <DropdownMenuTrigger asChild>
                   <InputGroupButton
                     aria-label={`Send to: ${pickLabel}`}
-                    data-slot="chat-send-to"
+                    data-testid="chat-send-to"
                     size="xs"
                   >
                     To: {pickLabel}
@@ -882,10 +995,16 @@ export function Composer({
             {draft.length > 0 ? (
               <span
                 className={cn(
-                  'text-[11px] tabular-nums',
-                  !local && draft.trim().length > maxChars ? 'text-destructive' : 'text-subtle'
+                  'flex items-center gap-1 text-[11px] tabular-nums',
+                  !local && draft.trim().length > maxChars
+                    ? 'font-medium text-foreground'
+                    : 'text-muted-foreground'
                 )}
               >
+                {/* Over the limit, the icon carries the tone (plan 174 S1.8). */}
+                {!local && draft.trim().length > maxChars ? (
+                  <AlertIcon aria-hidden className="size-3 text-destructive" weight="fill" />
+                ) : null}
                 {local
                   ? command.kind === 'marker'
                     ? `${[...(command.label ?? '')].length}/120`
@@ -893,14 +1012,18 @@ export function Composer({
                   : `${draft.trim().length}/${maxChars}`}
               </span>
             ) : null}
-            <Kbd aria-label="Enter">↵</Kbd>
+            <ShortcutKeys accelerator="Enter" />
             <InputGroupButton
               aria-label={
                 local
                   ? 'Run local command'
                   : pending
                     ? 'Sending message'
-                    : 'Send message to all writable destinations'
+                    : targets.length === 0
+                      ? 'Send message: no destination picked'
+                      : picked === null || targets.length === writable.length
+                        ? 'Send message to all writable destinations'
+                        : `Send message to ${pickLabel}`
               }
               disabled={
                 localPending || (!local && (!canSend || !validateChatDraft(command.text, maxChars)))
@@ -929,14 +1052,14 @@ export function Composer({
             </CommandList>
           </Command>
         ) : null}
-        {markerContext?.available ? (
+        {/* Only while it matters (plan 174 H-24): Buddy still connecting to
+            hear markers, or why it cannot. Working, or off, says nothing. */}
+        {markerContext?.available &&
+        (markerContext.voice?.state === 'starting' || markerContext.voice?.message) ? (
           <p className="mt-1 text-[11px] text-muted-foreground" data-slot="marker-voice-status">
-            {markerContext.voice?.state === 'on'
-              ? 'Orcle hears marker commands.'
-              : markerContext.voice?.state === 'starting'
-                ? 'Orcle is connecting to hear marker commands…'
-                : (markerContext.voice?.message ??
-                  'Typed /marker commands are available. Turn on Orcle listening for voice markers.')}
+            {markerContext.voice?.state === 'starting'
+              ? 'Buddy is connecting to hear marker commands…'
+              : markerContext.voice?.message}
           </p>
         ) : null}
         {notice ? (
@@ -945,7 +1068,6 @@ export function Composer({
             {savedMarker && onUndoMarker ? (
               <Button
                 variant="ghost"
-                size="sm"
                 disabled={localPending}
                 onClick={() => {
                   if (localPendingRef.current) return
@@ -957,7 +1079,7 @@ export function Composer({
                       setNotice('Marker removed.')
                     })
                     .catch((error) =>
-                      setNotice(error instanceof Error ? error.message : 'Could not remove marker.')
+                      setNotice(error instanceof Error ? error.message : "Couldn't remove marker.")
                     )
                     .finally(() => {
                       localPendingRef.current = false
@@ -971,10 +1093,12 @@ export function Composer({
           </div>
         ) : null}
         {replyToQuestionId ? (
-          <p className="mt-1 text-[11px] text-subtle">Orcle&apos;s draft. ↵ sends it.</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Buddy&apos;s draft. <ShortcutKeys accelerator="Enter" variant="text" /> sends it.
+          </p>
         ) : null}
         {/* Only exceptions speak here (plan 057, D3): the "To:" picker names
-            where a message goes, and Orcle's segment carries its status. */}
+            where a message goes, and Buddy's segment carries its status. */}
         <div className="mt-1.5 empty:hidden">
           <CommentsDestinationStatus
             failures={failures}
@@ -982,6 +1106,21 @@ export function Composer({
             providers={[...providers]}
             sendTargets={targetPlatforms}
           />
+          {retry ? (
+            <Button
+              aria-label={
+                retry.restoreDraft ? 'Retry sending the message' : 'Retry where the send failed'
+              }
+              className="mt-1"
+              data-testid="chat-send-retry"
+              size="xs"
+              type="button"
+              variant="outline"
+              onClick={retrySend}
+            >
+              Retry
+            </Button>
+          ) : null}
           {cohostNudge && onCohostNudgeDismiss && onCohostNudgeTurnOn ? (
             <CohostNudge onDismiss={onCohostNudgeDismiss} onTurnOn={onCohostNudgeTurnOn} />
           ) : null}
@@ -1001,27 +1140,39 @@ function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): Re
   if (operation.phase !== 'sending') return null
   return (
     <div aria-label="Latest message delivery" className="mt-1.5 flex">
-      <Badge className="max-w-full truncate" title={operation.text} variant="secondary">
-        Sending…
-      </Badge>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge className="max-w-full truncate">Sending…</Badge>
+        </TooltipTrigger>
+        <TooltipContent>{operation.text}</TooltipContent>
+      </Tooltip>
     </div>
   )
 }
 
-function OffAir({ providers }: { providers: readonly LiveChatProviderState[] }): ReactElement {
+/**
+ * The empty chat (plan 174 H-12): one short line that is true now. While
+ * live it says chat is connected (or what a destination still needs); off
+ * air it says how chat starts.
+ */
+function OffAir({
+  live,
+  providers
+}: {
+  live: boolean
+  providers: readonly LiveChatProviderState[]
+}): ReactElement {
+  const text = live
+    ? liveChatEmptyMessage(
+        { providers: [...providers] },
+        'No destination on this livestream has chat.',
+        'Chat is connected. New messages appear here.'
+      )
+    : 'Start a livestream to see chat here.'
   return (
-    <Empty className="h-full border-0 p-6">
+    <Empty className="h-full">
       <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <ChatIcon weight="duotone" />
-        </EmptyMedia>
-        <EmptyTitle className="text-base">No messages yet</EmptyTitle>
-        <EmptyDescription>
-          {liveChatEmptyMessage(
-            { providers: [...providers] },
-            'Start a livestream to see chat here.'
-          )}
-        </EmptyDescription>
+        <EmptyDescription data-testid="chat-empty">{text}</EmptyDescription>
       </EmptyHeader>
       <CommentsDestinationStatus providers={[...providers]} />
     </Empty>

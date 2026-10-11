@@ -373,9 +373,11 @@ try {
     timeoutMs,
     'microphone-input-lost health event'
   )
+  // This session records AND streams, so the audience hears the silence: the
+  // notice speaks of the livestream (plan 174 B-6, S2.2).
   await waitForRendererRuntimeNotice(
     smoke,
-    'Microphone stopped: recording continues with silence',
+    'Microphone stopped: livestream continues with silence',
     'persistent microphone-loss warning'
   )
 
@@ -678,7 +680,7 @@ async function seedRendererCaptionsProfile(smoke) {
 }
 
 // The session records and streams: the backend reports it as `recording`, and
-// the inspector pill reads "Streaming" because it is on air (plan 095 S5).
+// the inspector pill reads "On air" because it is (plan 095 S5, plan 174 D4).
 async function hydrateRendererActiveSession(smoke) {
   const hydrated = await smokeCommand(smoke, 'eval-js', {
     code: `
@@ -690,7 +692,7 @@ async function hydrateRendererActiveSession(smoke) {
       let sessionStatus = null
       while (Date.now() < deadline) {
         sessionStatus = document.querySelector('[data-videorc-session-status]')?.textContent?.trim() ?? null
-        if (sessionStatus === 'Streaming') break
+        if (sessionStatus === 'On air') break
         await sleep(50)
       }
       return { recordingState: recording.state, sessionStatus }
@@ -698,7 +700,7 @@ async function hydrateRendererActiveSession(smoke) {
   })
   if (
     hydrated?.result?.recordingState !== 'recording' ||
-    hydrated.result.sessionStatus !== 'Streaming'
+    hydrated.result.sessionStatus !== 'On air'
   ) {
     throw new Error(`Renderer did not hydrate record+stream: ${JSON.stringify(hydrated)}`)
   }

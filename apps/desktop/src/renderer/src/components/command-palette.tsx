@@ -1,20 +1,28 @@
 import {
-  CameraIcon,
   CaptionsIcon,
   ChatIcon,
+  ClipIcon,
   DarkModeIcon,
   DesktopIcon,
   LightModeIcon,
-  OrcleIcon,
+  LivestreamIcon,
+  BuddyIcon,
+  NoteIcon,
+  PreviewIcon,
+  RecordIcon,
+  SceneIcon,
   SettingsIcon,
+  SpeakerOffIcon,
+  SpeakerOnIcon,
   StopIcon
 } from '@/components/icons'
 import { useTheme } from 'next-themes'
-import type { ReactElement } from 'react'
+import { useState, type ReactElement, type ReactNode } from 'react'
 
 import {
   CommandDialog,
   CommandEmpty,
+  CommandFooter,
   CommandGroup,
   CommandInput,
   CommandItem,
@@ -22,17 +30,72 @@ import {
   CommandSeparator,
   CommandShortcut
 } from '@/components/ui/command'
-import { Kbd } from '@/components/ui/kbd'
-import { ORCLE_TABS } from '@/lib/orcle-tabs'
-import { displayKeyGlyph } from '@/lib/platform'
-import { SETTINGS_TABS } from '@/lib/settings-tabs'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
+import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
+import { HEALTH_SEARCH_KEYWORDS } from '@/lib/health-door'
+import { openLivestreamView } from '@/lib/livestream-tabs'
+import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
+import { shortcutAccelerator } from '@/lib/shortcuts'
+import { sessionStopControl } from '@/lib/studio-session-view'
 import {
   STUDIO_PANELS,
   WORKSPACE_TABS,
+  isStudioPanel,
   shortcutDigitFor,
-  useWorkspaceNav
+  useWorkspaceNav,
+  type WorkspaceTab,
+  type WorkspaceTabGroup
 } from '@/components/workspace-nav'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
+import { WINDOW_NAMES } from '../../../shared/window-names'
+
+// ⌘K (plan 174 S3.21, A-9, A-13): Session first (the transport's own
+// actions), then every page with one verb, the windows, the saved scenes,
+// Buddy's and Settings' tabs, and the look. Each item's value is the words
+// the footer shows for it, and its keywords are what people type instead.
+
+/** What people type for a page that is not its name. */
+export const PAGE_KEYWORDS: Readonly<Record<WorkspaceTab, readonly string[]>> = {
+  studio: ['record', 'go live', 'stage', 'transport'],
+  ai: ['companion', 'ai', 'chat', 'voice', 'reports', 'clean cut'],
+  sources: ['camera', 'microphone', 'screen', 'window', 'devices', 'audio', 'mixer'],
+  layouts: ['layout', 'layouts', 'composition', 'background', 'takeover', 'presets'],
+  assets: ['backgrounds', 'overlays', 'images', 'takeovers'],
+  live: ['destinations', 'stream key', 'youtube', 'twitch', 'kick', 'schedule', 'go live'],
+  captions: ['subtitles', 'transcription'],
+  recording: ['recording', 'quality', 'resolution', 'folder', 'file', 'storage'],
+  library: ['recordings', 'clips', 'markers', 'history'],
+  settings: ['preferences', 'keyboard', 'shortcuts', 'permissions', 'updates', 'about'],
+  diagnostics: HEALTH_SEARCH_KEYWORDS
+}
+
+const SETTINGS_KEYWORDS: Readonly<Record<SettingsTabId, readonly string[]>> = {
+  general: ['theme', 'startup', 'animate', 'preferences'],
+  permissions: ['camera access', 'screen recording', 'microphone access', 'system access'],
+  shortcuts: ['keyboard', 'keys', 'hotkeys', 'bindings'],
+  remote: ['phone', 'stream deck', 'pair', 'control'],
+  about: ['version', 'update', 'release notes', 'support bundle']
+}
+
+const BUDDY_KEYWORDS: Readonly<Record<BuddyTabId, readonly string[]>> = {
+  live: ['profile', 'persona', 'buddy live', 'status'],
+  chat: ['posting', 'suggest', 'auto', 'moderation'],
+  voice: ['commands', 'speak', 'listen'],
+  reports: ['summary', 'stream report'],
+  'clean-cut': ['edit', 'export', 'cut', 'recording']
+}
+
+const tabsIn = (group: WorkspaceTabGroup): typeof WORKSPACE_TABS =>
+  WORKSPACE_TABS.filter((tab) => tab.group === group)
+
+/** Every page in sidebar order, Health (no row) last. */
+const PAGES = [...tabsIn('stage'), ...STUDIO_PANELS, ...tabsIn('library'), ...tabsIn('system')]
+
+/** A row's secondary context, after its title. */
+function Context({ children }: { children: ReactNode }): ReactElement {
+  return <span className="truncate text-muted-foreground">{children}</span>
+}
 
 /** ⌘K command palette: jump anywhere + run the core session/theme actions. Open state is
  *  owned by the shell so the sidebar trigger and the global shortcut share it. */
@@ -43,129 +106,278 @@ export function CommandPalette({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { setActive, openStudioPanel, openSettings, openOrcle } = useWorkspaceNav()
+  const { setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
   const {
     runtimeInfo,
     savedScenes,
     applySavedScene,
-    startSession,
-    stopSession,
+    captureConfig,
+    setCaptureConfig,
+    settings,
+    markClip,
+    startRecording,
+    startLivestream,
+    requestStopSession,
+    previewWindow,
+    togglePreviewWindow,
+    notesWindow,
+    openNotesWindow,
+    closeNotesWindow,
     commentsWindow,
     toggleCommentsWindow,
     captionsWindow,
     toggleCaptionsWindow
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
-  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
-  const { setTheme } = useTheme()
+  const platform = runtimeInfo?.platform
+  const { theme, setTheme } = useTheme()
+  // cmdk's selected item; the footer names it.
+  const [selected, setSelected] = useState('')
 
   const run = (action: () => void | Promise<void>): void => {
     onOpenChange(false)
     void action()
   }
 
+  // Running, not starting: while a start is in flight the two starts stay,
+  // disabled, so the row the streamer reached for does not change under
+  // the cursor.
   const live = recording.state === 'recording' || recording.state === 'streaming'
   const busy = recording.state === 'starting' || recording.state === 'stopping'
+  // The transport's own stop words (plan 174 D3): "End livestream" on air,
+  // "Stop recording" for a recording.
+  const stopLabel = sessionStopControl(recording, false).label
+  const microphoneMuted = captureConfig.audio.microphoneMuted
+  const muteLabel = microphoneMuted ? 'Unmute microphone' : 'Mute microphone'
+  const MuteIcon = microphoneMuted ? SpeakerOnIcon : SpeakerOffIcon
+
+  const openPage = (id: WorkspaceTab): void => {
+    if (isStudioPanel(id)) openStudioPanel(id)
+    else if (id === 'settings') openSettings()
+    else if (id === 'ai') openBuddy()
+    else setActive(id)
+  }
+
+  const shortcut = (accelerator: string | undefined): ReactNode =>
+    accelerator ? (
+      <CommandShortcut className="tracking-normal">
+        <ShortcutKeys accelerator={accelerator} platform={platform} />
+      </CommandShortcut>
+    ) : null
 
   return (
-    <CommandDialog open={open} onOpenChange={onOpenChange}>
+    <CommandDialog
+      open={open}
+      value={selected}
+      onOpenChange={onOpenChange}
+      onValueChange={setSelected}
+    >
       <CommandInput placeholder="Search commands…" />
       <CommandList>
         <CommandEmpty>No results found.</CommandEmpty>
 
-        {savedScenes.length ? (
-          <CommandGroup heading="Saved scenes">
-            {savedScenes.map((scene) => (
+        {/* The transport's two starts and its stop, in its words (plan 174
+            D3): "Start recording" and "Go live…", then "Stop recording" or
+            "End livestream"; the mute and the clip mark beside them. */}
+        <CommandGroup heading="Session">
+          {live ? (
+            <CommandItem
+              value={stopLabel}
+              keywords={['stop', 'end', 'recording', 'livestream']}
+              disabled={busy}
+              // A livestream asks first (plan 174 S0.1); a recording stops.
+              onSelect={() => run(() => void requestStopSession('palette'))}
+            >
+              <StopIcon className="size-4" />
+              {stopLabel}
+              {shortcut(shortcutAccelerator('record-toggle'))}
+            </CommandItem>
+          ) : (
+            <>
               <CommandItem
-                key={scene.id}
-                value={`saved-scene-${scene.id}`}
-                keywords={[scene.name]}
-                onSelect={() =>
-                  run(async () => {
-                    await applySavedScene(scene.id)
-                  })
-                }
+                value={START_RECORDING_COMMAND}
+                keywords={['record']}
+                disabled={busy}
+                onSelect={() => run(() => void startRecording())}
               >
-                {scene.name}
+                <RecordIcon className="size-4" />
+                {START_RECORDING_COMMAND}
+                {shortcut(shortcutAccelerator('record-toggle'))}
               </CommandItem>
-            ))}
-          </CommandGroup>
-        ) : null}
-        <CommandGroup heading="Go to">
-          {WORKSPACE_TABS.map((tab) => {
-            const digit = shortcutDigitFor(tab.id)
-            return (
               <CommandItem
-                key={tab.id}
-                value={`Go to ${tab.label}`}
-                onSelect={() => run(() => setActive(tab.id))}
+                value={GO_LIVE_COMMAND}
+                keywords={['stream', 'livestream', 'broadcast']}
+                disabled={busy}
+                onSelect={() => run(() => void startLivestream())}
               >
-                <tab.icon className="size-4" />
-                {tab.label}
-                {digit ? (
-                  <CommandShortcut className="tracking-normal">
-                    <Kbd>
-                      {modKey}
-                      {digit}
-                    </Kbd>
-                  </CommandShortcut>
-                ) : null}
+                <LivestreamIcon className="size-4" />
+                {GO_LIVE_COMMAND}
               </CommandItem>
-            )
-          })}
-        </CommandGroup>
-
-        <CommandSeparator />
-
-        <CommandGroup heading="Setup">
+            </>
+          )}
           <CommandItem
-            value="Schedule livestream · Upcoming events"
+            value={muteLabel}
+            keywords={['mic', 'microphone', 'audio', 'mute', 'silence']}
             onSelect={() =>
-              run(() => {
-                sessionStorage.setItem('videorc-scheduling-view', 'upcoming')
-                openStudioPanel('live')
-                window.dispatchEvent(new Event('videorc:upcoming'))
-              })
+              run(() =>
+                setCaptureConfig((current) => ({
+                  ...current,
+                  audio: { ...current.audio, microphoneMuted: !current.audio.microphoneMuted }
+                }))
+              )
             }
           >
-            Schedule livestream · Upcoming events
+            <MuteIcon className="size-4" />
+            {muteLabel}
+            {shortcut(settings.globalShortcuts?.micToggle)}
           </CommandItem>
-          {STUDIO_PANELS.map((panel) => {
-            const digit = shortcutDigitFor(panel.id)
-            return (
-              <CommandItem
-                key={panel.id}
-                value={`Open ${panel.label}`}
-                onSelect={() => run(() => openStudioPanel(panel.id))}
-              >
-                <panel.icon className="size-4" />
-                {panel.label}
-                {digit ? (
-                  <CommandShortcut className="tracking-normal">
-                    <Kbd>
-                      {modKey}
-                      {digit}
-                    </Kbd>
-                  </CommandShortcut>
-                ) : null}
-              </CommandItem>
-            )
-          })}
+          {live ? (
+            <CommandItem
+              value="Mark clip"
+              keywords={['clip', 'highlight', 'marker', 'moment']}
+              onSelect={() => run(() => void markClip())}
+            >
+              <ClipIcon className="size-4" />
+              Mark clip
+              {shortcut(settings.globalShortcuts?.clipMark)}
+            </CommandItem>
+          ) : null}
         </CommandGroup>
 
         <CommandSeparator />
 
-        {/* Plan 150: every Orcle tab is one jump away, like Settings'. */}
-        <CommandGroup heading="Orcle">
-          {ORCLE_TABS.map((tab) => (
+        {/* One verb for every page, in sidebar order. Health is out of the
+            sidebar (plan 174 D9): ⌘K finds it by what people look for there. */}
+        <CommandGroup heading="Pages">
+          {PAGES.map((page) => {
+            const digit = shortcutDigitFor(page.id)
+            return (
+              <CommandItem
+                key={page.id}
+                value={`Open ${page.label}`}
+                keywords={[...PAGE_KEYWORDS[page.id]]}
+                onSelect={() => run(() => openPage(page.id))}
+              >
+                <page.icon className="size-4" />
+                {page.label}
+                {shortcut(digit ? `CmdOrCtrl+${digit}` : undefined)}
+              </CommandItem>
+            )
+          })}
+          <CommandItem
+            value="Open Upcoming events"
+            keywords={['schedule', 'livestream', 'events', 'calendar']}
+            onSelect={() => run(() => openLivestreamView('upcoming'))}
+          >
+            <LivestreamIcon className="size-4" />
+            Upcoming events
+            <Context>Livestream</Context>
+          </CommandItem>
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        {/* Every window by its one name (plan 174 S2.3a, A-11), in the
+            Window menu's order. */}
+        <CommandGroup heading="Windows">
+          <CommandItem
+            value={
+              previewWindow.open ? `Close ${WINDOW_NAMES.preview}` : `Open ${WINDOW_NAMES.preview}`
+            }
+            keywords={['monitor', 'stage', 'window']}
+            onSelect={() => run(togglePreviewWindow)}
+          >
+            <PreviewIcon className="size-4" />
+            {previewWindow.open ? `Close ${WINDOW_NAMES.preview}` : `Open ${WINDOW_NAMES.preview}`}
+            {shortcut(shortcutAccelerator('preview-window'))}
+          </CommandItem>
+          {runtimeInfo?.notesWindowEnabled !== false ? (
+            <CommandItem
+              value={
+                notesWindow.open ? `Close ${WINDOW_NAMES.notes}` : `Open ${WINDOW_NAMES.notes}`
+              }
+              keywords={['script', 'teleprompter', 'window']}
+              onSelect={() => run(notesWindow.open ? closeNotesWindow : openNotesWindow)}
+            >
+              <NoteIcon className="size-4" />
+              {notesWindow.open ? `Close ${WINDOW_NAMES.notes}` : `Open ${WINDOW_NAMES.notes}`}
+              {shortcut(shortcutAccelerator('notes-window'))}
+            </CommandItem>
+          ) : null}
+          {runtimeInfo?.commentsWindowEnabled ? (
+            <CommandItem
+              value={
+                commentsWindow.open
+                  ? `Close ${WINDOW_NAMES.streamManager}`
+                  : `Open ${WINDOW_NAMES.streamManager}`
+              }
+              keywords={['chat', 'comments', 'activity', 'viewers', 'window', 'buddy']}
+              onSelect={() => run(() => toggleCommentsWindow())}
+            >
+              <ChatIcon className="size-4" />
+              {commentsWindow.open
+                ? `Close ${WINDOW_NAMES.streamManager}`
+                : `Open ${WINDOW_NAMES.streamManager}`}
+              {shortcut(shortcutAccelerator('comments-window'))}
+            </CommandItem>
+          ) : null}
+          {captionsWindow.enabled || captionsWindow.open ? (
+            <CommandItem
+              value={
+                captionsWindow.open
+                  ? `Close ${WINDOW_NAMES.captions}`
+                  : `Open ${WINDOW_NAMES.captions}`
+              }
+              keywords={['subtitles', 'window', 'reader']}
+              onSelect={() => run(() => toggleCaptionsWindow())}
+            >
+              <CaptionsIcon className="size-4" />
+              {captionsWindow.open
+                ? `Close ${WINDOW_NAMES.captions}`
+                : `Open ${WINDOW_NAMES.captions}`}
+              {shortcut(shortcutAccelerator('captions-window'))}
+            </CommandItem>
+          ) : null}
+        </CommandGroup>
+
+        {savedScenes.length ? (
+          <>
+            <CommandSeparator />
+            <CommandGroup heading="Scenes">
+              {savedScenes.map((scene) => (
+                <CommandItem
+                  key={scene.id}
+                  value={`Switch to ${scene.name}`}
+                  keywords={['scene', 'layout']}
+                  onSelect={() =>
+                    run(async () => {
+                      await applySavedScene(scene.id)
+                    })
+                  }
+                >
+                  <SceneIcon className="size-4" />
+                  {scene.name}
+                  <Context>Saved scene</Context>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </>
+        ) : null}
+
+        <CommandSeparator />
+
+        {/* Plan 150: every Buddy tab is one jump away, like Settings'. */}
+        <CommandGroup heading="Buddy">
+          {BUDDY_TABS.map((tab) => (
             <CommandItem
               key={tab.id}
-              value={`Orcle ${tab.label}`}
-              onSelect={() => run(() => openOrcle(tab.id))}
+              value={`Open Buddy → ${tab.label}`}
+              keywords={[...BUDDY_KEYWORDS[tab.id]]}
+              onSelect={() => run(() => openBuddy(tab.id))}
             >
-              <OrcleIcon className="size-4" />
+              <BuddyIcon className="size-4" />
               {tab.label}
+              <Context>Buddy</Context>
             </CommandItem>
           ))}
         </CommandGroup>
@@ -178,86 +390,57 @@ export function CommandPalette({
           {SETTINGS_TABS.map((tab) => (
             <CommandItem
               key={tab.id}
-              value={`Settings ${tab.label}`}
+              value={`Open Settings → ${tab.label}`}
+              keywords={[...SETTINGS_KEYWORDS[tab.id]]}
               onSelect={() => run(() => openSettings(tab.id))}
             >
               <SettingsIcon className="size-4" />
               {tab.label}
+              <Context>Settings</Context>
+              {tab.id === 'shortcuts' ? shortcut(shortcutAccelerator('shortcuts-page')) : null}
             </CommandItem>
           ))}
         </CommandGroup>
 
         <CommandSeparator />
 
-        <CommandGroup heading="Session">
-          {live ? (
-            <CommandItem
-              value="Stop session"
-              disabled={busy}
-              onSelect={() => run(() => void stopSession())}
-            >
-              <StopIcon className="size-4" />
-              Stop session
-            </CommandItem>
-          ) : (
-            <CommandItem
-              value="Start session recording"
-              disabled={busy}
-              onSelect={() => run(() => void startSession())}
-            >
-              <CameraIcon className="size-4" />
-              Start session
-            </CommandItem>
-          )}
-          {runtimeInfo?.commentsWindowEnabled ? (
-            <CommandItem
-              value="Toggle Stream Manager chat window"
-              onSelect={() => run(() => toggleCommentsWindow())}
-            >
-              <ChatIcon className="size-4" />
-              {commentsWindow.open ? 'Close Stream Manager' : 'Open Stream Manager'}
-              <CommandShortcut className="tracking-normal">
-                <Kbd>
-                  {modKey}
-                  {shiftKey}J
-                </Kbd>
-              </CommandShortcut>
-            </CommandItem>
-          ) : null}
-          {captionsWindow.enabled || captionsWindow.open ? (
-            <CommandItem
-              value="Toggle captions reader"
-              onSelect={() => run(() => toggleCaptionsWindow())}
-            >
-              <CaptionsIcon className="size-4" />
-              {captionsWindow.open ? 'Close captions reader' : 'Open captions reader'}
-              <CommandShortcut className="tracking-normal">
-                <Kbd>
-                  {modKey}
-                  {shiftKey}C
-                </Kbd>
-              </CommandShortcut>
-            </CommandItem>
-          ) : null}
-        </CommandGroup>
-
-        <CommandSeparator />
-
-        <CommandGroup heading="Theme">
-          <CommandItem value="Theme light" onSelect={() => run(() => setTheme('light'))}>
+        {/* The look in use wears the check (plan 174 A-9). */}
+        <CommandGroup heading="Appearance">
+          <CommandItem
+            value="Light theme"
+            keywords={['theme', 'appearance', 'mode']}
+            data-checked={theme === 'light'}
+            onSelect={() => run(() => setTheme('light'))}
+          >
             <LightModeIcon className="size-4" />
             Light
           </CommandItem>
-          <CommandItem value="Theme dark" onSelect={() => run(() => setTheme('dark'))}>
+          <CommandItem
+            value="Dark theme"
+            keywords={['theme', 'appearance', 'mode']}
+            data-checked={theme === 'dark'}
+            onSelect={() => run(() => setTheme('dark'))}
+          >
             <DarkModeIcon className="size-4" />
             Dark
           </CommandItem>
-          <CommandItem value="Theme system" onSelect={() => run(() => setTheme('system'))}>
+          <CommandItem
+            value="System theme"
+            keywords={['theme', 'appearance', 'mode', 'automatic']}
+            data-checked={theme === 'system'}
+            onSelect={() => run(() => setTheme('system'))}
+          >
             <DesktopIcon className="size-4" />
             System
           </CommandItem>
         </CommandGroup>
       </CommandList>
+      {/* The selected action and the key that runs it. The list already
+          announces the selection, so the footer is decoration. */}
+      <CommandFooter aria-hidden>
+        <span className="min-w-0 truncate">{selected}</span>
+        <ShortcutKeys accelerator="Enter" className="shrink-0" platform={platform} />
+      </CommandFooter>
     </CommandDialog>
   )
 }

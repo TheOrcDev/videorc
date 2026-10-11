@@ -14,7 +14,7 @@
 //! recording (plan 119 decision 6). It never holds chat text beyond the
 //! question wording, and nothing of it reaches a server.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,16 +23,20 @@ use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
+pub use crate::buddy_pet::{BuddyAvatar, BuddyMotionSettings, BuddyTrigger};
 use crate::captions::{CaptionUpdateKind, CaptionsUpdate, ListenStop};
 use crate::cohost_ack::{
     AuthorLedger, DeadAirLane, GreetedHow, dead_air_due, dead_air_text, match_candidates,
     name_forms_match, name_match_forms, name_tokens,
 };
+use crate::cohost_auto_chat::{AnswerCandidate, AutoChatLane, AutoChatPass};
 use crate::cohost_command::{
     CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
 };
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
-use crate::live_chat::{LiveChatEventType, LiveChatMessage, LiveChatMessageFragment};
+use crate::live_chat::{
+    LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, comments_destination_id,
+};
 use crate::live_chat_moderation::{
     ModerationOperation, ModerationOutcomeCode, ModerationPhase, ModerationRefusal,
     ModerationRequest, ModerationSource, RemoveConfirmMode,
@@ -54,9 +58,10 @@ use crate::twitch_chat::gif_title;
 use crate::videorc_api::{
     COHOST_COMMAND_MAX_CANDIDATES, COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError,
     CohostApiErrorKind, CohostCommandCandidate, CohostCommandRequest, CohostCommandResponse,
-    CohostSpotlightCandidate, CohostSpotlightRequest, CohostSpotlightResponse, CohostTickMessage,
-    CohostTickOpenPromise, CohostTickOpenQuestion, CohostTickPromise, CohostTickQuestion,
-    CohostTickRequest, CohostTickResponse, VideorcApiClient,
+    CohostSpotlightCandidate, CohostSpotlightRequest, CohostSpotlightResponse, CohostTickIntent,
+    CohostTickMessage, CohostTickMood, CohostTickOpenPromise, CohostTickOpenQuestion,
+    CohostTickPersona, CohostTickPromise, CohostTickQuestion, CohostTickRequest,
+    CohostTickResponse, VideorcApiClient,
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
@@ -67,7 +72,10 @@ pub const COHOST_REPORT_SAVED_EVENT: &str = "cohost.report.saved";
 /// step down `COHOST_PROMPT_VERSION_LADDER` (3 → 2 → 1) until it ends
 /// (server rollback); a rejected v1 tick is a real failure.
 pub const COHOST_PROMPT_VERSION: u32 = 3;
-pub const COHOST_PROMPT_VERSION_LADDER: [u32; 3] = [3, 2, 1];
+pub const COHOST_PROMPT_VERSION_LADDER: [u32; 4] = [4, 3, 2, 1];
+/// Persona, per-question `addressed`/`mood` and banter (plan 164 S-D3): a
+/// session starts on it only when `/capabilities` reported `cohost.tick: 4`.
+pub(crate) const COHOST_PROMPT_VERSION_PERSONA_MIN: u32 = 4;
 /// `rules` ride every version from v2 on, whatever the pinned version.
 const COHOST_PROMPT_VERSION_RULES_MIN: u32 = 2;
 /// Transcript, summary, promises, recap, on-topic (plan 068 D7).
@@ -102,6 +110,8 @@ const TICK_OPEN_PROMISES_CAP: usize = 20;
 const PROMISE_TEXT_MAX_CHARS: usize = 160;
 const TOPIC_MAX_CHARS: usize = 60;
 pub(crate) const RECAP_MAX_CHARS: usize = 140;
+/// v4 banter line cap (plan 164 S-D4).
+const BANTER_TEXT_MAX_CHARS: usize = 120;
 /// Renderer contract bounds (`cohostQuestionSchema`), in UTF-16 units.
 const QUESTION_TEXT_MAX_UNITS: usize = 2000;
 const QUESTION_ASKER_MAX_UNITS: usize = 512;
@@ -420,7 +430,7 @@ pub enum CohostListeningState {
     Blocked,
 }
 
-/// Whether Orcle hears the streamer right now (plan 068 D2). Owned by the
+/// Whether Buddy hears the streamer right now (plan 068 D2). Owned by the
 /// caption coordinator's listen intent; every optional field is omitted when
 /// absent because the renderer contract rejects `null`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -481,6 +491,447 @@ impl CohostListening {
     }
 }
 
+// --- Persona and automatic chat (plan 164 S-A2) --------------------------------
+
+/// The creature's name: 1 to 24 UTF-16 units, trimmed.
+pub const COHOST_PERSONA_NAME_MAX_CHARS: usize = 24;
+pub const COHOST_PERSONA_PERSONALITY_MAX_CHARS: usize = 1200;
+pub const COHOST_GREETING_TEMPLATES_MAX: usize = 60;
+pub const COHOST_GREETING_TEXT_MAX_CHARS: usize = 200;
+/// A persona image path is `<personaId>/<state>.<ext>` under the managed
+/// buddy-assets root (plan 164 D20); the renderer turns it into a protocol URL.
+const COHOST_PERSONA_IMAGE_PATH_MAX_CHARS: usize = 256;
+/// The persona a fresh install has: the bundled default pack under this id.
+pub const COHOST_DEFAULT_PERSONA_ID: &str = "default";
+pub const COHOST_DEFAULT_PERSONA_NAME: &str = "Buddy";
+
+/// The avatar's state images (plan 164 D16). `idle` is required on stream;
+/// the others fall back to it when missing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostAvatarState {
+    Idle,
+    Talk,
+    Laugh,
+    Think,
+}
+
+impl CohostAvatarState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Talk => "talk",
+            Self::Laugh => "laugh",
+            Self::Think => "think",
+        }
+    }
+}
+
+/// How the comic bubble is drawn (plan 164 D17).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostBubbleStyle {
+    #[default]
+    Speech,
+    Thought,
+    Shout,
+}
+
+/// Where the persona's images came from. `default` means the bundled pack.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostPersonaSource {
+    #[default]
+    Default,
+    Uploaded,
+    Generated,
+}
+
+/// One relative asset path per state. Absent, never null (the renderer
+/// contract rejects null).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPersonaImages {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub laugh: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think: Option<String>,
+}
+
+impl CohostPersonaImages {
+    fn entries(&self) -> [(CohostAvatarState, Option<&str>); 4] {
+        [
+            (CohostAvatarState::Idle, self.idle.as_deref()),
+            (CohostAvatarState::Talk, self.talk.as_deref()),
+            (CohostAvatarState::Laugh, self.laugh.as_deref()),
+            (CohostAvatarState::Think, self.think.as_deref()),
+        ]
+    }
+}
+
+/// The user's creature (plan 164): its name, personality and looks. Lives in
+/// `cohostSettings.persona`; the images are relative paths under the managed
+/// buddy-assets root, owned by main (uploads) or the backend (generation).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPersona {
+    /// Names the asset folder; regenerated by "Start over".
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub personality: String,
+    #[serde(default)]
+    pub bubble_style: CohostBubbleStyle,
+    #[serde(default)]
+    pub images: CohostPersonaImages,
+    #[serde(default)]
+    pub source: CohostPersonaSource,
+    /// Still or Alive (plan 168 D2). `default` so a row from before plan 168
+    /// loads as Still.
+    #[serde(default)]
+    pub avatar: BuddyAvatar,
+    /// How the Buddy moves on air (plan 168 D10, D13, D15).
+    #[serde(default)]
+    pub motion: BuddyMotionSettings,
+    /// Per-trigger reaction overrides (plan 168 D14); a reaction id or
+    /// `none`. Absent triggers use D14's defaults.
+    #[serde(default)]
+    pub reactions: BTreeMap<BuddyTrigger, String>,
+    /// The library avatar this Buddy is (plan 170 D12): a user avatar's uuid
+    /// or `official:<slug>`. Absent (never null) for a Buddy made only on
+    /// this computer and for the untouched default; library sync never
+    /// overwrites a Buddy without it unless it is the untouched default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_avatar_id: Option<String>,
+}
+
+impl Default for CohostPersona {
+    fn default() -> Self {
+        Self {
+            id: COHOST_DEFAULT_PERSONA_ID.to_string(),
+            name: COHOST_DEFAULT_PERSONA_NAME.to_string(),
+            personality: String::new(),
+            bubble_style: CohostBubbleStyle::Speech,
+            images: CohostPersonaImages::default(),
+            source: CohostPersonaSource::Default,
+            avatar: BuddyAvatar::Still,
+            motion: BuddyMotionSettings::default(),
+            reactions: BTreeMap::new(),
+            library_avatar_id: None,
+        }
+    }
+}
+
+/// The chat posting mode (plan 164 D4): everything is off by default.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostAutoChatMode {
+    #[default]
+    Off,
+    Suggest,
+    Auto,
+}
+
+/// The activity kinds a greeting template answers (plan 164). Closed: an
+/// unknown kind is refused at the wire, never stored.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostActivityTemplateKind {
+    Follow,
+    Sub,
+    Resub,
+    SubGift,
+    CommunitySubGift,
+    Membership,
+    Cheer,
+    Kicks,
+    SuperChat,
+    SuperSticker,
+    Raid,
+    WatchStreak,
+    PowerUp,
+    Redemption,
+}
+
+/// The platforms a template may be limited to; omitted means any.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CohostGreetingPlatform {
+    Twitch,
+    Youtube,
+    Kick,
+    X,
+}
+
+/// The avatar state an utterance shows (plan 164 D18); never `idle`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostUtteranceState {
+    #[default]
+    Talk,
+    Laugh,
+    Think,
+}
+
+/// What made the Buddy speak (plan 164 D7).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostUtteranceTriggerKind {
+    Greeting,
+    Answer,
+    Banter,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtteranceTrigger {
+    pub kind: CohostUtteranceTriggerKind,
+    /// The Activity row a greeting answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    /// The chat row an answer replies to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
+/// Where an utterance stands (plan 164 D7). `proposed` waits for the
+/// streamer (Suggest) or for the send (Auto); `sent` landed on at least one
+/// destination; `failed` reached none (the log says why); `dismissed` was
+/// declined or expired; `bubble-only` never goes to chat.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostUtteranceStatus {
+    Proposed,
+    Sent,
+    Dismissed,
+    BubbleOnly,
+    Failed,
+}
+
+/// One thing the Buddy said or wants to say (plan 164 D7), on `cohost.state`
+/// for the Stream Manager's cards and Phase C's bubble.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtterance {
+    pub id: String,
+    pub text: String,
+    pub state: CohostUtteranceState,
+    pub trigger: CohostUtteranceTrigger,
+    /// Where a send goes; empty means every writable destination (banter,
+    /// the Say box), resolved when it is sent.
+    #[serde(default)]
+    pub destination_ids: Vec<String>,
+    pub status: CohostUtteranceStatus,
+    pub at: String,
+    /// Present while `proposed` in Suggest mode: the card leaves then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// A greeting written by the user, with `{name}`-style fields resolved in
+/// Phase D (plan 164 S-D1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostGreetingTemplate {
+    pub id: String,
+    pub kind: CohostActivityTemplateKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<CohostGreetingPlatform>,
+    pub text: String,
+    #[serde(default)]
+    pub state: CohostUtteranceState,
+    #[serde(default)]
+    pub enabled: bool,
+    /// The reaction this greeting plays (plan 168 D14): a reaction id of the
+    /// persona's pack, or `none`; it wins over the trigger's. Absent, never
+    /// null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reaction: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostGreetingsSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub templates: Vec<CohostGreetingTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostCooldownBehaviour {
+    #[serde(default)]
+    pub enabled: bool,
+    pub cooldown_seconds: u32,
+}
+
+/// The automatic behaviours (plan 164 D5), each behind its own switch under
+/// the mode. Phase A stores them; Phase D acts on them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAutoChat {
+    #[serde(default)]
+    pub mode: CohostAutoChatMode,
+    #[serde(default)]
+    pub greetings: CohostGreetingsSettings,
+    #[serde(default = "default_answers")]
+    pub answers: CohostCooldownBehaviour,
+    #[serde(default = "default_banter")]
+    pub banter: CohostCooldownBehaviour,
+}
+
+fn default_answers() -> CohostCooldownBehaviour {
+    CohostCooldownBehaviour {
+        enabled: false,
+        cooldown_seconds: 20,
+    }
+}
+
+fn default_banter() -> CohostCooldownBehaviour {
+    CohostCooldownBehaviour {
+        enabled: false,
+        cooldown_seconds: 240,
+    }
+}
+
+impl Default for CohostAutoChat {
+    fn default() -> Self {
+        Self {
+            mode: CohostAutoChatMode::Off,
+            greetings: CohostGreetingsSettings::default(),
+            answers: default_answers(),
+            banter: default_banter(),
+        }
+    }
+}
+
+/// Mood → avatar state (plan 164 D18, Phase A note): amused → laugh,
+/// thinking → think, neutral (or unknown) → talk.
+pub(crate) fn utterance_state_for_mood(mood: Option<CohostTickMood>) -> CohostUtteranceState {
+    match mood {
+        Some(CohostTickMood::Amused) => CohostUtteranceState::Laugh,
+        Some(CohostTickMood::Thinking) => CohostUtteranceState::Think,
+        Some(CohostTickMood::Neutral | CohostTickMood::Unknown) | None => {
+            CohostUtteranceState::Talk
+        }
+    }
+}
+
+fn utf16_len(value: &str) -> usize {
+    value.chars().map(char::len_utf16).sum()
+}
+
+/// A stored image path is one folder (the persona id) and one file, never a
+/// parent step or an absolute path: it is joined under the managed root.
+fn persona_image_path_ok(path: &str) -> bool {
+    !path.is_empty()
+        && utf16_len(path) <= COHOST_PERSONA_IMAGE_PATH_MAX_CHARS
+        && !path.starts_with('/')
+        && !path.starts_with('\\')
+        && !path.contains("..")
+        && !path.contains('\\')
+        && path.matches('/').count() == 1
+}
+
+/// The persona as the wire may carry it, trimmed: the name must be 1 to 24
+/// characters, the personality at most 1200, the id a plain token, every
+/// image path a relative `<id>/<file>` (plan 164 S-A2). The reason names the
+/// field so the renderer can show it inline.
+pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona, String> {
+    let mut valid = persona.clone();
+    valid.name = persona.name.trim().to_string();
+    if valid.name.is_empty() {
+        return Err("The Buddy needs a name.".to_string());
+    }
+    if utf16_len(&valid.name) > COHOST_PERSONA_NAME_MAX_CHARS {
+        return Err(format!(
+            "The name is at most {COHOST_PERSONA_NAME_MAX_CHARS} characters."
+        ));
+    }
+    if valid.id.is_empty()
+        || valid.id.len() > 128
+        || !valid
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("The persona id must be a plain token.".to_string());
+    }
+    if utf16_len(&valid.personality) > COHOST_PERSONA_PERSONALITY_MAX_CHARS {
+        return Err(format!(
+            "The personality is at most {COHOST_PERSONA_PERSONALITY_MAX_CHARS} characters."
+        ));
+    }
+    for (state, path) in valid.images.entries() {
+        if let Some(path) = path
+            && !persona_image_path_ok(path)
+        {
+            return Err(format!(
+                "The {} image path is not a managed asset path.",
+                state.as_str()
+            ));
+        }
+    }
+    crate::buddy_pet::validate_avatar(&valid.avatar)?;
+    crate::buddy_pet::validate_motion(&valid.motion)?;
+    crate::buddy_pet::validate_reactions(&valid.reactions)?;
+    if valid
+        .library_avatar_id
+        .as_deref()
+        .is_some_and(|id| !crate::cohost_library::persona_link_ok(id))
+    {
+        return Err("The library avatar id is not a library id.".to_string());
+    }
+    Ok(valid)
+}
+
+/// The automatic chat settings as the wire may carry them: at most 60
+/// templates, each 1 to 200 characters of text with a plain id (plan 164
+/// S-A2). Unknown kinds never reach here: the closed enum refuses them.
+pub(crate) fn validate_auto_chat(auto_chat: &CohostAutoChat) -> Result<CohostAutoChat, String> {
+    let mut valid = auto_chat.clone();
+    if valid.greetings.templates.len() > COHOST_GREETING_TEMPLATES_MAX {
+        return Err(format!(
+            "At most {COHOST_GREETING_TEMPLATES_MAX} greeting templates."
+        ));
+    }
+    for template in &mut valid.greetings.templates {
+        template.text = template.text.trim().to_string();
+        if template.id.trim().is_empty() || template.id.len() > 128 {
+            return Err("A greeting template needs an id.".to_string());
+        }
+        if template.text.is_empty() {
+            return Err("A greeting template needs some text.".to_string());
+        }
+        if utf16_len(&template.text) > COHOST_GREETING_TEXT_MAX_CHARS {
+            return Err(format!(
+                "A greeting is at most {COHOST_GREETING_TEXT_MAX_CHARS} characters."
+            ));
+        }
+        if template
+            .reaction
+            .as_deref()
+            .is_some_and(|reaction| !crate::buddy_pet::reaction_id_ok(reaction))
+        {
+            return Err(
+                "A greeting's reaction is 1 to 40 lowercase letters, digits or dashes.".to_string(),
+            );
+        }
+    }
+    for (label, behaviour) in [("answers", &valid.answers), ("banter", &valid.banter)] {
+        if behaviour.cooldown_seconds == 0 || behaviour.cooldown_seconds > 3600 {
+            return Err(format!("The {label} cooldown is 1 to 3600 seconds."));
+        }
+    }
+    Ok(valid)
+}
+
 // --- Settings ----------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -489,7 +940,7 @@ pub struct CohostSettings {
     pub enabled: bool,
     pub tone: CohostTone,
     pub notes: String,
-    /// Orcle's picks go on stream by themselves (server highlights and
+    /// Buddy's picks go on stream by themselves (server highlights and
     /// high-priority questions, with the engine's cadence rules).
     pub auto_highlight: bool,
     /// The comment the streamer is talking about goes on stream by itself.
@@ -500,12 +951,12 @@ pub struct CohostSettings {
     /// so a settings row from before the field still loads.
     #[serde(default)]
     pub rules: Vec<String>,
-    /// Orcle hears the microphone for the whole live stream, as text, even
+    /// Buddy hears the microphone for the whole live stream, as text, even
     /// with live captions off (plan 068 D2). `default` so a settings row from
     /// before the field still loads.
     #[serde(default)]
     pub listen: bool,
-    /// "Commands need 'Orcle' first" (plan 140 S3): the structured phrases
+    /// "Commands need 'Buddy' first" (plan 140 S3): the structured phrases
     /// ("remove it from our chat") stop working without the wake word.
     /// Default off. `default` so a settings row from before the field loads.
     #[serde(default)]
@@ -515,6 +966,14 @@ pub struct CohostSettings {
     /// except on YouTube, which always waits. `default` for older rows.
     #[serde(default)]
     pub remove_confirm: RemoveConfirmMode,
+    /// The user's creature (plan 164 S-A2). `default` so a settings row from
+    /// before the field loads as the bundled default pack.
+    #[serde(default)]
+    pub persona: CohostPersona,
+    /// Automatic chat (plan 164 S-A2): mode off and every behaviour disabled
+    /// by default. `default` so a settings row from before the field loads.
+    #[serde(default)]
+    pub auto_chat: CohostAutoChat,
 }
 
 impl Default for CohostSettings {
@@ -529,6 +988,8 @@ impl Default for CohostSettings {
             listen: false,
             wake_word_required: false,
             remove_confirm: RemoveConfirmMode::Confirm,
+            persona: CohostPersona::default(),
+            auto_chat: CohostAutoChat::default(),
         }
     }
 }
@@ -568,6 +1029,27 @@ impl CohostSettings {
         if let Some(remove_confirm) = patch.remove_confirm {
             self.remove_confirm = remove_confirm;
         }
+        if let Some(persona) = patch.persona {
+            self.persona = persona;
+        }
+        if let Some(auto_chat) = patch.auto_chat {
+            self.auto_chat = auto_chat;
+        }
+    }
+
+    /// The patch with its persona and automatic chat validated and trimmed,
+    /// or the first reason it is refused (plan 164 S-A2). Checked before
+    /// anything is stored, so a refused patch changes nothing.
+    fn validated_patch(patch: CohostSettingsPatch) -> Result<CohostSettingsPatch, CohostError> {
+        let mut patch = patch;
+        if let Some(persona) = patch.persona.take() {
+            patch.persona = Some(validate_persona(&persona).map_err(CohostError::InvalidPersona)?);
+        }
+        if let Some(auto_chat) = patch.auto_chat.take() {
+            patch.auto_chat =
+                Some(validate_auto_chat(&auto_chat).map_err(CohostError::InvalidAutoChat)?);
+        }
+        Ok(patch)
     }
 }
 
@@ -588,7 +1070,7 @@ pub fn load_cohost_settings(database: &Database) -> CohostSettings {
         Ok(Some(settings)) => settings.normalized(),
         Ok(None) => CohostSettings::default(),
         Err(error) => {
-            tracing::warn!("Could not read Orcle settings; using defaults: {error:#}");
+            tracing::warn!("Could not read Buddy settings; using defaults: {error:#}");
             CohostSettings::default()
         }
     }
@@ -660,7 +1142,7 @@ pub struct CohostPromiseReminder {
 }
 
 /// A recap for viewers who asked what they missed, or one the streamer
-/// drafted from the summary. Never posted by Orcle; gone after `RECAP_TTL`.
+/// drafted from the summary. Never posted by Buddy; gone after `RECAP_TTL`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostRecap {
@@ -711,12 +1193,12 @@ pub enum CohostCommandKind {
 pub enum CohostCommandStatus {
     /// It happened: highlighted, cleared, removed or hidden.
     Done,
-    /// No comment matched, or Orcle didn't catch what was said.
+    /// No comment matched, or Buddy didn't catch what was said.
     NotFound,
     /// A chooser is open: `candidates` holds the comments to pick from.
     Ambiguous,
     /// A card waits for a yes: a voice removal (`operationId`), or a highlight
-    /// of a comment Orcle flagged. While a confirmed removal runs at the
+    /// of a comment Buddy flagged. While a confirmed removal runs at the
     /// platform the status stays `confirm`, without `expiresAt`.
     Confirm,
     /// Chat moderation refused, or the removal failed.
@@ -747,7 +1229,7 @@ pub struct CohostCommandTarget {
 pub struct CohostCommand {
     /// `cmd-<uuid>`; the `cohost.command.*` RPCs take it back.
     pub id: String,
-    /// The words that made the command, as Orcle heard them.
+    /// The words that made the command, as Buddy heard them.
     pub heard: String,
     pub kind: CohostCommandKind,
     pub status: CohostCommandStatus,
@@ -808,7 +1290,7 @@ impl CohostCommandError {
     fn not_pending() -> Self {
         Self {
             code: "not-pending",
-            message: "No Orcle command is waiting for that answer.".to_string(),
+            message: "No Buddy command is waiting for that answer.".to_string(),
         }
     }
 }
@@ -958,7 +1440,7 @@ pub struct CohostState {
     /// first, at most three. Omitted while empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recently_resolved: Vec<CohostRecentlyResolved>,
-    /// Whether Orcle hears the streamer (plan 068). Omitted without a session
+    /// Whether Buddy hears the streamer (plan 068). Omitted without a session
     /// or by a backend from before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listening: Option<CohostListening>,
@@ -989,6 +1471,17 @@ pub struct CohostState {
     /// The voice-command kill switches; omitted while both are on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_availability: Option<CohostCommandAvailability>,
+    /// Plan 164 D7: what the Buddy said or proposes this chat session,
+    /// oldest first, at most 20. Omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub utterances: Vec<CohostUtterance>,
+    /// Plan 164 D10: automatic sends this chat session. Omitted while zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub auto_chat_sends: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl CohostState {
@@ -1024,26 +1517,40 @@ impl CohostState {
             dead_air_nudge: None,
             command: None,
             command_availability: None,
+            utterances: Vec::new(),
+            auto_chat_sends: 0,
         }
     }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CohostError {
-    #[error("Orcle is turned off in Settings.")]
+    #[error("Buddy is turned off in Settings.")]
     Disabled,
-    /// Plan 140 S1: Orcle is Premium only, enforced here and not just by the
+    /// Plan 140 S1: Buddy is Premium only, enforced here and not just by the
     /// renderer's `liveCohostGate`.
-    #[error("Orcle requires Videorc Premium.")]
+    #[error("Buddy requires Videorc Premium.")]
     PremiumRequired,
-    #[error("Orcle needs the active live chat session; sessionId did not match.")]
+    #[error("Buddy needs the active live chat session; sessionId did not match.")]
     SessionMismatch,
     #[error("sessionId and the question, message, promise or author id are required.")]
     InvalidParams,
-    #[error("Orcle has nothing to recap yet: no summary has arrived this session.")]
+    #[error("Buddy has nothing to recap yet: no summary has arrived this session.")]
     NoSummary,
-    #[error("Could not persist Orcle settings: {0}")]
+    #[error("Could not persist Buddy settings: {0}")]
     Storage(String),
+    /// Plan 164 S-A2: the persona on a settings patch is out of bounds.
+    #[error("{0}")]
+    InvalidPersona(String),
+    /// Plan 164 S-A2: the automatic chat settings on a patch are out of bounds.
+    #[error("{0}")]
+    InvalidAutoChat(String),
+    /// Plan 164 D4: a send was asked for while the chat mode is off.
+    #[error("The Buddy's chat mode is off. Turn on Suggest or Auto in Stream Manager.")]
+    AutoChatOff,
+    /// Plan 164 S-D2: the card to approve is gone, answered or expired.
+    #[error("{0}")]
+    UtteranceUnavailable(&'static str),
 }
 
 impl CohostError {
@@ -1055,6 +1562,10 @@ impl CohostError {
             Self::InvalidParams => "invalid-params",
             Self::NoSummary => "cohost-no-summary",
             Self::Storage(_) => "cohost-settings-storage-failed",
+            Self::InvalidPersona(_) => "cohost-persona-invalid",
+            Self::InvalidAutoChat(_) => "cohost-auto-chat-invalid",
+            Self::AutoChatOff => "cohost-auto-chat-off",
+            Self::UtteranceUnavailable(_) => "cohost-utterance-unavailable",
         }
     }
 }
@@ -1412,7 +1923,7 @@ struct CohostSession {
     session_id: String,
     generation: u64,
     consent: bool,
-    /// Whether Orcle hears the streamer this session (plan 068).
+    /// Whether Buddy hears the streamer this session (plan 068).
     listening: Option<CohostListening>,
     stream_title: Option<String>,
     status: CohostStatus,
@@ -1518,6 +2029,12 @@ struct CohostSession {
     /// Removal operations voice commands created this session, for the
     /// report: each terminal outcome is counted once.
     command_operations: HashMap<String, CommandOperationTrack>,
+    /// Plan 164 S-D3: tick replies the viewer asked the Buddy for by name,
+    /// new this tick, waiting for the auto-chat lane to route them.
+    answer_candidates: Vec<AnswerCandidate>,
+    /// Plan 164 S-D4: a banter request is outstanding (it shares the tick's
+    /// `in_flight`, so the two never overlap).
+    banter_in_flight: bool,
 }
 
 /// What the engine remembers about one chat row it noted.
@@ -1536,6 +2053,9 @@ struct KnownMessage {
     noted_at: Instant,
     /// Plan 140 S3: the platform a command card names.
     platform: StreamPlatform,
+    /// Plan 164 S-D3: the comments destination the row came from, where an
+    /// automatic answer goes.
+    destination_id: String,
     /// A Twitch notification row that arrived as a message: voice commands
     /// never target it (it has no deletable id).
     notification: bool,
@@ -1584,7 +2104,7 @@ pub(crate) struct PreparedCommandParse {
 enum UnknownCommandResolution {
     /// The parser read it: run it like a spoken command.
     Resolved(CommandKind, Vec<String>),
-    /// "Orcle didn't catch that".
+    /// "Buddy didn't catch that".
     Unheard,
     /// A newer command, or a session change, landed while the parser was
     /// thinking: say nothing.
@@ -1845,7 +2365,7 @@ const COMMAND_FLAG_MAX_AGE_SECS: i64 = 120;
 const COMMAND_CANDIDATES_CAP: usize = 3;
 /// A card's excerpt, in UTF-16 units (like the moderation audit row).
 const COMMAND_EXCERPT_MAX_UNITS: usize = 140;
-/// What Orcle heard, as the strip shows it.
+/// What Buddy heard, as the strip shows it.
 const COMMAND_HEARD_MAX_UNITS: usize = 300;
 
 /// Plan 140 S8, desktop-owned thresholds (contract part E): the cloud parser
@@ -1867,7 +2387,7 @@ const COMMAND_PARSE_MAX_PAUSE: Duration = Duration::from_secs(24 * 60 * 60);
 
 const COMMAND_VOICE_PAUSED: &str = "Voice commands are paused by Videorc.";
 const COMMAND_SIGNED_OUT: &str = "Cancelled because you signed out.";
-const COMMAND_STOPPED_LISTENING: &str = "Cancelled because Orcle stopped listening.";
+const COMMAND_STOPPED_LISTENING: &str = "Cancelled because Buddy stopped listening.";
 
 /// What a voice command's card waits for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1876,7 +2396,7 @@ enum CommandPending {
     None,
     /// A chooser: picking one runs the command on it.
     Choice,
-    /// A highlight of a comment Orcle flagged (high severity) waits for a yes.
+    /// A highlight of a comment Buddy flagged (high severity) waits for a yes.
     HighlightConfirm,
     /// The removal request is on its way to chat moderation.
     Requesting,
@@ -1909,7 +2429,7 @@ impl CommandIntent {
 #[derive(Debug, Clone)]
 struct CommandRecord {
     wire: CohostCommand,
-    /// `None` for an utterance Orcle did not understand.
+    /// `None` for an utterance Buddy did not understand.
     intent: Option<CommandIntent>,
     pending: CommandPending,
     /// When it was heard: the same-target and correction windows count from here.
@@ -2043,7 +2563,7 @@ struct NewCommand {
     spec: CommandTargetSpec,
     heard: String,
     reason: Option<String>,
-    /// Addressed with the wake word ("Orcle, ..."). A structured phrase
+    /// Addressed with the wake word ("Buddy, ..."). A structured phrase
     /// heard without it is `false`.
     wake_word: bool,
 }
@@ -2387,6 +2907,8 @@ impl CohostSession {
             report: ReportLedger::default(),
             command: None,
             command_operations: HashMap::new(),
+            answer_candidates: Vec::new(),
+            banter_in_flight: false,
         }
     }
 
@@ -2450,6 +2972,9 @@ impl CohostSession {
                 dismissed: self.report.recap_dismissed,
             },
             commands: (!self.report.commands.is_empty()).then(|| self.report.commands.clone()),
+            // Plan 164 D10: posts are written as they land (`append_post`),
+            // never rebuilt here; the merge keeps them.
+            posts: Vec::new(),
         }
     }
 
@@ -2481,10 +3006,6 @@ impl CohostSession {
         // Plan 140 S3: a card a voice command opened closes with what was
         // heard; the caller cancels its removal.
         self.abandon_command(COMMAND_SIGNED_OUT, &chrono::Utc::now().to_rfc3339())
-    }
-
-    fn snapshot(&self) -> CohostState {
-        self.snapshot_at(Instant::now())
     }
 
     fn snapshot_at(&self, now: Instant) -> CohostState {
@@ -2528,6 +3049,8 @@ impl CohostSession {
             command: self.command.as_ref().map(|record| record.wire.clone()),
             // The engine sets the kill switches; the session never knows them.
             command_availability: None,
+            utterances: Vec::new(),
+            auto_chat_sends: 0,
         }
     }
 
@@ -2711,6 +3234,10 @@ impl CohostSession {
                     at: mapped.at.clone(),
                     noted_at: now,
                     platform: message.platform,
+                    destination_id: comments_destination_id(
+                        message.platform,
+                        message.target_id.as_deref(),
+                    ),
                     notification: message
                         .raw_provider_type
                         .as_deref()
@@ -2811,7 +3338,62 @@ impl CohostSession {
             transcript,
             summary,
             open_promises,
+            persona: self.tick_persona(settings),
+            intent: None,
         }
+    }
+
+    /// v4 (plan 164 S-D3): the persona rides only on v4; a v3 body stays
+    /// byte-identical to what a v3 desktop sends.
+    fn tick_persona(&self, settings: &CohostSettings) -> Option<CohostTickPersona> {
+        (self.prompt_version >= COHOST_PROMPT_VERSION_PERSONA_MIN).then(|| CohostTickPersona {
+            name: settings.persona.name.clone(),
+            personality: settings.persona.personality.clone(),
+        })
+    }
+
+    fn speaks_v4(&self) -> bool {
+        self.prompt_version >= COHOST_PROMPT_VERSION_PERSONA_MIN
+    }
+
+    /// A banter request (plan 164 S-D4): the v4 tick shape with
+    /// `intent: banter`, no chat and no transcript. The pending delta stays
+    /// for the next real tick; `in_flight` is shared so they never overlap.
+    fn build_banter_request(
+        &mut self,
+        settings: &CohostSettings,
+        now: Instant,
+    ) -> CohostTickRequest {
+        self.tick_seq = self.tick_seq.saturating_add(1);
+        self.last_tick_at = Some(now);
+        self.in_flight = true;
+        self.banter_in_flight = true;
+        CohostTickRequest {
+            client_version: DESKTOP_CLIENT_VERSION.to_string(),
+            session_client_id: self.session_id.clone(),
+            tick_seq: self.tick_seq,
+            prompt_version: self.prompt_version,
+            consent_to_process_chat: self.consent,
+            tone: settings.tone,
+            notes: settings.notes.clone(),
+            rules: Some(settings.rules.clone()),
+            stream_title: self.stream_title.clone(),
+            open_questions: Vec::new(),
+            messages: Vec::new(),
+            dropped_messages: 0,
+            transcript: None,
+            summary: (!self.summary.is_empty()).then(|| self.summary.clone()),
+            open_promises: None,
+            persona: self.tick_persona(settings),
+            intent: Some(CohostTickIntent::Banter),
+        }
+    }
+
+    /// The banter request answered (or failed): the lane is free again. A
+    /// failure is logged by the caller and never pauses the session.
+    fn finish_banter(&mut self) {
+        self.banter_in_flight = false;
+        self.in_flight = false;
     }
 
     /// Merge a successful tick. `questions` is the full open set: existing ids
@@ -3062,6 +3644,25 @@ impl CohostSession {
             }
             if self.counted_question_ids.insert(incoming.id.clone()) {
                 self.questions_total = self.questions_total.saturating_add(1);
+            }
+            // Plan 164 S-D3: a NEW question the viewer addressed to the Buddy
+            // by name, with a drafted reply, is an answer candidate once.
+            if existing.is_none()
+                && incoming.addressed
+                && !incoming.suggested_reply.trim().is_empty()
+            {
+                let message_id = message_ids.first().cloned();
+                let destination_id = message_id
+                    .as_deref()
+                    .and_then(|id| self.known.get(id))
+                    .map(|known| known.destination_id.clone());
+                self.answer_candidates.push(AnswerCandidate {
+                    question_id: incoming.id.clone(),
+                    message_id,
+                    destination_id,
+                    text: truncate_utf16(&incoming.suggested_reply, QUESTION_TEXT_MAX_UNITS),
+                    state: utterance_state_for_mood(incoming.mood),
+                });
             }
             let question = CohostQuestion {
                 id: incoming.id,
@@ -3500,9 +4101,9 @@ impl CohostSession {
         let nothing = || {
             CommandResolution::NotFound(
                 match intent {
-                    CommandIntent::Remove => "Orcle couldn't find a comment to remove.",
+                    CommandIntent::Remove => "Buddy couldn't find a comment to remove.",
                     CommandIntent::Highlight | CommandIntent::Clear => {
-                        "Orcle couldn't find a comment to show."
+                        "Buddy couldn't find a comment to show."
                     }
                 }
                 .to_string(),
@@ -3519,7 +4120,7 @@ impl CohostSession {
                 eligible.truncate(COMMAND_CANDIDATES_CAP);
                 match eligible.len() {
                     0 => {
-                        CommandResolution::NotFound("Orcle couldn't find that comment.".to_string())
+                        CommandResolution::NotFound("Buddy couldn't find that comment.".to_string())
                     }
                     1 => CommandResolution::One(eligible.remove(0)),
                     _ => CommandResolution::Several(eligible),
@@ -3546,7 +4147,7 @@ impl CohostSession {
                     }
                 },
                 CommandTarget::None => CommandResolution::NotFound(
-                    "Orcle couldn't tell which comment you mean.".to_string(),
+                    "Buddy couldn't tell which comment you mean.".to_string(),
                 ),
             },
         }
@@ -3566,7 +4167,7 @@ impl CohostSession {
     ) -> CommandResolution {
         let not_found = || {
             CommandResolution::NotFound(format!(
-                "Orcle couldn't find a comment from {}.",
+                "Buddy couldn't find a comment from {}.",
                 spoken.trim()
             ))
         };
@@ -3723,7 +4324,7 @@ impl CohostSession {
                 let recent = self.newest_command_messages(COMMAND_CANDIDATES_CAP);
                 if recent.is_empty() {
                     CommandResolution::NotFound(
-                        "Orcle couldn't find a comment to remove.".to_string(),
+                        "Buddy couldn't find a comment to remove.".to_string(),
                     )
                 } else {
                     CommandResolution::Several(recent)
@@ -3955,7 +4556,7 @@ impl CohostSession {
 
     /// One comment to show: on stream now (`CohostAutoHighlight`, source
     /// `command`, past the automatic cadence rules: the streamer asked),
-    /// unless Orcle flagged it high: then it asks first.
+    /// unless Buddy flagged it high: then it asks first.
     fn highlight_or_ask(
         &mut self,
         record: &mut CommandRecord,
@@ -3977,8 +4578,8 @@ impl CohostSession {
             record.pending = CommandPending::HighlightConfirm;
             record.wire.status = CohostCommandStatus::Confirm;
             record.wire.message = match command_flag_label(kind) {
-                Some(label) => format!("Orcle flagged this ({label}). Show it anyway?"),
-                None => "Orcle flagged this. Show it anyway?".to_string(),
+                Some(label) => format!("Buddy flagged this ({label}). Show it anyway?"),
+                None => "Buddy flagged this. Show it anyway?".to_string(),
             };
             record.wire.expires_at = Some(expires_at.clone());
             record.wire.at = ctx.now_iso();
@@ -4174,7 +4775,7 @@ impl CohostSession {
         Ok(effects)
     }
 
-    /// Orcle was addressed and understood nothing: "Orcle didn't catch
+    /// Buddy was addressed and understood nothing: "Buddy didn't catch
     /// that: '…'". Never while a card is open: an unclear utterance must not
     /// close a card the streamer may still answer.
     fn note_unheard_command(&mut self, heard: &str, ctx: &CommandContext) -> bool {
@@ -4190,7 +4791,7 @@ impl CohostSession {
         if let Some(message) = command_gate(ctx, None) {
             record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
         } else {
-            let message = format!("Orcle didn't catch that: '{}'.", record.wire.heard);
+            let message = format!("Buddy didn't catch that: '{}'.", record.wire.heard);
             record.finish(CohostCommandStatus::NotFound, message, &now_iso);
             self.report.commands.not_found += 1;
         }
@@ -5347,7 +5948,7 @@ pub(crate) fn tick_message_from_chat(message: &LiveChatMessage) -> Option<Cohost
     })
 }
 
-/// What Orcle reads for a message with Twitch GIFs (plan 155, D7). The raw
+/// What Buddy reads for a message with Twitch GIFs (plan 155, D7). The raw
 /// text is the GIPHY title in brackets (`[Y A Y Yes GIF]`), which reads as a
 /// viewer's words. A GIF alone becomes `sent a GIF: <title>`; a GIF among
 /// words becomes `(GIF: <title>)` in its place. Without a gif fragment the
@@ -5428,14 +6029,23 @@ pub struct CohostEngine {
     /// sessions, so the renderer can key on it alone.
     auto_highlight_generation: u64,
     /// The voice-command kill switches as last read (plan 140 S3); `None`
-    /// while both are on. Every state carries it, Orcle running or not.
+    /// while both are on. Every state carries it, Buddy running or not.
     command_availability: Option<CohostCommandAvailability>,
     /// The cloud command parser (plan 140 S8).
     command_parser: CommandParserLane,
+    /// Plan 164 Phase D: greetings, answers, banter and the Say box. Engine
+    /// wide, following the live-chat session: greetings are free and never
+    /// need the tick session.
+    auto_chat: AutoChatLane,
+    /// `cohost.tick` from the last capability read (plan 164 S-D3): a new
+    /// session speaks v4 (persona, moods, banter) only when the web said 4.
+    web_tick_version: Option<u32>,
 }
 
 impl CohostEngine {
     pub fn new(settings: CohostSettings) -> Self {
+        // Plan 164 S-A7: the persona's name wakes the Buddy from the start.
+        crate::cohost_command::set_persona_wake_tokens(&settings.persona.name);
         Self {
             settings: settings.normalized(),
             generation: 0,
@@ -5445,6 +6055,23 @@ impl CohostEngine {
             auto_highlight_generation: 0,
             command_availability: None,
             command_parser: CommandParserLane::default(),
+            auto_chat: AutoChatLane::default(),
+            web_tick_version: None,
+        }
+    }
+
+    /// `cohost.tick` from the capability read (plan 164 S-D3).
+    pub(crate) fn set_web_tick_version(&mut self, version: Option<u32>) {
+        self.web_tick_version = version;
+    }
+
+    /// The tick contract a new session starts on: v4 only when the web
+    /// reported it, else the pinned v3 (sent exactly as before).
+    fn initial_prompt_version(&self) -> u32 {
+        if self.web_tick_version >= Some(COHOST_PROMPT_VERSION_PERSONA_MIN) {
+            COHOST_PROMPT_VERSION_PERSONA_MIN
+        } else {
+            COHOST_PROMPT_VERSION
         }
     }
 
@@ -5456,7 +6083,7 @@ impl CohostEngine {
     }
 
     /// Whether a parse may go out for `scope` now: the capability, Premium,
-    /// the voice kill switch, Orcle on with this session and its consent to
+    /// the voice kill switch, Buddy on with this session and its consent to
     /// process chat, nothing in flight, and the gap and any pause over.
     fn command_parser_ready(
         &self,
@@ -5560,12 +6187,19 @@ impl CohostEngine {
     }
 
     pub fn snapshot(&self) -> CohostState {
+        self.snapshot_with_lane(Instant::now())
+    }
+
+    fn snapshot_with_lane(&self, now: Instant) -> CohostState {
         let mut state = self
             .session
             .as_ref()
-            .map(CohostSession::snapshot)
+            .map(|session| session.snapshot_at(now))
             .unwrap_or_else(CohostState::off);
         state.command_availability = self.command_availability;
+        // Plan 164 D7: the lane rides every state, tick session or not.
+        state.utterances = self.auto_chat.snapshot(now);
+        state.auto_chat_sends = self.auto_chat.sends();
         state
     }
 
@@ -5741,13 +6375,11 @@ impl CohostEngine {
         now: Instant,
     ) -> u64 {
         self.generation = self.generation.wrapping_add(1);
-        self.session = Some(CohostSession::new(
-            session_id,
-            self.generation,
-            consent,
-            stream_title,
-            now,
-        ));
+        let prompt_version = self.initial_prompt_version();
+        let mut session =
+            CohostSession::new(session_id, self.generation, consent, stream_title, now);
+        session.prompt_version = prompt_version;
+        self.session = Some(session);
         self.generation
     }
 
@@ -6122,6 +6754,206 @@ impl CohostEngine {
             .is_ok_and(|session| session.own_send_delivered(text, question_id, now))
     }
 
+    // --- Automatic chat (plan 164 Phase D) ----------------------------------
+
+    /// Activity rows just delivered: greetings, by the mode (D4) and the
+    /// throttle (D9). Runs with or without a tick session.
+    pub(crate) fn note_activity(
+        &mut self,
+        messages: &[LiveChatMessage],
+        now: Instant,
+        now_iso: &str,
+    ) -> AutoChatPass {
+        self.auto_chat
+            .note_activity(&self.settings.auto_chat, messages, now, now_iso)
+    }
+
+    /// The pump's pass over the held greeting buckets.
+    pub(crate) fn drain_auto_chat(&mut self, now: Instant, now_iso: &str) -> AutoChatPass {
+        self.auto_chat.drain(&self.settings.auto_chat, now, now_iso)
+    }
+
+    pub(crate) fn auto_chat_next_due(&self) -> Option<Instant> {
+        self.auto_chat.next_due()
+    }
+
+    pub(crate) fn auto_chat_pump_armed(&self) -> bool {
+        self.auto_chat.pump_armed()
+    }
+
+    pub(crate) fn set_auto_chat_pump_armed(&mut self, armed: bool) {
+        self.auto_chat.set_pump_armed(armed);
+    }
+
+    /// The answer candidates the last tick produced (S-D3), routed by the
+    /// lane: the answers switch, its cooldown, the limiter, then the mode.
+    pub(crate) fn route_answer_candidates(
+        &mut self,
+        generation: u64,
+        now: Instant,
+        now_iso: &str,
+    ) -> AutoChatPass {
+        let candidates = match self.session.as_mut() {
+            Some(session) if session.generation == generation => {
+                std::mem::take(&mut session.answer_candidates)
+            }
+            _ => Vec::new(),
+        };
+        let mut merged = AutoChatPass::default();
+        for candidate in candidates {
+            let pass =
+                self.auto_chat
+                    .route_answer(&self.settings.auto_chat, candidate, now, now_iso);
+            merged.send.extend(pass.send);
+            merged.propose.extend(pass.propose);
+            merged.log.extend(pass.log);
+        }
+        merged
+    }
+
+    /// A banter request (S-D4), when its time came: the switch and cooldowns
+    /// (lane), a v4 session that is listening with nothing in flight, the
+    /// signed-in Premium preconditions, and a live microphone quiet for the
+    /// dead-air stretch. Marks the request as made.
+    pub(crate) fn prepare_banter(
+        &mut self,
+        generation: u64,
+        signed_in_premium: bool,
+        voice: VoiceActivity,
+        now: Instant,
+    ) -> Option<PreparedTick> {
+        if !signed_in_premium || !self.auto_chat.banter_allowed(&self.settings.auto_chat, now) {
+            return None;
+        }
+        let settings = self.settings.clone();
+        let session = self.session.as_mut()?;
+        if session.generation != generation
+            || session.status != CohostStatus::Listening
+            || !session.consent
+            || !session.speaks_v4()
+            || session.in_flight
+            || session.next_attempt_at.is_some_and(|at| now < at)
+        {
+            return None;
+        }
+        if !crate::cohost_ack::banter_due(voice, now) {
+            return None;
+        }
+        self.auto_chat.note_banter_requested(now);
+        Some(PreparedTick {
+            request: session.build_banter_request(&settings, now),
+            generation,
+        })
+    }
+
+    /// The banter answer: one line to every writable destination, by the
+    /// mode. A failure only frees the lane; the next real tick reports it.
+    pub(crate) fn apply_banter_result(
+        &mut self,
+        generation: u64,
+        result: Result<CohostTickResponse, CohostApiError>,
+        now: Instant,
+        now_iso: &str,
+    ) -> AutoChatPass {
+        let mut pass = AutoChatPass::default();
+        let Some(session) = self.session.as_mut() else {
+            return pass;
+        };
+        if session.generation != generation || !session.banter_in_flight {
+            return pass;
+        }
+        session.finish_banter();
+        match result {
+            Ok(response) => {
+                let Some(banter) = response.banter else {
+                    pass.log
+                        .push("Buddy banter: the server returned no line.".to_string());
+                    return pass;
+                };
+                let text = truncate_utf16(banter.text.trim(), BANTER_TEXT_MAX_CHARS);
+                let state = utterance_state_for_mood(banter.mood);
+                pass = self.auto_chat.route_banter(
+                    &self.settings.auto_chat,
+                    &text,
+                    state,
+                    now,
+                    now_iso,
+                );
+            }
+            Err(error) => pass.log.push(format!(
+                "Buddy banter failed ({}): {}",
+                error.detail.code,
+                error.message()
+            )),
+        }
+        pass
+    }
+
+    /// `cohost.utterance.approve` (S-D2): the card to send, or why not. The
+    /// mode is checked here too: off refuses even an approved card (D4).
+    pub(crate) fn approve_utterance(
+        &mut self,
+        utterance_id: &str,
+        now: Instant,
+    ) -> Result<CohostUtterance, CohostError> {
+        if self.settings.auto_chat.mode == CohostAutoChatMode::Off {
+            return Err(CohostError::AutoChatOff);
+        }
+        self.auto_chat
+            .approve(utterance_id, now)
+            .map_err(|refusal| CohostError::UtteranceUnavailable(refusal.message()))
+    }
+
+    pub(crate) fn dismiss_utterance(&mut self, utterance_id: &str) -> bool {
+        self.auto_chat.dismiss(utterance_id)
+    }
+
+    /// The Say box (D7): the utterance, and whether it goes to chat.
+    pub(crate) fn say(
+        &mut self,
+        text: &str,
+        state: CohostUtteranceState,
+        now: Instant,
+        now_iso: &str,
+    ) -> (CohostUtterance, bool) {
+        self.auto_chat
+            .say(&self.settings.auto_chat, text, state, now, now_iso)
+    }
+
+    pub(crate) fn mark_utterance(
+        &mut self,
+        utterance_id: &str,
+        status: CohostUtteranceStatus,
+    ) -> bool {
+        self.auto_chat.mark(utterance_id, status)
+    }
+
+    pub(crate) fn register_buddy_operation(&mut self, operation_id: &str) {
+        self.auto_chat.register_operation(operation_id);
+    }
+
+    pub(crate) fn is_buddy_operation(&self, operation_id: &str) -> bool {
+        self.auto_chat.is_own_operation(operation_id)
+    }
+
+    pub(crate) fn note_automatic_sent(&mut self, now: Instant) {
+        self.auto_chat.note_sent(now);
+    }
+
+    /// The live-chat session the lane follows (for the Say box and the pump).
+    pub(crate) fn auto_chat_session_id(&self) -> Option<String> {
+        self.auto_chat.session_id().map(str::to_string)
+    }
+
+    pub(crate) fn follow_auto_chat_session(&mut self, session_id: &str) -> bool {
+        self.auto_chat.follow_session(session_id)
+    }
+
+    /// Whether the chat mode allows a send right now (re-read at send time).
+    pub(crate) fn auto_chat_mode(&self) -> CohostAutoChatMode {
+        self.settings.auto_chat.mode
+    }
+
     fn session_for_mut(&mut self, session_id: &str) -> Result<&mut CohostSession, CohostError> {
         match self.session.as_mut() {
             Some(session) if session.session_id == session_id => Ok(session),
@@ -6174,6 +7006,547 @@ impl CohostEngine {
     }
 }
 
+// --- Automatic chat (plan 164 Phase D) ------------------------------------------------
+//
+// The lane decides (`cohost_auto_chat`); this is the side of it that touches
+// the app: the live-chat coordinator (which destinations can be written to),
+// the YouTube breaker (plan 094), the stream targets (plan 161), the send
+// itself (`live_chat::send_live_chat_message`, with a Buddy-owned
+// `operationId`), the report (`cohost_reports`, as each send lands) and the
+// pump that releases held greetings. Every send re-reads the mode first:
+// `off` never posts, whatever was decided before.
+
+/// `cohost.tick` from the capability read (plan 164 S-D3).
+pub(crate) async fn set_tick_capability(state: &AppState, tick: Option<u32>) {
+    state.cohost.lock().await.set_web_tick_version(tick);
+}
+
+/// Whether a `liveChat.send` operation is the Buddy's own (D10): its
+/// delivery never reads as "the streamer replied".
+pub(crate) async fn is_buddy_operation(state: &AppState, operation_id: &str) -> bool {
+    state.cohost.lock().await.is_buddy_operation(operation_id)
+}
+
+/// Act on a lane pass: log its lines, publish proposals, spawn its sends and
+/// arm the pump for what it held. `lifecycle_delivery` orders the state emit
+/// with chat delivery when the caller holds the fence; the pump takes one.
+async fn apply_auto_chat_pass(
+    state: &AppState,
+    pass: AutoChatPass,
+    lifecycle_delivery: Option<&OwnedMutexGuard<()>>,
+) {
+    if let Some(due) = pass.schedule {
+        arm_auto_chat_pump(state, due).await;
+    }
+    publish_auto_chat_pass(state, pass, lifecycle_delivery).await;
+}
+
+/// The pass minus the pump: logs, proposals, sends. The pump itself calls
+/// this (it owns its own schedule).
+async fn publish_auto_chat_pass(
+    state: &AppState,
+    pass: AutoChatPass,
+    lifecycle_delivery: Option<&OwnedMutexGuard<()>>,
+) {
+    for line in &pass.log {
+        state.emit_log("info", line.clone());
+    }
+    if pass.changed() {
+        for utterance in &pass.propose {
+            state.emit_log(
+                "info",
+                format!(
+                    "Buddy proposes ({}): {}",
+                    utterance_trigger_label(utterance.trigger.kind),
+                    utterance.text
+                ),
+            );
+        }
+        let snapshot = state.cohost.lock().await.snapshot();
+        match lifecycle_delivery {
+            Some(guard) => emit_state(state, &snapshot, guard),
+            None => {
+                let guard = state.live_chat_persistence.begin_delivery().await;
+                emit_state(state, &snapshot, &guard);
+            }
+        }
+    }
+    for utterance in pass.send {
+        let state = state.clone();
+        tokio::spawn(async move {
+            send_automatic(&state, utterance).await;
+        });
+    }
+}
+
+fn utterance_trigger_label(kind: CohostUtteranceTriggerKind) -> &'static str {
+    match kind {
+        CohostUtteranceTriggerKind::Greeting => "greeting",
+        CohostUtteranceTriggerKind::Answer => "answer",
+        CohostUtteranceTriggerKind::Banter => "banter",
+        CohostUtteranceTriggerKind::Manual => "say",
+    }
+}
+
+/// Arm the pump that releases held greetings at `due` (one task at a time).
+async fn arm_auto_chat_pump(state: &AppState, due: Instant) {
+    {
+        let mut engine = state.cohost.lock().await;
+        if engine.auto_chat_pump_armed() {
+            return;
+        }
+        engine.set_auto_chat_pump_armed(true);
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut next = Some(due);
+        while let Some(due) = next {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
+            let pass = {
+                let mut engine = state.cohost.lock().await;
+                engine.drain_auto_chat(Instant::now(), &chrono::Utc::now().to_rfc3339())
+            };
+            next = pass.schedule;
+            publish_auto_chat_pass(&state, pass, None).await;
+            if next.is_none() {
+                let mut engine = state.cohost.lock().await;
+                next = engine.auto_chat_next_due();
+                if next.is_none() {
+                    engine.set_auto_chat_pump_armed(false);
+                }
+            }
+        }
+    });
+}
+
+/// The destinations an automatic send may reach right now (D9): the
+/// utterance's own, or every write-ready one when it names none; minus
+/// YouTube while the plan 094 breaker is open or the budget sheds sends, and
+/// minus any platform whose stream target is `failed` (plan 161). Returns
+/// the ids and the reasons for what was dropped.
+async fn automatic_send_destinations(
+    state: &AppState,
+    session_id: &str,
+    wanted: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let providers: Vec<crate::live_chat::LiveChatProviderState> = {
+        let coordinator = state.live_chat.lock().await;
+        if coordinator.session_id() != Some(session_id) {
+            return (Vec::new(), vec!["the chat session ended".to_string()]);
+        }
+        coordinator.providers().to_vec()
+    };
+    let youtube_blocked = crate::youtube_quota::paused_until(state).is_some()
+        || crate::youtube_quota::budget_refuses(state, crate::youtube_quota::BudgetCall::ChatSend)
+            .is_some();
+    let failed_platforms: Vec<StreamPlatform> =
+        match crate::recording::current_stream_targets_snapshot(state).await {
+            Ok(snapshot) => snapshot
+                .targets
+                .iter()
+                .filter(|target| target.state == crate::streaming::StreamTargetState::Failed)
+                .map(|target| target.platform)
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+    let mut ids = Vec::new();
+    let mut skipped = Vec::new();
+    for provider in providers {
+        if !wanted.is_empty() && !wanted.contains(&provider.id) {
+            continue;
+        }
+        if provider.write != crate::live_chat::CommentsWriteState::Ready {
+            skipped.push(format!("{} is not writable", provider.id));
+            continue;
+        }
+        if provider.platform == StreamPlatform::Youtube && youtube_blocked {
+            skipped.push(format!(
+                "{} skipped: YouTube calls are paused by the quota breaker",
+                provider.id
+            ));
+            continue;
+        }
+        if failed_platforms.contains(&provider.platform) {
+            skipped.push(format!(
+                "{} skipped: its stream destination failed",
+                provider.id
+            ));
+            continue;
+        }
+        ids.push(provider.id);
+    }
+    (ids, skipped)
+}
+
+/// The text as the strictest reached platform takes it (D8): X 140, Kick
+/// 500, the rest 200 characters. Clipped with an ellipsis, never silently.
+fn clip_for_platforms(text: &str, platforms: &[StreamPlatform]) -> (String, bool) {
+    let cap = platforms
+        .iter()
+        .map(|platform| match platform {
+            StreamPlatform::X => crate::x_live::X_CHAT_MESSAGE_MAX_CHARS,
+            StreamPlatform::Kick => 200,
+            _ => 200,
+        })
+        .min()
+        .unwrap_or(200);
+    let count = text.chars().count();
+    if count <= cap {
+        return (text.to_string(), false);
+    }
+    let head: String = text.chars().take(cap.saturating_sub(1)).collect();
+    (format!("{}…", head.trim_end()), true)
+}
+
+/// Send one utterance as the streamer (D3, D10): a Buddy-owned
+/// `operationId`, the mode re-read, the destinations filtered, the text
+/// clipped, the outcome on the utterance, the state and the report.
+async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
+    let now_iso = chrono::Utc::now().to_rfc3339();
+    let (session_id, mode) = {
+        let engine = state.cohost.lock().await;
+        (engine.auto_chat_session_id(), engine.auto_chat_mode())
+    };
+    let trigger = utterance.trigger.kind;
+    let manual = trigger == CohostUtteranceTriggerKind::Manual;
+    // D18: an answer on its way to chat is a pending answer; the Buddy may
+    // think while it travels (never over a bubble; settled if it fails).
+    if trigger == CohostUtteranceTriggerKind::Answer && crate::buddy_overlay::overlay_enabled(state)
+    {
+        crate::buddy_overlay::think(state).await;
+    }
+    // The mode is the one gate every send passes, decided at send time (D4):
+    // Auto for anything automatic, Suggest or Auto for an approved card.
+    let mode_allows = match mode {
+        CohostAutoChatMode::Off => false,
+        CohostAutoChatMode::Suggest => {
+            utterance.status == CohostUtteranceStatus::Proposed && !manual
+        }
+        CohostAutoChatMode::Auto => true,
+    };
+    let session_id = match (session_id, mode_allows) {
+        (Some(session_id), true) => session_id,
+        (None, _) => {
+            fail_utterance(state, &utterance, "no live chat session", &now_iso).await;
+            return;
+        }
+        (Some(_), false) => {
+            fail_utterance(
+                state,
+                &utterance,
+                "the chat mode does not allow it",
+                &now_iso,
+            )
+            .await;
+            return;
+        }
+    };
+    let (destination_ids, skipped) =
+        automatic_send_destinations(state, &session_id, &utterance.destination_ids).await;
+    for reason in &skipped {
+        state.emit_log("info", format!("Buddy send: {reason}."));
+    }
+    if destination_ids.is_empty() {
+        fail_utterance(
+            state,
+            &utterance,
+            "no destination can take it right now",
+            &now_iso,
+        )
+        .await;
+        return;
+    }
+    let platforms: Vec<StreamPlatform> = {
+        let coordinator = state.live_chat.lock().await;
+        coordinator
+            .providers()
+            .iter()
+            .filter(|provider| destination_ids.contains(&provider.id))
+            .map(|provider| provider.platform)
+            .collect()
+    };
+    let (text, clipped) = clip_for_platforms(&utterance.text, &platforms);
+    if clipped {
+        state.emit_log(
+            "info",
+            format!(
+                "Buddy clipped a {} to the platform cap: {text}",
+                utterance_trigger_label(trigger)
+            ),
+        );
+    }
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    state
+        .cohost
+        .lock()
+        .await
+        .register_buddy_operation(&operation_id);
+    let result = crate::live_chat::send_live_chat_message(
+        state,
+        crate::live_chat::CommentsSendParams {
+            operation_id,
+            session_id: session_id.clone(),
+            text: text.clone(),
+            in_reply_to_question_id: None,
+            destination_ids: Some(destination_ids),
+        },
+    )
+    .await;
+    let (status, outcome) = match &result {
+        Ok(operation) => match operation.phase {
+            crate::live_chat::CommentsSendOperationPhase::Sent => (
+                CohostUtteranceStatus::Sent,
+                crate::protocol::CohostReportPostResult::Sent,
+            ),
+            crate::live_chat::CommentsSendOperationPhase::Partial => (
+                CohostUtteranceStatus::Sent,
+                crate::protocol::CohostReportPostResult::Partial,
+            ),
+            _ => (
+                CohostUtteranceStatus::Failed,
+                crate::protocol::CohostReportPostResult::Failed,
+            ),
+        },
+        Err(_) => (
+            CohostUtteranceStatus::Failed,
+            crate::protocol::CohostReportPostResult::Failed,
+        ),
+    };
+    match &result {
+        Ok(operation) if status == CohostUtteranceStatus::Sent => state.emit_log(
+            "info",
+            format!(
+                "Buddy posted ({}) to {}: {text}",
+                utterance_trigger_label(trigger),
+                operation
+                    .destinations
+                    .iter()
+                    .filter(|d| d.phase == crate::live_chat::DestinationDeliveryPhase::Sent)
+                    .map(|d| d.destination_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Ok(operation) => state.emit_log(
+            "warn",
+            format!(
+                "Buddy send ({}) reached no destination: {}",
+                utterance_trigger_label(trigger),
+                operation
+                    .destinations
+                    .iter()
+                    .map(|d| format!(
+                        "{} {}",
+                        d.destination_id,
+                        d.reason.clone().unwrap_or_default()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!(
+                "Buddy send ({}) failed: {error}",
+                utterance_trigger_label(trigger)
+            ),
+        ),
+    }
+    let snapshot = {
+        let mut engine = state.cohost.lock().await;
+        if status == CohostUtteranceStatus::Sent {
+            engine.note_automatic_sent(Instant::now());
+        }
+        engine.mark_utterance(&utterance.id, status);
+        engine.snapshot()
+    };
+    // D7: the words that reached chat reach the bubble as they land. A manual
+    // line bubbled when it was typed (`say_utterance`), so it is not shown
+    // twice; an answer that went nowhere stops thinking.
+    if status == CohostUtteranceStatus::Sent {
+        if !manual {
+            let landed = CohostUtterance {
+                status,
+                text: text.clone(),
+                ..utterance.clone()
+            };
+            crate::buddy_overlay::show_for_utterance(state, &landed).await;
+        }
+    } else if trigger == CohostUtteranceTriggerKind::Answer {
+        crate::buddy_overlay::settle(state).await;
+    }
+    let post = crate::protocol::CohostReportPost {
+        id: utterance.id.clone(),
+        at: now_iso,
+        trigger,
+        text,
+        destinations: platforms,
+        result: outcome,
+    };
+    match state.database.append_cohost_report_post(&session_id, post) {
+        Ok(true) => {}
+        Ok(false) => state.emit_log(
+            "info",
+            "Buddy report post skipped: the session row is gone.".to_string(),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Buddy report post could not be saved: {error}"),
+        ),
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    emit_state(state, &snapshot, &lifecycle_delivery);
+}
+
+async fn fail_utterance(
+    state: &AppState,
+    utterance: &CohostUtterance,
+    reason: &str,
+    now_iso: &str,
+) {
+    state.emit_log(
+        "warn",
+        format!(
+            "Buddy did not send ({}): {reason}: {}",
+            utterance_trigger_label(utterance.trigger.kind),
+            utterance.text
+        ),
+    );
+    let snapshot = {
+        let mut engine = state.cohost.lock().await;
+        engine.mark_utterance(&utterance.id, CohostUtteranceStatus::Failed);
+        engine.snapshot()
+    };
+    if utterance.trigger.kind == CohostUtteranceTriggerKind::Answer {
+        crate::buddy_overlay::settle(state).await;
+    }
+    if let Some(session_id) = state.cohost.lock().await.auto_chat_session_id() {
+        let _ = state.database.append_cohost_report_post(
+            &session_id,
+            crate::protocol::CohostReportPost {
+                id: utterance.id.clone(),
+                at: now_iso.to_string(),
+                trigger: utterance.trigger.kind,
+                text: utterance.text.clone(),
+                destinations: Vec::new(),
+                result: crate::protocol::CohostReportPostResult::Failed,
+            },
+        );
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    emit_state(state, &snapshot, &lifecycle_delivery);
+}
+
+/// `cohost.utterance.approve` (S-D2): the Stream Manager sends a proposed
+/// card. The send runs on its own task; the reply is the state with the
+/// card still `proposed` until the send lands.
+pub async fn approve_utterance(
+    state: &AppState,
+    params: crate::protocol::CohostUtteranceParams,
+) -> Result<CohostState, CohostError> {
+    if params.session_id.trim().is_empty() || params.utterance_id.trim().is_empty() {
+        return Err(CohostError::InvalidParams);
+    }
+    let (utterance, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        if engine.auto_chat_session_id().as_deref() != Some(params.session_id.as_str()) {
+            return Err(CohostError::SessionMismatch);
+        }
+        let utterance = engine.approve_utterance(&params.utterance_id, Instant::now())?;
+        (utterance, engine.snapshot())
+    };
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        send_automatic(&task_state, utterance).await;
+    });
+    Ok(snapshot)
+}
+
+/// `cohost.utterance.dismiss` (S-D2).
+pub async fn dismiss_utterance(
+    state: &AppState,
+    params: crate::protocol::CohostUtteranceParams,
+) -> Result<CohostState, CohostError> {
+    if params.session_id.trim().is_empty() || params.utterance_id.trim().is_empty() {
+        return Err(CohostError::InvalidParams);
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let mut engine = state.cohost.lock().await;
+    if engine.auto_chat_session_id().as_deref() != Some(params.session_id.as_str()) {
+        return Err(CohostError::SessionMismatch);
+    }
+    let changed = engine.dismiss_utterance(&params.utterance_id);
+    let snapshot = engine.snapshot();
+    drop(engine);
+    if changed {
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
+    Ok(snapshot)
+}
+
+/// `cohost.utterance.say` (D7): the streamer's own line, one utterance that
+/// both posts and bubbles. In Auto, with the live-chat session named, it goes
+/// to every writable destination like any utterance; otherwise (Off, Suggest,
+/// or no chat session: an empty `sessionId`) it is bubble-only. Either way
+/// the bubble shows at once when the Buddy is on some output (Phase C's
+/// `show_bubble`); a named session must be the active one (the lane follows
+/// it).
+pub async fn say_utterance(
+    state: &AppState,
+    params: crate::protocol::CohostSayParams,
+) -> Result<CohostState, CohostError> {
+    let text = params.text.trim().to_string();
+    if text.is_empty() || text.chars().count() > COHOST_GREETING_TEXT_MAX_CHARS {
+        return Err(CohostError::InvalidParams);
+    }
+    let session_id = params.session_id.trim();
+    let session_id = if session_id.is_empty() {
+        None
+    } else {
+        let chat_session_id = state
+            .live_chat
+            .lock()
+            .await
+            .session_id()
+            .map(str::to_string);
+        if chat_session_id.as_deref() != Some(session_id) {
+            return Err(CohostError::SessionMismatch);
+        }
+        Some(session_id.to_string())
+    };
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let (utterance, send, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        if let Some(session_id) = session_id.as_deref() {
+            engine.follow_auto_chat_session(session_id);
+        }
+        let (mut utterance, mut send) = engine.say(
+            &text,
+            params.state.unwrap_or_default(),
+            Instant::now(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        if send && session_id.is_none() {
+            // Auto mode without a chat session: nowhere to post, so the line
+            // is bubble-only rather than a send that fails.
+            send = false;
+            utterance.status = CohostUtteranceStatus::BubbleOnly;
+            engine.mark_utterance(&utterance.id, CohostUtteranceStatus::BubbleOnly);
+        }
+        (utterance, send, engine.snapshot())
+    };
+    emit_state(state, &snapshot, &lifecycle_delivery);
+    drop(lifecycle_delivery);
+    crate::buddy_overlay::show_for_utterance(state, &utterance).await;
+    if send {
+        let task_state = state.clone();
+        tokio::spawn(async move {
+            send_automatic(&task_state, utterance).await;
+        });
+    }
+    Ok(snapshot)
+}
+
 // --- AppState integration ------------------------------------------------------------
 
 fn emit_state(state: &AppState, snapshot: &CohostState, _lifecycle_delivery: &OwnedMutexGuard<()>) {
@@ -6192,7 +7565,7 @@ pub(crate) fn note_caption_final(state: &AppState, update: &CaptionsUpdate) {
     }
 }
 
-/// Orcle learns a transcript final only when the caption coordinator still
+/// Buddy learns a transcript final only when the caption coordinator still
 /// owns its admitted speech epoch. Caption callbacks route clip marks through
 /// their immutable recording owner independently, before this admission gate.
 /// The caller checks ownership and calls this synchronously under that lock;
@@ -6201,12 +7574,12 @@ pub(crate) fn note_transcript_final(
     state: &AppState,
     update: &CaptionsUpdate,
     final_: RecentSpeechFinal,
-    orcle_owned: bool,
+    buddy_owned: bool,
 ) {
     if final_.text.trim().is_empty() {
         return;
     }
-    if !orcle_owned {
+    if !buddy_owned {
         return;
     }
     note_caption_final(state, update);
@@ -6219,7 +7592,7 @@ pub(crate) fn note_transcript_final(
     }
 }
 
-/// Plan 140 S2: the pure command detector reads the final while an Orcle
+/// Plan 140 S2: the pure command detector reads the final while a Buddy
 /// session is armed (`arm_command_detector`). Std mutex, no await: the
 /// caption task observes and returns, like the buffers above. The context
 /// (the wake-word setting, an open card or chooser) is the engine's mirror
@@ -6230,7 +7603,7 @@ fn detect_voice_command(
     final_: &RecentSpeechFinal,
 ) -> Option<(CommandSession, DetectedCommand)> {
     // Contract part D: `voiceCommands: false` stops command detection.
-    if !crate::service_flags::orcle_voice_commands_enabled(state) {
+    if !crate::service_flags::buddy_voice_commands_enabled(state) {
         return None;
     }
     let mut commands = state.cohost_commands.lock().ok()?;
@@ -6257,7 +7630,7 @@ pub(crate) fn dispatch_detected_command(
 ) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(
-            "Heard an Orcle command ({}) but no runtime is available to run it.",
+            "Heard a Buddy command ({}) but no runtime is available to run it.",
             command.kind.label()
         );
         return;
@@ -6320,7 +7693,7 @@ fn clear_transcript(state: &AppState) {
         handle.spawn(async move {
             if let Err(refusal) = crate::live_chat_moderation::cancel(&state, &operation_id).await {
                 tracing::debug!(
-                    "An Orcle removal was no longer pending at a session boundary: {refusal}"
+                    "A Buddy removal was no longer pending at a session boundary: {refusal}"
                 );
             }
         });
@@ -6331,6 +7704,9 @@ fn clear_transcript(state: &AppState) {
 /// under the engine lock after every command change, so the mirror never
 /// trails a newer change; the caption task reads it without that lock.
 fn mirror_command_slot(state: &AppState, engine: &CohostEngine) {
+    // Plan 164 S-A7: the wake words follow the persona's name on every
+    // settings change, for the detector and the marker grammar alike.
+    crate::cohost_command::set_persona_wake_tokens(&engine.settings.persona.name);
     let (context, pending_operation) = engine.command_slot_mirror();
     if let Ok(mut commands) = state.cohost_commands.lock() {
         commands.context = context;
@@ -6341,8 +7717,8 @@ fn mirror_command_slot(state: &AppState, engine: &CohostEngine) {
 /// The voice-command kill switches as they are now (contract part D).
 fn command_availability_now(state: &AppState) -> Option<CohostCommandAvailability> {
     command_availability(
-        crate::service_flags::orcle_voice_commands_enabled(state),
-        crate::service_flags::orcle_remove_enabled(state),
+        crate::service_flags::buddy_voice_commands_enabled(state),
+        crate::service_flags::buddy_remove_enabled(state),
     )
 }
 
@@ -6366,8 +7742,8 @@ async fn live_card_message_id(state: &AppState) -> Option<String> {
 async fn command_context(state: &AppState, premium: bool) -> CommandContext {
     CommandContext {
         premium,
-        voice_enabled: crate::service_flags::orcle_voice_commands_enabled(state),
-        remove_enabled: crate::service_flags::orcle_remove_enabled(state),
+        voice_enabled: crate::service_flags::buddy_voice_commands_enabled(state),
+        remove_enabled: crate::service_flags::buddy_remove_enabled(state),
         on_stream: live_card_message_id(state).await,
         now: Instant::now(),
         now_utc: chrono::Utc::now(),
@@ -6390,7 +7766,7 @@ async fn run_detected_command(
         question = command.question,
         reason = command.reason.as_deref().unwrap_or("none"),
         wake_word = command.wake_word,
-        "Orcle heard a command: '{}'.",
+        "Buddy heard a command: '{}'.",
         command.heard
     );
     let intent = match command.kind {
@@ -6404,7 +7780,7 @@ async fn run_detected_command(
             return answer_by_voice(state, scope, CommandAnswer::Choose(index), premium).await;
         }
         CommandKind::Unknown => {
-            // Only a clearly addressed "Orcle" earns a reply.
+            // Only a clearly addressed "Buddy" earns a reply.
             if !command.wake_word {
                 return;
             }
@@ -6426,7 +7802,7 @@ async fn run_detected_command(
                 }
                 UnknownCommandResolution::Superseded => {
                     tracing::info!(
-                        "Orcle dropped a parsed command: a newer command or session came first."
+                        "Buddy dropped a parsed command: a newer command or session came first."
                     );
                 }
             };
@@ -6456,7 +7832,7 @@ async fn run_detected_command(
 /// Plan 140 S8: every wake-word utterance the local grammar could not read
 /// is offered to the cloud command parser first, when the web enabled it
 /// (`features.cohostCommandEnabled`), on Premium, with the voice kill switch
-/// on, an Orcle session for `scope` and its consent to process chat. One
+/// on, a Buddy session for `scope` and its consent to process chat. One
 /// call at most, never retried, on this command's own task with no lock
 /// held across it. Any failure, timeout or doubt is "didn't catch that".
 async fn resolve_unknown_command(
@@ -6496,7 +7872,7 @@ where
     C: FnOnce(String, CohostCommandRequest) -> F,
     F: std::future::Future<Output = Result<CohostCommandResponse, CohostApiError>>,
 {
-    let voice_enabled = crate::service_flags::orcle_voice_commands_enabled(state);
+    let voice_enabled = crate::service_flags::buddy_voice_commands_enabled(state);
     let ready = {
         let engine = state.cohost.lock().await;
         engine.command_parser_ready(scope, premium, voice_enabled, Instant::now())
@@ -6533,7 +7909,7 @@ where
             tracing::info!(
                 code = %error.detail.code,
                 status = ?error.detail.status,
-                "Orcle's command parser failed: {}",
+                "Buddy's command parser failed: {}",
                 error.message()
             );
             return if current {
@@ -6551,14 +7927,14 @@ where
             tracing::info!(
                 kind = %kind.label(),
                 targets = message_ids.len(),
-                "Orcle's command parser read '{heard}'."
+                "Buddy's command parser read '{heard}'."
             );
             UnknownCommandResolution::Resolved(kind, message_ids)
         }
         None => {
             tracing::info!(
                 choice = %response.intent.choice,
-                "Orcle's command parser was not sure enough about '{heard}'."
+                "Buddy's command parser was not sure enough about '{heard}'."
             );
             UnknownCommandResolution::Unheard
         }
@@ -6702,7 +8078,7 @@ async fn run_new_command(
             let mut engine = state.cohost.lock().await;
             engine.set_command_availability(ctx.availability());
             let Some(effects) = engine.begin_command(scope, command, &ctx) else {
-                tracing::info!("Orcle dropped a voice command: its session changed.");
+                tracing::info!("Buddy dropped a voice command: its session changed.");
                 return;
             };
             mirror_command_slot(state, &engine);
@@ -6732,7 +8108,7 @@ async fn answer_by_voice(
     {
         tracing::debug!(
             code = error.code,
-            "Orcle dropped a voice answer: {}",
+            "Buddy dropped a voice answer: {}",
             error.message
         );
     }
@@ -6790,7 +8166,7 @@ async fn run_command_effects(
     // otherwise find the old one still pending.
     for operation_id in &effects.cancel_superseded {
         if let Err(refusal) = crate::live_chat_moderation::cancel(state, operation_id).await {
-            tracing::debug!("A replaced Orcle removal was no longer pending: {refusal}");
+            tracing::debug!("A replaced Buddy removal was no longer pending: {refusal}");
         }
     }
     if effects.clear_highlight {
@@ -6863,7 +8239,7 @@ async fn request_command_removal(
         ModerationRequest {
             operation_id: uuid::Uuid::new_v4().to_string(),
             message_id: request.message_id.clone(),
-            source: ModerationSource::OrcleVoice,
+            source: ModerationSource::BuddyVoice,
             reason: request.reason.clone(),
             confirm_mode: request.confirm_mode,
         },
@@ -6897,7 +8273,7 @@ async fn request_command_removal(
         // Replaced (or its session ended) while the request was on its way:
         // no card is left to answer it, so nothing may wait for an answer.
         if let Err(refusal) = crate::live_chat_moderation::cancel(state, &operation_id).await {
-            tracing::debug!("A replaced Orcle removal was no longer pending: {refusal}");
+            tracing::debug!("A replaced Buddy removal was no longer pending: {refusal}");
         }
     }
 }
@@ -6909,7 +8285,7 @@ async fn confirm_command_removal(state: &AppState, operation_id: &str) {
     let operation = match crate::live_chat_moderation::confirm(state, operation_id).await {
         Ok(operation) => Some(operation),
         Err(refusal) => {
-            tracing::info!("An Orcle removal could not run: {refusal}");
+            tracing::info!("A Buddy removal could not run: {refusal}");
             state
                 .database
                 .get_chat_moderation_operation(operation_id)
@@ -6927,7 +8303,7 @@ async fn cancel_command_removal(state: &AppState, operation_id: &str) {
     let operation = match crate::live_chat_moderation::cancel(state, operation_id).await {
         Ok(operation) => Some(operation),
         Err(refusal) => {
-            tracing::info!("An Orcle removal could not be cancelled: {refusal}");
+            tracing::info!("A Buddy removal could not be cancelled: {refusal}");
             state
                 .database
                 .get_chat_moderation_operation(operation_id)
@@ -6973,7 +8349,7 @@ async fn sync_command_operation(state: &AppState, operation: ModerationOperation
 /// removal (and the report), from the stored copy, so an older change that
 /// lands late never wins. Manual removals are not commands.
 pub(crate) fn note_moderation_operation(state: &AppState, operation: &ModerationOperation) {
-    if operation.source != ModerationSource::OrcleVoice {
+    if operation.source != ModerationSource::BuddyVoice {
         return;
     }
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -6986,7 +8362,7 @@ pub(crate) fn note_moderation_operation(state: &AppState, operation: &Moderation
     });
 }
 
-/// Orcle was addressed and understood nothing.
+/// Buddy was addressed and understood nothing.
 async fn note_unheard_command(
     state: &AppState,
     scope: &CommandSession,
@@ -7106,7 +8482,7 @@ async fn publish_listening_under_fence(
     emit_state(state, &snapshot, lifecycle_delivery);
 }
 
-/// Sign-out is a privacy boundary for what Orcle heard (plan 068 review):
+/// Sign-out is a privacy boundary for what Buddy heard (plan 068 review):
 /// the spotlight transcript, the recent-speech buffer, the Clip that tail and
 /// voice activity go, and so do the session's pending transcript, summary,
 /// topic, promises, recap, on-topic marks and voice greetings; a tick in
@@ -7136,7 +8512,7 @@ pub(crate) async fn purge_speech_for_sign_out(state: &AppState) {
         {
             session.listening = Some(CohostListening::blocked(
                 "signed-out",
-                "Sign in so Orcle can hear you.",
+                "Sign in so Buddy can hear you.",
             ));
         }
         // Plan 140 S3: the closed card waits for nothing any more.
@@ -7156,11 +8532,11 @@ async fn cancel_abandoned_removal(state: &AppState, operation_id: Option<String>
         return;
     };
     if let Err(refusal) = crate::live_chat_moderation::cancel(state, &operation_id).await {
-        tracing::debug!("An abandoned Orcle removal was no longer pending: {refusal}");
+        tracing::debug!("An abandoned Buddy removal was no longer pending: {refusal}");
     }
 }
 
-/// Sign-in completed: a running Orcle session with listening on hears the
+/// Sign-in completed: a running Buddy session with listening on hears the
 /// streamer again (its consent still decides, as at start).
 pub(crate) async fn resume_listen_after_sign_in(state: &AppState) {
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
@@ -7187,7 +8563,7 @@ pub(crate) async fn resume_listen_after_sign_in(state: &AppState) {
     // listening (plan 140 S2).
     arm_command_detector(state, &session_id, generation, wake_word_required);
     if consent {
-        crate::captions::grant_orcle_speech(state).await;
+        crate::captions::grant_buddy_speech(state).await;
     }
     start_listen_if_wanted(state, &session_id, consent, listen).await;
     let snapshot = fresh_snapshot(state).await;
@@ -7215,7 +8591,7 @@ async fn start_listen_if_wanted(state: &AppState, session_id: &str, consent: boo
     } else if !consent {
         CohostListening::blocked(
             "consent-required",
-            "Orcle can hear you once cloud AI consent is on.",
+            "Buddy can hear you once cloud AI consent is on.",
         )
     } else {
         crate::captions::start_listen_for_cohost(state, session_id).await
@@ -7223,7 +8599,7 @@ async fn start_listen_if_wanted(state: &AppState, session_id: &str, consent: boo
     record_listening(state, session_id, listening).await;
 }
 
-/// A running Orcle session for `session_id`, without its schedulers, for the
+/// A running Buddy session for `session_id`, without its schedulers, for the
 /// stop-path tests outside this module.
 #[cfg(test)]
 pub(crate) async fn start_cohost_session_for_test(state: &AppState, session_id: &str) {
@@ -7235,7 +8611,7 @@ pub(crate) async fn start_cohost_session_for_test(state: &AppState, session_id: 
 }
 
 pub async fn cohost_status(state: &AppState) -> CohostState {
-    // The kill switches ride every state, Orcle running or not (plan 140).
+    // The kill switches ride every state, Buddy running or not (plan 140).
     fresh_snapshot(state).await
 }
 
@@ -7249,16 +8625,23 @@ pub async fn set_cohost_settings(
     state: &AppState,
     patch: CohostSettingsPatch,
 ) -> Result<CohostSettings, CohostError> {
+    let patch = CohostSettings::validated_patch(patch)?;
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let mut engine = state.cohost.lock().await;
-    let mut next = engine.settings.clone();
+    let previous = engine.settings.clone();
+    let mut next = previous.clone();
     next.apply(patch);
     state
         .database
         .save_setting(COHOST_SETTINGS_KEY, &next)
         .map_err(|error| CohostError::Storage(error.to_string()))?;
+    // Plan 170 D12: a local edit of a linked library avatar goes to the account.
+    crate::cohost_library::settings_saved(state, &previous, &next);
     let listen_changed = engine.settings.listen != next.listen;
     engine.settings = next.clone();
+    // Plan 168 S-B1: the pet on stream follows the persona (avatar, pack,
+    // still images); the sprite worker decides whether anything changed.
+    state.buddy_sprite.set_persona(&next.persona);
     // Plan 140 S3: the detector reads the wake-word setting from its slot.
     mirror_command_slot(state, &engine);
     let report = if !next.enabled && engine.session.is_some() {
@@ -7281,10 +8664,10 @@ pub async fn set_cohost_settings(
         }
     }
     if stopped {
-        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::retire_buddy_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen(state).await;
-        state.emit_log("info", "Orcle stopped: turned off in Settings.");
+        state.emit_log("info", "Buddy stopped: turned off in Settings.");
         emit_state(state, &snapshot, &lifecycle_delivery);
         return Ok(next);
     }
@@ -7311,7 +8694,7 @@ pub async fn start_cohost(
     start_cohost_if_entitled(state, params, premium_entitled()).await
 }
 
-/// Plan 140 S1: Orcle is Premium only, in the backend too. The renderer gate
+/// Plan 140 S1: Buddy is Premium only, in the backend too. The renderer gate
 /// (`liveCohostGate`) stays, but a `cohost.start` from a Basic account is
 /// refused here with `premium-required`, whatever the renderer believes. The
 /// decision is passed in, like `prepare_tick`'s, so the gate is testable
@@ -7388,12 +8771,12 @@ where
         cancel_abandoned_removal(state, abandoned_removal).await;
         // Invalidate delayed listen publications and capture-resume admissions
         // before reflecting the new consent. Explicit captions keep their task.
-        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::retire_buddy_speech(state).await;
         crate::captions::stop_listen(state).await;
         clear_transcript(state);
         arm_command_detector(state, &session_id, generation, wake_word_required);
         if consent {
-            crate::captions::grant_orcle_speech(state).await;
+            crate::captions::grant_buddy_speech(state).await;
         }
         start_listen_if_wanted(state, &session_id, consent, listen).await;
         let snapshot = fresh_snapshot(state).await;
@@ -7419,12 +8802,12 @@ where
     let wake_word_required = engine.settings.wake_word_required;
     drop(engine);
     save_session_report(state, replaced);
-    crate::captions::retire_orcle_speech(state).await;
+    crate::captions::retire_buddy_speech(state).await;
     crate::captions::stop_listen(state).await;
     clear_transcript(state);
     arm_command_detector(state, &session_id, generation, wake_word_required);
     if consent {
-        crate::captions::grant_orcle_speech(state).await;
+        crate::captions::grant_buddy_speech(state).await;
     }
     // The listen intent joins after the session exists (it reports into the
     // session) and before the first state emit (so the renderer sees it at
@@ -7432,7 +8815,7 @@ where
     start_listen_if_wanted(state, &session_id, consent, listen).await;
     let snapshot = fresh_snapshot(state).await;
     before_state_emit.await;
-    state.emit_log("info", format!("Orcle listening for session {session_id}."));
+    state.emit_log("info", format!("Buddy listening for session {session_id}."));
     emit_state(state, &snapshot, &lifecycle_delivery);
     drop(lifecycle_delivery);
     Ok(snapshot)
@@ -7450,7 +8833,7 @@ pub async fn stop_cohost(state: &AppState) -> CohostState {
     .await
 }
 
-/// Plan 140 S1: Orcle is Premium only. Called after every
+/// Plan 140 S1: Buddy is Premium only. Called after every
 /// `entitlements.updated` publication: when `LiveCohost` is no longer
 /// entitled, a running session stops through the normal stop path (its report
 /// is saved) and the stopped state carries the reason, so the renderer can
@@ -7510,7 +8893,7 @@ where
         // The off state names why the backend ended the session (a Premium
         // lapse); a streamer's own Stop carries no reason, as before.
         snapshot.reason = stopped_reason;
-        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::retire_buddy_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen_with(state, listen_stop).await;
     }
@@ -7518,19 +8901,19 @@ where
     if stopped {
         match stopped_reason {
             Some(CohostReason::PremiumRequired) => {
-                state.emit_log("warn", "Orcle stopped: Videorc Premium is required.");
+                state.emit_log("warn", "Buddy stopped: Videorc Premium is required.");
             }
             Some(CohostReason::SignedOut) => {
-                state.emit_log("warn", "Orcle stopped: sign in to Videorc to use it.");
+                state.emit_log("warn", "Buddy stopped: sign in to Videorc to use it.");
             }
             Some(reason) => state.emit_log(
                 "warn",
                 format!(
-                    "Orcle stopped: {}.",
+                    "Buddy stopped: {}.",
                     serde_json::to_string(&reason).unwrap_or_default()
                 ),
             ),
-            None => state.emit_log("info", "Orcle stopped."),
+            None => state.emit_log("info", "Buddy stopped."),
         }
         emit_state(state, &snapshot, lifecycle_delivery);
     }
@@ -7595,7 +8978,7 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     drop(engine);
     save_session_report(state, report);
     if stopped {
-        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::retire_buddy_speech(state).await;
         clear_transcript(state);
         // The recording monitor retires its capture next: the listen task
         // drains there (`finish_captions_for_capture`) instead of aborting.
@@ -7603,7 +8986,7 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     }
     before_state_emit.await;
     if stopped {
-        state.emit_log("info", "Orcle stopped.");
+        state.emit_log("info", "Buddy stopped.");
         emit_state(state, &snapshot, lifecycle_delivery);
     }
 }
@@ -7622,7 +9005,7 @@ fn save_session_report(state: &AppState, report: Option<CohostSessionReport>) {
             state.emit_log(
                 "info",
                 format!(
-                    "Orcle saved the report for session {session_id}: {} question(s), {} flag(s), {} open promise(s).",
+                    "Buddy saved the report for session {session_id}: {} question(s), {} flag(s), {} open promise(s).",
                     report.questions.total,
                     report.flags.raised,
                     report.promises.open.len()
@@ -7635,16 +9018,16 @@ fn save_session_report(state: &AppState, report: Option<CohostSessionReport>) {
         }
         Ok(false) => state.emit_log(
             "info",
-            format!("Orcle report for session {session_id} skipped: the session row is gone."),
+            format!("Buddy report for session {session_id} skipped: the session row is gone."),
         ),
         Err(error) => state.emit_log(
             "warn",
-            format!("Orcle report for session {session_id} could not be saved: {error}"),
+            format!("Buddy report for session {session_id} could not be saved: {error}"),
         ),
     }
 }
 
-/// `cohost.report.get`: the saved report (null when Orcle left none), the
+/// `cohost.report.get`: the saved report (null when Buddy left none), the
 /// session's moments (computed now, never stored) and its chat totals.
 pub async fn get_session_report(
     state: &AppState,
@@ -7697,6 +9080,25 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
     if messages.is_empty() {
         return;
     }
+    // Plan 164 Phase D: greetings run with or without the tick session. The
+    // sends are spawned, never awaited under the delivery fence.
+    let (auto_chat, buddy_events) = {
+        let mut engine = state.cohost.lock().await;
+        // Plan 168 S-C3: Activity rows make the Buddy react on stream (the
+        // greeting's own reaction wins), any chat keeps it awake.
+        let buddy_events = crate::buddy_animator::live_chat_events(
+            messages,
+            &engine.settings.auto_chat,
+            chrono::Utc::now(),
+        );
+        let auto_chat =
+            engine.note_activity(messages, Instant::now(), &chrono::Utc::now().to_rfc3339());
+        (auto_chat, buddy_events)
+    };
+    for event in buddy_events {
+        state.buddy_sprite.notify(event);
+    }
+    apply_auto_chat_pass(state, auto_chat, Some(lifecycle_delivery)).await;
     let snapshot = {
         let mut engine = state.cohost.lock().await;
         if engine.session.is_none() {
@@ -7870,7 +9272,7 @@ pub async fn dismiss_flag(
 
 /// Chat moderation hook (plan 140 S4): a message the streamer removed or hid
 /// takes its flag with it. A deletion alone never cleared flags; this does,
-/// without counting a dismissal. Silent when Orcle is off or on another
+/// without counting a dismissal. Silent when Buddy is off or on another
 /// session. Called after the tombstone delivery, never under its fence.
 pub(crate) async fn resolve_flag_for_removed_message(
     state: &AppState,
@@ -8014,7 +9416,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         state.emit_log(
             "info",
             format!(
-                "Orcle puts {} on stream ({}{}).",
+                "Buddy puts {} on stream ({}{}).",
                 command.message_id,
                 serde_json::to_string(&command.source).unwrap_or_default(),
                 if command.refresh { ", refresh" } else { "" }
@@ -8072,13 +9474,40 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         if reminded && let Some(reminder) = &snapshot.promise_reminder {
             state.emit_log(
                 "info",
-                format!("Orcle reminds you of a promise: {}", reminder.text),
+                format!("Buddy reminds you of a promise: {}", reminder.text),
             );
         }
         if let Some(text) = nudged {
-            state.emit_log("info", format!("Orcle nudges you: {text}"));
+            state.emit_log("info", format!("Buddy nudges you: {text}"));
         }
         emit_state(state, &snapshot, &lifecycle_delivery);
+    }
+    // Plan 164 S-D4: banter on dead air, on the tick lane (never two
+    // requests in flight), only on a v4 session.
+    let banter = state.cohost.lock().await.prepare_banter(
+        generation,
+        token.is_some() && premium,
+        voice,
+        Instant::now(),
+    );
+    if let Some(prepared) = banter {
+        drop(lifecycle_delivery);
+        let Some(token) = token.as_ref() else {
+            return true;
+        };
+        let result = match VideorcApiClient::new() {
+            Ok(client) => client.post_cohost_tick(token, &prepared.request).await,
+            Err(error) => Err(CohostApiError::network(error.to_string())),
+        };
+        let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+        let pass = state.cohost.lock().await.apply_banter_result(
+            prepared.generation,
+            result,
+            Instant::now(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        apply_auto_chat_pass(state, pass, Some(&lifecycle_delivery)).await;
+        return true;
     }
     let prepared = {
         let mut engine = state.cohost.lock().await;
@@ -8098,7 +9527,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             state.emit_log(
                 "warn",
                 format!(
-                    "Orcle paused: {}.",
+                    "Buddy paused: {}.",
                     serde_json::to_string(&reason).unwrap_or_default()
                 ),
             );
@@ -8123,7 +9552,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         Ok(response) => Some((
             "info",
             format!(
-                "Orcle tick {} merged: {} message(s), {} open question(s), {} flag(s).",
+                "Buddy tick {} merged: {} message(s), {} open question(s), {} flag(s).",
                 prepared.request.tick_seq,
                 message_count,
                 response.questions.len(),
@@ -8137,7 +9566,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             Some((
                 "info",
                 format!(
-                    "Orcle tick {}: the server does not speak tick contract v{}; using v{} for the rest of this session.",
+                    "Buddy tick {}: the server does not speak tick contract v{}; using v{} for the rest of this session.",
                     prepared.request.tick_seq,
                     prepared.request.prompt_version,
                     fallback_prompt_version(prepared.request.prompt_version).unwrap_or(1)
@@ -8147,7 +9576,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         Err(error) => Some((
             "warn",
             format!(
-                "Orcle tick {} failed ({}, {}{}): {}",
+                "Buddy tick {} failed ({}, {}{}): {}",
                 prepared.request.tick_seq,
                 serde_json::to_string(&error.reason()).unwrap_or_default(),
                 error.detail.code,
@@ -8161,28 +9590,27 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         )),
     };
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    let snapshot = {
+    let (snapshot, answers) = {
         let mut engine = state.cohost.lock().await;
-        let applied = engine.apply_tick_result(
-            prepared.generation,
-            dropped,
-            result,
-            Instant::now(),
-            &chrono::Utc::now().to_rfc3339(),
-        );
+        let now = Instant::now();
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        let applied = engine.apply_tick_result(prepared.generation, dropped, result, now, &now_iso);
         if !applied {
             state.emit_log(
                 "warn",
-                "Orcle tick response dropped: its session was replaced.",
+                "Buddy tick response dropped: its session was replaced.",
             );
             return false;
         }
-        engine.snapshot()
+        // Plan 164 S-D3: replies the viewer asked the Buddy for by name.
+        let answers = engine.route_answer_candidates(prepared.generation, now, &now_iso);
+        (engine.snapshot(), answers)
     };
     if let Some((level, message)) = log {
         state.emit_log(level, message);
     }
     emit_state(state, &snapshot, &lifecycle_delivery);
+    apply_auto_chat_pass(state, answers, Some(&lifecycle_delivery)).await;
     true
 }
 
@@ -8295,14 +9723,14 @@ async fn run_spotlight_pass(state: &AppState, generation: u64) -> bool {
         state.emit_log(
             "info",
             format!(
-                "Orcle spotlight: the streamer is talking about {message_id} (about {about:.2})."
+                "Buddy spotlight: the streamer is talking about {message_id} (about {about:.2})."
             ),
         );
     }
     for question_id in &outcome.resolved {
         state.emit_log(
             "info",
-            format!("Orcle marks question {question_id} answered on air."),
+            format!("Buddy marks question {question_id} answered on air."),
         );
     }
     if let (Some(off), Some(failure)) = (outcome.lane_off_for, failure) {
@@ -8310,7 +9738,7 @@ async fn run_spotlight_pass(state: &AppState, generation: u64) -> bool {
         state.emit_log(
             "info",
             format!(
-                "Orcle spotlight lane paused for {} s after {failure}.",
+                "Buddy spotlight lane paused for {} s after {failure}.",
                 off.as_secs()
             ),
         );
@@ -8390,6 +9818,8 @@ mod tests {
             listen: false,
             wake_word_required: false,
             remove_confirm: RemoveConfirmMode::Confirm,
+            persona: CohostPersona::default(),
+            auto_chat: CohostAutoChat::default(),
         }
     }
 
@@ -8456,6 +9886,8 @@ mod tests {
             suggested_reply: "Keychron Q1!".to_string(),
             from_notes: true,
             on_topic: false,
+            addressed: false,
+            mood: None,
         }
     }
 
@@ -9279,7 +10711,7 @@ mod tests {
                 &mut engine,
                 t,
                 version,
-                CohostApiError::timeout("Orcle did not answer within 3 s."),
+                CohostApiError::timeout("Buddy did not answer within 3 s."),
             );
             assert_eq!(outcome.lane_off_for, None);
             t += secs(3);
@@ -11074,10 +12506,10 @@ mod tests {
         }
     }
 
-    /// Plan 155, D7: Orcle hears a Twitch GIF as an action with its title,
+    /// Plan 155, D7: Buddy hears a Twitch GIF as an action with its title,
     /// never as the bracketed GIPHY title pretending to be the viewer's words.
     #[test]
-    fn orcle_reads_a_twitch_gif_as_an_action_with_its_title() {
+    fn buddy_reads_a_twitch_gif_as_an_action_with_its_title() {
         let gif = |text: &str| LiveChatMessageFragment {
             fragment_type: "gif".into(),
             text: text.into(),
@@ -11726,7 +13158,7 @@ mod tests {
             Err(server_error(
                 502,
                 "ai-gateway-error",
-                "The Orcle tick failed on every configured model."
+                "The Buddy tick failed on every configured model."
             )),
             start + secs(2),
             "t1"
@@ -11738,7 +13170,7 @@ mod tests {
             snapshot.detail,
             Some(CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Orcle tick failed on every configured model.".to_string(),
+                message: "The Buddy tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -11772,7 +13204,7 @@ mod tests {
         assert!(engine.apply_tick_result(
             generation,
             0,
-            Err(CohostApiError::timeout("Orcle did not answer within 12 s.")),
+            Err(CohostApiError::timeout("Buddy did not answer within 12 s.")),
             start + secs(42),
             "t3"
         ));
@@ -11782,7 +13214,7 @@ mod tests {
             snapshot.detail,
             Some(CohostErrorDetail {
                 code: "timeout".to_string(),
-                message: "Orcle did not answer within 12 s.".to_string(),
+                message: "Buddy did not answer within 12 s.".to_string(),
                 status: None,
             })
         );
@@ -11992,6 +13424,302 @@ mod tests {
     }
 
     #[test]
+    fn settings_persona_and_auto_chat_round_trip_and_default_for_older_rows() {
+        let database = Database::open_in_memory_for_tests();
+        // A row from before plan 164 loads with the default persona and
+        // everything automatic off.
+        database
+            .save_setting(
+                COHOST_SETTINGS_KEY,
+                &serde_json::json!({
+                    "enabled": true,
+                    "tone": "short",
+                    "notes": "",
+                    "autoHighlight": false
+                }),
+            )
+            .unwrap();
+        let loaded = load_cohost_settings(&database);
+        assert_eq!(loaded.persona, CohostPersona::default());
+        assert_eq!(loaded.persona.id, COHOST_DEFAULT_PERSONA_ID);
+        assert_eq!(loaded.persona.name, COHOST_DEFAULT_PERSONA_NAME);
+        assert_eq!(loaded.auto_chat.mode, CohostAutoChatMode::Off);
+        assert!(!loaded.auto_chat.greetings.enabled);
+        assert!(loaded.auto_chat.greetings.templates.is_empty());
+        assert!(!loaded.auto_chat.answers.enabled);
+        assert_eq!(loaded.auto_chat.answers.cooldown_seconds, 20);
+        assert!(!loaded.auto_chat.banter.enabled);
+        assert_eq!(loaded.auto_chat.banter.cooldown_seconds, 240);
+
+        let mut settings = CohostSettings::default();
+        settings.apply(CohostSettingsPatch {
+            persona: Some(CohostPersona {
+                id: "p-1".to_string(),
+                name: "Grum the Goblin".to_string(),
+                personality: "Cheerful goblin merchant".to_string(),
+                bubble_style: CohostBubbleStyle::Shout,
+                images: CohostPersonaImages {
+                    idle: Some("p-1/idle.png".to_string()),
+                    laugh: Some("p-1/laugh.webp".to_string()),
+                    ..CohostPersonaImages::default()
+                },
+                source: CohostPersonaSource::Uploaded,
+                avatar: BuddyAvatar::Alive {
+                    pack_id: "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a".to_string(),
+                },
+                motion: BuddyMotionSettings {
+                    intensity: 0.8,
+                    sleep_after_seconds: 0,
+                    breathing: false,
+                },
+                reactions: BTreeMap::from([
+                    (BuddyTrigger::Follow, "wave".to_string()),
+                    (BuddyTrigger::DestinationFailed, "worried".to_string()),
+                    (BuddyTrigger::Tip, "none".to_string()),
+                ]),
+                library_avatar_id: Some("official:orc".to_string()),
+            }),
+            auto_chat: Some(CohostAutoChat {
+                mode: CohostAutoChatMode::Suggest,
+                greetings: CohostGreetingsSettings {
+                    enabled: true,
+                    templates: vec![CohostGreetingTemplate {
+                        id: "t-1".to_string(),
+                        kind: CohostActivityTemplateKind::Follow,
+                        platform: Some(CohostGreetingPlatform::Twitch),
+                        text: "Welcome to the horde, {name}".to_string(),
+                        state: CohostUtteranceState::Laugh,
+                        enabled: true,
+                        reaction: Some("proud".to_string()),
+                    }],
+                },
+                answers: CohostCooldownBehaviour {
+                    enabled: true,
+                    cooldown_seconds: 30,
+                },
+                banter: default_banter(),
+            }),
+            ..CohostSettingsPatch::default()
+        });
+        database
+            .save_setting(COHOST_SETTINGS_KEY, &settings)
+            .unwrap();
+        assert_eq!(load_cohost_settings(&database), settings);
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["persona"]["name"], "Grum the Goblin");
+        assert_eq!(json["persona"]["bubbleStyle"], "shout");
+        assert_eq!(json["persona"]["source"], "uploaded");
+        assert_eq!(json["persona"]["images"]["idle"], "p-1/idle.png");
+        // Absent states are omitted, never null (the renderer contract).
+        assert!(json["persona"]["images"].get("talk").is_none());
+        // Plan 168 D2: the avatar rides as a tagged object.
+        assert_eq!(
+            json["persona"]["avatar"],
+            serde_json::json!({ "kind": "alive", "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" })
+        );
+        // Plan 168 D10, D14: motion and the reaction overrides round-trip.
+        assert_eq!(
+            json["persona"]["motion"],
+            serde_json::json!({ "intensity": 0.8, "sleepAfterSeconds": 0, "breathing": false })
+        );
+        assert_eq!(
+            json["persona"]["reactions"],
+            serde_json::json!({ "follow": "wave", "tip": "none", "destination-failed": "worried" })
+        );
+        assert_eq!(
+            json["autoChat"]["greetings"]["templates"][0]["reaction"],
+            "proud"
+        );
+        // Plan 170 D12: the library link rides the persona; a row from before
+        // it loads unlinked, and an unlinked persona omits it (never null).
+        assert_eq!(json["persona"]["libraryAvatarId"], "official:orc");
+        assert_eq!(loaded.persona.library_avatar_id, None);
+        assert!(
+            serde_json::to_value(&loaded.persona)
+                .unwrap()
+                .get("libraryAvatarId")
+                .is_none()
+        );
+        // A row from before plan 168 loads Still with the default motion.
+        assert_eq!(loaded.persona.avatar, BuddyAvatar::Still);
+        assert_eq!(loaded.persona.motion, BuddyMotionSettings::default());
+        assert!(loaded.persona.reactions.is_empty());
+        assert_eq!(json["autoChat"]["mode"], "suggest");
+        assert_eq!(
+            json["autoChat"]["greetings"]["templates"][0]["kind"],
+            "follow"
+        );
+        assert_eq!(
+            json["autoChat"]["greetings"]["templates"][0]["platform"],
+            "twitch"
+        );
+        assert_eq!(
+            json["autoChat"]["greetings"]["templates"][0]["state"],
+            "laugh"
+        );
+        assert_eq!(json["autoChat"]["answers"]["cooldownSeconds"], 30);
+        assert_eq!(json["autoChat"]["banter"]["cooldownSeconds"], 240);
+    }
+
+    #[test]
+    fn settings_patch_refuses_an_out_of_bounds_persona_and_an_unknown_template_kind() {
+        let persona = |name: &str, personality: &str| CohostPersona {
+            name: name.to_string(),
+            personality: personality.to_string(),
+            ..CohostPersona::default()
+        };
+        assert_eq!(
+            validate_persona(&persona("  Grum ", "")).unwrap().name,
+            "Grum"
+        );
+        assert_eq!(
+            validate_persona(&persona("   ", "")).unwrap_err(),
+            "The Buddy needs a name."
+        );
+        assert!(validate_persona(&persona(&"n".repeat(25), "")).is_err());
+        assert!(validate_persona(&persona("Grum", &"p".repeat(1201))).is_err());
+        let mut bad_path = persona("Grum", "");
+        bad_path.images.idle = Some("../idle.png".to_string());
+        assert_eq!(
+            validate_persona(&bad_path).unwrap_err(),
+            "The idle image path is not a managed asset path."
+        );
+        bad_path.images.idle = Some("/tmp/idle.png".to_string());
+        assert!(validate_persona(&bad_path).is_err());
+        bad_path.images.idle = Some("p-1/idle.png".to_string());
+        assert!(validate_persona(&bad_path).is_ok());
+        // Plan 168: an Alive avatar names a uuid or a bundled pack.
+        for good in ["0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a", "bundled:buddy"] {
+            bad_path.avatar = BuddyAvatar::Alive {
+                pack_id: good.to_string(),
+            };
+            assert!(validate_persona(&bad_path).is_ok(), "{good}");
+        }
+        let mut moving = persona("Grum", "");
+        moving.motion.intensity = 1.5;
+        assert_eq!(
+            validate_persona(&moving).unwrap_err(),
+            "Motion is between 0 and 1."
+        );
+        moving.motion = BuddyMotionSettings {
+            sleep_after_seconds: 10,
+            ..BuddyMotionSettings::default()
+        };
+        assert!(validate_persona(&moving).is_err());
+        moving.motion = BuddyMotionSettings::default();
+        moving
+            .reactions
+            .insert(BuddyTrigger::Raid, "Big Wave".to_string());
+        assert!(validate_persona(&moving).is_err());
+        moving
+            .reactions
+            .insert(BuddyTrigger::Raid, "surprised".to_string());
+        assert!(validate_persona(&moving).is_ok());
+        // Plan 170 D12: a library link is a uuid or `official:<slug>`.
+        for good in ["7c9e6679-7425-40de-944b-e07fc1ee9a51", "official:golem"] {
+            moving.library_avatar_id = Some(good.to_string());
+            assert!(validate_persona(&moving).is_ok(), "{good}");
+        }
+        for bad in ["", "../x", "Official:Buddy", &"a".repeat(65)] {
+            moving.library_avatar_id = Some(bad.to_string());
+            assert_eq!(
+                validate_persona(&moving).unwrap_err(),
+                "The library avatar id is not a library id.",
+                "{bad}"
+            );
+        }
+        moving.library_avatar_id = None;
+        for bad in [
+            "../x",
+            "bundled:",
+            "0B1E9F0E-6C8A-4C55-9A3F-3F6D2B1C4E5A",
+            "",
+        ] {
+            bad_path.avatar = BuddyAvatar::Alive {
+                pack_id: bad.to_string(),
+            };
+            assert_eq!(
+                validate_persona(&bad_path).unwrap_err(),
+                "The avatar's pack id is not a pack id.",
+                "{bad}"
+            );
+        }
+        let refused = CohostSettings::validated_patch(CohostSettingsPatch {
+            persona: Some(persona("", "")),
+            ..CohostSettingsPatch::default()
+        })
+        .unwrap_err();
+        assert_eq!(refused.code(), "cohost-persona-invalid");
+
+        let template = |text: &str| CohostGreetingTemplate {
+            id: "t".to_string(),
+            kind: CohostActivityTemplateKind::Cheer,
+            platform: None,
+            text: text.to_string(),
+            state: CohostUtteranceState::Talk,
+            enabled: true,
+            reaction: None,
+        };
+        let auto_chat = |templates: Vec<CohostGreetingTemplate>| CohostAutoChat {
+            greetings: CohostGreetingsSettings {
+                enabled: true,
+                templates,
+            },
+            ..CohostAutoChat::default()
+        };
+        assert_eq!(
+            validate_auto_chat(&auto_chat(vec![template("  hi {name} ")]))
+                .unwrap()
+                .greetings
+                .templates[0]
+                .text,
+            "hi {name}"
+        );
+        assert_eq!(
+            validate_auto_chat(&auto_chat(vec![template("   ")])).unwrap_err(),
+            "A greeting template needs some text."
+        );
+        assert!(validate_auto_chat(&auto_chat(vec![template(&"x".repeat(201))])).is_err());
+        assert!(validate_auto_chat(&auto_chat(vec![template("hi"); 61])).is_err());
+        // Plan 168 D14: a greeting's reaction is a plain reaction id.
+        for (reaction, ok) in [
+            ("laugh", true),
+            ("none", true),
+            ("talk-a", true),
+            ("Laugh", false),
+            ("", false),
+        ] {
+            let mut with_reaction = template("hi");
+            with_reaction.reaction = Some(reaction.to_string());
+            assert_eq!(
+                validate_auto_chat(&auto_chat(vec![with_reaction])).is_ok(),
+                ok,
+                "{reaction}"
+            );
+        }
+        let refused = CohostSettings::validated_patch(CohostSettingsPatch {
+            auto_chat: Some(auto_chat(vec![template("")])),
+            ..CohostSettingsPatch::default()
+        })
+        .unwrap_err();
+        assert_eq!(refused.code(), "cohost-auto-chat-invalid");
+        // The kind enum is closed: an unknown kind never deserializes.
+        let unknown = serde_json::from_value::<CohostSettingsPatch>(serde_json::json!({
+            "autoChat": {
+                "mode": "off",
+                "greetings": {
+                    "enabled": true,
+                    "templates": [{ "id": "t", "kind": "hype-train", "text": "hi", "state": "talk", "enabled": true }]
+                },
+                "answers": { "enabled": false, "cooldownSeconds": 20 },
+                "banter": { "enabled": false, "cooldownSeconds": 240 }
+            }
+        }))
+        .unwrap_err();
+        assert!(unknown.to_string().contains("hype-train"), "{unknown}");
+    }
+
+    #[test]
     fn settings_round_trip_through_storage_and_cap_notes() {
         let database = Database::open_in_memory_for_tests();
         assert_eq!(load_cohost_settings(&database), CohostSettings::default());
@@ -12006,6 +13734,8 @@ mod tests {
             listen: None,
             wake_word_required: None,
             remove_confirm: None,
+            persona: None,
+            auto_chat: None,
         });
         assert_eq!(settings.notes.chars().count(), COHOST_NOTES_MAX_CHARS);
         assert_eq!(settings.rules, vec!["No spoilers".to_string()]);
@@ -12306,6 +14036,8 @@ mod tests {
                 listen: None,
                 wake_word_required: None,
                 remove_confirm: None,
+                persona: None,
+                auto_chat: None,
             },
         )
         .await
@@ -12379,6 +14111,8 @@ mod tests {
                 listen: None,
                 wake_word_required: None,
                 remove_confirm: None,
+                persona: None,
+                auto_chat: None,
             },
         )
         .await
@@ -12696,6 +14430,8 @@ mod tests {
                 listen: None,
                 wake_word_required: None,
                 remove_confirm: None,
+                persona: None,
+                auto_chat: None,
             },
         )
         .await
@@ -12957,7 +14693,7 @@ mod tests {
             revoked.listening,
             Some(CohostListening::blocked(
                 "consent-required",
-                "Orcle can hear you once cloud AI consent is on."
+                "Buddy can hear you once cloud AI consent is on."
             ))
         );
         assert!(!crate::captions::listen_wanted_for_test(&state).await);
@@ -13226,7 +14962,7 @@ mod tests {
         .await
         .unwrap();
 
-        // No consent: Orcle never starts the intent.
+        // No consent: Buddy never starts the intent.
         let started = start_cohost(
             &state,
             CohostStartParams {
@@ -13319,7 +15055,7 @@ mod tests {
             "no emit without a change"
         );
 
-        // Every Orcle stop ends the intent.
+        // Every Buddy stop ends the intent.
         stop_cohost(&state).await;
         assert!(!crate::captions::listen_wanted_for_test(&state).await);
         assert_eq!(cohost_status(&state).await.listening, None);
@@ -13853,10 +15589,10 @@ mod tests {
         assert!(utf16(blocked.message.as_deref().unwrap()) <= 2_000);
     }
 
-    /// Finding 4: sign-out purges everything Orcle heard under the account,
+    /// Finding 4: sign-out purges everything Buddy heard under the account,
     /// blocks listening, and drops the answer of a tick in flight.
     #[tokio::test]
-    async fn sign_out_purges_what_orcle_heard_and_blocks_listening() {
+    async fn sign_out_purges_what_buddy_heard_and_blocks_listening() {
         let state = test_state();
         let start = Instant::now();
         note_transcript_final(
@@ -13990,7 +15726,7 @@ mod tests {
             engine.start_session("session-1".to_string(), true, None, Instant::now());
             engine.session.as_mut().unwrap().listening = Some(CohostListening::blocked(
                 "signed-out",
-                "Sign in so Orcle can hear you.",
+                "Sign in so Buddy can hear you.",
             ));
         }
         let mut events = state.events.subscribe();
@@ -14008,7 +15744,7 @@ mod tests {
         assert!(!crate::captions::listen_wanted_for_test(&state).await);
     }
 
-    /// Finding 2: the recording monitor's Orcle stop (a capture end) leaves
+    /// Finding 2: the recording monitor's Buddy stop (a capture end) leaves
     /// the listen-only task to drain in `finish_captions_for_capture`; an
     /// explicit `cohost.stop` still ends it at once.
     #[tokio::test]
@@ -14049,7 +15785,7 @@ mod tests {
         assert!(!crate::captions::caption_task_alive_for_test(&state).await);
     }
 
-    // --- Plan 119 S1: the Orcle report -------------------------------------------
+    // --- Plan 119 S1: the Buddy report -------------------------------------------
 
     fn overlay(message_id: &str, remaining: Duration) -> OverlayObservation {
         OverlayObservation {
@@ -14448,7 +16184,7 @@ mod tests {
         }
     }
 
-    async fn enable_orcle(state: &AppState, enabled: bool) {
+    async fn enable_buddy(state: &AppState, enabled: bool) {
         set_cohost_settings(
             state,
             CohostSettingsPatch {
@@ -14477,24 +16213,24 @@ mod tests {
             .lock()
             .await
             .start_session("s-settings".to_string(), Vec::new());
-        enable_orcle(&state, true).await;
+        enable_buddy(&state, true).await;
         start_cohost(&state, start_params("s-settings"))
             .await
             .unwrap();
         note_messages(&state, &messages("s-settings", 0..3)).await;
-        enable_orcle(&state, false).await;
+        enable_buddy(&state, false).await;
         let report = state
             .database
             .get_cohost_report("s-settings")
             .unwrap()
-            .expect("turning Orcle off saves the report");
+            .expect("turning Buddy off saves the report");
         assert_eq!(report.messages_seen, 3);
         assert_eq!(report.stream_title.as_deref(), Some("Night one"));
         assert_eq!(report.segments, 1);
         assert_eq!(saved_report_ids(&mut events), vec!["s-settings"]);
 
         // Explicit stop.
-        enable_orcle(&state, true).await;
+        enable_buddy(&state, true).await;
         state
             .database
             .ensure_fake_live_chat_session("s-stop")
@@ -14568,7 +16304,7 @@ mod tests {
         );
     }
 
-    /// Plan 140 S1: Orcle is Premium only in the backend too. A Basic account's
+    /// Plan 140 S1: Buddy is Premium only in the backend too. A Basic account's
     /// start is refused before any chat validation or state publication, with
     /// the plan's code and copy; the same start with Premium runs.
     #[tokio::test]
@@ -14583,32 +16319,32 @@ mod tests {
             .lock()
             .await
             .start_session("s-basic".to_string(), Vec::new());
-        enable_orcle(&state, true).await;
+        enable_buddy(&state, true).await;
         let mut events = state.events.subscribe();
 
         let refused = start_cohost_if_entitled(&state, start_params("s-basic"), false)
             .await
-            .expect_err("a Basic account cannot start Orcle");
+            .expect_err("a Basic account cannot start Buddy");
         assert_eq!(refused, CohostError::PremiumRequired);
         assert_eq!(refused.code(), "premium-required");
-        assert_eq!(refused.to_string(), "Orcle requires Videorc Premium.");
+        assert_eq!(refused.to_string(), "Buddy requires Videorc Premium.");
         assert_eq!(cohost_status(&state).await, CohostState::off());
-        // Nothing was published: the renderer keeps its locked Orcle card.
+        // Nothing was published: the renderer keeps its locked Buddy card.
         assert!(events.try_recv().is_err());
 
         let started = start_cohost_if_entitled(&state, start_params("s-basic"), true)
             .await
-            .expect("Premium starts Orcle");
+            .expect("Premium starts Buddy");
         assert_eq!(started.session_id.as_deref(), Some("s-basic"));
         stop_cohost(&state).await;
     }
 
-    /// Plan 140 S1: a mid-session Premium lapse ends Orcle through the normal
+    /// Plan 140 S1: a mid-session Premium lapse ends Buddy through the normal
     /// stop path. The report is saved and announced, the published off state
     /// names the reason, and nothing happens while Premium holds or when
     /// nothing is running.
     #[tokio::test]
-    async fn a_premium_lapse_stops_orcle_and_saves_its_report() {
+    async fn a_premium_lapse_stops_buddy_and_saves_its_report() {
         let state = test_state();
         state
             .database
@@ -14619,7 +16355,7 @@ mod tests {
             .lock()
             .await
             .start_session("s-lapse".to_string(), Vec::new());
-        enable_orcle(&state, true).await;
+        enable_buddy(&state, true).await;
         start_cohost(&state, start_params("s-lapse")).await.unwrap();
         note_messages(&state, &messages("s-lapse", 0..4)).await;
         // A debug build without the Basic override resolves to the Developer
@@ -14663,9 +16399,9 @@ mod tests {
         assert!(events.try_recv().is_err());
     }
 
-    /// Orcle turned off and back on mid-stream: one report, merged.
+    /// Buddy turned off and back on mid-stream: one report, merged.
     #[tokio::test]
-    async fn orcle_off_and_on_mid_stream_folds_into_one_report() {
+    async fn buddy_off_and_on_mid_stream_folds_into_one_report() {
         let state = test_state();
         state.database.ensure_fake_live_chat_session("s-1").unwrap();
         state
@@ -14673,10 +16409,10 @@ mod tests {
             .lock()
             .await
             .start_session("s-1".to_string(), Vec::new());
-        enable_orcle(&state, true).await;
+        enable_buddy(&state, true).await;
         start_cohost(&state, start_params("s-1")).await.unwrap();
         note_messages(&state, &messages("s-1", 0..3)).await;
-        enable_orcle(&state, false).await;
+        enable_buddy(&state, false).await;
         assert_eq!(
             state
                 .database
@@ -14687,7 +16423,7 @@ mod tests {
             3
         );
 
-        enable_orcle(&state, true).await;
+        enable_buddy(&state, true).await;
         start_cohost(&state, start_params("s-1")).await.unwrap();
         note_messages(&state, &messages("s-1", 3..8)).await;
         stop_cohost(&state).await;
@@ -14782,7 +16518,7 @@ mod tests {
                 target,
                 question: false,
             },
-            heard: "orcle test".to_string(),
+            heard: "buddy test".to_string(),
             reason: None,
             wake_word: true,
         }
@@ -14792,7 +16528,7 @@ mod tests {
         NewCommand {
             intent: CommandIntent::Remove,
             spec: CommandTargetSpec::Resolved(vec![message_id.to_string()]),
-            heard: "orcle remove that one".to_string(),
+            heard: "buddy remove that one".to_string(),
             reason: Some("toxic".to_string()),
             wake_word: true,
         }
@@ -14863,7 +16599,7 @@ mod tests {
             provider_message_id: message.provider_message_id.clone(),
             author_name: message.author_name.clone(),
             excerpt: message.message_text.clone(),
-            source: ModerationSource::OrcleVoice,
+            source: ModerationSource::BuddyVoice,
             reason: Some("toxic".to_string()),
             phase,
             confirm_mode: RemoveConfirmMode::Confirm,
@@ -14940,7 +16676,7 @@ mod tests {
     }
 
     /// A Twitch chat session holding `rows` (with `sender` as its delete
-    /// credentials) and an Orcle session on it that noted them.
+    /// credentials) and a Buddy session on it that noted them.
     async fn command_state(
         rows: &[LiveChatMessage],
         sender: Option<crate::live_chat::ChatSenderConfig>,
@@ -15078,9 +16814,9 @@ mod tests {
         }
     }
 
-    fn set_orcle_flags(state: &AppState, orcle: &str) {
+    fn set_buddy_flags(state: &AppState, buddy: &str) {
         let flags = crate::service_flags::parse_service_flags(
-            &format!(r#"{{"version":1,"orcle":{orcle}}}"#),
+            &format!(r#"{{"version":1,"orcle":{buddy}}}"#),
             chrono::Utc::now(),
         )
         .unwrap();
@@ -15133,10 +16869,10 @@ mod tests {
         // A command: camelCase keys, kebab-case enums, empty optionals omitted.
         let command = CohostCommand {
             id: "cmd-1".to_string(),
-            heard: "orcle highlight coders x".to_string(),
+            heard: "buddy highlight coders x".to_string(),
             kind: CohostCommandKind::Highlight,
             status: CohostCommandStatus::NotFound,
-            message: "Orcle couldn't find a comment from coders x.".to_string(),
+            message: "Buddy couldn't find a comment from coders x.".to_string(),
             target: None,
             candidates: Vec::new(),
             operation_id: None,
@@ -15148,10 +16884,10 @@ mod tests {
             serde_json::to_value(&command).unwrap(),
             serde_json::json!({
                 "id": "cmd-1",
-                "heard": "orcle highlight coders x",
+                "heard": "buddy highlight coders x",
                 "kind": "highlight",
                 "status": "not-found",
-                "message": "Orcle couldn't find a comment from coders x.",
+                "message": "Buddy couldn't find a comment from coders x.",
                 "at": "2026-10-04T12:00:00Z"
             })
         );
@@ -15205,7 +16941,7 @@ mod tests {
         assert_eq!(
             session.resolve_command_name("old timer", false, now),
             CommandResolution::NotFound(
-                "Orcle couldn't find a comment from old timer.".to_string()
+                "Buddy couldn't find a comment from old timer.".to_string()
             )
         );
         assert_eq!(
@@ -15392,7 +17128,7 @@ mod tests {
             assert_eq!(session.highlight_deixis(now), None);
             assert_eq!(
                 session.resolve_removal_deixis(Some(owner.id.as_str()), now, chrono::Utc::now()),
-                CommandResolution::NotFound("Orcle couldn't find a comment to remove.".to_string())
+                CommandResolution::NotFound("Buddy couldn't find a comment to remove.".to_string())
             );
         }
         // An id handed in from elsewhere (S8) gets the same rules.
@@ -15404,7 +17140,7 @@ mod tests {
                 NewCommand {
                     intent: CommandIntent::Highlight,
                     spec: CommandTargetSpec::Resolved(vec![owner.id.clone(), raid.id.clone()]),
-                    heard: "orcle show that".to_string(),
+                    heard: "buddy show that".to_string(),
                     reason: None,
                     wake_word: true,
                 },
@@ -15413,7 +17149,7 @@ mod tests {
             .unwrap();
         let command = current_command(&engine);
         assert_eq!(command.status, CohostCommandStatus::NotFound);
-        assert_eq!(command.message, "Orcle couldn't find that comment.");
+        assert_eq!(command.message, "Buddy couldn't find that comment.");
         assert!(engine.snapshot().auto_highlight.is_none());
     }
 
@@ -15490,7 +17226,7 @@ mod tests {
     }
 
     #[test]
-    fn a_highlight_of_a_comment_orcle_flagged_high_asks_first() {
+    fn a_highlight_of_a_comment_buddy_flagged_high_asks_first() {
         let now = Instant::now();
         let rows = vec![
             command_row(1, "grumpy_gus", StreamPlatform::Twitch, "you are bad"),
@@ -15522,7 +17258,7 @@ mod tests {
         assert_eq!(card.kind, CohostCommandKind::Highlight);
         assert_eq!(
             card.message,
-            "Orcle flagged this (harassment). Show it anyway?"
+            "Buddy flagged this (harassment). Show it anyway?"
         );
         assert!(card.expires_at.is_some() && card.operation_id.is_none());
         assert!(
@@ -15798,7 +17534,7 @@ mod tests {
                 NewCommand {
                     intent: CommandIntent::Highlight,
                     spec: CommandTargetSpec::Resolved(vec![rows[0].id.clone(), rows[1].id.clone()]),
-                    heard: "orcle show one of those".to_string(),
+                    heard: "buddy show one of those".to_string(),
                     reason: None,
                     wake_word: true,
                 },
@@ -15835,7 +17571,7 @@ mod tests {
             ctx.on_stream = Some(rows[0].id.clone());
             ctx
         };
-        // "Orcle, remove it": the card on stream is the one.
+        // "Buddy, remove it": the card on stream is the one.
         let operation = open_removal_card(
             &mut engine,
             &scope,
@@ -15916,7 +17652,7 @@ mod tests {
             })
             .collect();
         let (mut engine, scope) = command_engine(now, &rows);
-        let hidden = "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Orcle remove messages.";
+        let hidden = "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages.";
         let outcomes = [
             (
                 ModerationPhase::Removed,
@@ -16051,7 +17787,7 @@ mod tests {
             command_row(2, "ada", StreamPlatform::Twitch, "hello"),
         ];
         let (state, scope) = command_state(&rows, fake_deletes()).await;
-        // Orcle flagged it a moment ago: "this one" is that comment.
+        // Buddy flagged it a moment ago: "this one" is that comment.
         state
             .cohost
             .lock()
@@ -16095,7 +17831,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(operation.phase, ModerationPhase::PendingConfirm);
-        assert_eq!(operation.source, ModerationSource::OrcleVoice);
+        assert_eq!(operation.source, ModerationSource::BuddyVoice);
         assert_eq!(operation.message_id, rows[0].id);
         assert_eq!(operation.reason.as_deref(), Some("toxic"));
         assert_eq!(card.expires_at, operation.confirm_by);
@@ -16292,7 +18028,7 @@ mod tests {
                 .request_removal
                 .map(|request| request.confirm_mode)
         };
-        // "Orcle, remove ada's comment": the setting applies.
+        // "Buddy, remove ada's comment": the setting applies.
         assert_eq!(
             mode_for(&mut engine, spoken(CommandIntent::Remove, named("ada"))),
             Some(RemoveConfirmMode::Countdown)
@@ -16439,11 +18175,11 @@ mod tests {
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), false).await;
         let refused = state_command(&state).await;
         assert_eq!(refused.status, CohostCommandStatus::Unavailable);
-        assert_eq!(refused.message, "Orcle requires Videorc Premium.");
+        assert_eq!(refused.message, "Buddy requires Videorc Premium.");
         assert!(no_operations(&state));
 
         // Removing paused by Videorc: the same, with its own line.
-        set_orcle_flags(&state, r#"{"remove":false}"#);
+        set_buddy_flags(&state, r#"{"remove":false}"#);
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
         let paused = state_command(&state).await;
         assert_eq!(paused.status, CohostCommandStatus::Unavailable);
@@ -16456,14 +18192,14 @@ mod tests {
                 remove: CohostSwitchState::Paused,
             })
         );
-        set_orcle_flags(&state, "{}");
+        set_buddy_flags(&state, "{}");
 
         // Chat moderation's own Premium check refuses: unavailable too.
         crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| false)).await;
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
         let premium = state_command(&state).await;
         assert_eq!(premium.status, CohostCommandStatus::Unavailable);
-        assert_eq!(premium.message, "Orcle requires Videorc Premium.");
+        assert_eq!(premium.message, "Buddy requires Videorc Premium.");
         crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| true)).await;
 
         // The rate limit: ten removals a minute, then a plain refusal.
@@ -16503,13 +18239,13 @@ mod tests {
     async fn the_voice_kill_switch_stops_detection_and_every_command() {
         let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hello")];
         let (state, scope) = command_state(&rows, None).await;
-        set_orcle_flags(&state, r#"{"voiceCommands":false}"#);
+        set_buddy_flags(&state, r#"{"voiceCommands":false}"#);
         // Detection stops.
         assert!(
             detect_voice_command(
                 &state,
                 &caption_final(1),
-                &spoken_final("Orcle, highlight coders x.")
+                &spoken_final("Buddy, highlight coders x.")
             )
             .is_none()
         );
@@ -16546,11 +18282,11 @@ mod tests {
             })
         );
         // Back on: heard again, and the state stops saying paused.
-        set_orcle_flags(&state, "{}");
+        set_buddy_flags(&state, "{}");
         let (_, command) = detect_voice_command(
             &state,
             &caption_final(2),
-            &spoken_final("Orcle, highlight coders x."),
+            &spoken_final("Buddy, highlight coders x."),
         )
         .unwrap();
         assert_eq!(command.kind, CommandKind::Highlight);
@@ -16591,11 +18327,11 @@ mod tests {
             )
             .is_none()
         );
-        // ...with "Orcle" first it is a command.
+        // ...with "Buddy" first it is a command.
         let (session, command) = detect_voice_command(
             &state,
             &caption_final(2),
-            &spoken_final("Orcle, remove it from our chat."),
+            &spoken_final("Buddy, remove it from our chat."),
         )
         .unwrap();
         assert_eq!(session.session_id, "session-1");
@@ -16807,7 +18543,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orcle_says_it_did_not_catch_an_unclear_request_unless_a_card_is_open() {
+    async fn buddy_says_it_did_not_catch_an_unclear_request_unless_a_card_is_open() {
         let rows = vec![
             command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
             command_row(2, "coders_y", StreamPlatform::Twitch, "which editor?"),
@@ -16829,7 +18565,7 @@ mod tests {
         );
         assert_eq!(
             unheard.message,
-            "Orcle didn't catch that: 'what is the weather'."
+            "Buddy didn't catch that: 'what is the weather'."
         );
         assert_eq!(state_counts(&state).await.not_found, 1);
         // Never without the wake word.
@@ -16999,7 +18735,7 @@ mod tests {
             "videorc-desktop/test",
             COMMAND_SESSION,
             seq,
-            "orcle show what they just asked",
+            "buddy show what they just asked",
             None,
             ids.iter()
                 .map(|id| CohostCommandCandidate {
@@ -17097,7 +18833,7 @@ mod tests {
             ),
             (
                 parse_answer(7, "highlight", 0.9, &[("elsewhere", 0.99)]),
-                "a comment Orcle never sent",
+                "a comment Buddy never sent",
             ),
             (
                 parse_answer(8, "highlight", 0.9, &[("m1", 0.9)]),
@@ -17171,7 +18907,7 @@ mod tests {
             session_id: COMMAND_SESSION.to_string(),
             generation,
         };
-        let heard = "  orcle show what ada asked ";
+        let heard = "  buddy show what ada asked ";
         // Off until the capability read says otherwise.
         assert!(!engine.command_parser_ready(&scope, true, true, now));
         assert_eq!(
@@ -17198,7 +18934,7 @@ mod tests {
             .expect("a parse");
         let request = &prepared.request;
         assert_eq!(request.seq, 1);
-        assert_eq!(request.utterance, "orcle show what ada asked");
+        assert_eq!(request.utterance, "buddy show what ada asked");
         assert!(request.consent_to_process_chat);
         assert_eq!(request.session_client_id, COMMAND_SESSION);
         assert_eq!(
@@ -17233,7 +18969,7 @@ mod tests {
         let prepared = engine
             .prepare_command_parse(
                 &scope,
-                "orcle that one",
+                "buddy that one",
                 Some(rows[0].id.as_str()),
                 true,
                 true,
@@ -17278,7 +19014,7 @@ mod tests {
             command_row(2, "ada", StreamPlatform::Twitch, "hello"),
         ];
         let (state, scope) = command_state(&rows, None).await;
-        let heard = "orcle show what coders x just asked";
+        let heard = "buddy show what coders x just asked";
         let tokens = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let token = {
@@ -17344,7 +19080,7 @@ mod tests {
 
         // A timeout and an error envelope are "didn't catch that", never a retry.
         for error in [
-            CohostApiError::timeout("Orcle did not answer within 2 s."),
+            CohostApiError::timeout("Buddy did not answer within 2 s."),
             crate::videorc_api::classify_cohost_failure(
                 504,
                 "judge-timeout",
@@ -17424,7 +19160,7 @@ mod tests {
         let resolution = resolve_unknown_command_with(
             &state,
             &scope,
-            "orcle get rid of that nonsense",
+            "buddy get rid of that nonsense",
             true,
             || Some("bearer".to_string()),
             move |_token: String, request: CohostCommandRequest| {
@@ -17458,5 +19194,441 @@ mod tests {
             state_command(&state).await.kind,
             CohostCommandKind::Highlight
         );
+    }
+
+    // --- Plan 164 Phase D: automatic chat at the engine level ---------------------
+
+    fn auto_chat_settings(mode: CohostAutoChatMode) -> CohostAutoChat {
+        CohostAutoChat {
+            mode,
+            greetings: CohostGreetingsSettings {
+                enabled: true,
+                templates: vec![CohostGreetingTemplate {
+                    id: "t-follow".to_string(),
+                    kind: CohostActivityTemplateKind::Follow,
+                    platform: None,
+                    text: "Welcome {name}!".to_string(),
+                    state: CohostUtteranceState::Talk,
+                    enabled: true,
+                    reaction: None,
+                }],
+            },
+            answers: CohostCooldownBehaviour {
+                enabled: true,
+                cooldown_seconds: 20,
+            },
+            banter: CohostCooldownBehaviour {
+                enabled: true,
+                cooldown_seconds: 240,
+            },
+        }
+    }
+
+    fn running_engine_with(
+        mode: CohostAutoChatMode,
+        web_tick: Option<u32>,
+        now: Instant,
+    ) -> (CohostEngine, u64) {
+        let mut settings = enabled_settings();
+        settings.auto_chat = auto_chat_settings(mode);
+        let mut engine = CohostEngine::new(settings);
+        engine.set_web_tick_version(web_tick);
+        let generation = engine.start_session(
+            "session-1".to_string(),
+            true,
+            Some("Rust night".into()),
+            now,
+        );
+        (engine, generation)
+    }
+
+    fn quiet_voice(now: Instant) -> VoiceActivity {
+        VoiceActivity {
+            last_voice_at: Some(now - Duration::from_secs(40)),
+            last_frame_at: Some(now),
+            last_signal_at: Some(now),
+            live_since: Some(now - Duration::from_secs(120)),
+        }
+    }
+
+    fn addressed_question(message_id: &str) -> CohostTickQuestion {
+        CohostTickQuestion {
+            addressed: true,
+            mood: Some(CohostTickMood::Amused),
+            ..question("q_addr", &[message_id])
+        }
+    }
+
+    #[test]
+    fn a_v3_web_never_sends_the_persona_and_a_v4_web_does() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, None, start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 3);
+        assert_eq!(prepared.request.persona, None);
+        assert_eq!(prepared.request.intent, None);
+        let body = serde_json::to_value(&prepared.request).unwrap();
+        assert!(
+            body.get("persona").is_none(),
+            "a v3 body stays byte-identical"
+        );
+        assert!(body.get("intent").is_none());
+
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(4), start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 4);
+        assert_eq!(
+            prepared.request.persona,
+            Some(CohostTickPersona {
+                name: "Buddy".to_string(),
+                personality: String::new(),
+            })
+        );
+        // A web that rolled back: the ladder steps to v3 and the persona leaves.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(
+                400,
+                "prompt-version-unsupported",
+                "promptVersion 4 is not supported."
+            )),
+            start + Duration::from_secs(2),
+            "2026-08-22T10:00:02Z",
+        ));
+        let retried = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(11))
+            .unwrap();
+        assert_eq!(retried.request.prompt_version, 3);
+        assert_eq!(retried.request.persona, None);
+        // A web that reports a lower tick version keeps v3 for a new session.
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(3), start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 3);
+        assert_eq!(prepared.request.persona, None);
+    }
+
+    #[test]
+    fn an_addressed_question_is_answered_in_auto_proposed_in_suggest_and_ignored_off() {
+        let start = Instant::now();
+        let rows = messages("session-1", 0..5);
+        let run = |mode: CohostAutoChatMode, addressed: bool| {
+            let (mut engine, generation) = running_engine_with(mode, Some(4), start);
+            engine.note_messages(&rows);
+            let prepared = engine
+                .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(prepared.request.prompt_version, 4);
+            let mut tick_question = addressed_question(&rows[0].id);
+            tick_question.addressed = addressed;
+            assert!(engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![tick_question])),
+                start + Duration::from_secs(2),
+                "2026-08-22T10:00:02Z",
+            ));
+            let pass = engine.route_answer_candidates(
+                generation,
+                start + Duration::from_secs(2),
+                "2026-08-22T10:00:02Z",
+            );
+            (engine, pass)
+        };
+        let (engine, auto) = run(CohostAutoChatMode::Auto, true);
+        assert_eq!(auto.send.len(), 1, "{auto:?}");
+        assert!(auto.propose.is_empty());
+        let answer = &auto.send[0];
+        assert_eq!(answer.text, "Keychron Q1!");
+        assert_eq!(
+            answer.state,
+            CohostUtteranceState::Laugh,
+            "amused reads as laugh"
+        );
+        assert_eq!(answer.trigger.kind, CohostUtteranceTriggerKind::Answer);
+        assert_eq!(
+            answer.trigger.message_id.as_deref(),
+            Some(rows[0].id.as_str())
+        );
+        assert_eq!(answer.destination_ids, vec!["twitch".to_string()]);
+        assert_eq!(engine.snapshot().utterances.len(), 1);
+
+        let (_, suggest) = run(CohostAutoChatMode::Suggest, true);
+        assert!(suggest.send.is_empty());
+        assert_eq!(suggest.propose.len(), 1);
+        assert_eq!(suggest.propose[0].status, CohostUtteranceStatus::Proposed);
+
+        let (engine, off) = run(CohostAutoChatMode::Off, true);
+        assert_eq!(off, AutoChatPass::default());
+        assert!(engine.snapshot().utterances.is_empty());
+
+        // An unaddressed question stays a suggestion in the pane (S-D3).
+        let (_, unaddressed) = run(CohostAutoChatMode::Auto, false);
+        assert_eq!(unaddressed, AutoChatPass::default());
+        // The same question on a later tick is not answered twice.
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        for tick in 1..=2u64 {
+            // Fresh chat each tick, past the idle interval.
+            engine.note_messages(&messages(
+                "session-1",
+                (tick as u32 - 1) * 5..tick as u32 * 5,
+            ));
+            let at = start + Duration::from_secs(tick * 30);
+            engine.prepare_tick(generation, true, true, at).unwrap();
+            assert!(engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![addressed_question(&rows[0].id)])),
+                at,
+                "2026-08-22T10:00:02Z",
+            ));
+            let pass = engine.route_answer_candidates(generation, at, "2026-08-22T10:00:02Z");
+            assert_eq!(pass.send.len(), usize::from(tick == 1));
+        }
+    }
+
+    #[test]
+    fn banter_rides_a_v4_session_on_dead_air_and_the_mode_gates_it() {
+        let start = Instant::now();
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        // A live microphone, quiet for 40 s.
+        let at = start + Duration::from_secs(30);
+        let prepared = engine
+            .prepare_banter(generation, true, quiet_voice(at), at)
+            .expect("banter is due");
+        assert_eq!(prepared.request.intent, Some(CohostTickIntent::Banter));
+        assert!(prepared.request.messages.is_empty());
+        assert_eq!(prepared.request.transcript, None);
+        assert!(prepared.request.persona.is_some());
+        // Nothing else leaves while it is in flight.
+        assert!(engine.prepare_tick(generation, true, true, at).is_err());
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let pass = engine.apply_banter_result(
+            generation,
+            Ok(CohostTickResponse {
+                banter: Some(crate::videorc_api::CohostTickBanter {
+                    text: " Chat, the keyboard is louder than the game. ".to_string(),
+                    mood: Some(CohostTickMood::Thinking),
+                }),
+                ..CohostTickResponse::default()
+            }),
+            at + Duration::from_secs(1),
+            "2026-08-22T10:00:31Z",
+        );
+        assert_eq!(pass.send.len(), 1);
+        assert_eq!(
+            pass.send[0].text,
+            "Chat, the keyboard is louder than the game."
+        );
+        assert_eq!(pass.send[0].state, CohostUtteranceState::Think);
+        assert_eq!(
+            pass.send[0].trigger.kind,
+            CohostUtteranceTriggerKind::Banter
+        );
+        assert!(
+            pass.send[0].destination_ids.is_empty(),
+            "every writable destination"
+        );
+        // The lane is free again, and the cooldown holds the next one.
+        let later = at + Duration::from_secs(5);
+        engine.note_messages(&messages("session-1", 0..5));
+        assert!(
+            engine
+                .prepare_tick(generation, true, true, later + Duration::from_secs(10))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(later), later)
+                .is_none()
+        );
+
+        // Off: never. v3: never. Not signed in or not Premium: never.
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(4), start);
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Auto, None, start);
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        assert!(
+            engine
+                .prepare_banter(generation, false, quiet_voice(at), at)
+                .is_none()
+        );
+        // A banter failure frees the lane without pausing the session.
+        let prepared = engine
+            .prepare_banter(generation, true, quiet_voice(at), at)
+            .unwrap();
+        let pass = engine.apply_banter_result(
+            prepared.generation,
+            Err(server_error(502, "ai-gateway-error", "upstream")),
+            at + Duration::from_secs(1),
+            "2026-08-22T10:00:31Z",
+        );
+        assert!(pass.send.is_empty());
+        assert_eq!(pass.log.len(), 1);
+        assert_eq!(engine.snapshot().status, CohostStatus::Listening);
+        engine.note_messages(&messages("session-1", 0..5));
+        assert!(
+            engine
+                .prepare_tick(generation, true, true, at + Duration::from_secs(10))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_proposed_card_is_refused_once_the_mode_is_off() {
+        let start = Instant::now();
+        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Suggest, None, start);
+        let mut follow =
+            crate::live_chat::fake_events_for_tests("session-1", StreamPlatform::Twitch, None)
+                .into_iter()
+                .find(|row| row.raw_provider_type.as_deref() == Some("follow"))
+                .unwrap();
+        follow.published_at = chrono::Utc::now().to_rfc3339();
+        let pass = engine.note_activity(&[follow], start, &chrono::Utc::now().to_rfc3339());
+        assert_eq!(pass.propose.len(), 1);
+        let id = pass.propose[0].id.clone();
+        assert_eq!(engine.auto_chat_session_id().as_deref(), Some("session-1"));
+        engine.settings.auto_chat.mode = CohostAutoChatMode::Off;
+        assert_eq!(
+            engine.approve_utterance(&id, start + Duration::from_secs(1)),
+            Err(CohostError::AutoChatOff)
+        );
+        engine.settings.auto_chat.mode = CohostAutoChatMode::Suggest;
+        let approved = engine
+            .approve_utterance(&id, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(approved.text, "Welcome new_friend!");
+        assert!(engine.mark_utterance(&id, CohostUtteranceStatus::Sent));
+        assert_eq!(
+            engine.approve_utterance(&id, start),
+            Err(CohostError::UtteranceUnavailable(
+                "That Buddy card was already answered."
+            ))
+        );
+        let state = engine.snapshot();
+        assert_eq!(state.utterances[0].status, CohostUtteranceStatus::Sent);
+        assert_eq!(state.auto_chat_sends, 0, "counted only when a send lands");
+        engine.note_automatic_sent(start);
+        assert_eq!(engine.snapshot().auto_chat_sends, 1);
+        // Buddy operations are its own, never the streamer's reply.
+        engine.register_buddy_operation("op-buddy");
+        assert!(engine.is_buddy_operation("op-buddy"));
+        assert!(!engine.is_buddy_operation("op-streamer"));
+    }
+
+    /// Plan 164 D7: the Say box with the chat mode off and the Buddy on an
+    /// output is one bubble-only utterance, never a send; with both output
+    /// switches off the utterance is recorded and nothing is shown; a named
+    /// session that is not the live one is refused.
+    #[tokio::test]
+    async fn say_with_the_mode_off_and_the_overlay_on_is_a_bubble_never_a_send() {
+        let state = test_state();
+        let mut rx = state.events.subscribe();
+        let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        assert_eq!(
+            state.cohost.lock().await.auto_chat_mode(),
+            CohostAutoChatMode::Off
+        );
+        let shown = say_utterance(
+            &state,
+            crate::protocol::CohostSayParams {
+                session_id: String::new(),
+                text: "  Hello   horde ".to_string(),
+                state: Some(CohostUtteranceState::Laugh),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(shown.utterances.len(), 1);
+        let said = &shown.utterances[0];
+        assert_eq!(said.status, CohostUtteranceStatus::BubbleOnly);
+        assert_eq!(said.trigger.kind, CohostUtteranceTriggerKind::Manual);
+        assert_eq!(said.text, "Hello   horde");
+        assert_eq!(shown.auto_chat_sends, 0);
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.event, COHOST_STATE_EVENT);
+        let bubble = rx.recv().await.unwrap();
+        assert_eq!(bubble.event, crate::buddy_overlay::BUDDY_STATE_EVENT);
+        assert_eq!(bubble.payload["state"], "laugh");
+        assert_eq!(bubble.payload["bubble"]["text"], "Hello horde");
+        assert_eq!(
+            crate::buddy_overlay::status(&state)
+                .await
+                .bubble
+                .unwrap()
+                .text,
+            "Hello horde"
+        );
+        assert_eq!(state.cohost.lock().await.auto_chat_session_id(), None);
+
+        // A named session that is not live is refused before anything moves.
+        let refused = say_utterance(
+            &state,
+            crate::protocol::CohostSayParams {
+                session_id: "session-nope".to_string(),
+                text: "x".to_string(),
+                state: None,
+            },
+        )
+        .await;
+        assert!(matches!(refused, Err(CohostError::SessionMismatch)));
+        assert!(rx.try_recv().is_err());
+
+        // Both output switches off: the utterance is kept, the bubble is not.
+        layout.buddy.show_on_stream = false;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        crate::buddy_overlay::clear(&state).await;
+        assert_eq!(
+            rx.recv().await.unwrap().event,
+            crate::buddy_overlay::BUDDY_STATE_EVENT
+        );
+        let shown = say_utterance(
+            &state,
+            crate::protocol::CohostSayParams {
+                session_id: String::new(),
+                text: "Quiet one".to_string(),
+                state: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(shown.utterances.len(), 2);
+        assert_eq!(
+            shown.utterances[1].status,
+            CohostUtteranceStatus::BubbleOnly
+        );
+        assert_eq!(rx.recv().await.unwrap().event, COHOST_STATE_EVENT);
+        assert!(
+            rx.try_recv().is_err(),
+            "no bubble with the Buddy on no output"
+        );
+        assert_eq!(crate::buddy_overlay::status(&state).await.bubble, None);
     }
 }

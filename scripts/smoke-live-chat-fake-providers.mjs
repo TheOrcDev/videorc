@@ -600,12 +600,12 @@ try {
         }
       ]
     })
-    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6017, timeoutMs)
+    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6018, timeoutMs)
     if (
       rolledTotals.supporters !== eventTotals.supporters ||
       rolledTotals.bits !== eventTotals.bits ||
       JSON.stringify(rolledTotals.tips) !== JSON.stringify(eventTotals.tips) ||
-      rolledTotals.chatters !== 10
+      rolledTotals.chatters !== 11
     ) {
       throw new Error(
         'Whole-session accounting changed when paid rows rolled out of the live buffer.'
@@ -630,6 +630,14 @@ try {
       throw new Error('Finished History accounting changed after local clear and stop.')
     }
 
+    // Plan 164 Phase D: the Buddy's greetings post as the streamer through
+    // the same send path. In `auto` with three enabled templates, every
+    // fake activity row with a template earns exactly one send on the
+    // destination it came from (the throttle spaces them: 5 s apart per
+    // destination, so each platform's rows land one per gap), and with the
+    // mode `off` nothing is sent at all.
+    await assertBuddyGreetings(ws)
+
     console.log(
       `Unified-comments fake-provider smoke OK - ${diagnostics.messagesReceived} messages, ` +
         `${diagnostics.duplicatesSkipped} duplicate(s) skipped, sent/failed/read-only/timeout ` +
@@ -642,6 +650,167 @@ try {
   }
 } finally {
   await stopApp()
+}
+
+async function assertBuddyGreetings(ws) {
+  const settingsBefore = await request(ws, timeoutMs, 'cohost.settings.get', {})
+  const templates = [
+    { id: 'smoke-follow', kind: 'follow', text: 'Welcome {name}!', state: 'talk', enabled: true },
+    {
+      id: 'smoke-raid',
+      kind: 'raid',
+      text: '{name} brings {count} warriors',
+      state: 'laugh',
+      enabled: true
+    },
+    {
+      id: 'smoke-superchat',
+      kind: 'super-chat',
+      platform: 'youtube',
+      text: '{amount} from {name}, thanks',
+      state: 'talk',
+      enabled: true
+    }
+  ]
+  const autoChat = (mode) => ({
+    mode,
+    greetings: { enabled: true, templates },
+    answers: { enabled: false, cooldownSeconds: 20 },
+    banter: { enabled: false, cooldownSeconds: 240 }
+  })
+  const buddyDestinations = [
+    { platform: 'twitch', targetId: 'smoke-buddy-twitch' },
+    { platform: 'youtube', targetId: 'smoke-buddy-youtube' },
+    { platform: 'kick', targetId: 'smoke-buddy-kick' }
+  ]
+  const startBuddySession = async (sessionId) => {
+    const operations = collectEvent(ws, 'liveChat.sendOperation')
+    const states = collectEvent(ws, 'cohost.state')
+    await request(ws, timeoutMs, 'liveChat.start', {
+      sessionId,
+      platforms: ['twitch', 'youtube', 'kick'],
+      destinations: buddyDestinations.map(({ platform, targetId }) => ({
+        platform,
+        targetId,
+        read: 'ready',
+        write: 'ready'
+      })),
+      fakes: buddyDestinations.map((destination) => ({
+        ...destination,
+        count: 1,
+        intervalMs: 60,
+        events: true
+      }))
+    })
+    return { operations, states }
+  }
+  const terminalSends = (operations, sessionId) =>
+    operations.payloads.filter(
+      (operation) =>
+        operation.sessionId === sessionId &&
+        (operation.phase === 'sent' ||
+          operation.phase === 'partial' ||
+          operation.phase === 'failed')
+    )
+
+  // Auto: three templates, three fake destinations. Twitch delivers a raid
+  // and a follow (two sends, the second 5 s after the first), YouTube one
+  // Super Chat, Kick one follow. Nothing else has a template.
+  await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: autoChat('auto') })
+  const autoSessionId = `smoke-buddy-auto-${Date.now()}`
+  const auto = await startBuddySession(autoSessionId)
+  const expectedSends = [
+    { targetId: 'smoke-buddy-twitch', text: 'raider42 brings 234 warriors' },
+    { targetId: 'smoke-buddy-youtube', text: '$5.00 from Maria, thanks' },
+    { targetId: 'smoke-buddy-kick', text: 'Welcome kick_fan!' },
+    { targetId: 'smoke-buddy-twitch', text: 'Welcome new_friend!' }
+  ]
+  await waitFor(
+    () => terminalSends(auto.operations, autoSessionId).length >= expectedSends.length,
+    Math.max(timeoutMs, 20_000),
+    `the ${expectedSends.length} Buddy greetings`
+  )
+  // Give any extra (wrong) send a moment to show up before counting.
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_500))
+  const sends = terminalSends(auto.operations, autoSessionId)
+  const landed = sends.map((operation) => ({
+    targetId: operation.destinations.map((delivery) => delivery.destinationId).join(','),
+    text: operation.text,
+    phases: operation.destinations.map((delivery) => delivery.phase).join(',')
+  }))
+  if (sends.length !== expectedSends.length) {
+    throw new Error(
+      `Buddy sent ${sends.length} greetings, expected ${expectedSends.length}: ${JSON.stringify(landed)}`
+    )
+  }
+  for (const expected of expectedSends) {
+    const match = landed.find(
+      (entry) => entry.targetId === expected.targetId && entry.text === expected.text
+    )
+    if (!match || match.phases !== 'sent') {
+      throw new Error(
+        `Buddy greeting missing or not sent: ${JSON.stringify(expected)} in ${JSON.stringify(landed)}`
+      )
+    }
+  }
+  // Each greeting went to its own destination only (plan 164 D8).
+  if (landed.some((entry) => entry.targetId.includes(','))) {
+    throw new Error(`A Buddy greeting fanned out: ${JSON.stringify(landed)}`)
+  }
+  // The Twitch follow waited for the 5 s gap after the raid (plan 164 D9).
+  const twitchOrder = sends
+    .filter((operation) => operation.destinations[0]?.destinationId === 'smoke-buddy-twitch')
+    .map((operation) => ({ text: operation.text, at: Date.parse(operation.createdAt) }))
+  if (
+    twitchOrder.length !== 2 ||
+    twitchOrder[0].text !== 'raider42 brings 234 warriors' ||
+    twitchOrder[1].at - twitchOrder[0].at < 4_500
+  ) {
+    throw new Error(`Buddy greetings on Twitch broke the 5 s gap: ${JSON.stringify(twitchOrder)}`)
+  }
+  // The state carries every utterance as sent, and counts the sends.
+  const sentState = auto.states.payloads.at(-1)
+  if (
+    (sentState?.autoChatSends ?? 0) !== expectedSends.length ||
+    !Array.isArray(sentState?.utterances) ||
+    sentState.utterances.filter((utterance) => utterance.status === 'sent').length !==
+      expectedSends.length
+  ) {
+    throw new Error(`cohost.state did not carry the Buddy's sends: ${JSON.stringify(sentState)}`)
+  }
+  // The report has every post, written as each one landed (plan 164 D10).
+  const autoReport = await request(ws, timeoutMs, 'cohost.report.get', { sessionId: autoSessionId })
+  const posts = autoReport?.report?.posts ?? []
+  if (posts.length !== expectedSends.length || posts.some((post) => post.result !== 'sent')) {
+    throw new Error(`The Buddy report lost posts: ${JSON.stringify(autoReport?.report)}`)
+  }
+  await request(ws, timeoutMs, 'liveChat.stop', {})
+
+  // Off: the same templates, the same rows, zero sends.
+  await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: autoChat('off') })
+  const offSessionId = `smoke-buddy-off-${Date.now()}`
+  const off = await startBuddySession(offSessionId)
+  const offRows = collectMessages(ws).messages
+  await waitFor(
+    () =>
+      offRows.filter((message) => message.sessionId === offSessionId && message.details).length >=
+      13,
+    timeoutMs,
+    'the fake activity rows of the Buddy-off session'
+  )
+  await new Promise((resolveWait) => setTimeout(resolveWait, 6_000))
+  const offSends = off.operations.payloads.filter(
+    (operation) => operation.sessionId === offSessionId
+  )
+  if (offSends.length !== 0) {
+    throw new Error(`Buddy sent with the mode off: ${JSON.stringify(offSends.map((o) => o.text))}`)
+  }
+  const offState = off.states.payloads.at(-1)
+  if (offState && (offState.utterances?.length ?? 0) > 0) {
+    throw new Error(`Buddy proposed with the mode off: ${JSON.stringify(offState.utterances)}`)
+  }
+  await request(ws, timeoutMs, 'liveChat.stop', {})
+  await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: settingsBefore.autoChat })
 }
 
 function closeWebSocket(ws) {

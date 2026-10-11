@@ -25,6 +25,7 @@ export const IPC_INVOKE_ROLES = {
   'app:get-runtime-info': MAIN_ONLY,
   'app:retry-hardware-acceleration': MAIN_ONLY,
   'app:set-native-theme': MAIN_ONLY,
+  'app:exit': MAIN_ONLY,
   'system:open-permissions': MAIN_ONLY,
   'system:request-media-access': MAIN_ONLY,
   'system:media-access-status': MAIN_ONLY,
@@ -33,6 +34,7 @@ export const IPC_INVOKE_ROLES = {
   'resource:authorize-output-directory': MAIN_ONLY,
   'resource:reveal-session': MAIN_ONLY,
   'resource:reveal-background': MAIN_ONLY,
+  'resource:reveal-support-bundle': MAIN_ONLY,
   'resource:trash-session-deletion': MAIN_ONLY,
   'resource:open-session': MAIN_ONLY,
   // In-app playback grants (plan 119, S11). Only the Studio renderer may mint
@@ -44,6 +46,17 @@ export const IPC_INVOKE_ROLES = {
   'screens:pick-image': MAIN_ONLY,
   'backgrounds:import-image': MAIN_ONLY,
   'scheduled-streams:import-thumbnail': MAIN_ONLY,
+  // The Buddy's avatar images (plan 164 S-A3): the Studio renderer only.
+  'buddy-assets:remove': MAIN_ONLY,
+  // The overlay raster decodes the persona's own files from bytes (S-C2).
+  'buddy-assets:read-image': MAIN_ONLY,
+  // Plan 168: pet pack files for the living preview in the Buddy tab and the
+  // Stream Manager's Buddy pane (Phase D); read-only, managed roots only.
+  'buddy-pets:read': MAIN_AND_COMMENTS,
+  // Plan 168 S-A3: Import pack… in the Buddy tab (Studio renderer only).
+  'buddy-pets:import-folder': MAIN_ONLY,
+  // Plan 168 S-F5: the creator's sheets and build in the Buddy tab.
+  'buddy-pets:read-creation': MAIN_ONLY,
   'backgrounds:bundled-assets': MAIN_ONLY,
   'backgrounds:asset-exists': MAIN_ONLY,
   // The detached Comments window renders the same chat rows as Studio; without
@@ -132,11 +145,14 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:clip-mark-result-push': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
   'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
+  // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):
+  // the Chat window asks, main shows the main window.
+  'comments-window:open-buddy-tab': MAIN_AND_COMMENTS,
   // Remove from chat and the removal card's answers (plan 140, S6): the Chat
   // window asks (its handler refuses any other sender), Studio replies.
   'comments-window:moderation': MAIN_AND_COMMENTS,
   'comments-window:moderation-result-push': MAIN_ONLY,
-  // Answers to Orcle's voice command cards (plan 140, S6 part B).
+  // Answers to Buddy's voice command cards (plan 140, S6 part B).
   'comments-window:cohost-command': MAIN_AND_COMMENTS,
   'comments-window:cohost-command-result-push': MAIN_ONLY,
   'captions-window:open': MAIN_ONLY,

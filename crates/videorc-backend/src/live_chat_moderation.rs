@@ -9,7 +9,7 @@
 //!   `live_chat_moderation_operations`, persisted before any provider call.
 //!   The `operationId` is an idempotency key: the same id returns the same row.
 //! - `Manual` requests (the row menu's "Remove from chat") are express consent
-//!   and run at once. `OrcleVoice` requests start in `pending-confirm` and run
+//!   and run at once. `BuddyVoice` requests start in `pending-confirm` and run
 //!   only when confirmed, or when an opt-in 5 s countdown passes uncancelled.
 //!   YouTube targets always need an explicit confirmation (API policy §III.E),
 //!   so their countdown never runs.
@@ -29,7 +29,7 @@
 //!
 //! Both outcomes below write a tombstone over the original row through the
 //! normal inbound path (`try_deliver_messages`), which persists it, redacts the
-//! text, clears the on-stream card and tells Orcle. The row keeps its app id;
+//! text, clears the on-stream card and tells Buddy. The row keeps its app id;
 //! `isDeleted` is true and `eventType` is `deleted` in both cases. They differ
 //! in `rawProviderType` and `messageText`:
 //!
@@ -66,13 +66,13 @@ use crate::streaming::{StreamPlatform, stream_platform_label};
 /// Event name for every change of a `ModerationOperation`. Never a LAN event.
 pub const MODERATION_OPERATION_EVENT: &str = "liveChat.moderationOperation";
 
-/// How long an Orcle removal card waits for an answer in confirm mode.
+/// How long a Buddy removal card waits for an answer in confirm mode.
 #[cfg(not(test))]
 pub const CONFIRM_WINDOW: Duration = Duration::from_secs(20);
 #[cfg(test)]
 pub const CONFIRM_WINDOW: Duration = Duration::from_millis(250);
 
-/// The opt-in countdown before an unanswered Orcle removal runs.
+/// The opt-in countdown before an unanswered Buddy removal runs.
 #[cfg(not(test))]
 pub const COUNTDOWN: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -91,7 +91,7 @@ pub const RATE_LIMIT_PER_MINUTE: usize = 10;
 pub const LIST_LIMIT: usize = 200;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
-/// Audit excerpt and reason caps (UTF-16 units, like the Orcle copy caps).
+/// Audit excerpt and reason caps (UTF-16 units, like the Buddy copy caps).
 pub const EXCERPT_MAX_UNITS: usize = 140;
 pub const REASON_MAX_UNITS: usize = 40;
 
@@ -111,7 +111,7 @@ pub const HIDDEN_PROVIDER_TYPE: &str = "videorc.hidden";
 
 /// The kill switch's user-facing line (contract part D).
 pub const REMOVE_PAUSED_MESSAGE: &str = "Removing messages is paused by Videorc.";
-pub const PREMIUM_REQUIRED_MESSAGE: &str = "Orcle requires Videorc Premium.";
+pub const PREMIUM_REQUIRED_MESSAGE: &str = "Buddy requires Videorc Premium.";
 
 /// Restart sweep outcomes (storage writes them; the renderer shows them).
 pub const RESTART_CANCELLED_OUTCOME: &str =
@@ -125,7 +125,10 @@ pub const RESTART_UNKNOWN_OUTCOME: &str =
 #[serde(rename_all = "kebab-case")]
 pub enum ModerationSource {
     Manual,
-    OrcleVoice,
+    /// The wire value stays `orcle-voice` (plan 170 D22): saved reports, the
+    /// strict RPC/IPC schemas and older apps carry it.
+    #[serde(rename = "orcle-voice")]
+    BuddyVoice,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -273,7 +276,7 @@ impl std::fmt::Display for ModerationRefusal {
 }
 
 /// What one provider delete attempt came back with. Providers return the
-/// actionable tail of a hide reason ("Reconnect Twitch to let Orcle remove
+/// actionable tail of a hide reason ("Reconnect Twitch to let Buddy remove
 /// messages."); the engine prefixes the "Hidden in Videorc" sentence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderDeleteOutcome {
@@ -420,7 +423,7 @@ pub(crate) fn initial_schedule(
             confirm_by: None,
             execute_at: None,
         },
-        ModerationSource::OrcleVoice => {
+        ModerationSource::BuddyVoice => {
             // YouTube's express-consent rule: the countdown never runs there.
             let explicit =
                 confirm_mode == RemoveConfirmMode::Confirm || platform == StreamPlatform::Youtube;
@@ -496,7 +499,7 @@ fn now_iso() -> String {
 // --- Public API (contract part A) -----------------------------------------------------
 
 /// Start a removal. `Manual` runs at once and returns the terminal operation;
-/// `OrcleVoice` returns the pending operation and the backend owns its timer.
+/// `BuddyVoice` returns the pending operation and the backend owns its timer.
 pub async fn request(
     state: &AppState,
     req: ModerationRequest,
@@ -542,8 +545,8 @@ pub async fn request(
         return Ok(existing);
     }
 
-    if req.source == ModerationSource::OrcleVoice {
-        if !crate::service_flags::orcle_remove_enabled(state) {
+    if req.source == ModerationSource::BuddyVoice {
+        if !crate::service_flags::buddy_remove_enabled(state) {
             return Err(ModerationRefusal::new("disabled", REMOVE_PAUSED_MESSAGE));
         }
         let premium = state
@@ -900,7 +903,7 @@ fn spawn_timer(
 }
 
 /// Run one `executing` operation to its terminal phase: gates, the provider
-/// call with its bounded retry, the local tombstone and the Orcle flag.
+/// call with its bounded retry, the local tombstone and the Buddy flag.
 async fn run_execution(
     state: &AppState,
     mut operation: ModerationOperation,
@@ -909,8 +912,8 @@ async fn run_execution(
     let label = stream_platform_label(operation.platform);
 
     // Voice-sourced removals re-check Premium and the kill switch at execution.
-    if operation.source == ModerationSource::OrcleVoice {
-        if !crate::service_flags::orcle_remove_enabled(state) {
+    if operation.source == ModerationSource::BuddyVoice {
+        if !crate::service_flags::buddy_remove_enabled(state) {
             operation.phase = ModerationPhase::Cancelled;
             operation.outcome = Some(format!("{REMOVE_PAUSED_MESSAGE} Nothing was removed."));
             return finish(state, operation).await;
@@ -990,7 +993,7 @@ async fn run_execution(
             ),
             StreamPlatform::Youtube | StreamPlatform::Twitch | StreamPlatform::Kick => (
                 ModerationOutcomeCode::MissingScope,
-                format!("Reconnect {label} to let Orcle remove messages."),
+                format!("Reconnect {label} to let Buddy remove messages."),
             ),
             _ => (
                 ModerationOutcomeCode::Unsupported,
@@ -1106,7 +1109,7 @@ async fn run_execution(
 }
 
 /// The platform deleted it (or never had it): tombstone the row as
-/// "Removed by you" and resolve the Orcle flag.
+/// "Removed by you" and resolve the Buddy flag.
 async fn mark_removed(
     state: &AppState,
     mut operation: ModerationOperation,
@@ -1224,7 +1227,7 @@ async fn delete_once(
             let Some(credentials) = crate::x_live::x_livestream_credentials().ok().flatten() else {
                 return ProviderDeleteOutcome::CannotDelete {
                     code: ModerationOutcomeCode::MissingScope,
-                    reason: "Authorize X Live to let Orcle remove messages.".to_string(),
+                    reason: "Authorize X Live to let Buddy remove messages.".to_string(),
                 };
             };
             crate::x_live::delete_broadcast_chat_message(
@@ -1256,7 +1259,7 @@ fn fake_scripted_delete(
         FakeChatDeleteBehavior::MissingScope => ProviderDeleteOutcome::CannotDelete {
             code: ModerationOutcomeCode::MissingScope,
             reason: format!(
-                "Reconnect {} to let Orcle remove messages.",
+                "Reconnect {} to let Buddy remove messages.",
                 stream_platform_label(platform)
             ),
         },
@@ -1543,7 +1546,7 @@ mod tests {
         assert_eq!((manual.confirm_by, manual.execute_at), (None, None));
 
         let confirm = initial_schedule(
-            ModerationSource::OrcleVoice,
+            ModerationSource::BuddyVoice,
             StreamPlatform::Twitch,
             RemoveConfirmMode::Confirm,
             now,
@@ -1557,7 +1560,7 @@ mod tests {
         assert_eq!(confirm.execute_at, None);
 
         let countdown = initial_schedule(
-            ModerationSource::OrcleVoice,
+            ModerationSource::BuddyVoice,
             StreamPlatform::Twitch,
             RemoveConfirmMode::Countdown,
             now,
@@ -1569,7 +1572,7 @@ mod tests {
 
         // YouTube: the countdown never runs, even when asked for.
         let youtube = initial_schedule(
-            ModerationSource::OrcleVoice,
+            ModerationSource::BuddyVoice,
             StreamPlatform::Youtube,
             RemoveConfirmMode::Countdown,
             now,
@@ -1606,9 +1609,9 @@ mod tests {
         assert_eq!(
             hidden_outcome(
                 StreamPlatform::Twitch,
-                "Reconnect Twitch to let Orcle remove messages."
+                "Reconnect Twitch to let Buddy remove messages."
             ),
-            "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Orcle remove messages."
+            "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages."
         );
     }
 
@@ -1623,7 +1626,7 @@ mod tests {
             provider_message_id: "p-1".to_string(),
             author_name: "coders_x".to_string(),
             excerpt: "hello".to_string(),
-            source: ModerationSource::OrcleVoice,
+            source: ModerationSource::BuddyVoice,
             reason: Some("toxic".to_string()),
             phase: ModerationPhase::PendingConfirm,
             confirm_mode: RemoveConfirmMode::Confirm,
@@ -1715,7 +1718,7 @@ mod tests {
         }
         let params: ModerationRequestParams =
             serde_json::from_value(moderation.get("requestParams").unwrap().clone()).unwrap();
-        assert_eq!(params.source, ModerationSource::OrcleVoice);
+        assert_eq!(params.source, ModerationSource::BuddyVoice);
         let params: ModerationOperationParams =
             serde_json::from_value(moderation.get("confirmParams").unwrap().clone()).unwrap();
         assert!(!params.operation_id.is_empty());
@@ -1835,7 +1838,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orcle_voice_waits_for_confirmation_and_confirm_runs_it() {
+    async fn buddy_voice_waits_for_confirmation_and_confirm_runs_it() {
         let (state, mut events) = test_state();
         let target = message(StreamPlatform::Twitch, 1);
         let (base, script) = twitch_server(&[204]).await;
@@ -1847,7 +1850,7 @@ mod tests {
         )
         .await;
 
-        let pending = request(&state, request_for(&target, ModerationSource::OrcleVoice))
+        let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap();
         assert_eq!(pending.phase, ModerationPhase::PendingConfirm);
@@ -1862,7 +1865,7 @@ mod tests {
         assert!(!buffered_message(&state, &target.id).await.is_deleted);
 
         // A second request for the same message waits behind the first.
-        let duplicate = request(&state, request_for(&target, ModerationSource::OrcleVoice))
+        let duplicate = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap_err();
         assert_eq!(duplicate.code, "already-pending");
@@ -1918,7 +1921,7 @@ mod tests {
         );
         // The message is free for a new operation now (it is a tombstone, so
         // that one is refused on eligibility, not on pending state).
-        let after = request(&state, request_for(&target, ModerationSource::OrcleVoice))
+        let after = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap_err();
         assert_eq!(after.code, "not-eligible");
@@ -1936,7 +1939,7 @@ mod tests {
             &[target.clone()],
         )
         .await;
-        let pending = request(&state, request_for(&target, ModerationSource::OrcleVoice))
+        let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap();
         let cancelled = cancel(&state, &pending.operation_id).await.unwrap();
@@ -1975,7 +1978,7 @@ mod tests {
             &[target.clone()],
         )
         .await;
-        let pending = request(&state, request_for(&target, ModerationSource::OrcleVoice))
+        let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap();
         tokio::time::sleep(CONFIRM_WINDOW + Duration::from_millis(150)).await;
@@ -2027,7 +2030,7 @@ mod tests {
             &state,
             ModerationRequest {
                 confirm_mode: RemoveConfirmMode::Countdown,
-                ..request_for(&target, ModerationSource::OrcleVoice)
+                ..request_for(&target, ModerationSource::BuddyVoice)
             },
         )
         .await
@@ -2062,7 +2065,7 @@ mod tests {
             &state,
             ModerationRequest {
                 confirm_mode: RemoveConfirmMode::Countdown,
-                ..request_for(&target, ModerationSource::OrcleVoice)
+                ..request_for(&target, ModerationSource::BuddyVoice)
             },
         )
         .await
@@ -2097,7 +2100,7 @@ mod tests {
             provider_message_id: "p".to_string(),
             author_name: "viewer".to_string(),
             excerpt: "hello".to_string(),
-            source: ModerationSource::OrcleVoice,
+            source: ModerationSource::BuddyVoice,
             reason: None,
             phase: ModerationPhase::PendingConfirm,
             confirm_mode: RemoveConfirmMode::Confirm,
@@ -2242,7 +2245,7 @@ mod tests {
         assert_eq!(
             operation.outcome.as_deref(),
             Some(
-                "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Orcle remove messages."
+                "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages."
             )
         );
         assert_eq!(
@@ -2368,7 +2371,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orcle_voice_needs_premium_while_manual_is_free() {
+    async fn buddy_voice_needs_premium_while_manual_is_free() {
         let (state, _events) = test_state();
         let premium = Arc::new(AtomicBool::new(false));
         let check = premium.clone();
@@ -2389,7 +2392,7 @@ mod tests {
 
         let refused = request(
             &state,
-            request_for(&targets[0], ModerationSource::OrcleVoice),
+            request_for(&targets[0], ModerationSource::BuddyVoice),
         )
         .await
         .unwrap_err();
@@ -2414,7 +2417,7 @@ mod tests {
         premium.store(true, Ordering::SeqCst);
         let pending = request(
             &state,
-            request_for(&targets[1], ModerationSource::OrcleVoice),
+            request_for(&targets[1], ModerationSource::BuddyVoice),
         )
         .await
         .unwrap();
@@ -2454,12 +2457,12 @@ mod tests {
         )
         .unwrap();
         crate::youtube_quota::apply_service_flags(&state, flags);
-        assert!(!crate::service_flags::orcle_remove_enabled(&state));
-        assert!(crate::service_flags::orcle_voice_commands_enabled(&state));
+        assert!(!crate::service_flags::buddy_remove_enabled(&state));
+        assert!(crate::service_flags::buddy_voice_commands_enabled(&state));
 
         let refused = request(
             &state,
-            request_for(&targets[0], ModerationSource::OrcleVoice),
+            request_for(&targets[0], ModerationSource::BuddyVoice),
         )
         .await
         .unwrap_err();
@@ -2477,7 +2480,7 @@ mod tests {
         crate::youtube_quota::apply_service_flags(&state, enabled);
         let pending = request(
             &state,
-            request_for(&targets[1], ModerationSource::OrcleVoice),
+            request_for(&targets[1], ModerationSource::BuddyVoice),
         )
         .await
         .unwrap();
@@ -2572,7 +2575,7 @@ mod tests {
             &[target.clone()],
         )
         .await;
-        let pending = request(&state, request_for(&target, ModerationSource::OrcleVoice))
+        let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap();
         note_session_ended(&state, SESSION.to_string());
@@ -2739,7 +2742,7 @@ mod tests {
             fake_scripted_delete(FakeChatDeleteBehavior::MissingScope, StreamPlatform::Kick),
             ProviderDeleteOutcome::CannotDelete {
                 code: ModerationOutcomeCode::MissingScope,
-                reason: "Reconnect Kick to let Orcle remove messages.".to_string(),
+                reason: "Reconnect Kick to let Buddy remove messages.".to_string(),
             }
         );
     }

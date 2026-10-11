@@ -46,6 +46,8 @@ fn inputs(snapshot: Option<&CompositorSceneSnapshot>) -> CompositorRenderInputs<
         screen_frame: None,
         caption_overlay: None,
         highlight_overlay: None,
+        buddy_overlay: None,
+        buddy_leg: None,
     }
 }
 
@@ -241,6 +243,8 @@ async fn publish(
         CompositorFrameConsumer::RawYuvEncoder,
         None,
         None,
+        false,
+        false,
         false,
         false,
         false,
@@ -592,6 +596,8 @@ async fn scene_switch_artifact_fixture() {
                     composes_simulcast_scene: true,
                 }),
                 stream_gpu.as_mut(),
+                false,
+                false,
                 false,
                 false,
                 false,
@@ -1067,6 +1073,8 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             false,
             false,
             false,
+            false,
+            false,
         )
         .await;
         let snapshot = state
@@ -1250,6 +1258,8 @@ async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_revea
                 composes_simulcast_scene: true,
             }),
             None,
+            false,
+            false,
             false,
             false,
             false,

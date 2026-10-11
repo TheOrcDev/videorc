@@ -85,13 +85,16 @@ const chooseCameraOff = async () => {
 const refreshDevices = () =>
   evaluate(`
   await openTab('sources');
-  const button = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+  // Scoped to the Sources page: Livestream → Upcoming has its own Refresh,
+  // which stays mounted (and may be throttled) once that page was visited.
+  const sourcesPage = () => document.querySelector('[data-videorc-sources-page]') ?? document;
+  const button = [...sourcesPage().querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
   if (!button || button.disabled) throw new Error('Device refresh unavailable.');
   button.click();
   await new Promise(requestAnimationFrame);
   const deadline = Date.now() + ${timeoutMs};
   while (Date.now() < deadline) {
-    const refreshed = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+    const refreshed = [...sourcesPage().querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
     if (refreshed && !refreshed.disabled) return true;
     await sleep(25);
   }

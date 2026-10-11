@@ -1,6 +1,7 @@
 import { AppIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
+import { assertStatusWord } from '@/lib/status-word'
 import { cn } from '@/lib/utils'
 
 export type StatusTone = 'good' | 'warn' | 'error' | 'live' | 'neutral'
@@ -17,7 +18,8 @@ const toneClass: Record<StatusTone, string> = {
  * The status pill (plan 050, D9): a round glass chip. The label and value stay
  * monochrome; the tone glows in the dot, or in the leading icon when there is
  * one. An error or an on-air session tints the whole chip instead: it has to
- * interrupt.
+ * interrupt. `value` is a word in sentence case, already mapped from its state
+ * (plan 174 S1.3): the chip never recases it.
  */
 export function StatusBadge({
   label,
@@ -30,6 +32,7 @@ export function StatusBadge({
   tone?: StatusTone
   icon?: AppIcon
 }): ReactElement {
+  assertStatusWord(value, 'StatusBadge')
   const emphasis = tone === 'error' || tone === 'live'
   return (
     <span
@@ -55,7 +58,7 @@ export function StatusBadge({
           {label}
         </span>
       ) : null}
-      <span className="max-w-40 truncate capitalize">{value}</span>
+      <span className="max-w-40 truncate">{value}</span>
     </span>
   )
 }

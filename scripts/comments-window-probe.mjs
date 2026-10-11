@@ -197,7 +197,7 @@ async function main() {
   )
 
   // Three providers share one chronological reader; YouTube + Twitch are
-  // writable while X truthfully remains receive-only.
+  // writable while X truthfully remains read-only.
   await smokeCommand('comments-window-push-snapshot', { snapshot: liveSnapshot() })
   const live = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
@@ -209,7 +209,7 @@ async function main() {
       s.text.includes('Twitch Viewer') &&
       s.text.includes('X Viewer') &&
       // Plan 057: the notes name only what a send skips.
-      s.destinationStatus.includes('X receive-only') &&
+      s.destinationStatus.includes('X read-only') &&
       !s.destinationStatus.includes('Sends to'),
     8000
   )
@@ -449,7 +449,7 @@ async function main() {
   assertCorrelatedTrace(delayedSend.last?.command, 'delayed send result', true)
 
   // The composer travels through the same correlated broker. This response is
-  // intentionally partial: YouTube succeeds, Twitch fails, X is receive-only.
+  // intentionally partial: YouTube succeeds, Twitch fails, X is read-only.
   const outboundText = 'Unified hello from Comments'
   await smokeCommand('comments-window-set-command-fixture', {
     kind: 'send',
@@ -465,10 +465,10 @@ async function main() {
       command: await smokeCommand('comments-window-command-trace')
     }),
     (s) =>
-      // Only the exceptions speak: Twitch's reason once, X receive-only in
+      // Only the exceptions speak: Twitch's reason once, X read-only in
       // the notes, and nothing for YouTube, which got the message.
       s.reader.text.includes('Twitch probe destination rejected this message.') &&
-      s.reader.destinationStatus.includes('X receive-only') &&
+      s.reader.destinationStatus.includes('X read-only') &&
       !s.reader.destinationStatus.includes('YouTube') &&
       s.reader.deliveryStatus === '' &&
       s.command.pendingCount === 0 &&
@@ -477,11 +477,11 @@ async function main() {
   )
   assertProbe(
     partialSend.ok,
-    'send: partial result names Twitch failure and X receive-only state',
+    'send: partial result names Twitch failure and X read-only state',
     JSON.stringify(partialSend.last)
   )
   assertCorrelatedTrace(partialSend.last?.command, 'send result', true)
-  await captureState('partial-send-x-receive-only', 'partial send with X receive-only')
+  await captureState('partial-send-x-receive-only', 'partial send with X read-only')
 
   const lateSendRoute = await smokeCommand('comments-window-route-send-result', {
     operation: lateHistorySendOperation()
@@ -853,7 +853,7 @@ async function probeNarrowWidths() {
         metrics.wideTabs &&
           !metrics.narrowTabs &&
           metrics.panes.chat &&
-          (metrics.panes.activity || metrics.panes.orcle),
+          (metrics.panes.activity || metrics.panes.buddy),
         `${tag}: Wide shows Chat and the right pane`,
         JSON.stringify({ panes: metrics.panes, wide: metrics.wideTabs })
       )

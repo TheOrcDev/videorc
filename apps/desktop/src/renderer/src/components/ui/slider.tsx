@@ -2,19 +2,30 @@ import * as React from 'react'
 import { Slider as SliderPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
+import { useFieldLabelledBy } from '@/components/ui/field-context'
 
+// A slider's name and spoken value belong on its thumbs, the elements with
+// role="slider" (plan 174 S0.5, E-3). Radix's root is a plain span, so
+// `aria-label`, `aria-labelledby` and `aria-valuetext` go to every thumb
+// instead. Inside a Field, a slider that names nothing takes the FieldLabel.
 function Slider({
   className,
   defaultValue,
   value,
   min = 0,
   max = 100,
+  'aria-label': ariaLabel,
+  'aria-labelledby': ariaLabelledBy,
+  'aria-valuetext': ariaValueText,
   ...props
 }: React.ComponentProps<typeof SliderPrimitive.Root>) {
   const _values = React.useMemo(
     () => (Array.isArray(value) ? value : Array.isArray(defaultValue) ? defaultValue : [min, max]),
     [value, defaultValue, min, max]
   )
+  const labelledBy = useFieldLabelledBy(ariaLabelledBy, ariaLabel)
+  // Only a given label replaces Radix's own ("Minimum" and "Maximum" on a range).
+  const thumbLabel = ariaLabel === undefined ? {} : { 'aria-label': ariaLabel }
 
   return (
     <SliderPrimitive.Root
@@ -42,6 +53,9 @@ function Slider({
         <SliderPrimitive.Thumb
           data-slot="slider-thumb"
           key={index}
+          {...thumbLabel}
+          aria-labelledby={labelledBy}
+          aria-valuetext={ariaValueText}
           className="block size-4 shrink-0 rounded-full bg-knob shadow-sm ring-1 ring-knob-ring transition-[color,box-shadow] duration-150 select-none hover:ring-4 hover:ring-ring/30 focus-visible:ring-4 focus-visible:ring-ring/30 focus-visible:outline-hidden disabled:pointer-events-none disabled:opacity-50"
         />
       ))}

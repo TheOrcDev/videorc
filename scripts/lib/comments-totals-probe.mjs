@@ -26,28 +26,36 @@ export async function waitForFakeActivityReceipts({
         .map((message) => message.details.kind)
     )
   await waitFor(
-    () => distinctOwnedReceipts() >= 16 && expectedKinds.every((kind) => eventKinds().has(kind)),
+    () => distinctOwnedReceipts() >= 17 && expectedKinds.every((kind) => eventKinds().has(kind)),
     timeoutMs,
     `every activity kind (${expectedKinds.join(', ')})`
   )
   return eventMessages.filter((message) => message.sessionId === eventsSessionId)
 }
 
+/**
+ * The fake activity session: one `count: 1` message per platform (3), the
+ * Twitch GIF row (plan 155), and the 13 activity rows of `fake_events()`
+ * (8 Twitch, 2 Kick, 3 YouTube): 17 rows. Chatters: the three fake viewers,
+ * the four paid authors and the GIF sender.
+ */
 export function assertFakeActivityTotals(eventTotals) {
   if (
     eventTotals?.status !== 'available' ||
-    eventTotals.messageCount !== 16 ||
+    eventTotals.messageCount !== 17 ||
     eventTotals.supporters !== 7 ||
     eventTotals.bits !== 1800 ||
     eventTotals.follows !== 2 ||
     eventTotals.raids !== 1 ||
-    eventTotals.chatters !== 7 ||
+    eventTotals.chatters !== 8 ||
     !isDeepStrictEqual(eventTotals.tips, [
       { currency: 'USD', amountMicros: 5_000_000 },
       { currency: 'EUR', amountMicros: 2_000_000 }
     ])
   ) {
-    throw new Error('Confirmed fake activity accounting disagreed with the normalized fixture.')
+    throw new Error(
+      `Confirmed fake activity accounting disagreed with the normalized fixture: ${JSON.stringify(eventTotals)}`
+    )
   }
 }
 

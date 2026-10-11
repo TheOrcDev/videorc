@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostCommand, ModerationOperation } from '@/lib/backend'
 import { removalPaneView } from '@/lib/chat-removal-view'
-import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/orcle-command-view'
+import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
 
 import { CommandCards, CommandStrip, type CommandAnswer } from './command-cards'
 import { RemovalCards } from './removal-cards'
@@ -20,7 +20,7 @@ const candidates = [
 function command(patch: Partial<CohostCommand> = {}): CohostCommand {
   return {
     id: 'cmd-1',
-    heard: 'orcle highlight the comment from coders',
+    heard: 'buddy highlight the comment from coders',
     kind: 'highlight',
     status: 'ambiguous',
     message: 'Which comment from coders?',
@@ -34,7 +34,7 @@ function command(patch: Partial<CohostCommand> = {}): CohostCommand {
 const flagged = (patch: Partial<CohostCommand> = {}): CohostCommand =>
   command({
     status: 'confirm',
-    message: 'Orcle flagged this (harassment). Show it anyway?',
+    message: 'Buddy flagged this (harassment). Show it anyway?',
     candidates: undefined,
     target: candidates[0],
     ...patch
@@ -86,13 +86,16 @@ function press(key: string, init: KeyboardEventInit = {}, target: EventTarget = 
 
 const slot = (name: string): HTMLElement | null =>
   container.querySelector<HTMLElement>(`[data-slot="${name}"]`)
+// The cards are shadcn Alerts: their hook is a test id, never a slot (plan 168 S-00).
+const byTestId = (name: string): HTMLElement | null =>
+  container.querySelector<HTMLElement>(`[data-testid="${name}"]`)
 
 describe('CommandStrip (plan 140, S6 part B)', () => {
-  it('says what Orcle heard and did, quietly when nothing happened', async () => {
+  it('says what Buddy heard and did, quietly when nothing happened', async () => {
     await render(command({ status: 'done', message: "Highlighted coders_x's comment." }))
     const strip = slot('command-strip')!
     expect(strip.getAttribute('role')).toBe('status')
-    expect(strip.textContent).toContain('Heard: “orcle highlight the comment from coders”')
+    expect(strip.textContent).toContain('Heard: “buddy highlight the comment from coders”')
     expect(strip.textContent).toContain("Highlighted coders_x's comment.")
     expect(strip.dataset.quiet).toBeUndefined()
 
@@ -106,18 +109,18 @@ describe('CommandCards: the chooser', () => {
   it('lists the comments with 1 to 3, and Cancel as its own button', async () => {
     const onAnswer = vi.fn()
     await render(command(), onAnswer)
-    const chooser = slot('command-chooser')!
+    const chooser = byTestId('command-chooser')!
     expect(chooser.textContent).toContain('Which comment from coders?')
     expect(chooser.textContent).toContain('Expires in 18s')
     const picks = [
-      ...chooser.querySelectorAll<HTMLButtonElement>('[data-slot="command-candidate"]')
+      ...chooser.querySelectorAll<HTMLButtonElement>('[data-testid="command-candidate"]')
     ]
     expect(picks.map((pick) => pick.textContent)).toEqual([
       '1Twitchcoders_x“first”',
       '2Kickcoders_y“second”'
     ])
-    const cancel = chooser.querySelector<HTMLButtonElement>('[data-slot="command-cancel"]')!
-    expect(cancel.closest('[data-slot="command-candidate"]')).toBeNull()
+    const cancel = chooser.querySelector<HTMLButtonElement>('[data-testid="command-cancel"]')!
+    expect(cancel.closest('[data-testid="command-candidate"]')).toBeNull()
     for (const button of chooser.querySelectorAll('button')) {
       expect(button.querySelector('button')).toBeNull()
     }
@@ -152,7 +155,7 @@ describe('CommandCards: the chooser', () => {
   it('a focused chooser answers its own keys, once', async () => {
     const onAnswer = vi.fn()
     await render(command(), onAnswer)
-    const chooser = slot('command-chooser')!
+    const chooser = byTestId('command-chooser')!
     chooser.focus()
     await act(async () => press('1', {}, chooser))
     expect(onAnswer).toHaveBeenCalledTimes(1)
@@ -166,12 +169,12 @@ describe('CommandCards: show a flagged comment anyway', () => {
   it('asks with Show and Cancel; Enter shows, Esc cancels', async () => {
     const onAnswer = vi.fn()
     await render(flagged(), onAnswer)
-    const card = slot('command-confirm')!
-    expect(card.textContent).toContain('Orcle flagged this (harassment). Show it anyway?')
+    const card = byTestId('command-confirm')!
+    expect(card.textContent).toContain('Buddy flagged this (harassment). Show it anyway?')
     expect(card.textContent).toContain('coders_x')
     expect(card.textContent).toContain('“first”')
     await act(async () =>
-      card.querySelector<HTMLButtonElement>('[data-slot="command-show"]')!.click()
+      card.querySelector<HTMLButtonElement>('[data-testid="command-show"]')!.click()
     )
     expect(onAnswer).toHaveBeenLastCalledWith('cmd-1', { action: 'confirm' })
     await act(async () => press('Enter'))
@@ -183,7 +186,7 @@ describe('CommandCards: show a flagged comment anyway', () => {
   it('waits while the answer is on its way', async () => {
     const onAnswer = vi.fn()
     await render(flagged(), onAnswer, true)
-    const buttons = [...slot('command-confirm')!.querySelectorAll('button')]
+    const buttons = [...byTestId('command-confirm')!.querySelectorAll('button')]
     expect(buttons.every((button) => button.disabled)).toBe(true)
     await act(async () => press('Enter'))
     expect(onAnswer).not.toHaveBeenCalled()

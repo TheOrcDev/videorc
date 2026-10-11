@@ -189,6 +189,9 @@ fn admin_only_method(method: &str) -> bool {
                 | "sessions.delete.resolve"
                 | "sessions.delete.complete"
                 | "sessions.delete.complete_admin"
+                // Plan 168 S-A3: only main, which copied and sized the
+                // folder, registers a pet pack.
+                | "cohost.pet.import"
         )
 }
 

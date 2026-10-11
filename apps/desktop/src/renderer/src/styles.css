@@ -85,8 +85,10 @@
   --accent-foreground: oklch(0.17 0.004 286);
   /* Pressed block: black-10%. */
   --accent-pressed: oklch(0 0 0 / 10%);
-  /* Tertiary text tier (section headers, footer hints, disabled). */
-  --subtle: oklch(0.58 0.005 286);
+  /* Tertiary text tier (section labels, hints, disabled). Plan 174 S1.8
+     (D12): 4.85:1 on the porcelain solid and 4.92:1 on a float; it was
+     0.58, 4.11:1. Essential copy uses the secondary tier, never this one. */
+  --subtle: oklch(0.54 0.005 286);
 
   /* The brand red — the logo's LED-glow eyes (same hue family both themes). */
   --destructive: oklch(0.55 0.24 27);
@@ -124,9 +126,6 @@
   --sidebar-accent-foreground: oklch(0.17 0.004 286);
   --sidebar-border: oklch(0 0 0 / 12%);
   --sidebar-ring: oklch(0 0 0 / 25%);
-
-  /* Floating glass panel shadow + hairline ring. */
-  --shadow-glass-panel: 0 16px 70px oklch(0 0 0 / 25%), 0 0 0 1px oklch(0 0 0 / 12%);
 
   /* Window glass (plan 091): a clear, neutral blur of the desktop under one
      cover per region. --glass-base is the theme's solid tone (oklch
@@ -214,7 +213,9 @@
   --accent-foreground: oklch(0.97 0.001 286);
   /* Pressed block: white-12%. */
   --accent-pressed: oklch(1 0 0 / 12%);
-  --subtle: oklch(0.55 0.008 286);
+  /* Plan 174 S1.8 (D12): 5.32:1 on the black solid and 4.69:1 on a dialog;
+     it was 0.55, 3.99:1. */
+  --subtle: oklch(0.62 0.008 286);
 
   /* The brand red — the logo's LED-glow eyes. Red stays semantic (record,
      live, destructive); it is never chrome. */
@@ -246,8 +247,6 @@
   --sidebar-accent-foreground: oklch(0.97 0.001 286);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(1 0 0 / 28%);
-
-  --shadow-glass-panel: 0 16px 70px oklch(0 0 0 / 60%), 0 0 0 1px oklch(1 0 0 / 10%);
 
   /* Dark window glass (plan 091, D3): the sidebar covers 88% and the work
      area 83% of the clear blur. 83% is the smallest work cover that keeps
@@ -336,13 +335,15 @@
 }
 
 /* Increase Contrast: hairlines strong enough to read on glass, the secondary
-   tier one step closer to the primary, and both covers at 95% (plan 091, D7). */
+   and tertiary tiers one step closer to the primary, and both covers at 95%
+   (plan 091, D7; the tertiary since plan 174 S1.8). */
 @media (prefers-contrast: more) {
   :root,
   :root[data-platform='win32'] {
     --border: oklch(0 0 0 / 28%);
     --input: oklch(0 0 0 / 28%);
     --muted-foreground: oklch(0.38 0.006 286);
+    --subtle: oklch(0.45 0.005 286);
     --glass-cover-sidebar: 0.95;
     --glass-cover-work: 0.95;
     --glass-float-rim: oklch(0 0 0 / 24%);
@@ -354,6 +355,7 @@
     --border: oklch(1 0 0 / 24%);
     --input: oklch(1 0 0 / 24%);
     --muted-foreground: oklch(0.8 0.01 286);
+    --subtle: oklch(0.68 0.008 286);
     --glass-cover-sidebar: 0.95;
     --glass-cover-work: 0.95;
     --glass-float-rim: oklch(1 0 0 / 30%);
@@ -403,15 +405,27 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 8px);
-  --radius-3xl: calc(var(--radius) + 14px);
-  --radius-4xl: calc(var(--radius) + 20px);
 
   /* Semantic radius tiers (plan 050, D4): containers 12, rows and cards 8,
      controls and chips 6. Use rounded-panel / rounded-row / rounded-chip. */
   --radius-panel: calc(var(--radius) + 2px); /* 12px */
   --radius-row: calc(var(--radius) - 2px); /* 8px */
   --radius-chip: calc(var(--radius) - 4px); /* 6px */
+  /* Tags (Badge outline: 9:16, counts, Idle) sit between chip and row. */
+  --radius-tag: 7px;
+
+  /* The type tokens (plan 174 S1.6a, J1-12): a section label 11 / 600
+     (text-label, tertiary), a section header 13 / 600 (text-section) and
+     metadata 12 (text-meta). Body stays text-sm (14). Never an arbitrary
+     text-[Npx] where one of these is meant. */
+  --text-label: 0.6875rem; /* 11px */
+  --text-label--line-height: 1rem;
+  --text-label--font-weight: 600;
+  --text-section: 0.8125rem; /* 13px */
+  --text-section--line-height: 1.25rem;
+  --text-section--font-weight: 600;
+  --text-meta: 0.75rem; /* 12px */
+  --text-meta--line-height: 1rem;
 
   /* The desktop scale (plan 050, D4): one toolbar, one status bar, one row,
      and one control height for every screen. */
@@ -428,12 +442,10 @@
     -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
 
-  /* One soft elevation token for menus/dialogs/popovers (borders do the rest). */
-  --shadow-soft: 0 1px 2px oklch(0 0 0 / 0.05), 0 10px 30px oklch(0 0 0 / 0.08);
-  /* Floating glass panel: layered drop + hairline ring (per-theme value above). */
-  --shadow-glass: var(--shadow-glass-panel);
-
   --color-subtle: var(--subtle);
+  /* The inset fill (plan 174 S1.6a, A-15): grouped lists, read-only fields
+     and in-pane wells, 3% of the text colour over the glass. bg-inset. */
+  --color-inset: color-mix(in oklab, var(--foreground) 3%, transparent);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);

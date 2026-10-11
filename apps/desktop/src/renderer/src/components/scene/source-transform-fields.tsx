@@ -1,7 +1,10 @@
 import { LockIcon } from '@/components/icons'
 import { useRef, useState, type ReactElement } from 'react'
 
+import { SectionLabel } from '@/components/section-label'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { InputGroup, InputGroupInput, InputGroupAddon } from '@/components/ui/input-group'
 import type { SceneSource } from '@/lib/backend'
@@ -76,30 +79,47 @@ export function SourceTransformFields({
     onCommit(transformFieldPatch(field, parsed, committed, aspectLocked))
   }
 
+  // Why the aspect lock cannot move (plan 174 J1-2): a disabled button never
+  // shows a title, so the reason rides on a focusable wrapper.
+  const aspectLockDisabledReason = disabled
+    ? (disabledReason ?? null)
+    : aspectForced
+      ? 'The camera shape sets the aspect.'
+      : !sizeEditable
+        ? 'This layout sets the size.'
+        : null
+
+  const aspectLockButton = (
+    <Button
+      aria-label={aspectLocked ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
+      aria-pressed={aspectLocked}
+      className={cn('text-muted-foreground', aspectLocked && 'text-foreground')}
+      disabled={aspectLockDisabledReason !== null || disabled}
+      size="icon-xs"
+      variant={aspectLocked ? 'secondary' : 'ghost'}
+      onClick={() => onAspectLockedChange?.(!aspectLockedChoice)}
+    >
+      <LockIcon weight={aspectLocked ? 'fill' : 'regular'} />
+    </Button>
+  )
+
   return (
     <div className="grid gap-2" data-videorc-transform-fields={source.id}>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[12.5px] leading-none font-medium text-subtle">
-          Position and size
-        </span>
-        <Button
-          aria-label={aspectLocked ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
-          aria-pressed={aspectLocked}
-          className={cn('text-muted-foreground', aspectLocked && 'text-foreground')}
-          disabled={disabled || aspectForced || !sizeEditable}
-          size="icon-xs"
-          title={
-            aspectForced
-              ? 'The aspect is set by the camera shape'
-              : aspectLocked
+        <SectionLabel>Position and size</SectionLabel>
+        {aspectLockDisabledReason !== null || disabled ? (
+          <DisabledReason reason={aspectLockDisabledReason}>{aspectLockButton}</DisabledReason>
+        ) : (
+          // What the lock does now, on hover and on focus (plan 174 S1.10).
+          <Tooltip>
+            <TooltipTrigger asChild>{aspectLockButton}</TooltipTrigger>
+            <TooltipContent>
+              {aspectLocked
                 ? 'Aspect locked. Size edits keep the shape.'
-                : 'Aspect free. Width and height move alone.'
-          }
-          variant={aspectLocked ? 'secondary' : 'ghost'}
-          onClick={() => onAspectLockedChange?.(!aspectLockedChoice)}
-        >
-          <LockIcon weight={aspectLocked ? 'fill' : 'regular'} />
-        </Button>
+                : 'Aspect free. Width and height move alone.'}
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
 
       <FieldGroup className="grid grid-cols-2 gap-2 sm:grid-cols-4">

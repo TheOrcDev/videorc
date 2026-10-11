@@ -183,7 +183,7 @@ pub const TWITCH_DELETE_MAX_AGE: chrono::Duration = chrono::Duration::hours(6);
 /// The hide reasons the moderation engine shows after "Viewers on Twitch
 /// still see it."
 pub const TWITCH_TOO_OLD_REASON: &str = "Twitch only removes messages under 6 hours old.";
-pub const TWITCH_MODERATE_RECONNECT_REASON: &str = "Reconnect Twitch to let Orcle remove messages.";
+pub const TWITCH_MODERATE_RECONNECT_REASON: &str = "Reconnect Twitch to let Buddy remove messages.";
 
 /// Why an empty id is refused before any request is built: Helix clears the
 /// WHOLE chat when `message_id` is omitted.

@@ -26,26 +26,31 @@ function stats(overrides: Partial<StudioHealthInput> = {}): StudioHealthInput {
 
 describe('studioHealth', () => {
   it('reports Live on a healthy Metal session while active', () => {
-    expect(studioHealth(stats(), true)).toMatchObject({ tone: 'good', value: 'Live' })
+    expect(studioHealth(stats(), true)).toMatchObject({ tone: 'good', value: 'Running' })
   })
 
   it('reports Ready on a healthy Metal session while idle', () => {
     expect(studioHealth(stats(), false)).toMatchObject({ tone: 'good', value: 'Ready' })
   })
 
-  it('degrades to "Preview may not match recording" on CPU fallback', () => {
+  it('degrades to "The preview may not match your recording" on CPU fallback', () => {
     const result = studioHealth(stats({ compositorBackend: 'cpu-fallback' }), false)
     expect(result.tone).toBe('error')
     expect(result.value).toBe('Degraded')
-    expect(result.detail).toContain('Preview may not match recording')
+    expect(result.detail).toContain('The preview may not match your recording.')
   })
 
-  it('includes the fallback reason in the degraded detail when known', () => {
+  // Plan 174 S3.18: the reason is engineering text; Health's Technical
+  // details show it, and the Studio alert opens Health.
+  it('keeps the raw fallback reason out of the degraded detail', () => {
     const result = studioHealth(
       stats({ compositorBackend: 'cpu-fallback', compositorFallbackReason: 'Metal disabled' }),
       true
     )
-    expect(result.detail).toBe('Preview may not match recording: Metal disabled')
+    expect(result.detail).toBe(
+      'The preview may not match your recording. Videorc is drawing it without the graphics card, so it can stutter.'
+    )
+    expect(result.detail).not.toContain('Metal disabled')
   })
 
   it('degrades when CPU fallback frames appear mid-recording even if the backend label is metal', () => {
@@ -93,7 +98,7 @@ describe('studioHealth', () => {
   it('never reds an active session whose preview has no transport yet', () => {
     expect(
       studioHealth(stats({ previewTransport: 'unavailable', previewSurfaceBacking: 'none' }), true)
-    ).toMatchObject({ tone: 'good', value: 'Live' })
+    ).toMatchObject({ tone: 'good', value: 'Running' })
   })
 
   it('keeps showing Fallback over Lagging when polling with high latency (no flapping)', () => {
@@ -149,7 +154,7 @@ describe('studioHealth', () => {
         'win32',
         'backend-d3d11-presenter'
       )
-    ).toMatchObject({ tone: 'good', value: 'Live' })
+    ).toMatchObject({ tone: 'good', value: 'Running' })
     expect(
       studioHealth(
         stats({
@@ -177,7 +182,7 @@ describe('recordingStartupHealthToast', () => {
   const REFUSED_MESSAGE =
     'Recording startup blocked before encoding: waiting for compositor frame (recent gaps none ms; 0 fresh frame(s) in 2500ms); cadence budget 200ms.'
 
-  it('maps the unsteady-start WARN to a keyed warning toast carrying the backend copy', () => {
+  it('maps the unsteady-start WARN to a keyed warning toast in plain words', () => {
     const result = recordingStartupHealthToast({
       code: RECORDING_STARTUP_CADENCE_UNSTEADY_CODE,
       level: 'warn',
@@ -186,8 +191,8 @@ describe('recordingStartupHealthToast', () => {
     expect(result).toEqual({
       variant: 'warning',
       id: RECORDING_STARTUP_UNSTEADY_TOAST_ID,
-      title: 'Recording started on an unsteady compositor',
-      description: UNSTEADY_MESSAGE,
+      title: 'The first seconds may stutter',
+      description: 'Videorc took a moment to settle when the recording started. Check its start.',
       duration: 15000
     })
     expect(result?.id).toBe('recording-startup-cadence-unsteady')
@@ -210,7 +215,7 @@ describe('recordingStartupHealthToast', () => {
       duration: Infinity
     })
     expect(result).toMatchObject({
-      title: 'Could not start',
+      title: "Couldn't start",
       description: sessionStartFailureToastOptions(
         REFUSED_MESSAGE,
         () => {},
@@ -253,7 +258,7 @@ describe('recordingStartupHealthToast', () => {
     expect(fallback).toMatchObject({
       variant: 'warning',
       id: 'microphone-capture-worker-fallback',
-      title: "Microphone can't be changed this session"
+      title: "Microphone can't be changed until you stop"
     })
     expect(fallback?.description).toContain('probe timed out')
     const unavailable = recordingStartupHealthToast({

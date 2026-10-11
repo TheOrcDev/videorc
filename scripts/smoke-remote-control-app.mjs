@@ -194,9 +194,11 @@ try {
   if (!clipTicket.payload?.accepted) fail('clipMark intent was not accepted')
   const clipAck = await clipAckPromise
   if (clipAck?.intentId !== clipTicket.payload.intentId || clipAck?.ok !== false) {
-    fail(`clipMark without a session was not refused through the renderer: ${JSON.stringify(clipAck)}`)
+    fail(
+      `clipMark without a session was not refused through the renderer: ${JSON.stringify(clipAck)}`
+    )
   }
-  if (clipAck?.message !== 'No active session.') {
+  if (clipAck?.message !== "You're not recording or live.") {
     fail(`clipMark refusal carried the wrong reason: ${JSON.stringify(clipAck)}`)
   }
   console.log('remote-control smoke: clipMark relay + refusal reason OK')
@@ -236,7 +238,7 @@ try {
     console.log('remote-control smoke: systemAudioToggle ack + confirmed state OK')
   } else {
     const refused = await toggleSystemAudio(null)
-    if (refused?.ok !== false || refused?.message !== 'System audio is not available.') {
+    if (refused?.ok !== false || refused?.message !== "System audio isn't available.") {
       fail(`systemAudioToggle without the device was not refused: ${JSON.stringify(refused)}`)
     }
     console.log('remote-control smoke: systemAudioToggle refused without the device OK')

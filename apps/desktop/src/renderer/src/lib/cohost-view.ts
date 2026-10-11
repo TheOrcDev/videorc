@@ -18,7 +18,11 @@ import type {
   StreamPlatform
 } from './backend'
 import { chatDraftMaxChars } from './chat-send'
-import { cohostErrorDetail } from './cohost-state'
+import { shortcutLabel } from './platform'
+import { shortcutAccelerator } from './shortcuts'
+import { formatRelativeTime } from './format-time'
+import { plural } from './format'
+import { buddyDisplayName } from './buddy-auto-chat-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 
 export {
@@ -39,32 +43,40 @@ export {
 // is a pure derivation of the last `cohost.state` event so the pane, the
 // destination chip and the detached Comments window cannot disagree.
 
-/** What Orcle does with chat, the half of the consent every Orcle user gets. */
-export const COHOST_CHAT_CONSENT_SENTENCE = 'Orcle reads live chat with Videorc cloud AI.'
+/** What Buddy does with chat, the half of the consent every Buddy user gets. */
+export const COHOST_CHAT_CONSENT_SENTENCE = "Buddy reads your live chat with Videorc's cloud AI."
 
 /**
- * What Orcle sends (plan 060 D11, plan 068 D3). The consent surfaces that stand
- * alone (the pane notice, the status popover) repeat it verbatim. Turning
- * Orcle on also turns listening on (Orcle Live, plan 119), so the sentence
- * names both halves as what happens, not as an option.
+ * What listening sends, in one wording on every surface (plan 174 F-26): the
+ * consent list, the listening switch and the pane's one-time card all build
+ * on these two halves.
  */
+const MIC_TO_TEXT =
+  "your microphone audio goes to Videorc's cloud speech-to-text and comes back as text"
+const MIC_KEPT =
+  "Videorc servers don't keep it. The transcript is saved with your recording on this computer."
+
+/** The listening line of the one list of cloud uses (`CLOUD_AI_USES`). */
+export const BUDDY_HEARS_YOU_USE = `Buddy hears you while you're live: ${MIC_TO_TEXT}.`
+
+/** The pane's one-time "Buddy can hear you" card, under its title. */
+export const COHOST_LISTEN_DISCLOSURE = `${MIC_TO_TEXT.charAt(0).toUpperCase()}${MIC_TO_TEXT.slice(1)}. ${MIC_KEPT}`
+
 /**
- * Orcle acts only when asked (plan 140). The full sentence is the Orcle tab's
+ * Buddy acts only when asked (plan 140). The full sentence is the Buddy tab's
  * and the pane hint's tooltip; the pane's action bar shows its first half.
  */
 export const COHOST_ACTS_ON_ASK_COPY =
-  'Orcle never acts on its own. It removes a comment only when you tell it to.'
-export const COHOST_ACTS_ON_ASK_HINT = 'Orcle never acts on its own.'
+  'Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+export const COHOST_ACTS_ON_ASK_HINT = 'Posts only in the modes you turn on.'
 
 /** The flag row's "Remove from chat" key (plan 140, S6): ⌫ alone dismisses. */
-export const COHOST_REMOVE_FLAGGED_KEY = '⇧⌫'
+export const COHOST_REMOVE_FLAGGED_KEY = 'Shift+Backspace'
 
-export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} While you're live it also hears you: your microphone audio goes to Videorc's cloud speech-to-text to be turned into text. Videorc servers don't keep it. The transcript is saved with your recording on this computer.`
-
-/** The listening half, as the description of the listening switch under the
- * Orcle tab's Customize. */
-export const COHOST_LISTEN_CONSENT_SENTENCE =
-  "While you're live, your microphone audio goes to Videorc's cloud speech-to-text to be turned into text, even with live captions off. Videorc servers don't keep it. The transcript is saved with your recording on this computer."
+/** The listening half, as the description of the listening switch beside
+ * Buddy Live on the Buddy tab. Listening is its own choice (plan 174 S3.14a,
+ * D7): turning Buddy Live on never turns it on. */
+export const COHOST_LISTEN_CONSENT_SENTENCE = `While you're live, ${MIC_TO_TEXT}, even with live captions off. ${MIC_KEPT}`
 
 export const EMPTY_COHOST_STATE: CohostState = {
   sessionId: null,
@@ -105,20 +117,7 @@ export function sortedCohostFlags(flags: readonly CohostFlag[]): CohostFlag[] {
   })
 }
 
-// --- Status chip -----------------------------------------------------------
-
-export interface CohostChipView {
-  label: string
-  /** Only `listening` earns the live accent; every other state is monochrome. */
-  tone: 'live' | 'muted'
-  /**
-   * What the failed tick actually said — "ai-gateway-error (HTTP 502): The
-   * Orcle tick failed on every configured model." — for the chip's tooltip
-   * or a secondary line. Null while listening, off, or when the engine paused
-   * itself locally (signed out, Basic, consent).
-   */
-  detail: string | null
-}
+// --- Error detail and reasons ----------------------------------------------
 
 /**
  * One line a streamer can paste into a bug report: the server's envelope code,
@@ -133,71 +132,38 @@ export function cohostErrorDetailText(detail: CohostErrorDetail | null | undefin
   return message ? `${head}: ${message}` : head
 }
 
+/**
+ * Why Buddy paused or stopped, as the words after "Paused:" or "Stopped:" in
+ * the one status vocabulary (plan 174 F-20).
+ */
 const REASON_LABELS: Record<CohostReason, string> = {
-  'premium-required': 'Premium',
-  'consent-required': 'consent',
-  'session-expired': 'session expired',
+  'premium-required': 'Premium needed',
+  'consent-required': 'cloud AI is off',
+  'session-expired': 'sign-in expired',
   'signed-out': 'signed out',
-  'quota-exhausted': 'quota',
-  'server-unconfigured': 'unavailable',
-  network: 'offline',
-  'gateway-error': 'AI error'
+  'quota-exhausted': 'daily AI allowance used up',
+  'server-unconfigured': 'Videorc AI is unavailable',
+  network: 'no connection',
+  'gateway-error': 'Videorc AI error'
 }
 
 export function cohostReasonLabel(reason: CohostReason | null): string | null {
   return reason ? REASON_LABELS[reason] : null
 }
 
-/** Short, honest chip copy for the destination strip. */
-export function cohostChipView(state: CohostState | null): CohostChipView | null {
-  if (!state) return null
-  const reason = cohostReasonLabel(state.reason)
-  // The engine only sets `detail` on a failed tick, and clears it the moment
-  // it listens again; a stale detail on a listening/off state is never shown.
-  const detail =
-    state.status === 'error' || state.status === 'paused'
-      ? cohostErrorDetailText(cohostErrorDetail(state))
-      : null
-  switch (state.status) {
-    case 'off':
-      return { label: 'Orcle: off', tone: 'muted', detail: null }
-    case 'listening': {
-      const count = state.questions.length
-      return {
-        label: count > 0 ? `Orcle: listening · ${count} q` : 'Orcle: listening',
-        tone: 'live',
-        detail: null
-      }
-    }
-    case 'paused':
-      return {
-        label: reason ? `Orcle: paused · ${reason}` : 'Orcle: paused',
-        tone: 'muted',
-        detail
-      }
-    case 'error':
-      return {
-        label: reason ? `Orcle: error · ${reason}` : 'Orcle: error',
-        tone: 'muted',
-        detail
-      }
-  }
-}
-
 // --- Pane mode -------------------------------------------------------------
 
+/**
+ * What the Buddy pane shows under its header. `upsell` carries the Premium
+ * reason and link; `consent` shows the one cloud-AI disclosure (the pane
+ * draws it from `CLOUD_AI_USES`, so it carries no line of its own);
+ * `disabled` is Buddy Live off, which the header's switch already says.
+ */
 export type CohostPaneMode =
   | { kind: 'upsell'; reason: string; upgradeUrl?: string }
-  | { kind: 'consent'; reason: string }
-  | { kind: 'disabled'; reason: string }
+  | { kind: 'consent' }
+  | { kind: 'disabled' }
   | { kind: 'live' }
-
-/**
- * The Orcle tab's key in running copy: ⌘9 on macOS, Ctrl+9 elsewhere. Read
- * from the user agent, as the Stream Manager reads its ⌘J, so this pure view
- * module stays free of lib/platform.ts.
- */
-const ORCLE_TAB_KEY = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘9' : 'Ctrl+9'
 
 /**
  * Which single-line explanation (if any) replaces the pane. Premium is checked
@@ -221,19 +187,8 @@ export function cohostPaneMode({
       ...(gate.upgradeUrl ? { upgradeUrl: gate.upgradeUrl } : {})
     }
   }
-  if (!consented) {
-    return {
-      kind: 'consent',
-      reason: `${COHOST_CONSENT_SENTENCE} Turn on cloud AI to use it.`
-    }
-  }
-  if (!enabled) {
-    // The Comments window cannot switch the main window's tab: copy only.
-    return {
-      kind: 'disabled',
-      reason: `Orcle is off. Turn it on in the Orcle tab (${ORCLE_TAB_KEY}).`
-    }
-  }
+  if (!consented) return { kind: 'consent' }
+  if (!enabled) return { kind: 'disabled' }
   return { kind: 'live' }
 }
 
@@ -335,17 +290,9 @@ export function cohostAskersLabel(askers: readonly string[]): string {
   return rest.length > 0 ? `${first} +${rest.length}` : first
 }
 
-/** Compact age for a dense row: "now", "4m", "2h", "1d". */
+/** Compact age for a dense row: "now", "4m", "2h", "1d", then a date (plan 174 S1.4). */
 export function cohostAgeLabel(iso: string, nowMs: number = Date.now()): string {
-  const at = Date.parse(iso)
-  if (!Number.isFinite(at)) return ''
-  const seconds = Math.max(0, Math.round((nowMs - at) / 1000))
-  if (seconds < 45) return 'now'
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${Math.max(1, minutes)}m`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h`
-  return `${Math.round(hours / 24)}d`
+  return formatRelativeTime(iso, nowMs)
 }
 
 export const COHOST_FLAG_KIND_LABELS: Record<CohostFlagKind, string> = {
@@ -387,13 +334,15 @@ export function cohostFlagChipLabel(flag: Pick<CohostFlag, 'kind' | 'target' | '
   return parts.join(' · ')
 }
 
+// Videorc can only remove a message, so a suggestion never names a timeout
+// or a ban it cannot carry out (plan 174 H-25).
 const COHOST_FLAG_ACTION_LABELS: Record<CohostFlagAction, string> = {
-  hide: 'Suggests hide',
-  timeout: 'Suggests timeout',
-  ban: 'Suggests ban'
+  hide: 'Suggests removing',
+  timeout: 'Suggests removing',
+  ban: 'Suggests removing'
 }
 
-/** A suggestion LABEL only: Orcle never moderates on its own, and neither
+/** A suggestion LABEL only: Buddy never moderates on its own, and neither
  * does this chip. Only the streamer's "Remove from chat" removes anything.
  * Null when the server suggested nothing. */
 export function cohostFlagActionLabel(flag: Pick<CohostFlag, 'action'>): string | null {
@@ -552,8 +501,17 @@ export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
 
 const COHOST_QUESTION_TOAST_TEXT_CAP = 64
 
-/** "Orcle: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows). */
-export function cohostQuestionToastMessage(question: CohostQuestion, shortcut = '⌘J'): string {
+/**
+ * "Grum: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows).
+ * The character speaks, so the toast carries the streamer's name for it
+ * (plan 174 J2-20); "Buddy" until one is known.
+ */
+export function cohostQuestionToastMessage(
+  question: CohostQuestion,
+  shortcut = shortcutLabel(shortcutAccelerator('cohost-focus')),
+  name?: string | null
+): string {
+  const speaker = buddyDisplayName(name)
   const askers = question.askers.length
   const who =
     askers > 1
@@ -562,7 +520,7 @@ export function cohostQuestionToastMessage(question: CohostQuestion, shortcut = 
         ? `${question.askers[0]} is asking`
         : 'a new question'
   const text = trimDraftToCap(question.text, COHOST_QUESTION_TOAST_TEXT_CAP)
-  return text ? `Orcle: ${who}: ${text} · ${shortcut}` : `Orcle: ${who} · ${shortcut}`
+  return text ? `${speaker}: ${who}: ${text} · ${shortcut}` : `${speaker}: ${who} · ${shortcut}`
 }
 
 export interface CohostQuestionToast {
@@ -582,15 +540,18 @@ export function cohostQuestionToast({
   paneOpen,
   lastToastAtMs,
   nowMs,
-  shortcut
+  shortcut,
+  name
 }: {
   previous: CohostState | null
   next: CohostState
   paneOpen: boolean
   lastToastAtMs: number | null
   nowMs: number
-  /** The key that focuses Orcle, as this platform writes it. */
+  /** The key that focuses Buddy, as this platform writes it. */
   shortcut?: string
+  /** The streamer's name for Buddy (`persona.name`), when the window knows it. */
+  name?: string | null
 }): CohostQuestionToast | null {
   if (paneOpen) return null
   if (next.status !== 'listening') return null
@@ -606,7 +567,7 @@ export function cohostQuestionToast({
     (question) => question.priority === 'high' && !known.has(question.id)
   )
   if (!candidate) return null
-  return { message: cohostQuestionToastMessage(candidate, shortcut), atMs: nowMs }
+  return { message: cohostQuestionToastMessage(candidate, shortcut, name), atMs: nowMs }
 }
 
 // --- Promises and recaps (plan 068 D8) --------------------------------------
@@ -622,12 +583,12 @@ const COHOST_PROMISE_TOAST_TEXT_CAP = 80
 export function cohostPromiseTriggerLabel(trigger: CohostPromiseTrigger): string | null {
   if (typeof trigger.value !== 'number' || !Number.isFinite(trigger.value)) return null
   const value = Math.max(0, Math.round(trigger.value))
-  if (trigger.kind === 'viewers') return `at ${value.toLocaleString()} viewers`
+  if (trigger.kind === 'viewers') return `at ${plural(value, 'viewer')}`
   if (trigger.kind === 'minutes') return `in ${value} min`
   return null
 }
 
-/** "Orcle: you promised: a giveaway at 100 viewers". */
+/** "Buddy: you promised: a giveaway at 100 viewers". */
 export function cohostPromiseReminderMessage(text: string): string {
   const trimmed = trimDraftToCap(text, COHOST_PROMISE_TOAST_TEXT_CAP)
   return trimmed ? `You promised: ${trimmed}` : 'You made a promise on stream.'
@@ -725,7 +686,7 @@ export function cohostNudgeVisible({
 
 // --- Listening (plan 068) ----------------------------------------------------
 
-/** One compact label and one plain sentence for whether Orcle hears the
+/** One compact label and one plain sentence for whether Buddy hears the
  * streamer. `off` has no view: an unused feature shows nothing. */
 export interface CohostListeningView {
   state: Exclude<CohostListeningState, 'off'>
@@ -745,7 +706,7 @@ const COHOST_LISTEN_BLOCKED_REASONS: ReadonlyMap<string, string> = new Map([
   ['signing-out', 'signing out'],
   ['shutting-down', 'Videorc is closing'],
   ['service-unavailable', "can't reach Videorc"],
-  ['consent-required', 'turn on cloud AI'],
+  ['consent-required', 'allow cloud AI'],
   ['cloud-ai-premium-required', 'needs Premium'],
   ['listen-monthly-quota-exhausted', 'monthly listening time used up'],
   ['captions-monthly-quota-exhausted', 'monthly caption time used up'],
@@ -791,11 +752,11 @@ export function cohostListeningView(
       return {
         state: 'starting',
         label: 'Starting to listen',
-        detail: 'Orcle is starting to hear your microphone.'
+        detail: 'Buddy is starting to hear your microphone.'
       }
     case 'on': {
       const allowance = cohostListenAllowanceLabel(listening)
-      const heard = 'Orcle hears your microphone as text.'
+      const heard = 'Buddy hears your microphone as text.'
       return {
         state: 'on',
         label: 'Listening',
@@ -809,7 +770,7 @@ export function cohostListeningView(
       return {
         state: 'blocked',
         label: reason ? `Not listening: ${reason}` : 'Not listening',
-        detail: listening.message?.trim() || "Orcle can't hear you right now."
+        detail: listening.message?.trim() || "Buddy can't hear you right now."
       }
     }
     default:
@@ -819,11 +780,14 @@ export function cohostListeningView(
 
 // --- Listening prompt (plan 068 D3) -------------------------------------------
 
-/** Persisted once the streamer answers the one-time card either way. */
+/**
+ * Persisted once the streamer answers the one-time card either way. The key
+ * keeps its old name (plan 170 D22) so a dismissal survives updates.
+ */
 export const COHOST_LISTEN_PROMPT_STORAGE_KEY = 'videorc.orcleListenPromptDismissed'
 
 /**
- * The one-time "Orcle can hear you" card: only for someone who runs Orcle,
+ * The one-time "Buddy can hear you" card: only for someone who runs Buddy,
  * has listening off, and has not answered it. `listen` unknown (a relay that
  * predates the setting) never shows it.
  */

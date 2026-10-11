@@ -2,6 +2,7 @@ import { layoutPresetOrientation } from '@/lib/capture'
 import { useState, type ReactElement } from 'react'
 import { useStudioCore } from '@/hooks/use-studio'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   Dialog,
   DialogContent,
@@ -13,7 +14,8 @@ import {
 import { Field, FieldLabel, FieldDescription } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { KebabMenu } from '@/components/kebab-menu'
-import { SourceSelect } from '@/components/source-select'
+import { DevicePicker } from '@/components/device-picker'
+import { SceneCard } from '@/components/studio/scene-card'
 import { LayoutThumb } from '@/components/studio/scenes-gallery'
 import {
   sceneNameError,
@@ -21,7 +23,6 @@ import {
   type SavedScene,
   type SceneVisual
 } from '@/lib/scene-presets'
-import { cn } from '@/lib/utils'
 
 type DialogAction = { kind: 'save' | 'rename' | 'delete' | 'repair'; scene?: SavedScene }
 export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }): ReactElement {
@@ -60,7 +61,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
         ? studio.renameSavedScene(action.scene.id, name)
         : studio.saveScene(name, action?.scene?.id)
     if (success) setAction(null)
-    else setError('Could not save. Wait for pending edits or check available storage.')
+    else setError("Couldn't save. Wait for pending edits or check available storage.")
   }
   const apply = async (scene: SavedScene, visual?: SceneVisual): Promise<void> => {
     setBusy(true)
@@ -68,9 +69,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
       const success = await studio.applySavedScene(scene.id, visual)
       if (!success) {
         open({ kind: 'repair', scene })
-        setError(
-          'The scene could not be applied. Check its sources and background, then try again.'
-        )
+        setError("The scene couldn't be applied. Check its sources and background, then try again.")
       } else setAction(null)
     } finally {
       setBusy(false)
@@ -78,17 +77,33 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
   }
   return (
     <>
-      <div className="flex items-center justify-between gap-2">
-        {!toolbar ? <span className="text-sm font-medium">Saved scenes</span> : null}
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={!canSaveScene}
-          onClick={() => open({ kind: 'save' })}
-        >
-          Save scene
-        </Button>
-      </div>
+      {toolbar ? (
+        // The Scene page's section actions (plan 174 S3.9, C-23 and V-10):
+        // "Update “{name}”" once the applied saved scene drifts, then Save
+        // scene. The section's own description names the scene and its state.
+        <>
+          {active && savedSceneModified ? (
+            <Button
+              data-testid="scene-update-saved"
+              disabled={!canSaveScene}
+              variant="outline"
+              onClick={() => open({ kind: 'save', scene: active })}
+            >
+              Update “{active.name}”…
+            </Button>
+          ) : null}
+          <Button disabled={!canSaveScene} variant="ghost" onClick={() => open({ kind: 'save' })}>
+            Save scene…
+          </Button>
+        </>
+      ) : (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium">Saved scenes</span>
+          <Button variant="ghost" disabled={!canSaveScene} onClick={() => open({ kind: 'save' })}>
+            Save scene…
+          </Button>
+        </div>
+      )}
       {!toolbar ? (
         <>
           {sceneLibraryError ? (
@@ -109,63 +124,39 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                 studio.isSessionActive &&
                 layoutPresetOrientation(studio.captureConfig.layout.layoutPreset) !==
                   layoutPresetOrientation(scene.visual.layout.layoutPreset)
+              // One SceneCard for every scene (plan 174 S3.3, B-20): the
+              // selected look and its check replace "✓ Applied".
               return (
-                <div
+                <SceneCard
                   key={scene.id}
-                  className={cn(
-                    'relative flex flex-col rounded-row border',
-                    selected && 'border-primary'
-                  )}
-                >
-                  <Button
-                    variant="ghost"
-                    className="h-auto flex-col items-stretch gap-2 p-2"
-                    aria-pressed={selected}
-                    title={
-                      orientationLocked
-                        ? 'Stop the recording or stream before switching orientation.'
-                        : undefined
-                    }
-                    disabled={orientationLocked || busy || savedScenePendingId === scene.id}
-                    onClick={() =>
-                      problems.length ? open({ kind: 'repair', scene }) : void apply(scene)
-                    }
-                  >
-                    <LayoutThumb
-                      preset={scene.visual.layout.layoutPreset}
-                      framing={scene.visual.layout.verticalScreenFraming}
-                    />
-                    <span className="truncate">
-                      {savedScenePendingId === scene.id ? 'Switching…' : scene.name}
-                    </span>
-                    {selected ? (
-                      <span className="text-xs text-muted-foreground">
-                        {savedSceneModified ? 'Modified' : '✓ Applied'}
-                      </span>
-                    ) : null}
-                    {problems.length ? (
-                      <span className="text-xs text-muted-foreground">Resolve sources</span>
-                    ) : null}
-                  </Button>
-                  <div className="flex justify-end px-1 pb-1">
+                  data-saved-scene={scene.id}
+                  disabled={orientationLocked || busy || savedScenePendingId === scene.id}
+                  disabledReason={
+                    orientationLocked
+                      ? 'Stop the recording or stream before switching orientation.'
+                      : null
+                  }
+                  label={savedScenePendingId === scene.id ? 'Switching…' : scene.name}
+                  menu={
                     <KebabMenu
                       label={`Actions for ${scene.name}`}
+                      reveal="hover"
                       items={[
                         {
                           id: 'update',
-                          label: 'Update saved scene',
+                          label: 'Update saved scene…',
                           disabled: !selected || !canSaveScene,
                           onSelect: () => open({ kind: 'save', scene })
                         },
                         {
                           id: 'save-as',
-                          label: 'Save as new scene',
+                          label: 'Save as new scene…',
                           disabled: !canSaveScene,
                           onSelect: () => open({ kind: 'save' })
                         },
                         {
                           id: 'rename',
-                          label: 'Rename',
+                          label: 'Rename…',
                           onSelect: () => open({ kind: 'rename', scene })
                         },
                         {
@@ -181,20 +172,45 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                         }
                       ]}
                     />
-                  </div>
-                </div>
+                  }
+                  meta={
+                    problems.length
+                      ? 'Resolve sources'
+                      : selected && savedSceneModified
+                        ? 'Modified'
+                        : undefined
+                  }
+                  selected={selected}
+                  thumb={
+                    <LayoutThumb
+                      framing={scene.visual.layout.verticalScreenFraming}
+                      preset={scene.visual.layout.layoutPreset}
+                    />
+                  }
+                  onSelect={() =>
+                    problems.length ? open({ kind: 'repair', scene }) : void apply(scene)
+                  }
+                />
               )
             })}
           </div>
         </>
-      ) : active ? (
-        <span className="text-xs text-muted-foreground">
-          {active.name}
-          {savedSceneModified ? ' · Modified' : ''}
-        </span>
       ) : null}
+      {/* The delete is the model confirm (plan 174 S0.3): what is lost, in
+          one sentence, behind the one recipe. */}
+      <ConfirmDialog
+        confirmLabel="Delete scene"
+        description="Only the saved snapshot is deleted. Your current scene and recording continue."
+        open={action?.kind === 'delete'}
+        testId="scene-delete"
+        title="Delete saved scene?"
+        onCancel={() => setAction(null)}
+        onConfirm={() => {
+          if (action?.scene && studio.deleteSavedScene(action.scene.id)) setAction(null)
+        }}
+      />
       <Dialog
-        open={action !== null}
+        open={action !== null && action.kind !== 'delete'}
         onOpenChange={(value) => {
           if (!value) setAction(null)
         }}
@@ -202,39 +218,38 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {action?.kind === 'delete'
-                ? 'Delete saved scene?'
-                : action?.kind === 'repair'
-                  ? 'Resolve scene sources'
-                  : action?.kind === 'rename'
-                    ? 'Rename scene'
-                    : action?.scene
-                      ? 'Update saved scene'
-                      : 'Save scene'}
+              {action?.kind === 'repair'
+                ? 'Resolve scene sources'
+                : action?.kind === 'rename'
+                  ? 'Rename scene'
+                  : action?.scene
+                    ? 'Update saved scene'
+                    : 'Save scene'}
             </DialogTitle>
             <DialogDescription>
-              {action?.kind === 'delete'
-                ? 'Only the saved snapshot is deleted. Your current scene and recording continue.'
-                : action?.kind === 'repair'
-                  ? 'Choose exact replacement sources. Repairs change the working scene; use Update to replace its saved snapshot.'
-                  : 'Save the visual setup. Audio, recording and streaming settings stay separate.'}
+              {action?.kind === 'repair'
+                ? 'Choose exact replacement sources. Repairs change the working scene; use Update to replace its saved snapshot.'
+                : 'Save the visual setup. Audio, recording and streaming settings stay separate.'}
             </DialogDescription>
           </DialogHeader>
           {action?.kind === 'repair' && repair ? (
             <div className="flex flex-col gap-4">
-              <SourceSelect
+              <DevicePicker
+                kind="camera"
                 label="Camera"
-                allowNone
+                noneLabel="Off"
                 devices={deviceList.devices.filter((device) => device.kind === 'camera')}
                 value={repair.sources.cameraId}
                 onChange={(cameraId) =>
                   setRepair({ ...repair, sources: { ...repair.sources, cameraId } })
                 }
               />
-              <SourceSelect
+              <DevicePicker
+                kind="capture"
                 label="Screen / window"
                 searchable
-                allowNone
+                groupByKind
+                noneLabel="None"
                 devices={deviceList.devices.filter(
                   (device) => device.kind === 'screen' || device.kind === 'window'
                 )}
@@ -262,7 +277,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                 </Button>
               ) : null}
             </div>
-          ) : action?.kind !== 'delete' ? (
+          ) : (
             <Field data-invalid={Boolean(error)}>
               <FieldLabel htmlFor="scene-preset-name">Name</FieldLabel>
               <Input
@@ -284,7 +299,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                 {error ?? 'Names must be unique.'}
               </FieldDescription>
             </Field>
-          ) : null}
+          )}
           {error && action?.kind === 'repair' ? (
             <p role="status" className="text-sm text-muted-foreground">
               {error}
@@ -294,16 +309,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
             <Button variant="ghost" onClick={() => setAction(null)}>
               Cancel
             </Button>
-            {action?.kind === 'delete' ? (
-              <Button
-                variant="destructive"
-                onClick={() => {
-                  if (action.scene && studio.deleteSavedScene(action.scene.id)) setAction(null)
-                }}
-              >
-                Delete scene
-              </Button>
-            ) : action?.kind === 'repair' ? (
+            {action?.kind === 'repair' ? (
               <Button
                 disabled={
                   busy || !repair || sceneSourceProblems(repair, deviceList.devices).length > 0

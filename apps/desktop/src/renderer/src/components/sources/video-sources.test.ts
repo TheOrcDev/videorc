@@ -28,7 +28,7 @@ function render(overrides: Partial<VideoSourcesViewProps> = {}): string {
       selectedName: 'Display 1',
       allowNone: true,
       disabled: false,
-      status: { label: 'Live', tone: 'good' },
+      status: { label: 'Receiving', tone: 'good' },
       facts: '2560 × 1664',
       onChange: noop
     },
@@ -37,13 +37,11 @@ function render(overrides: Partial<VideoSourcesViewProps> = {}): string {
       value: 'cam:built-in',
       selectedName: 'MacBook Pro Camera',
       disabled: false,
-      status: { label: 'Live', tone: 'good' },
+      status: { label: 'Receiving', tone: 'good' },
       facts: '1920 × 1080 · 30 fps',
       shortfall: null,
       onChange: noop
     },
-    screenPermission: null,
-    cameraPermission: null,
     synthetic: null,
     ...overrides
   }
@@ -73,7 +71,7 @@ describe('Sources Video column (plan 173)', () => {
 
   it('shows each live source’s status and facts', () => {
     const markup = render()
-    expect(markup.match(/>Live</g)).toHaveLength(2)
+    expect(markup.match(/>Receiving</g)).toHaveLength(2)
     expect(markup).toContain('>2560 × 1664<')
     expect(markup).toContain('>1920 × 1080 · 30 fps<')
   })
@@ -84,7 +82,7 @@ describe('Sources Video column (plan 173)', () => {
         devices: cameras,
         value: 'cam:built-in',
         disabled: false,
-        status: { label: 'Live', tone: 'good' },
+        status: { label: 'Receiving', tone: 'good' },
         facts: '3840 × 2160 · 25 fps',
         shortfall: 'This camera only offers 3840×2160 at 25 fps.',
         onChange: noop
@@ -92,7 +90,8 @@ describe('Sources Video column (plan 173)', () => {
     })
     expect(markup).toContain('This camera only offers 3840×2160 at 25 fps.')
     expect(markup).not.toContain('3840 × 2160 · 25 fps')
-    expect(markup).toContain('data-tone="warning"')
+    // A warning is an Alert, never amber text (plan 174 S3.8).
+    expect(markup).toMatch(/data-slot="alert"[^>]*data-variant="warning"/)
   })
 
   it('says Not found with its hint for a missing camera', () => {
@@ -105,7 +104,7 @@ describe('Sources Video column (plan 173)', () => {
         status: {
           label: 'Not found',
           tone: 'warn',
-          hint: 'It is not connected. Reconnect it, or pick another.'
+          hint: "It isn't connected. Reconnect it, or choose another."
         },
         facts: null,
         shortfall: null,
@@ -113,10 +112,10 @@ describe('Sources Video column (plan 173)', () => {
       }
     })
     expect(markup).toContain('>Not found<')
-    expect(markup).toContain('It is not connected. Reconnect it, or pick another.')
+    expect(markup).toContain('It isn&#x27;t connected. Reconnect it, or choose another.')
   })
 
-  it('leads with one permission alert and disables what it locks', () => {
+  it('locks the screen picker while nothing can be captured, with no alert in the column', () => {
     const markup = render({
       screen: {
         devices: screens.map((device) => ({ ...device, status: 'permission-required' as const })),
@@ -126,32 +125,13 @@ describe('Sources Video column (plan 173)', () => {
         status: null,
         facts: null,
         onChange: noop
-      },
-      screenPermission: { targetName: 'videorc-backend', onOpen: noop, onReveal: noop }
+      }
     })
-    expect(markup).toContain('Screen Recording permission is required for videorc-backend.')
-    expect(markup).toContain('Open Screen Recording')
-    expect(markup.match(/Screen Recording permission is required/g)).toHaveLength(1)
-    // The alert comes before the list it is about.
-    expect(markup.indexOf('Open Screen Recording')).toBeLessThan(
-      markup.indexOf('data-slot="grouped-list"')
-    )
+    // The page's permission alert carries the fix (plan 174 S3.8).
+    expect(markup).not.toContain('data-slot="alert"')
     expect(markup).toMatch(
       /data-disabled="true"[^>]*data-slot="source-item"[^>]*data-source="screen"/
     )
-  })
-
-  it('names the camera action the platform offers', () => {
-    const markup = render({
-      cameraPermission: {
-        targetName: 'Videorc',
-        actionLabel: 'Enable Camera',
-        onOpen: noop,
-        onReveal: noop
-      }
-    })
-    expect(markup).toContain('Camera permission is required for Videorc.')
-    expect(markup).toContain('>Enable Camera<')
   })
 
   it('says how a live switch lands only while a session runs', () => {

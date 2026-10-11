@@ -1,4 +1,5 @@
 import type { PreviewCameraStatus, PreviewScreenStatus } from '@/lib/backend'
+import { formatFrameRate, formatResolution } from '@/lib/format-video'
 
 // Plan 173: the facts line under a live video source's picker. Only what the
 // backend measured or negotiated, and only while the source is live: an
@@ -6,7 +7,7 @@ import type { PreviewCameraStatus, PreviewScreenStatus } from '@/lib/backend'
 
 function dimensions(width: number | undefined, height: number | undefined): string | null {
   if (!width || !height || width <= 0 || height <= 0) return null
-  return `${Math.round(width)} × ${Math.round(height)}`
+  return formatResolution({ width, height })
 }
 
 /**
@@ -51,5 +52,5 @@ export function cameraFacts(
     (fps): fps is number => typeof fps === 'number' && Number.isFinite(fps) && fps > 0
   )
   if (caps.length === 0) return size
-  return `${size} · ${Math.round(Math.min(...caps))} fps`
+  return `${size} · ${formatFrameRate(Math.round(Math.min(...caps)))}`
 }

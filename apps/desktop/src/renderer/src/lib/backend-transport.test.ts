@@ -8,19 +8,19 @@ import { isTransientBackendError, shouldToastBackendError } from './backend-tran
 // must still surface.
 describe('backend transport error classification', () => {
   const transient = [
-    'Backend WebSocket is not connected.',
-    'Backend connection closed.',
-    'Could not connect to the Rust backend.'
+    "Videorc's engine isn't connected.",
+    "Videorc's engine connection closed.",
+    "Couldn't connect to Videorc's engine."
   ]
 
   it('classifies exactly the three BackendClient-minted strings as transient', () => {
     for (const message of transient) {
       expect(isTransientBackendError(message)).toBe(true)
     }
-    expect(isTransientBackendError('  Backend connection closed.  ')).toBe(true)
+    expect(isTransientBackendError("  Videorc's engine connection closed.  ")).toBe(true)
     // The user-gesture pre-check guard is a DIFFERENT string and a different
     // concern — never treat it as a transport transient.
-    expect(isTransientBackendError('Backend socket is not connected.')).toBe(false)
+    expect(isTransientBackendError('Videorc is reconnecting. Try again in a moment.')).toBe(false)
     expect(isTransientBackendError('Scene apply failed: invalid layout')).toBe(false)
   })
 

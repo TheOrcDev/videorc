@@ -5,6 +5,7 @@ import {
   cloudAiUploadGate,
   goLiveEntitlementGate,
   noiseCleanupGate,
+  streamingDestinationCap,
   streamingDestinationEnableGate,
   videoProfileEntitlementGate
 } from './entitlement-ui'
@@ -99,6 +100,22 @@ describe('entitlement UI gates', () => {
       featureId: 'multistreaming',
       reason: capReason
     })
+  })
+
+  it('puts the cap in the section rule and one notice only at the cap (plan 174 S3.5a, D-14)', () => {
+    const below = streamingDestinationCap(basicEntitlements, { enabledTargetIds: ['youtube'] })
+    expect(below).toEqual({
+      max: CAP,
+      atCap: false,
+      rule: `Stream to up to ${CAP} at once.`,
+      notice: null
+    })
+    const full = streamingDestinationCap(premiumEntitlements, { enabledTargetIds: fiveTargets })
+    expect(full.atCap).toBe(true)
+    expect(full.notice).toBe(
+      `${CAP} destinations are on, the most at once. Turn one off to add another.`
+    )
+    expect(full.notice).not.toMatch(/premium/i)
   })
 
   it(`allows anyone to enable up to ${CAP} destinations`, () => {
@@ -306,7 +323,7 @@ describe('entitlement UI gates', () => {
     expect(noiseCleanupGate(null)).toEqual({
       allowed: false,
       featureId: 'noise-cleanup',
-      reason: 'Noise Cleanup requires Videorc Premium.',
+      reason: 'Noise cleanup is part of Videorc Premium.',
       upgradeUrl: VIDEORC_PREMIUM_URL
     })
     expect(noiseCleanupGate(basicEntitlements)).toEqual(noiseCleanupGate(null))
