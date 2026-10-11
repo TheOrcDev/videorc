@@ -3,11 +3,11 @@
 Videorc exposes a local, token-gated remote-control surface (issue #143) so a
 Stream Deck — or any local integration (Companion, Loupedeck, scripts) — can
 start/stop sessions, switch scenes, mute the mic, show takeovers, and bring
-windows forward. **Off by default**; enable it in Settings → Remote control.
+windows forward. **Off by default**; enable it in Settings → Remote → Remote control.
 
 Two integration tiers:
 
-1. **Global shortcuts (no protocol):** Settings → Global shortcuts registers
+1. **Global shortcuts (no protocol):** Settings → Shortcuts → Global shortcuts registers
    OS-wide accelerators for record/stream/mic/system audio. Bind them to any
    macro tool or a Stream Deck Hotkey action. Works while Videorc is in the
    background.
@@ -45,8 +45,10 @@ rotatable from Settings; **regenerating closes every paired client**.
 ## Requests
 
 `{"id":"…","method":"remote.describe"}` → `{ describe, state, protocol }`
-where `describe` lists `layoutPresets`, `takeovers` (`{id, name}`), and
-`windows`.
+where `describe` lists `layoutPresets`, `layoutLabels` (each preset id's
+name as the desktop shows it, `{ "screen-camera": "Screen + camera" }`,
+since plan 174 S2.3a; absent from older apps), `takeovers` (`{id, name}`),
+and `windows`.
 
 `{"id":"…","method":"remote.intent","params":{…}}` → `{ intentId, accepted,
 message? }`. Accepted intents produce a `remote.ack` event
@@ -104,7 +106,7 @@ backend-confirmed state, debounce, and regenerate-cuts-clients.
 
 A phone on the same Wi-Fi as a **live comment monitor + Stream Deck**: read
 every chat message, tap one to put it on stream, switch scenes, show takeovers,
-mute the mic, start/stop. **Off by default**; Settings → Phone remote. Turning
+mute the mic, start/stop. **Off by default**; Settings → Remote → Phone remote. Turning
 it on also turns Remote control on; turning Remote control off closes it.
 
 The backend serves its own client at `http://<lan-ip>:<port>/` — a static page
@@ -233,6 +235,25 @@ paired device can do is what it could already do with the mic: switch the
 computer's sound into, or out of, the recording and the stream. Turning it on
 is the privacy-relevant direction, so it runs through the same renderer path
 as the Studio switch, and the Studio shows the change.
+
+### Layout names on the phone (plan 174 S2.3a leak argument)
+
+The phone names its scene keys the way the desktop does ("Screen + camera",
+"Vertical split") instead of title-casing preset ids ("Side By Side"). What
+crosses the LAN socket is one more field in the existing `remote.describe`
+answer: `layoutLabels`, a map from the built-in layout preset ids already
+listed in `layoutPresets` to their fixed English names from
+`lib/layout-labels.ts`. The names are compiled into the app, the same for
+every user: no scene a streamer named, no device, path, account, token or
+setting. No route, method or event is added, `LAN_EVENTS` and the router are
+unchanged, and the backend stores `describe` as an opaque value as before. A
+paired phone learns nothing it could not already derive from the ids, and
+can do nothing new.
+
+The phone's other words now match the desktop too, with no protocol change:
+the tabs read Chat and Controls, the header reads ON AIR while a livestream
+runs, the on-stream badge reads "On stream", the clear key reads "Take off
+stream", and the stop key reads "End livestream".
 
 ## Events (LAN sockets only)
 

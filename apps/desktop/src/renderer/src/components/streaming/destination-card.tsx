@@ -59,6 +59,8 @@ import type {
 import { AvatarCircle } from '@/lib/chat-avatar'
 import { oauthUnavailableReason } from '@/lib/capture'
 import { destinationSetup } from '@/lib/destination-readiness'
+import { destinationLabel } from '@/lib/platform-copy'
+import { destinationStateLabel } from '@/lib/state-labels'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { streamKeyPlatformMismatch, streamKeyTailHint } from '@/lib/stream-key-format'
 import { metadataPlatformLabel } from '@/lib/stream-metadata-summary'
@@ -92,24 +94,22 @@ const AUTH_MODE_OPTIONS: SegmentedControlOption<StreamAuthMode>[] = [
   { value: 'manual-rtmp', label: 'Stream key' }
 ]
 
+const RUNTIME_BADGE_TONES: Record<StreamTargetRuntime['state'], BadgeTone> = {
+  live: 'live',
+  connecting: 'warning',
+  reconnecting: 'warning',
+  warning: 'warning',
+  failed: 'destructive',
+  'not-configured': 'warning',
+  ready: 'outline',
+  stopped: 'outline'
+}
+
+/** The running destination's badge: the one destination vocabulary (plan 174 J2-4). */
 function runtimeBadge(runtime: StreamTargetRuntime): { tone: BadgeTone; label: string } {
-  switch (runtime.state) {
-    case 'live':
-      return { tone: 'live', label: 'On air' }
-    case 'connecting':
-      return { tone: 'warning', label: 'Connecting' }
-    case 'reconnecting':
-      return { tone: 'warning', label: 'Reconnecting' }
-    case 'warning':
-      return { tone: 'warning', label: 'Not receiving' }
-    case 'failed':
-      return { tone: 'destructive', label: 'Stopped' }
-    case 'not-configured':
-      return { tone: 'warning', label: 'Skipped' }
-    case 'stopped':
-      return { tone: 'outline', label: 'Ended' }
-    default:
-      return { tone: 'outline', label: 'Idle' }
+  return {
+    tone: RUNTIME_BADGE_TONES[runtime.state] ?? 'outline',
+    label: destinationStateLabel(runtime.state)
   }
 }
 
@@ -316,7 +316,7 @@ export function DestinationCard({
         icon={<PlatformGlyph platform={target.platform} />}
         title={
           <ListRowButton aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
-            {target.label}
+            {destinationLabel(target.label)}
           </ListRowButton>
         }
         context={oauthMode ? account?.accountLabel : 'Stream key'}
@@ -336,7 +336,7 @@ export function DestinationCard({
       >
         <Switch
           aria-describedby={enableLockGate ? enableLockId : undefined}
-          aria-label={`Enable ${target.label}`}
+          aria-label={`Enable ${destinationLabel(target.label)}`}
           checked={target.enabled}
           disabled={enableSwitchDisabled}
           onCheckedChange={patchEnabled}
@@ -599,14 +599,14 @@ export function DestinationCard({
                     } will be replaced by the new one ending ${streamKeyTailHint(
                       pendingKeySave?.value ?? ''
                     )}. The old one is kept as your previous ${credentialLabel}, so you can restore it.`
-                  : `The key ending ${streamKeyTailHint(pendingKeySave?.value ?? '')} will be saved to ${target.label}.`
+                  : `The key ending ${streamKeyTailHint(pendingKeySave?.value ?? '')} will be saved to ${destinationLabel(target.label)}.`
               }
               open={pendingKeySave !== null}
               testId="stream-key-save"
               title={
                 target.streamKeyPresent
-                  ? `Replace the ${target.label} ${credentialLabel}?`
-                  : `Save this ${credentialLabel} to ${target.label}?`
+                  ? `Replace the ${destinationLabel(target.label)} ${credentialLabel}?`
+                  : `Save this ${credentialLabel} to ${destinationLabel(target.label)}?`
               }
               onCancel={() => setPendingKeySave(null)}
               onConfirm={confirmPendingKeySave}
@@ -625,7 +625,7 @@ export function DestinationCard({
               } is kept as your previous ${credentialLabel} after removal, so you can restore it.`}
               open={confirmingClear}
               testId="stream-key-remove"
-              title={`Remove the ${target.label} ${credentialLabel}?`}
+              title={`Remove the ${destinationLabel(target.label)} ${credentialLabel}?`}
               onCancel={() => setConfirmingClear(false)}
               onConfirm={confirmClearKey}
             />
@@ -686,13 +686,11 @@ function streamTargetStatusBadge(state: NonNullable<StreamTargetSettings['status
     case 'connecting':
       return { tone: 'warning', label: 'Updating' }
     case 'live':
-      return { tone: 'live', label: 'On air' }
+    case 'failed':
+    case 'stopped':
+      return { tone: RUNTIME_BADGE_TONES[state], label: destinationStateLabel(state) }
     case 'warning':
       return { tone: 'warning', label: 'Review' }
-    case 'failed':
-      return { tone: 'destructive', label: 'Failed' }
-    case 'stopped':
-      return { tone: 'outline', label: 'Ended' }
     default:
       return { tone: 'outline', label: 'Idle' }
   }

@@ -574,7 +574,7 @@ pub(crate) fn stream_platform_label(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Youtube => "YouTube",
         StreamPlatform::Twitch => "Twitch",
         StreamPlatform::Kick => "Kick",
-        StreamPlatform::X => "X / Twitter",
+        StreamPlatform::X => "X",
         StreamPlatform::Tiktok => "TikTok",
         StreamPlatform::Instagram => "Instagram",
         StreamPlatform::Custom => "Custom RTMP",
@@ -666,7 +666,7 @@ pub fn default_stream_targets() -> Vec<StreamTargetSettings> {
             "Kick",
             "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app",
         ),
-        default_stream_target(StreamPlatform::X, "X / Twitter", ""),
+        default_stream_target(StreamPlatform::X, "X", ""),
         default_stream_target_with_id(
             "youtube-vertical",
             StreamPlatform::Youtube,

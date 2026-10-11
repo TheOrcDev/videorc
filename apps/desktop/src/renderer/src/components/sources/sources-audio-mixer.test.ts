@@ -105,7 +105,9 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(markup).toContain(
       'Your own stream open in a browser tab is captured too. Mute that tab: headphones don&#x27;t stop it.'
     )
-    expect(markup).toContain('Use headphones so your mic doesn&#x27;t pick up your speakers.')
+    expect(markup).toContain(
+      'Use headphones so your microphone doesn&#x27;t pick up your speakers.'
+    )
     expect(markup).toContain(
       'Your Mac&#x27;s volume and mute don&#x27;t change what&#x27;s recorded.'
     )
@@ -124,14 +126,14 @@ describe('Sources System audio row (plans 069, 173)', () => {
       { requested: true, sessionActive: true, confirmed: false, issue: 'unavailable' },
       { macOS: false }
     )
-    expect(failed).toContain('System audio could not start.')
+    expect(failed).toContain('System audio couldn&#x27;t start.')
     expect(failed).not.toContain('Open Settings')
     const bypassed = render(
       { requested: true, sessionActive: true, confirmed: false, issue: 'bypassed' },
       { macOS: false }
     )
     expect(bypassed).toContain(
-      'System audio is off for this session because the microphone is on a fallback input.'
+      'System audio is off until you stop, because the microphone is on a fallback input.'
     )
   })
 
@@ -172,7 +174,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(render({}).match(onSwitch)?.[0]).toContain('data-state="unchecked"')
   })
 
-  it('chips On outside a session, Live while mixed, and nothing while Off', () => {
+  it('chips On outside a session, Receiving while mixed, and nothing while Off', () => {
     expect(render({ requested: true })).toContain('>On<')
     const source = createFrameEmitter<MeterFrame>()
     expect(
@@ -180,7 +182,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
         { requested: true, sessionActive: true, confirmed: true },
         { meter: { kind: 'source', source } }
       )
-    ).toContain('>Live<')
+    ).toContain('>Receiving<')
     expect(render({})).not.toContain('data-slot="source-status"')
   })
 })
@@ -197,7 +199,7 @@ function renderMicrophone(
         microphoneSelected: true,
         status: null,
         meter: { kind: 'value', peakDb: -18 },
-        monitorLabel: 'Monitoring',
+        monitorState: 'monitoring',
         unavailableReason: undefined,
         gainDb: 0,
         muted: false,
@@ -249,7 +251,7 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(renderMicrophone({ muted: false }).match(toggle)?.[0]).toContain('aria-pressed="false"')
     const muted = renderMicrophone({
       muted: true,
-      monitorLabel: 'Muted',
+      monitorState: 'muted',
       status: { label: 'Muted', tone: 'neutral' }
     })
     expect(muted.match(toggle)?.[0]).toContain('aria-pressed="true"')

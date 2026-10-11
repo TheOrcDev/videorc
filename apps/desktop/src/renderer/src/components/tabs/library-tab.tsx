@@ -79,7 +79,13 @@ import {
   finalizingBadgeLabel,
   isFinalizingSession
 } from '@/lib/session-finalization'
-import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
+import {
+  dayLabel,
+  durationMsLabel,
+  formatBytes,
+  isActiveRecordingState,
+  plural
+} from '@/lib/format'
 import { openCleanCut } from '@/lib/clean-cut-events'
 import {
   cleanCutModeLabel,
@@ -718,7 +724,7 @@ export function LibraryTab({
                       totalBytes: sessionStorageTotals.totalBytes,
                       freeBytes
                     })
-                  : `${sessions.length} recordings loaded`}
+                  : `${plural(sessions.length, 'recording')} loaded`}
               </span>
               {sessionsNextCursor ? (
                 <Button

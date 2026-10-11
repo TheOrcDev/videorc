@@ -42,7 +42,7 @@ import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-o
 import { OVERLAY_ITEM_LABELS, overlayStartNotices } from '@/lib/overlay-layout'
 import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
-import { platformLabel } from '@/lib/platform-copy'
+import { destinationLabel, platformLabel } from '@/lib/platform-copy'
 import { YOUTUBE_STREAM_KEY_LINK_LABEL, YOUTUBE_STREAM_KEY_URL } from '@/lib/youtube-quota-copy'
 
 /** Why the primary waits: the dialog lists what blocks it above the button. */
@@ -157,7 +157,7 @@ export function GoLiveConfirmationDialog({
             {scheduledTargets.map((target) => (
               <div key={target.id} className="rounded-row border border-border bg-inset p-3">
                 <p className="font-medium">
-                  {target.label}:{' '}
+                  {destinationLabel(target.label)}:{' '}
                   {preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
                     ?.title ?? target.scheduledEventTitle}
                 </p>
@@ -539,7 +539,7 @@ export function GoLiveDestinationRow({
     <div className="grid gap-2 rounded-row border border-border bg-inset p-3 sm:grid-cols-[1fr_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{destination.label}</span>
+          <span className="font-medium">{destinationLabel(destination.label)}</span>
           <Badge variant={destination.ready ? 'success' : 'destructive'}>
             {destination.ready ? (
               <SuccessIcon data-icon="inline-start" weight="fill" />
@@ -582,7 +582,7 @@ export function GoLiveDestinationRow({
               variant="outline"
               onClick={() => onResolveBlocker(destination.targetId, 'disable')}
             >
-              Go live without {destination.label}
+              Go live without {destinationLabel(destination.label)}
             </Button>
           </div>
         ) : null}
@@ -684,9 +684,9 @@ function commentsWriteLabel(state: CommentsWriteState): string {
     case 'ready':
       return 'Ready'
     case 'missing-scope':
-      return 'Reconnect needed'
+      return 'Reconnect to send'
     case 'read-only':
-      return 'Receive only'
+      return 'Read-only'
     case 'failed':
       return 'Failed'
     case 'unavailable':

@@ -80,7 +80,7 @@ describe('entitlements', () => {
     expect(entitlementDisabledReason(null, 'live-cohost')).toContain('Premium')
     expect(isFeatureEntitled(null, 'noise-cleanup')).toBe(false)
     expect(entitlementDisabledReason(null, 'noise-cleanup')).toBe(
-      'Noise Cleanup requires Videorc Premium.'
+      'Noise cleanup is part of Videorc Premium.'
     )
     // Recording AND streaming are free at full quality — the website promises
     // free 4K recording, and streaming quality went free with Plan 075. The

@@ -782,9 +782,9 @@ async function ensureStudioMicVisuals(smoke, { selectDevice = true } = {}) {
       const deadline = Date.now() + 10000;
       while (Date.now() < deadline) {
         const visualizer = document.querySelector('[data-videorc-mic-visualizer]');
-        const live = Array.from(document.querySelectorAll('span')).some(
-          (candidate) => candidate.textContent?.trim() === 'Live'
-        );
+        // The meter's state attribute, not its words: plan 174 C-38 says
+        // "Receiving" where it once said "Live".
+        const live = Boolean(document.querySelector('[data-videorc-mic-monitor-state="live"]'));
         if (visualizer && live) return { mounted: true, live: true };
         await sleep(100);
       }

@@ -1,4 +1,5 @@
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
 import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-loader'
@@ -59,10 +60,11 @@ import {
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
+import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/start-blocked-copy'
 import { copyText } from '@/lib/copy-text'
 import { platformLabel } from '@/lib/platform-copy'
-import { currentPlatform, osSettingsName } from '@/lib/platform'
-import { toast } from '@/lib/toast'
+import { currentPlatform, osSettingsName, trashName } from '@/lib/platform'
+import { registerSupportBundleExport, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
@@ -6913,7 +6915,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           clearSessionRuntimeState()
           void refreshSessions(nextClient)
         }
-        // "Open Stream Manager when I go live" (plan 055, decision 6). Go Live
+        // "Open Stream Manager when you go live" (plan 055, decision 6). Go Live
         // is record+stream, which the backend reports as `recording` with a
         // stream URL (plan 095 S5).
         if (
@@ -10357,7 +10359,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       notifyOnce(
         'chat-closed-for-recording',
         'warning',
-        'Stream Manager closed for this recording',
+        `${WINDOW_NAMES.streamManager} closed for this recording`,
         {
           description: 'Videorc closed it so your chat stays out of the recording.'
         }
@@ -10599,6 +10601,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSupportBundleExportPending(false)
     }
   }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  // Plan 174 A-20: a toast whose raw details were withheld offers this export
+  // (latest-value hand-off, like the ref mirrors above; idempotent per render).
+  registerSupportBundleExport(() => void exportSupportBundle())
 
   const scheduleHardwareAccelerationRetry = useCallback(async () => {
     if (!window.videorc?.retryHardwareAcceleration) {
@@ -12219,15 +12224,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus
   ])
 
+  // The start-blocking copy table (plan 174 B-22): what to do next, never
+  // "Backend socket is closed." or "Checking FFmpeg…".
   const startBlockedReason = (() => {
-    if (wsStatus !== 'connected') {
-      return `Backend socket is ${wsStatus}.`
+    const disconnected = connectionBlockedReason(wsStatus)
+    if (disconnected) {
+      return disconnected
     }
     if (isSessionActive) {
-      return 'A capture session is already active.'
+      return START_BLOCKED_COPY.sessionRunning
     }
     if (!outputEnabled) {
-      return 'Enable Record MKV, Stream RTMP, or both before starting.'
+      return START_BLOCKED_COPY.noOutput
     }
     if (!recordingProfileEntitlement.allowed) {
       return recordingProfileEntitlement.reason
@@ -12246,14 +12254,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     if (captureConfig.streamEnabled && !streamReady) {
       return captureConfig.streaming.targets.some((target) => target.enabled)
-        ? 'Finish manual livestream destination setup before streaming.'
-        : 'Enable at least one livestream destination before streaming.'
+        ? START_BLOCKED_COPY.destinationSetup
+        : START_BLOCKED_COPY.noDestination
     }
     if (!health) {
-      return 'Checking FFmpeg before starting.'
+      return START_BLOCKED_COPY.checkingRecorder
     }
     if (!health.ffmpeg.available) {
-      return health.ffmpeg.message ?? 'FFmpeg is not available.'
+      return START_BLOCKED_COPY.recorderMissing
     }
     // Only a finished verdict blocks here. A check that is still running or
     // failed is settled when Go Live is pressed: the start waits for it.
@@ -14422,7 +14430,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
       if (failedCount > 0) {
         throw new Error(
-          `${failedCount} file(s) could not be moved to Trash; their sessions were kept.`
+          `${plural(failedCount, "file couldn't", "files couldn't")} be moved to the ${trashName()}, so ${failedCount === 1 ? 'its recording was' : 'their recordings were'} kept.`
         )
       }
     },

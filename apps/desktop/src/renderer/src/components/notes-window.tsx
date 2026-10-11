@@ -8,6 +8,7 @@ import { WindowHeader } from '@/components/window-frame'
 import type { NotesFontScale, NotesWindowState } from '@/lib/backend'
 import { cn } from '@/lib/utils'
 import { MAX_NOTES_TEXT_LENGTH } from '../../../shared/notes-limits'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // The detached Notes window (plan 050 S4): the private teleprompter, now a real
 // renderer window on the same glass, header and controls as Chat and Captions.
@@ -154,7 +155,7 @@ export function NotesWindow({
 
   return (
     <div className="flex h-full flex-col text-foreground" data-smoke-marker={smokeMarker}>
-      <WindowHeader className={marker} title="Notes">
+      <WindowHeader className={marker} title={WINDOW_NAMES.notes}>
         {/* SegmentedControl has no Radix, so it splits no shared chunk the main
             window loads eagerly (asset budget). A pick goes back to writing. */}
         <SegmentedControl

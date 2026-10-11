@@ -18,6 +18,7 @@ import {
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { commandModifierHeld, normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
+import { WINDOW_NAMES } from '../shared/window-names'
 import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
@@ -2786,7 +2787,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 360,
     minHeight: 240,
-    title: 'Videorc Notes',
+    title: WINDOW_NAMES.notes,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -3632,7 +3633,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 320,
     minHeight: 360,
-    title: 'Videorc Stream Manager',
+    title: WINDOW_NAMES.streamManager,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -3851,7 +3852,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 360,
     minHeight: 200,
-    title: 'Videorc Captions',
+    title: WINDOW_NAMES.captions,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -4300,7 +4301,7 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
 </style></head><body>
   <div class="hint"><div class="title">${PREVIEW_WAIT_TITLE}</div>
   <div id="videorc-wait-detail">${PREVIEW_WAIT_DETAIL_DEFAULT}</div></div>
-  <div class="drag-bar"><span class="label">Preview</span></div>
+  <div class="drag-bar"><span class="label">${WINDOW_NAMES.preview}</span></div>
 </body></html>`
 
 async function openPreviewWindow(): Promise<PreviewWindowState> {
@@ -4351,7 +4352,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: docked ? 1 : 320,
     minHeight: docked ? 1 : 208,
-    title: 'Videorc Preview',
+    title: WINDOW_NAMES.preview,
     // window-glass.ts: real material pinned dark and the traffic lights centred
     // on the 28px strip on macOS; off macOS the standard frame and solid base
     // keep the window draggable without renderer drag regions.

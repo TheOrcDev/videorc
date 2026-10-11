@@ -268,7 +268,7 @@ function paintHighlight() {
   const msLeft = highlight.expiresAt ? Date.parse(highlight.expiresAt) - Date.now() : null
   // The backend's clear event is authoritative. If it was missed (a network
   // blip at the wrong moment) the card is gone from the stream anyway — never
-  // leave a stale "ON STREAM" badge behind.
+  // leave a stale "On stream" badge behind.
   if (highlight.phase === 'live' && msLeft !== null && msLeft < -1500) {
     highlight = { phase: 'idle' }
     renderDeck()
@@ -283,7 +283,8 @@ function paintHighlight() {
     let badge = meta.querySelector('.onstream')
     if (isLive) {
       if (!badge) meta.append((badge = el('span', 'onstream')))
-      badge.textContent = secondsLeft === null ? 'ON STREAM' : `ON STREAM ${secondsLeft}s`
+      // The desktop's words (plan 174 I-14): "On stream", like Stream Manager.
+      badge.textContent = secondsLeft === null ? 'On stream' : `On stream ${secondsLeft}s`
     } else badge?.remove()
   }
   clearInterval(highlightTimer)
@@ -326,8 +327,13 @@ function updateKeys(container, nodes) {
   })
 }
 
-function prettyPreset(id) {
-  return id.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+// The desktop sends each layout's name with describe (plan 174 I-14); an
+// older desktop without it still gets a readable key.
+function presetName(id) {
+  const label = describe?.layoutLabels?.[id]
+  if (typeof label === 'string' && label) return label
+  const words = id.replace(/[-_]/g, ' ')
+  return words.charAt(0).toUpperCase() + words.slice(1)
 }
 
 function key({ name, hint, on = false, accent, disabled = false, onTap, onHold }) {
@@ -412,14 +418,14 @@ function renderDeck() {
   const session = state.sessionActive
     ? (sessionControl?.node ??
       key({
-        name: streaming ? 'End stream' : 'Stop recording',
+        name: streaming ? 'End livestream' : 'Stop recording',
         hint: 'Hold to stop',
         on: true,
         accent: 'red',
         onHold: () => send({ kind: action })
       }))
     : key({
-        name: streaming ? 'Go live' : 'Record',
+        name: streaming ? 'Go Live' : 'Record',
         hint: streaming && state.recordEnabled ? 'Stream + record' : 'Tap to start',
         accent: 'red',
         onTap: () => send({ kind: action })
@@ -443,7 +449,7 @@ function renderDeck() {
       })
     : null
   const comments = key({
-    name: 'Clear comment',
+    name: 'Take off stream',
     hint: highlight.phase === 'live' ? 'On stream now' : 'Nothing on stream',
     disabled: highlight.phase !== 'live',
     onTap: () => send({ kind: 'commentHighlightClear' })
@@ -458,7 +464,7 @@ function renderDeck() {
   $('deck-scenes').replaceChildren(
     ...presets.map((layoutPreset) =>
       key({
-        name: prettyPreset(layoutPreset),
+        name: presetName(layoutPreset),
         on: state.layoutPreset === layoutPreset,
         onTap: () => send({ kind: 'sceneApply', layoutPreset })
       })
@@ -508,7 +514,7 @@ function start() {
   if (!credentials) {
     showGate(
       'Pair this phone',
-      'In Videorc on your computer, open Settings → Phone remote → Pair a phone, then scan the code with this phone’s camera.'
+      'In Videorc on your computer, open Settings → Remote → Pair a phone, then scan the code with this phone’s camera.'
     )
     $('status').dataset.status = 'unpaired'
     $('status').textContent = STATUS_TEXT.unpaired
@@ -566,7 +572,7 @@ commentsList.addEventListener('click', async (event) => {
     isLive ? { kind: 'commentHighlightClear' } : { kind: 'commentHighlight', messageId: id }
   )
   if (pendingId === id) pendingId = null
-  if (!result.ok) snack(result.message ?? 'Could not show that comment.')
+  if (!result.ok) snack(result.message ?? "Couldn't put that message on stream.")
   paintHighlight()
 })
 

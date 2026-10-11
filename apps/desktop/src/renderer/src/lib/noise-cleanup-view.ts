@@ -67,8 +67,8 @@ export function deriveNoiseCleanupView({
       menuAction: 'cancel',
       directLabel: `Cleaning ${Math.round(progress)}%`,
       menuLabel: `Cancel cleanup · ${Math.round(progress)}%`,
-      detail: `Cleaning noise: ${Math.round(progress)}% complete.`,
-      statusAnnouncement: `Cleaning noise, ${coarseProgress(progress)} percent.`,
+      detail: `Reducing noise: ${Math.round(progress)}% complete.`,
+      statusAnnouncement: `Reducing noise, ${coarseProgress(progress)} percent.`,
       busy: true,
       conflictsWithFileActions: true
     })
@@ -96,7 +96,7 @@ export function deriveNoiseCleanupView({
   }
 
   if (captureActive || session.status === 'running') {
-    const reason = 'Available when the recording ends.'
+    const reason = 'Available when the recording or livestream ends.'
     return view({ directLabel: 'Reduce noise', menuLabel: 'Reduce noise', disabledReason: reason })
   }
   if (session.mode === 'imported') {

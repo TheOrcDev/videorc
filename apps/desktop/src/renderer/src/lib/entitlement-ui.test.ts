@@ -306,7 +306,7 @@ describe('entitlement UI gates', () => {
     expect(noiseCleanupGate(null)).toEqual({
       allowed: false,
       featureId: 'noise-cleanup',
-      reason: 'Noise Cleanup requires Videorc Premium.',
+      reason: 'Noise cleanup is part of Videorc Premium.',
       upgradeUrl: VIDEORC_PREMIUM_URL
     })
     expect(noiseCleanupGate(basicEntitlements)).toEqual(noiseCleanupGate(null))

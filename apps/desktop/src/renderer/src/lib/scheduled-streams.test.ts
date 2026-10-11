@@ -282,7 +282,7 @@ describe('Upcoming, split by platform', () => {
     })
     expect(scheduledLifecycleChip(scheduledEvent({ lifecycle: 'live' }))).toEqual({
       kind: 'live',
-      label: 'Live'
+      label: 'On air'
     })
     expect(scheduledLifecycleChip(scheduledEvent({ lifecycle: 'completed' }))).toMatchObject({
       label: 'Ended',

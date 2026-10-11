@@ -41,7 +41,10 @@ describe('Stream Manager status bar', () => {
     )
     expect(providerCapabilityLabel(provider({ write: 'missing-scope' }))).toBe('reconnect to send')
     expect(providerCapabilityLabel(provider({ state: 'failed' }))).toBe('failed')
-    expect(providerCapabilityLabel(provider({ state: 'reconnecting' }))).toBe('reconnecting')
+    expect(providerCapabilityLabel(provider({ state: 'reconnecting' }))).toBe('reconnecting…')
+    // One chat vocabulary (plan 174 H-13): never "off" or "receive-only".
+    expect(providerCapabilityLabel(provider({ state: 'unsupported' }))).toBe('unavailable')
+    expect(providerCapabilityLabel(provider({ write: 'unavailable' }))).toBe('read-only')
     // The words still live in the hover text.
     expect(providerCapabilityTitle(provider(), null).split('\n')[0]).toBe(
       'Twitch chat: reads and sends'

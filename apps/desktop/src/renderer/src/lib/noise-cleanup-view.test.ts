@@ -77,7 +77,7 @@ describe('Noise Cleanup Library view', () => {
         directLabel: 'Reduce noise',
         menuLabel: 'Reduce noise · Premium',
         premiumLocked: true,
-        detail: 'Noise Cleanup requires Videorc Premium.'
+        detail: 'Noise cleanup is part of Videorc Premium.'
       })
     }
   })
@@ -93,7 +93,7 @@ describe('Noise Cleanup Library view', () => {
 
   it('states truthful disabled reasons for live, imported, missing, and unfinished sessions', () => {
     expect(derive({ captureActive: true }).disabledReason).toBe(
-      'Available when the recording ends.'
+      'Available when the recording or livestream ends.'
     )
     expect(derive({ session: session({ mode: 'imported' }) }).disabledReason).toContain('imported')
     expect(
@@ -109,12 +109,12 @@ describe('Noise Cleanup Library view', () => {
       {
         session: session(),
         captureActive: true,
-        reason: 'Available when the recording ends.'
+        reason: 'Available when the recording or livestream ends.'
       },
       {
         session: session({ status: 'running' }),
         captureActive: false,
-        reason: 'Available when the recording ends.'
+        reason: 'Available when the recording or livestream ends.'
       },
       {
         session: session({ mode: 'imported' }),
@@ -159,7 +159,7 @@ describe('Noise Cleanup Library view', () => {
     expect(derive({ job: job({ status: 'processing', progressPercent: 42.4 }) })).toMatchObject({
       directLabel: 'Cleaning 42%',
       menuLabel: 'Cancel cleanup · 42%',
-      statusAnnouncement: 'Cleaning noise, 40 percent.'
+      statusAnnouncement: 'Reducing noise, 40 percent.'
     })
     expect(derive({ job: job({ status: 'validating', progressPercent: 100 }) })).toMatchObject({
       directLabel: 'Validating…',

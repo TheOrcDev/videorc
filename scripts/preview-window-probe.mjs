@@ -598,7 +598,7 @@ async function runSceneSlotScenarios() {
   })
   assertProbe(
     footer.result?.popOut === true && footer.result?.showLive === false,
-    'scene-dock: footer offers Pop out (not Show live here) while docked here',
+    'scene-dock: footer offers Pop out (not Show preview here) while docked here',
     JSON.stringify(footer.result)
   )
 

@@ -34,6 +34,7 @@ import {
   layoutPresetOrientation,
   resolutionOptionsForOrientation
 } from '@/lib/capture'
+import { captionsStatusLabel, systemAudioIssueLabel } from '@/lib/state-labels'
 import {
   systemAudioDevice,
   requestSystemAudioResume,
@@ -52,25 +53,9 @@ function compactCaptionsStatus(
   sessionActive: boolean,
   premiumAllowed: boolean
 ): string {
-  switch (status.state) {
-    case 'starting':
-      return 'Starting…'
-    case 'listening':
-    case 'live':
-      return sessionActive ? 'Live' : 'Waiting for session'
-    case 'reconnecting':
-      return 'Reconnecting…'
-    case 'degraded':
-      return 'Higher delay'
-    case 'blocked':
-      return 'Blocked'
-    case 'error':
-      return 'Error'
-    case 'ready':
-      return 'Ready'
-    default:
-      return enabled ? 'Armed' : premiumAllowed ? 'Off' : 'Premium'
-  }
+  // A locked switch says why; otherwise the one captions vocabulary (plan 174 D-26).
+  if (!enabled && !premiumAllowed) return 'Premium'
+  return captionsStatusLabel(status, { enabled, sessionActive })
 }
 
 /**
@@ -293,16 +278,8 @@ export function SystemAudioInspectorValue({
   /** Plan 076: turn System audio on again after the echo guard paused it. */
   onResume: () => void
 }): ReactElement {
-  const status =
-    view.issue === 'lost'
-      ? 'Stopped'
-      : view.issue === 'bypassed'
-        ? 'Off for this session'
-        : view.issue === 'echo'
-          ? 'Paused'
-          : view.issue
-            ? 'Could not start'
-            : view.stateLabel
+  // The Sources row's words for the same issue (plan 174 J2-4).
+  const status = view.issue ? systemAudioIssueLabel(view.issue) : view.stateLabel
   return (
     <div className="flex h-control min-w-0 items-center justify-end gap-2.5 px-2">
       {view.permissionRequired ? (

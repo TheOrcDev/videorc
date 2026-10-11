@@ -26,7 +26,7 @@ function render(
       disabled: false,
       discoveryPending: false,
       meter,
-      monitorLabel: 'Live',
+      monitorState: 'live',
       onChange: noop,
       ...overrides
     })
@@ -120,12 +120,12 @@ describe('Microphone section (plan 092)', () => {
   it('names the signal state for screen readers and the perf probe, off screen', () => {
     const markup = render(
       { kind: 'source', source: createFrameEmitter<MeterFrame>() },
-      { monitorLabel: 'Live' }
+      { monitorState: 'live' }
     )
     expect(markup).toContain(
-      '<span class="sr-only" data-videorc-mic-monitor-state="live">Live</span>'
+      '<span class="sr-only" data-videorc-mic-monitor-state="live">Receiving</span>'
     )
-    expect(render({ kind: 'value', peakDb: -40 }, { monitorLabel: 'Muted' })).toContain(
+    expect(render({ kind: 'value', peakDb: -40 }, { monitorState: 'muted' })).toContain(
       'data-videorc-mic-monitor-state="muted">Muted</span>'
     )
   })

@@ -86,7 +86,7 @@ describe('Library Noise Cleanup direct action', () => {
       view({
         directAction: 'upgrade',
         menuAction: 'upgrade',
-        detail: 'Noise Cleanup requires Videorc Premium.',
+        detail: 'Noise cleanup is part of Videorc Premium.',
         premiumLocked: true
       })
     )
@@ -100,7 +100,7 @@ describe('Library Noise Cleanup direct action', () => {
     const locked = view({
       directAction: 'upgrade',
       menuAction: 'upgrade',
-      detail: 'Noise Cleanup requires Videorc Premium.',
+      detail: 'Noise cleanup is part of Videorc Premium.',
       premiumLocked: true
     })
     const first = renderAction('Same title', locked, 'session-one')
@@ -119,8 +119,8 @@ describe('Library Noise Cleanup direct action', () => {
         menuAction: 'cancel',
         directLabel: 'Cleaning 42%',
         menuLabel: 'Cancel cleanup · 42%',
-        detail: 'Cleaning noise: 42% complete.',
-        statusAnnouncement: 'Cleaning noise, 40 percent.',
+        detail: 'Reducing noise: 42% complete.',
+        statusAnnouncement: 'Reducing noise, 40 percent.',
         busy: true,
         conflictsWithFileActions: true
       })
@@ -130,7 +130,7 @@ describe('Library Noise Cleanup direct action', () => {
     expect(markup).toContain('disabled=""')
     expect(markup).toContain('aria-busy="true"')
     expect(markup).toContain('aria-live="polite"')
-    expect(markup).toContain('Cleaning noise, 40 percent.')
+    expect(markup).toContain('Reducing noise, 40 percent.')
   })
 
   it('keeps a reconnect-disabled action focusable with a described reason', () => {

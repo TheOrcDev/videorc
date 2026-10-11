@@ -35,6 +35,7 @@ import {
 } from '@/lib/capture'
 import { destinationSetup, destinationSetupHint } from '@/lib/destination-readiness'
 import { NO_VALUE } from '@/lib/format'
+import { destinationLabel } from '@/lib/platform-copy'
 import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
 import {
   classifyStreamHealthAttribution,
@@ -254,7 +255,7 @@ export function ReadyToGoLive({
               variant="link"
               onClick={() => onOpenDestination(target.id)}
             >
-              {target.label} · {hint}
+              {destinationLabel(target.label)} · {hint}
             </Button>
           ))}
         </div>
@@ -490,7 +491,7 @@ export function TechnicalDetails({
           {outputs.map(({ target, video }, index) => (
             <DetailRow
               key={target?.id ?? `stream-${index}`}
-              label={target?.label ?? 'Stream'}
+              label={target ? destinationLabel(target.label) : 'Stream'}
               value={formatEffectiveStreamProfile(video)}
             />
           ))}

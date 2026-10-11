@@ -75,7 +75,7 @@ describe('systemAudioIssueFromHealthEvent', () => {
       'bypassed'
     )
     expect(systemAudioIssueCopy('bypassed')).toBe(
-      'System audio is off for this session because the microphone is on a fallback input.'
+      'System audio is off until you stop, because the microphone is on a fallback input.'
     )
     expect(systemAudioIssueFromHealthEvent({ code: 'microphone-input-lost' })).toBeNull()
   })

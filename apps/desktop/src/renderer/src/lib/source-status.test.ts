@@ -40,7 +40,7 @@ describe('videoSourceStatus', () => {
 
   it('says Live for a delivering source', () => {
     expect(videoSourceStatus({ ...base, preview: { state: 'live', frameAgeMs: 40 } })).toEqual({
-      label: 'Live',
+      label: 'Receiving',
       tone: 'good'
     })
   })
@@ -53,12 +53,12 @@ describe('videoSourceStatus', () => {
     })
     expect(
       videoSourceStatus({ ...base, kind: 'screen', preview: { state: 'live', frameAgeMs: 60000 } })
-    ).toEqual({ label: 'Live', tone: 'good' })
+    ).toEqual({ label: 'Receiving', tone: 'good' })
   })
 
   it('trusts a live preview over a lagging device list', () => {
     expect(videoSourceStatus({ ...base, device: 'missing', preview: { state: 'live' } })).toEqual({
-      label: 'Live',
+      label: 'Receiving',
       tone: 'good'
     })
   })
@@ -131,7 +131,7 @@ describe('microphoneStatus', () => {
 
   it('says Live during a session and Muted while muted', () => {
     expect(microphoneStatus({ ...base, sessionActive: true })).toEqual({
-      label: 'Live',
+      label: 'Receiving',
       tone: 'good'
     })
     expect(microphoneStatus({ ...base, sessionActive: true, muted: true })).toEqual({
@@ -172,7 +172,7 @@ describe('systemAudioStatus', () => {
       tone: 'neutral'
     })
     expect(systemAudioStatus({ ...off, checked: true, meter: true }, true)).toEqual({
-      label: 'Live',
+      label: 'Receiving',
       tone: 'good'
     })
   })

@@ -13,7 +13,7 @@ export type UnlockAction = { kind: 'sign-in' } | { kind: 'view-premium'; url: st
 
 /** The one wording for controls a running recording or livestream locks. */
 export const SESSION_LOCK_REASON =
-  "Locked while you're recording or live. Changes apply to your next session."
+  "Locked while you're recording or live. Changes apply the next time you record or go live."
 
 /** The one wording for controls that wait for the backend to come back. */
 export const OFFLINE_LOCK_REASON = 'Videorc is reconnecting. These controls come back in a moment.'

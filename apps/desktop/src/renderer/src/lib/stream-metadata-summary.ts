@@ -5,6 +5,7 @@ import type {
   StreamTargetMetadataDraft,
   StreamTargetSettings
 } from '@/lib/backend'
+import { destinationLabel } from '@/lib/platform-copy'
 
 /** The platforms that carry a per-destination row in Broadcast info. */
 export type MetadataPlatform = 'youtube' | 'twitch' | 'kick' | 'x'
@@ -62,7 +63,7 @@ export function visibleMetadataOverrides(
     }
     visible.push({
       override,
-      label: target.label.trim() || metadataPlatformLabel(target.platform)
+      label: destinationLabel(target.label.trim()) || metadataPlatformLabel(target.platform)
     })
   }
   return visible

@@ -51,7 +51,9 @@ describe('Studio inputs System audio row (plan 069)', () => {
   it('keeps a lost source On with a short status and the full copy on hover', () => {
     const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'lost' })
     expect(markup).toContain('>Stopped<')
-    expect(markup).toContain('title="System audio stopped. The session keeps going."')
+    expect(markup).toContain(
+      'title="System audio stopped. Your recording or livestream keeps going."'
+    )
     expect(markup).toContain('aria-checked="true"')
   })
 
@@ -62,16 +64,16 @@ describe('Studio inputs System audio row (plan 069)', () => {
     expect(markup).toContain('aria-checked="true"')
   })
 
-  it('says a fallback microphone keeps system audio out of this session', () => {
+  it('says a fallback microphone keeps system audio out until you stop', () => {
     const markup = render({
       requested: true,
       sessionActive: true,
       confirmed: false,
       issue: 'bypassed'
     })
-    expect(markup).toContain('>Off for this session<')
+    expect(markup).toContain('>Off until you stop<')
     expect(markup).toContain(
-      'title="System audio is off for this session because the microphone is on a fallback input."'
+      'title="System audio is off until you stop, because the microphone is on a fallback input."'
     )
   })
 })

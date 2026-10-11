@@ -16,6 +16,7 @@ import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
 import { selectedDeviceStatus, videoSourceStatus, type SourceStatus } from '@/lib/source-status'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { systemAccessActionLabel } from '@/lib/system-access-view'
 
 // Plan 173: the Sources page's Video column, Screen and Camera, each one
 // SourceItem in one grouped list. What the column says about a source comes
@@ -319,11 +320,8 @@ export function VideoSources(): ReactElement {
         cameraPermissionRequired
           ? {
               targetName,
-              actionLabel: cameraPermissionAction
-                ? cameraPermissionAction === 'request-media-access'
-                  ? 'Enable Camera'
-                  : 'Open Camera Settings'
-                : null,
+              // The Permissions list's one wording for the fix (plan 174 B-23).
+              actionLabel: systemAccessActionLabel(cameraPermissionAction, runtimeInfo?.platform),
               onOpen: () => void handleSystemPermission('camera'),
               onReveal: () => void revealPermissionTarget()
             }

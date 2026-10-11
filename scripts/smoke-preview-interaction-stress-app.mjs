@@ -1187,7 +1187,8 @@ while true {
       previewWindow = content.windows.first { window in
         let title = window.title ?? ""
         let owner = window.owningApplication?.applicationName ?? ""
-        return title == "Videorc Preview" &&
+        // shared/window-names.ts (plan 174 S2.3a); the old title keeps A/B runs on older builds working.
+        return (title == "Preview" || title == "Videorc Preview") &&
           window.owningApplication?.processID == ${expectedPid} &&
           (owner.localizedCaseInsensitiveContains("Electron") ||
             owner.localizedCaseInsensitiveContains("Videorc"))

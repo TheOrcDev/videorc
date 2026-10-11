@@ -100,26 +100,20 @@ const COPY_RULES: ReadonlyArray<{ id: string; pattern: RegExp }> = [
  */
 const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/backendClient.ts': 20,
-  'src/components/captions/captions-controls.tsx': 1,
-  'src/components/comments-destination-status.tsx': 2,
-  'src/components/preview-stage.tsx': 3,
   'src/components/settings/encoder-preference-field.tsx': 1,
   'src/components/streaming/go-live-panel.tsx': 1,
-  'src/components/studio/session-panel.tsx': 3,
   'src/components/tabs/diagnostics-tab.tsx': 13,
-  'src/components/tabs/studio-tab.tsx': 2,
   'src/hooks/use-scheduled-streams.ts': 3,
-  'src/hooks/use-studio.tsx': 15,
+  'src/hooks/use-studio.tsx': 14,
   'src/lib/backend-transport.ts': 3,
-  'src/lib/capture.ts': 3,
+  'src/lib/capture.ts': 2,
   'src/lib/format.ts': 5,
   'src/lib/go-live-output.ts': 1,
   'src/lib/live-source-selection.ts': 1,
   'src/lib/native-preview-surface-lifecycle.ts': 1,
   'src/lib/obs-import-map.ts': 3,
   'src/lib/record-latency.ts': 1,
-  'src/lib/studio-health.ts': 1,
-  'src/lib/toast.ts': 1
+  'src/lib/studio-health.ts': 1
 }
 
 /** JSX attributes a reader sees or hears; any other attribute's string is code. */

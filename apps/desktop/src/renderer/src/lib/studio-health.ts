@@ -89,7 +89,7 @@ export function recordingStartupHealthToast(
     return {
       variant: 'warning',
       id: MICROPHONE_CAPTURE_WORKER_FALLBACK_CODE,
-      title: "Microphone can't be changed this session",
+      title: "Microphone can't be changed until you stop",
       description: event.message,
       duration: 15000
     }
@@ -228,5 +228,6 @@ export function studioHealth(
     return { tone: 'neutral', value: 'Idle' }
   }
 
-  return { tone: 'good', value: active ? 'Live' : 'Ready' }
+  // "Running", never "Live" (plan 174 D4): only a livestream is on air.
+  return { tone: 'good', value: active ? 'Running' : 'Ready' }
 }

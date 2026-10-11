@@ -10,28 +10,8 @@ import type {
 import type { ChatSendFailure } from '@/lib/chat-send'
 import type { CohostState } from '@/lib/backend'
 import { cohostChipView } from '@/lib/cohost-view'
+import { chatStateLabel } from '@/lib/state-labels'
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
-
-function providerStateLabel(state: LiveChatProviderConnectionState): string {
-  switch (state) {
-    case 'disabled':
-      return 'Idle'
-    case 'connecting':
-      return 'Connecting'
-    case 'connected':
-      return 'Connected'
-    case 'reconnecting':
-      return 'Reconnecting'
-    case 'waiting':
-      return 'Waiting'
-    case 'failed':
-      return 'Failed'
-    case 'unsupported':
-      return 'Unavailable'
-    case 'ended':
-      return 'Ended'
-  }
-}
 
 function providerBadgeVariant(
   state: LiveChatProviderConnectionState
@@ -50,16 +30,6 @@ function providerBadgeVariant(
   }
 }
 
-function providerStatusLabel(provider: LiveChatProviderState): string {
-  if (provider.write === 'read-only') {
-    return 'Receive-only'
-  }
-  if (provider.write === 'missing-scope') return 'Reconnect to send'
-  if (provider.write === 'failed') return 'Send failed'
-  if (provider.write === 'unavailable' && provider.state === 'connected') return 'Receive-only'
-  return providerStateLabel(provider.state)
-}
-
 // Chat binds to the linked account's channel, not to wherever the stream key
 // points. On a manual-RTMP stream of a different channel that reads the wrong
 // chat with a green "Connected" badge — name the bound account so the
@@ -72,12 +42,6 @@ export function providerBadgeTitle(provider: LiveChatProviderState): string {
     return `${message} · ${identity}`
   }
   return message || identity
-}
-
-/** The badge word for a parked connector: "Paused" when it resumes on its own. */
-function providerBadgeLabel(provider: LiveChatProviderState): string {
-  if (provider.state === 'waiting' && provider.retryAt) return 'Paused'
-  return providerStatusLabel(provider)
 }
 
 /**
@@ -109,11 +73,11 @@ export function commentsDestinationNotes({
     } else if (provider.write === 'read-only' || provider.state === 'connected') {
       // X sends now (closed-beta chat API, 2026-08-19) — read-only here only
       // means THIS stream lacks send context (e.g. a manual-RTMP X target).
-      parts.push(`${label} receive-only`)
+      parts.push(`${label} read-only`)
     } else if (provider.state === 'failed') {
       parts.push(`${label} failed`)
     } else if (provider.state === 'connecting' || provider.state === 'reconnecting') {
-      parts.push(`${label} ${providerStateLabel(provider.state).toLowerCase()}`)
+      parts.push(`${label} ${chatStateLabel(provider).toLowerCase()}`)
     }
   }
 
@@ -208,7 +172,7 @@ export function CommentsDestinationStatus({
           )}
           {CHAT_PLATFORM_LABELS[provider.platform]}
           <span aria-hidden>·</span>
-          {providerBadgeLabel(provider)}
+          {chatStateLabel(provider)}
         </Badge>
       ))}
       <CohostStatusChip state={cohostState} />

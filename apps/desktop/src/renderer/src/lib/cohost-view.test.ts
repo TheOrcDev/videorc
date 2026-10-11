@@ -783,7 +783,8 @@ describe('tick wire v2 view', () => {
 
   it('labels a suggested action without ever being one', () => {
     expect(cohostFlagActionLabel(flag())).toBeNull()
-    expect(cohostFlagActionLabel(flag({ action: 'timeout' }))).toBe('Suggests timeout')
+    expect(cohostFlagActionLabel(flag({ action: 'timeout' }))).toBe('Suggests removing')
+    expect(cohostFlagActionLabel(flag({ action: 'ban' }))).toBe('Suggests removing')
     expect(cohostFlagDetail(flag({ alsoKinds: ['scam', 'unknown'] }))).toBe(
       'Repeated link drop.\nAlso: Scam, Flagged'
     )

@@ -22,6 +22,21 @@ export function platformLabel(platform: StreamPlatform): string {
   return PLATFORM_LABELS[platform] ?? platform
 }
 
+/**
+ * Default destination names Videorc saved before plan 174 S2.3a (D-36).
+ * Configs keep what they saved; only what the streamer reads changes.
+ */
+const RETIRED_DESTINATION_LABELS: Readonly<Record<string, StreamPlatform>> = {
+  'X / Twitter': 'x'
+}
+
+/** A destination's name as the streamer reads it: a retired default reads as its platform. */
+export function destinationLabel(label: string): string {
+  return Object.prototype.hasOwnProperty.call(RETIRED_DESTINATION_LABELS, label)
+    ? platformLabel(RETIRED_DESTINATION_LABELS[label])
+    : label
+}
+
 export interface PlatformCopy {
   /** What to call the computer: "Mac", "PC" or "computer". */
   deviceNoun: 'Mac' | 'PC' | 'computer'
