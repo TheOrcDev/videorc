@@ -165,6 +165,63 @@ describe('the creator controller (plan 168 S-F5)', () => {
     controller.dispose()
   })
 
+  it('picks the sheets up again in a creator opened after leaving the tab mid-way', async () => {
+    // QA 2026-10-11: the loop lives in the creator, so leaving the Buddy tab
+    // during "Making the sheets" stopped it after the sheet in flight, and
+    // the creator came back waiting at "Make the sheets".
+    const backend = fakeBackend(creation())
+    const first = createBuddyPetCreatorController(backend.client)
+    await first.refresh()
+    await first.makeSheets()
+    first.dispose()
+    const generated = (): number =>
+      backend.methods().filter((method) => method === 'cohost.pet.sheet.generate').length
+    expect(generated()).toBe(1)
+    // Back while the first sheet is still being made: nothing new is asked
+    // for, and its event carries on to the next.
+    backend.set(
+      creation({ step: 'build', pilotAccepted: true, running: { job: 'sheet', sheet: 'gaze-up2' } })
+    )
+    const second = createBuddyPetCreatorController(backend.client)
+    await second.refresh()
+    await flush()
+    expect(generated()).toBe(1)
+    expect(second.getState().autoSheets).toBe(true)
+    backend.set(creation({ step: 'build', pilotAccepted: true, sheets: [source('gaze-up2')] }))
+    backend.emit('cohost.pet.sheet.generated', {
+      buildId: BUILD,
+      sheet: 'gaze-up2',
+      version: 1,
+      opaque: false
+    })
+    await flush()
+    expect(generated()).toBe(2)
+    second.dispose()
+    // Back after that one landed unseen: the next one is asked for at once.
+    backend.set(
+      creation({
+        step: 'build',
+        pilotAccepted: true,
+        sheets: [source('gaze-up2'), source('gaze-up1')]
+      })
+    )
+    const third = createBuddyPetCreatorController(backend.client)
+    await third.refresh()
+    await flush()
+    expect(generated()).toBe(3)
+    expect(backend.calls.at(-2)?.[1]).toMatchObject({ kind: 'gaze', row: 'level' })
+    // Cancelled, it is never picked up again.
+    await third.cancel()
+    third.dispose()
+    // A creation nobody asked sheets for opens as it was.
+    const other = fakeBackend(creation({ buildId: '1d2e3f40-5a6b-4c7d-8e9f-0a1b2c3d4e5f' }))
+    const fourth = createBuddyPetCreatorController(other.client)
+    await fourth.refresh()
+    await flush()
+    expect(other.methods()).not.toContain('cohost.pet.sheet.generate')
+    fourth.dispose()
+  })
+
   it('stops the sheets at a failure and says why on that row', async () => {
     const backend = fakeBackend(creation())
     const controller = createBuddyPetCreatorController(backend.client)
