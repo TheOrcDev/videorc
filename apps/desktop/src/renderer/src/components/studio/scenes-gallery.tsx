@@ -7,6 +7,7 @@ const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
 import { PanelSection } from '@/components/panel-section'
 import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -50,13 +51,13 @@ const STUDIO_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = 
     value: 'horizontal',
     label: <DisplayIcon />,
     'aria-label': 'Horizontal studio (16:9)',
-    title: 'Horizontal · 16:9'
+    tooltip: 'Horizontal · 16:9'
   },
   {
     value: 'vertical',
     label: <MobileIcon />,
     'aria-label': 'Vertical studio (9:16)',
-    title: 'Vertical · 9:16'
+    tooltip: 'Vertical · 9:16'
   }
 ]
 
@@ -120,20 +121,23 @@ export function ScenesGallery(): ReactElement {
               gallery is in the EAGER Studio chunk: SegmentedControl has no
               Radix, so it costs the initial asset budget nothing. A switch
               restarts the canvas, so arrows only move focus (manual). */}
-          <SegmentedControl
-            activationMode="manual"
-            aria-label="Studio orientation"
-            disabled={isSessionActive}
-            options={STUDIO_ORIENTATION_OPTIONS}
-            size="sm"
-            title={
+          <DisabledReason
+            reason={
               isSessionActive
                 ? 'Locked while you’re recording or live. Stop to switch orientation.'
-                : undefined
+                : null
             }
-            value={mode}
-            onValueChange={switchMode}
-          />
+          >
+            <SegmentedControl
+              activationMode="manual"
+              aria-label="Studio orientation"
+              disabled={isSessionActive}
+              options={STUDIO_ORIENTATION_OPTIONS}
+              size="sm"
+              value={mode}
+              onValueChange={switchMode}
+            />
+          </DisabledReason>
           <Button size="sm" variant="ghost" onClick={() => openStudioPanel('layouts')}>
             Edit scene
           </Button>

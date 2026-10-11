@@ -5,6 +5,7 @@ import { SESSION_LOCK_REASON } from '@/lib/lock-view'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Spinner } from '@/components/ui/spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { copyText } from '@/lib/copy-text'
 import { toastUserError } from '@/lib/user-error'
 import {
@@ -592,16 +593,11 @@ function EventRow({
           <LifecycleChip chip={scheduledLifecycleChip(event)} />
           {privacy ? <Badge variant="outline">{privacy}</Badge> : null}
         </div>
-        <span
-          className="truncate text-xs text-muted-foreground"
-          title={
-            event.lastSyncedAt
-              ? `Last checked ${new Date(event.lastSyncedAt).toLocaleString()}`
-              : undefined
-          }
-        >
-          {event.accountLabel} · {scheduledWhenLabel(event)}
-        </span>
+        {/* When Videorc last checked the platform: hover detail (plan 174 S1.10). */}
+        <ScheduledMetaLine
+          lastSyncedAt={event.lastSyncedAt}
+          text={`${event.accountLabel} · ${scheduledWhenLabel(event)}`}
+        />
         {event.error ? (
           <Alert variant="destructive">
             <AlertDescription>
@@ -654,5 +650,25 @@ function EventRow({
         ) : null}
       </div>
     </div>
+  )
+}
+
+/** The account and the time, with the last platform check on hover. */
+function ScheduledMetaLine({
+  text,
+  lastSyncedAt
+}: {
+  text: string
+  lastSyncedAt?: string | null
+}): ReactElement {
+  const line = <span className="truncate text-xs text-muted-foreground">{text}</span>
+  if (!lastSyncedAt) return line
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{line}</TooltipTrigger>
+      <TooltipContent align="start">
+        Last checked {new Date(lastSyncedAt).toLocaleString()}
+      </TooltipContent>
+    </Tooltip>
   )
 }

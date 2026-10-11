@@ -13,7 +13,7 @@ import { useContext, useEffect, useState, type ReactElement, type ReactNode } fr
 
 import { CohostPresenceDot } from '@/components/cohost-status'
 import { GroupedList } from '@/components/list-row'
-import { NavigableRow } from '@/components/navigable-row'
+import { NavigableRow, NavigableRowHintLines } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
 import { StatusDot } from '@/components/status-dot'
@@ -22,6 +22,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav'
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
@@ -269,13 +270,11 @@ export function SessionStatusPill({
         />
       </span>
       {wsStatus === 'connected' && sessionAlsoRecords(recording) ? (
-        <Badge
-          data-testid="session-also-recording"
-          title="Also recording a local file"
-          variant="outline"
-        >
-          Rec
-        </Badge>
+        <InfoTooltip content="Also recording a local file">
+          <Badge data-testid="session-also-recording" variant="outline">
+            Rec
+          </Badge>
+        </InfoTooltip>
       ) : null}
     </>
   )
@@ -503,12 +502,13 @@ function CohostSessionRow(): ReactElement {
   const view = cohostPresenceView(cohostState, nowMs)
   const alerts = activeCohostAlerts(cohostState, nowMs)
   const alertLabels = alerts.map((alert) => cohostAlertLabel(alert))
+  const hintLines = [...alertLabels, ...view.tooltipLines]
 
   return (
     <NavigableRow
       icon={BuddyIcon}
       label="Buddy"
-      title={[...alertLabels, ...view.tooltipLines].join('\n') || undefined}
+      hint={hintLines.length > 0 ? <NavigableRowHintLines lines={hintLines} /> : undefined}
       value={
         alertLabels.length > 0 ? (
           <span data-testid="session-buddy-alert">
@@ -564,13 +564,7 @@ export function TakeoverSection(): ReactElement {
                     aria-pressed={isActive}
                     disabled={disconnected}
                     size="sm"
-                    title={
-                      disconnected
-                        ? undefined
-                        : isActive
-                          ? `Take ${screen.name} off the output`
-                          : `Put ${screen.name} on the output`
-                    }
+                    // The line under the takeovers says what a click does.
                     variant={isActive ? 'default' : 'outline'}
                     onClick={() =>
                       void (isActive ? clearActiveScreen() : activateScreen(screen.id))

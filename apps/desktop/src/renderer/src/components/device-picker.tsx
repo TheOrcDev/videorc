@@ -118,14 +118,16 @@ export function DevicePicker({
           disabled={disabled}
           id={id}
           role="combobox"
-          // A long name truncates in a narrow row: the title reveals it.
-          title={inline ? view.label : undefined}
           type="button"
         >
           <span
             className={cn('flex min-w-0 items-center gap-1.5', inline ? 'justify-end' : 'flex-1')}
           >
-            <span className="min-w-0 truncate">{view.label}</span>
+            {/* A long name truncates in a narrow row: the title on the cut
+                text itself reveals it (plan 174 S1.10, truncation only). */}
+            <span className="min-w-0 truncate" title={inline ? view.label : undefined}>
+              {view.label}
+            </span>
             {statusInTrigger && view.status ? (
               <span className="shrink-0 text-xs font-normal text-muted-foreground">
                 {view.status}

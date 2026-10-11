@@ -708,18 +708,16 @@ export function SceneStage({
           }}
         >
           {sources.map((source) => (
-            <ToggleGroupItem
-              key={source.id}
-              aria-label={`Select ${source.name}`}
-              title={source.name}
-              value={source.id}
-            >
+            <ToggleGroupItem key={source.id} aria-label={`Select ${source.name}`} value={source.id}>
               {source.kind === 'camera' ? (
                 <CameraIcon data-icon="inline-start" />
               ) : (
                 <DisplayIcon data-icon="inline-start" />
               )}
-              <span className="max-w-44 truncate">{source.name}</span>
+              {/* A long name truncates: the title on the cut text reveals it (S1.10). */}
+              <span className="max-w-44 truncate" title={source.name}>
+                {source.name}
+              </span>
             </ToggleGroupItem>
           ))}
           {overlayItems.map((entry) => {
@@ -729,11 +727,13 @@ export function SceneStage({
                 key={entry.stageId}
                 aria-label={`Select ${entry.label}`}
                 data-videorc-stage-overlay-chip={entry.item}
-                title={entry.badge ? `${entry.label} (${entry.badge})` : entry.label}
                 value={entry.stageId}
               >
                 <Icon data-icon="inline-start" />
-                <span className="max-w-44 truncate">{entry.label}</span>
+                {/* The stream-only or recording-only badge is on the stage itself. */}
+                <span className="max-w-44 truncate" title={entry.label}>
+                  {entry.label}
+                </span>
               </ToggleGroupItem>
             )
           })}

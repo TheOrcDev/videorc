@@ -51,9 +51,10 @@ describe('Studio Sources System audio row (plan 069)', () => {
   it('keeps a lost source On with a short status and the full copy on hover', () => {
     const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'lost' })
     expect(markup).toContain('>Stopped<')
-    expect(markup).toContain(
-      'title="System audio stopped. Your recording or livestream keeps going."'
-    )
+    // The full copy is the status's description, never a native title (S1.10).
+    expect(markup).toContain('System audio stopped. Your recording or livestream keeps going.')
+    expect(markup).toContain('data-slot="info-tooltip"')
+    expect(markup).not.toMatch(/\btitle="/)
     expect(markup).toContain('aria-checked="true"')
   })
 
@@ -73,8 +74,9 @@ describe('Studio Sources System audio row (plan 069)', () => {
     })
     expect(markup).toContain('>Off until you stop<')
     expect(markup).toContain(
-      'title="System audio is off until you stop, because the microphone is on a fallback input."'
+      'System audio is off until you stop, because the microphone is on a fallback input.'
     )
+    expect(markup).not.toMatch(/\btitle="/)
   })
 })
 

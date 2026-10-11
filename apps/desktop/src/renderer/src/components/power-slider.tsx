@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   clampToRange,
   formatValue,
@@ -179,17 +180,21 @@ export function PowerSlider({
             </span>
           )}
           {canReset ? (
-            <Button
-              aria-label={`Reset ${label}`}
-              className="size-7 text-muted-foreground"
-              disabled={disabled}
-              size="icon"
-              title="Reset to default"
-              variant="ghost"
-              onClick={reset}
-            >
-              <ResetIcon className="size-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={`Reset ${label}`}
+                  className="size-7 text-muted-foreground"
+                  disabled={disabled}
+                  size="icon"
+                  variant="ghost"
+                  onClick={reset}
+                >
+                  <ResetIcon className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Reset to default</TooltipContent>
+            </Tooltip>
           ) : null}
         </div>
       </div>

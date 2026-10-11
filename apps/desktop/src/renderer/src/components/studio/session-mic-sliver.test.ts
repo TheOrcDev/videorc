@@ -23,7 +23,9 @@ describe('session mic sliver (plan 092)', () => {
       })
     )
     expect(markup).toContain('data-videorc-session-mic-sliver')
-    expect(markup).toContain('title="Microphone muted"')
+    // Its name for assistive tech, never a native title (plan 174 S1.10).
+    expect(markup).toContain('aria-label="Microphone muted"')
+    expect(markup).not.toContain('title=')
     expect(markup).toContain('w-9')
     expect(markup.match(/data-slot="bar-visualizer-bar"/g)).toHaveLength(5)
   })

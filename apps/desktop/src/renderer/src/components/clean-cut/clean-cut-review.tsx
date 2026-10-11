@@ -37,6 +37,7 @@ import {
   EmptyTitle
 } from '@/components/ui/empty'
 import { DisabledReason } from '@/components/ui/disabled-reason'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -1071,23 +1072,13 @@ function KindChips({
         if (changed) onToggle(changed.group.id)
       }}
     >
-      {chips.map((chip) => (
-        <DisabledReason
-          key={chip.group.id}
-          reason={chip.state === 'empty' ? `No ${chip.group.label.toLowerCase()} found.` : null}
-        >
+      {chips.map((chip) => {
+        const item = (
           <ToggleGroupItem
             className="h-6 gap-1.5 px-1.5 text-xs"
             data-chip={chip.group.id}
             data-state-kind={chip.state}
             disabled={chip.state === 'empty'}
-            title={
-              chip.state === 'empty'
-                ? undefined
-                : chip.state === 'on'
-                  ? `Keep all ${chip.total}`
-                  : `Cut all ${chip.total}`
-            }
             value={chip.group.id}
           >
             <span
@@ -1099,8 +1090,30 @@ function KindChips({
               {chip.state === 'mixed' ? `${chip.cut}/${chip.total}` : chip.total}
             </span>
           </ToggleGroupItem>
-        </DisabledReason>
-      ))}
+        )
+        if (chip.state === 'empty') {
+          return (
+            <DisabledReason
+              key={chip.group.id}
+              reason={`No ${chip.group.label.toLowerCase()} found.`}
+            >
+              {item}
+            </DisabledReason>
+          )
+        }
+        // What a click does, on hover and on focus (plan 174 S1.10). The chip
+        // sits in a span trigger: the toggle's own data-state must stay on/off.
+        return (
+          <Tooltip key={chip.group.id}>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">{item}</span>
+            </TooltipTrigger>
+            <TooltipContent>
+              {chip.state === 'on' ? `Keep all ${chip.total}` : `Cut all ${chip.total}`}
+            </TooltipContent>
+          </Tooltip>
+        )
+      })}
     </ToggleGroup>
   )
 }
@@ -1129,19 +1142,22 @@ function Moments({
         {pins.map((pin) => {
           const Glyph = MOMENT_ICONS[pin.kind] ?? PinIcon
           return (
-            <Button
-              key={pin.key}
-              className="max-w-full"
-              size="xs"
-              title={pin.excerpt || pin.label}
-              type="button"
-              variant="ghost"
-              onClick={() => onSeek(pin.startMs)}
-            >
-              <Glyph data-icon="inline-start" />
-              <span className="tabular-nums">{formatCutClock(pin.startMs)}</span>
-              <span className="truncate">{pin.label}</span>
-            </Button>
+            <Tooltip key={pin.key}>
+              <TooltipTrigger asChild>
+                <Button
+                  className="max-w-full"
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                  onClick={() => onSeek(pin.startMs)}
+                >
+                  <Glyph data-icon="inline-start" />
+                  <span className="tabular-nums">{formatCutClock(pin.startMs)}</span>
+                  <span className="truncate">{pin.label}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{pin.excerpt || pin.label}</TooltipContent>
+            </Tooltip>
           )
         })}
       </div>

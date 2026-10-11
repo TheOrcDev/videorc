@@ -1,13 +1,14 @@
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
-import { useMemo, useState, type ReactElement } from 'react'
+import { useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   useStudioCore,
@@ -292,9 +293,9 @@ export function ReadyToGoLive({
       ) : null}
       <ChecklistRow
         detail={presetOk ? quality.text : `${quality.text} · choose a stream-safe preset`}
+        description={quality.lines ? <QualityLines lines={quality.lines} /> : undefined}
         label="Quality"
         ok={presetOk}
-        title={quality.title}
       />
       {captions ? (
         <>
@@ -355,8 +356,15 @@ function StreamCheckRow({
       return <ChecklistRow detail="Checking…" label="Stream settings" ok={false} />
     case 'failed':
       return (
-        <div className="flex flex-col gap-1" title={preflight.message}>
-          <ChecklistRow detail="Couldn't check" label="Stream settings" ok={false} />
+        <div className="flex flex-col gap-1">
+          {/* The raw probe message is one hover or focus away, not inline;
+              Technical details reads it too (plan 174 S1.10, D-23). */}
+          <ChecklistRow
+            detail="Couldn't check"
+            detailHint={preflight.message}
+            label="Stream settings"
+            ok={false}
+          />
           <div className="flex items-center justify-between gap-2 pl-6">
             <span className="text-xs text-muted-foreground">
               Go Live checks again when you start.
@@ -400,9 +408,10 @@ function LiveStreamRow({
   return (
     <ChecklistRow
       detail={healthy ? 'Healthy' : liveProblemLabel(attribution)}
+      // The problem's whole sentence on hover and on focus (plan 174 S1.10).
+      detailHint={streamHealthDescription(attribution, true, { state: 'not-requested' })}
       label="Stream"
       ok={healthy}
-      title={streamHealthDescription(attribution, true, { state: 'not-requested' })}
     />
   )
 }
@@ -577,9 +586,10 @@ function formatQuality(video: VideoSettings): string {
 
 /**
  * One quality line for every destination. Identical outputs read once;
- * different ones say so and list each destination by its own name on hover.
+ * different ones say so and list each destination by its own name, one line
+ * each under the row (plan 174 S1.10, D-23).
  */
-export function qualitySummary(outputs: StreamOutput[]): { text: string; title?: string } {
+export function qualitySummary(outputs: StreamOutput[]): { text: string; lines?: string[] } {
   const lines = outputs.map(({ target, video }) => ({
     label: target?.label,
     quality: formatQuality(
@@ -590,7 +600,7 @@ export function qualitySummary(outputs: StreamOutput[]): { text: string; title?:
   if (distinct.size <= 1) return { text: lines[0]?.quality ?? NO_VALUE }
   return {
     text: 'Varies by destination',
-    title: lines.map((line) => `${line.label ?? 'Stream'}: ${line.quality}`).join('\n')
+    lines: lines.map((line) => `${line.label ?? 'Stream'}: ${line.quality}`)
   }
 }
 
@@ -759,23 +769,29 @@ function formatEffectiveStreamProfile(video: VideoSettings): string {
   return `${formatVideoQuality(video, { size: 'full', bitrate: true })} CBR`
 }
 
+/**
+ * One readiness fact (plan 174 S1.10, D-23): never a native title.
+ * `description` is what the short `detail` stands for, as visible lines under
+ * it; `detailHint` explains the detail on hover and on keyboard focus.
+ */
 function ChecklistRow({
   label,
   detail,
   ok,
-  title
+  description,
+  detailHint
 }: {
   label: string
   detail: string
   ok: boolean
-  title?: string
+  description?: ReactNode
+  detailHint?: ReactNode
 }): ReactElement {
-  return (
+  const row = (
     <div
       className="flex items-start justify-between gap-3 text-sm"
       data-ok={ok}
       data-slot="checklist-row"
-      title={title}
     >
       <div className="flex items-center gap-2">
         {ok ? (
@@ -785,8 +801,30 @@ function ChecklistRow({
         )}
         <span>{label}</span>
       </div>
-      <span className="text-right text-xs text-muted-foreground">{detail}</span>
+      <InfoTooltip align="end" content={detailHint}>
+        <span className="text-right text-xs text-muted-foreground">{detail}</span>
+      </InfoTooltip>
     </div>
+  )
+  if (!description) return row
+  return (
+    <div className="flex flex-col gap-1">
+      {row}
+      <div className="pl-6 text-xs text-muted-foreground" data-slot="checklist-row-description">
+        {description}
+      </div>
+    </div>
+  )
+}
+
+/** One line per destination when their qualities differ. */
+function QualityLines({ lines }: { lines: readonly string[] }): ReactElement {
+  return (
+    <ul className="flex flex-col gap-0.5">
+      {lines.map((line) => (
+        <li key={line}>{line}</li>
+      ))}
+    </ul>
   )
 }
 
