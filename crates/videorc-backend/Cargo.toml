@@ -68,3 +68,13 @@ windows-core = "0.62.2"
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["test-util"] }
+
+[features]
+# Builds the dev-only pack example (plan 172); `cargo test` skips it otherwise.
+buddy-pack-example = []
+
+[[example]]
+name = "buddy_pack"
+# Dev-only (plan 172): kept out of `cargo test -p videorc-backend`, whose
+# macOS CI compile already runs close to the job limit.
+required-features = ["buddy-pack-example"]

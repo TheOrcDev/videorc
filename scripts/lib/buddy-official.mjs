@@ -7,7 +7,9 @@
 // streamer's own Buddy is. Change both together.
 
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+// Repo paths stay forward-slashed on every OS (a test pins them; Windows CI).
+import { posix } from 'node:path'
+const { join } = posix
 
 export const BUDDY_LOOK_VERSION = 1
 export const DEFAULT_MODEL = 'openai/gpt-image-2.5-sunburst'

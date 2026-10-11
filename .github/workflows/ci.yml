@@ -21,7 +21,9 @@ jobs:
     runs-on: macos-15
     # Cold macOS builds can spend 38m compiling tests before the separate
     # dev build and process/memory sentinel. Keep time for every gate.
-    timeout-minutes: 60
+    # The macOS test build alone takes about 48 min; a cancelled run bills the
+    # whole limit and proves nothing (plan 172).
+    timeout-minutes: 75
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
