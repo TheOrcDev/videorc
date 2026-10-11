@@ -31,7 +31,9 @@
   dedicated machine, the schedule, gates and fault automation.
 - **Category**: test infrastructure + live acceptance
 - **Planned at**: commit `20d36819` (origin/main), 2026-10-11
-- **Executed**: not yet
+- **Executed**: L0 built 2026-10-12 (`live:hookup`, `live:doctor`,
+  `docs/live-lab.md`); owner hookup and an all-PASS doctor run owed. L1-L6
+  not yet.
 - **Route**: Orchestrator, fit 10, model lane `fable-5` (multi-system,
   public-facing, secrets). Per-slice lanes in "Model lane note".
 
@@ -241,6 +243,19 @@ Each has a recommendation. D1-D3 block L0.
 **Done when:** `pnpm live:doctor` is all PASS on the owner's Mac, and each
 check fails clearly when broken on purpose (wrong channel, display off,
 config 0644).
+
+**Built 2026-10-12.** As written, plus: `--stream-key <slot>
+--from-clipboard` and `--client-json <path>` (Google's Download JSON) so
+the hookup works from Claude Code's `!` prompt, which has no terminal for
+hidden input; `--keys-only` and `--client` keep the hidden prompts for
+Terminal.app. `--lab-display <name>` names the lab display when its name is
+not obviously virtual. OAuth and the checks live in
+`scripts/live-lab/lib/{oauth,doctor-checks}.mjs`, unit-tested under
+`pnpm test:scripts` (no network). The doctor prints SKIP, not FAIL, for the
+lab quota counter (L4), the build under test and its TCC recording (L2) and
+network fault rules (L5) until those slices land. Wrong channel and config
+0644 fail in the unit tests and by hand; the all-PASS run waits on the
+owner's hookup.
 **STOP if:** the channel account cannot authorize force-ssl in a Testing
 project (then D3 needs a new answer).
 
