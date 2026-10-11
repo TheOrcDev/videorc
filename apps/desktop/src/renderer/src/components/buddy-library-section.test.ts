@@ -288,6 +288,16 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(mocked.signIn).toHaveBeenCalledOnce()
   })
 
+  it('a library it could not list says why, not that it is empty', async () => {
+    // QA 2026-10-11: offline, My Buddies said "Buddies you create show up
+    // here" while the account had three.
+    const message = 'Could not reach Videorc. Check your connection and try again.'
+    await render(fakeBackend(library({ mine: null, error: { code: 'network', message } })).client)
+    const mine = byTestId('buddy-library-mine')!
+    expect(mine.textContent).not.toContain(BUDDY_LIBRARY_COPY.emptyMine)
+    expect(byTestId('buddy-library-error')?.textContent).toBe(message)
+  })
+
   it('an empty library says where your Buddies will show up', async () => {
     await render(fakeBackend(library({ mine: [] })).client)
     expect(byTestId('buddy-library-empty')?.textContent).toBe(BUDDY_LIBRARY_COPY.emptyMine)
