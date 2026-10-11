@@ -35,7 +35,8 @@ export class CdpClient {
         if (!pending) return
         this.pending.delete(message.id)
         clearTimeout(pending.timer)
-        if (message.error) pending.reject(new Error(`CDP ${pending.method}: ${message.error.message}`))
+        if (message.error)
+          pending.reject(new Error(`CDP ${pending.method}: ${message.error.message}`))
         else pending.resolve(message.result)
         return
       }
@@ -57,14 +58,22 @@ export class CdpClient {
         socket.close?.()
         rejectConnect(new Error('CDP connection timed out'))
       }, timeoutMs)
-      socket.addEventListener('open', () => {
-        clearTimeout(timer)
-        resolveConnect(new CdpClient(socket))
-      }, { once: true })
-      socket.addEventListener('error', () => {
-        clearTimeout(timer)
-        rejectConnect(new Error('CDP connection failed'))
-      }, { once: true })
+      socket.addEventListener(
+        'open',
+        () => {
+          clearTimeout(timer)
+          resolveConnect(new CdpClient(socket))
+        },
+        { once: true }
+      )
+      socket.addEventListener(
+        'error',
+        () => {
+          clearTimeout(timer)
+          rejectConnect(new Error('CDP connection failed'))
+        },
+        { once: true }
+      )
     })
   }
 
@@ -92,7 +101,9 @@ export class CdpClient {
       awaitPromise: true
     })
     if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text)
+      throw new Error(
+        result.exceptionDetails.exception?.description ?? result.exceptionDetails.text
+      )
     }
     return result.result?.value
   }
@@ -106,10 +117,18 @@ export class CdpClient {
 
 /** The main Studio renderer among CDP targets: a page loading index.html (packaged) or the dev server root. */
 export function pickMainTarget(targets) {
-  const pages = (targets ?? []).filter((target) => target?.type === 'page' && target.webSocketDebuggerUrl)
+  const pages = (targets ?? []).filter(
+    (target) => target?.type === 'page' && target.webSocketDebuggerUrl
+  )
   return (
-    pages.find((target) => /^file:\/\/.*\/renderer\/index\.html(?:[?#].*)?$/.test(target.url ?? '')) ??
-    pages.find((target) => /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?\/(?:index\.html)?(?:[?#].*)?$/.test(target.url ?? '')) ??
+    pages.find((target) =>
+      /^file:\/\/.*\/renderer\/index\.html(?:[?#].*)?$/.test(target.url ?? '')
+    ) ??
+    pages.find((target) =>
+      /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?\/(?:index\.html)?(?:[?#].*)?$/.test(
+        target.url ?? ''
+      )
+    ) ??
     null
   )
 }
@@ -154,7 +173,9 @@ export function pageHelper(bindingName) {
         ready: row.getAttribute('data-ready') === 'true',
         canExclude: Boolean(q('[data-testid="go-live-destination-exclude"]', row))
       })),
-      excluded: qa('[data-testid="go-live-excluded"]', dialog).map((row) => row.getAttribute('data-target-id')),
+      excluded: qa('[data-testid="go-live-excluded"]', dialog).map((row) =>
+        row.getAttribute('data-target-id')
+      ),
       blockers: qa('[data-testid="go-live-blockers"] li', dialog).map(text).slice(0, 10),
       partialSetup: Boolean(q('[data-testid="go-live-partial-setup"]', dialog)),
       captionsBlocked: Boolean(q('[data-testid="go-live-captions-skip"]', dialog)),
@@ -165,12 +186,18 @@ export function pageHelper(bindingName) {
 
   function toasts() {
     return qa('[data-sonner-toast]')
-      .map((toast) => ({ type: toast.getAttribute('data-type') || null, text: text(toast).slice(0, 300) }))
+      .map((toast) => ({
+        type: toast.getAttribute('data-type') || null,
+        text: text(toast).slice(0, 300)
+      }))
       .slice(-5)
   }
 
   function setValue(element, value) {
-    const proto = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+    const proto =
+      element instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype
     Object.getOwnPropertyDescriptor(proto, 'value').set.call(element, value)
     element.dispatchEvent(new Event('input', { bubbles: true }))
   }
@@ -208,11 +235,15 @@ export function pageHelper(bindingName) {
       return { ok: true }
     },
     exclude(targetId) {
-      const row = qa('[data-testid="go-live-destination"]').find((element) => element.getAttribute('data-target-id') === targetId)
+      const row = qa('[data-testid="go-live-destination"]').find(
+        (element) => element.getAttribute('data-target-id') === targetId
+      )
       return click(row && q('[data-testid="go-live-destination-exclude"]', row))
     },
     include(targetId) {
-      const row = qa('[data-testid="go-live-excluded"]').find((element) => element.getAttribute('data-target-id') === targetId)
+      const row = qa('[data-testid="go-live-excluded"]').find(
+        (element) => element.getAttribute('data-target-id') === targetId
+      )
       return click(row && q('[data-testid="go-live-include"]', row))
     },
     confirm: () => click(q('[data-testid="go-live-confirm"]')),
@@ -225,7 +256,9 @@ export function pageHelper(bindingName) {
       let closed = 0
       for (const overlay of qa('[data-slot="dialog-overlay"][data-state="open"]')) {
         if (dialogEl()) break
-        overlay.ownerDocument.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        overlay.ownerDocument.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+        )
         closed += 1
       }
       return closed
@@ -244,7 +277,12 @@ export function pageHelper(bindingName) {
   const start = () => {
     new MutationObserver(() => {
       if (timer === null) timer = setTimeout(emit, 50)
-    }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true })
+    }).observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true
+    })
     emit()
   }
   if (document.documentElement) start()
@@ -275,7 +313,8 @@ export function classifyGoLiveOutcome({ dialog, toasts = [], remoteState, confir
     return { outcome: 'failed', reason: toasts.at(-1)?.text ?? 'session failed' }
   }
   if (dialog?.open && !dialog.pending) {
-    if (dialog.partialSetup) return { outcome: 'partial-setup', reason: 'some destinations could not be set up' }
+    if (dialog.partialSetup)
+      return { outcome: 'partial-setup', reason: 'some destinations could not be set up' }
     if (dialog.captionsBlocked) return { outcome: 'blocked', reason: 'captions cannot start' }
     if (dialog.blockers?.length) return { outcome: 'blocked', reason: dialog.blockers.join(' / ') }
   }
@@ -314,16 +353,20 @@ export function createUiDriver({ cdp, bus, waitFor }) {
   }
 
   const call = (expression) => cdp.evaluate(`window.__videorcLab ? (${expression}) : null`)
-  const snapshot = async () => (await call('window.__videorcLab.snapshot()')) ?? { dialog: { open: false }, toasts: [] }
+  const snapshot = async () =>
+    (await call('window.__videorcLab.snapshot()')) ?? { dialog: { open: false }, toasts: [] }
   const lastUi = () => bus.last('ui') ?? { dialog: { open: false }, toasts: [] }
 
   async function waitForDialog(predicate, { deadlineMs, label }) {
     const current = await snapshot()
     bus.emit('ui', current)
-    return waitFor(() => {
-      const ui = lastUi()
-      return predicate(ui.dialog, ui) ? ui.dialog : null
-    }, { deadlineMs, label })
+    return waitFor(
+      () => {
+        const ui = lastUi()
+        return predicate(ui.dialog, ui) ? ui.dialog : null
+      },
+      { deadlineMs, label }
+    )
   }
 
   return {
@@ -351,12 +394,16 @@ export function createUiDriver({ cdp, bus, waitFor }) {
 
     /** Fills the stream details. The title must start with the policy prefix. */
     async fillGoLive({ title, description, privacy, titlePrefix, deadlineMs = 15_000 }) {
-      if (typeof titlePrefix !== 'string' || !titlePrefix) throw new Error('titlePrefix is required')
+      if (typeof titlePrefix !== 'string' || !titlePrefix)
+        throw new Error('titlePrefix is required')
       if (typeof title !== 'string' || !title.startsWith(titlePrefix)) {
         throw new Error(`The title must start with "${titlePrefix}".`)
       }
-      const result = await call(`window.__videorcLab.fill(${JSON.stringify({ title, description, privacy })})`)
-      if (!result?.ok) throw new Error(`Could not fill the Go Live details: ${result?.reason ?? 'no helper'}`)
+      const result = await call(
+        `window.__videorcLab.fill(${JSON.stringify({ title, description, privacy })})`
+      )
+      if (!result?.ok)
+        throw new Error(`Could not fill the Go Live details: ${result?.reason ?? 'no helper'}`)
       return waitForDialog(
         (dialog) =>
           dialog?.open &&
@@ -378,19 +425,23 @@ export function createUiDriver({ cdp, bus, waitFor }) {
       const { dialog } = await snapshot()
       if (!dialog?.open) throw new Error('The Go Live dialog is not open.')
       for (const targetId of dialog.excluded ?? []) {
-        if (wanted.includes(targetId)) await call(`window.__videorcLab.include(${JSON.stringify(targetId)})`)
+        if (wanted.includes(targetId))
+          await call(`window.__videorcLab.include(${JSON.stringify(targetId)})`)
       }
       for (const row of dialog.destinations ?? []) {
         if (wanted.includes(row.targetId)) continue
         if (row.ready || !row.canExclude) {
-          throw new Error(`Unexpected destination "${row.targetId}" in Go Live; refusing to confirm.`)
+          throw new Error(
+            `Unexpected destination "${row.targetId}" in Go Live; refusing to confirm.`
+          )
         }
         await call(`window.__videorcLab.exclude(${JSON.stringify(row.targetId)})`)
       }
       return waitForDialog(
         (state) =>
           state?.open &&
-          JSON.stringify((state.destinations ?? []).map((row) => row.targetId).sort()) === JSON.stringify(wanted),
+          JSON.stringify((state.destinations ?? []).map((row) => row.targetId).sort()) ===
+            JSON.stringify(wanted),
         { deadlineMs, label: `Go Live destinations [${wanted.join(', ')}]` }
       )
     },
@@ -403,15 +454,18 @@ export function createUiDriver({ cdp, bus, waitFor }) {
 
     /** Waits until the Go Live either went live or visibly did not. */
     readGoLiveOutcome({ deadlineMs = 90_000 } = {}) {
-      return waitFor(() => {
-        const ui = lastUi()
-        return classifyGoLiveOutcome({
-          dialog: ui.dialog,
-          toasts: ui.toasts,
-          remoteState: bus.last('remote.state'),
-          confirmed: true
-        })
-      }, { deadlineMs, label: 'Go Live outcome' })
+      return waitFor(
+        () => {
+          const ui = lastUi()
+          return classifyGoLiveOutcome({
+            dialog: ui.dialog,
+            toasts: ui.toasts,
+            remoteState: bus.last('remote.state'),
+            confirmed: true
+          })
+        },
+        { deadlineMs, label: 'Go Live outcome' }
+      )
     },
 
     async cancelGoLive() {

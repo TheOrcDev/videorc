@@ -7,7 +7,8 @@ export function createFakeClock(start = Date.parse('2026-10-12T06:00:00.000Z')) 
   const timers = new Map()
 
   const flush = async () => {
-    for (let index = 0; index < 20; index += 1) await new Promise((resolve) => setImmediate(resolve))
+    for (let index = 0; index < 20; index += 1)
+      await new Promise((resolve) => setImmediate(resolve))
   }
 
   const clock = {

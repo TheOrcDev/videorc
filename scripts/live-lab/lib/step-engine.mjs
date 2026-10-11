@@ -11,7 +11,7 @@
 //     estimatedQuotaUnits: 0,            // or (params) => number; lab project units this run may spend
 //     usesBundledClient: false,          // true only for U15's release suite
 //     usesLabYoutubeClient: false,       // optional: pass the lab OAuth client (U14)
-//     destination: 'local-sink',         // 'local-sink' (loopback RTMP) or 'youtube'
+//     destination: 'local-sink',         // 'local-sink' (loopback RTMP) or 'youtube' (default)
 //     orientations: ['horizontal'],      // optional: stream key slots to seed
 //     steps: [
 //       {
@@ -21,8 +21,12 @@
 //         sceneId: 0,                    // optional card scene glyph (0-15)
 //         onFail: 'abort',               // 'abort' (default) skips later steps; 'continue'
 //         async run(ctx) { ... return evidence },
-//         expect(evidence, ctx) { return true | 'why it failed' }   // optional
+//         expect(evidence, ctx) { return true | 'why it failed' }   // optional check, or
+//         expect: 'what the step expects',                          // a description only
 //       }
+//
+//   run() may return { skipped: true, reason } (a policy-gated fault, say):
+//   the step is recorded as skipped, not failed, and the run goes on.
 //     ]
 //   })
 //
@@ -31,10 +35,14 @@
 //   ctx.params       scenario params from VIDEORC_LIVE_LAB_SCENARIO_PARAMS (JSON object, {} when unset)
 //   ctx.remote       remote control (intents, remote.state), see session.mjs
 //   ctx.ui           CDP driver for the real Go Live dialog, see ui-driver.mjs
-//   ctx.observe      app observer (journal, health events, census), see app-observer.mjs
+//   ctx.observe      app observer (journal, health events, census, incidents()), see app-observer.mjs
 //   ctx.card         the test card server (push, setStep)
 //   ctx.killSwitch   the U4 kill switch (check, notifyStudioEnded, snapshot)
 //   ctx.observer     optional YouTube observer hook (U8/U9), null in U6
+//   ctx.policy       the loaded policy (read-only, frozen)
+//   ctx.healthEvents() [{ code, at (epoch ms), level, source }] from the backend
+//                    health.event feed and journal health lines, deduplicated
+//   ctx.ledger       { ledgerPaths } the app's owned-process ledgers (process-census)
 //   ctx.sink         the local RTMP sink when destination is 'local-sink', else null
 //   ctx.runDir       the run folder (evidence lands here)
 //   ctx.log(msg)     one line to run.log and stdout (never put a secret in it)
@@ -191,8 +199,9 @@ export function defineScenario(scenario) {
   assertField(typeof scenario.usesBundledClient === 'boolean', 'usesBundledClient is required')
   const usesLabYoutubeClient = scenario.usesLabYoutubeClient ?? false
   assertField(typeof usesLabYoutubeClient === 'boolean', 'usesLabYoutubeClient must be boolean')
+  const destination = scenario.destination ?? 'youtube'
   assertField(
-    DESTINATIONS.includes(scenario.destination),
+    DESTINATIONS.includes(destination),
     `destination must be one of ${DESTINATIONS.join(', ')}`
   )
   const orientations = scenario.orientations ?? ['horizontal']
@@ -202,7 +211,7 @@ export function defineScenario(scenario) {
       orientations.every((value) => ORIENTATIONS.includes(value)),
     'orientations must list horizontal and/or vertical'
   )
-  if (scenario.destination === 'local-sink') {
+  if (destination === 'local-sink') {
     assertField(!usesLabYoutubeClient, 'a local-sink scenario never uses the YouTube client')
     assertField(
       typeof scenario.estimatedQuotaUnits === 'function' || scenario.estimatedQuotaUnits === 0,
@@ -214,7 +223,10 @@ export function defineScenario(scenario) {
   const seen = new Set()
   const steps = scenario.steps.map((step, index) => {
     assertField(step && typeof step === 'object', `step ${index} must be an object`)
-    assertField(ID.test(step.id ?? ''), `step ${index} id must be lowercase letters, digits, dashes`)
+    assertField(
+      ID.test(step.id ?? ''),
+      `step ${index} id must be lowercase letters, digits, dashes`
+    )
     assertField(!seen.has(step.id), `step id "${step.id}" is used twice`)
     seen.add(step.id)
     assertField(typeof step.run === 'function', `step "${step.id}" needs run(ctx)`)
@@ -223,15 +235,21 @@ export function defineScenario(scenario) {
       `step "${step.id}" needs a positive deadlineMs`
     )
     assertField(
-      step.expect === undefined || typeof step.expect === 'function',
-      `step "${step.id}" expect must be a function`
+      step.expect === undefined ||
+        typeof step.expect === 'function' ||
+        typeof step.expect === 'string',
+      `step "${step.id}" expect must be a function (a check) or a string (what the step expects)`
     )
     const onFail = step.onFail ?? 'abort'
-    assertField(['abort', 'continue'].includes(onFail), `step "${step.id}" onFail is abort|continue`)
+    assertField(
+      ['abort', 'continue'].includes(onFail),
+      `step "${step.id}" onFail is abort|continue`
+    )
     return Object.freeze({ ...step, onFail })
   })
   return Object.freeze({
     ...scenario,
+    destination,
     usesLabYoutubeClient,
     orientations: Object.freeze([...orientations]),
     steps: Object.freeze(steps)
@@ -294,7 +312,7 @@ function evidenceOf(value) {
 }
 
 function expectationVerdict(step, value, ctx) {
-  if (!step.expect) return null
+  if (typeof step.expect !== 'function') return null
   let verdict
   try {
     verdict = step.expect(value, ctx)
@@ -394,10 +412,17 @@ export async function runScenarioSteps({
         deadline,
         stop
       ])
-      const problem = expectationVerdict(step, value, stepCtx)
-      result = problem
-        ? { id: step.id, status: 'fail', reason: problem, evidence: evidenceOf(value) }
-        : { id: step.id, status: 'pass', evidence: evidenceOf(value) }
+      const problem = value?.skipped === true ? null : expectationVerdict(step, value, stepCtx)
+      result =
+        value?.skipped === true
+          ? {
+              id: step.id,
+              status: 'skipped',
+              reason: String(value.reason ?? 'skipped by the step')
+            }
+          : problem
+            ? { id: step.id, status: 'fail', reason: problem, evidence: evidenceOf(value) }
+            : { id: step.id, status: 'pass', evidence: evidenceOf(value) }
     } catch (error) {
       if (signal?.aborted) {
         stopped = reasonOf(signal)
@@ -415,7 +440,12 @@ export async function runScenarioSteps({
       if (!stepController.signal.aborted) stepController.abort(new StoppedError('step finished'))
     }
     const endedAt = clock.now()
-    result = { ...result, startedAt: iso(startedAt), endedAt: iso(endedAt), durationMs: endedAt - startedAt }
+    result = {
+      ...result,
+      startedAt: iso(startedAt),
+      endedAt: iso(endedAt),
+      durationMs: endedAt - startedAt
+    }
     results.push(result)
     onStepEnd({ index, total: scenario.steps.length, step, result })
     if ((result.status === 'fail' || result.status === 'timeout') && step.onFail === 'abort') {

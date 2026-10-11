@@ -5,7 +5,14 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { createFakeClock } from './harness-test-fakes.mjs'
-import { EXIT, buildManifest, countRunsToday, executeRun, parseRunArgs, sha256 } from './harness.mjs'
+import {
+  EXIT,
+  buildManifest,
+  countRunsToday,
+  executeRun,
+  parseRunArgs,
+  sha256
+} from './harness.mjs'
 import { validatePolicy } from './policy.mjs'
 import { examplePolicy } from './policy.test.mjs'
 import { createWaitFor, defineScenario } from './step-engine.mjs'
@@ -48,7 +55,11 @@ function scenario(steps, overrides = {}) {
 
 // A fake remote whose streamStop reaches idle 2 s later on the fake clock.
 function fakeRemote({ bus, clock, live = true }) {
-  let state = { sessionState: live ? 'streaming' : 'idle', sessionActive: live, layoutPreset: 'screen-only' }
+  let state = {
+    sessionState: live ? 'streaming' : 'idle',
+    sessionActive: live,
+    layoutPreset: 'screen-only'
+  }
   bus.emit('remote.state', state)
   const intents = []
   return {
@@ -67,7 +78,13 @@ function fakeRemote({ bus, clock, live = true }) {
   }
 }
 
-async function rig({ workDir, clock = createFakeClock(), scenarios = {}, overrides = {}, session = {} } = {}) {
+async function rig({
+  workDir,
+  clock = createFakeClock(),
+  scenarios = {},
+  overrides = {},
+  session = {}
+} = {}) {
   const out = []
   const calls = { startSession: 0, teardown: 0, released: [] }
   let currentPolicy = policy()
@@ -79,7 +96,11 @@ async function rig({ workDir, clock = createFakeClock(), scenarios = {}, overrid
     workDir,
     out: (line) => out.push(line),
     random: () => 'a1b2c3',
-    loadPolicy: async () => ({ policy: currentPolicy, problems: currentPolicy ? [] : ['missing'], path: '/policy.json' }),
+    loadPolicy: async () => ({
+      policy: currentPolicy,
+      problems: currentPolicy ? [] : ['missing'],
+      path: '/policy.json'
+    }),
     readPolicyText: async () => POLICY_TEXT,
     readInstallRecord: async () => INSTALL,
     loadScenario: async (name) => scenarios[name] ?? null,
@@ -146,9 +167,15 @@ test('parseRunArgs follows the CLI contract', () => {
     privacy: null,
     json: false
   })
-  assert.throws(() => parseRunArgs(['--scenario', 'dry']), /--trigger must be one of schedule, on-demand, manual/)
+  assert.throws(
+    () => parseRunArgs(['--scenario', 'dry']),
+    /--trigger must be one of schedule, on-demand, manual/
+  )
   assert.throws(() => parseRunArgs(['--scenario', '../x', '--trigger', 'manual']), /--scenario/)
-  assert.throws(() => parseRunArgs(['--scenario', 'dry', '--trigger', 'manual', '--build', 'nightly']), /--build/)
+  assert.throws(
+    () => parseRunArgs(['--scenario', 'dry', '--trigger', 'manual', '--build', 'nightly']),
+    /--build/
+  )
   assert.throws(() => parseRunArgs(['--scenario', 'dry', '--trigger', 'manual', '--fast']), /usage/)
 })
 
@@ -157,22 +184,80 @@ test('refusals exit 2 before anything starts and print REFUSED (reason)', async 
   const dry = scenario([{ id: 'one', deadlineMs: 1000, run: () => 1 }])
   const cases = [
     { argv: ['--scenario', 'nope', '--trigger', 'manual'], reason: 'unknown-scenario' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], params: '{bad', reason: 'bad-scenario-params' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], params: '[1]', reason: 'bad-scenario-params' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], policy: null, reason: /^policy missing or invalid/ },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], policy: policy({ enabled: false }), reason: 'policy disabled (enabled is false)' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], deps: { stopFileExists: async () => true }, reason: 'STOP file present' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], deps: { fetchControl: async () => ({ enabled: false }) }, reason: 'control.json says enabled: false' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], deps: { fetchControl: async () => { throw new Error('offline') } }, reason: 'control.json unreachable or unreadable' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], lock: { pid: 4242, runId: 'other', startedAt: 'x' }, reason: 'run lock held (other, pid 4242)' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], deps: { countRunsToday: async () => 8 }, reason: 'daily run count reached (8 of 8)' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual', '--privacy', 'public'], reason: 'public not allowed (visibility.allowPublic is false)' },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual', '--build', 'candidate'], reason: /^installed build is release, not candidate/ },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], deps: { readInstallRecord: async () => null }, reason: /^no installed build recorded/ },
-    { argv: ['--scenario', 'unit', '--trigger', 'manual'], deps: { acquireRunLock: async () => ({ ok: false, reason: 'raced' }) }, reason: 'raced' }
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      params: '{bad',
+      reason: 'bad-scenario-params'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      params: '[1]',
+      reason: 'bad-scenario-params'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      policy: null,
+      reason: /^policy missing or invalid/
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      policy: policy({ enabled: false }),
+      reason: 'policy disabled (enabled is false)'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      deps: { stopFileExists: async () => true },
+      reason: 'STOP file present'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      deps: { fetchControl: async () => ({ enabled: false }) },
+      reason: 'control.json says enabled: false'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      deps: {
+        fetchControl: async () => {
+          throw new Error('offline')
+        }
+      },
+      reason: 'control.json unreachable or unreadable'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      lock: { pid: 4242, runId: 'other', startedAt: 'x' },
+      reason: 'run lock held (other, pid 4242)'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      deps: { countRunsToday: async () => 8 },
+      reason: 'daily run count reached (8 of 8)'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual', '--privacy', 'public'],
+      reason: 'public not allowed (visibility.allowPublic is false)'
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual', '--build', 'candidate'],
+      reason: /^installed build is release, not candidate/
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      deps: { readInstallRecord: async () => null },
+      reason: /^no installed build recorded/
+    },
+    {
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      deps: { acquireRunLock: async () => ({ ok: false, reason: 'raced' }) },
+      reason: 'raced'
+    }
   ]
   for (const entry of cases) {
-    const r = await rig({ workDir, scenarios: { unit: dry }, overrides: { scenarioParamsText: entry.params, ...entry.deps } })
+    const r = await rig({
+      workDir,
+      scenarios: { unit: dry },
+      overrides: { scenarioParamsText: entry.params, ...entry.deps }
+    })
     if ('policy' in entry) r.setPolicy(entry.policy)
     if (entry.lock) r.setLock(entry.lock)
     const result = await executeRun({ argv: entry.argv, deps: r.deps })
@@ -189,17 +274,38 @@ test('refusals exit 2 before anything starts and print REFUSED (reason)', async 
 test('a clean run exits 0 with a complete manifest and releases the lock', async () => {
   const workDir = await tmpWork()
   const clock = createFakeClock()
-  const unit = scenario([
-    { id: 'one', deadlineMs: 1000, run: (ctx) => ({ prefix: ctx.run.titlePrefix, params: ctx.params }) },
-    { id: 'two', deadlineMs: 1000, run: () => 'ok' }
-  ], { plannedMinutes: (params) => params.minutes })
-  const r = await rig({ workDir, clock, scenarios: { unit }, overrides: { scenarioParamsText: '{"minutes":7}' } })
-  const result = await executeRun({ argv: ['--scenario', 'unit', '--trigger', 'on-demand', '--json'], deps: r.deps })
+  const unit = scenario(
+    [
+      {
+        id: 'one',
+        deadlineMs: 1000,
+        run: (ctx) => ({ prefix: ctx.run.titlePrefix, params: ctx.params })
+      },
+      { id: 'two', deadlineMs: 1000, run: () => 'ok' }
+    ],
+    { plannedMinutes: (params) => params.minutes }
+  )
+  const r = await rig({
+    workDir,
+    clock,
+    scenarios: { unit },
+    overrides: { scenarioParamsText: '{"minutes":7}' }
+  })
+  const result = await executeRun({
+    argv: ['--scenario', 'unit', '--trigger', 'on-demand', '--json'],
+    deps: r.deps
+  })
   assert.equal(result.exitCode, EXIT.ok)
   const runId = '2026-10-12-unit-a1b2c3'
   assert.equal(result.runDir, join(workDir, 'runs', runId))
   assert.equal(r.out.at(-1), `RUN_DIR=${result.runDir}`)
-  assert.deepEqual(JSON.parse(r.out.at(-2)), { runId, outcome: 'pass', exitCode: 0, stopReason: null, failedSteps: [] })
+  assert.deepEqual(JSON.parse(r.out.at(-2)), {
+    runId,
+    outcome: 'pass',
+    exitCode: 0,
+    stopReason: null,
+    failedSteps: []
+  })
   assert.deepEqual(r.calls.released, [runId])
 
   const manifest = JSON.parse(await readFile(join(result.runDir, 'manifest.json'), 'utf8'))
@@ -224,7 +330,10 @@ test('a clean run exits 0 with a complete manifest and releases the lock', async
   assert.deepEqual(manifest.policy, { sha256: sha256(POLICY_TEXT) })
   assert.equal(manifest.outcome, 'pass')
   assert.equal(manifest.exitCode, 0)
-  assert.deepEqual(manifest.steps.map((step) => step.status), ['pass', 'pass'])
+  assert.deepEqual(
+    manifest.steps.map((step) => step.status),
+    ['pass', 'pass']
+  )
   assert.deepEqual(manifest.steps[0].evidence, { prefix: 'Automated test', params: { minutes: 7 } })
   assert.equal(manifest.teardown.clean, true)
   assert.deepEqual(manifest.session, { appVersion: '0.9.142' })
@@ -235,16 +344,34 @@ test('a clean run exits 0 with a complete manifest and releases the lock', async
 
 test('a failed step exits 1; a dirty teardown exits 1', async () => {
   const workDir = await tmpWork()
-  const failing = scenario([{ id: 'one', deadlineMs: 1000, run: () => { throw new Error('dialog missing') } }])
+  const failing = scenario([
+    {
+      id: 'one',
+      deadlineMs: 1000,
+      run: () => {
+        throw new Error('dialog missing')
+      }
+    }
+  ])
   const r = await rig({ workDir, scenarios: { unit: failing } })
-  const result = await executeRun({ argv: ['--scenario', 'unit', '--trigger', 'manual'], deps: r.deps })
+  const result = await executeRun({
+    argv: ['--scenario', 'unit', '--trigger', 'manual'],
+    deps: r.deps
+  })
   assert.equal(result.exitCode, EXIT.failed)
   assert.equal(result.manifest.outcome, 'fail')
   assert.equal(r.calls.teardown, 1)
 
   const passing = scenario([{ id: 'one', deadlineMs: 1000, run: () => 1 }])
-  const dirty = await rig({ workDir: await tmpWork(), scenarios: { unit: passing }, session: { dirtyTeardown: true } })
-  const second = await executeRun({ argv: ['--scenario', 'unit', '--trigger', 'manual'], deps: dirty.deps })
+  const dirty = await rig({
+    workDir: await tmpWork(),
+    scenarios: { unit: passing },
+    session: { dirtyTeardown: true }
+  })
+  const second = await executeRun({
+    argv: ['--scenario', 'unit', '--trigger', 'manual'],
+    deps: dirty.deps
+  })
   assert.equal(second.exitCode, EXIT.failed)
 })
 
@@ -254,9 +381,16 @@ test('a session that fails to start is a crash (exit 1) and still writes the man
   const r = await rig({
     workDir,
     scenarios: { unit },
-    overrides: { startSession: async () => { throw new Error('The lab display "Lab" is not connected.') } }
+    overrides: {
+      startSession: async () => {
+        throw new Error('The lab display "Lab" is not connected.')
+      }
+    }
   })
-  const result = await executeRun({ argv: ['--scenario', 'unit', '--trigger', 'schedule'], deps: r.deps })
+  const result = await executeRun({
+    argv: ['--scenario', 'unit', '--trigger', 'schedule'],
+    deps: r.deps
+  })
   assert.equal(result.exitCode, EXIT.failed)
   assert.equal(result.manifest.outcome, 'crashed')
   assert.equal(r.out.at(-1), `RUN_DIR=${result.runDir}`)
@@ -268,11 +402,18 @@ test('a policy flip to enabled:false mid-run ends the stream and tears down with
   const workDir = await tmpWork()
   const clock = createFakeClock()
   const live = scenario([
-    { id: 'live', deadlineMs: 600_000, run: (ctx) => ctx.waitFor(() => false, { deadlineMs: 600_000, label: 'forever' }) },
+    {
+      id: 'live',
+      deadlineMs: 600_000,
+      run: (ctx) => ctx.waitFor(() => false, { deadlineMs: 600_000, label: 'forever' })
+    },
     { id: 'after', deadlineMs: 1000, run: () => 1 }
   ])
   const r = await rig({ workDir, clock, scenarios: { unit: live }, session: { live: true } })
-  const promise = executeRun({ argv: ['--scenario', 'unit', '--trigger', 'on-demand'], deps: r.deps })
+  const promise = executeRun({
+    argv: ['--scenario', 'unit', '--trigger', 'on-demand'],
+    deps: r.deps
+  })
   await r.started
   await clock.advance(1000)
   const flippedAt = clock.now()
@@ -284,10 +425,16 @@ test('a policy flip to enabled:false mid-run ends the stream and tears down with
   assert.equal(result.exitCode, EXIT.stopped)
   assert.equal(result.manifest.outcome, 'stopped')
   assert.equal(result.manifest.stopReason, 'policy disabled (enabled is false)')
-  assert.deepEqual(result.manifest.steps.map((step) => step.status), ['stopped', 'skipped'])
+  assert.deepEqual(
+    result.manifest.steps.map((step) => step.status),
+    ['stopped', 'skipped']
+  )
   const stop = r.calls.remote.intents.find((intent) => intent.kind === 'streamStop')
   assert.ok(stop, 'teardown sent streamStop')
-  assert.ok(r.calls.teardownDoneAt - flippedAt <= 60_000, `teardown done ${r.calls.teardownDoneAt - flippedAt} ms after the flip`)
+  assert.ok(
+    r.calls.teardownDoneAt - flippedAt <= 60_000,
+    `teardown done ${r.calls.teardownDoneAt - flippedAt} ms after the flip`
+  )
   assert.equal(r.calls.remote.state().sessionState, 'idle')
   assert.equal(result.manifest.teardown.clean, true)
   assert.ok(result.manifest.teardown.streamEndedMs <= 5000)
@@ -297,7 +444,13 @@ test('a STOP file mid-run stops at the next 15 s tick', async () => {
   const workDir = await tmpWork()
   const clock = createFakeClock()
   let stopFile = false
-  const live = scenario([{ id: 'live', deadlineMs: 600_000, run: (ctx) => ctx.waitFor(() => false, { deadlineMs: 600_000 }) }])
+  const live = scenario([
+    {
+      id: 'live',
+      deadlineMs: 600_000,
+      run: (ctx) => ctx.waitFor(() => false, { deadlineMs: 600_000 })
+    }
+  ])
   const r = await rig({
     workDir,
     clock,
@@ -309,7 +462,8 @@ test('a STOP file mid-run stops at the next 15 s tick', async () => {
   await r.started
   stopFile = true
   const placedAt = clock.now()
-  for (let index = 0; index < 60 && r.calls.teardownDoneAt === undefined; index += 1) await clock.advance(1000)
+  for (let index = 0; index < 60 && r.calls.teardownDoneAt === undefined; index += 1)
+    await clock.advance(1000)
   const result = await promise
   assert.equal(result.exitCode, EXIT.stopped)
   assert.equal(result.manifest.stopReason, 'STOP file present')
@@ -320,15 +474,31 @@ test('countRunsToday counts on-demand and manual manifests of the policy day', a
   const runsDir = join(await tmpWork(), 'runs')
   const write = async (name, manifest) => {
     await mkdir(join(runsDir, name), { recursive: true })
-    await writeFile(join(runsDir, name, 'manifest.json'), manifest === null ? '{broken' : JSON.stringify(manifest))
+    await writeFile(
+      join(runsDir, name, 'manifest.json'),
+      manifest === null ? '{broken' : JSON.stringify(manifest)
+    )
   }
   await write('2026-10-12-dry-aaaaaa', { trigger: 'manual', startedAt: '2026-10-12T08:00:00.000Z' })
-  await write('2026-10-12-dry-bbbbbb', { trigger: 'on-demand', startedAt: '2026-10-12T09:00:00.000Z' })
-  await write('2026-10-12-churn-cccccc', { trigger: 'schedule', startedAt: '2026-10-12T02:30:00.000Z' })
+  await write('2026-10-12-dry-bbbbbb', {
+    trigger: 'on-demand',
+    startedAt: '2026-10-12T09:00:00.000Z'
+  })
+  await write('2026-10-12-churn-cccccc', {
+    trigger: 'schedule',
+    startedAt: '2026-10-12T02:30:00.000Z'
+  })
   await write('2026-10-12-dry-dddddd', null)
   await write('2026-10-11-dry-eeeeee', { trigger: 'manual', startedAt: '2026-10-11T08:00:00.000Z' })
   assert.equal(await countRunsToday({ runsDir, day: '2026-10-12', timeZone: 'Europe/Madrid' }), 3)
-  assert.equal(await countRunsToday({ runsDir: join(runsDir, 'none'), day: '2026-10-12', timeZone: 'Europe/Madrid' }), 0)
+  assert.equal(
+    await countRunsToday({
+      runsDir: join(runsDir, 'none'),
+      day: '2026-10-12',
+      timeZone: 'Europe/Madrid'
+    }),
+    0
+  )
 })
 
 test('buildManifest keeps only allowlisted build fields', () => {
@@ -337,7 +507,11 @@ test('buildManifest keeps only allowlisted build fields', () => {
     scenario: scenario([{ id: 'one', deadlineMs: 1, run() {} }]),
     request: { trigger: 'manual' },
     privacy: 'unlisted',
-    install: { ...INSTALL, feedUrl: 'https://example.invalid/secret-feed', previous: { version: '0.9.141' } },
+    install: {
+      ...INSTALL,
+      feedUrl: 'https://example.invalid/secret-feed',
+      previous: { version: '0.9.141' }
+    },
     machine: MACHINE,
     policyFile: { sha256: 'x' },
     startedAtMs: 0

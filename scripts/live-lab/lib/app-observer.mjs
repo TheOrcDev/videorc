@@ -232,6 +232,34 @@ export function healthRecordFromEvent(message) {
 }
 
 /**
+ * Health events as one list of { code, at (epoch ms), level, source } (pure),
+ * from backend records ({ ts, code }) and journal records ({ ts, codes[] }).
+ * The same event usually arrives through both feeds; one copy per code per
+ * second is kept.
+ */
+export function flattenHealthEvents(records) {
+  const seen = new Set()
+  const flat = []
+  for (const record of records ?? []) {
+    const at = Date.parse(record?.ts ?? '')
+    if (!Number.isFinite(at)) continue
+    const codes =
+      typeof record.code === 'string'
+        ? [record.code]
+        : Array.isArray(record.codes)
+          ? record.codes
+          : []
+    for (const code of codes) {
+      const key = `${code}@${Math.floor(at / 1000)}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      flat.push({ code, at, level: record.level ?? null, source: record.source ?? null })
+    }
+  }
+  return flat.sort((left, right) => left.at - right.at)
+}
+
+/**
  * The observer for one run. `rootPid()` resolves the app PID for the census;
  * `ledgerPaths()` the owned-process ledgers. Returns the read side used by
  * ctx.observe and a stop() for teardown.
@@ -274,7 +302,12 @@ export function createAppObserver({
       const { tsMs: _tsMs, ...stored } = line
       write('journal.ndjson', `${JSON.stringify(stored)}\n`)
       if (line.kind === 'health') {
-        const record = { ts: line.ts, source: 'journal', codes: line.healthEventCodes, level: line.healthLevel }
+        const record = {
+          ts: line.ts,
+          source: 'journal',
+          codes: line.healthEventCodes,
+          level: line.healthLevel
+        }
         health.push(record)
         write('health.ndjson', `${JSON.stringify(record)}\n`)
         bus.emit('health', record)
@@ -289,7 +322,10 @@ export function createAppObserver({
   async function sampleCensus() {
     try {
       const pid = await rootPid()
-      lastCensus = await collectCensus({ ledgerPaths: await ledgerPaths(), rootPid: pid ?? undefined })
+      lastCensus = await collectCensus({
+        ledgerPaths: await ledgerPaths(),
+        rootPid: pid ?? undefined
+      })
       const ts = new Date(clock.now()).toISOString()
       write('census.csv', censusCsvRows(lastCensus, ts))
       bus.emit('census', { ts, summary: lastCensus.summary })
@@ -327,6 +363,9 @@ export function createAppObserver({
     latestJournal: () => lastJournal,
     journalLines: (sinceMs = 0) => journal.filter((line) => line.tsMs >= sinceMs),
     healthEvents: () => [...health],
+    healthEventsFlat: () => flattenHealthEvents(health),
+    // YouTube-side incidents arrive with the U8 observer (wired by U9).
+    incidents: () => [],
     lastCensus: () => lastCensus,
     journalPath: () => tail.currentPath()
   }

@@ -70,7 +70,9 @@ export function buildLaunchEnv({ dirs, config, scenario }) {
   }
   if (scenario.usesLabYoutubeClient) {
     if (!config?.client?.id || !config?.client?.secret) {
-      throw new Error('This scenario needs the lab OAuth client; run pnpm live:hookup --client first.')
+      throw new Error(
+        'This scenario needs the lab OAuth client; run pnpm live:hookup --client first.'
+      )
     }
     env.VIDEORC_YOUTUBE_CLIENT_ID = config.client.id
     env.VIDEORC_YOUTUBE_CLIENT_SECRET = config.client.secret
@@ -110,7 +112,10 @@ export async function readDevToolsActivePort(userDataDir, read = (path) => readF
 // The app's own LaunchServices ownership publication (written by the app with
 // mode 0600 under the launch state dir). Read for the census root only; the
 // launcher's stop() is the only thing that ever signals the app.
-export async function readPublishedAppPid(launchStateDir, { list = readdir, read = (path) => readFile(path, 'utf8') } = {}) {
+export async function readPublishedAppPid(
+  launchStateDir,
+  { list = readdir, read = (path) => readFile(path, 'utf8') } = {}
+) {
   let names
   try {
     names = await list(launchStateDir)
@@ -182,16 +187,25 @@ function waitForExit(child, ms) {
 /** SIGTERM then SIGKILL, to this exact child only. */
 export async function stopOwnedChild(child, { graceMs = 3000 } = {}) {
   if (!child?.pid) return { pid: null, state: 'not-started' }
-  if (child.exitCode !== null || child.signalCode !== null) return { pid: child.pid, state: 'exited' }
+  if (child.exitCode !== null || child.signalCode !== null)
+    return { pid: child.pid, state: 'exited' }
   child.kill('SIGTERM')
   if (await waitForExit(child, graceMs)) return { pid: child.pid, state: 'terminated' }
   child.kill('SIGKILL')
   await waitForExit(child, graceMs)
-  return { pid: child.pid, state: child.exitCode !== null || child.signalCode !== null ? 'killed' : 'leaked' }
+  return {
+    pid: child.pid,
+    state: child.exitCode !== null || child.signalCode !== null ? 'killed' : 'leaked'
+  }
 }
 
 export function owned(child, label) {
-  return { label, child, pid: child?.pid ?? null, stop: (options) => stopOwnedChild(child, options) }
+  return {
+    label,
+    child,
+    pid: child?.pid ?? null,
+    stop: (options) => stopOwnedChild(child, options)
+  }
 }
 
 /** `-w <pid>` ends caffeinate with the harness even if teardown never runs. */
@@ -239,7 +253,8 @@ export async function labDisplayBounds(name, { exec = execFileAsync } = {}) {
   })
   const bounds = topLeftBounds(JSON.parse(stdout), name)
   if (!bounds) throw new Error(`The lab display "${name}" is not connected.`)
-  if (bounds.isMain) throw new Error(`The lab display "${name}" is the main display; make another display main.`)
+  if (bounds.isMain)
+    throw new Error(`The lab display "${name}" is the main display; make another display main.`)
   return bounds
 }
 
@@ -260,8 +275,16 @@ export function cardBrowserArgs({ url, bounds, profileDir }) {
 }
 
 /** Opens the card fullscreen on the lab display in a Chrome instance this run owns. */
-export function startCardBrowser({ url, bounds, profileDir, chromePath = DEFAULT_CHROME_PATH, spawnFn = spawn }) {
-  const child = spawnFn(chromePath, cardBrowserArgs({ url, bounds, profileDir }), { stdio: 'ignore' })
+export function startCardBrowser({
+  url,
+  bounds,
+  profileDir,
+  chromePath = DEFAULT_CHROME_PATH,
+  spawnFn = spawn
+}) {
+  const child = spawnFn(chromePath, cardBrowserArgs({ url, bounds, profileDir }), {
+    stdio: 'ignore'
+  })
   return owned(child, 'card-browser')
 }
 
@@ -287,8 +310,15 @@ export function localSinkArgs({ port, streamKey, outputPath }) {
  * One loopback RTMP listener (the smoke:multistream pattern). Returns the
  * server URL the destination is seeded with; nothing leaves the machine.
  */
-export function startLocalSink({ port, streamKey, outputPath, ffmpegPath = 'ffmpeg', spawnFn = spawn }) {
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('sink port must be 1024-65535')
+export function startLocalSink({
+  port,
+  streamKey,
+  outputPath,
+  ffmpegPath = 'ffmpeg',
+  spawnFn = spawn
+}) {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535)
+    throw new Error('sink port must be 1024-65535')
   const child = spawnFn(ffmpegPath, localSinkArgs({ port, streamKey, outputPath }), {
     stdio: ['ignore', 'ignore', 'pipe']
   })
@@ -305,7 +335,9 @@ export function startLocalSink({ port, streamKey, outputPath, ffmpegPath = 'ffmp
 export function isLoopbackRtmp(url) {
   try {
     const parsed = new URL(url)
-    return parsed.protocol === 'rtmp:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
+    return (
+      parsed.protocol === 'rtmp:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
+    )
   } catch {
     return false
   }

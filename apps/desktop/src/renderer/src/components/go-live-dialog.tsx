@@ -232,6 +232,10 @@ export function GoLiveConfirmationDialog({
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
       <DialogContent
         className="gap-4"
+        // Stable hooks for the live lab's CDP driver (plan 178 U6): the
+        // dialog says whether a confirmed Go Live is still under way.
+        data-pending={pending ? 'true' : 'false'}
+        data-phase={phase?.kind}
         data-testid="go-live-dialog"
         size="xl"
         onKeyDown={onKeyDown}
@@ -247,7 +251,11 @@ export function GoLiveConfirmationDialog({
         <DialogBody>
           <div className="flex flex-col gap-5">
             {hasInstantTargets ? (
-              <section aria-label="Stream details" className="flex flex-col gap-2">
+              <section
+                aria-label="Stream details"
+                className="flex flex-col gap-2"
+                data-testid="go-live-details"
+              >
                 <SectionLabel as="h3">Stream details</SectionLabel>
                 <BroadcastInfoFields
                   disabled={pending || !draft}
@@ -436,13 +444,20 @@ export function GoLiveConfirmationDialog({
         </DialogBody>
 
         <DialogFooter>
-          <Button ref={cancelRef} disabled={pending} variant="ghost" onClick={onCancel}>
+          <Button
+            ref={cancelRef}
+            data-testid="go-live-cancel"
+            disabled={pending}
+            variant="ghost"
+            onClick={onCancel}
+          >
             Cancel
           </Button>
           {partialSetup ? (
             <Button
               ref={primaryRef}
               aria-keyshortcuts={shortcutAriaKeys(confirmAccelerator, platform)}
+              data-testid="go-live-continue-partial"
               disabled={!canContinuePartial}
               onClick={onContinuePartial}
             >
@@ -557,7 +572,12 @@ export function GoLiveCaptionsStatus({
         <AlertTitle>Captions can&apos;t start</AlertTitle>
         <AlertDescription className="flex flex-col items-start gap-2">
           <span>{readiness.description}</span>
-          <Button disabled={pending} variant="outline" onClick={onContinueWithoutCaptions}>
+          <Button
+            data-testid="go-live-captions-skip"
+            disabled={pending}
+            variant="outline"
+            onClick={onContinueWithoutCaptions}
+          >
             Go live without captions
           </Button>
         </AlertDescription>
@@ -654,6 +674,7 @@ export function GoLiveDestinationRow({
       data-ready={ready}
       data-slot="go-live-destination"
       data-target-id={destination.targetId}
+      data-testid="go-live-destination"
     >
       <ListRow
         className="h-auto min-h-10 py-1.5"
@@ -704,6 +725,7 @@ export function GoLiveDestinationRow({
               </Button>
             ) : null}
             <Button
+              data-testid="go-live-destination-exclude"
               disabled={pending}
               variant="outline"
               onClick={() => onResolveBlocker(destination.targetId, 'exclude')}
@@ -734,6 +756,7 @@ export function GoLiveExcludedRow({
       className="flex flex-col"
       data-slot="go-live-excluded"
       data-target-id={target.id}
+      data-testid="go-live-excluded"
     >
       <ListRow
         className="h-auto min-h-10 py-1.5"
@@ -745,7 +768,12 @@ export function GoLiveExcludedRow({
       </ListRow>
       <div className="flex min-w-0 flex-wrap items-center gap-2 pr-3 pb-3 pl-13">
         <p className="min-w-0 flex-1 text-xs text-muted-foreground">{GO_LIVE_EXCLUDED_NOTE}</p>
-        <Button disabled={pending} variant="outline" onClick={onInclude}>
+        <Button
+          data-testid="go-live-include"
+          disabled={pending}
+          variant="outline"
+          onClick={onInclude}
+        >
           Add back
         </Button>
       </div>

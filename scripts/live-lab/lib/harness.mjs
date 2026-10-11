@@ -93,12 +93,20 @@ export function parseRunArgs(argv) {
 }
 
 export function localDay(ms, timeZone) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(
-    new Date(ms)
-  )
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date(ms))
 }
 
-export function newRunId({ nowMs, scenario, timeZone, random = () => randomBytes(3).toString('hex') }) {
+export function newRunId({
+  nowMs,
+  scenario,
+  timeZone,
+  random = () => randomBytes(3).toString('hex')
+}) {
   return `${localDay(nowMs, timeZone)}-${scenario}-${random()}`
 }
 
@@ -111,7 +119,13 @@ export function runsDirOf(workDir) {
  * run manifests (policy.mjs counting rules: scheduled runs do not count). An
  * unreadable manifest counts as a run: a broken folder never frees a slot.
  */
-export async function countRunsToday({ runsDir, day, timeZone, list = readdir, read = (path) => readFile(path, 'utf8') }) {
+export async function countRunsToday({
+  runsDir,
+  day,
+  timeZone,
+  list = readdir,
+  read = (path) => readFile(path, 'utf8')
+}) {
   let names
   try {
     names = await list(runsDir)
@@ -125,7 +139,11 @@ export async function countRunsToday({ runsDir, day, timeZone, list = readdir, r
     try {
       const manifest = JSON.parse(await read(join(runsDir, name, 'manifest.json')))
       const started = Date.parse(manifest.startedAt)
-      if (LIMITED_TRIGGERS.includes(manifest.trigger) && Number.isFinite(started) && localDay(started, timeZone) === day) {
+      if (
+        LIMITED_TRIGGERS.includes(manifest.trigger) &&
+        Number.isFinite(started) &&
+        localDay(started, timeZone) === day
+      ) {
         count += 1
       }
     } catch {
@@ -141,7 +159,9 @@ export function sha256(text) {
 
 function pick(record, keys) {
   if (!record) return null
-  return Object.fromEntries(keys.filter((key) => record[key] !== undefined).map((key) => [key, record[key]]))
+  return Object.fromEntries(
+    keys.filter((key) => record[key] !== undefined).map((key) => [key, record[key]])
+  )
 }
 
 /** The run manifest (pure). No secrets, no home paths. */
@@ -176,7 +196,16 @@ export function buildManifest({
     usesBundledClient: scenario.usesBundledClient,
     usesLabYoutubeClient: scenario.usesLabYoutubeClient,
     params: params ?? {},
-    build: pick(install, ['source', 'version', 'sha', 'ref', 'runId', 'teamId', 'appPath', 'installedAt']),
+    build: pick(install, [
+      'source',
+      'version',
+      'sha',
+      'ref',
+      'runId',
+      'teamId',
+      'appPath',
+      'installedAt'
+    ]),
     harness: machine?.harness ?? null,
     macOS: machine?.macOS ?? null,
     hardware: machine?.hardware ?? null,
@@ -186,7 +215,9 @@ export function buildManifest({
     outcome,
     exitCode,
     stopReason,
-    clearedStaleLock: clearedStaleLock ? pick(clearedStaleLock, ['runId', 'pid', 'startedAt']) : null,
+    clearedStaleLock: clearedStaleLock
+      ? pick(clearedStaleLock, ['runId', 'pid', 'startedAt'])
+      : null,
     session,
     steps,
     teardown
@@ -273,14 +304,17 @@ export async function executeRun({ argv, deps }) {
   }
 
   const loaded = await deps.loadPolicy()
-  if (!loaded.policy) return refuse(`policy missing or invalid: ${loaded.problems?.[0] ?? 'unknown problem'}`)
+  if (!loaded.policy)
+    return refuse(`policy missing or invalid: ${loaded.problems?.[0] ?? 'unknown problem'}`)
   const policy = loaded.policy
 
   const install = await deps.readInstallRecord()
   if (!install) return refuse('no installed build recorded; run pnpm live:install first')
   const build = request.build ?? install.source
   if (request.build && install.source !== request.build) {
-    return refuse(`installed build is ${install.source}, not ${request.build}; run pnpm live:install --build ${request.build}`)
+    return refuse(
+      `installed build is ${install.source}, not ${request.build}; run pnpm live:install --build ${request.build}`
+    )
   }
 
   let controlEnabled = null
@@ -290,7 +324,8 @@ export async function executeRun({ argv, deps }) {
     controlEnabled = null
   }
   const holder = await deps.readRunLock()
-  const lockHeld = holder === null ? false : holder.corrupt ? true : deps.processAlive(holder.pid) ? holder : false
+  const lockHeld =
+    holder === null ? false : holder.corrupt ? true : deps.processAlive(holder.pid) ? holder : false
   const startedAtMs = clock.now()
   const day = localDay(startedAtMs, policy.schedule.timezone)
   const state = {
@@ -318,7 +353,12 @@ export async function executeRun({ argv, deps }) {
   if (!verdict.ok) return refuse(verdict.reason)
   const privacy = verdict.privacy
 
-  const runId = newRunId({ nowMs: startedAtMs, scenario: scenario.name, timeZone: policy.schedule.timezone, random: deps.random })
+  const runId = newRunId({
+    nowMs: startedAtMs,
+    scenario: scenario.name,
+    timeZone: policy.schedule.timezone,
+    random: deps.random
+  })
   const lock = await deps.acquireRunLock({ runId })
   if (!lock.ok) return refuse(lock.reason)
 
@@ -345,7 +385,8 @@ export async function executeRun({ argv, deps }) {
     params,
     clearedStaleLock: lock.clearedStale ?? null
   }
-  const writeManifest = (value) => writeFile(join(runDir, 'manifest.json'), `${JSON.stringify(value, null, 2)}\n`)
+  const writeManifest = (value) =>
+    writeFile(join(runDir, 'manifest.json'), `${JSON.stringify(value, null, 2)}\n`)
   const log = (message) => {
     const line = `[${new Date(clock.now()).toISOString()}] ${message}`
     out(line)
@@ -356,7 +397,9 @@ export async function executeRun({ argv, deps }) {
     await mkdir(runDir, { recursive: true })
     base.machine = await deps.machineFacts()
     await writeManifest(buildManifest(base))
-    log(`Run ${runId}: ${scenario.name}, ${request.trigger}, ${build} ${install.version ?? '?'}, ${privacy}.`)
+    log(
+      `Run ${runId}: ${scenario.name}, ${request.trigger}, ${build} ${install.version ?? '?'}, ${privacy}.`
+    )
 
     killSwitch = (deps.createKillSwitch ?? createKillSwitch)({
       policy,
@@ -367,7 +410,13 @@ export async function executeRun({ argv, deps }) {
         log(`Kill switch: ${reason}. Ending the stream and tearing down.`)
         abort.abort(new StoppedError(reason))
       },
-      run: { trigger: request.trigger, build, privacy, plannedMinutes: scenario.plannedMinutes, startedAt: startedAtMs },
+      run: {
+        trigger: request.trigger,
+        build,
+        privacy,
+        plannedMinutes: scenario.plannedMinutes,
+        startedAt: startedAtMs
+      },
       reloadPolicy: () => deps.loadPolicy(),
       quota: () => ({ quotaUnitsToday: deps.quotaUnitsToday(), bundledUnitsToday: 0 }),
       exists: () => deps.stopFileExists(),
@@ -411,19 +460,31 @@ export async function executeRun({ argv, deps }) {
       clock,
       signal: abort.signal,
       check: () => killSwitch.check(),
-      ctx: { ...session.ctx, run: runInfo, params, killSwitch, runDir, log, events: bus },
+      ctx: { ...session.ctx, run: runInfo, params, policy, killSwitch, runDir, log, events: bus },
       onStepStart: ({ index, total, step }) => {
         log(`Step ${index + 1}/${total} ${step.id}`)
-        session.ctx.card?.setStep({ index: index + 1, total, name: step.title ?? step.id, sceneId: step.sceneId ?? 0 })
+        session.ctx.card?.setStep({
+          index: index + 1,
+          total,
+          name: step.title ?? step.id,
+          sceneId: step.sceneId ?? 0
+        })
       },
       onStepEnd: ({ step, result: stepResult }) => {
-        log(`Step ${step.id}: ${stepResult.status}${stepResult.reason ? ` (${stepResult.reason})` : ''}`)
+        log(
+          `Step ${step.id}: ${stepResult.status}${stepResult.reason ? ` (${stepResult.reason})` : ''}`
+        )
         appendFile(join(runDir, 'steps.ndjson'), `${JSON.stringify(stepResult)}\n`).catch(() => {})
       }
     })
   } catch (error) {
     if (error instanceof StoppedError || abort.signal.aborted) {
-      result = { ...result, stopped: abort.signal.aborted ? abort.signal.reason?.reason ?? error.message : error.reason }
+      result = {
+        ...result,
+        stopped: abort.signal.aborted
+          ? (abort.signal.reason?.reason ?? error.message)
+          : error.reason
+      }
     } else {
       crashed = error
       log(`Run crashed: ${error?.message ?? error}`)
@@ -433,9 +494,14 @@ export async function executeRun({ argv, deps }) {
     detachSignals?.()
     if (session) {
       try {
-        teardownSummary = await session.teardown({ reason: result.stopped ?? (crashed ? 'crashed' : 'done') })
+        teardownSummary = await session.teardown({
+          reason: result.stopped ?? (crashed ? 'crashed' : 'done')
+        })
       } catch (error) {
-        teardownSummary = { clean: false, steps: [{ name: 'teardown', ok: false, detail: error.message }] }
+        teardownSummary = {
+          clean: false,
+          steps: [{ name: 'teardown', ok: false, detail: error.message }]
+        }
       }
     }
     const stopped = result.stopped ?? null
@@ -463,7 +529,17 @@ export async function executeRun({ argv, deps }) {
     if (!released.released) log(`Run lock not released: ${released.reason}`)
     log(`Run ${runId}: ${manifest.outcome} (exit ${exitCode}).`)
     if (request.json) {
-      out(JSON.stringify({ runId, outcome: manifest.outcome, exitCode, stopReason: stopped, failedSteps: result.results.filter((step) => step.status === 'fail' || step.status === 'timeout').map((step) => step.id) }))
+      out(
+        JSON.stringify({
+          runId,
+          outcome: manifest.outcome,
+          exitCode,
+          stopReason: stopped,
+          failedSteps: result.results
+            .filter((step) => step.status === 'fail' || step.status === 'timeout')
+            .map((step) => step.id)
+        })
+      )
     }
     out(`RUN_DIR=${runDir}`)
     // eslint-disable-next-line no-unsafe-finally

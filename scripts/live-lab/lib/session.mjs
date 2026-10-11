@@ -4,7 +4,11 @@ import { createServer } from 'node:net'
 import { join } from 'node:path'
 
 import { ownedProcessLedgerPaths } from '../../lib/process-census.mjs'
-import { connectRemote, remoteRequest, waitForRemoteDescribe } from '../../lib/remote-control-client.mjs'
+import {
+  connectRemote,
+  remoteRequest,
+  waitForRemoteDescribe
+} from '../../lib/remote-control-client.mjs'
 import { request as backendRequest } from '../../smoke-recording-session.mjs'
 import { createAppObserver, journalDirCandidates } from './app-observer.mjs'
 import { startCardServer } from './card-server.mjs'
@@ -63,19 +67,29 @@ export async function ledgerPathsFor(dirs, appPath) {
 function connectBackendSocket(connection, timeoutMs = RPC_TIMEOUT_MS) {
   // Like smoke-recording-session's connectBackend, without the tokened URL in errors.
   return new Promise((resolveSocket, rejectSocket) => {
-    const socket = new WebSocket(`ws://${connection.host}:${connection.port}/ws?token=${encodeURIComponent(connection.token)}`)
+    const socket = new WebSocket(
+      `ws://${connection.host}:${connection.port}/ws?token=${encodeURIComponent(connection.token)}`
+    )
     const timer = setTimeout(() => {
       socket.close()
       rejectSocket(new Error('Timed out connecting to the backend renderer socket.'))
     }, timeoutMs)
-    socket.addEventListener('open', () => {
-      clearTimeout(timer)
-      resolveSocket(socket)
-    }, { once: true })
-    socket.addEventListener('error', () => {
-      clearTimeout(timer)
-      rejectSocket(new Error('Could not connect to the backend renderer socket.'))
-    }, { once: true })
+    socket.addEventListener(
+      'open',
+      () => {
+        clearTimeout(timer)
+        resolveSocket(socket)
+      },
+      { once: true }
+    )
+    socket.addEventListener(
+      'error',
+      () => {
+        clearTimeout(timer)
+        rejectSocket(new Error('Could not connect to the backend renderer socket.'))
+      },
+      { once: true }
+    )
   })
 }
 
@@ -86,7 +100,8 @@ async function until(probe, { deadlineMs, label, intervalMs = 250 }) {
   for (;;) {
     const value = await probe().catch(() => null)
     if (value) return value
-    if (Date.now() > deadline) throw new Error(`${label} not ready within ${Math.round(deadlineMs / 1000)} s`)
+    if (Date.now() > deadline)
+      throw new Error(`${label} not ready within ${Math.round(deadlineMs / 1000)} s`)
     await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs))
   }
 }
@@ -100,7 +115,8 @@ export function createRemote({ socket, bus }) {
     } catch {
       return
     }
-    if (message.event === 'remote.state' || message.event === 'remote.ack') bus.emit(message.event, message.payload)
+    if (message.event === 'remote.state' || message.event === 'remote.ack')
+      bus.emit(message.event, message.payload)
   })
   return {
     state: () => bus.last('remote.state') ?? null,
@@ -121,17 +137,29 @@ export function createRemote({ socket, bus }) {
         else if (payload?.intentId === wanted) settle?.(payload)
       })
       try {
-        const response = await remoteRequest(socket, 'remote.intent', { kind, ...fields }, { timeoutMs: deadlineMs })
+        const response = await remoteRequest(
+          socket,
+          'remote.intent',
+          { kind, ...fields },
+          { timeoutMs: deadlineMs }
+        )
         const payload = response?.payload ?? {}
         if (!payload.accepted) {
-          return { accepted: false, ok: false, message: payload.message ?? response?.error?.message ?? null }
+          return {
+            accepted: false,
+            ok: false,
+            message: payload.message ?? response?.error?.message ?? null
+          }
         }
         wanted = payload.intentId
         const ack =
           acks.find((entry) => entry?.intentId === wanted) ??
           (await new Promise((resolveAck, rejectAck) => {
             const timer = setTimeout(
-              () => rejectAck(new Error(`${kind}: no remote.ack within ${Math.round(deadlineMs / 1000)} s`)),
+              () =>
+                rejectAck(
+                  new Error(`${kind}: no remote.ack within ${Math.round(deadlineMs / 1000)} s`)
+                ),
               deadlineMs
             )
             settle = (entry) => {
@@ -139,7 +167,12 @@ export function createRemote({ socket, bus }) {
               resolveAck(entry)
             }
           }))
-        return { accepted: true, ok: ack.ok === true, message: ack.message ?? null, intentId: wanted }
+        return {
+          accepted: true,
+          ok: ack.ok === true,
+          message: ack.message ?? null,
+          intentId: wanted
+        }
       } finally {
         off()
       }
@@ -162,7 +195,8 @@ export function createSessionStarter({
 }) {
   return async function startSession({ runInfo, scenario, policy, runDir, bus, signal, log }) {
     const dirs = labProfileDirs(workDir, scenario.destination)
-    for (const dir of [dirs.appDataDir, dirs.userDataDir, dirs.launchStateDir]) await mkdir(dir, { recursive: true })
+    for (const dir of [dirs.appDataDir, dirs.userDataDir, dirs.launchStateDir])
+      await mkdir(dir, { recursive: true })
     const sessionWait = createWaitFor({ bus, clock, signal, defaultDeadlineMs: READY_DEADLINE_MS })
     const teardownWait = createWaitFor({ bus, clock, defaultDeadlineMs: READY_DEADLINE_MS })
     const parts = { helpers: [] }
@@ -178,7 +212,12 @@ export function createSessionStarter({
         rootPid: parts.appPid ?? undefined,
         helpers: [parts.browser, parts.sink, parts.caffeinate],
         collect: () =>
-          collectArtifacts({ runDir, userDataDir: dirs.userDataDir, launchStateDir: dirs.launchStateDir, startedAtMs }),
+          collectArtifacts({
+            runDir,
+            userDataDir: dirs.userDataDir,
+            launchStateDir: dirs.launchStateDir,
+            startedAtMs
+          }),
         closeCard: async () => {
           parts.cdp?.close()
           parts.remoteSocket?.close()
@@ -192,11 +231,21 @@ export function createSessionStarter({
     try {
       parts.caffeinate = startCaffeinate()
       parts.card = await startCardServer({
-        runInfo: { runId: runInfo.runId, scenario: runInfo.scenario, appVersion: install.version, startedAt: runInfo.startedAt },
+        runInfo: {
+          runId: runInfo.runId,
+          scenario: runInfo.scenario,
+          appVersion: install.version,
+          startedAt: runInfo.startedAt
+        },
         onDropped: (fields) => log(`Card dropped fields: ${fields.join(', ')}`)
       })
       const bounds = await labDisplayBounds(config?.labDisplay?.name)
-      parts.browser = startCardBrowser({ url: parts.card.url, bounds, profileDir: join(workDir, 'card-browser'), chromePath })
+      parts.browser = startCardBrowser({
+        url: parts.card.url,
+        bounds,
+        profileDir: join(workDir, 'card-browser'),
+        chromePath
+      })
       log(`Test card on the lab display (${bounds.width}x${bounds.height}).`)
 
       if (scenario.destination === 'local-sink') {
@@ -215,11 +264,18 @@ export function createSessionStarter({
       log(`Videorc launched from ${install.appPath}.`)
 
       parts.backendSocket = await connectBackendSocket(parts.app.backend)
-      const rpc = (method, params) => backendRequest(parts.backendSocket, RPC_TIMEOUT_MS, method, params)
+      const rpc = (method, params) =>
+        backendRequest(parts.backendSocket, RPC_TIMEOUT_MS, method, params)
 
-      const devtoolsUrl = await until(() => parts.app.devtoolsUrl(), { deadlineMs: READY_DEADLINE_MS, label: 'CDP endpoint' })
+      const devtoolsUrl = await until(() => parts.app.devtoolsUrl(), {
+        deadlineMs: READY_DEADLINE_MS,
+        label: 'CDP endpoint'
+      })
       const target = await until(
-        async () => pickMainTarget(await (await fetch(`${httpBaseFromDevtools(devtoolsUrl)}/json/list`)).json()),
+        async () =>
+          pickMainTarget(
+            await (await fetch(`${httpBaseFromDevtools(devtoolsUrl)}/json/list`)).json()
+          ),
         { deadlineMs: READY_DEADLINE_MS, label: 'Studio renderer target' }
       )
       parts.cdp = await CdpClient.connect(target.webSocketDebuggerUrl)
@@ -237,9 +293,14 @@ export function createSessionStarter({
         log
       })
 
-      parts.remoteSocket = await connectRemote(parts.seed.remote.host, parts.seed.remote.port, parts.seed.remote.token, {
-        timeoutMs: READY_DEADLINE_MS
-      })
+      parts.remoteSocket = await connectRemote(
+        parts.seed.remote.host,
+        parts.seed.remote.port,
+        parts.seed.remote.token,
+        {
+          timeoutMs: READY_DEADLINE_MS
+        }
+      )
       parts.remote = createRemote({ socket: parts.remoteSocket, bus })
       parts.describe = await parts.remote.describe()
       await ui.dismissOtherDialogs()
@@ -264,6 +325,7 @@ export function createSessionStarter({
       await parts.observer.start()
 
       const observe = parts.observer
+      const ledgerPaths = await ledgerPathsFor(dirs, install.appPath)
       return {
         ctx: {
           remote: parts.remote,
@@ -273,6 +335,8 @@ export function createSessionStarter({
           sink: parts.sink ?? null,
           observer: null,
           describe: parts.describe,
+          healthEvents: () => observe.healthEventsFlat(),
+          ledger: { ledgerPaths },
           ownedPids: () => ({
             app: parts.appPid ?? null,
             backend: parts.app.backend?.pid ?? null,

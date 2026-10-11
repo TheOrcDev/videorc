@@ -399,7 +399,7 @@ after each install); an ad-hoc signed app is refused.
 `gh` (no quarantine flag expected), or TCC grants do not survive a
 Developer-ID-signed swap.
 
-### U6 — Harness core (plan 176 L2, unattended)
+### U6 — Harness core (plan 176 L2, unattended) — BUILT
 
 As plan 176 L2 (launch with the lab profile, CDP UI driver, app observer,
 teardown, `dry` scenario against a local RTMP sink), plus:
@@ -417,6 +417,25 @@ teardown, `dry` scenario against a local RTMP sink), plus:
 **Done when:** plan 176 L2's done-when, plus `live:run --scenario dry` on
 the lab machine with no one present, and a test that a policy flip to
 `enabled: false` mid-run stops and tears down within 60 s.
+
+**BUILT** (branch `plan-178/u6`): `live:run` (`scripts/live-lab/run.mjs`,
+exit 0/1/2/3, `REFUSED (<reason>)`, last line `RUN_DIR=`), step engine and
+scenario format (`lib/step-engine.mjs`, `defineScenario`, params from
+`VIDEORC_LIVE_LAB_SCENARIO_PARAMS`), shared steps (`lib/common-steps.mjs`),
+LaunchServices launch + owned helpers (`lib/launch.mjs`), profile seed through
+the app's own RPCs + saved Studio config (`lib/seed.mjs`), CDP Go Live driver
+(`lib/ui-driver.mjs`), journal/health/census observer (`lib/app-observer.mjs`),
+teardown + evidence (`lib/teardown.mjs`), wiring (`lib/session.mjs`,
+`lib/harness.mjs`), `scenarios/dry.mjs`; Go Live dialog hooks
+(`data-pending`, `data-phase`, 7 new test ids) + vitest. The kill switch is
+checked before every step and every 15 s with control.json / policy reloaded
+every 45 s, so a flip ends the stream inside 60 s (fake-clock test). Owed on
+the lab machine: `pnpm live:run --scenario dry --trigger manual` unattended
+(needs the owner's policy file, a U5 install record, the lab display,
+BlackHole and Chrome), confirming the CDP endpoint shows up in the
+LaunchServices stderr file, that `sceneApply screen-camera` is accepted with
+the camera off, and that a seeded `rtmp://127.0.0.1` destination passes the
+Go Live preflight.
 
 ### U7 — Test card and speech rig (plan 176 L3 = plan 166 S6)
 

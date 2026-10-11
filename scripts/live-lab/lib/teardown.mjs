@@ -35,7 +35,12 @@ async function timed(name, fn, clock, steps) {
     steps.push({ name, ok: true, detail: detail ?? null, ms: clock.now() - startedAt })
     return true
   } catch (error) {
-    steps.push({ name, ok: false, detail: error?.message ?? String(error), ms: clock.now() - startedAt })
+    steps.push({
+      name,
+      ok: false,
+      detail: error?.message ?? String(error),
+      ms: clock.now() - startedAt
+    })
     return false
   }
 }
@@ -49,11 +54,15 @@ export async function endStream({ remote, waitFor, deadlineMs = STREAM_STOP_DEAD
   const state = remote.state()
   if (!state?.sessionActive) return 'not live'
   const sent = await remote.intent('streamStop', {}, { deadlineMs })
-  if (!sent?.accepted) throw new Error(`streamStop was not accepted: ${sent?.message ?? 'no reason'}`)
-  await waitFor(() => {
-    const now = remote.state()
-    return now && !now.sessionActive && now.sessionState === 'idle'
-  }, { deadlineMs, label: 'session idle after streamStop' })
+  if (!sent?.accepted)
+    throw new Error(`streamStop was not accepted: ${sent?.message ?? 'no reason'}`)
+  await waitFor(
+    () => {
+      const now = remote.state()
+      return now && !now.sessionActive && now.sessionState === 'idle'
+    },
+    { deadlineMs, label: 'session idle after streamStop' }
+  )
   return 'stopped'
 }
 
@@ -135,34 +144,50 @@ export async function collectArtifacts({
   await mkdir(crashDir, { recursive: true })
   await mkdir(logsDir, { recursive: true })
 
-  for (const path of await listNewFiles(diagnosticReportsDir, startedAtMs, (name) => CRASH_REPORT_NAME.test(name))) {
+  for (const path of await listNewFiles(diagnosticReportsDir, startedAtMs, (name) =>
+    CRASH_REPORT_NAME.test(name)
+  )) {
     await copyFile(path, join(crashDir, basename(path)))
     collected.crashReports.push(basename(path))
   }
   for (const sub of ['completed', 'pending', 'new']) {
-    for (const path of await listNewFiles(join(userDataDir, 'Crashpad', sub), startedAtMs, (name) => name.endsWith('.dmp'))) {
+    for (const path of await listNewFiles(join(userDataDir, 'Crashpad', sub), startedAtMs, (name) =>
+      name.endsWith('.dmp')
+    )) {
       await copyFile(path, join(crashDir, `crashpad-${basename(path)}`))
       collected.crashpad.push(basename(path))
     }
   }
   try {
-    await copyFile(join(userDataDir, 'backend-crashes.json'), join(crashDir, 'backend-crashes.json'))
+    await copyFile(
+      join(userDataDir, 'backend-crashes.json'),
+      join(crashDir, 'backend-crashes.json')
+    )
     collected.backendCrashes = true
   } catch {
     // None recorded.
   }
-  for (const path of await listNewFiles(join(userDataDir, 'logs'), startedAtMs, (name) => name.startsWith('backend.log'))) {
+  for (const path of await listNewFiles(join(userDataDir, 'logs'), startedAtMs, (name) =>
+    name.startsWith('backend.log')
+  )) {
     await copyFile(path, join(logsDir, basename(path)))
     collected.logs.push(basename(path))
   }
-  for (const path of await listNewFiles(join(userDataDir, 'logs', 'ffmpeg'), startedAtMs, (name) => name.endsWith('.log'))) {
+  for (const path of await listNewFiles(join(userDataDir, 'logs', 'ffmpeg'), startedAtMs, (name) =>
+    name.endsWith('.log')
+  )) {
     await copyFile(path, join(logsDir, `ffmpeg-${basename(path)}`))
     collected.logs.push(`ffmpeg-${basename(path)}`)
   }
   if (launchStateDir) {
-    for (const path of await listNewFiles(launchStateDir, startedAtMs, (name) => /\.(?:stdout|stderr)\.log$/.test(name))) {
+    for (const path of await listNewFiles(launchStateDir, startedAtMs, (name) =>
+      /\.(?:stdout|stderr)\.log$/.test(name)
+    )) {
       const kind = path.endsWith('.stdout.log') ? 'stdout' : 'stderr'
-      await writeFile(join(logsDir, `app-${kind}.log`), redactLaunchOutput(await readFile(path, 'utf8')))
+      await writeFile(
+        join(logsDir, `app-${kind}.log`),
+        redactLaunchOutput(await readFile(path, 'utf8'))
+      )
       collected.logs.push(`app-${kind}.log`)
     }
   }
@@ -190,23 +215,38 @@ export async function teardown({
   const startedAt = clock.now()
   const steps = []
   let streamEndedMs = null
-  await timed('end-stream', async () => {
-    const result = await endStream({ remote, waitFor })
-    streamEndedMs = clock.now() - startedAt
-    return result
-  }, clock, steps)
+  await timed(
+    'end-stream',
+    async () => {
+      const result = await endStream({ remote, waitFor })
+      streamEndedMs = clock.now() - startedAt
+      return result
+    },
+    clock,
+    steps
+  )
   await timed('stop-observer', async () => observer?.stop(), clock, steps)
-  await timed('quit-app', async () => {
-    if (!quitApp) return 'not launched'
-    const result = await quitApp()
-    return result?.state ?? 'quit'
-  }, clock, steps)
-  await timed('clean-ledger', async () => {
-    const paths = typeof ledgerPaths === 'function' ? await ledgerPaths() : ledgerPaths
-    if (!paths?.length) return 'no ledgers'
-    const result = await assertClean({ ledgerPaths: paths, rootPid })
-    return result.clean ? 'clean' : result
-  }, clock, steps)
+  await timed(
+    'quit-app',
+    async () => {
+      if (!quitApp) return 'not launched'
+      const result = await quitApp()
+      return result?.state ?? 'quit'
+    },
+    clock,
+    steps
+  )
+  await timed(
+    'clean-ledger',
+    async () => {
+      const paths = typeof ledgerPaths === 'function' ? await ledgerPaths() : ledgerPaths
+      if (!paths?.length) return 'no ledgers'
+      const result = await assertClean({ ledgerPaths: paths, rootPid })
+      return result.clean ? 'clean' : result
+    },
+    clock,
+    steps
+  )
   for (const helper of helpers) {
     if (!helper) continue
     await timed(`stop-${helper.label}`, async () => (await helper.stop())?.state, clock, steps)

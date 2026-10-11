@@ -43,7 +43,10 @@ export class SeedRefused extends Error {
 export function pickLabDevices(deviceList, labDisplayName) {
   const devices = Array.isArray(deviceList?.devices) ? deviceList.devices : []
   if (typeof labDisplayName !== 'string' || !labDisplayName.trim()) {
-    throw new SeedRefused('no-lab-display', 'No lab display is configured (pnpm live:hookup --lab-display "<name>").')
+    throw new SeedRefused(
+      'no-lab-display',
+      'No lab display is configured (pnpm live:hookup --lab-display "<name>").'
+    )
   }
   const wanted = labDisplayName.trim().toLowerCase()
   const screens = devices.filter((device) => device.kind === 'screen')
@@ -55,14 +58,25 @@ export function pickLabDevices(deviceList, labDisplayName) {
     )
   }
   if (screen.status !== 'available') {
-    throw new SeedRefused('lab-display-unavailable', `The lab display is ${screen.status} in Videorc (Screen Recording grant?).`)
+    throw new SeedRefused(
+      'lab-display-unavailable',
+      `The lab display is ${screen.status} in Videorc (Screen Recording grant?).`
+    )
   }
-  const microphone = devices.find((device) => device.kind === 'microphone' && MIC_NAME.test(device.name))
+  const microphone = devices.find(
+    (device) => device.kind === 'microphone' && MIC_NAME.test(device.name)
+  )
   if (!microphone) {
-    throw new SeedRefused('blackhole-missing', 'BlackHole 2ch is not listed as a microphone; the lab never streams a room mic.')
+    throw new SeedRefused(
+      'blackhole-missing',
+      'BlackHole 2ch is not listed as a microphone; the lab never streams a room mic.'
+    )
   }
   if (microphone.status !== 'available') {
-    throw new SeedRefused('blackhole-unavailable', `BlackHole is ${microphone.status} in Videorc (Microphone grant?).`)
+    throw new SeedRefused(
+      'blackhole-unavailable',
+      `BlackHole is ${microphone.status} in Videorc (Microphone grant?).`
+    )
   }
   return {
     screen: { id: screen.id, name: screen.name },
@@ -78,7 +92,10 @@ export function pickLabDevices(deviceList, labDisplayName) {
 export function plannedTargets({ scenario, config, sink, titlePrefix }) {
   if (scenario.destination === 'local-sink') {
     if (!sink || !isLoopbackRtmp(sink.serverUrl)) {
-      throw new SeedRefused('sink-not-loopback', 'A local-sink scenario needs a loopback RTMP sink.')
+      throw new SeedRefused(
+        'sink-not-loopback',
+        'A local-sink scenario needs a loopback RTMP sink.'
+      )
     }
     return [
       {
@@ -92,7 +109,10 @@ export function plannedTargets({ scenario, config, sink, titlePrefix }) {
   return scenario.orientations.map((slot) => {
     const entry = config?.streamKeys?.[slot]
     if (typeof entry?.key !== 'string' || entry.key.length < 16) {
-      throw new SeedRefused('stream-key-missing', `No ${slot} stream key is configured (pnpm live:hookup --stream-key ${slot}).`)
+      throw new SeedRefused(
+        'stream-key-missing',
+        `No ${slot} stream key is configured (pnpm live:hookup --stream-key ${slot}).`
+      )
     }
     return {
       ...TARGET_SLOTS[slot],
@@ -123,7 +143,10 @@ export function buildCaptureConfig({ existing, devices, targets, stored, now = n
   const seeded = targets.map((target) => {
     const result = stored[target.id]
     if (!result?.streamKeyPresent || typeof result.streamKeySecretRef !== 'string') {
-      throw new SeedRefused('key-not-stored', `The app did not confirm the ${target.id} stream key.`)
+      throw new SeedRefused(
+        'key-not-stored',
+        `The app did not confirm the ${target.id} stream key.`
+      )
     }
     const previous = previousTargets.find((entry) => entry?.id === target.id) ?? {}
     return {
@@ -157,7 +180,11 @@ export function buildCaptureConfig({ existing, devices, targets, stored, now = n
       microphoneName: devices.microphone.name,
       testPattern: false
     },
-    layout: { ...(isObject(base.layout) ? base.layout : {}), layoutPreset: LAB_SCENE, arrangementMode: 'preset' },
+    layout: {
+      ...(isObject(base.layout) ? base.layout : {}),
+      layoutPreset: LAB_SCENE,
+      arrangementMode: 'preset'
+    },
     streamEnabled: true,
     recordEnabled: false,
     captions: { ...(isObject(base.captions) ? base.captions : {}), enabled: false },
@@ -180,15 +207,19 @@ export function buildCaptureConfig({ existing, devices, targets, stored, now = n
 export function verifySeededConfig(saved, { targets, devices, scenario }) {
   const problems = []
   if (!isObject(saved)) return ['the renderer has no saved Studio config']
-  if (saved.sources?.screenId !== devices.screen.id) problems.push('screen source is not the lab display')
-  if (saved.sources?.microphoneId !== devices.microphone.id) problems.push('microphone is not BlackHole')
+  if (saved.sources?.screenId !== devices.screen.id)
+    problems.push('screen source is not the lab display')
+  if (saved.sources?.microphoneId !== devices.microphone.id)
+    problems.push('microphone is not BlackHole')
   if (saved.sources?.cameraId) problems.push('a camera is selected')
   if (saved.streamEnabled !== true) problems.push('streaming is off')
   const enabled = (saved.streaming?.targets ?? []).filter((target) => target?.enabled)
   const enabledIds = enabled.map((target) => target.id).sort()
   const wantedIds = targets.map((target) => target.id).sort()
   if (JSON.stringify(enabledIds) !== JSON.stringify(wantedIds)) {
-    problems.push(`enabled destinations are [${enabledIds.join(', ')}], expected [${wantedIds.join(', ')}]`)
+    problems.push(
+      `enabled destinations are [${enabledIds.join(', ')}], expected [${wantedIds.join(', ')}]`
+    )
   }
   for (const target of enabled) {
     if (target.streamKey) problems.push(`${target.id} has a raw key in the saved config`)
@@ -204,7 +235,16 @@ export function verifySeededConfig(saved, { targets, devices, scenario }) {
  * backend socket; `evaluate(expression)` runs in the main renderer and
  * `reloadAndWait()` reloads it and resolves once it is back.
  */
-export async function seedProfile({ rpc, evaluate, reloadAndWait, scenario, config, sink, titlePrefix, log = () => {} }) {
+export async function seedProfile({
+  rpc,
+  evaluate,
+  reloadAndWait,
+  scenario,
+  config,
+  sink,
+  titlePrefix,
+  log = () => {}
+}) {
   const devices = pickLabDevices(await rpc('devices.list'), config?.labDisplay?.name)
   const targets = plannedTargets({ scenario, config, sink, titlePrefix })
   const stored = {}
@@ -217,7 +257,10 @@ export async function seedProfile({ rpc, evaluate, reloadAndWait, scenario, conf
   log(`Seed: stored ${targets.length} stream key(s) in the lab profile's secrets store.`)
   const remote = await rpc('remote.control.enable')
   if (!remote?.enabled || !Number.isInteger(remote?.port) || typeof remote?.token !== 'string') {
-    throw new SeedRefused('remote-control', 'remote.control.enable did not enable the remote surface.')
+    throw new SeedRefused(
+      'remote-control',
+      'remote.control.enable did not enable the remote surface.'
+    )
   }
   const existingText = await evaluate(`localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`)
   let existing = null
@@ -240,7 +283,10 @@ export async function seedProfile({ rpc, evaluate, reloadAndWait, scenario, conf
   }
   const problems = verifySeededConfig(saved, { targets, devices, scenario })
   if (problems.length) {
-    throw new SeedRefused('seed-not-applied', `The lab profile seed did not take: ${problems.join('; ')}.`)
+    throw new SeedRefused(
+      'seed-not-applied',
+      `The lab profile seed did not take: ${problems.join('; ')}.`
+    )
   }
   log(`Seed: lab display, BlackHole and ${targets.map((target) => target.id).join(', ')} are set.`)
   return {
