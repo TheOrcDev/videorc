@@ -5,6 +5,7 @@
 // runner; the words are the glossary's (destination, on air, Stopped).
 
 import type { StreamTargetRuntime } from '@/lib/backend'
+import { destinationStateLabel } from './state-labels'
 import { liveProblemLabel, type StreamHealthAttribution } from './stream-health-attribution'
 
 export type LiveDestinationProblem = {
@@ -21,19 +22,19 @@ export type LiveDestinationsView =
   | { kind: 'problems'; summary: string; problems: LiveDestinationProblem[] }
 
 /**
- * The destination that needs the streamer, or null while it is fine. A leg
- * that stopped or failed reads "Stopped"; one being retried "Reconnecting";
- * one the platform stopped receiving "Not receiving" (plan 161's states).
+ * The destination that needs the streamer, or null while it is fine, in the
+ * one word every surface uses for that state (plan 174 S2.3a): "Failed",
+ * "Ended", "Reconnecting…", "Not receiving".
  */
 export function liveDestinationProblem(target: StreamTargetRuntime): LiveDestinationProblem | null {
+  const word = destinationStateLabel(target.state)
   switch (target.state) {
     case 'failed':
     case 'stopped':
-      return { targetId: target.targetId, label: target.label, word: 'Stopped', tone: 'error' }
+      return { targetId: target.targetId, label: target.label, word, tone: 'error' }
     case 'reconnecting':
-      return { targetId: target.targetId, label: target.label, word: 'Reconnecting', tone: 'warn' }
     case 'warning':
-      return { targetId: target.targetId, label: target.label, word: 'Not receiving', tone: 'warn' }
+      return { targetId: target.targetId, label: target.label, word, tone: 'warn' }
     default:
       return null
   }

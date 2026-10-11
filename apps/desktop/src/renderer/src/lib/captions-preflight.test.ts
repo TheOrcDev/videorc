@@ -7,7 +7,9 @@ import {
   captionsSuppressedForSession,
   captionRuntimeStartBlocked,
   captionSessionOutputReadiness,
-  decideGoLiveCaptionsReadiness
+  decideGoLiveCaptionsReadiness,
+  CAPTION_OUTPUT_RULE_LABELS,
+  livestreamCaptionsBlocker
 } from './captions-preflight'
 
 function capabilities(captions: AiCapabilities['captions']): AiCapabilities {
@@ -156,7 +158,7 @@ describe('decideGoLiveCaptionsReadiness', () => {
       ]
     })
     expect(readiness).toMatchObject({ ready: false })
-    expect(readiness.description).toContain('one shared stream output profile')
+    expect(readiness.description).toContain('one stream quality for every destination')
   })
 
   it('does not gate sessions when captions are persistently off', () => {
@@ -191,5 +193,51 @@ describe('decideGoLiveCaptionsReadiness', () => {
         outputReadiness: { ready: true }
       })
     ).toBe(true)
+  })
+})
+
+describe('caption rules before Go Live (plan 174 S3.4, D-9)', () => {
+  const p30 = { width: 1920, height: 1080, fps: 30, bitrateKbps: 6_000 }
+  const p60 = { ...p30, fps: 60 }
+
+  it('says the frame-rate rule whatever the last start was, with short words for a row', () => {
+    const blocker = livestreamCaptionsBlocker({
+      captionsEnabled: true,
+      burnTarget: 'stream',
+      recordEnabled: false,
+      recordingVideo: p60,
+      streamVideos: []
+    })
+    expect(blocker?.rule).toBe('frame-rate')
+    expect(blocker?.description).toContain('30 fps')
+    expect(blocker?.description).not.toMatch(/Recording only|record \+ multistream|profile/)
+    expect(CAPTION_OUTPUT_RULE_LABELS['frame-rate']).toBe('Need 30 fps or less')
+  })
+
+  it('says the one-quality rule for a recorded multistream', () => {
+    const blocker = livestreamCaptionsBlocker({
+      captionsEnabled: true,
+      burnTarget: 'both',
+      recordEnabled: true,
+      recordingVideo: p30,
+      streamVideos: [p30, { ...p30, bitrateKbps: 4_500 }]
+    })
+    expect(blocker?.rule).toBe('one-stream-quality')
+  })
+
+  it('is quiet with captions off, off the stream, or an output that fits', () => {
+    const base = {
+      burnTarget: 'stream' as const,
+      recordEnabled: false,
+      recordingVideo: p60,
+      streamVideos: []
+    }
+    expect(livestreamCaptionsBlocker({ ...base, captionsEnabled: false })).toBeNull()
+    expect(
+      livestreamCaptionsBlocker({ ...base, captionsEnabled: true, burnTarget: 'recording' })
+    ).toBeNull()
+    expect(
+      livestreamCaptionsBlocker({ ...base, captionsEnabled: true, recordingVideo: p30 })
+    ).toBeNull()
   })
 })

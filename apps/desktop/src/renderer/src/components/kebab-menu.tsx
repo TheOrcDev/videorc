@@ -2,6 +2,7 @@ import { MoreIcon, SpinnerIcon, type AppIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -20,6 +21,8 @@ export interface KebabMenuItem {
   /** Destructive items render in the destructive tone, last, in a group of their own. */
   destructive?: boolean
   disabled?: boolean
+  /** Why a disabled item is off, on hover (plan 174 S3.11): one sentence. */
+  disabledReason?: string | null
   /**
    * Items with the same group sit together, a hairline between groups, in the
    * order each group first appears. Ungrouped items form one group.
@@ -72,6 +75,7 @@ export function KebabMenu({
   busy = false,
   disabled = false,
   reveal = 'always',
+  tabIndex,
   className
 }: {
   items: KebabMenuItem[]
@@ -83,6 +87,8 @@ export function KebabMenu({
   disabled?: boolean
   /** `hover`: hidden until the `group/kebab-host` row is hovered or focused. */
   reveal?: 'always' | 'hover'
+  /** The trigger's tab stop: -1 in a roving-focus row that is not the active one. */
+  tabIndex?: number
   className?: string
 }): ReactElement {
   const groups = kebabMenuGroups(items)
@@ -96,6 +102,7 @@ export function KebabMenu({
           className={cn(reveal === 'hover' && REVEAL_ON_HOVER, className)}
           disabled={disabled}
           size="icon"
+          tabIndex={tabIndex}
           variant="ghost"
           onClick={(event) => event.stopPropagation()}
         >
@@ -127,16 +134,22 @@ function KebabMenuGroup({
       {separated ? <DropdownMenuSeparator /> : null}
       <DropdownMenuGroup>
         {items.map((item) => (
-          <DropdownMenuItem
+          <DisabledReason
             key={item.id}
-            disabled={item.disabled}
-            variant={item.destructive ? 'destructive' : 'default'}
-            onSelect={() => item.onSelect()}
+            focusable={false}
+            reason={item.disabled ? item.disabledReason : null}
+            side="left"
           >
-            {item.icon ? <item.icon data-icon="inline-start" /> : null}
-            {item.label}
-            {item.shortcut ? <DropdownMenuShortcut>{item.shortcut}</DropdownMenuShortcut> : null}
-          </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={item.disabled}
+              variant={item.destructive ? 'destructive' : 'default'}
+              onSelect={() => item.onSelect()}
+            >
+              {item.icon ? <item.icon data-icon="inline-start" /> : null}
+              {item.label}
+              {item.shortcut ? <DropdownMenuShortcut>{item.shortcut}</DropdownMenuShortcut> : null}
+            </DropdownMenuItem>
+          </DisabledReason>
         ))}
       </DropdownMenuGroup>
     </>

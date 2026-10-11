@@ -54,6 +54,7 @@ import {
   type PendingBackgroundReplace
 } from '@/components/background-replace-dialog'
 import { TakeoverScreensSection } from '@/components/takeover-screens-section'
+import { revealInFileManagerLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 type BadgeVariant = NonNullable<ComponentProps<typeof Badge>['variant']>
@@ -176,7 +177,7 @@ export function AssetsTab(): ReactElement {
   return (
     <div className="flex flex-col">
       <PageHeader
-        description="Backgrounds for your scenes and takeover screens for the output. Click a preset to apply it, then tune it with Adjust style on its tile."
+        description="Backgrounds for your scenes and takeovers for the output. Click a preset to apply it, then tune it with Adjust style on its tile."
         title="Assets"
       />
 
@@ -424,7 +425,7 @@ function PresetTile({
               },
               {
                 id: 'reveal',
-                label: 'Reveal in Finder',
+                label: revealInFileManagerLabel(),
                 icon: PreviewIcon,
                 disabled: asset.kind !== 'imported' || !asset.assetPath,
                 onSelect: () => {

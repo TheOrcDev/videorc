@@ -44,12 +44,19 @@ import {
 import { readLastSettingsTab, writeLastSettingsTab, type SettingsTabId } from '@/lib/settings-tabs'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 import { isActiveRecordingState } from '@/lib/format'
-import { sessionStatusLabel, sessionStatusPulses, sessionStatusTone } from '@/lib/state-labels'
+// Straight from the session view, not `state-labels`, so the other state
+// tables stay out of the eager bundle (plan 174 S2.3a).
+import {
+  sessionStatusLabel,
+  sessionStatusPulses,
+  sessionStatusTone
+} from '@/lib/studio-session-view'
 import {
   isMediaAccessSnapshotReady,
   shouldShowPermissionsOnboarding,
   systemAccessRows
 } from '@/lib/system-access'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // Workspace views are loaded only on first navigation, then retained by the
 // browser module cache. Studio remains the launch surface, but its dashboard and
@@ -188,10 +195,10 @@ export function AppShell(): ReactElement {
   // 119 S3). Any other way to a page drops that ask, so the next visit to
   // Buddy shows the last stream again.
   const [buddyReportSessionId, setBuddyReportSessionId] = useState<string | null>(null)
-  // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
-  // the Buddy tab, and the ready toast opens a cut's review there. The card's
-  // "Open in Library" focuses the cut copy's row. Like the report ask, any
-  // other way to a page drops them.
+  // Clean cut (plan 119 S14): Library's "Make a clean cut…" selects a
+  // recording in the Buddy tab, and the ready toast opens a cut's review
+  // there. The card's "Open in Library" and the review's "Back to Library"
+  // focus a row. Like the report ask, any other way to a page drops them.
   const [cleanCutRequest, setCleanCutRequest] = useState<CleanCutTabRequest | null>(null)
   const [libraryFocusSessionId, setLibraryFocusSessionId] = useState<string | null>(null)
   const cleanCutNonceRef = useRef(0)
@@ -488,7 +495,7 @@ export function AppShell(): ReactElement {
                   {active === 'library' ? (
                     <LibraryTab
                       focusSessionId={libraryFocusSessionId}
-                      onOpenCleanCut={(sessionId) => openCleanCut({ sessionId })}
+                      onOpenCleanCut={(sessionId) => openCleanCut({ sessionId, origin: 'library' })}
                       onOpenBuddyReport={openBuddyReport}
                     />
                   ) : null}
@@ -523,7 +530,7 @@ export function AppShell(): ReactElement {
             />
             <StatusBarHint
               accelerator={shortcutAccelerator('preview-window')}
-              label="Preview"
+              label={WINDOW_NAMES.preview}
               pressed={previewWindowOpen}
               onClick={() => void togglePreviewWindow()}
             />
@@ -532,7 +539,7 @@ export function AppShell(): ReactElement {
             {runtimeInfo?.notesWindowEnabled !== false ? (
               <StatusBarHint
                 accelerator={shortcutAccelerator('notes-window')}
-                label="Notes"
+                label={WINDOW_NAMES.notes}
                 pressed={notesWindowOpen}
                 onClick={() => (notesWindowOpen ? void closeNotesWindow() : void openNotesWindow())}
               />
@@ -540,7 +547,7 @@ export function AppShell(): ReactElement {
             {runtimeInfo?.commentsWindowEnabled !== false ? (
               <StatusBarHint
                 accelerator={shortcutAccelerator('comments-window')}
-                label="Stream Manager"
+                label={WINDOW_NAMES.streamManager}
                 pressed={commentsWindowOpen}
                 onClick={() =>
                   commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()

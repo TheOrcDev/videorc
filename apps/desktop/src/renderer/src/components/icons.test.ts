@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CameraIcon,
   StudioIcon,
-  BrainIcon,
+  MarkerIcon,
   KickIcon,
   BuddyIcon,
   YOUTUBE_MARK_ASPECT,
@@ -35,7 +35,7 @@ describe('semantic icon registry', () => {
       )
       await writeFile(
         join(root, 'inspector.ts'),
-        `export { BrainIcon } from ${JSON.stringify(registry)};`
+        `export { MarkerIcon } from ${JSON.stringify(registry)};`
       )
       const built = await build({
         configFile: false,
@@ -64,8 +64,10 @@ describe('semantic icon registry', () => {
         .filter((chunk) => !eager.has(chunk.fileName))
         .flatMap((chunk) => Object.keys(chunk.modules))
       expect(initialModules.some((id) => id.endsWith('/csr/VideoCamera.es.js'))).toBe(true)
-      expect(initialModules.filter((id) => /\/(?:csr|defs)\/Brain\.es\.js$/.test(id))).toEqual([])
-      expect(deferredModules.some((id) => id.endsWith('/defs/Brain.es.js'))).toBe(true)
+      expect(
+        initialModules.filter((id) => /\/(?:csr|defs)\/BookmarkSimple\.es\.js$/.test(id))
+      ).toEqual([])
+      expect(deferredModules.some((id) => id.endsWith('/defs/BookmarkSimple.es.js'))).toBe(true)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -83,11 +85,11 @@ describe('semantic icon registry', () => {
     ]
     const rendered = weights.map((weight) =>
       renderToStaticMarkup(
-        createElement(BrainIcon, {
+        createElement(MarkerIcon, {
           weight,
           size: 24,
           className: 'semantic-icon',
-          'aria-label': 'Brain',
+          'aria-label': 'Marker',
           color: 'currentColor'
         })
       )
@@ -95,7 +97,7 @@ describe('semantic icon registry', () => {
     for (const markup of rendered) {
       expect(markup).toContain('width="24"')
       expect(markup).toContain('class="semantic-icon"')
-      expect(markup).toContain('aria-label="Brain"')
+      expect(markup).toContain('aria-label="Marker"')
       expect(markup).toContain('viewBox="0 0 256 256"')
     }
     expect(new Set(rendered).size).toBe(6)

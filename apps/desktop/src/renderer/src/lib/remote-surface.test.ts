@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   executeRemoteIntent,
+  remoteLayoutLabels,
   RemoteSurfacePublisher,
   type RemoteIntentContext,
   type RemoteSurfaceValues
@@ -503,6 +504,65 @@ describe('RemoteSurfacePublisher', () => {
       // The phone learns an on/off and an available flag: never the status
       // string, the device id or its name.
       expect(JSON.stringify(published)).not.toMatch(/permission-required|system-audio:/)
+      publisher.detach()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('remoteLayoutLabels (plan 174 I-14)', () => {
+  it('names each preset as the desktop does, never a title-cased id', () => {
+    expect(remoteLayoutLabels(['screen-camera', 'side-by-side'])).toEqual({
+      'screen-camera': 'Screen + camera',
+      'side-by-side': 'Side by side'
+    })
+    // The phone lists both orientations together, so the vertical twins say so.
+    expect(
+      remoteLayoutLabels(['screen-camera', 'vertical-screen-camera', 'vertical-split'])
+    ).toEqual({
+      'screen-camera': 'Screen + camera',
+      'vertical-screen-camera': 'Vertical screen + camera',
+      'vertical-split': 'Split'
+    })
+  })
+
+  it('rides along in describe and carries only fixed preset names', async () => {
+    vi.useFakeTimers()
+    try {
+      const published: unknown[] = []
+      const publisher = new RemoteSurfacePublisher()
+      publisher.attach({
+        request: async (_method, params) => {
+          published.push(params)
+          return undefined as never
+        }
+      })
+      publisher.markConnected()
+      publisher.syncValues([
+        'idle',
+        false,
+        true,
+        false,
+        false,
+        'screen-camera',
+        null,
+        false,
+        false,
+        false,
+        ['screen-camera', 'camera-only'],
+        [{ id: 'brb', name: 'Be right back' }],
+        undefined,
+        false
+      ])
+      await vi.runAllTimersAsync()
+      const [{ describe: described }] = published as Array<{
+        describe: { layoutLabels: Record<string, string> }
+      }>
+      expect(described.layoutLabels).toEqual({
+        'screen-camera': 'Screen + camera',
+        'camera-only': 'Camera only'
+      })
       publisher.detach()
     } finally {
       vi.useRealTimers()

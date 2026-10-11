@@ -34,6 +34,7 @@ export const IPC_INVOKE_ROLES = {
   'resource:authorize-output-directory': MAIN_ONLY,
   'resource:reveal-session': MAIN_ONLY,
   'resource:reveal-background': MAIN_ONLY,
+  'resource:reveal-support-bundle': MAIN_ONLY,
   'resource:trash-session-deletion': MAIN_ONLY,
   'resource:open-session': MAIN_ONLY,
   // In-app playback grants (plan 119, S11). Only the Studio renderer may mint

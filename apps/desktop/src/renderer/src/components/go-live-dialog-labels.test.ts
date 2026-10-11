@@ -61,14 +61,14 @@ describe('GoLiveDestinationRow (plan 174 S2.2)', () => {
   it('says how a destination connects in the Livestream page words', () => {
     const signIn = renderToStaticMarkup(
       createElement(GoLiveDestinationRow, {
-        destination: destination(),
+        view: { destination: destination(), ready: true, problem: null },
         pending: false,
         onResolveBlocker: noop
       })
     )
     const key = renderToStaticMarkup(
       createElement(GoLiveDestinationRow, {
-        destination: destination({ authMode: 'manual-rtmp' }),
+        view: { destination: destination({ authMode: 'manual-rtmp' }), ready: true, problem: null },
         pending: false,
         onResolveBlocker: noop
       })
@@ -85,7 +85,7 @@ describe('GoLiveDestinationRow (plan 174 S2.2)', () => {
     const onResolveBlocker = vi.fn()
     const markup = renderToStaticMarkup(
       createElement(GoLiveDestinationRow, {
-        destination: destination({ ready: false }),
+        view: { destination: destination({ ready: false }), ready: false, problem: 'Reconnect.' },
         pending: false,
         onResolveBlocker
       })
@@ -155,6 +155,12 @@ describe('GoLiveConfirmationDialog labels (plan 174 S2.2)', () => {
     ]
     return buttons[buttons.length - 1]!
   }
+  // The label without its ⌘↵ key chip (plan 174 S3.4).
+  const primaryLabel = (): string => {
+    const copy = primary().cloneNode(true) as HTMLElement
+    copy.querySelectorAll('[data-slot=kbd]').forEach((chip) => chip.remove())
+    return copy.textContent?.trim() ?? ''
+  }
 
   it('is titled "Go live" and counts the destinations it starts', () => {
     renderDialog({
@@ -168,14 +174,14 @@ describe('GoLiveConfirmationDialog labels (plan 174 S2.2)', () => {
       }
     })
     expect(dialog().querySelector('[data-slot=dialog-title]')?.textContent).toBe('Go live')
-    expect(primary().textContent?.trim()).toBe('Go live on 2 destinations')
+    expect(primaryLabel()).toBe('Go live on 2 destinations')
     expect(primary().disabled).toBe(false)
     expect(dialog().textContent).not.toMatch(/Confirm Go Live|metadata/)
   })
 
   it('reads plain "Go live" for one destination', () => {
     renderDialog({ preflight: { valid: true, issues: [], destinations: [destination()] } })
-    expect(primary().textContent?.trim()).toBe('Go live')
+    expect(primaryLabel()).toBe('Go live')
   })
 
   it('keeps its label while blocked, and says why on hover and focus', () => {
@@ -193,7 +199,7 @@ describe('GoLiveConfirmationDialog labels (plan 174 S2.2)', () => {
         destinations: [destination({ ready: false })]
       }
     })
-    expect(primary().textContent?.trim()).toBe('Go live')
+    expect(primaryLabel()).toBe('Go live')
     expect(primary().disabled).toBe(true)
     const wrapper = primary().closest<HTMLElement>('[data-slot=disabled-reason]')
     expect(wrapper?.tabIndex).toBe(0)
@@ -208,7 +214,7 @@ describe('GoLiveConfirmationDialog labels (plan 174 S2.2)', () => {
       preflight: { valid: true, issues: [], destinations: [destination()] },
       partialSetup: { streaming: undefined as never, failures: [], readyLabels: ['Twitch'] }
     })
-    expect(primary().textContent?.trim()).toBe('Go live on Twitch')
+    expect(primaryLabel()).toBe('Go live on Twitch')
     expect(dialog().textContent).not.toMatch(/Continue With Ready/)
   })
 })

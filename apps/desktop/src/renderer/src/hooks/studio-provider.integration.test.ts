@@ -84,6 +84,7 @@ import type {
   SessionChatTotals,
   StreamOutputTopologyProbeResult,
   StreamScreen,
+  StreamingSettings,
   VideorcAccountRefreshResult,
   VideorcAccountSnapshot,
   VideorcApi
@@ -1480,6 +1481,19 @@ class StudioBackend {
       case 'performance.check.get':
         // Measured and current: the provider must not start a check on mount.
         return this.performanceCheck
+      case 'diagnostics.supportBundle.export':
+        return {
+          path: 'C:\\Videorc\\support-bundles\\videorc-support-bundle-20261011-093000Z.json',
+          includedSections: [],
+          redactionSummary: {
+            secretValues: 0,
+            databasePaths: 0,
+            mediaPaths: 0,
+            homePaths: 0,
+            urlCredentials: 0,
+            aiArtifactBodies: 0
+          }
+        }
       case 'encoder.preference.get':
         return { preference: 'auto', quickSyncAvailable: false, envOverride: false }
       case 'encoder.preference.set':
@@ -3174,6 +3188,44 @@ describe('real StudioProvider lifecycle', () => {
       JSON.parse(localStorage.getItem(STORAGE_KEYS.captureConfig) ?? '{}').audio.microphoneMuted
     ).toBe(false)
     expect(releaseWrites.slice(0, 2)).toEqual(['unmuted config', 'ownership removed'])
+  })
+
+  // Plan 174 S3.18 (I-1): the bundle lands in a folder Finder hides, so the
+  // export toast reveals it, through main, by the path the export returned.
+  it('offers to show an exported support bundle in the file manager', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const revealSupportBundle = vi.fn(async (_path: string) => {})
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      revealSupportBundle
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      await observations.at(-1)!.core.exportSupportBundle()
+    })
+    const exported = toastSpies.success.mock.calls.find(
+      ([title]) => title === 'Support bundle exported'
+    )
+    expect(exported?.[1]).toMatchObject({
+      description: 'videorc-support-bundle-20261011-093000Z.json',
+      action: { label: 'Show in Explorer' }
+    })
+    await act(async () => exported![1].action.onClick())
+    expect(revealSupportBundle).toHaveBeenCalledExactlyOnceWith(
+      'C:\\Videorc\\support-bundles\\videorc-support-bundle-20261011-093000Z.json'
+    )
   })
 
   it('shows one persistent recovery error when an active recording fails', async () => {
@@ -11064,6 +11116,96 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(2)
   })
 
+  // Plan 174 S3.4 (B-8): "Go live without X" used to switch X off in the
+  // saved settings, so every later Go Live skipped it too.
+  it('leaves a destination out of one Go Live only, and never saves it', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const savedX = () =>
+      latest()!.core.captureConfig.streaming.targets.find((target) => target.id === 'x')
+    const lastValidation = () =>
+      backend.sentCommands
+        .filter((command) => command.method === 'streamTargets.confirmation.validate')
+        .at(-1)?.params as { streaming: StreamingSettings } | undefined
+
+    // Left out, then brought back, then left out again: the saved X stays on.
+    await openYouTubeAndXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual(['x'])
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'include')
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual([])
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube', 'x'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    expect(savedX()?.enabled).toBe(true)
+    expect(latest()!.core.captureConfig.streaming.enabledTargetIds).toContain('x')
+
+    // Cancelling forgets it.
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual([])
+
+    // Going live without X: X is never prepared or started, and stays saved on.
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube', 'x'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect((start?.params as { streaming: StreamingSettings }).streaming.enabledTargetIds).toEqual([
+      'youtube'
+    ])
+    expect(backend.xPrepareCount).toBe(0)
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(savedX()?.enabled).toBe(true)
+
+    // The attempt over, the next Go Live starts from the saved destinations.
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.state === 'idle' &&
+        latest()?.core.goLiveExcludedTargetIds.length === 0
+    )
+    expect(savedX()?.enabled).toBe(true)
+  })
+
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {
     const backend = new StudioBackend()
     enableYouTubeAndXOauthForTest(backend)
@@ -14207,6 +14349,7 @@ function createVideorcApi(options: {
   acknowledgeProvider: (id: string) => Promise<boolean>
   openSession?: (sessionId: string) => Promise<string>
   revealSession?: (sessionId: string) => Promise<void>
+  revealSupportBundle?: VideorcApi['revealSupportBundle']
   setPreviewAspectRatio?: (width: number, height: number) => Promise<void>
   nativePreview?: {
     getWindowState: () => PreviewWindowState
@@ -14314,6 +14457,7 @@ function createVideorcApi(options: {
       getCaptionLines: async () => null,
       openSession: options.openSession ?? (async () => ''),
       revealSession: options.revealSession ?? (async () => {}),
+      revealSupportBundle: options.revealSupportBundle ?? (async () => {}),
       getUpdateStatus: async () => ({ phase: 'unsupported' }),
       onBackendConnection: (callback: (value: unknown) => void) =>
         subscribe('backend:connection', callback),

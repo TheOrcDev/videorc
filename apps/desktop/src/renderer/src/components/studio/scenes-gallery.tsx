@@ -1,10 +1,11 @@
-import { sceneSourceProblems, visualSources } from '@/lib/scene-presets'
+import { sceneGalleryReason, sceneSourceGaps, visualSources } from '@/lib/scene-presets'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { CheckIcon, DisplayIcon, MobileIcon } from '@/components/icons'
+import { DisplayIcon, MobileIcon } from '@/components/icons'
 import { lazy, Suspense, type ReactElement } from 'react'
 const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
 
 import { PanelSection } from '@/components/panel-section'
+import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
 import { Button } from '@/components/ui/button'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useWorkspaceNav } from '@/components/workspace-nav'
@@ -15,9 +16,8 @@ import {
   studioModeTogglePreset,
   type LayoutOrientation
 } from '@/lib/capture'
-import { MediaCard } from '@/components/media-card'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
-import { cn } from '@/lib/utils'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 // Built-in layouts and named visual snapshots share the Scenes surface.
 // The gallery is MODE-SCOPED: horizontal and vertical are two disjoint scene
@@ -83,6 +83,22 @@ export function ScenesGallery(): ReactElement {
 
   // Entering a mode re-applies its remembered scene; the orientation⇄canvas
   // coupling in applyCameraPreset flips the output profile alongside it.
+  // What each scene needs that the current sources lack (plan 174 S3.3).
+  const cards = scenes.map((preset) => ({
+    preset,
+    gaps: sceneSourceGaps(
+      {
+        layout: { ...captureConfig.layout, layoutPreset: preset.id, arrangementMode: 'preset' },
+        sources: visualSources(captureConfig.sources),
+        background: null
+      },
+      deviceList.devices
+    )
+  }))
+  const reason = sceneGalleryReason(
+    cards.map(({ preset, gaps }) => ({ label: preset.label, gaps }))
+  )
+
   const switchMode = (target: LayoutOrientation): void => {
     if (target === mode) {
       return
@@ -112,7 +128,7 @@ export function ScenesGallery(): ReactElement {
             size="sm"
             title={
               isSessionActive
-                ? 'The canvas is fixed while a session is running. Stop to switch orientation.'
+                ? 'Locked while you’re recording or live. Stop to switch orientation.'
                 : undefined
             }
             value={mode}
@@ -125,62 +141,41 @@ export function ScenesGallery(): ReactElement {
       }
     >
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
-        {scenes.map((preset) => {
-          const problems = sceneSourceProblems(
-            {
-              layout: {
-                ...captureConfig.layout,
-                layoutPreset: preset.id,
-                arrangementMode: 'preset'
-              },
-              sources: visualSources(captureConfig.sources),
-              background: null
-            },
-            deviceList.devices
-          )
-          const disabled = problems.length > 0
+        {cards.map(({ preset, gaps }) => {
           const active = !activeSavedSceneId && activePreset === preset.id
+          const shortcut = settings.globalShortcuts?.layouts?.[preset.id]
           return (
-            <MediaCard
+            <SceneCard
               key={preset.id}
-              asChild
-              className={cn(
-                'group gap-2 p-2 text-left',
-                disabled && 'cursor-not-allowed opacity-50'
-              )}
-              interactive={!active}
+              data-scene-preset={preset.id}
+              disabled={gaps.length > 0}
+              label={layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+              meta={
+                shortcut ? (
+                  <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
+                ) : undefined
+              }
               selected={active}
-            >
-              <button
-                aria-pressed={active}
-                disabled={disabled}
-                title={problems.length ? problems.join(' ') : undefined}
-                type="button"
-                onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
-              >
+              thumb={
                 <LayoutThumb
                   framing={captureConfig.layout.verticalScreenFraming}
                   preset={preset.id}
                 />
-                <span className="flex items-center justify-between gap-1.5">
-                  <span className="truncate text-sm font-medium">
-                    {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
-                    {settings.globalShortcuts?.layouts?.[preset.id] ? (
-                      <ShortcutKeys
-                        accelerator={settings.globalShortcuts.layouts[preset.id]!}
-                        platform={runtimeInfo?.platform}
-                      />
-                    ) : null}
-                  </span>
-                  {active ? (
-                    <CheckIcon className="size-4 shrink-0 text-primary" weight="bold" />
-                  ) : null}
-                </span>
-              </button>
-            </MediaCard>
+              }
+              onSelect={() => applyCameraPreset({ layoutPreset: preset.id })}
+            />
           )
         })}
       </div>
+      {/* Why some scenes can't be chosen, once, under the gallery (B-20). */}
+      <SceneGalleryReason
+        action={
+          <Button size="xs" variant="ghost" onClick={() => openWorkspaceTab('sources')}>
+            Open Sources
+          </Button>
+        }
+        reason={reason}
+      />
       {mode === 'vertical' ? (
         <ScreenFramingControl
           value={captureConfig.layout.verticalScreenFraming}

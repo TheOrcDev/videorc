@@ -89,7 +89,7 @@ export function recordingStartupHealthToast(
     return {
       variant: 'warning',
       id: MICROPHONE_CAPTURE_WORKER_FALLBACK_CODE,
-      title: "Microphone can't be changed this session",
+      title: "Microphone can't be changed until you stop",
       description: event.message,
       duration: 15000
     }
@@ -115,8 +115,8 @@ export function recordingStartupHealthToast(
   return null
 }
 
-/** The slice of diagnostics the compact Studio health badge reads. Full stats live in the
- * Diagnostics tab; this is the at-a-glance "is the live program healthy" signal. */
+/** The slice of diagnostics the compact Studio health badge reads. Full stats live on
+ * Health; this is the at-a-glance "is the live program healthy" signal. */
 export type StudioHealthInput = Pick<
   DiagnosticStats,
   | 'compositorBackend'
@@ -136,11 +136,6 @@ export interface StudioHealth {
   detail?: string
 }
 
-/** The degraded preview alert (plan 174 S3.2, B-26): the fact, then the cause and its effect. */
-export const PREVIEW_DEGRADED_TITLE = 'Preview may not match the recording'
-export const PREVIEW_DEGRADED_DETAIL =
-  'Videorc is drawing the picture on the CPU, so it may stutter.'
-
 // Live preview present-latency budget (ms) from the preview/recording parity plan.
 const PREVIEW_PRESENT_BUDGET_P95_MS = 75
 const PREVIEW_PRESENT_BUDGET_P99_MS = 150
@@ -148,7 +143,7 @@ const PREVIEW_PRESENT_BUDGET_P99_MS = 150
 /**
  * Derive a compact preview/recording health signal for the Studio badge.
  *
- * Degraded ("Preview may not match recording") whenever the compositor drops to CPU
+ * Degraded ("The preview may not match your recording") whenever the compositor drops to CPU
  * fallback — the Metal program path failed, so preview quality and parity with the recording
  * are no longer guaranteed. Warn when preview presentation drifts past the live latency
  * budget or is on a non-native fallback transport.
@@ -185,12 +180,13 @@ export function studioHealth(
     stats.compositorBackend === 'cpu-fallback' ||
     (active && nativePreviewExpected && stats.compositorCpuFallbackFrames > 0)
   ) {
-    // Plan 174 S3.2 (B-26): what it means and why, in the streamer's words.
-    // The backend's own fallback reason stays in Health, where it is read.
+    // Plain words (plan 174 S3.18): the fallback reason is engineering text,
+    // so it stays in Health's Technical details, one click away.
     return {
       tone: 'error',
-      value: PREVIEW_DEGRADED_TITLE,
-      detail: PREVIEW_DEGRADED_DETAIL
+      value: 'Degraded',
+      detail:
+        'The preview may not match your recording. Videorc is drawing it without the graphics card, so it can stutter.'
     }
   }
 
@@ -210,7 +206,7 @@ export function studioHealth(
     return {
       tone: 'warn',
       value: 'Fallback',
-      detail: `Preview is on the ${stats.previewTransport} fallback instead of the native surface`
+      detail: 'The preview is on a fallback path, so it may stutter.'
     }
   }
 
@@ -223,9 +219,7 @@ export function studioHealth(
     return {
       tone: 'warn',
       value: 'Lagging',
-      detail: `Preview behind the live budget: present p95 ${Math.round(p95 ?? 0)}ms / p99 ${Math.round(
-        p99 ?? 0
-      )}ms`
+      detail: 'The preview is running behind what you do.'
     }
   }
 
@@ -233,5 +227,6 @@ export function studioHealth(
     return { tone: 'neutral', value: 'Idle' }
   }
 
-  return { tone: 'good', value: active ? 'Live' : 'Ready' }
+  // "Running", never "Live" (plan 174 D4): only a livestream is on air.
+  return { tone: 'good', value: active ? 'Running' : 'Ready' }
 }

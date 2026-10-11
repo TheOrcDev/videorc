@@ -26,30 +26,31 @@ function stats(overrides: Partial<StudioHealthInput> = {}): StudioHealthInput {
 
 describe('studioHealth', () => {
   it('reports Live on a healthy Metal session while active', () => {
-    expect(studioHealth(stats(), true)).toMatchObject({ tone: 'good', value: 'Live' })
+    expect(studioHealth(stats(), true)).toMatchObject({ tone: 'good', value: 'Running' })
   })
 
   it('reports Ready on a healthy Metal session while idle', () => {
     expect(studioHealth(stats(), false)).toMatchObject({ tone: 'good', value: 'Ready' })
   })
 
-  // Plan 174 S3.2 (B-26): the alert says what it means and why, in the
-  // streamer's words; the backend's own fallback reason stays in Health.
-  it('degrades to "Preview may not match the recording" on CPU fallback', () => {
+  it('degrades to "The preview may not match your recording" on CPU fallback', () => {
     const result = studioHealth(stats({ compositorBackend: 'cpu-fallback' }), false)
     expect(result.tone).toBe('error')
-    expect(result.value).toBe('Preview may not match the recording')
-    expect(result.detail).toBe('Videorc is drawing the picture on the CPU, so it may stutter.')
+    expect(result.value).toBe('Degraded')
+    expect(result.detail).toContain('The preview may not match your recording.')
   })
 
-  it('keeps the backend fallback reason out of the degraded copy', () => {
+  // Plan 174 S3.18: the reason is engineering text; Health's Technical
+  // details show it, and the Studio alert opens Health.
+  it('keeps the raw fallback reason out of the degraded detail', () => {
     const result = studioHealth(
       stats({ compositorBackend: 'cpu-fallback', compositorFallbackReason: 'Metal disabled' }),
       true
     )
-    expect(result.value).toBe('Preview may not match the recording')
-    expect(result.detail).not.toContain('Metal')
-    expect(`${result.value} ${result.detail}`).not.toMatch(/compositor/i)
+    expect(result.detail).toBe(
+      'The preview may not match your recording. Videorc is drawing it without the graphics card, so it can stutter.'
+    )
+    expect(result.detail).not.toContain('Metal disabled')
   })
 
   it('degrades when CPU fallback frames appear mid-recording even if the backend label is metal', () => {
@@ -97,7 +98,7 @@ describe('studioHealth', () => {
   it('never reds an active session whose preview has no transport yet', () => {
     expect(
       studioHealth(stats({ previewTransport: 'unavailable', previewSurfaceBacking: 'none' }), true)
-    ).toMatchObject({ tone: 'good', value: 'Live' })
+    ).toMatchObject({ tone: 'good', value: 'Running' })
   })
 
   it('keeps showing Fallback over Lagging when polling with high latency (no flapping)', () => {
@@ -153,7 +154,7 @@ describe('studioHealth', () => {
         'win32',
         'backend-d3d11-presenter'
       )
-    ).toMatchObject({ tone: 'good', value: 'Live' })
+    ).toMatchObject({ tone: 'good', value: 'Running' })
     expect(
       studioHealth(
         stats({
@@ -257,7 +258,7 @@ describe('recordingStartupHealthToast', () => {
     expect(fallback).toMatchObject({
       variant: 'warning',
       id: 'microphone-capture-worker-fallback',
-      title: "Microphone can't be changed this session"
+      title: "Microphone can't be changed until you stop"
     })
     expect(fallback?.description).toContain('probe timed out')
     const unavailable = recordingStartupHealthToast({

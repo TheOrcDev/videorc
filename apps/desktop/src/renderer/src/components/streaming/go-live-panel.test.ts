@@ -268,3 +268,40 @@ describe('Technical details', () => {
     expect(container.textContent).not.toContain('Keyframe interval')
   })
 })
+
+describe('Ready to go live: captions (plan 174 S3.4, D-9)', () => {
+  const youtube = [target('youtube', 'YouTube')]
+
+  it('has no Captions row while captions are off', () => {
+    expect(renderToStaticMarkup(readiness({ targets: youtube }))).not.toContain('>Captions<')
+  })
+
+  it('says the caption rule before Go Live, in short words and a sentence', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ReadyToGoLive, {
+        ...(readiness({ targets: youtube }).props as Parameters<typeof ReadyToGoLive>[0]),
+        captions: {
+          blocker: {
+            rule: 'frame-rate',
+            description: 'Captions on a livestream work up to 30 fps.'
+          }
+        }
+      })
+    )
+    expect(markup).toContain('>Captions<')
+    expect(markup).toContain('Need 30 fps or less')
+    expect(markup).toContain('data-slot="captions-not-ready"')
+    expect(markup).toContain('Captions on a livestream work up to 30 fps.')
+  })
+
+  it('reads On when the output fits', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ReadyToGoLive, {
+        ...(readiness({ targets: youtube }).props as Parameters<typeof ReadyToGoLive>[0]),
+        captions: { blocker: null }
+      })
+    )
+    expect(markup).toContain('>Captions<')
+    expect(markup).not.toContain('captions-not-ready')
+  })
+})

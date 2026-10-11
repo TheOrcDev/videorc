@@ -1,11 +1,7 @@
 import { ChatIcon, ChevronRightIcon } from '@/components/icons'
-import { lazy, Suspense, useState, type ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 
-import {
-  CleanCutCard,
-  type CleanCutFocus,
-  type CleanCutReviewTarget
-} from '@/components/clean-cut/clean-cut-card'
+import { CleanCutTab } from '@/components/clean-cut/clean-cut-tab'
 import {
   CohostListenField,
   BuddyModerationSection,
@@ -62,21 +58,6 @@ import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
 import { closeBuddyPetCreator, useBuddyPetCreatorOpen } from '@/lib/buddy-pet-creator-nav'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
-// The review is the heaviest part of Clean cut (player, transcript editor):
-// it loads the first time a cut is reviewed.
-const CleanCutReview = lazy(async () => ({
-  default: (await import('@/components/clean-cut/clean-cut-review')).CleanCutReview
-}))
-
-function reviewTargetOf(request: CleanCutTabRequest | null): CleanCutReviewTarget | null {
-  if (!request?.review) return null
-  return {
-    sessionId: request.sessionId,
-    mode: request.mode ?? 'clean',
-    jobId: request.jobId ?? null
-  }
-}
-
 /** The tab a deep link lands on, for a page rendered without the shell's tab. */
 function initialTab(
   reportSessionId: string | null,
@@ -99,8 +80,8 @@ function initialTab(
  *
  * `reportSessionId` is the Library's "Buddy report" ask: Reports opens on
  * that session. Without it the report follows the last stream.
- * `cleanCutRequest` is the Library's "Clean cut" (select that recording) or
- * the ready toast's Review (open that cut's review, inside Clean cut).
+ * `cleanCutRequest` is the Library's "Make a clean cut…" (select that
+ * recording) or a Review ask (open that cut's review, inside Clean cut).
  */
 export function BuddyTab({
   reportSessionId = null,
@@ -135,21 +116,13 @@ export function BuddyTab({
     }
   }
   const cleanCut = useCleanCut()
-  const [review, setReview] = useState<CleanCutReviewTarget | null>(() =>
-    reviewTargetOf(cleanCutRequest)
-  )
   const [appliedRequest, setAppliedRequest] = useState<number | null>(
     cleanCutRequest?.nonce ?? null
   )
   if (cleanCutRequest && cleanCutRequest.nonce !== appliedRequest) {
     setAppliedRequest(cleanCutRequest.nonce)
-    setReview(reviewTargetOf(cleanCutRequest))
     setOwnTab('clean-cut')
   }
-  const focus: CleanCutFocus | null =
-    cleanCutRequest && !cleanCutRequest.review
-      ? { sessionId: cleanCutRequest.sessionId, nonce: cleanCutRequest.nonce }
-      : null
   const openLibrarySession = onOpenLibrarySession ?? (() => undefined)
   const creatorOpen = useBuddyPetCreatorOpen()
 
@@ -197,41 +170,15 @@ export function BuddyTab({
           </PageStack>
         </TabsContent>
         <TabsContent className="flex flex-1 flex-col" value="clean-cut">
-          {review ? (
-            <Suspense fallback={<CleanCutReviewFallback />}>
-              <CleanCutReview
-                client={cleanCut}
-                target={review}
-                onClose={() => setReview(null)}
-                onOpenLibrarySession={openLibrarySession}
-              />
-            </Suspense>
-          ) : (
-            <ConfigGrid className={CONFIG_GRID_PAIR}>
-              <CleanCutCard
-                client={cleanCut}
-                focus={focus}
-                onOpenLibrarySession={openLibrarySession}
-                onReview={setReview}
-              />
-            </ConfigGrid>
-          )}
+          <CleanCutTab
+            client={cleanCut}
+            request={cleanCutRequest}
+            onOpenLibrarySession={openLibrarySession}
+          />
         </TabsContent>
       </PageTabs>
       <BuddyTabConsentDialog />
     </>
-  )
-}
-
-function CleanCutReviewFallback(): ReactElement {
-  return (
-    <div
-      aria-live="polite"
-      className="flex min-h-40 items-center justify-center text-xs text-muted-foreground"
-      role="status"
-    >
-      Loading the review…
-    </div>
   )
 }
 

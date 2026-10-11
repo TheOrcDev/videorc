@@ -33,8 +33,14 @@ import {
   type ProviderStreamOutputPlan,
   videoProfileCompatibility
 } from '@/lib/capture'
+import {
+  CAPTION_OUTPUT_RULE_LABELS,
+  livestreamCaptionsBlockerFor,
+  type CaptionOutputRule
+} from '@/lib/captions-preflight'
 import { destinationSetup, destinationSetupHint } from '@/lib/destination-readiness'
 import { NO_VALUE } from '@/lib/format'
+import { destinationLabel } from '@/lib/platform-copy'
 import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
 import {
   classifyStreamHealthAttribution,
@@ -148,6 +154,11 @@ export function GoLivePanel({
       </PanelSection>
       <ReadyToGoLive
         accountByPlatform={accountByPlatform}
+        captions={
+          captureConfig.captions.enabled
+            ? { blocker: livestreamCaptionsBlockerFor(captureConfig) }
+            : undefined
+        }
         diagnosticStats={diagnosticStats}
         ffmpegReady={Boolean(health?.ffmpeg.available)}
         liveOutputActive={liveOutputActive}
@@ -178,6 +189,7 @@ export function GoLivePanel({
 export function ReadyToGoLive({
   targets,
   accountByPlatform,
+  captions,
   ffmpegReady,
   profileCompatible,
   providerPlan,
@@ -194,6 +206,11 @@ export function ReadyToGoLive({
 }: {
   targets: StreamTargetSettings[]
   accountByPlatform: ReadonlyMap<StreamPlatform, PlatformAccount>
+  /**
+   * Live captions, when on: the output rule a livestream would break (plan
+   * 174 S3.4, D-9), so the Go Live dialog is never the first to say it.
+   */
+  captions?: { blocker: { rule: CaptionOutputRule; description: string } | null }
   ffmpegReady: boolean
   profileCompatible: boolean
   providerPlan: ProviderStreamOutputPlan
@@ -255,7 +272,7 @@ export function ReadyToGoLive({
               variant="link"
               onClick={() => onOpenDestination(target.id)}
             >
-              {target.label} · {hint}
+              {destinationLabel(target.label)} · {hint}
             </Button>
           ))}
         </div>
@@ -275,6 +292,20 @@ export function ReadyToGoLive({
         ok={presetOk}
         title={quality.title}
       />
+      {captions ? (
+        <>
+          <ChecklistRow
+            detail={captions.blocker ? CAPTION_OUTPUT_RULE_LABELS[captions.blocker.rule] : 'On'}
+            label="Captions"
+            ok={!captions.blocker}
+          />
+          {captions.blocker ? (
+            <p className="-mt-1 pl-6 text-xs text-muted-foreground" data-slot="captions-not-ready">
+              {captions.blocker.description}
+            </p>
+          ) : null}
+        </>
+      ) : null}
       {recordEnabled && recordingMatchesStream ? (
         <InfoRow
           detail={`${formatQuality(recordingVideo)} · matches the stream`}
@@ -491,7 +522,7 @@ export function TechnicalDetails({
           {outputs.map(({ target, video }, index) => (
             <DetailRow
               key={target?.id ?? `stream-${index}`}
-              label={target?.label ?? 'Stream'}
+              label={target ? destinationLabel(target.label) : 'Stream'}
               value={formatEffectiveStreamProfile(video)}
             />
           ))}

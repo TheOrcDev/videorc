@@ -1,5 +1,10 @@
 import type { AiCapabilities, CaptionTransport } from '@/lib/backend'
-import type { CaptionBurnTarget } from '@/lib/capture'
+import {
+  providerStreamOutputPlanOptions,
+  streamOutputVideosForTargets,
+  type CaptionBurnTarget,
+  type CaptureConfig
+} from '@/lib/capture'
 
 export type GoLiveCaptionsReadiness = {
   kind: 'disabled' | 'ready' | 'blocked' | 'skipped'
@@ -12,7 +17,12 @@ export type GoLiveCaptionsReadiness = {
 export type CaptionSessionOutputReadiness = {
   ready: boolean
   description?: string
+  /** Which rule the output breaks, for a short label (the Livestream checklist). */
+  reason?: CaptionOutputRule
 }
+
+/** The two output rules livestream captions have (plan 174 S3.4, D-9). */
+export type CaptionOutputRule = 'frame-rate' | 'one-stream-quality'
 
 type CaptionOutputProfile = {
   width: number
@@ -40,20 +50,71 @@ export function captionSessionOutputReadiness(input: {
   if (input.recordingVideo.fps > 30 || streamVideos.some((video) => video.fps > 30)) {
     return {
       ready: false,
+      reason: 'frame-rate',
       description:
-        'Livestream caption burn-in currently supports up to 30 fps. Choose a 30 fps output, select Recording only, or continue this session without captions.'
+        'Captions on a livestream work up to 30 fps. Choose a 30 fps quality in Output, or go live without captions this time.'
     }
   }
 
   if (input.recordEnabled && uniqueProfiles(streamVideos).length > 1) {
     return {
       ready: false,
+      reason: 'one-stream-quality',
       description:
-        'Captioned record + multistream currently requires one shared stream output profile. Match the enabled destination profiles, or continue this session without captions.'
+        'Captions on a livestream you also record need one stream quality for every destination. Give your destinations the same quality in Livestream, or go live without captions this time.'
     }
   }
 
   return { ready: true }
+}
+
+/** The short words for a broken rule, where a sentence doesn't fit (a checklist row). */
+export const CAPTION_OUTPUT_RULE_LABELS: Readonly<Record<CaptionOutputRule, string>> = {
+  'frame-rate': 'Need 30 fps or less',
+  'one-stream-quality': 'Need one stream quality'
+}
+
+/**
+ * The caption rule a livestream would break with today's setup, asked before
+ * Go Live (plan 174 S3.4, D-9): the Livestream checklist and the Captions
+ * page say it, so the Go Live dialog is never the first place it shows. The
+ * same check the dialog runs, as if going live now whatever the last start
+ * was. Null when captions are off or the output fits.
+ */
+export function livestreamCaptionsBlocker(input: {
+  captionsEnabled: boolean
+  burnTarget: CaptionBurnTarget
+  recordEnabled: boolean
+  recordingVideo: CaptionOutputProfile
+  streamVideos: CaptionOutputProfile[]
+}): { rule: CaptionOutputRule; description: string } | null {
+  if (!input.captionsEnabled) return null
+  const readiness = captionSessionOutputReadiness({ ...input, streamEnabled: true })
+  if (readiness.ready || !readiness.reason || !readiness.description) return null
+  return { rule: readiness.reason, description: readiness.description }
+}
+
+/**
+ * `livestreamCaptionsBlocker` for a whole capture config: the stream outputs
+ * the destinations would get if the streamer went live now.
+ */
+export function livestreamCaptionsBlockerFor(
+  config: Pick<
+    CaptureConfig,
+    'captions' | 'recordEnabled' | 'streamEnabled' | 'video' | 'streaming' | 'layout'
+  >
+): { rule: CaptionOutputRule; description: string } | null {
+  return livestreamCaptionsBlocker({
+    captionsEnabled: config.captions.enabled,
+    burnTarget: config.captions.burnTarget,
+    recordEnabled: config.recordEnabled,
+    recordingVideo: config.video,
+    streamVideos: streamOutputVideosForTargets(
+      config.video,
+      config.streaming,
+      providerStreamOutputPlanOptions(config)
+    ).map(({ video }) => video)
+  })
 }
 
 export function captionRuntimeStartBlocked(input: {
@@ -110,8 +171,8 @@ export function decideGoLiveCaptionsReadiness(input: {
     title: 'Captions ready',
     description:
       captions.preferredTransport === 'realtime'
-        ? 'Realtime microphone transcription is ready.'
-        : 'Caption transcription is ready with a slightly higher delay.',
+        ? 'Live microphone transcription is ready.'
+        : 'Caption transcription is ready in 3-second chunks, a few seconds behind.',
     transport: captions.preferredTransport
   }
 }

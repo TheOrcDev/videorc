@@ -11,6 +11,7 @@ import {
   CLEAN_CUT_ATTEMPTED_STORAGE_KEY,
   CLEAN_CUT_AUTO_STORAGE_KEY,
   autoRunCleanCut,
+  cleanCutAutoSkipReason,
   cleanCutAutoFromStorage,
   cleanCutAutoToStorage,
   decideCleanCutAutoRun,
@@ -211,6 +212,43 @@ describe('autoRunCleanCut', () => {
     expect(studio.request).not.toHaveBeenCalled()
   })
 
+  it('warns once per recording when consent, Premium or the capability is missing', async () => {
+    const studio = context({ consent: false })
+    await expect(autoRunCleanCut(FINALIZED, studio)).resolves.toEqual({
+      kind: 'skip',
+      reason: 'no-consent'
+    })
+    expect(toastMock.warning).toHaveBeenCalledExactlyOnceWith(
+      "Your clean cut didn't start",
+      expect.objectContaining({
+        id: 'clean-cut-auto-rec-1',
+        description: "Cloud AI isn't allowed, so Clean cut can't run.",
+        action: expect.objectContaining({ label: 'Open Clean cut' })
+      })
+    )
+    // The ledger holds it: the same recording never warns twice.
+    resetCleanCutAutoClaims()
+    await expect(autoRunCleanCut(FINALIZED, studio)).resolves.toMatchObject({
+      reason: 'already-attempted'
+    })
+    expect(toastMock.warning).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays silent for a skip the streamer expects', async () => {
+    const studio = context({ sessions: [session({ mode: 'stream', mp4Path: undefined })] })
+    await autoRunCleanCut(FINALIZED, studio)
+    expect(toastMock.warning).not.toHaveBeenCalled()
+    expect(cleanCutAutoSkipReason('not-eligible', { premiumReason: 'P', reasonCode: null })).toBe(
+      null
+    )
+    expect(cleanCutAutoSkipReason('not-premium', { premiumReason: 'P', reasonCode: null })).toBe(
+      'P'
+    )
+    expect(
+      cleanCutAutoSkipReason('unavailable', { premiumReason: 'P', reasonCode: 'quota-exhausted' })
+    ).toBe("This month's Clean cut minutes are used up.")
+  })
+
   it('needs consent, Premium and the capability', async () => {
     for (const overrides of [
       { consent: false },
@@ -262,13 +300,19 @@ describe('autoRunCleanCut', () => {
   })
 
   it('says quietly when the start was refused, but not for a job already running', async () => {
-    const refused = Object.assign(new Error('This month is used up.'), { code: 'unavailable' })
+    const refused = Object.assign(new Error('raw server text'), {
+      code: 'clean-cut-monthly-quota-exhausted'
+    })
     const studio = context()
     studio.request.mockRejectedValueOnce(refused)
     await autoRunCleanCut(FINALIZED, studio)
+    // Plain words, never the raw text, and the way to Clean cut (E-25).
     expect(toastMock.warning).toHaveBeenCalledWith(
       "Your clean cut didn't start",
-      expect.objectContaining({ description: 'This month is used up.' })
+      expect.objectContaining({
+        description: expect.stringContaining("This month's Clean cut minutes ran out."),
+        action: expect.objectContaining({ label: 'Open Clean cut' })
+      })
     )
 
     resetCleanCutAutoClaims()

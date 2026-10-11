@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  audioMixerMonitorLabel,
+  audioMixerMonitorState,
   micVisualAnalyserEnabled,
   type MicVisualGateInput
 } from './mic-visual-gate'
@@ -39,27 +39,27 @@ describe('micVisualAnalyserEnabled', () => {
   })
 })
 
-describe('audioMixerMonitorLabel', () => {
-  it('says Live only for a running session with a live signal path', () => {
-    expect(audioMixerMonitorLabel({ sessionActive: true, signalLive: true })).toBe('Live')
+describe('audioMixerMonitorState', () => {
+  it('is live only for a running session with a live signal path', () => {
+    expect(audioMixerMonitorState({ sessionActive: true, signalLive: true })).toBe('live')
   })
 
-  it('says Monitoring for an idle meter that is actually delivering', () => {
-    expect(audioMixerMonitorLabel({ sessionActive: false, signalLive: true })).toBe('Monitoring')
+  it('is monitoring for an idle meter that is actually delivering', () => {
+    expect(audioMixerMonitorState({ sessionActive: false, signalLive: true })).toBe('monitoring')
   })
 
-  it('says Idle whenever nothing is being read, armed or not', () => {
-    expect(audioMixerMonitorLabel({ sessionActive: false, signalLive: false })).toBe('Idle')
+  it('is idle whenever nothing is being read, armed or not', () => {
+    expect(audioMixerMonitorState({ sessionActive: false, signalLive: false })).toBe('idle')
     // No signal mid-session: the path is not live, and the label must not claim it.
-    expect(audioMixerMonitorLabel({ sessionActive: true, signalLive: false })).toBe('Idle')
+    expect(audioMixerMonitorState({ sessionActive: true, signalLive: false })).toBe('idle')
   })
 
-  it('says Muted for a muted microphone, so flat bars never read as a dead one', () => {
-    expect(audioMixerMonitorLabel({ sessionActive: false, signalLive: false, muted: true })).toBe(
-      'Muted'
+  it('is muted for a muted microphone, so flat bars never read as a dead one', () => {
+    expect(audioMixerMonitorState({ sessionActive: false, signalLive: false, muted: true })).toBe(
+      'muted'
     )
-    expect(audioMixerMonitorLabel({ sessionActive: true, signalLive: false, muted: true })).toBe(
-      'Muted'
+    expect(audioMixerMonitorState({ sessionActive: true, signalLive: false, muted: true })).toBe(
+      'muted'
     )
   })
 })

@@ -53,6 +53,7 @@ import {
   type SessionStatusGlyph,
   type SessionStatusView
 } from '@/lib/studio-session-view'
+import { connectionBlockedReason } from '@/lib/state-labels'
 
 /**
  * The session transport (plan 050 S12): status, clock, and Record / Go Live… /
@@ -534,14 +535,16 @@ export function TakeoverSection(): ReactElement {
   const { activateScreen, activeScreen, clearActiveScreen, screens, wsStatus } = useStudioCore()
   const { setActive } = useWorkspaceNav()
   const ready = screens.filter((screen) => screen.status !== 'missing')
-  const disconnected = wsStatus !== 'connected'
+  // Plan 174 B-22: the streamer's words for a dropped connection, never "Backend socket".
+  const disconnectedReason = connectionBlockedReason(wsStatus)
+  const disconnected = disconnectedReason !== null
 
   return (
     <PanelSection title="Takeover">
       {ready.length === 0 ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <ImageIcon className="size-3.5 shrink-0" weight="duotone" />
-          <span className="min-w-0">No takeover screens yet.</span>
+          <span className="min-w-0">No takeovers yet.</span>
           <button
             className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
             type="button"
@@ -556,10 +559,7 @@ export function TakeoverSection(): ReactElement {
             {ready.map((screen) => {
               const isActive = activeScreen?.id === screen.id
               return (
-                <DisabledReason
-                  key={screen.id}
-                  reason={disconnected ? `Backend socket is ${wsStatus}.` : null}
-                >
+                <DisabledReason key={screen.id} reason={disconnectedReason}>
                   <Button
                     aria-pressed={isActive}
                     disabled={disconnected}
@@ -589,10 +589,10 @@ export function TakeoverSection(): ReactElement {
               down when it wrapped). */}
           <span className="block min-h-8 text-xs text-muted-foreground">
             {disconnected
-              ? `Backend socket is ${wsStatus}. Takeovers need the backend.`
+              ? `${disconnectedReason} Takeovers work once Videorc is connected.`
               : activeScreen
                 ? `${activeScreen.name} is covering the output. Click it to return.`
-                : 'Click a takeover to cover the output. Works while live.'}
+                : 'Click a takeover to cover the output. Works while you’re recording or live.'}
           </span>
         </>
       )}

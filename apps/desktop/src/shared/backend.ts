@@ -4554,6 +4554,9 @@ export interface VideorcApi {
   revealSelectedResource: (capabilityId: string) => Promise<void>
   revealSession: (sessionId: string) => Promise<void>
   revealBackgroundAsset: (assetId: string) => Promise<void>
+  /** Shows an exported support bundle in Finder or Explorer (plan 174 S3.18).
+   * Main reveals only a bundle file inside the backend's export folder. */
+  revealSupportBundle: (path: string) => Promise<void>
   obsDiscover?: () => Promise<ObsDiscovery>
   obsRead?: (collection: string, profile: string) => Promise<ObsSetup | null>
   obsReadStreamKey?: (profile: string) => Promise<string | null>

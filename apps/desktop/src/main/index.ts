@@ -18,6 +18,7 @@ import {
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { commandModifierHeld, normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
+import { WINDOW_NAMES } from '../shared/window-names'
 import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
@@ -274,6 +275,7 @@ import {
   type DeferredPermissionRestartState
 } from './deferred-permission-restart'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
+import { supportBundleRevealPath } from './support-bundle-reveal'
 import {
   BUDDY_LIBRARY_CACHE_DIR,
   isBuddyPersonaId,
@@ -2805,7 +2807,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 360,
     minHeight: 240,
-    title: 'Videorc Notes',
+    title: WINDOW_NAMES.notes,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -3651,7 +3653,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 320,
     minHeight: 360,
-    title: 'Videorc Stream Manager',
+    title: WINDOW_NAMES.streamManager,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -3870,7 +3872,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 360,
     minHeight: 200,
-    title: 'Videorc Captions',
+    title: WINDOW_NAMES.captions,
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -4319,7 +4321,7 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
 </style></head><body>
   <div class="hint"><div class="title">${PREVIEW_WAIT_TITLE}</div>
   <div id="videorc-wait-detail">${PREVIEW_WAIT_DETAIL_DEFAULT}</div></div>
-  <div class="drag-bar"><span class="label">Preview</span></div>
+  <div class="drag-bar"><span class="label">${WINDOW_NAMES.preview}</span></div>
 </body></html>`
 
 async function openPreviewWindow(): Promise<PreviewWindowState> {
@@ -4370,7 +4372,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: docked ? 1 : 320,
     minHeight: docked ? 1 : 208,
-    title: 'Videorc Preview',
+    title: WINDOW_NAMES.preview,
     // window-glass.ts: real material pinned dark and the traffic lights centred
     // on the 28px strip on macOS; off macOS the standard frame and solid base
     // keep the window draggable without renderer drag regions.
@@ -13370,6 +13372,14 @@ async function grantSessionMedia(
   return { url: issued.url, expiresAt: issued.expiresAt }
 }
 
+// Show in Finder for an exported support bundle (plan 174 S3.18). The
+// backend's admin health reply names its database, and bundles live in
+// `support-bundles` beside it; anything else is refused.
+async function revealSupportBundle(path: unknown): Promise<void> {
+  const health = await requestBackendAdmin<{ databasePath?: unknown }>('health.ping', {}, 10_000)
+  shell.showItemInFolder(supportBundleRevealPath(path, health?.databasePath))
+}
+
 async function revealManagedBackground(assetId: unknown): Promise<void> {
   if (typeof assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(assetId)) {
     throw new Error('Managed background asset id is invalid.')
@@ -14559,6 +14569,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('resource:reveal-background', (_event, assetId: unknown) =>
     revealManagedBackground(assetId)
+  )
+  secureIpcHandle('resource:reveal-support-bundle', (_event, path: unknown) =>
+    revealSupportBundle(path)
   )
   // OBS setup import (O1): read-only discovery over OBS Studio's config files.
   // The stream key never rides these payloads — obs:read strips it; the apply

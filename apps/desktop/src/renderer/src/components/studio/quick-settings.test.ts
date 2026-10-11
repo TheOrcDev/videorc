@@ -34,7 +34,7 @@ function render(input: Partial<SystemAudioSwitchInput>): string {
   )
 }
 
-describe('Studio inputs System audio row (plan 069)', () => {
+describe('Studio Sources System audio row (plan 069)', () => {
   it('shows Off and On beside a labelled switch', () => {
     expect(render({})).toContain('>Off<')
     expect(render({})).toContain('aria-label="System audio"')
@@ -51,7 +51,9 @@ describe('Studio inputs System audio row (plan 069)', () => {
   it('keeps a lost source On with a short status and the full copy on hover', () => {
     const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'lost' })
     expect(markup).toContain('>Stopped<')
-    expect(markup).toContain('title="System audio stopped. The session keeps going."')
+    expect(markup).toContain(
+      'title="System audio stopped. Your recording or livestream keeps going."'
+    )
     expect(markup).toContain('aria-checked="true"')
   })
 
@@ -62,21 +64,21 @@ describe('Studio inputs System audio row (plan 069)', () => {
     expect(markup).toContain('aria-checked="true"')
   })
 
-  it('says a fallback microphone keeps system audio out of this session', () => {
+  it('says a fallback microphone keeps system audio out until you stop', () => {
     const markup = render({
       requested: true,
       sessionActive: true,
       confirmed: false,
       issue: 'bypassed'
     })
-    expect(markup).toContain('>Off for this session<')
+    expect(markup).toContain('>Off until you stop<')
     expect(markup).toContain(
-      'title="System audio is off for this session because the microphone is on a fallback input."'
+      'title="System audio is off until you stop, because the microphone is on a fallback input."'
     )
   })
 })
 
-describe('Studio Inputs rows (plan 080 S4)', () => {
+describe('Studio Sources rows (plan 080 S4)', () => {
   const display: Device = { id: 'screen:2', name: 'Display 2', kind: 'screen', status: 'available' }
   const camera: Device = {
     id: 'camera:1',
@@ -98,7 +100,6 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       selectedCaptureDevice: devices.find((device) => device.id === sources.screenId),
       selectedCamera: devices.find((device) => device.id === sources.cameraId),
       selectedMicrophone: undefined,
-      patchVideo: vi.fn(),
       isSessionActive: false,
       entitlements: null,
       captionsStatus: { state: 'idle' },
@@ -127,9 +128,10 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       camera,
       systemAudio
     ])
-    // The microphone has one home, the Microphone section above (plan 092).
+    // The microphone has one home, the Microphone section above (plan 092);
+    // Output is the Session row (plan 174 S3.3, B-15).
     // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
-    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio', 'Output'])
+    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio'])
     expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
     expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
@@ -137,6 +139,19 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
     expect(markup).toContain('title="MacBook Pro Camera"')
     // The old joined trigger ("Display 2 · MacBook Pro Camera") is gone.
     expect(markup).not.toContain('Display 2 · MacBook Pro Camera')
+  })
+
+  it('calls them Sources, with a way home, and keeps Captions out of them (B-15, B-25)', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
+    expect(markup).not.toContain('Inputs')
+    const [sources, captions] = markup.split('data-slot="panel-section"').slice(1)
+    expect(sources).toContain('>Sources</h2>')
+    expect(sources).toContain('>Open Sources</button>')
+    expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
+    expect(captions).not.toContain('<h2')
+    // Captions is a door to its page there (plan 174 S3.2, B-13), not a switch row.
+    expect(rowLabels(captions ?? '')).toEqual([])
+    expect(captions).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
   })
 
   it('opens Screen and Camera with one click: the row control is the dropdown', () => {

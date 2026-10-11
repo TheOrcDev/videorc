@@ -1,4 +1,5 @@
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
 import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-loader'
@@ -61,11 +62,18 @@ import {
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
+import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/start-blocked-copy'
 import { copyText } from '@/lib/copy-text'
 import { platformLabel } from '@/lib/platform-copy'
-import { currentPlatform, osSettingsName } from '@/lib/platform'
-import { toast } from '@/lib/toast'
+import {
+  currentPlatform,
+  osSettingsName,
+  revealInFileManagerLabel,
+  trashName
+} from '@/lib/platform'
+import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { openHealthToastAction } from '@/lib/health-door'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
 import {
@@ -323,6 +331,7 @@ import type {
   DeviceList,
   EntitlementsSnapshot,
   NoiseCleanupJob,
+  CleanCutJob,
   MediaAccessSnapshot,
   FileAssessment,
   EventsLaggedPayload,
@@ -457,6 +466,8 @@ import {
   decideGoLiveCaptionsReadiness,
   type GoLiveCaptionsReadiness
 } from '@/lib/captions-preflight'
+import { streamingWithoutTargets, updateGoLiveExclusions } from '@/lib/go-live-exclusions'
+import type { GoLivePhase } from '@/lib/go-live-dialog-view'
 import {
   goLiveEntitlementGate,
   liveCohostGate,
@@ -478,6 +489,7 @@ import {
   buddyLiveSettingsPatch
 } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
+import { upsertCleanCutJob } from '@/lib/clean-cut-jobs'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-jobs'
 import {
   applyLiveChatMessages,
@@ -1142,6 +1154,11 @@ export type StudioContextValue = {
   health: BackendHealth | null
   entitlements: EntitlementsSnapshot | null
   noiseCleanupJobs: NoiseCleanupJob[]
+  /** Every Clean cut job this connection has heard on `cleanCut.status`
+   * (plan 174 S3.11, E-4): the Library's status chip and its file-action
+   * holds. A job reported before this window connected shows at its next
+   * status. */
+  cleanCutJobs: CleanCutJob[]
   account: VideorcAccountSnapshot | null
   aiCapabilities: AiCapabilities | null
   aiQuota: AiQuotaStatus | null
@@ -1259,6 +1276,16 @@ export type StudioContextValue = {
   sessionStartIntent: SessionStartIntent | null
   /** The stop overran its finalize window: the warning under Force stop (B-16). */
   sessionStopOverrun: boolean
+  /**
+   * Destinations left out of this Go Live only ("Go live without …", plan
+   * 174 S3.4, B-8): every start step sends the saved settings minus these,
+   * and nothing writes them back. Cleared when the attempt ends.
+   */
+  goLiveExcludedTargetIds: readonly string[]
+  /** Where a confirmed Go Live is, for the dialog's pending label (B-14). */
+  goLivePhase: GoLivePhase | null
+  /** Runs the Go Live check again (after a Reconnect), with this attempt's exclusions. */
+  recheckGoLive: () => Promise<void>
   // preview + audio
   previewUrl: string | null
   previewLoading: boolean
@@ -1365,7 +1392,15 @@ export type StudioContextValue = {
   runPerformanceCheck: () => Promise<void>
   applyRtmpPreset: (preset: RtmpPreset) => void
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
-  resolveGoLiveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => Promise<void>
+  /**
+   * The Go Live dialog's fixes: leave a destination out of this livestream
+   * (`exclude`, never saved), bring it back (`include`), or switch it to its
+   * stream key (`manual-rtmp`, which is saved).
+   */
+  resolveGoLiveBlocker: (
+    targetId: string,
+    resolution: 'exclude' | 'include' | 'manual-rtmp'
+  ) => Promise<void>
   // Resolves true only when the key was actually stored (lets the UI clear
   // the typed draft without ever losing an unsaved key).
   saveManualStreamKey: (targetId: string, streamKey: string) => Promise<boolean>
@@ -2180,6 +2215,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setEntitlements(snapshot)
   }, [])
   const [noiseCleanupJobs, setNoiseCleanupJobs] = useState<NoiseCleanupJob[]>([])
+  const [cleanCutJobs, setCleanCutJobs] = useState<CleanCutJob[]>([])
   const announcedNoiseCleanupCompletionsRef = useRef(new Set<string>())
   const entitlementRefreshInFlightRef = useRef<{
     client: BackendClient
@@ -3415,6 +3451,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsForSession, setSuppressCaptionsForSession] = useState(false)
+  // "Go live without …" for this attempt only (plan 174 S3.4, B-8).
+  const [goLiveExcludedTargetIds, setGoLiveExcludedTargetIds] = useState<readonly string[]>([])
+  const goLiveExcludedTargetIdsRef = useRef<readonly string[]>([])
+  const commitGoLiveExclusions = useCallback((next: readonly string[]) => {
+    goLiveExcludedTargetIdsRef.current = next
+    setGoLiveExcludedTargetIds(next)
+  }, [])
+  const [goLivePhase, setGoLivePhase] = useState<GoLivePhase | null>(null)
   // Plan 174 S3.1: the intent behind the starting or running session, so
   // the captions runtime reads what the session does rather than the saved
   // mode; null once it ends or when another client started it.
@@ -6873,6 +6917,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // A clean cut that finished out of view (plan 119 S15): its copy joins
       // the Library, and the ready toast says so once per cut-list revision.
       nextClient.on('cleanCut.status', (job) => {
+        setCleanCutJobs((current) => upsertCleanCutJob(current, job))
         if (job.state !== 'completed') return
         void refreshSessions(nextClient)
         void import('@/lib/clean-cut-notify')
@@ -6968,7 +7013,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           clearSessionRuntimeState()
           void refreshSessions(nextClient)
         }
-        // "Open Stream Manager when I go live" (plan 055, decision 6). Go Live
+        // "Open Stream Manager when you go live" (plan 055, decision 6). Go Live
         // is record+stream, which the backend reports as `recording` with a
         // stream URL (plan 095 S5).
         if (
@@ -7556,7 +7601,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // repeat every reconnect: one toast per text.
         console.warn('[backend-error] event:', message)
         notifyOnce(`backend-error:${message}`, 'error', 'Videorc hit a problem', {
-          description: 'Export a support bundle from Health if it repeats.'
+          description: 'Export a support bundle from Health if it repeats.',
+          // The door to Health (plan 174 D9), on the toast's timed life.
+          action: openHealthToastAction(),
+          duration: TOAST_WITH_DESCRIPTION_MS
         })
       }),
       nextClient.on('connection.closed', () => setWsStatus('closed'))
@@ -10416,7 +10464,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       notifyOnce(
         'chat-closed-for-recording',
         'warning',
-        'Stream Manager closed for this recording',
+        `${WINDOW_NAMES.streamManager} closed for this recording`,
         {
           description: 'Videorc closed it so your chat stays out of the recording.'
         }
@@ -10641,16 +10689,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         'diagnostics.supportBundle.export',
         params
       )
-      // The bundle lands in the app's own data folder, which Finder hides;
-      // Copy path gets the streamer to it (a reveal needs a main-process
-      // handler for this file, which the renderer cannot ask for yet).
+      // The bundle lands in the app's own data folder, which Finder hides,
+      // so the toast shows it there (plan 174 S3.18, I-1). Main reveals only
+      // a bundle inside that folder. Outside Electron, Copy path stands in.
+      const revealSupportBundle = window.videorc?.revealSupportBundle
       toast.success('Support bundle exported', {
         description: basename(result.path),
         duration: 15_000,
-        action: {
-          label: 'Copy path',
-          onClick: () => void copyText(result.path, "Couldn't copy the path.")
-        }
+        action: revealSupportBundle
+          ? {
+              label: revealInFileManagerLabel(freshRuntimeInfo?.platform),
+              onClick: () =>
+                void revealSupportBundle(result.path).catch((error: unknown) =>
+                  reportError(error, { action: 'show', object: 'the support bundle' })
+                )
+            }
+          : {
+              label: 'Copy path',
+              onClick: () => void copyText(result.path, "Couldn't copy the path.")
+            }
       })
     } catch (error) {
       reportError(error, { action: 'export', object: 'a support bundle' })
@@ -10658,6 +10715,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSupportBundleExportPending(false)
     }
   }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  // Plan 174 A-20: a toast whose raw details were withheld offers this export
+  // (latest-value hand-off, like the ref mirrors above; idempotent per render).
+  registerSupportBundleExport(() => void exportSupportBundle())
 
   const scheduleHardwareAccelerationRetry = useCallback(async () => {
     if (!window.videorc?.retryHardwareAcceleration) {
@@ -11397,6 +11457,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSuppressCaptionsForSession(false)
     }
   }, [isSessionActive, suppressCaptionsForSession])
+
+  // "Go live without …" belongs to one attempt (plan 174 S3.4, B-8): once the
+  // dialog is gone and nothing is starting or running, the next Go Live
+  // starts from the saved destinations again, whether this one went live,
+  // failed or was cancelled.
+  useEffect(() => {
+    if (
+      goLiveConfirmationOpen ||
+      goLiveConfirmationPending ||
+      startRequestPending ||
+      isSessionActive
+    ) {
+      return
+    }
+    if (goLiveExcludedTargetIdsRef.current.length > 0) commitGoLiveExclusions([])
+  }, [
+    commitGoLiveExclusions,
+    goLiveConfirmationOpen,
+    goLiveConfirmationPending,
+    isSessionActive,
+    startRequestPending
+  ])
 
   // Consent is the USER'S durable intent: no code path may revoke it. An
   // earlier effect here silently flipped the toggle off whenever cloud AI
@@ -12272,14 +12354,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // than the saved mode.
   const startBlockedReasonFor = useCallback(
     (intent: SessionStartIntent): string | null => {
-      if (wsStatus !== 'connected') {
-        return `Backend socket is ${wsStatus}.`
+      // The start-blocking copy table (plan 174 B-22): what to do next, never
+      // "Backend socket is closed." or "Checking FFmpeg…".
+      const disconnected = connectionBlockedReason(wsStatus)
+      if (disconnected) {
+        return disconnected
       }
       if (isSessionActive) {
-        return 'A capture session is already active.'
+        return START_BLOCKED_COPY.sessionRunning
       }
       if (!intent.record && !intent.stream) {
-        return 'Enable Record MKV, Stream RTMP, or both before starting.'
+        return START_BLOCKED_COPY.noOutput
       }
       const config = captureConfigForIntent(captureConfig, intent)
       const recordingProfileGate = intent.record
@@ -12308,15 +12393,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         if (!areEnabledStreamTargetsStartReady(config.streaming)) {
           return config.streaming.targets.some((target) => target.enabled)
-            ? 'Finish manual livestream destination setup before streaming.'
-            : 'Enable at least one livestream destination before streaming.'
+            ? START_BLOCKED_COPY.destinationSetup
+            : START_BLOCKED_COPY.noDestination
         }
       }
       if (!health) {
-        return 'Checking FFmpeg before starting.'
+        return START_BLOCKED_COPY.checkingRecorder
       }
       if (!health.ffmpeg.available) {
-        return health.ffmpeg.message ?? 'FFmpeg is not available.'
+        return START_BLOCKED_COPY.recorderMissing
       }
       // Only a finished verdict blocks here. A check that is still running or
       // failed is settled when Go Live is pressed: the start waits for it.
@@ -13601,7 +13686,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       confirmedPreflight?: GoLivePreflight,
       // What this session will really send (plan 090): a broadcast prepared
       // at the saved profile would advertise a size the stream never reaches.
-      sessionOutput?: Pick<GoLiveOutput.GoLiveSessionOutput, 'video' | 'streaming'>
+      sessionOutput?: Pick<GoLiveOutput.GoLiveSessionOutput, 'video' | 'streaming'>,
+      // Left out of this livestream (plan 174 S3.4, B-8): never prepared on
+      // its platform and never started, yet still on in the saved settings.
+      excludedTargetIds: readonly string[] = []
     ): Promise<GoLivePartialSetup> => {
       if (!client) {
         throw offlineError()
@@ -13616,9 +13704,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         outputStreaming.targets.find((candidate) => candidate.id === target.id) ?? target
       let nextStreaming = captureConfig.streaming
       const failures: GoLiveSetupFailure[] = []
+      const sent = (target: StreamTargetSettings): boolean =>
+        target.enabled && !excludedTargetIds.includes(target.id)
       for (const target of captureConfig.streaming.targets.filter(
-        (target) => target.enabled && target.authMode === 'oauth'
+        (target) => sent(target) && target.authMode === 'oauth'
       )) {
+        setGoLivePhase({ kind: 'preparing', platform: target.platform })
         try {
           if (target.platform === 'youtube') {
             const unavailable = oauthUnavailableReason(target.platform)
@@ -13820,7 +13911,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // a metadata failure must not block going live over the key.
       const twitchAccount = platformAccounts.find((item) => item.platform === 'twitch')
       for (const target of captureConfig.streaming.targets.filter(
-        (target) => target.enabled && target.authMode !== 'oauth' && target.platform === 'twitch'
+        (target) => sent(target) && target.authMode !== 'oauth' && target.platform === 'twitch'
       )) {
         if (!twitchAccount) {
           nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
@@ -13857,7 +13948,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // title and category whatever the ingest path; best-effort.
       const kickAccount = platformAccounts.find((item) => item.platform === 'kick')
       for (const target of captureConfig.streaming.targets.filter(
-        (target) => target.enabled && target.authMode !== 'oauth' && target.platform === 'kick'
+        (target) => sent(target) && target.authMode !== 'oauth' && target.platform === 'kick'
       )) {
         if (!kickAccount) {
           continue
@@ -13889,16 +13980,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
       await refreshPlatformAccountsForClient(client)
       // Keep saved preferences intact while carrying the exact profiles used
-      // for provider preparation through to the media start.
-      const preparedStreaming = {
-        ...outputStreaming,
-        targets: nextStreaming.targets.map((target) => ({
-          ...target,
-          outputPreset: outputTarget(target).outputPreset,
-          outputBitrateKbps: outputTarget(target).outputBitrateKbps,
-          outputOrientation: outputTarget(target).outputOrientation
-        }))
-      }
+      // for provider preparation through to the media start. The saved
+      // settings above keep a left-out destination on; the start sends
+      // without it.
+      const preparedStreaming = streamingWithoutTargets(
+        {
+          ...outputStreaming,
+          targets: nextStreaming.targets.map((target) => ({
+            ...target,
+            outputPreset: outputTarget(target).outputPreset,
+            outputBitrateKbps: outputTarget(target).outputBitrateKbps,
+            outputOrientation: outputTarget(target).outputOrientation
+          }))
+        },
+        excludedTargetIds
+      )
       return {
         streaming: preparedStreaming,
         failures,
@@ -14112,7 +14208,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setGoLivePartialSetup(null)
     setGoLiveConfirmationOpen(false)
     setSuppressCaptionsForSession(false)
+    commitGoLiveExclusions([])
   }, [
+    commitGoLiveExclusions,
     goLiveConfirmationPending,
     goLivePartialSetup,
     settlePreparedPlatformLifecycle,
@@ -14136,9 +14234,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
 
     const confirmationPromise = (async (): Promise<void> => {
+      // What this attempt sends: the saved destinations minus the ones left
+      // out of this livestream (plan 174 S3.4, B-8). Never written back.
+      const excludedTargetIds = goLiveExcludedTargetIdsRef.current
+      const goLiveStreaming = streamingWithoutTargets(captureConfig.streaming, excludedTargetIds)
       try {
         setLastError(null)
         setGoLiveConfirmationPending(true)
+        setGoLivePhase({ kind: 'checking' })
         if (streamMetadataDraft) {
           const saved = await client.request<StreamMetadataDraft>(
             'streamTargets.metadata.update',
@@ -14155,11 +14258,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           'streamTargets.confirmation.validate',
           {
             scheduledEventIds: Object.fromEntries(
-              captureConfig.streaming.targets
+              goLiveStreaming.targets
                 .filter((t) => t.enabled && t.scheduledEventId)
                 .map((t) => [t.id, t.scheduledEventId])
             ),
-            streaming: captureConfig.streaming
+            streaming: goLiveStreaming
           }
         )
         const changedScheduledEvent = preflight.destinations.some(
@@ -14180,6 +14283,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const preflightDecision = decideGoLivePreflight(preflight)
         if (preflightDecision.kind === 'blocked') {
           const premiumIssue = premiumRequiredIssueMessage(preflight)
+          // The dialog stays open on the fresh preflight, which says what to
+          // fix; a toast repeating it was noise (plan 174 S3.4, B-18).
           if (premiumIssue) {
             void loadSessionRuntimeRecovery().then((runtime) =>
               runtime.showPremiumUpgrade(
@@ -14187,31 +14292,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 premiumIssue
               )
             )
-          } else {
-            // The server's verdict can differ from what the dialog showed
-            // before the click; the dialog now marks what blocks it.
-            toast.warning('Fix the items marked in red, then go live', { id: 'go-live-blocked' })
           }
           return
         }
         // Settled before anything is created on a platform, so a refused
         // start leaves no broadcast behind and a prepared one advertises the
         // profile this session will send.
-        const sessionOutput = await settleStreamOutputTopology(captureConfig.streaming)
+        const sessionOutput = await settleStreamOutputTopology(goLiveStreaming)
         if (sessionOutput.reason) {
           throw new Error(sessionOutput.reason)
         }
         preparedGoLiveOutputRef.current = sessionOutput
-        const setup = await prepareOauthTargetsForGoLive(preflight, sessionOutput)
+        const setup = await prepareOauthTargetsForGoLive(
+          preflight,
+          sessionOutput,
+          excludedTargetIds
+        )
         const setupDecision = decidePreparedGoLiveSetup(setup)
         if (setupDecision.kind === 'no-ready-destinations') {
           throw new Error('No livestream destinations are ready after platform setup.')
         }
         if (setupDecision.kind === 'partial') {
-          // The dialog shows the failures with Continue or Cancel (B-18).
+          // The dialog lists what failed and offers the ready ones (B-18).
           setGoLivePartialSetup(setupDecision.setup)
           return
         }
+        setGoLivePhase({ kind: 'starting' })
         setGoLiveConfirmationOpen(false)
         await runStartSession(
           setupDecision.streaming,
@@ -14231,6 +14337,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         )
       } finally {
         setGoLiveConfirmationPending(false)
+        setGoLivePhase(null)
       }
     })()
     confirmGoLiveInFlightPromiseRef.current = confirmationPromise
@@ -14606,7 +14713,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
       if (failedCount > 0) {
         throw new Error(
-          `${failedCount} file(s) could not be moved to Trash; their sessions were kept.`
+          `${plural(failedCount, "file couldn't", "files couldn't")} be moved to the ${trashName()}, so ${failedCount === 1 ? 'its recording was' : 'their recordings were'} kept.`
         )
       }
     },
@@ -14973,30 +15080,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     []
   )
 
-  // Resolves a Go Live blocker from inside the confirmation dialog: disable
-  // the destination (go live without it) or flip it to Manual RTMP. The
-  // preflight revalidates against the patched snapshot immediately so the
-  // dialog reflects the resolution without reopening.
-  const resolveGoLiveBlocker = useCallback(
-    async (targetId: string, resolution: 'disable' | 'manual-rtmp') => {
-      const patch: Partial<StreamTargetSettings> =
-        resolution === 'disable' ? { enabled: false } : { authMode: 'manual-rtmp' }
-      const nextStreaming = streamingWithTargetPatch(
-        captureConfigRef.current.streaming,
-        targetId,
-        patch
-      )
-      patchStreamingTarget(targetId, patch)
+  // Asks the backend whether this Go Live can start as it stands: the saved
+  // destinations (with an optional patch) minus the ones left out of this
+  // attempt. The dialog shows the answer without reopening.
+  const revalidateGoLive = useCallback(
+    async (streaming: StreamingSettings, excludedTargetIds: readonly string[]) => {
       if (!client) {
         return
       }
+      const sent = streamingWithoutTargets(streaming, excludedTargetIds)
       try {
         const preflight = await client.request<GoLivePreflight>(
           'streamTargets.confirmation.validate',
           {
-            streaming: nextStreaming,
+            streaming: sent,
             scheduledEventIds: Object.fromEntries(
-              nextStreaming.targets
+              sent.targets
                 .filter((t) => t.enabled && t.scheduledEventId)
                 .map((t) => [t.id, t.scheduledEventId])
             )
@@ -15007,7 +15106,41 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error)
       }
     },
-    [client, patchStreamingTarget, reportError]
+    [client, reportError]
+  )
+
+  // Resolves a Go Live blocker from inside the confirmation dialog (plan 174
+  // S3.4, B-8). "Go live without {destination}" leaves it out of THIS
+  // livestream only: the saved destination stays on, and the next Go Live
+  // includes it again. "Add back" undoes that. Switching to the stream key is
+  // a saved change, and the dialog says so.
+  const resolveGoLiveBlocker = useCallback(
+    async (targetId: string, resolution: 'exclude' | 'include' | 'manual-rtmp') => {
+      if (resolution === 'manual-rtmp') {
+        const patch: Partial<StreamTargetSettings> = { authMode: 'manual-rtmp' }
+        const nextStreaming = streamingWithTargetPatch(
+          captureConfigRef.current.streaming,
+          targetId,
+          patch
+        )
+        patchStreamingTarget(targetId, patch)
+        await revalidateGoLive(nextStreaming, goLiveExcludedTargetIdsRef.current)
+        return
+      }
+      const nextExcluded = updateGoLiveExclusions(
+        goLiveExcludedTargetIdsRef.current,
+        targetId,
+        resolution === 'exclude'
+      )
+      commitGoLiveExclusions(nextExcluded)
+      await revalidateGoLive(captureConfigRef.current.streaming, nextExcluded)
+    },
+    [commitGoLiveExclusions, patchStreamingTarget, revalidateGoLive]
+  )
+
+  const recheckGoLive = useCallback(
+    () => revalidateGoLive(captureConfigRef.current.streaming, goLiveExcludedTargetIdsRef.current),
+    [revalidateGoLive]
   )
 
   const patchManualStreamKeyResult = useCallback(
@@ -15895,6 +16028,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       health,
       entitlements,
       noiseCleanupJobs,
+      cleanCutJobs,
       account,
       aiCapabilities,
       aiQuota,
@@ -15971,6 +16105,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       goLivePartialSetup,
       goLiveCaptionsReadiness,
       continueGoLiveWithoutCaptions,
+      goLiveExcludedTargetIds,
+      goLivePhase,
+      recheckGoLive,
       previewUrl,
       previewLoading,
       nativePreviewSurfaceEnabled,
@@ -16138,6 +16275,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       health,
       entitlements,
       noiseCleanupJobs,
+      cleanCutJobs,
       account,
       aiCapabilities,
       aiQuota,
@@ -16214,6 +16352,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       goLivePartialSetup,
       goLiveCaptionsReadiness,
       continueGoLiveWithoutCaptions,
+      goLiveExcludedTargetIds,
+      goLivePhase,
+      recheckGoLive,
       previewUrl,
       previewLoading,
       nativePreviewSurfaceEnabled,
@@ -16399,8 +16540,9 @@ function isEditableTargetSafe(target: EventTarget | null): boolean {
     : false
 }
 
+/** The file name in a macOS or a Windows path. */
 function basename(path: string): string {
-  return path.split('/').at(-1) ?? path
+  return path.split(/[\\/]/).at(-1) ?? path
 }
 
 function delay(ms: number): Promise<void> {

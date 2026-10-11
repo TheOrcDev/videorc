@@ -16,8 +16,8 @@ import { QuickSettings } from '@/components/studio/quick-settings'
 import { RecordingTab } from './recording-tab'
 
 // Plan 174: the Output page's typed fields commit once and never transpose
-// (D-1), and the Output page and the Studio's Output row pick a resolution
-// the same way, so the bitrate moves with the size on both (D-8).
+// (D-1), and the bitrate moves with the size (D-8). Studio has no second
+// resolution picker: its Output row opens this page (S3.3, B-15).
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
@@ -69,7 +69,7 @@ function Harness({ surface, video }: { surface: () => ReactElement; video: Video
     performanceCheck: undefined,
     performanceCheckProgress: null,
     runPerformanceCheck: vi.fn(),
-    // Studio's Inputs rows.
+    // Studio's Sources and Captions rows.
     switchSourceDeviceLive: vi.fn(),
     sourceSwitchReason: () => null,
     sourceSelectionState: { pending: null, checking: false, error: null, snapshot: null },
@@ -183,30 +183,22 @@ describe('Output page typed fields (plan 174, D-1)', () => {
   })
 })
 
-describe('one resolution picker on both surfaces (plan 174, D-8)', () => {
-  it('moves the bitrate with the size on the Output page and in the Studio row alike', async () => {
+describe('one resolution picker (plan 174, D-8 and S3.3 B-15)', () => {
+  it('moves the bitrate with the size on the Output page', async () => {
     await renderOutputPage()
     const button = [...document.querySelectorAll('button')].find((entry) =>
       entry.textContent?.startsWith('4K')
     )!
     await act(async () => button.click())
-    const fromOutputPage = { ...stored }
-    await act(async () => root.unmount())
+    expect(stored).toMatchObject({ width: 3840, height: 2160, bitrateKbps: 30000 })
+  })
 
-    patches = []
-    root = createRoot(container)
+  it('gives Studio no second picker: Output is the Session row that opens this page', async () => {
     await render(() => createElement(QuickSettings))
-    const outputRow = [...document.querySelectorAll('[data-slot="inspector-row"]')].find(
-      (row) => row.querySelector('span')?.textContent === 'Output'
-    )!
-    await act(async () => (outputRow.querySelector('[role="combobox"]') as HTMLElement).click())
-    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) =>
-      entry.textContent?.startsWith('4K')
-    )!
-    await act(async () => option.click())
-    const fromStudioRow = { ...stored }
-
-    expect(fromStudioRow).toEqual(fromOutputPage)
-    expect(fromStudioRow).toMatchObject({ width: 3840, height: 2160, bitrateKbps: 30000 })
+    const labels = [...document.querySelectorAll('[data-slot="inspector-row"]')].map(
+      (row) => row.querySelector('span')?.textContent
+    )
+    expect(labels).not.toContain('Output')
+    expect(document.querySelector('[aria-label="Output"]')).toBeNull()
   })
 })

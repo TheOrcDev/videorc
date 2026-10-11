@@ -122,12 +122,12 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
  */
 export function systemAudioIssueCopy(issue: SystemAudioIssue, platform?: string): string {
   return issue === 'lost'
-    ? 'System audio stopped. The session keeps going.'
+    ? 'System audio stopped. Your recording or livestream keeps going.'
     : issue === 'bypassed'
-      ? 'System audio is off for this session because the microphone is on a fallback input.'
+      ? 'System audio is off until you stop, because the microphone is on a fallback input.'
       : issue === 'echo'
         ? `Paused: your stream is playing on this ${platformCopy(platform).deviceNoun} and coming back as an echo. Mute that tab, then resume.`
-        : 'System audio could not start.'
+        : "System audio couldn't start."
 }
 
 /** The window event the Studio answers by turning System audio on again. */

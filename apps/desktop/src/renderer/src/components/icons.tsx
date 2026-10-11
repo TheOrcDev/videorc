@@ -64,7 +64,7 @@ type _RegistryIconProps = _AssertIconProps<
     | 'ArrowUp'
     | 'ArrowsClockwise'
     | 'ArrowsDownUp'
-    | 'Brain'
+    | 'BookmarkSimple'
     | 'Broadcast'
     | 'Bug'
     | 'CaretDown'
@@ -96,7 +96,6 @@ type _RegistryIconProps = _AssertIconProps<
     | 'Info'
     | 'InstagramLogo'
     | 'Layout'
-    | 'Lightning'
     | 'LinkSimple'
     | 'LockKey'
     | 'MagnifyingGlass'
@@ -114,7 +113,6 @@ type _RegistryIconProps = _AssertIconProps<
     | 'PushPin'
     | 'Record'
     | 'Scissors'
-    | 'ShieldCheck'
     | 'SignIn'
     | 'SignOut'
     | 'SlidersHorizontal'
@@ -175,7 +173,6 @@ export {
   CircleNotch as SpinnerIcon,
   Heartbeat as HeartbeatIcon,
   Gauge as GaugeIcon,
-  ShieldCheck as VerifiedIcon,
   MinusCircle as DisabledIcon
 } from '@phosphor-icons/react'
 /**
@@ -229,7 +226,10 @@ export {
   FileVideo as VideoFileIcon,
   FilmSlate as ClapperboardIcon,
   FrameCorners as FrameIcon,
-  Crosshair as CrosshairIcon
+  Crosshair as CrosshairIcon,
+  // A marker: a point on a recording's timeline its owner wants to find
+  // again (CONTEXT.md). Never scissors, which mean a cut (plan 174 S3.12).
+  BookmarkSimple as MarkerIcon
 } from '@phosphor-icons/react'
 /**
  * Files, assets and editing.
@@ -262,9 +262,8 @@ export {
  * the real Buddy artwork: `BuddyIcon` below at icon size, `BuddyEmblem` larger.
  */
 export {
-  Brain as BrainIcon,
   Sparkle as SparkleIcon,
-  Lightning as FastIcon,
+  // Scissors means cutting only: Clean cut and clips (plan 174 S3.12, J1-22).
   Scissors as ClipIcon,
   Wrench as RepairIcon,
   Bug as BugIcon,

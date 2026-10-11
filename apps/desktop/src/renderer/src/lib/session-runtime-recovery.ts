@@ -25,8 +25,9 @@ import { OFFLINE_TOAST_ID, userErrorMessage, type UserErrorContext } from '@/lib
 import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifyOnce } from '@/lib/notify-once'
-import { toast } from '@/lib/toast'
+import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { openHealthToastAction } from '@/lib/health-door'
 import type { StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
 import {
   youtubeBroadcastToast,
@@ -275,8 +276,14 @@ export function showBackendError(
     const show = copy.tone === 'warning' ? toast.warning : toast.error
     show(copy.title, { id: OFFLINE_TOAST_ID, description: copy.description })
   } else {
+    // A failure Videorc can't explain says to look at Health (plan 174 D9),
+    // so its toast opens it. The door keeps the toast's timed life: a
+    // door is not a fix, so it never pins the toast open.
     notifyOnce(`backend-error:${copy.title}:${message}`, copy.tone, copy.title, {
-      description: copy.description
+      description: copy.description,
+      ...(copy.kind === 'unknown'
+        ? { action: openHealthToastAction(), duration: TOAST_WITH_DESCRIPTION_MS }
+        : {})
     })
   }
 }

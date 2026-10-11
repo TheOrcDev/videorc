@@ -50,7 +50,8 @@ export function CaptionPreview(): ReactElement {
   return (
     <PanelSection
       action={
-        <Badge variant={isSample ? 'secondary' : 'success'}>{isSample ? 'Sample' : 'Live'}</Badge>
+        // Which text the preview shows, not a status (plan 174 D-26): never a green "Live".
+        <Badge variant="secondary">{isSample ? 'Sample' : 'Latest caption'}</Badge>
       }
       className="lg:sticky lg:top-0"
       description="The selected style at your current video aspect ratio."

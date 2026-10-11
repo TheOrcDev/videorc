@@ -67,8 +67,8 @@ export function deriveNoiseCleanupView({
       menuAction: 'cancel',
       directLabel: `Cleaning ${Math.round(progress)}%`,
       menuLabel: `Cancel cleanup · ${Math.round(progress)}%`,
-      detail: `Cleaning noise: ${Math.round(progress)}% complete.`,
-      statusAnnouncement: `Cleaning noise, ${coarseProgress(progress)} percent.`,
+      detail: `Reducing noise: ${Math.round(progress)}% complete.`,
+      statusAnnouncement: `Reducing noise, ${coarseProgress(progress)} percent.`,
       busy: true,
       conflictsWithFileActions: true
     })
@@ -96,20 +96,20 @@ export function deriveNoiseCleanupView({
   }
 
   if (captureActive || session.status === 'running') {
-    const reason = 'Available after the live session ends.'
-    return view({ directLabel: 'Clean noise', menuLabel: 'Clean noise', disabledReason: reason })
+    const reason = 'Available when the recording or livestream ends.'
+    return view({ directLabel: 'Reduce noise', menuLabel: 'Reduce noise', disabledReason: reason })
   }
   if (session.mode === 'imported') {
-    const reason = 'Imported recordings are not supported by Noise Cleanup yet.'
-    return view({ directLabel: 'Clean noise', menuLabel: 'Clean noise', disabledReason: reason })
+    const reason = "Noise cleanup doesn't work on imported recordings yet."
+    return view({ directLabel: 'Reduce noise', menuLabel: 'Reduce noise', disabledReason: reason })
   }
   if (!session.mp4Path && !session.outputPath) {
     const reason = 'The local recording file is missing.'
-    return view({ directLabel: 'Clean noise', menuLabel: 'Clean noise', disabledReason: reason })
+    return view({ directLabel: 'Reduce noise', menuLabel: 'Reduce noise', disabledReason: reason })
   }
   if (session.status !== 'completed') {
-    const reason = 'Noise Cleanup requires a finished recording.'
-    return view({ directLabel: 'Clean noise', menuLabel: 'Clean noise', disabledReason: reason })
+    const reason = 'Noise cleanup needs a finished recording.'
+    return view({ directLabel: 'Reduce noise', menuLabel: 'Reduce noise', disabledReason: reason })
   }
 
   const gate = noiseCleanupGate(entitlements)
@@ -117,8 +117,8 @@ export function deriveNoiseCleanupView({
     return view({
       directAction: 'upgrade',
       menuAction: 'upgrade',
-      directLabel: 'Clean noise',
-      menuLabel: 'Clean noise · Premium',
+      directLabel: 'Reduce noise',
+      menuLabel: 'Reduce noise · Premium',
       detail: gate.reason,
       premiumLocked: true
     })
@@ -128,8 +128,8 @@ export function deriveNoiseCleanupView({
   return view({
     directAction: 'start',
     menuAction: 'start',
-    directLabel: retry ? 'Retry cleanup' : 'Clean noise',
-    menuLabel: retry ? 'Retry cleanup' : 'Clean noise',
+    directLabel: retry ? 'Retry cleanup' : 'Reduce noise',
+    menuLabel: retry ? 'Retry cleanup' : 'Reduce noise',
     detail: retry ? (job.errorMessage ?? 'The previous cleanup did not finish.') : null
   })
 }

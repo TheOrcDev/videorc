@@ -79,7 +79,7 @@ export function scheduledLifecycleChip(event: ScheduledStreamEvent): ScheduledLi
     case 'preparing':
       return { kind: 'status', label: 'Preparing', tone: 'neutral' }
     case 'live':
-      return { kind: 'live', label: 'Live' }
+      return { kind: 'live', label: 'On air' }
     case 'completed':
       return { kind: 'status', label: 'Ended', tone: 'neutral' }
     case 'canceled':

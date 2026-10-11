@@ -434,7 +434,7 @@ export function LayoutTab(): ReactElement {
   const liveHint = liveHidden ? `${liveHidden.title}. ${liveHidden.detail}` : null
   // Decision 6: entering the tab with the preview CLOSED opens it docked into
   // the canvas; an open floating preview stays floating (the footer offers
-  // "Show live here"); leaving the tab changes nothing. Once per tab entry,
+  // "Show preview here"); leaving the tab changes nothing. Once per tab entry,
   // decided on main's fresh state so a stale renderer snapshot at app start
   // can never re-dock a window the user left floating.
   const autoOpenDecidedRef = useRef(false)
@@ -1316,7 +1316,8 @@ function SourceVisibilityField({
 // corner menu is a snap that writes the same rect.
 const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
-  captions: 'The caption bar. Its width is the rect; style and size stay in Captions.',
+  captions:
+    'The caption bar. Drag its edges to set its width; style and text size live in Captions.',
   buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.'
 }
 
@@ -1366,7 +1367,9 @@ export function OverlayItemInspector({
         />
       </Field>
       <Field>
-        <FieldLabel>Snap ({orientation})</FieldLabel>
+        <FieldLabel>
+          {orientation === 'vertical' ? 'Snap on the vertical stream' : 'Snap to'}
+        </FieldLabel>
         {/* One-shot moves, so plain Buttons: nothing stays selected (plan 174 C-37). */}
         <div aria-label="Snap overlay" className="flex w-full flex-wrap gap-2" role="group">
           {OVERLAY_SNAPS.map((snap) => (

@@ -292,8 +292,8 @@ describe('stats bar items (plan 057)', () => {
       { label: 'Bitrate', value: '6 Mbps' },
       { label: 'Frame rate', value: '60 fps' },
       { label: 'Dropped frames', value: 'None' },
-      { label: 'Twitch', value: 'Live', platform: 'twitch', dot: 'good' },
-      { label: 'X', value: 'Live', platform: 'x', dot: 'good' }
+      { label: 'Twitch', value: 'On air', platform: 'twitch', dot: 'good' },
+      { label: 'X', value: 'On air', platform: 'x', dot: 'good' }
     ])
   })
 
@@ -366,7 +366,7 @@ describe('stats bar items (plan 057)', () => {
     })
     expect(
       reading(reconnecting)?.details.find((detail) => detail.label === 'YouTube')
-    ).toMatchObject({ value: 'Reconnecting', dot: 'error' })
+    ).toMatchObject({ value: 'Reconnecting…', dot: 'error' })
     const notReceiving = withTargets(healthy(), [
       { targetId: 'yt', platform: 'youtube', label: 'YouTube', state: 'warning' }
     ])

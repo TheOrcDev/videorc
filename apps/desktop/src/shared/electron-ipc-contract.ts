@@ -209,6 +209,7 @@ export const electronInvokeApiMethods = {
   'resource:authorize-output-directory': 'authorizeOutputDirectory',
   'resource:reveal-session': 'revealSession',
   'resource:reveal-background': 'revealBackgroundAsset',
+  'resource:reveal-support-bundle': 'revealSupportBundle',
   'resource:open-session': 'openSession',
   'media:grant-session': 'grantSessionMedia',
   'resource:trash-session-deletion': 'trashSessionDeletion',
@@ -1383,6 +1384,7 @@ const specificRuntimeInvokeContracts = {
   'resource:authorize-output-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-background': invokeContract(tupleSchema([boundedIdentifier])),
+  'resource:reveal-support-bundle': invokeContract(tupleSchema([pathSchema])),
   'resource:open-session': invokeContract(tupleSchema([boundedIdentifier])),
   'media:grant-session': invokeContract(
     tupleSchema([boundedIdentifier]),

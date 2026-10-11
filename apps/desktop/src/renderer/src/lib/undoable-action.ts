@@ -50,3 +50,17 @@ export function scheduleUndoableAction(
     }
   }
 }
+
+/**
+ * An action that waits for its owner instead of a clock (plan 174 S3.12): it
+ * runs on `flush` (an Undo toast closed, the dialog went away) unless `undo`
+ * comes first. Drive it from the toast's own lifecycle, which pauses while
+ * the pointer rests on it and while the window is hidden, so Undo is never
+ * on screen for an action that already ran.
+ */
+export function holdUndoableAction(run: () => void): UndoableAction {
+  return scheduleUndoableAction(run, 0, {
+    setTimeout: () => null,
+    clearTimeout: () => undefined
+  })
+}

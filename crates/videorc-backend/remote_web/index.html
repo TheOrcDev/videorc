@@ -20,7 +20,7 @@
   <body>
     <header class="bar">
       <h1>Videorc</h1>
-      <span id="live" class="live" hidden>LIVE</span>
+      <span id="live" class="live" hidden>ON AIR</span>
       <span class="spring"></span>
       <span id="status" class="pill" data-status="connecting">Connecting…</span>
     </header>
@@ -29,14 +29,14 @@
       <section id="view-gate" class="gate" hidden>
         <h2 id="gate-title">Pair this phone</h2>
         <p id="gate-text">
-          In Videorc on your computer, open Settings → Phone remote → Pair a phone, then scan the
-          code with this phone's camera.
+          In Videorc on your computer, open Settings → Remote → Pair a phone, then scan the code
+          with this phone's camera.
         </p>
       </section>
 
       <section id="view-comments" class="view" hidden>
         <div id="comments" class="comments" role="list"></div>
-        <p id="comments-empty" class="empty">Comments appear here when you are live.</p>
+        <p id="comments-empty" class="empty">Chat appears here when you go live.</p>
         <button id="jump" class="jump" type="button" hidden></button>
       </section>
 
@@ -52,8 +52,8 @@
     <div id="snack" class="snack" role="status" hidden></div>
 
     <nav id="tabs" class="tabs" hidden>
-      <button type="button" data-view="comments" aria-pressed="true">Comments</button>
-      <button type="button" data-view="deck" aria-pressed="false">Deck</button>
+      <button type="button" data-view="comments" aria-pressed="true">Chat</button>
+      <button type="button" data-view="deck" aria-pressed="false">Controls</button>
     </nav>
 
     <noscript>Videorc Remote needs JavaScript.</noscript>

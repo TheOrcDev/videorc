@@ -6,7 +6,14 @@ import type {
   SessionSummary
 } from './backend'
 import { openCleanCut } from './clean-cut-events'
-import { cleanCutCapabilities, cleanCutEligibility, type CleanCutSession } from './clean-cut-view'
+import {
+  CLEAN_CUT_CONSENT_OFF_REASON,
+  cleanCutCapabilities,
+  cleanCutEligibility,
+  cleanCutErrorReason,
+  cleanCutUnavailableReason,
+  type CleanCutSession
+} from './clean-cut-view'
 import { cloudAiUploadGate } from './entitlement-ui'
 import { applyFinalizationEvent } from './session-finalization'
 import { toast } from './toast'
@@ -100,6 +107,28 @@ export function decideCleanCutAutoRun(input: CleanCutAutoInput): CleanCutAutoDec
   return { kind: 'run' }
 }
 
+/** Skips the streamer would expect to be cut: each warns once (E-25). */
+const NOTICED_SKIPS: ReadonlySet<CleanCutAutoSkipReason> = new Set([
+  'no-consent',
+  'not-premium',
+  'unavailable'
+])
+
+/**
+ * Why a finished recording got no clean cut with the switch on, in plain
+ * words (plan 174 E-25), or null when the skip is expected (the switch off,
+ * already tried, a stream without a recording, a short take). Pure.
+ */
+export function cleanCutAutoSkipReason(
+  reason: CleanCutAutoSkipReason,
+  context: { premiumReason: string; reasonCode: string | null }
+): string | null {
+  if (!NOTICED_SKIPS.has(reason)) return null
+  if (reason === 'no-consent') return CLEAN_CUT_CONSENT_OFF_REASON
+  if (reason === 'not-premium') return context.premiumReason
+  return cleanCutUnavailableReason(context.reasonCode)
+}
+
 export interface CleanCutStorage {
   getItem(key: string): string | null
   setItem(key: string, value: string): void
@@ -146,23 +175,40 @@ export async function autoRunCleanCut(
   )
   const attempted = claimedSessionIds.has(sessionId) || attemptedIds.includes(sessionId)
   const session = attempted ? null : await findSessionRow(context, event)
+  const gate = cloudAiUploadGate(context.entitlements)
+  const capabilities = cleanCutCapabilities(context.capabilities)
   const decision = decideCleanCutAutoRun({
     event,
     session,
     autoEnabled: true,
     attempted,
     consent: context.consent,
-    premium: cloudAiUploadGate(context.entitlements).allowed,
-    available: cleanCutCapabilities(context.capabilities)?.available === true
+    premium: gate.allowed,
+    available: capabilities?.available === true
   })
-  if (decision.kind !== 'run') return decision
+  const claim = (): void => {
+    claimedSessionIds.add(sessionId)
+    writeStorage(
+      storage,
+      CLEAN_CUT_ATTEMPTED_STORAGE_KEY,
+      JSON.stringify(withAttemptedSessionId(attemptedIds, sessionId))
+    )
+  }
+  if (decision.kind !== 'run') {
+    // A skip the streamer didn't expect warns once per recording (E-25): the
+    // ledger keeps it from warning again, and the toast leads to Clean cut.
+    const why = cleanCutAutoSkipReason(decision.reason, {
+      premiumReason: gate.allowed ? '' : gate.reason,
+      reasonCode: capabilities?.reasonCode ?? null
+    })
+    if (why) {
+      claim()
+      showCleanCutAutoFailed(sessionId, why)
+    }
+    return decision
+  }
 
-  claimedSessionIds.add(sessionId)
-  writeStorage(
-    storage,
-    CLEAN_CUT_ATTEMPTED_STORAGE_KEY,
-    JSON.stringify(withAttemptedSessionId(attemptedIds, sessionId))
-  )
+  claim()
   try {
     await context.request<CleanCutJob>('cleanCut.start', {
       sessionId,
@@ -171,18 +217,21 @@ export async function autoRunCleanCut(
     })
   } catch (error) {
     if (errorCode(error) !== 'already-running') {
-      showCleanCutAutoFailed(sessionId, error instanceof Error ? error.message : String(error))
+      showCleanCutAutoFailed(sessionId, cleanCutErrorReason(error))
     }
   }
   return decision
 }
 
-/** Quiet on purpose: nothing retries by itself, and the card has Retry. */
+/**
+ * Quiet on purpose: nothing retries by itself, and Clean cut has Make and
+ * Retry. One toast per recording; its action opens Clean cut on it.
+ */
 export function showCleanCutAutoFailed(sessionId: string, reason: string): void {
   toast.warning("Your clean cut didn't start", {
     id: `clean-cut-auto-${sessionId}`,
     description: reason,
-    action: { label: 'Open Buddy', onClick: () => openCleanCut({ sessionId }) }
+    action: { label: 'Open Clean cut', onClick: () => openCleanCut({ sessionId }) }
   })
 }
 

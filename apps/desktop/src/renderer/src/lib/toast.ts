@@ -9,7 +9,25 @@ import { stripIpcPrefix } from '@/lib/ipc-error-message'
 // This is defence in depth behind typed backend copy; the raw text goes to
 // the renderer console, which the support bundle collects.
 
-export const TOAST_DETAILS_IN_DIAGNOSTICS = 'Details are in diagnostics.'
+/**
+ * What a toast says in place of a withheld provider message (plan 174 A-20):
+ * the raw text went to the console, which the support bundle collects.
+ */
+export const TOAST_DETAILS_SAVED = 'Details were saved for support.'
+
+/** The support bundle action's one name (plan 174 S1.6b, I-1). */
+export const SUPPORT_BUNDLE_LABEL = 'Export support bundle'
+
+let supportBundleExport: (() => void) | null = null
+
+/**
+ * The main window hands its support bundle export here, so a toast whose
+ * details were withheld offers "Export support bundle" (plan 174 A-20).
+ * Windows without one show the sentence alone.
+ */
+export function registerSupportBundleExport(exporter: (() => void) | null): void {
+  supportBundleExport = exporter
+}
 
 const HTML_TAG = /<\/?[a-zA-Z!][^>]*>/g
 const ESCAPED_ENTITY = /&(?:lt|gt|quot|amp|apos|#\d+|#x[0-9a-fA-F]+);/g
@@ -34,13 +52,13 @@ function decodeEntity(entity: string): string {
 
 export type GuardedToastText = {
   text: string
-  /** The raw text when it was altered, for the diagnostics log; null otherwise. */
+  /** The raw text when it was altered, for the console and the support bundle; null otherwise. */
   withheld: string | null
 }
 
 /**
  * Pure. Strips HTML tags, decodes escaped entities, and replaces anything that
- * still looks like a JSON blob with "Details are in diagnostics.".
+ * still looks like a JSON blob with "Details were saved for support.".
  */
 export function guardToastText(raw: string): GuardedToastText {
   // Plan 174 S2.4: a backstop behind `userErrorMessage`. The wrapper is
@@ -64,11 +82,11 @@ export function guardToastText(raw: string): GuardedToastText {
   }
   HTML_TAG.lastIndex = 0
   if (JSON_BLOB.test(text) || /[{}]/.test(text)) {
-    text = TOAST_DETAILS_IN_DIAGNOSTICS
+    text = TOAST_DETAILS_SAVED
     altered = true
   } else {
     text = text.replace(/\s+/g, ' ').trim()
-    if (altered && !text) text = TOAST_DETAILS_IN_DIAGNOSTICS
+    if (altered && !text) text = TOAST_DETAILS_SAVED
   }
   return { text, withheld: altered ? raw : null }
 }
@@ -97,8 +115,6 @@ function guardOptions(
 ): { title: ToastTitle; options: ExternalToast | undefined } {
   let nextTitle = title
   let nextOptions = options
-  const duration = timed ? defaultToastDuration(options) : options?.duration
-  if (options && duration !== options.duration) nextOptions = { ...options, duration }
   if (typeof title === 'string') {
     const guarded = guardToastText(title)
     if (guarded.withheld !== null) {
@@ -113,6 +129,20 @@ function guardOptions(
       nextOptions = { ...nextOptions, description: guarded.text }
     }
   }
+  // A withheld message points at the support bundle, so offer to export it
+  // (plan 174 A-20), unless the toast already has its own action.
+  const exporter = supportBundleExport
+  if (
+    exporter &&
+    !nextOptions?.action &&
+    (nextTitle === TOAST_DETAILS_SAVED || nextOptions?.description === TOAST_DETAILS_SAVED)
+  ) {
+    nextOptions = { ...nextOptions, action: { label: SUPPORT_BUNDLE_LABEL, onClick: exporter } }
+  }
+  // Durations follow the toast's final shape, so the offered export keeps the
+  // toast up like any other action (plan 174 S2.4's durations).
+  const duration = timed ? defaultToastDuration(nextOptions) : nextOptions?.duration
+  if (nextOptions && duration !== nextOptions.duration) nextOptions = { ...nextOptions, duration }
   return { title: nextTitle, options: nextOptions }
 }
 

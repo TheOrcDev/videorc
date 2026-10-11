@@ -198,6 +198,7 @@ const api: VideorcApi = {
     invoke('resource:authorize-output-directory', directoryHandleId),
   revealSession: (sessionId) => invoke('resource:reveal-session', sessionId),
   revealBackgroundAsset: (assetId) => invoke('resource:reveal-background', assetId),
+  revealSupportBundle: (path) => invoke('resource:reveal-support-bundle', path),
   obsDiscover: () => invoke('obs:discover'),
   obsRead: (collection, profile) => invoke('obs:read', collection, profile),
   obsReadStreamKey: (profile) => invoke('obs:read-stream-key', profile),

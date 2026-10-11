@@ -43,16 +43,16 @@ describe('liveDestinationsView', () => {
       kind: 'problems',
       summary: '1 of 4 on air',
       problems: [
-        { targetId: 'youtube', label: 'YouTube', word: 'Stopped', tone: 'error' },
-        { targetId: 'kick', label: 'Kick', word: 'Reconnecting', tone: 'warn' },
+        { targetId: 'youtube', label: 'YouTube', word: 'Failed', tone: 'error' },
+        { targetId: 'kick', label: 'Kick', word: 'Reconnecting…', tone: 'warn' },
         { targetId: 'x', label: 'X', word: 'Not receiving', tone: 'warn' }
       ]
     })
   })
 
-  it('reads a stopped leg as Stopped, and a fine one as no problem', () => {
+  it('reads a leg that ended as Ended, and a fine one as no problem', () => {
     expect(liveDestinationProblem(target('stopped'))).toMatchObject({
-      word: 'Stopped',
+      word: 'Ended',
       tone: 'error'
     })
     for (const state of ['live', 'ready', 'connecting', 'not-configured'] as const) {

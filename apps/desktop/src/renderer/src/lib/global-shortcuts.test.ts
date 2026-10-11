@@ -176,6 +176,10 @@ describe('globalShortcutLabel (plan 174 A-22)', () => {
     expect(globalShortcutLabel('stream-toggle')).toBe('Go Live / end livestream')
     expect(globalShortcutLabel('layout-next')).toBe('Next scene')
     expect(globalShortcutLabel('layout:camera-only')).not.toContain('camera-only')
+    // Out of its list, a vertical layout says so (plan 174 S2.3a).
+    expect(globalShortcutLabel('layout:vertical-screen-camera')).toBe('Vertical screen + camera')
+    expect(globalShortcutLabel('record-toggle')).toBe('Record / stop recording')
+    expect(globalShortcutLabel('mic-toggle')).toBe('Mute / unmute microphone')
     expect(globalShortcutLabel('unknown-action')).toBe('unknown-action')
   })
 })

@@ -70,6 +70,9 @@ describe('the application menu mirrors SHORTCUTS', () => {
       expect(entry, window.id).toBeDefined()
       // Both sides are Electron accelerators (plan 174 S1.2): equal, not mapped.
       expect(window.accelerator, window.id).toBe(entry!.accelerators[0])
+      // One name per window (plan 174 S2.3a, A-11): the menu and Settings →
+      // Shortcuts say the same thing.
+      expect(entry!.label, window.id).toBe(`Open ${window.label}`)
     }
   })
 

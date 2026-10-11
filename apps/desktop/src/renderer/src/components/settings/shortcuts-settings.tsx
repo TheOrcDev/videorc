@@ -2,7 +2,6 @@ import { findAcceleratorOwner } from '../../../../shared/accelerator'
 import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
 import {
   globalShortcutEntries,
-  globalShortcutLayout,
   type GlobalShortcutAction
 } from '../../../../shared/global-shortcuts'
 import { useSyncExternalStore, type ReactElement } from 'react'
@@ -15,8 +14,7 @@ import { FieldGroup, FieldLegend, FieldSet } from '@/components/ui/field'
 import { KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
-import { globalShortcutRegistration } from '@/lib/global-shortcuts'
-import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
+import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { shortcutsByGroup } from '@/lib/shortcuts'
@@ -30,24 +28,6 @@ const GLOBAL_ACTION_ROWS = [
   'layout-next',
   'layout-previous'
 ] as const satisfies readonly GlobalShortcutAction[]
-
-const GLOBAL_ACTION_LABELS: Record<(typeof GLOBAL_ACTION_ROWS)[number], string> = {
-  'record-toggle': RECORD_SHORTCUT_LABEL,
-  'stream-toggle': GO_LIVE_SHORTCUT_LABEL,
-  'mic-toggle': 'Mute / unmute mic',
-  'system-audio-toggle': 'Turn system audio on/off',
-  'clip-mark': 'Mark a clip',
-  'layout-next': 'Next layout',
-  'layout-previous': 'Previous layout'
-}
-
-function globalShortcutActionLabel(action: GlobalShortcutAction): string {
-  const layout = globalShortcutLayout(action)
-  if (layout) {
-    return BUILTIN_LAYOUTS.find(({ id }) => id === layout)?.label ?? layout
-  }
-  return GLOBAL_ACTION_LABELS[action as (typeof GLOBAL_ACTION_ROWS)[number]]
-}
 
 /**
  * Settings → Shortcuts: the global shortcuts you record, beside every key that
@@ -78,7 +58,7 @@ export function ShortcutsSettings(): ReactElement {
         action,
         runtimeInfo?.platform
       )
-      return owner ? `Already used by ${globalShortcutActionLabel(owner)}.` : null
+      return owner ? `Already used by ${globalShortcutLabel(owner)}.` : null
     }
 
   return (
@@ -92,7 +72,7 @@ export function ShortcutsSettings(): ReactElement {
             <ShortcutRecorderField
               key={action}
               id={`global-shortcut-${action}`}
-              label={globalShortcutActionLabel(action)}
+              label={globalShortcutLabel(action)}
               platform={runtimeInfo?.platform}
               validate={validateGlobalShortcut(action)}
               registrationFailed={shortcutRegistration[action] === false}

@@ -5,6 +5,7 @@ import { toastUserError } from '@/lib/user-error'
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Field,
@@ -38,11 +39,14 @@ import {
   captionsStatusIsActive,
   latestFinalCaptionText
 } from '@/lib/captions-ui'
+import { livestreamCaptionsBlockerFor } from '@/lib/captions-preflight'
 import { simulcastArmed, type CaptionsCaptureSettings } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { unlockActionForGate } from '@/lib/lock-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
+import { captionsStatusLabel, captionsStatusTone } from '@/lib/state-labels'
 import { cn } from '@/lib/utils'
+import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 const LANGUAGES = [
   { id: 'auto', label: 'Auto-detect' },
@@ -71,51 +75,44 @@ function captionsStatusPresentation(
   enabled: boolean,
   sessionActive: boolean
 ): CaptionStatusPresentation {
-  if (!enabled) {
-    return { value: 'Off', tone: 'neutral', detail: 'Enable captions to arm them for a session.' }
+  // The word and its tone are the one captions vocabulary (plan 174 D-26);
+  // only the line under it is this page's own.
+  const options = { enabled, sessionActive }
+  return {
+    value: captionsStatusLabel(status, options),
+    tone: captionsStatusTone(status, options),
+    detail: captionsStatusDetail(status, enabled, sessionActive)
   }
+}
+
+function captionsStatusDetail(
+  status: CaptionsStatus,
+  enabled: boolean,
+  sessionActive: boolean
+): string {
+  if (!enabled) return 'Turn on Live captions to transcribe your next recording or livestream.'
   switch (status.state) {
     case 'starting':
-      return { value: 'Starting', tone: 'neutral', detail: 'Connecting to transcription…' }
+      return 'Connecting to transcription…'
     case 'listening':
     case 'live':
-      return { value: 'Listening', tone: 'good', detail: 'Microphone speech is being transcribed.' }
+      return 'Microphone speech is being transcribed.'
     case 'reconnecting':
-      return { value: 'Reconnecting', tone: 'warn', detail: 'Trying to restore live captions.' }
+      return 'Trying to restore live captions.'
     case 'degraded':
-      return {
-        value: 'Higher delay',
-        tone: 'warn',
-        detail: status.message ?? 'Captions are continuing with a longer delay.'
-      }
+      return status.message ?? 'Captions are continuing in 3-second chunks.'
     case 'blocked':
-      return {
-        value: 'Blocked',
-        tone: 'error',
-        detail: status.message ?? 'Captions need attention before they can start.'
-      }
+      return status.message ?? 'Captions need attention before they can start.'
     case 'error':
-      return {
-        value: 'Error',
-        tone: 'error',
-        detail: status.message ?? 'Captions stopped unexpectedly.'
-      }
+      return status.message ?? 'Captions stopped unexpectedly.'
     case 'ready':
-      return {
-        value: 'Ready',
-        tone: 'good',
-        detail: sessionActive
-          ? 'Ready to listen for microphone speech.'
-          : 'Starts with your next session.'
-      }
+      return sessionActive
+        ? 'Ready to listen for microphone speech.'
+        : 'Starts with your next recording or livestream.'
     default:
-      return {
-        value: sessionActive ? 'Waiting' : 'Armed',
-        tone: 'neutral',
-        detail: sessionActive
-          ? 'Waiting for the caption service.'
-          : 'Starts with your next session.'
-      }
+      return sessionActive
+        ? 'Waiting for the caption service.'
+        : 'Starts with your next recording or livestream.'
   }
 }
 
@@ -169,6 +166,9 @@ export function CaptionsControls(): ReactElement {
   // A vertical destination shares the recording's picture with the
   // horizontal stream, so livestream captions land in the recording too.
   const verticalLegArmed = simulcastArmed(captureConfig)
+  // The rule a livestream would break today, said here before Go Live does
+  // (plan 174 S3.4, D-9).
+  const livestreamBlocker = captions.enabled ? livestreamCaptionsBlockerFor(captureConfig) : null
   const canEnable = gate.allowed || captions.enabled
   const showRetry =
     captions.enabled &&
@@ -210,7 +210,7 @@ export function CaptionsControls(): ReactElement {
   return (
     <PanelSection
       action={<StatusBadge tone={status.tone} value={status.value} />}
-      description="Transcribe your microphone during a recording or livestream."
+      description="Transcribe your microphone during a recording or livestream. On a livestream, captions need 30 fps or less, and one stream quality when you also record."
       icon={CaptionsIcon}
       title="Live captions"
     >
@@ -223,8 +223,8 @@ export function CaptionsControls(): ReactElement {
           <FieldContent>
             <FieldTitle>Enable live captions</FieldTitle>
             <FieldDescription>
-              Starts automatically with your next session. Turn this off at any time to stop audio
-              upload.
+              Starts with your next recording or livestream. Turn it off at any time to stop sending
+              audio.
             </FieldDescription>
           </FieldContent>
           <Switch
@@ -234,6 +234,12 @@ export function CaptionsControls(): ReactElement {
             onCheckedChange={(enabled) => patchCaptions({ enabled })}
           />
         </Field>
+        {livestreamBlocker ? (
+          <Alert data-testid="captions-livestream-blocker" variant="warning">
+            <AlertTitle>Captions can&apos;t go out on your next livestream</AlertTitle>
+            <AlertDescription>{livestreamBlocker.description}</AlertDescription>
+          </Alert>
+        ) : null}
 
         <div className="flex flex-col gap-3 rounded-row border border-border bg-inset p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -325,7 +331,7 @@ export function CaptionsControls(): ReactElement {
             <FieldLabel htmlFor="caption-language">Spoken language</FieldLabel>
             <FieldDescription>
               {isSessionActive
-                ? 'Language is locked until the next session.'
+                ? 'Locked while you’re recording or live. Changes apply the next time you record or go live.'
                 : 'Auto-detect works for most conversations.'}
             </FieldDescription>
           </FieldContent>
@@ -385,8 +391,8 @@ export function CaptionsControls(): ReactElement {
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
           <p className="max-w-md text-xs text-muted-foreground">
-            While enabled, microphone audio is sent to Videorc’s transcription provider only during
-            an active session.
+            When Live captions is on, Videorc sends your microphone audio to its transcription
+            service only while you record or go live.
           </p>
           <Button
             disabled={!captionsWindow.enabled && !captionsWindow.open}
@@ -395,7 +401,9 @@ export function CaptionsControls(): ReactElement {
             onClick={() => void toggleCaptionsWindow()}
           >
             <ExternalLinkIcon data-icon="inline-start" />
-            {captionsWindow.open ? 'Close reader' : 'Open reader'}
+            {captionsWindow.open
+              ? `Close ${WINDOW_NAMES.captions}`
+              : `Open ${WINDOW_NAMES.captions}`}
             <ShortcutKeys
               accelerator={shortcutAccelerator('captions-window')}
               className="ml-1"

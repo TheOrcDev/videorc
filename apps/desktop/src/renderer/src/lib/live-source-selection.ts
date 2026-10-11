@@ -97,8 +97,10 @@ export class LiveSourceSelectionController {
 
   reason(kind: SessionSourceKind): string | null {
     if (this.sessionState === 'idle' || this.sessionState === 'failed') return null
-    if (this.sessionState === 'starting') return 'Sources are available after the session starts.'
-    if (this.sessionState === 'stopping') return 'The session is stopping.'
+    // The streamer's words for the session's edges (plan 174 S2.3a): never "session".
+    if (this.sessionState === 'starting')
+      return 'Sources can change once the recording or livestream has started.'
+    if (this.sessionState === 'stopping') return 'Stopping…'
     if (this.state.pending || this.state.checking)
       return this.state.checking ? (this.state.error ?? 'Checking source…') : 'Changing source…'
     const capability = this.state.snapshot?.capabilities.find((item) => item.kind === kind)

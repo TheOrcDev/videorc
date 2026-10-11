@@ -5,6 +5,7 @@ import {
 } from '../../../shared/global-shortcuts'
 export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 import { toast } from '@/lib/toast'
+import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 
 import type { DeviceStatus, GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
@@ -80,9 +81,12 @@ function toggleSystemAudio(context: GlobalShortcutContext): void {
   }
 }
 
+// The one label table for global shortcuts: Settings → Shortcuts, its
+// "Already used by" refusal and the registration toast all read it (plan 174
+// S2.3a, after S2.4). The session pair is S2.2's verb pair.
 const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
-  'record-toggle': 'Record / stop recording',
-  'stream-toggle': 'Go Live / end livestream',
+  'record-toggle': RECORD_SHORTCUT_LABEL,
+  'stream-toggle': GO_LIVE_SHORTCUT_LABEL,
   'mic-toggle': 'Mute / unmute microphone',
   'system-audio-toggle': 'Turn system audio on or off',
   'clip-mark': 'Mark a clip',
@@ -90,11 +94,15 @@ const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
   'layout-previous': 'Previous scene'
 }
 
-/** Pure. What a global shortcut does, in words, never its id (plan 174 A-22). */
+/**
+ * Pure. What a global shortcut does, in words, never its id (plan 174 A-22).
+ * Read out of its list (a toast, "Already used by …"), so a vertical layout
+ * says so ("Vertical screen + camera").
+ */
 export function globalShortcutLabel(action: string): string {
   if (!isGlobalShortcutAction(action)) return action
   const layout = globalShortcutLayout(action)
-  if (layout) return layoutPresetLabel(layout)
+  if (layout) return layoutPresetLabel(layout, { bothOrientations: true })
   return GLOBAL_SHORTCUT_LABELS[action] ?? action
 }
 

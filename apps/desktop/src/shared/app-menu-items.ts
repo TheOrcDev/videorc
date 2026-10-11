@@ -3,6 +3,8 @@
 // or SHORTCUTS, so this mirrors them; workspace-nav-menu.test.ts holds them
 // equal.
 
+import { WINDOW_NAMES } from './window-names'
+
 /** A key main forwards on `shortcut:navigate`: ⌘1–⌘9 open a page, ⌘, Settings. */
 export type AppMenuPageKey = '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | ','
 
@@ -43,10 +45,10 @@ export interface AppMenuWindow {
 
 /** The Window menu's windows. Each item opens its window, or closes it, like its shortcut. */
 export const APP_MENU_WINDOWS: readonly AppMenuWindow[] = [
-  { id: 'preview', label: 'Preview', accelerator: 'CmdOrCtrl+P' },
-  { id: 'notes', label: 'Notes', accelerator: 'CmdOrCtrl+Shift+N' },
-  { id: 'stream-manager', label: 'Stream Manager', accelerator: 'CmdOrCtrl+Shift+J' },
-  { id: 'captions', label: 'Captions reader', accelerator: 'CmdOrCtrl+Shift+C' }
+  { id: 'preview', label: WINDOW_NAMES.preview, accelerator: 'CmdOrCtrl+P' },
+  { id: 'notes', label: WINDOW_NAMES.notes, accelerator: 'CmdOrCtrl+Shift+N' },
+  { id: 'stream-manager', label: WINDOW_NAMES.streamManager, accelerator: 'CmdOrCtrl+Shift+J' },
+  { id: 'captions', label: WINDOW_NAMES.captions, accelerator: 'CmdOrCtrl+Shift+C' }
 ]
 
 /** Help → Release Notes: this version's page, as the packaged renderer's `releaseNotesUrl` builds it. */

@@ -6,6 +6,8 @@ import {
   LightModeIcon,
   LivestreamIcon,
   BuddyIcon,
+  NoteIcon,
+  PreviewIcon,
   RecordIcon,
   SettingsIcon,
   StopIcon
@@ -26,6 +28,7 @@ import {
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { BUDDY_TABS } from '@/lib/buddy-tabs'
 import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
+import { HEALTH_SEARCH_KEYWORDS } from '@/lib/health-door'
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import { SETTINGS_TABS } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
@@ -37,6 +40,7 @@ import {
   useWorkspaceNav
 } from '@/components/workspace-nav'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 /** ⌘K command palette: jump anywhere + run the core session/theme actions. Open state is
  *  owned by the shell so the sidebar trigger and the global shortcut share it. */
@@ -55,6 +59,11 @@ export function CommandPalette({
     startRecording,
     startLivestream,
     requestStopSession,
+    previewWindow,
+    togglePreviewWindow,
+    notesWindow,
+    openNotesWindow,
+    closeNotesWindow,
     commentsWindow,
     toggleCommentsWindow,
     captionsWindow,
@@ -106,6 +115,9 @@ export function CommandPalette({
               <CommandItem
                 key={tab.id}
                 value={`Go to ${tab.label}`}
+                // Health is out of the sidebar (plan 174 D9): ⌘K finds it by
+                // what people look for there.
+                keywords={tab.id === 'diagnostics' ? [...HEALTH_SEARCH_KEYWORDS] : undefined}
                 onSelect={() => run(() => setActive(tab.id))}
               >
                 <tab.icon className="size-4" />
@@ -221,13 +233,47 @@ export function CommandPalette({
               </CommandItem>
             </>
           )}
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        {/* Every window by its one name (plan 174 S2.3a, A-11), in the
+            Window menu's order. */}
+        <CommandGroup heading="Windows">
+          <CommandItem value="Toggle Preview window" onSelect={() => run(togglePreviewWindow)}>
+            <PreviewIcon className="size-4" />
+            {previewWindow.open ? `Close ${WINDOW_NAMES.preview}` : `Open ${WINDOW_NAMES.preview}`}
+            <CommandShortcut className="tracking-normal">
+              <ShortcutKeys
+                accelerator={shortcutAccelerator('preview-window')}
+                platform={platform}
+              />
+            </CommandShortcut>
+          </CommandItem>
+          {runtimeInfo?.notesWindowEnabled !== false ? (
+            <CommandItem
+              value="Toggle Notes window"
+              onSelect={() => run(notesWindow.open ? closeNotesWindow : openNotesWindow)}
+            >
+              <NoteIcon className="size-4" />
+              {notesWindow.open ? `Close ${WINDOW_NAMES.notes}` : `Open ${WINDOW_NAMES.notes}`}
+              <CommandShortcut className="tracking-normal">
+                <ShortcutKeys
+                  accelerator={shortcutAccelerator('notes-window')}
+                  platform={platform}
+                />
+              </CommandShortcut>
+            </CommandItem>
+          ) : null}
           {runtimeInfo?.commentsWindowEnabled ? (
             <CommandItem
               value="Toggle Stream Manager chat window"
               onSelect={() => run(() => toggleCommentsWindow())}
             >
               <ChatIcon className="size-4" />
-              {commentsWindow.open ? 'Close Stream Manager' : 'Open Stream Manager'}
+              {commentsWindow.open
+                ? `Close ${WINDOW_NAMES.streamManager}`
+                : `Open ${WINDOW_NAMES.streamManager}`}
               <CommandShortcut className="tracking-normal">
                 <ShortcutKeys
                   accelerator={shortcutAccelerator('comments-window')}
@@ -238,11 +284,13 @@ export function CommandPalette({
           ) : null}
           {captionsWindow.enabled || captionsWindow.open ? (
             <CommandItem
-              value="Toggle captions reader"
+              value="Toggle Captions reader window"
               onSelect={() => run(() => toggleCaptionsWindow())}
             >
               <CaptionsIcon className="size-4" />
-              {captionsWindow.open ? 'Close captions reader' : 'Open captions reader'}
+              {captionsWindow.open
+                ? `Close ${WINDOW_NAMES.captions}`
+                : `Open ${WINDOW_NAMES.captions}`}
               <CommandShortcut className="tracking-normal">
                 <ShortcutKeys
                   accelerator={shortcutAccelerator('captions-window')}

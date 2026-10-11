@@ -39,6 +39,11 @@ beforeEach(() => {
     startLivestream: vi.fn(),
     stopSession: vi.fn(async () => true),
     requestStopSession: vi.fn(async () => false),
+    previewWindow: { open: false },
+    togglePreviewWindow: vi.fn(async () => undefined),
+    notesWindow: { open: false },
+    openNotesWindow: vi.fn(async () => undefined),
+    closeNotesWindow: vi.fn(async () => undefined),
     commentsWindow: { open: false },
     toggleCommentsWindow: vi.fn(async () => undefined),
     captionsWindow: { open: false },
@@ -132,5 +137,43 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
     await render()
     expect(item('Start recording').getAttribute('aria-disabled')).toBe('true')
     expect(item('Go live…').getAttribute('aria-disabled')).toBe('true')
+  })
+})
+
+describe('CommandPalette windows (plan 174 S2.3a, A-11)', () => {
+  it('lists every window by its one name, in the Window menu order', async () => {
+    mocked.recording = { state: 'idle' }
+    mocked.core.runtimeInfo = {
+      platform: 'darwin',
+      commentsWindowEnabled: true,
+      notesWindowEnabled: true
+    }
+    mocked.core.captionsWindow = { open: false, enabled: true }
+    mocked.core.notesWindow = { open: true }
+    await render()
+    const windows = labels().filter((label) => /^(Open|Close) /.test(label))
+    expect(windows.map((label) => label.replace(/[⌘⇧].*$/, '').trim())).toEqual([
+      'Open Preview',
+      'Close Notes',
+      'Open Stream Manager',
+      'Open Captions reader'
+    ])
+    await act(async () => item(windows[1]).click())
+    expect(mocked.core.closeNotesWindow).toHaveBeenCalledOnce()
+    expect(mocked.core.openNotesWindow).not.toHaveBeenCalled()
+  })
+})
+
+describe('CommandPalette Health door (plan 174 D9)', () => {
+  it('finds Health by what people look for there', async () => {
+    await render()
+    const input = document.querySelector<HTMLInputElement>('[cmdk-input]')!
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => {
+      setValue.call(input, 'support bundle')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(labels()).toContain('Health')
+    expect(labels()).not.toContain('Library')
   })
 })

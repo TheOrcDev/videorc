@@ -29,7 +29,14 @@ expects to diverge.
 The Buddy tab's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
 a small picture opened larger to look at it, a meaning no slot had
 (`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is
-the output frame). That makes **92 slots over 88 glyphs**.
+the output frame). That made **92 slots over 88 glyphs**.
+
+Plan 174 S3.12 (J1-22) split markers from cuts. Scissors (`ClipIcon`) had
+meant Clean cut, clip marks _and_ markers; a marker is a point on the
+timeline to find again (`CONTEXT.md`), so it got its own slot, `MarkerIcon`
+(BookmarkSimple), and scissors now mean cutting only. The same pass freed
+three glyphs no call site used: `VerifiedIcon` (ShieldCheck), `BrainIcon`
+(Brain) and `FastIcon` (Lightning). That makes **90 slots over 86 glyphs**.
 
 Plan 119 retired two slots and added two. `BuddyIcon` replaced both
 `PublishIcon` (Sparkle, a glyph `SparkleIcon` keeps) and `CohostIcon` (Robot,
@@ -64,7 +71,7 @@ lands**:
 
 1. **Count.** 100 is the hard ceiling. `pnpm icons:build` refuses to build a
    larger export rather than leaving the count to whoever last added a glyph.
-   At 88 glyphs the app has ~12 of headroom; the audit's divergences would
+   At 86 glyphs the app has ~14 of headroom; the audit's divergences would
    spend about 3 of it.
 
 2. **Where the SVGs may live.** Videorc's repository is public and AGPL, which
@@ -147,7 +154,7 @@ like-for-like glyph.
 
 ### Export shopping list
 
-The 91 slots are the authoritative list — read them straight out of
+The 90 slots are the authoritative list — read them straight out of
 `components/icons.tsx`, where each is grouped and documented. Export one SVG
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.
