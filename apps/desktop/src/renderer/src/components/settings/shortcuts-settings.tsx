@@ -10,11 +10,11 @@ import { useSyncExternalStore, type ReactElement } from 'react'
 import { PanelSection } from '@/components/panel-section'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
 import { FieldGroup, FieldLegend, FieldSet } from '@/components/ui/field'
-import { Kbd, KbdGroup } from '@/components/ui/kbd'
+import { KbdGroup } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutRegistration } from '@/lib/global-shortcuts'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
-import { displayKeyGlyphs, isMacPlatform } from '@/lib/platform'
 import { shortcutsByGroup } from '@/lib/shortcuts'
 
 const GLOBAL_ACTION_ROWS = [
@@ -127,8 +127,8 @@ export function ShortcutsSettings(): ReactElement {
           </FieldSet>
         ))}
         <p className="flex flex-wrap items-center gap-1 px-1 text-xs text-muted-foreground">
-          <Kbd>Esc</Kbd> cancels,{' '}
-          <Kbd>{isMacPlatform(runtimeInfo?.platform) ? '⌫' : 'Backspace'}</Kbd> clears.
+          <ShortcutKeys accelerator="Escape" platform={runtimeInfo?.platform} /> cancels,{' '}
+          <ShortcutKeys accelerator="Backspace" platform={runtimeInfo?.platform} /> clears.
         </p>
       </PanelSection>
 
@@ -144,8 +144,12 @@ export function ShortcutsSettings(): ReactElement {
                 >
                   <span className="flex-1 truncate text-muted-foreground">{entry.label}</span>
                   <KbdGroup>
-                    {displayKeyGlyphs(entry.keys, runtimeInfo?.platform).map((key, index) => (
-                      <Kbd key={`${entry.id}-${index}`}>{key}</Kbd>
+                    {entry.accelerators.map((accelerator) => (
+                      <ShortcutKeys
+                        key={accelerator}
+                        accelerator={accelerator}
+                        platform={runtimeInfo?.platform}
+                      />
                     ))}
                   </KbdGroup>
                 </div>

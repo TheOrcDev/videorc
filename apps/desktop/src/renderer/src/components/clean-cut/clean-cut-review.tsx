@@ -31,7 +31,7 @@ import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
@@ -78,7 +78,6 @@ import {
   type CleanCutTranscript as CleanCutTranscriptData
 } from '@/lib/clean-cut-view'
 import { isActiveRecordingState } from '@/lib/format'
-import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
@@ -315,7 +314,7 @@ export function CleanCutReview({
     target.sessionId,
     mode === 'clean' ? 'condensed' : 'clean'
   )
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const platform = runtimeInfo?.platform
 
   const select = useCallback(
     (id: string | null, seek: boolean): void => {
@@ -682,7 +681,7 @@ export function CleanCutReview({
               <SaveIcon data-icon="inline-start" />
             )}
             Save changes
-            <Kbd className="ml-0.5">{modKey}S</Kbd>
+            <ShortcutKeys accelerator="CmdOrCtrl+S" className="ml-0.5" platform={platform} />
           </Button>
         </DisabledReason>
       </footer>

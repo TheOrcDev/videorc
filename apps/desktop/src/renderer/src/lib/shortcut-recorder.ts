@@ -3,8 +3,8 @@
 // is unit-tested without a DOM; the component only applies the step.
 
 import {
-  acceleratorDisplayKeys,
   acceleratorFromKeyInput,
+  acceleratorLabel,
   validateAccelerator,
   type AcceleratorKeyInput,
   type AcceleratorModifier
@@ -21,7 +21,7 @@ const isMac = (platform: string | undefined): boolean => platform === 'darwin'
 
 /** How a combination reads in running copy: "⌘M" on macOS, "Ctrl+M" elsewhere. */
 export function acceleratorInlineLabel(accelerator: string, platform: string | undefined): string {
-  return acceleratorDisplayKeys(accelerator, platform).join(isMac(platform) ? '' : '+')
+  return acceleratorLabel(accelerator, platform)
 }
 
 export function shortcutRecorderStep(

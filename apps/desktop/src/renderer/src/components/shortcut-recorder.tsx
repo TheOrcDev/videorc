@@ -1,11 +1,12 @@
 import { useCallback, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 
 import type { AcceleratorKeyInput, AcceleratorModifier } from '../../../shared/accelerator'
-import { acceleratorDisplayKeys, acceleratorModifierLabels } from '../../../shared/accelerator'
+import { acceleratorModifiersLabel } from '../../../shared/accelerator'
 import { CloseIcon } from '@/components/icons'
 import { Field, FieldDescription, FieldError, FieldLabel } from '@/components/ui/field'
 import { InputGroup, InputGroupAddon, InputGroupButton } from '@/components/ui/input-group'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { shortcutRecorderStep } from '@/lib/shortcut-recorder'
 import { cn } from '@/lib/utils'
 
@@ -158,8 +159,7 @@ export function ShortcutRecorderField({
     handleKey(domKeyInput(event, 'keyUp'))
   }
 
-  const keys = acceleratorDisplayKeys(value, platform)
-  const heldLabels = acceleratorModifierLabels(held, platform)
+  const heldLabel = acceleratorModifiersLabel(held, platform)
 
   return (
     <Field>
@@ -190,22 +190,16 @@ export function ShortcutRecorderField({
             onKeyUp={onKeyUp}
           >
             {armed ? (
-              heldLabels.length > 0 ? (
+              heldLabel ? (
                 <KbdGroup>
-                  {heldLabels.map((glyph) => (
-                    <Kbd key={glyph}>{glyph}</Kbd>
-                  ))}
+                  <Kbd>{heldLabel}</Kbd>
                   <span className="text-muted-foreground">…</span>
                 </KbdGroup>
               ) : (
                 <span className="truncate text-muted-foreground">Press shortcut…</span>
               )
-            ) : keys.length > 0 ? (
-              <KbdGroup>
-                {keys.map((glyph, index) => (
-                  <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-                ))}
-              </KbdGroup>
+            ) : value ? (
+              <ShortcutKeys accelerator={value} platform={platform} />
             ) : (
               <span className="truncate text-muted-foreground">Unassigned</span>
             )}

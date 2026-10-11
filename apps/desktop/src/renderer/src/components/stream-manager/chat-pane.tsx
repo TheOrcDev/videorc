@@ -43,7 +43,7 @@ import {
   InputGroupButton,
   InputGroupInput
 } from '@/components/ui/input-group'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type {
@@ -516,7 +516,7 @@ export function ChatPane({
             }}
           />
           <InputGroupAddon align="inline-end">
-            <Kbd>⌘F</Kbd>
+            <ShortcutKeys accelerator="CmdOrCtrl+F" />
           </InputGroupAddon>
         </InputGroup>
       </div>
@@ -893,7 +893,7 @@ export function Composer({
                   : `${draft.trim().length}/${maxChars}`}
               </span>
             ) : null}
-            <Kbd aria-label="Enter">↵</Kbd>
+            <ShortcutKeys accelerator="Enter" />
             <InputGroupButton
               aria-label={
                 local
@@ -971,7 +971,9 @@ export function Composer({
           </div>
         ) : null}
         {replyToQuestionId ? (
-          <p className="mt-1 text-[11px] text-subtle">Buddy&apos;s draft. ↵ sends it.</p>
+          <p className="mt-1 text-[11px] text-subtle">
+            Buddy&apos;s draft. <ShortcutKeys accelerator="Enter" variant="text" /> sends it.
+          </p>
         ) : null}
         {/* Only exceptions speak here (plan 057, D3): the "To:" picker names
             where a message goes, and Buddy's segment carries its status. */}

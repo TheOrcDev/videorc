@@ -2,7 +2,7 @@ import { CameraIcon, ExternalLinkIcon, PinIcon, WarningIcon } from '@/components
 import type { ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -20,7 +20,7 @@ import {
   type SystemAccessAction,
   type SystemAccessRow
 } from '@/lib/system-access'
-import { displayAccelerator } from '@/lib/platform'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
 
 type PreviewStageProps = {
@@ -442,7 +442,7 @@ function DetachedPreviewCard({
             </div>
             <Button data-videorc-open-preview-window size="sm" onClick={onOpen}>
               Open preview
-              <Kbd className="ml-1">{displayAccelerator('Cmd+P')}</Kbd>
+              <ShortcutKeys accelerator={shortcutAccelerator('preview-window')} className="ml-1" />
             </Button>
           </>
         )

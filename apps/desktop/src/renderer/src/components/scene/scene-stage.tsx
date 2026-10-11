@@ -20,7 +20,7 @@ import {
 } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Separator } from '@/components/ui/separator'
 import { Toggle } from '@/components/ui/toggle'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -1031,17 +1031,17 @@ export function SceneStage({
           ) : dragEnabled || overlays?.editable ? (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span className="inline-flex items-center gap-1.5">
-                <Kbd>Shift</Kbd>
+                <ShortcutKeys accelerator="Shift" />
                 constrain / aspect
               </span>
               {effectiveSnap ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <Kbd>Alt / ⌥</Kbd>
+                  <ShortcutKeys accelerator="Alt" />
                   no snap
                 </span>
               ) : null}
               <span className="inline-flex items-center gap-1.5">
-                <Kbd>Esc</Kbd>
+                <ShortcutKeys accelerator="Escape" />
                 cancel
               </span>
             </div>

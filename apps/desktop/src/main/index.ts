@@ -16,7 +16,7 @@ import {
   type BuddyPetSummary
 } from '../shared/buddy-pet'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
-import { normalizeAccelerator } from '../shared/accelerator'
+import { commandModifierHeld, normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
 import type {
   GlobalShortcutsConfig,
@@ -2190,7 +2190,9 @@ function createWindow(): void {
     // below), and in practice it never sees the keyup that ends one either —
     // which left the sidebar's shortcut chips stuck on after every ⌘1–⌘9.
     // before-input-event still receives every keyUp, so main stays truthful.
-    publishShortcutModifier(input.meta || input.control)
+    // ⌘ on macOS, Ctrl elsewhere (plan 174 A-17): the same key the renderer's
+    // shell takes, so ⌃ never raises the chips or steals a page digit on a Mac.
+    publishShortcutModifier(commandModifierHeld(input, process.platform))
 
     if (globalShortcutGate.isArmed) {
       // Swallow every key (page handlers and menu accelerators alike) and hand
@@ -2213,7 +2215,7 @@ function createWindow(): void {
     if (input.type !== 'keyDown' || input.alt || input.shift) {
       return
     }
-    if (!(input.meta || input.control)) {
+    if (!commandModifierHeld(input, process.platform)) {
       return
     }
     const isDigit = input.key >= '1' && input.key <= '9'
@@ -2712,7 +2714,7 @@ function saveNotesDocument(patch: Partial<NotesDocument>): NotesDocument {
 // the aux windows. Nothing else is intercepted (typing in Notes stays untouched).
 function attachAuxWindowShortcuts(window: BrowserWindow): void {
   window.webContents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown' || input.alt || !(input.meta || input.control)) {
+    if (input.type !== 'keyDown' || input.alt || !commandModifierHeld(input, process.platform)) {
       return
     }
     if (input.shift) {

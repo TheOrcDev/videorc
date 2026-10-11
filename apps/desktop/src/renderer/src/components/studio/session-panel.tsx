@@ -21,7 +21,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import {
@@ -34,6 +34,7 @@ import { cohostPresenceView } from '@/lib/cohost-presence'
 import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import {
   outputSummary,
   sessionAlsoRecords,
@@ -115,7 +116,10 @@ export function SessionTransport({
               >
                 <RecordIcon data-icon="inline-start" weight="fill" />
                 Record
-                <Kbd className="ml-0.5">␣</Kbd>
+                <ShortcutKeys
+                  accelerator={shortcutAccelerator('record-toggle')}
+                  className="ml-0.5"
+                />
               </Button>
             </DisabledReason>
             <DisabledReason className="flex-1" reason={liveStreamBlockedReason}>

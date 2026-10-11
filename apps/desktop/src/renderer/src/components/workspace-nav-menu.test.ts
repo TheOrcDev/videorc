@@ -64,22 +64,20 @@ describe('the application menu mirrors SHORTCUTS', () => {
     'stream-manager': 'comments-window',
     captions: 'captions-window'
   }
-  const MODIFIERS: Record<string, string> = { '⌘': 'CmdOrCtrl', '⇧': 'Shift' }
-
   it('puts each window on the chord its shortcut uses', () => {
     for (const window of APP_MENU_WINDOWS) {
       const entry = SHORTCUTS.find((shortcut) => shortcut.id === SHORTCUT_IDS[window.id])
       expect(entry, window.id).toBeDefined()
-      expect(window.accelerator, window.id).toBe(
-        entry!.keys.map((key) => MODIFIERS[key] ?? key).join('+')
-      )
+      // Both sides are Electron accelerators (plan 174 S1.2): equal, not mapped.
+      expect(window.accelerator, window.id).toBe(entry!.accelerators[0])
     }
   })
 
   it('lists the page digits SHORTCUTS documents', () => {
     for (const page of MENU_PAGES) {
       const entry = SHORTCUTS.find(
-        (shortcut) => shortcut.group === 'Navigation' && shortcut.keys.at(-1) === page.key
+        (shortcut) =>
+          shortcut.group === 'Navigation' && shortcut.accelerators[0] === `CmdOrCtrl+${page.key}`
       )
       expect(entry?.label, `⌘${page.key}`).toBe(page.label)
     }

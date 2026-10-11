@@ -133,7 +133,12 @@ describe('StatusBar', () => {
         createElement(
           StatusBar,
           { leading: createElement('span', null, 'Connected') },
-          createElement(StatusBarHint, { keys: '⌘K', label: 'Search', onClick })
+          createElement(StatusBarHint, {
+            accelerator: 'CmdOrCtrl+K',
+            platform: 'darwin',
+            label: 'Search',
+            onClick
+          })
         )
       )
     )

@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import {
   Select,
   SelectContent,
@@ -69,7 +69,6 @@ import {
   type BuddyPetReviewMarks,
   type BuddyPetReviewRow
 } from '@/lib/buddy-pet-creator-view'
-import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import {
   BUDDY_PET_ATLAS_SHEETS,
@@ -137,7 +136,7 @@ export function BuddyPetCreator({
     consented: aiConsent,
     capabilities: connection.capabilities ?? aiCapabilities
   })
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const platform = runtimeInfo?.platform
 
   const [naming, setNaming] = useState(false)
   const [cancelOpen, setCancelOpen] = useState(false)
@@ -419,7 +418,7 @@ export function BuddyPetCreator({
             onClick={primary.run}
           >
             {primary.label}
-            <Kbd className="ml-0.5">{modKey}↵</Kbd>
+            <ShortcutKeys accelerator="CmdOrCtrl+Enter" className="ml-0.5" platform={platform} />
           </Button>
         ) : null}
       </div>

@@ -5,7 +5,7 @@ import { removalKeyAnswer } from '@/components/stream-manager/removal-cards'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import type { CohostUtterance } from '@/lib/backend'
 import { BUDDY_UTTERANCE_TRIGGER_LABELS } from '@/lib/buddy-auto-chat-view'
 import { cn } from '@/lib/utils'
@@ -147,7 +147,7 @@ export function BuddyUtteranceCards({
                   onClick={() => onApprove(utterance)}
                 >
                   Send
-                  {utterance === newest ? <Kbd>↵</Kbd> : null}
+                  {utterance === newest ? <ShortcutKeys accelerator="Enter" /> : null}
                 </Button>
                 <Button
                   data-testid="buddy-utterance-dismiss"
@@ -158,7 +158,7 @@ export function BuddyUtteranceCards({
                   onClick={() => onDismiss(utterance)}
                 >
                   Dismiss
-                  {utterance === newest ? <Kbd>⌫</Kbd> : null}
+                  {utterance === newest ? <ShortcutKeys accelerator="Backspace" /> : null}
                 </Button>
               </div>
             </Alert>

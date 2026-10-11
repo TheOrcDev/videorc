@@ -4,13 +4,14 @@ import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { MicrophoneIcon, BuddyIcon, PreviewIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { buddyCardPickIndex, removalKeyAnswer } from '@/components/stream-manager/removal-cards'
 import type {
   CommandChooserView,
   CommandConfirmView,
   CommandStripView
 } from '@/lib/buddy-command-view'
+import { shortcutLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 // Buddy voice commands in the Stream Manager's Buddy pane (plan 140, S6 part
@@ -190,7 +191,7 @@ function CommandChooser({
                 variant="ghost"
                 onClick={() => onAnswer({ action: 'choose', index: candidate.index })}
               >
-                <Kbd>{candidate.key}</Kbd>
+                <ShortcutKeys accelerator={candidate.key} />
                 <ChatPlatformIcon
                   className={candidate.platform === 'youtube' ? 'ml-1' : undefined}
                   platform={candidate.platform}
@@ -208,13 +209,13 @@ function CommandChooser({
         <Button
           data-testid="command-cancel"
           size="xs"
-          title="Cancel (Esc)"
+          title={`Cancel (${shortcutLabel('Escape')})`}
           type="button"
           variant="ghost"
           onClick={() => onAnswer({ action: 'cancel' })}
         >
           Cancel
-          <Kbd>esc</Kbd>
+          <ShortcutKeys accelerator="Escape" />
         </Button>
       </div>
     </Alert>
@@ -276,25 +277,25 @@ function CommandConfirm({
           data-testid="command-show"
           disabled={view.busy}
           size="xs"
-          title="Show it (Enter)"
+          title={`Show it (${shortcutLabel('Enter')})`}
           type="button"
           variant="secondary"
           onClick={() => onAnswer({ action: 'confirm' })}
         >
           Show
-          {keys ? <Kbd>↵</Kbd> : null}
+          {keys ? <ShortcutKeys accelerator="Enter" /> : null}
         </Button>
         <Button
           data-testid="command-cancel"
           disabled={view.busy}
           size="xs"
-          title="Cancel (Esc)"
+          title={`Cancel (${shortcutLabel('Escape')})`}
           type="button"
           variant="ghost"
           onClick={() => onAnswer({ action: 'cancel' })}
         >
           Cancel
-          {keys ? <Kbd>esc</Kbd> : null}
+          {keys ? <ShortcutKeys accelerator="Escape" /> : null}
         </Button>
       </div>
     </Alert>

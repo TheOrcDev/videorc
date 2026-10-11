@@ -9,7 +9,7 @@ import {
   InputGroupButton,
   InputGroupInput
 } from '@/components/ui/input-group'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
@@ -446,7 +446,7 @@ export function BuddyModerationSection({
                 onClick={addRule}
               >
                 Add
-                <Kbd>↵</Kbd>
+                <ShortcutKeys accelerator="Enter" />
               </InputGroupButton>
             </InputGroupAddon>
           </InputGroup>

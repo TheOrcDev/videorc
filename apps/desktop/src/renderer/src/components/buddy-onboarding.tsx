@@ -36,7 +36,7 @@ import {
 } from '@/components/ui/dialog'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { useVideorcAccount } from '@/hooks/use-account'
@@ -88,7 +88,6 @@ import {
   buddyOnboardingProgress
 } from '@/lib/buddy-onboarding-copy'
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
-import { displayKeyGlyph } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
@@ -169,7 +168,7 @@ export function BuddyOnboarding({
   const connected = useBuddyLookClient()
   const client = injectedClient !== undefined ? injectedClient : connected
   const { state: look, controller: lookController } = useBuddyLook(client)
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const platform = runtimeInfo?.platform
   const sheetRef = useRef<HTMLDivElement>(null)
 
   const creating = look.pending === 'create' || look.running?.kind === 'create'
@@ -464,7 +463,11 @@ export function BuddyOnboarding({
               <Button data-testid="buddy-onboarding-create-own" type="button" onClick={primary}>
                 <SparkleIcon data-icon="inline-start" />
                 {BUDDY_ONBOARDING_STEP1.primary}
-                <Kbd className="ml-0.5">{modKey}↵</Kbd>
+                <ShortcutKeys
+                  accelerator="CmdOrCtrl+Enter"
+                  className="ml-0.5"
+                  platform={platform}
+                />
               </Button>
             ) : step < 4 ? (
               <>
@@ -485,7 +488,11 @@ export function BuddyOnboarding({
                   onClick={next}
                 >
                   {BUDDY_ONBOARDING_BUTTONS.next}
-                  <Kbd className="ml-0.5">{modKey}↵</Kbd>
+                  <ShortcutKeys
+                    accelerator="CmdOrCtrl+Enter"
+                    className="ml-0.5"
+                    platform={platform}
+                  />
                 </Button>
               </>
             ) : look.draft && !creating ? (
@@ -497,7 +504,11 @@ export function BuddyOnboarding({
                   onClick={() => void keepAsMyBuddy()}
                 >
                   {BUDDY_ONBOARDING_STEP4.use}
-                  <Kbd className="ml-0.5">{modKey}↵</Kbd>
+                  <ShortcutKeys
+                    accelerator="CmdOrCtrl+Enter"
+                    className="ml-0.5"
+                    platform={platform}
+                  />
                 </Button>
                 <Button
                   data-testid="buddy-onboarding-make-alive"
@@ -523,7 +534,11 @@ export function BuddyOnboarding({
                   <SparkleIcon data-icon="inline-start" />
                 )}
                 {BUDDY_ONBOARDING_STEP4.primary}
-                <Kbd className="ml-0.5">{modKey}↵</Kbd>
+                <ShortcutKeys
+                  accelerator="CmdOrCtrl+Enter"
+                  className="ml-0.5"
+                  platform={platform}
+                />
               </Button>
             )}
           </div>

@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react'
 
-import { Kbd, KbdGroup } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 /**
@@ -11,12 +11,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
  */
 export function ShortcutTooltip({
   label,
-  keys,
+  accelerator,
+  platform,
   children
 }: {
   label: string
-  /** Key chips of the bound shortcut; empty when none is bound. */
-  keys: readonly string[]
+  /** The bound shortcut as an Electron accelerator; empty or absent when none is bound. */
+  accelerator?: string
+  platform?: string
   children: ReactElement
 }): ReactElement {
   return (
@@ -26,13 +28,7 @@ export function ShortcutTooltip({
       </TooltipTrigger>
       <TooltipContent>
         {label}
-        {keys.length > 0 ? (
-          <KbdGroup>
-            {keys.map((glyph, index) => (
-              <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-            ))}
-          </KbdGroup>
-        ) : null}
+        {accelerator ? <ShortcutKeys accelerator={accelerator} platform={platform} /> : null}
       </TooltipContent>
     </Tooltip>
   )

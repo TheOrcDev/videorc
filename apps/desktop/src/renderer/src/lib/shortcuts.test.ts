@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import { WORKSPACE_SHORTCUTS } from '@/components/workspace-nav'
 
+import { parseAccelerator } from '../../../shared/accelerator-format'
+
 import { SHORTCUTS, navShortcutDigit, shortcutsByGroup } from './shortcuts'
 
 describe('SHORTCUTS registry', () => {
@@ -17,24 +19,29 @@ describe('SHORTCUTS registry', () => {
         : entry.id.startsWith('nav-')
     )
     expect(
-      navEntries.filter(
-        (entry) => /^[1-9]$/.test(entry.keys.at(-1) ?? '') || entry.keys.at(-1) === ','
-      ).length
+      navEntries.filter((entry) => /^CmdOrCtrl\+([1-9]|,)$/.test(entry.accelerators[0])).length
     ).toBe(WORKSPACE_SHORTCUTS.length)
   })
 
   it('labels ⌘9 Buddy (plan 119)', () => {
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
-      keys: ['⌘', '9'],
+      accelerators: ['CmdOrCtrl+9'],
       label: 'Buddy'
     })
   })
 
-  it('has unique ids and non-empty key lists', () => {
+  it('has unique ids and accelerators that parse on every platform', () => {
     const ids = SHORTCUTS.map((entry) => entry.id)
     expect(new Set(ids).size).toBe(ids.length)
     for (const entry of SHORTCUTS) {
-      expect(entry.keys.length).toBeGreaterThan(0)
+      expect(entry.accelerators.length).toBeGreaterThan(0)
+      for (const accelerator of entry.accelerators) {
+        // Plan 174 S1.2: authored as accelerators, never as Mac glyphs.
+        expect(accelerator, entry.id).not.toMatch(/[⌘⇧⌥⌃␣⌫↵]/)
+        for (const platform of ['darwin', 'win32', 'linux']) {
+          expect(parseAccelerator(accelerator, platform), `${entry.id} ${platform}`).not.toBeNull()
+        }
+      }
     }
   })
 
@@ -62,7 +69,11 @@ describe('SHORTCUTS registry', () => {
       'cohost-dismiss'
     ])
     expect(cohost.every((entry) => entry.group === 'Chat')).toBe(true)
-    expect(cohost.find((entry) => entry.id === 'cohost-focus')?.keys).toEqual(['⌘', 'J'])
-    expect(cohost.find((entry) => entry.id === 'cohost-dismiss')?.keys).toEqual(['⌫'])
+    expect(cohost.find((entry) => entry.id === 'cohost-focus')?.accelerators).toEqual([
+      'CmdOrCtrl+J'
+    ])
+    expect(cohost.find((entry) => entry.id === 'cohost-dismiss')?.accelerators).toEqual([
+      'Backspace'
+    ])
   })
 })

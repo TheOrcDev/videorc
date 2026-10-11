@@ -1,5 +1,6 @@
 import type { ReactElement, ReactNode } from 'react'
 
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { cn } from '@/lib/utils'
 
 /**
@@ -35,13 +36,16 @@ export function StatusBar({
  * tertiary. `pressed` marks a window that is open (the action then closes it).
  */
 export function StatusBarHint({
-  keys,
+  accelerator,
+  platform,
   label,
   pressed,
   onClick,
   className
 }: {
-  keys: string
+  /** The shortcut as an Electron accelerator, printed per platform (plan 174 S1.2). */
+  accelerator: string
+  platform?: string
   label: string
   pressed?: boolean
   onClick: () => void
@@ -58,7 +62,12 @@ export function StatusBarHint({
       type="button"
       onClick={onClick}
     >
-      <span className="font-medium text-muted-foreground">{keys}</span>
+      <ShortcutKeys
+        accelerator={accelerator}
+        className="text-muted-foreground"
+        platform={platform}
+        variant="text"
+      />
       {label}
     </button>
   )

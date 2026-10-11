@@ -11,7 +11,7 @@ import {
 } from '@/components/buddy-look-tiles'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -21,7 +21,6 @@ import { buddyLookAvailability, buddyLookDraftImages } from '@/lib/buddy-look-vi
 import { BUDDY_STATE_LABELS } from '@/lib/buddy-persona-view'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
-import { displayKeyGlyph } from '@/lib/platform'
 
 /** The draft's living preview: big enough to read the pose, small beside the actions. */
 const DRAFT_PREVIEW_PX = 112
@@ -74,7 +73,7 @@ export function BuddyLookSection({
     consented: aiConsent,
     capabilities: state.capabilities ?? aiCapabilities ?? null
   })
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const platform = runtimeInfo?.platform
   const [saveError, setSaveError] = useState<string | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
 
@@ -179,7 +178,11 @@ export function BuddyLookSection({
                     onClick={() => void keep()}
                   >
                     Keep this look
-                    <Kbd className="ml-0.5">{modKey}↵</Kbd>
+                    <ShortcutKeys
+                      accelerator="CmdOrCtrl+Enter"
+                      className="ml-0.5"
+                      platform={platform}
+                    />
                   </Button>
                   <Button
                     data-testid="buddy-look-discard"

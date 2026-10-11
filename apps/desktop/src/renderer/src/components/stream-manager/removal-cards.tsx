@@ -5,13 +5,14 @@ import { DeleteIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import type {
   RemovalAnswer,
   RemovalCardView,
   RemovalPaneView,
   RemovalResultView
 } from '@/lib/chat-removal-view'
+import { shortcutLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 // Buddy's removal cards (plan 140, S6), at the top of the Stream Manager's
@@ -155,13 +156,13 @@ function RemovalCard({
       data-testid="removal-confirm"
       disabled={card.busy}
       size="xs"
-      title={`${card.confirmLabel} (Enter)`}
+      title={`${card.confirmLabel} (${shortcutLabel('Enter')})`}
       type="button"
       variant={card.primary === 'confirm' ? 'destructive' : 'ghost'}
       onClick={() => onAnswer('confirm')}
     >
       {card.confirmLabel}
-      {keys ? <Kbd>↵</Kbd> : null}
+      {keys ? <ShortcutKeys accelerator="Enter" /> : null}
     </Button>
   )
   const cancel = (
@@ -170,13 +171,13 @@ function RemovalCard({
       data-testid="removal-cancel"
       disabled={card.busy}
       size="xs"
-      title="Cancel (Esc)"
+      title={`Cancel (${shortcutLabel('Escape')})`}
       type="button"
       variant={card.primary === 'cancel' ? 'secondary' : 'ghost'}
       onClick={() => onAnswer('cancel')}
     >
       Cancel
-      {keys ? <Kbd>esc</Kbd> : null}
+      {keys ? <ShortcutKeys accelerator="Escape" /> : null}
     </Button>
   )
   return (
