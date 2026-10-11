@@ -135,7 +135,7 @@ export function decideGoLiveCaptionsReadiness(input: {
       kind: 'disabled',
       blocksStart: false,
       title: 'Captions off',
-      description: 'Live captions are not enabled for this session.',
+      description: "Live captions aren't enabled for this session.",
       transport: null
     }
   }
@@ -151,14 +151,14 @@ export function decideGoLiveCaptionsReadiness(input: {
   if (input.outputReadiness && !input.outputReadiness.ready) {
     return blocked(
       input.outputReadiness.description ??
-        'Live captions are not compatible with the selected output configuration.'
+        "Live captions aren't compatible with the selected output configuration."
     )
   }
 
   const captions = input.capabilities?.captions
   if (!captions) {
     return blocked(
-      'Videorc could not verify live-caption readiness for this deployment. Try again, or continue this session without captions.'
+      "Videorc couldn't verify live-caption readiness for this deployment. Try again, or continue this session without captions."
     )
   }
   if (!captions.available || !captions.preferredTransport) {
@@ -225,7 +225,7 @@ function unavailableReason(
 ): string {
   switch (reasonCode) {
     case 'cloud-ai-premium-required':
-      return 'Live captions are not available for this account. Continue without captions or review your plan.'
+      return "Live captions aren't available for this account. Continue without captions or review your plan."
     case 'ai-user-disabled':
       return 'Live captions are disabled for this account. Continue without captions or contact support.'
     case 'captions-monthly-quota-exhausted':
@@ -235,8 +235,8 @@ function unavailableReason(
       return 'Live captions are temporarily disabled on this Videorc deployment.'
     case 'captions-invalid-config':
     case 'captions-not-configured':
-      return 'Live captions are not configured correctly on this Videorc deployment.'
+      return "Live captions aren't configured correctly on this Videorc deployment."
     default:
-      return 'Live captions are not ready on this Videorc deployment.'
+      return "Live captions aren't ready on this Videorc deployment."
   }
 }

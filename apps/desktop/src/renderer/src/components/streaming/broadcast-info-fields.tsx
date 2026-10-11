@@ -134,7 +134,7 @@ export function BroadcastInfoFields({
           <FieldContent>
             <FieldLabel htmlFor={`${idPrefix}-made-for-kids`}>Made for kids</FieldLabel>
             <FieldDescription>
-              YouTube asks every stream to say whether it is made for kids.
+              YouTube asks every stream to say whether it's made for kids.
               {madeForKidsNote ? <> {madeForKidsNote}</> : null}
             </FieldDescription>
           </FieldContent>

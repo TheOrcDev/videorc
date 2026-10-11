@@ -392,7 +392,7 @@ const COMMAND_COUNT_LABELS: ReadonlyArray<
   ['cleared', 'cleared', 'Cleared'],
   ['removed', 'removed', 'Removed'],
   ['hidden-locally', 'hiddenLocally', 'Hidden in Videorc'],
-  ['cancelled', 'cancelled', 'Cancelled'],
+  ['cancelled', 'cancelled', 'Canceled'],
   ['expired', 'expired', 'No answer'],
   ['failed', 'failed', 'Failed'],
   ['not-found', 'notFound', 'Not found']

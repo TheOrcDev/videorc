@@ -76,7 +76,7 @@ describe('sessionStartFailureMessage', () => {
     expect(sessionStartFailureMessage('No livestream destinations are ready.')).toBe(
       'No livestream destinations are ready.'
     )
-    expect(sessionStartFailureMessage(new Error('   '))).toBe('The session could not start.')
+    expect(sessionStartFailureMessage(new Error('   '))).toBe("The session couldn't start.")
   })
 })
 

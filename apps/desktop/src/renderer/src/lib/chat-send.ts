@@ -134,7 +134,7 @@ export function chatSendFailures(
       reason:
         destination.reason ??
         (destination.phase === 'timed-out-unknown'
-          ? 'Delivery is unknown; Videorc did not retry.'
+          ? "Delivery is unknown; Videorc didn't retry."
           : 'Send failed.')
     }))
 }

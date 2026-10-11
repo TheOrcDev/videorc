@@ -258,8 +258,8 @@ export function LibraryTab({
       await deleteSessions(deleting)
       toast.success(
         deleting.length === 1
-          ? `Recording moved to the ${trashName()}.`
-          : `${deleting.length} recordings moved to the ${trashName()}.`
+          ? `Recording moved to the ${trashName()}`
+          : `${deleting.length} recordings moved to the ${trashName()}`
       )
       setSelection((current) => ({
         ...current,
@@ -1313,14 +1313,11 @@ function useSessionMenu({
         toast.success('No problems found', { id: `quality-check:${session.id}` })
       } else {
         const first = next.reasons[0] ?? next.issues[0]?.kind
-        toast.warning(
-          `${next.issues.length} quality issue${next.issues.length === 1 ? '' : 's'} found.`,
-          {
-            description: next.repairable
-              ? `${first ? `${first} ` : ''}Repair is available from this menu.`
-              : first
-          }
-        )
+        toast.warning(`${plural(next.issues.length, 'quality issue')} found`, {
+          description: next.repairable
+            ? `${first ? `${first} ` : ''}Repair is available from this menu.`
+            : first
+        })
       }
     } catch (error) {
       toastUserError(
@@ -1344,7 +1341,7 @@ function useSessionMenu({
       if (next.status === 'repaired') {
         setHasBackup(true)
         toast.success(
-          next.interpolated ? 'Repaired with interpolated frames.' : 'Recording repaired.'
+          next.interpolated ? 'Repaired with interpolated frames' : 'Recording repaired'
         )
       } else if (next.status === 'ready') {
         toast.success('No problems found', { id: `quality-check:${session.id}` })
@@ -1370,12 +1367,12 @@ function useSessionMenu({
     try {
       const restored = await restoreRecording(session.id)
       if (restored) {
-        toast.success('Restored the original recording from backup.')
+        toast.success('Restored the original recording from backup')
         setHasBackup(false)
         setAssessment(null)
         setPhase('idle')
       } else {
-        toast.info('No backup was found for this recording.')
+        toast.info('No backup found for this recording')
       }
     } catch (error) {
       toastUserError(error, { action: 'restore', object: 'the original' })

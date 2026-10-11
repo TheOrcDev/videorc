@@ -242,7 +242,7 @@ describe('renderCommentHighlightCards images (plan 095, S3)', () => {
     // Consecutive words paint as one run, so the names land in the message run.
     expect(texts).toContain('gg Kappa PogU')
     expect(warn).toHaveBeenCalledTimes(1)
-    expect(warn.mock.calls[0]?.[0]).toMatch(/2 emote\(s\) show as text/)
+    expect(warn.mock.calls[0]?.[0]).toMatch(/2 emotes show as text/)
     expect(warn.mock.calls[0]?.[0]).toMatch(/Kappa: main has no cached file/)
     expect(warn.mock.calls[0]?.[0]).toMatch(/PogU: main did not cache it/)
   })

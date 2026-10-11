@@ -136,7 +136,7 @@ export function cleanCutEligibility(session: EligibilityRow): CleanCutEligibilit
   if (session.status !== 'completed' || session.finalizationState === 'finalizing') {
     return refuse('Clean cut is available once the recording has finished.')
   }
-  if (session.mode === 'imported') return refuse('Imported videos are not supported yet.')
+  if (session.mode === 'imported') return refuse("Imported videos aren't supported yet.")
   if (session.derivedFromSessionId || session.processingKind || session.cleanCutOfSessionId) {
     return refuse("A cleaned or cut copy can't be cut again.")
   }
@@ -363,7 +363,7 @@ export function cleanCutStatusView(
         retry: hasCutList ? 'render' : 'start'
       }
     case 'cancelled':
-      return { ...base, kind: 'cancelled', label: 'Cancelled', retry: 'start' }
+      return { ...base, kind: 'cancelled', label: 'Canceled', retry: 'start' }
   }
 }
 
@@ -377,11 +377,11 @@ const FAILURE_COPY: Readonly<Record<string, string>> = {
   'signed-out': 'Sign in to Videorc, then retry.',
   network: "Videorc couldn't be reached. Retry when you're online.",
   'source-changed': 'The recording changed while it was being cut. Retry to start over.',
-  'insufficient-space': 'There is not enough free disk space for the cut copy.',
+  'insufficient-space': "There isn't enough free disk space for the cut copy.",
   'render-invalid': "The cut didn't pass its checks, so it wasn't saved. Retry to cut again.",
   'ffmpeg-unsupported': "This computer's video encoder couldn't make the cut.",
   'file-missing': 'The recording file is missing.',
-  'no-speech': 'No speech found, so there is nothing to cut.',
+  'no-speech': "No speech found, so there's nothing to cut.",
   'no-audio': 'This recording has no audio to transcribe.'
 }
 
@@ -417,7 +417,7 @@ export function cleanCutErrorReason(error: unknown): string {
 
 const UNAVAILABLE_COPY: Readonly<Record<string, string>> = {
   disabled: "Clean cut is paused on Videorc's side. Try again later.",
-  blocked: 'Cloud AI is not available for this account.',
+  blocked: "Cloud AI isn't available for this account.",
   'premium-required': 'Clean cut is part of Videorc Premium.',
   'provider-unconfigured': "Clean cut isn't set up on Videorc's side yet. Try again later.",
   'quota-exhausted': "This month's Clean cut minutes are used up."

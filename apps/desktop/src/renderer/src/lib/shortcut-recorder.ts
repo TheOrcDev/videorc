@@ -78,7 +78,7 @@ export function shortcutRecorderStep(
     case 'clear':
       return { type: result.kind }
     case 'unsupported':
-      return { type: 'reject', message: 'That key cannot be part of a shortcut. Try another.' }
+      return { type: 'reject', message: "That key can't be part of a shortcut. Try another." }
     case 'combo': {
       const verdict = validateAccelerator(result.accelerator, platform)
       if (!verdict.ok && verdict.reason === 'needs-modifier') {

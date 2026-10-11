@@ -126,7 +126,7 @@ export class LiveSourceSelectionController {
       snapshot.pending?.kind ?? (completed || !this.requestId ? null : this.state.pending)
     const error = completed
       ? operation.stage !== 'applied'
-        ? (operation.reason ?? 'The source could not be changed.')
+        ? (operation.reason ?? "The source couldn't be changed.")
         : null
       : this.state.checking && !this.requestId
         ? null
@@ -134,7 +134,7 @@ export class LiveSourceSelectionController {
     if (completed && operation.stage === 'failed') {
       this.reportFailure(
         operation.requestId,
-        operation.reason ?? 'The source could not be changed.',
+        operation.reason ?? "The source couldn't be changed.",
         { kind: operation.kind, deviceId: operation.deviceId }
       )
     }
@@ -166,7 +166,7 @@ export class LiveSourceSelectionController {
             : undefined,
       error:
         outputPending && this.proofReads >= 20
-          ? 'The source changed, but output could not be confirmed. Retry status.'
+          ? "The source changed, but Videorc couldn't confirm the output. Check again."
           : !outputPending && this.state.outputPending
             ? null
             : error
@@ -219,7 +219,7 @@ export class LiveSourceSelectionController {
           this.publish({
             ...this.state,
             checking: true,
-            error: 'The backend could not confirm source status. Retry status to reconnect.'
+            error: "Videorc couldn't check your sources. Check again to reconnect."
           })
       })
       .finally(() => {
@@ -254,7 +254,7 @@ export class LiveSourceSelectionController {
     if (epoch === this.epoch && this.state.checking && !this.state.error) {
       this.publish({
         ...this.state,
-        error: 'The source change could not be confirmed. Retry status to reconnect.'
+        error: "Videorc couldn't confirm the source change. Check again to reconnect."
       })
     }
   }
@@ -305,7 +305,7 @@ export class LiveSourceSelectionController {
           checking: true,
           error:
             this.attempts >= 3
-              ? 'The source change could not be confirmed. Retry status to reconnect.'
+              ? "Videorc couldn't confirm the source change. Check again to reconnect."
               : null
         })
       }
@@ -358,7 +358,7 @@ export class LiveSourceSelectionController {
           ...this.state,
           pending: null,
           checking: false,
-          error: 'Protected windows could not be checked.',
+          error: "Protected windows couldn't be checked.",
           errorKind: kind
         })
       }

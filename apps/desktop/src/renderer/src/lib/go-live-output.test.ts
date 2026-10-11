@@ -215,7 +215,7 @@ describe('goLiveSessionOutputNotice', () => {
         },
         sharedFallbackVideo: null
       })
-    ).toMatchObject({ title: 'Streaming at 720p · 30 fps.' })
+    ).toMatchObject({ title: 'Streaming at 720p · 30 fps' })
 
     const shared = goLiveSessionOutputNotice({ steppedDown: null, sharedFallbackVideo: stream })
     expect(shared?.title).toBe('Recording will match the stream.')

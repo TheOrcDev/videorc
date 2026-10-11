@@ -99,7 +99,7 @@ describe('Buddy tab copy (plan 119 S2)', () => {
       // Plan 170 D17: created Buddies live in the account; the inspiration picture is not kept.
       "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
       // Plan 172 D10 (plan 174 G-6): a library Buddy's moves join the account.
-      "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that is in your library, in your Videorc account too, so it moves on any computer.",
+      "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that's in your library, in your Videorc account too, so it moves on any computer.",
       "Buddy replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
       "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
@@ -334,7 +334,7 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     expect(BUDDY_REMOVAL_LIMITS).toContain('20 seconds')
     expect(BUDDY_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')
     expect(BUDDY_REMOVAL_FALLBACK).toBe(
-      'If the platform cannot remove it, Buddy hides it in Videorc and tells you viewers may still see it.'
+      "If the platform can't remove it, Buddy hides it in Videorc and tells you viewers may still see it."
     )
     expect(BUDDY_VOICE_PREMIUM).toContain('Voice commands are part of Videorc Premium.')
     expect(BUDDY_VOICE_PREMIUM).toContain('free for everyone')

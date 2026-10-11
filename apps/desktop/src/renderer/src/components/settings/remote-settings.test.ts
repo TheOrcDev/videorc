@@ -149,7 +149,7 @@ describe('RemoteSettings confirms', () => {
     await act(async () => menuItem('Remove…').click())
     const dialog = byTestId('phone-remove-dialog')
     expect(dialog?.textContent).toContain('Remove Pixel?')
-    expect(dialog?.textContent).toContain('It is disconnected now')
+    expect(dialog?.textContent).toContain("It's disconnected now")
     await act(async () => byTestId('phone-remove-cancel')!.click())
     expect(remote().phone.revokeDevice).not.toHaveBeenCalled()
     await openPhoneMenu('Pixel')

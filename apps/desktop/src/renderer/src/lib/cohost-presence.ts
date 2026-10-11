@@ -1,4 +1,5 @@
 import type { CohostQuestion, CohostState } from './backend'
+import { plural } from './format'
 import {
   cohostErrorDetail,
   cohostErrorDetailText,
@@ -80,10 +81,6 @@ function nonNegative(value: number | undefined): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
 }
 
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`
-}
-
 function presenceKind(
   state: CohostState | null,
   options: CohostPresenceOptions
@@ -118,7 +115,7 @@ function presenceLabel(
     case 'thinking':
       return 'Thinking…'
     case 'listening':
-      return openCount > 0 ? `${openCount} ${plural(openCount, 'question')}` : 'Reading chat'
+      return openCount > 0 ? plural(openCount, 'question') : 'Reading chat'
     case 'paused': {
       const reason = cohostReasonLabel(state?.reason ?? null)
       return reason ? `Paused: ${reason}` : 'Paused'
@@ -159,13 +156,13 @@ function presenceTooltip(
   if (lastPass) lines.push(`last pass ${lastPass}`)
 
   const seen = nonNegative(state?.messagesSeen)
-  if (seen > 0) lines.push(`${seen} ${plural(seen, 'message')} read`)
+  if (seen > 0) lines.push(`${plural(seen, 'message')} read`)
 
   const total = nonNegative(state?.questionsTotal)
   if (total > 0) {
-    lines.push(`${total} ${plural(total, 'question')} found (${openCount} open)`)
+    lines.push(`${plural(total, 'question')} found (${openCount} open)`)
   } else if (openCount > 0) {
-    lines.push(`${openCount} ${plural(openCount, 'question')} open`)
+    lines.push(`${plural(openCount, 'question')} open`)
   }
 
   const nextPass = cohostNextPassLabel(state?.nextTickAt ?? null, nowMs)
@@ -222,7 +219,7 @@ export function cohostPresenceView(
 export function cohostEmptyStateCopy(view: CohostPresenceView, state: CohostState | null): string {
   if (view.kind === 'reading') {
     const pending = nonNegative(state?.pendingMessages)
-    return `Reading ${pending} new ${plural(pending, 'message')}…`
+    return `Reading ${plural(pending, 'new message')}…`
   }
   if (view.kind === 'thinking') return 'Thinking about the last batch…'
   if (view.kind === 'listening') return 'Reading chat. Questions will appear here.'
@@ -248,7 +245,7 @@ export function cohostGroupedDeltaFlash(
   const known = new Set(previous.questions.map((question) => question.id))
   const added = next.questions.filter((question) => !known.has(question.id)).length
   if (added <= 0) return null
-  return `grouped ${added} ${plural(added, 'question')}`
+  return `grouped ${plural(added, 'question')}`
 }
 
 /** Question ids in a stable shape for the unread reducer and the toast. */

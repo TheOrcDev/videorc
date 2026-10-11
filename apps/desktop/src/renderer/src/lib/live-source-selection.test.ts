@@ -159,7 +159,7 @@ describe('live source selection authority', () => {
       await instance.select('microphone', 'mic-b', [])
       await vi.advanceTimersByTimeAsync(6000)
       expect(get).toHaveBeenCalledTimes(21)
-      expect(changed.mock.lastCall?.[0].error).toContain('output could not be confirmed')
+      expect(changed.mock.lastCall?.[0].error).toContain("couldn't confirm the output")
       final = terminal(switchSource.mock.calls[0][0])
       await instance.retryStatus()
       expect(changed.mock.lastCall?.[0]).toMatchObject({ error: null, outputPending: false })
@@ -318,7 +318,7 @@ describe('live source selection authority', () => {
     expect(changed.mock.lastCall?.[0]).toMatchObject({
       pending: 'microphone',
       checking: true,
-      error: expect.stringContaining('Retry status')
+      error: expect.stringContaining('Check again')
     })
     const original = switchSource.mock.calls[0][0]
     switchSource.mockImplementationOnce(async (request) => terminal(request))
@@ -337,7 +337,7 @@ describe('live source selection authority', () => {
     await instance.refresh()
     await instance.select('microphone', 'mic-b', [])
     expect(switchSource).toHaveBeenCalledTimes(3)
-    expect(changed.mock.lastCall?.[0].error).toContain('Retry status')
+    expect(changed.mock.lastCall?.[0].error).toContain('Check again')
   })
 
   it('offers recovery after a failed GET and clears connectivity errors after success', async () => {
@@ -346,7 +346,7 @@ describe('live source selection authority', () => {
     await instance.refresh()
     expect(changed.mock.lastCall?.[0]).toMatchObject({
       checking: true,
-      error: expect.stringContaining('Retry status')
+      error: expect.stringContaining('Check again')
     })
     await instance.retryStatus()
     expect(changed.mock.lastCall?.[0]).toMatchObject({ checking: false, error: null })

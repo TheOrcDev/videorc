@@ -33,7 +33,7 @@ export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): React
             ? 'Turning off…'
             : `Preparing ${targetName ?? 'source'}…`
         : health?.health === 'unavailable'
-          ? 'Source unavailable. Select it again to retry, or choose another.'
+          ? 'Source unavailable. Choose it again to retry, or choose another.'
           : state.snapshot?.lastOperation?.kind === kind &&
               state.snapshot.lastOperation.stage === 'applied' &&
               !state.snapshot.lastOperation.outputObserved
@@ -47,7 +47,7 @@ export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): React
       <span>{message}</span>
       {(state.checking || state.outputPending) && state.error ? (
         <Button size="sm" variant="outline" onClick={() => void retrySourceStatus()}>
-          Retry status
+          Check again
         </Button>
       ) : null}
     </span>

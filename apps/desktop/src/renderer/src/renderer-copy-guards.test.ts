@@ -11,8 +11,11 @@ import { describe, expect, it } from 'vitest'
 //
 // Plan 174 S2.1 (J2-6, J2-10, J2-21, A-26) adds the rules of docs/ui-copy.md
 // ("No internals"): no engineering word, no retired page or control name and
-// no three-dot ellipsis in copy. Today's offenders are a ratchet that S2.2 to
-// S2.5 shrink to zero.
+// no three-dot ellipsis in copy. S2.2 to S2.5 brought its offenders to zero,
+// so there is no allowlist: a new offender fails.
+//
+// Plan 174 S2.5 (J2-21, V-X9) adds "Casing": a command's label (a button, a
+// menu item, a tab) is sentence case. Only names keep their capitals.
 
 const RENDERER_ROOT = join(__dirname, '..')
 
@@ -90,28 +93,6 @@ const COPY_RULES: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: 'receive-only', pattern: /\breceive-only\b/i },
   { id: '...', pattern: /\.\.\./ }
 ]
-
-/**
- * The ratchet: per file, how many strings broke a copy rule when S2.1 landed.
- * Plan 174 S2.2 to S2.5 shrink it to nothing. When you fix one, lower that
- * file's count (the test names the new number) or delete the line at zero.
- * Never raise a count or add a file: rewrite the new copy instead
- * (docs/ui-copy.md says how).
- */
-const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
-  'src/backendClient.ts': 20,
-  'src/components/settings/encoder-preference-field.tsx': 1,
-  'src/components/streaming/go-live-panel.tsx': 1,
-  'src/hooks/use-studio.tsx': 14,
-  'src/lib/backend-transport.ts': 3,
-  'src/lib/capture.ts': 2,
-  'src/lib/format.ts': 5,
-  'src/lib/go-live-output.ts': 1,
-  'src/lib/live-source-selection.ts': 1,
-  'src/lib/native-preview-surface-lifecycle.ts': 1,
-  'src/lib/obs-import-map.ts': 3,
-  'src/lib/record-latency.ts': 1
-}
 
 /** JSX attributes a reader sees or hears; any other attribute's string is code. */
 const COPY_ATTRIBUTES = new Set([
@@ -211,29 +192,125 @@ function copyRuleOffenders(path: string, source: string): string[] {
   })
 }
 
-/** What breaks the ratchet: a file over its allowance, or an allowance above its file's count. */
-function ratchetProblems(
-  offenders: ReadonlyMap<string, readonly string[]>,
-  ratchet: Readonly<Record<string, number>>
-): string[] {
-  const problems: string[] = []
-  for (const [path, found] of offenders) {
-    const allowed = ratchet[path] ?? 0
-    if (found.length > allowed) {
-      problems.push(
-        `${path}: copy-rule offenders ${found.length}, allowance ${allowed}. Rewrite the new ones (docs/ui-copy.md); never raise the allowance.\n  ${found.join('\n  ')}`
-      )
+/** Controls whose visible text is a command's label. */
+const COMMAND_TAGS = new Set([
+  'AlertDialogAction',
+  'AlertDialogCancel',
+  'Button',
+  'ContextMenuItem',
+  'DropdownMenuItem',
+  'InputGroupButton',
+  'TabsTrigger',
+  'ToggleGroupItem'
+])
+
+/**
+ * The words a label may capitalize after its first word (docs/ui-copy.md
+ * "Casing"): the product, its pages, tabs and windows, the platforms, and the
+ * Buddy modes and creator steps that copy names ("Switch to Still").
+ */
+const CAPITALIZED_NAMES = new Set([
+  'Videorc',
+  'Premium',
+  'Buddy',
+  'Live',
+  'Go',
+  'Stream',
+  'Manager',
+  'Studio',
+  'Sources',
+  'Scene',
+  'Assets',
+  'Livestream',
+  'Captions',
+  'Output',
+  'Library',
+  'Settings',
+  'Health',
+  'Preview',
+  'Notes',
+  'Setup',
+  'Upcoming',
+  'Permissions',
+  'Shortcuts',
+  'Clean',
+  'Alive',
+  'Still',
+  'Auto',
+  'Check',
+  'YouTube',
+  'Twitch',
+  'Kick',
+  'TikTok',
+  'Instagram',
+  'Facebook',
+  'Google',
+  'OBS',
+  'Finder',
+  'macOS',
+  'Windows'
+])
+
+/**
+ * A command's visible label: its JSX text, with each string an expression child
+ * can render ("{busy ? 'Saving…' : 'Save scene…'}") read as its own label. An
+ * icon or other element child splits nothing: it is not a word.
+ */
+function commandLabels(path: string, source: string): Array<{ line: number; text: string }> {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: Array<{ line: number; text: string }> = []
+  const literals = (node: ts.Node, into: string[]): void => {
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isCallExpression(node)) {
+      return
     }
-  }
-  for (const [path, allowed] of Object.entries(ratchet)) {
-    const count = offenders.get(path)?.length ?? 0
-    if (count < allowed) {
-      problems.push(
-        `${path}: copy-rule offenders ${count}, allowance ${allowed}. Lower its COPY_RULE_RATCHET count to ${count}${count === 0 ? ' (delete the line)' : ''}.`
-      )
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      into.push(node.text)
+      return
     }
+    if (ts.isTemplateExpression(node)) {
+      into.push(node.head.text, ...node.templateSpans.map((span) => span.literal.text))
+      return
+    }
+    ts.forEachChild(node, (child) => literals(child, into))
   }
-  return problems
+  const visit = (node: ts.Node): void => {
+    if (ts.isJsxElement(node) && COMMAND_TAGS.has(node.openingElement.tagName.getText(file))) {
+      const labels: string[] = []
+      let text = ''
+      for (const child of node.children) {
+        if (ts.isJsxText(child)) text += child.text
+        else if (ts.isJsxExpression(child) && child.expression) literals(child.expression, labels)
+      }
+      const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+      for (const label of [text, ...labels]) {
+        if (/[a-z]/.test(label))
+          found.push({ line: line + 1, text: label.replace(/\s+/g, ' ').trim() })
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+/** The words that make `label` Title Case: capitalized after a part's first word, not a name. */
+function titleCaseWords(label: string): string[] {
+  return label
+    .replace(/“[^”]*”/g, ' ')
+    .split(/\s[·:]\s|[:·]\s/)
+    .flatMap((part) => part.trim().split(/\s+/).slice(1))
+    .map((word) => word.replace(/[^A-Za-z'’-]/g, ''))
+    .filter(
+      (word) => /^[A-Z][a-z]/.test(word) && !CAPITALIZED_NAMES.has(word.replace(/['’]s$/, ''))
+    )
+}
+
+/** Each command label in `source` that is Title Case, as `path:line text <words>`. */
+function titleCaseOffenders(path: string, source: string): string[] {
+  return commandLabels(path, source).flatMap(({ line, text }) => {
+    const words = titleCaseWords(text)
+    return words.length > 0 ? [`${path}:${line} ${text} <${words.join(', ')}>`] : []
+  })
 }
 
 describe('renderer copy guards (plan 174)', () => {
@@ -258,26 +335,34 @@ describe('renderer copy guards (plan 174)', () => {
     expect(offenders).toEqual([])
   })
 
-  it('keeps internals, retired names and "..." out of copy, and its ratchet only shrinks', () => {
-    const offenders = new Map(
-      files.map(({ path, source }) => [path, copyRuleOffenders(path, source)] as const)
-    )
-    expect(ratchetProblems(offenders, COPY_RULE_RATCHET)).toEqual([])
+  it('keeps internals, retired names and "..." out of copy', () => {
+    const offenders = files.flatMap(({ path, source }) => copyRuleOffenders(path, source))
+    expect(offenders).toEqual([])
   })
 
-  it('fails a ratchet that grows, a new file, and an allowance left above the count', () => {
-    const offenders = new Map([
-      ['src/a.tsx', ['src/a.tsx:1 [backend] Backend is offline.', 'src/a.tsx:2 [...] Wait...']],
-      ['src/b.tsx', ['src/b.tsx:4 [OAuth] OAuth failed.']],
-      ['src/c.tsx', []]
+  it('writes every command label in sentence case', () => {
+    const offenders = files
+      .filter(({ path }) => path.endsWith('.tsx'))
+      .flatMap(({ path, source }) => titleCaseOffenders(path, source))
+    expect(offenders).toEqual([])
+  })
+
+  it('reads a command label as Title Case only past its names', () => {
+    const source = [
+      'export const a = <Button><PlusIcon />Import From OBS</Button>',
+      'export const b = <Button>Open Stream Manager</Button>',
+      "export const c = <Button>{busy ? 'Saving…' : 'New Recording'}</Button>",
+      'export const d = <DropdownMenuItem>Go Live…</DropdownMenuItem>',
+      'export const e = <Button>Update “{name}”…</Button>',
+      'export const f = <TabsTrigger value="a">Schedule · Upcoming events</TabsTrigger>',
+      'export const g = <span>Enable Camera</span>',
+      "export const h = <Button>{label ?? 'Show Capture Helper'}</Button>"
+    ].join('\n')
+    expect(titleCaseOffenders('sample.tsx', source)).toEqual([
+      'sample.tsx:1 Import From OBS <From>',
+      'sample.tsx:3 New Recording <Recording>',
+      'sample.tsx:8 Show Capture Helper <Capture, Helper>'
     ])
-    expect(ratchetProblems(offenders, { 'src/a.tsx': 1, 'src/c.tsx': 2, 'src/d.tsx': 1 })).toEqual([
-      'src/a.tsx: copy-rule offenders 2, allowance 1. Rewrite the new ones (docs/ui-copy.md); never raise the allowance.\n  src/a.tsx:1 [backend] Backend is offline.\n  src/a.tsx:2 [...] Wait...',
-      'src/b.tsx: copy-rule offenders 1, allowance 0. Rewrite the new ones (docs/ui-copy.md); never raise the allowance.\n  src/b.tsx:4 [OAuth] OAuth failed.',
-      'src/c.tsx: copy-rule offenders 0, allowance 2. Lower its COPY_RULE_RATCHET count to 0 (delete the line).',
-      'src/d.tsx: copy-rule offenders 0, allowance 1. Lower its COPY_RULE_RATCHET count to 0 (delete the line).'
-    ])
-    expect(ratchetProblems(offenders, { 'src/a.tsx': 2, 'src/b.tsx': 1 })).toEqual([])
   })
 
   it('reads copy where a streamer meets it, and leaves code alone', () => {

@@ -184,7 +184,7 @@ describe('buddyReactionDisabledReason (plan 174 S1.1, F-12)', () => {
     ).toBe('Only an Alive Buddy reacts. Make it Alive on the Buddy page.')
     expect(
       buddyReactionDisabledReason({ relay: true, alive: true, packReactions: null, chip: wave })
-    ).toBe('Reactions are not ready yet.')
+    ).toBe("Reactions aren't ready yet.")
     expect(
       buddyReactionDisabledReason({
         relay: true,

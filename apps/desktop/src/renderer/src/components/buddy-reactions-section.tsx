@@ -56,7 +56,7 @@ export function BuddyReactionsSection({
     setError(null)
     const next = withBuddyTriggerReaction(table, trigger, value)
     onSave({ ...persona, reactions: next }).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : 'Could not save the reactions.')
+      setError(failure instanceof Error ? failure.message : "Couldn't save the reactions.")
     )
   }
   return (

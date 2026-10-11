@@ -93,7 +93,7 @@ export interface BuddyPreviewPackRequest {
 const FULL_BOX = [0, 0, 1, 1] as const
 
 function abortError(): Error {
-  const error = new Error('The Buddy pack load was cancelled.')
+  const error = new Error('The Buddy pack load was canceled.')
   error.name = 'AbortError'
   return error
 }

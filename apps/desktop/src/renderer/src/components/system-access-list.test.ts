@@ -22,7 +22,7 @@ const rows: SystemAccessRow[] = [
     label: 'Camera',
     purpose: 'Camera overlay in your scenes.',
     state: 'not-granted',
-    detail: 'Your System Settings is blocking the camera. Grant access there.'
+    detail: 'System Settings is blocking the camera. Allow Videorc there.'
   },
   {
     id: 'microphone',
@@ -47,7 +47,7 @@ describe('SystemAccessList', () => {
   it('shows every purpose and every open detail in full, never on hover only', () => {
     const markup = render()
     for (const row of rows) expect(markup).toContain(row.purpose)
-    expect(markup).toContain('Your System Settings is blocking the camera. Grant access there.')
+    expect(markup).toContain('System Settings is blocking the camera. Allow Videorc there.')
     expect(markup).toContain('Checked when you test the microphone or start recording.')
     // A granted row's chip already says it.
     expect(markup).not.toContain('Permission granted.')

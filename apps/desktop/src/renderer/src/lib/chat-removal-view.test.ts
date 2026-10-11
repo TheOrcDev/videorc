@@ -285,7 +285,7 @@ describe('removalResultView and removalPaneView: the brief result', () => {
         operation({
           operationId: 'done',
           phase: 'cancelled',
-          outcome: 'Cancelled. Nothing was removed.',
+          outcome: 'Canceled. Nothing was removed.',
           updatedAt: '2026-10-04T12:00:09Z'
         })
       ],
@@ -296,7 +296,7 @@ describe('removalResultView and removalPaneView: the brief result', () => {
       ['a', false],
       ['b', true]
     ])
-    expect(view.results.map((result) => result.text)).toEqual(['Cancelled. Nothing was removed.'])
+    expect(view.results.map((result) => result.text)).toEqual(['Canceled. Nothing was removed.'])
     expect(view.active).toBe(true)
     expect(removalPaneView([], NOW).active).toBe(false)
   })

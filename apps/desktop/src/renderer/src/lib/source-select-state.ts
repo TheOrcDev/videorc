@@ -27,7 +27,7 @@ const COPY: Record<SessionSourceKind, DevicePickerCopy> = {
     empty: 'No screens or windows found',
     noMatch: 'No matching screens or windows',
     search: 'Search screens and windows…',
-    select: 'Select a screen or window',
+    select: 'Choose a screen or window',
     saved: 'Saved screen or window'
   },
   camera: {
@@ -35,7 +35,7 @@ const COPY: Record<SessionSourceKind, DevicePickerCopy> = {
     empty: 'No cameras found',
     noMatch: 'No matching cameras',
     search: 'Search cameras…',
-    select: 'Select a camera',
+    select: 'Choose a camera',
     saved: 'Saved camera'
   },
   microphone: {
@@ -43,7 +43,7 @@ const COPY: Record<SessionSourceKind, DevicePickerCopy> = {
     empty: 'No microphones found',
     noMatch: 'No matching microphones',
     search: 'Search microphones…',
-    select: 'Select a microphone',
+    select: 'Choose a microphone',
     saved: 'Saved microphone'
   }
 }

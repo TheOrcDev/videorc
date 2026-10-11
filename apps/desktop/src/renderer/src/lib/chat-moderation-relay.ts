@@ -314,7 +314,7 @@ export function startChatModerationRelay(options: ChatModerationRelayOptions): C
         await api.pushModerationResult?.({
           requestId: command.requestId,
           ok: false,
-          error: errorMessage(error, 'Could not remove the message.')
+          error: errorMessage(error, "Couldn't remove the message.")
         })
       })
       .catch(() => undefined)

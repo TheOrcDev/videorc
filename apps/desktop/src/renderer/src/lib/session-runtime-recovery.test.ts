@@ -71,7 +71,7 @@ describe('session runtime recovery', () => {
       activity: recovery.activity,
       currentDedupeKey: null
     })!
-    expect(presentation.notice.message).toBe('Videorc could not finish this livestream.')
+    expect(presentation.notice.message).toBe("Videorc couldn't finish this livestream.")
     expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe('Livestream stopped unexpectedly')
 
     vi.stubGlobal('window', { videorc: { revealSession: vi.fn() } })
@@ -169,7 +169,7 @@ describe('session runtime recovery', () => {
     expect(toastSpies.success).toHaveBeenCalledWith('Account connected', {
       id: 'oauth-callback:provider'
     })
-    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't finish connecting the account.", {
+    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't finish connecting the account", {
       id: 'oauth-callback:provider',
       description: 'Authorization was declined.',
       duration: 8_000
@@ -210,11 +210,11 @@ describe('session runtime recovery', () => {
     expect(toastSpies.error).toHaveBeenCalledTimes(4)
     const ids = new Set(toastSpies.error.mock.calls.map((call) => (call[1] as { id: string }).id))
     expect([...ids]).toEqual(['oauth-callback:youtube'])
-    expect(toastSpies.error.mock.calls[2][0]).toBe("Couldn't finish connecting YouTube.")
+    expect(toastSpies.error.mock.calls[2][0]).toBe("Couldn't finish connecting YouTube")
     expect(toastSpies.error.mock.calls[2][1]).toMatchObject({
       description: `Couldn't finish connecting YouTube. Videorc's daily YouTube API limit is used up. Try again after ${dayLabel}${retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.`
     })
-    expect(toastSpies.error.mock.calls[3][0]).toBe("Couldn't finish connecting YouTube.")
+    expect(toastSpies.error.mock.calls[3][0]).toBe("Couldn't finish connecting YouTube")
   })
 })
 
@@ -265,7 +265,7 @@ describe('audio-loss provenance', () => {
       currentDedupeKey: null
     })!
     expect(sessionRuntimeNoticeTitle(result.notice)).toBe(
-      'Microphone audio could not be recorded: saved session has missing audio'
+      "Microphone audio couldn't be recorded: saved session has missing audio"
     )
   })
 })

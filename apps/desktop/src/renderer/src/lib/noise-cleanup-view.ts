@@ -90,7 +90,7 @@ export function deriveNoiseCleanupView({
       menuAction: 'open-output',
       directLabel: 'Open cleaned copy',
       menuLabel: 'Open cleaned copy',
-      detail: 'Noise cleanup completed. The original recording was not changed.',
+      detail: "Noise cleanup completed. The original recording wasn't changed.",
       statusAnnouncement: 'Noise cleanup completed.'
     })
   }
@@ -130,7 +130,7 @@ export function deriveNoiseCleanupView({
     menuAction: 'start',
     directLabel: retry ? 'Retry cleanup' : 'Reduce noise',
     menuLabel: retry ? 'Retry cleanup' : 'Reduce noise',
-    detail: retry ? (job.errorMessage ?? 'The previous cleanup did not finish.') : null
+    detail: retry ? (job.errorMessage ?? "The previous cleanup didn't finish.") : null
   })
 }
 
@@ -163,8 +163,8 @@ export function noiseCleanupCancellationNotice(
 ): NoiseCleanupCancellationNotice {
   if (job.status === 'cancelled') {
     return {
-      title: 'Noise cleanup cancelled',
-      description: 'The original recording was not changed.'
+      title: 'Noise cleanup canceled',
+      description: "The original recording wasn't changed."
     }
   }
   if (['queued', 'processing', 'validating'].includes(job.status)) {

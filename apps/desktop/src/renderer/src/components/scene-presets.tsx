@@ -61,7 +61,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
         ? studio.renameSavedScene(action.scene.id, name)
         : studio.saveScene(name, action?.scene?.id)
     if (success) setAction(null)
-    else setError('Could not save. Wait for pending edits or check available storage.')
+    else setError("Couldn't save. Wait for pending edits or check available storage.")
   }
   const apply = async (scene: SavedScene, visual?: SceneVisual): Promise<void> => {
     setBusy(true)
@@ -69,9 +69,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
       const success = await studio.applySavedScene(scene.id, visual)
       if (!success) {
         open({ kind: 'repair', scene })
-        setError(
-          'The scene could not be applied. Check its sources and background, then try again.'
-        )
+        setError("The scene couldn't be applied. Check its sources and background, then try again.")
       } else setAction(null)
     } finally {
       setBusy(false)
@@ -92,7 +90,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
               variant="outline"
               onClick={() => open({ kind: 'save', scene: active })}
             >
-              Update “{active.name}”
+              Update “{active.name}”…
             </Button>
           ) : null}
           <Button
@@ -101,7 +99,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
             variant="ghost"
             onClick={() => open({ kind: 'save' })}
           >
-            Save scene
+            Save scene…
           </Button>
         </>
       ) : (
@@ -113,7 +111,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
             disabled={!canSaveScene}
             onClick={() => open({ kind: 'save' })}
           >
-            Save scene
+            Save scene…
           </Button>
         </div>
       )}
@@ -157,19 +155,19 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
                       items={[
                         {
                           id: 'update',
-                          label: 'Update saved scene',
+                          label: 'Update saved scene…',
                           disabled: !selected || !canSaveScene,
                           onSelect: () => open({ kind: 'save', scene })
                         },
                         {
                           id: 'save-as',
-                          label: 'Save as new scene',
+                          label: 'Save as new scene…',
                           disabled: !canSaveScene,
                           onSelect: () => open({ kind: 'save' })
                         },
                         {
                           id: 'rename',
-                          label: 'Rename',
+                          label: 'Rename…',
                           onSelect: () => open({ kind: 'rename', scene })
                         },
                         {

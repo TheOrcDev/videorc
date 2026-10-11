@@ -82,7 +82,7 @@ export function youtubeConnectPausedMessage(pausedUntil: Date | string, now?: Da
 
 /**
  * The toast for a broadcast transition that failed: "Couldn't start the
- * YouTube broadcast." / "Couldn't end the YouTube broadcast.", naming the
+ * YouTube broadcast" / "Couldn't end the YouTube broadcast", naming the
  * destination only when its label is not just the platform's name (the owner
  * saw "Could not complete YouTube on YouTube." on 2026-10-02).
  */
@@ -100,8 +100,8 @@ export function youtubeBroadcastToast(
   return {
     title:
       step === 'start'
-        ? "Couldn't start the YouTube broadcast."
-        : "Couldn't end the YouTube broadcast.",
+        ? "Couldn't start the YouTube broadcast"
+        : "Couldn't end the YouTube broadcast",
     description: named
   }
 }
@@ -122,19 +122,19 @@ export function youtubeBudgetNotice(
   switch (step) {
     case 'shed-extras':
       return {
-        title: "YouTube subscriber count paused to save Videorc's daily YouTube limit.",
+        title: "YouTube subscriber count paused to save Videorc's daily YouTube limit",
         description:
-          'Thumbnails are skipped too and the YouTube viewer count updates every 2 minutes. Chat and your stream are not affected.'
+          "Thumbnails are skipped too and the YouTube viewer count updates every 2 minutes. Chat and your stream aren't affected."
       }
     case 'shed-viewers':
       return {
-        title: "YouTube viewer count paused to save Videorc's daily YouTube limit.",
+        title: "YouTube viewer count paused to save Videorc's daily YouTube limit",
         description:
-          'Chat keeps reading and your stream is not affected. Everything resumes tomorrow.'
+          "Chat keeps reading and your stream isn't affected. Everything resumes tomorrow."
       }
     case 'essentials-only':
       return {
-        title: "YouTube extras paused for today to save Videorc's daily YouTube limit.",
+        title: "YouTube extras paused for today to save Videorc's daily YouTube limit",
         description:
           'Chat keeps reading, and Go Live and Stop still work. Sending to YouTube chat, viewer and subscriber counts resume tomorrow.'
       }

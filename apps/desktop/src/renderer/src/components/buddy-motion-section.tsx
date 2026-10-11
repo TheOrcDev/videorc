@@ -43,7 +43,7 @@ export function BuddyMotionSection({
   const save = (next: BuddyMotionSettings): void => {
     setError(null)
     onSave({ ...persona, motion: next }).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : 'Could not save the motion.')
+      setError(failure instanceof Error ? failure.message : "Couldn't save the motion.")
     )
   }
   const commitIntensity = (value: number): void => {

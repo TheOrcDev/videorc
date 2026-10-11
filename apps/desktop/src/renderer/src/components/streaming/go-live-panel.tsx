@@ -681,7 +681,7 @@ function streamHealthDescription(
   if (!liveOutputActive) {
     switch (preflight.state) {
       case 'not-requested':
-        return 'The output path has not been checked yet.'
+        return "The output path hasn't been checked yet."
       case 'pending':
         return 'Checking the output path…'
       case 'failed':
@@ -701,7 +701,7 @@ function streamHealthDescription(
     case 'capture':
       return 'Capture is running below the target frame rate.'
     case 'render':
-      return 'The compositor is running below the target frame rate.'
+      return 'The scene is rendering below the target frame rate.'
     case 'encoder':
       return 'The encoder or its output queue is losing frames.'
     case 'fallback':

@@ -30,7 +30,7 @@ export function youtubeThumbnailFailure(payload: unknown): YouTubeThumbnailResul
     message:
       typeof result.message === 'string' && result.message
         ? result.message
-        : 'The thumbnail was not set. The stream is not affected.',
+        : "The thumbnail wasn't set. The stream isn't affected.",
     retryable: result.retryable === true
   }
 }

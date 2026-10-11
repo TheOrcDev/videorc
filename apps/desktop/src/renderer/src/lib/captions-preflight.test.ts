@@ -26,7 +26,7 @@ describe('decideGoLiveCaptionsReadiness', () => {
 
     expect(result.kind).toBe('blocked')
     expect(result.blocksStart).toBe(true)
-    expect(result.description).toContain('could not verify')
+    expect(result.description).toContain("couldn't verify")
   })
 
   it('uses a deployment-safe reason when caption infrastructure is unavailable', () => {

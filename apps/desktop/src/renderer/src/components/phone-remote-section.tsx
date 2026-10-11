@@ -108,7 +108,7 @@ function PairingDialog({
         <DialogHeader>
           <DialogTitle>Pair a phone</DialogTitle>
           <DialogDescription>
-            Scan with your phone&apos;s camera while it is on the same Wi-Fi as this computer. The
+            Scan with your phone&apos;s camera while it's on the same Wi-Fi as this computer. The
             code works once.
           </DialogDescription>
         </DialogHeader>
@@ -382,7 +382,7 @@ export function PhoneRemoteSection(): ReactElement {
       <ConfirmDialog
         confirmDisabled={pending}
         confirmLabel="Remove phone"
-        description="It is disconnected now and needs a new pairing to come back. Your Stream Deck is not affected."
+        description="It's disconnected now and needs a new pairing to come back. Your Stream Deck isn't affected."
         open={removing !== null}
         testId="phone-remove"
         title={`Remove ${(removing && names.get(removing.id)) ?? removing?.name ?? 'this phone'}?`}

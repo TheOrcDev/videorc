@@ -197,7 +197,7 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
         { label: 'Peak', value: formatViewerCount(peak) },
         { label: 'Average', value: formatViewerCount(average) }
       ],
-      description: `Peak ${formatViewerCount(peak)} viewers, average ${formatViewerCount(average)}`
+      description: `Peak ${formatViewerCount(peak)} ${peak === 1 ? 'viewer' : 'viewers'}, average ${formatViewerCount(average)}`
     } satisfies StatItemModel
   }
   const live = input.dashboard?.session.state === 'live'
@@ -230,14 +230,14 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
       })),
       ...waiting.map((platform) => ({
         label: CHAT_PLATFORM_LABELS[platform],
-        value: 'waiting',
+        value: 'Waiting',
         platform
       })),
       ...(peak !== null ? [{ label: 'Peak', value: formatViewerCount(peak) }] : []),
       ...(latest && stale ? [{ label: 'Updated', value: 'over a minute ago' }] : [])
     ],
     description: latest
-      ? `${count} viewers${peak !== null ? `, peak ${formatViewerCount(peak)}` : ''}`
+      ? `${count} ${latest.total === 1 ? 'viewer' : 'viewers'}${peak !== null ? `, peak ${formatViewerCount(peak)}` : ''}`
       : 'No viewer count yet'
   } satisfies StatItemModel
 }

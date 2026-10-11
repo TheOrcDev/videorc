@@ -44,7 +44,7 @@ export function EncoderPreferenceField({
           </div>
           <p className="text-xs text-muted-foreground">
             {state.envOverride
-              ? 'Set by VIDEORC_WINDOWS_H264_ENCODER for this run.'
+              ? 'Set by a launch setting for this run.'
               : "Used only when this PC's hardware encoder can't start. Intel Quick Sync encodes on the Intel graphics chip instead of the processor, and falls back to software if its own check fails."}
           </p>
         </div>

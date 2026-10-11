@@ -105,7 +105,7 @@ export function BuddyLookSection({
         <Field>
           <FieldLabel>
             {view === 'working'
-              ? 'Making the new look'
+              ? 'Making the new look…'
               : view === 'draft'
                 ? 'Your new look'
                 : 'Current look'}

@@ -368,7 +368,7 @@ describe('BuddyReportCard: the Commands row (plan 140, S6)', () => {
     const [row] = rows('commands')
     expect(row).toBeTruthy()
     expect(row.textContent).toContain('Commands')
-    expect(row.textContent).toContain('Highlighted 3 · Cleared 1 · Removed 2 · Cancelled 1')
+    expect(row.textContent).toContain('Highlighted 3 · Cleared 1 · Removed 2 · Canceled 1')
     expect(row.textContent).toContain('7 commands')
     // Counts only: never a viewer's name or words.
     expect(row.textContent).not.toContain('coders_x')

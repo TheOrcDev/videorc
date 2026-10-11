@@ -19,6 +19,7 @@ import {
 import { activityItems } from '@/lib/stream-activity'
 import { YOUTUBE_ARTBOARD, YOUTUBE_ICON_URL, YOUTUBE_MARK } from '@/lib/youtube-mark'
 import { X_LOGO_WHITE_URL, X_VERIFIED_URL } from '@/lib/x-mark'
+import { plural } from '@/lib/format'
 import type { CaptionStyleId, LiveChatMessageFragment, OverlayRect } from '@/lib/backend'
 import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../../../shared/comments-command-timing'
 
@@ -732,7 +733,7 @@ export async function renderCommentHighlightCards(
   ])
   if (emoteFailures.length > 0) {
     warn(
-      `Highlight card: ${emoteFailures.length} emote(s) show as text (${emoteFailures.join('; ')}).`
+      `Highlight card: ${plural(emoteFailures.length, 'emote')} show as text (${emoteFailures.join('; ')}).`
     )
   }
   const render = (canvas: HighlightCanvas): Promise<string | null> =>
