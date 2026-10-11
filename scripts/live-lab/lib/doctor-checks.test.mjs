@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { emptyConfig } from './config.mjs'
 import {
+  evaluateQuota,
   FAIL,
   PASS,
   SKIP,
@@ -169,4 +170,14 @@ test('summary fails on any FAIL and ignores WARN and SKIP', () => {
   })
   assert.equal(summarize([...results, check('d', FAIL, '')]).ok, false)
   assert.match(formatResult(check('config', PASS, 'ok')), /^PASS {2}config/)
+})
+
+test('lab quota: pass under 75%, warn from 75%, fail when spent or unreadable', () => {
+  const day = { day: '2026-10-12', max: 8000 }
+  assert.equal(evaluateQuota({ ...day, units: 120, remaining: 7880 }).status, PASS)
+  assert.equal(evaluateQuota({ ...day, units: 6000, remaining: 2000 }).status, WARN)
+  const spent = evaluateQuota({ ...day, units: 8000, remaining: 0 })
+  assert.equal(spent.status, FAIL)
+  assert.match(spent.detail, /8000 of 8000 units spent \(Pacific day 2026-10-12\)/)
+  assert.equal(evaluateQuota(null, new Error('ledger is not valid JSON')).status, FAIL)
 })

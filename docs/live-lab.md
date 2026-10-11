@@ -85,9 +85,11 @@ pnpm live:doctor
 ```
 
 PASS / WARN / FAIL / SKIP per check, non-zero exit on any FAIL. It spends 2
-lab quota units (one `channels.list` per role). Checks for parts not built
-yet (lab quota counter, build under test and its TCC grants, network fault
-rules) print SKIP with the slice that adds them.
+lab quota units (one `channels.list` per role), charged to the lab quota
+ledger (`quota-ledger.json` next to the config, 0600, per Pacific day, cap
+8,000 units); "lab quota today" warns from 75% and fails when the day is
+spent. Checks for parts not built yet (build under test and its TCC grants,
+network fault rules) print SKIP with the slice that adds them.
 
 `pnpm live:hookup --show` prints what is stored, fingerprints only.
 

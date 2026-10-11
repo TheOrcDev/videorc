@@ -2,8 +2,8 @@
 
 // Plan 176 L0: is the live lab ready to go live? Prints PASS / WARN / FAIL /
 // SKIP per check and exits non-zero on any FAIL. Spends 2 lab quota units
-// (one channels.list per role). Never prints more than the last 4 characters
-// of a secret.
+// (one channels.list per role), charged to the lab quota ledger (plan 178
+// U8). Never prints more than the last 4 characters of a secret.
 
 import { execFile } from 'node:child_process'
 import { connect } from 'node:tls'
@@ -20,6 +20,7 @@ import {
   evaluateClient,
   evaluateLabDisplay,
   evaluatePermissions,
+  evaluateQuota,
   evaluateStreamKeys,
   evaluateTokenAge,
   evaluateTool,
@@ -27,6 +28,7 @@ import {
   summarize
 } from './lib/doctor-checks.mjs'
 import { fetchMyChannel, refreshAccessToken } from './lib/oauth.mjs'
+import { createQuotaLedger } from './lib/quota-ledger.mjs'
 
 const execFileAsync = promisify(execFile)
 const RTMPS_HOST = 'a.rtmps.youtube.com'
@@ -69,7 +71,7 @@ function reachable(host, port, timeoutMs = 5000) {
   })
 }
 
-async function roleChecks(role, config, broadcasterChannelId) {
+async function roleChecks(role, config, broadcasterChannelId, ledger) {
   const entry = config?.roles?.[role]
   if (!entry?.refreshToken) {
     return {
@@ -86,6 +88,7 @@ async function roleChecks(role, config, broadcasterChannelId) {
   }
   let accessToken
   try {
+    ledger.charge('channels.list')
     accessToken = await refreshAccessToken({
       clientId: config.client.id,
       clientSecret: config.client.secret,
@@ -126,9 +129,10 @@ async function main() {
   results.push(evaluateClient(config))
   results.push(...evaluateStreamKeys(config))
 
+  const ledger = createQuotaLedger({ dir })
   let broadcasterChannelId = null
   for (const role of ROLES) {
-    const outcome = await roleChecks(role, config, broadcasterChannelId)
+    const outcome = await roleChecks(role, config, broadcasterChannelId, ledger)
     if (role === 'broadcaster') broadcasterChannelId = outcome.channelId
     results.push(...outcome.results)
   }
@@ -146,9 +150,11 @@ async function main() {
   results.push(evaluateTool('ffmpeg', ffmpeg, 'brew install ffmpeg'))
   results.push(check('rtmps ingest', rtmps.ok ? PASS : FAIL, rtmps.detail))
 
-  results.push(
-    check('lab quota today', SKIP, 'The unit counter arrives with the observer (plan 176 L4).')
-  )
+  try {
+    results.push(evaluateQuota(ledger.today()))
+  } catch (error) {
+    results.push(evaluateQuota(null, error))
+  }
   results.push(
     check(
       'build under test',

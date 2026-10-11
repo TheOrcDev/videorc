@@ -380,7 +380,7 @@ write a complete run folder; YouTube shows completed Unlisted VODs.
 
 ### Phase B: YouTube side, reports, on demand, schedule
 
-### U8 — Observer, viewer bot, clip puller, quota ledger (plan 176 L4 = plan 166 S7)
+### U8 — Observer, viewer bot, clip puller, quota ledger (plan 176 L4 = plan 166 S7) — BUILT
 
 As plan 176 L4, plus: the observer feeds the kill switch's Studio-ended
 signal (broadcast `complete` while the app is On air), and the P0 rule from
@@ -390,6 +390,39 @@ uses the D3 account.
 **Done when:** plan 176 L4's done-when.
 **STOP if:** pulling clips of our own stream is against YouTube's terms for
 the channel owner (observer only then).
+
+**Built** on branch `plan-178/u8`: `scripts/live-lab/lib/{quota-ledger,
+youtube-api,youtube-observer,viewer-bot,clip-puller}.mjs` + tests against
+`scripts/lib/fake-youtube-api.mjs` (extended additively with `extraTokens`
+for a second account) and injected runners; `createAccessTokenSource` in
+`oauth.mjs`; `live:doctor`'s "lab quota today" check now reads the ledger.
+Owed on the lab machine: the first real run fills the observer log, the
+viewer bot's message reaches the app, and the ledger's costs match the lab
+project's Cloud Console metrics (liveChatMessages.list is charged 1 unit,
+as in `youtube_quota.rs`).
+
+**Terms of Service finding (checked 2026-10-12, owner decision needed).**
+YouTube's Terms (Permissions and Restrictions) forbid to "access, reproduce,
+download ... any part of the Service or any Content except: (a) as
+expressly authorized by the Service; or (b) with prior written permission
+from YouTube and, if applicable, the respective rights holders", and to
+"access the Service using any automated means (such as robots, botnets or
+scrapers)" except public search engines or with YouTube's prior written
+permission. The channel owner holds the rights to the content, but both
+clauses are about how the Service is accessed, and owning the content does
+not waive them. The path YouTube expressly authorizes for owners is the
+Studio download of their own uploaded videos (MP4, 720p or 360p, 5 per
+video per day, support.google.com/youtube/answer/56100); it does not cover
+recording the live HLS with yt-dlp. So a strict reading says clip pulling
+is not expressly permitted even for our own stream; the practical risk is
+low (own channel, 2 min every 15-30 min) but it is a terms call, not a
+technical one. What was built: the clip puller only runs while `clipPull`
+is true (default true, per the slice brief) and only after the
+broadcaster's API confirms the video is a broadcast of the lab channel
+(`observer.isOwnVideo`); otherwise it returns `skipped` without touching
+YouTube. **Recommendation:** the U4 policy carries `clipPull` and U9 passes
+it through, defaulting to `false` until the owner rules (a new owner decision); with
+it off the lab is observer-only, which is the plan's STOP fallback.
 
 ### U9 — Scenarios, frame checks, verdicts, reports (plan 176 L5 + plan 166 S8 steps 1-2)
 

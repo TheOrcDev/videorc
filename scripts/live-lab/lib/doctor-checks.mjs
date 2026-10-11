@@ -180,6 +180,22 @@ export function evaluateTool(name, versionOutput, installHint) {
     : check(name, FAIL, `Not found. ${installHint}`)
 }
 
+// Plan 178 U8: today's lab quota from the ledger (`ledger.today()`), or the
+// error reading it. Warn from 75% of the cap, fail when nothing is left.
+export const QUOTA_WARN_RATIO = 0.75
+
+export function evaluateQuota(today, error = null) {
+  if (error) return check('lab quota today', FAIL, error.message ?? String(error))
+  const detail = `${today.units} of ${today.max} units spent (Pacific day ${today.day})`
+  if (today.remaining <= 0) {
+    return check('lab quota today', FAIL, `${detail}. Wait for midnight Pacific.`)
+  }
+  if (today.units >= today.max * QUOTA_WARN_RATIO) {
+    return check('lab quota today', WARN, `${detail}. Plan runs around what is left.`)
+  }
+  return check('lab quota today', PASS, detail)
+}
+
 export function summarize(results) {
   const counts = { [PASS]: 0, [WARN]: 0, [FAIL]: 0, [SKIP]: 0 }
   for (const result of results) counts[result.status] += 1
