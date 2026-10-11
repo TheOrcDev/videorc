@@ -22,7 +22,11 @@ import {
 } from './icons'
 import { X_MARK_PATH } from '../lib/x-mark'
 
-describe('semantic icon registry', () => {
+// Whole-renderer source scans are CPU-bound: under a parallel full run on a
+// laptop they pass vitest's 5 s default (ogre 2026-10-12: 6.9 s; 1.5 s alone).
+const SOURCE_SCAN_TIMEOUT = { timeout: 30_000 }
+
+describe('semantic icon registry', SOURCE_SCAN_TIMEOUT, () => {
   it('keeps optional glyph modules outside the initial chunk through the actual registry', async () => {
     const root = await mkdtemp(join(tmpdir(), 'videorc-icon-chunks-'))
     try {
