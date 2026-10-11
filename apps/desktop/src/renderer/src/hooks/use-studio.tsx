@@ -138,7 +138,6 @@ import {
   reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
   resolveProviderStreamOutputPlan,
-  rtmpDefaults,
   simulcastArmed,
   simulcastLegLiveRequest,
   smokePreviewCompositorCaptureConfig,
@@ -294,7 +293,6 @@ import type {
   CohostEnableCommand,
   CohostFlagParams,
   CohostPromiseParams,
-  CohostQuestion,
   CohostSayParams,
   CohostUtteranceParams,
   CohostQuestionParams,
@@ -382,7 +380,6 @@ import type {
   RemoteLanPairing,
   RemoteLanStatus,
   RuntimeInfo,
-  RtmpPreset,
   Scene,
   SceneCommitStatus,
   SceneConfigParams,
@@ -484,7 +481,6 @@ import {
 import {
   applyCohostState,
   cohostEnableRelayPatch,
-  cohostHighlightMessageId,
   mergeAutoChatRelayPatch,
   buddyLiveSettingsPatch
 } from '@/lib/cohost-state'
@@ -1205,7 +1201,6 @@ export type StudioContextValue = {
   /** Read-only live-chat snapshot for the studio comments panel, driven by liveChat.* events. */
   liveChatSnapshot: LiveChatSnapshot
   /** Clear the local chat view (calls liveChat.clearLocal; not platform messages). */
-  clearLiveChat: () => Promise<void>
   /** Live captions (premium cloud AI): status + transcript lines from captions.* events. */
   captionsStatus: CaptionsStatus
   captionLines: CaptionsUpdate[]
@@ -1258,11 +1253,7 @@ export type StudioContextValue = {
    * nothing. */
   answerBuddyConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
-  dismissCohostQuestion: (questionId: string, sessionId?: string) => void
   /** Put a voice-resolved question back (`cohost.question.restore`, plan 060 D9). */
-  restoreCohostQuestion: (questionId: string, sessionId?: string) => void
-  dismissCohostFlag: (messageId: string, sessionId?: string) => void
-  showCohostQuestionOnStream: (question: CohostQuestion) => void
   streamMetadataDraft: StreamMetadataDraft | null
   streamMetadataValidation: StreamMetadataValidation | null
   goLivePreflight: GoLivePreflight | null
@@ -1393,7 +1384,6 @@ export type StudioContextValue = {
   setEncoderPreference: (preference: WindowsH264EncoderPreference) => Promise<void>
   performanceCheckProgress: PerformanceCheckProgress | null
   runPerformanceCheck: () => Promise<void>
-  applyRtmpPreset: (preset: RtmpPreset) => void
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
   /**
    * The Go Live dialog's fixes: leave a destination out of this livestream
@@ -1426,9 +1416,6 @@ export type StudioContextValue = {
   refreshDevices: () => Promise<void>
   loadMoreSessions: () => Promise<void>
   loadSessionDetails: (sessionId: string) => Promise<void>
-  refreshEntitlements: () => Promise<void>
-  refreshPlatformAccounts: () => Promise<void>
-  validatePlatformAccounts: () => Promise<PlatformAccountValidation[]>
   /**
    * Starts a platform sign-in in the browser and resolves its link, or null
    * when it never got there. A caller that shows the browser step itself
@@ -1447,7 +1434,6 @@ export type StudioContextValue = {
   searchKickCategories: (query: string) => Promise<void>
   refreshXNativeCapability: (accountId?: string) => Promise<void>
   authorizeXLive: () => Promise<void>
-  refreshStreamMetadata: () => Promise<void>
   saveStreamMetadataDraft: () => Promise<void>
   cancelGoLiveConfirmation: () => void
   confirmGoLive: () => Promise<void>
@@ -1462,7 +1448,6 @@ export type StudioContextValue = {
   dismissSessionRuntimeNotice: () => void
   /** Re-run the exact start that failed (same streaming override). */
   retrySessionStart: () => void
-  refreshScreens: () => Promise<void>
   importScreenImage: () => Promise<void>
   renameScreen: (screenId: string, name: string) => Promise<void>
   deleteScreen: (screenId: string) => Promise<void>
@@ -1485,15 +1470,12 @@ export type StudioContextValue = {
   /** Live drag drafts for the Scene canvas (plan 058); refused while a session runs. */
   setSceneEditorDraft: (params: SceneEditorDraftParams) => Promise<SceneEditorDraftAck>
   clearSceneEditorDraft: () => Promise<SceneEditorDraftAck>
-  commitCameraTransform: (sourceId: string, x: number, y: number) => Promise<void>
   setSceneSourceVisible: (sourceId: string, visible: boolean) => Promise<void>
-  moveSceneSource: (sourceId: string, direction: -1 | 1) => Promise<void>
   handleSystemPermission: (pane: SystemPermissionPane) => Promise<void>
   openSystemPermissionSettings: (pane: SystemPermissionPane) => Promise<void>
   revealPermissionTarget: () => Promise<void>
   scheduleHardwareAccelerationRetry: () => Promise<void>
   exportSupportBundle: () => Promise<void>
-  registerPreviewSurfaceResize: () => void
   syncNativePreviewSurfaceBounds: (
     bounds: PreviewSurfaceBounds,
     generation?: number
@@ -2550,10 +2532,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [replaceLiveChatSendOperation]
   )
-  const clearLiveChat = useCallback(async () => {
-    if (!client) return
-    await client.request('liveChat.clearLocal')
-  }, [client])
   // A silently empty Comments feed must never be the only signal that chat
   // setup failed at go-live (2026-07-10: Twitch chat needed a reconnect and
   // the failure lived only in a backend warn log). Toast each broken
@@ -4668,54 +4646,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [reportError, runCohostAction]
   )
 
-  const dismissCohostQuestion = useCallback(
-    (questionId: string, sessionId?: string): void => {
-      const target = sessionId ?? cohostStateRef.current?.sessionId
-      if (!target) return
-      void runCohostAction('cohost.question.dismiss', { sessionId: target, questionId }).catch(
-        (error: unknown) => reportError(error)
-      )
-    },
-    [reportError, runCohostAction]
-  )
-
-  const restoreCohostQuestion = useCallback(
-    (questionId: string, sessionId?: string): void => {
-      const target = sessionId ?? cohostStateRef.current?.sessionId
-      if (!target) return
-      void runCohostAction('cohost.question.restore', { sessionId: target, questionId }).catch(
-        (error: unknown) => reportError(error)
-      )
-    },
-    [reportError, runCohostAction]
-  )
-
-  const dismissCohostFlag = useCallback(
-    (messageId: string, sessionId?: string): void => {
-      const target = sessionId ?? cohostStateRef.current?.sessionId
-      if (!target) return
-      void runCohostAction('cohost.flag.dismiss', { sessionId: target, messageId }).catch(
-        (error: unknown) => reportError(error)
-      )
-    },
-    [reportError, runCohostAction]
-  )
-
-  // "Show on stream" is a FREE reuse of the existing comment highlight: the
-  // group's first source message is the one the overlay renders.
-  const showCohostQuestionOnStream = useCallback(
-    (question: CohostQuestion): void => {
-      const messageId = cohostHighlightMessageId(question)
-      if (!messageId) return
-      const message = liveChatSnapshotRef.current.messages.find(
-        (candidate) => candidate.id === messageId
-      )
-      if (!message || !commentCanHighlight(message)) return
-      toggleCommentHighlight(message)
-    },
-    [toggleCommentHighlight]
-  )
-
   // Buddy's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
   // safety gate, one command per decision with an engine-wide generation) and
   // the renderer only executes it. Always-set semantics: an automatic path
@@ -5992,14 +5922,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [commitActiveScreen]
   )
 
-  const refreshScreens = useCallback(async () => {
-    try {
-      await refreshScreensForClient(client)
-    } catch (error) {
-      reportError(error)
-    }
-  }, [client, refreshScreensForClient, reportError])
-
   const refreshPlatformAccountsForClient = useCallback(
     async (activeClient: BackendClient | null) => {
       if (!activeClient) {
@@ -6020,14 +5942,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     []
   )
 
-  const refreshPlatformAccounts = useCallback(async () => {
-    try {
-      await refreshPlatformAccountsForClient(client)
-    } catch (error) {
-      reportError(error)
-    }
-  }, [client, refreshPlatformAccountsForClient, reportError])
-
   const validatePlatformAccountsForClient = useCallback(
     async (activeClient: BackendClient | null) => {
       if (!activeClient) {
@@ -6043,15 +5957,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     []
   )
-
-  const validatePlatformAccounts = useCallback(async () => {
-    try {
-      return await validatePlatformAccountsForClient(client)
-    } catch (error) {
-      reportError(error)
-      return []
-    }
-  }, [client, reportError, validatePlatformAccountsForClient])
 
   const refreshYouTubeChannels = useCallback(
     async (accountId?: string, options: { background?: boolean } = {}) => {
@@ -6297,30 +6202,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       reportError(error, { action: 'start', object: 'X Live approval' })
     }
   }, [client, reportError, wsStatus])
-
-  const refreshStreamMetadataForClient = useCallback(async (activeClient: BackendClient | null) => {
-    if (!activeClient) {
-      setStreamMetadataDraft(null)
-      setStreamMetadataValidation(null)
-      return
-    }
-
-    const draft = await activeClient.request<StreamMetadataDraft>('streamTargets.metadata.get')
-    const validation = await activeClient.request<StreamMetadataValidation>(
-      'streamTargets.metadata.validate',
-      draft
-    )
-    setStreamMetadataDraft(draft)
-    setStreamMetadataValidation(validation)
-  }, [])
-
-  const refreshStreamMetadata = useCallback(async () => {
-    try {
-      await refreshStreamMetadataForClient(client)
-    } catch (error) {
-      reportError(error)
-    }
-  }, [client, refreshStreamMetadataForClient, reportError])
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings))
@@ -8396,13 +8277,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [refreshMediaAccess, reportError]
   )
 
-  const refreshEntitlements = useCallback(async (): Promise<void> => {
-    if (!client || wsStatusRef.current !== 'connected') {
-      return
-    }
-    await refreshEntitlementsForClient(client)
-  }, [client, refreshEntitlementsForClient])
-
   // Purchases and token expiry must not remain stale. App ready (first connect)
   // covers a cold launch, focus covers return from the Premium browser, and
   // the bounded signed-in timer covers an app left open.
@@ -8777,57 +8651,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     },
     [applyCommittedScene, client, patchLayout, persistWorkingVisual, reportError]
-  )
-
-  const moveSceneSource = useCallback(
-    async (sourceId: string, direction: -1 | 1) => {
-      if (!client || !scene) {
-        return
-      }
-
-      const currentIndex = scene.sources.findIndex((source) => source.id === sourceId)
-      const nextIndex = currentIndex + direction
-      if (currentIndex === -1 || nextIndex < 0 || nextIndex >= scene.sources.length) {
-        return
-      }
-
-      const sourceIds = scene.sources.map((source) => source.id)
-      const [moved] = sourceIds.splice(currentIndex, 1)
-      if (!moved) {
-        return
-      }
-      sourceIds.splice(nextIndex, 0, moved)
-
-      try {
-        const status = await client.request<SceneCommitStatus>('scene.sources.reorder', {
-          sourceIds
-        })
-        applyCommittedScene(status)
-      } catch (error) {
-        reportError(error, { action: 'change', object: 'the scene' })
-      }
-    },
-    [applyCommittedScene, client, reportError, scene]
-  )
-
-  const commitCameraTransform = useCallback(
-    async (sourceId: string, x: number, y: number) => {
-      if (!client) {
-        return
-      }
-
-      try {
-        const status = await client.request<SceneCommitStatus>('scene.source.transform.update', {
-          sourceId,
-          transform: { x, y }
-        })
-        applyCommittedScene(status)
-        syncSourceTransformsToLayout(status.scene)
-      } catch (error) {
-        reportError(error, { action: 'move', object: 'the camera' })
-      }
-    },
-    [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
   )
 
   const rememberLayoutTransactionSnapshot = useCallback((snapshot: LayoutTransactionSnapshot) => {
@@ -10647,18 +10470,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     return () => unsubscribe?.()
   }, [nativePreviewSurfaceEnabled, syncNativePreviewSurfaceCompositor])
-
-  const registerPreviewSurfaceResize = useCallback(() => {
-    if (!client || wsStatus !== 'connected') {
-      return
-    }
-    void client
-      .request<DiagnosticStats>('diagnostics.preview_surface.resize')
-      .then(setDiagnosticStats)
-      .catch(() => {
-        // Resize diagnostics are best-effort and should never interrupt editing.
-      })
-  }, [client, wsStatus])
 
   const importScreenImage = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
@@ -15136,16 +14947,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => window.clearTimeout(timer)
   }, [performanceCheck, recording.state, runPerformanceCheck, runtimeInfo?.isPackaged])
 
-  const applyRtmpPreset = useCallback((preset: RtmpPreset) => {
-    setCaptureConfig((current) => ({
-      ...current,
-      rtmpPreset: preset,
-      rtmpServerUrl: rtmpDefaults[preset] || current.rtmpServerUrl,
-      // Stream keys are platform-specific — never carry one across a platform switch.
-      streamKey: ''
-    }))
-  }, [])
-
   const patchStreamingTarget = useCallback(
     (targetId: string, patch: Partial<StreamTargetSettings>) => {
       setCaptureConfig((current) =>
@@ -16140,7 +15941,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       xNativeCapability,
       xNativeCapabilityLoading,
       youtubeQuota,
-      clearLiveChat,
       captionsStatus,
       captionLines,
       captionsCommandPending,
@@ -16173,10 +15973,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       buddyConsentRequested,
       answerBuddyConsent,
       markCohostQuestionAnswered,
-      dismissCohostQuestion,
-      restoreCohostQuestion,
-      dismissCohostFlag,
-      showCohostQuestionOnStream,
       streamMetadataDraft,
       streamMetadataValidation,
       goLivePreflight,
@@ -16229,7 +16025,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setEncoderPreference,
       performanceCheckProgress,
       runPerformanceCheck,
-      applyRtmpPreset,
       patchStreamingTarget,
       resolveGoLiveBlocker,
       saveManualStreamKey,
@@ -16242,9 +16037,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshDevices,
       loadMoreSessions,
       loadSessionDetails,
-      refreshEntitlements,
-      refreshPlatformAccounts,
-      validatePlatformAccounts,
       connectPlatformAccount,
       disconnectPlatformAccount,
       refreshYouTubeChannels,
@@ -16253,7 +16045,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       searchKickCategories,
       refreshXNativeCapability,
       authorizeXLive,
-      refreshStreamMetadata,
       saveStreamMetadataDraft,
       cancelGoLiveConfirmation,
       confirmGoLive,
@@ -16263,7 +16054,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionRuntimeNotice,
       dismissSessionRuntimeNotice,
       retrySessionStart,
-      refreshScreens,
       importScreenImage,
       renameScreen,
       deleteScreen,
@@ -16277,7 +16067,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneSourceTransform,
       setSceneEditorDraft,
       clearSceneEditorDraft,
-      commitCameraTransform,
       applyCameraPreset,
       savedScenes: sceneLibrary.scenes,
       activeSavedSceneId,
@@ -16301,13 +16090,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       retrySourceStatus,
       switchSourceDeviceLive,
       setSceneSourceVisible,
-      moveSceneSource,
       handleSystemPermission,
       openSystemPermissionSettings,
       revealPermissionTarget,
       scheduleHardwareAccelerationRetry,
       exportSupportBundle,
-      registerPreviewSurfaceResize,
       syncNativePreviewSurfaceBounds,
       sampleAudioMeter,
       armWarmMicrophone,
@@ -16389,7 +16176,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       xNativeCapability,
       xNativeCapabilityLoading,
       youtubeQuota,
-      clearLiveChat,
       captionsStatus,
       captionLines,
       captionsCommandPending,
@@ -16422,10 +16208,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       buddyConsentRequested,
       answerBuddyConsent,
       markCohostQuestionAnswered,
-      dismissCohostQuestion,
-      restoreCohostQuestion,
-      dismissCohostFlag,
-      showCohostQuestionOnStream,
       streamMetadataDraft,
       streamMetadataValidation,
       goLivePreflight,
@@ -16478,7 +16260,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setEncoderPreference,
       performanceCheckProgress,
       runPerformanceCheck,
-      applyRtmpPreset,
       patchStreamingTarget,
       resolveGoLiveBlocker,
       saveManualStreamKey,
@@ -16491,9 +16272,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshDevices,
       loadMoreSessions,
       loadSessionDetails,
-      refreshEntitlements,
-      refreshPlatformAccounts,
-      validatePlatformAccounts,
       connectPlatformAccount,
       disconnectPlatformAccount,
       refreshYouTubeChannels,
@@ -16502,7 +16280,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       searchKickCategories,
       refreshXNativeCapability,
       authorizeXLive,
-      refreshStreamMetadata,
       saveStreamMetadataDraft,
       cancelGoLiveConfirmation,
       confirmGoLive,
@@ -16512,7 +16289,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionRuntimeNotice,
       dismissSessionRuntimeNotice,
       retrySessionStart,
-      refreshScreens,
       importScreenImage,
       renameScreen,
       deleteScreen,
@@ -16526,7 +16302,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneSourceTransform,
       setSceneEditorDraft,
       clearSceneEditorDraft,
-      commitCameraTransform,
       applyCameraPreset,
       sceneLibrary.scenes,
       sceneLibrary.error,
@@ -16549,13 +16324,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       retrySourceStatus,
       switchSourceDeviceLive,
       setSceneSourceVisible,
-      moveSceneSource,
       handleSystemPermission,
       openSystemPermissionSettings,
       revealPermissionTarget,
       scheduleHardwareAccelerationRetry,
       exportSupportBundle,
-      registerPreviewSurfaceResize,
       syncNativePreviewSurfaceBounds,
       sampleAudioMeter,
       armWarmMicrophone,

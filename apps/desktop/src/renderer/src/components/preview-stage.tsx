@@ -278,15 +278,15 @@ function DockedPreviewFrame({
           with the video edges. */}
       <div className="flex items-center justify-end gap-1.5 pt-2">
         {permissionPane && permissionAccess?.action && onOpenPermissions ? (
-          <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
+          <Button variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
             {permissionActionLabel(permissionAccess, platform)}
           </Button>
         ) : null}
-        <Button data-videorc-preview-pop-out size="sm" variant="secondary" onClick={onPopOut}>
+        <Button data-videorc-preview-pop-out variant="secondary" onClick={onPopOut}>
           <ExternalLinkIcon className="size-4" />
           Pop out
         </Button>
-        <Button size="sm" variant="secondary" onClick={onClose}>
+        <Button variant="secondary" onClick={onClose}>
           Close
         </Button>
       </div>
@@ -421,22 +421,18 @@ function DetachedPreviewCard({
               {detail ? <span className="text-xs text-muted-foreground">{detail}</span> : null}
             </div>
             <div className="flex flex-wrap justify-center gap-2">
-              <Button size="sm" variant="secondary" onClick={onOpen}>
+              <Button variant="secondary" onClick={onOpen}>
                 {`Show ${WINDOW_NAMES.preview}`}
               </Button>
-              <Button data-videorc-preview-stick size="sm" variant="outline" onClick={onStick}>
+              <Button data-videorc-preview-stick variant="outline" onClick={onStick}>
                 <PinIcon className="size-4" />
                 Stick to app
               </Button>
-              <Button size="sm" variant="outline" onClick={onClose}>
+              <Button variant="outline" onClick={onClose}>
                 {`Close ${WINDOW_NAMES.preview}`}
               </Button>
               {showPermissionAction && permissionPane && onOpenPermissions ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => onOpenPermissions(permissionPane)}
-                >
+                <Button variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
                   {permissionActionLabel(permissionAccess, platform)}
                 </Button>
               ) : null}
@@ -454,7 +450,7 @@ function DetachedPreviewCard({
                 Open it to watch your scene as viewers see it.
               </span>
             </div>
-            <Button data-videorc-open-preview-window size="sm" onClick={onOpen}>
+            <Button data-videorc-open-preview-window onClick={onOpen}>
               {`Open ${WINDOW_NAMES.preview}`}
               <ShortcutKeys accelerator={shortcutAccelerator('preview-window')} className="ml-1" />
             </Button>
@@ -470,7 +466,7 @@ function DetachedPreviewCard({
             {/* The panel header no longer repeats the stage's actions (plan
                 174 S3.3, B-23), so the window opens from here too. */}
             {!previewWindowOpen ? (
-              <Button size="sm" variant="outline" onClick={onOpen}>
+              <Button variant="outline" onClick={onOpen}>
                 Open preview
                 <ShortcutKeys
                   accelerator={shortcutAccelerator('preview-window')}
@@ -479,12 +475,12 @@ function DetachedPreviewCard({
               </Button>
             ) : null}
             {onRetry && disabledCopy.retryable ? (
-              <Button size="sm" variant="outline" onClick={onRetry}>
+              <Button variant="outline" onClick={onRetry}>
                 Retry preview
               </Button>
             ) : null}
             {permissionPane && permissionAccess?.action && onOpenPermissions ? (
-              <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
+              <Button variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
                 {permissionActionLabel(permissionAccess, platform)}
               </Button>
             ) : null}

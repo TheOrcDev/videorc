@@ -696,7 +696,6 @@ export function SceneStage({
           disabled={phase !== 'idle'}
           aria-label="Scene sources"
           className="min-w-0 flex-wrap"
-          size="sm"
           type="single"
           value={selectedStageId ?? ''}
           onValueChange={(value) => {
@@ -1149,7 +1148,7 @@ export function SceneStage({
               D15), here for the mouse; the key works anywhere on the page. */}
           {onUndo ? (
             <>
-              <Button data-videorc-stage-undo size="sm" variant="ghost" onClick={onUndo}>
+              <Button data-videorc-stage-undo variant="ghost" onClick={onUndo}>
                 Undo
                 <ShortcutKeys accelerator="CmdOrCtrl+Z" />
               </Button>
@@ -1157,7 +1156,7 @@ export function SceneStage({
             </>
           ) : null}
           {showFreeformHint && onRequestFreeform ? (
-            <Button size="sm" variant="ghost" onClick={onRequestFreeform}>
+            <Button variant="ghost" onClick={onRequestFreeform}>
               Make freeform
             </Button>
           ) : null}
@@ -1167,7 +1166,6 @@ export function SceneStage({
                 aria-label="Snap"
                 disabled={!dragEnabled || phase === 'dragging'}
                 pressed={snap}
-                size="sm"
                 onPressedChange={setSnap}
               >
                 Snap
@@ -1180,18 +1178,18 @@ export function SceneStage({
               Elsewhere the plain preview toggle stays. */}
           {onPopOut && onShowLive ? (
             liveDocked ? (
-              <Button data-videorc-stage-pop-out size="sm" variant="ghost" onClick={onPopOut}>
+              <Button data-videorc-stage-pop-out variant="ghost" onClick={onPopOut}>
                 <ExternalLinkIcon data-icon="inline-start" />
                 Pop out
               </Button>
             ) : (
-              <Button data-videorc-stage-show-live size="sm" variant="ghost" onClick={onShowLive}>
+              <Button data-videorc-stage-show-live variant="ghost" onClick={onShowLive}>
                 <PreviewIcon data-icon="inline-start" />
                 Show preview here
               </Button>
             )
           ) : (
-            <Button size="sm" variant="ghost" onClick={onTogglePreview}>
+            <Button variant="ghost" onClick={onTogglePreview}>
               <ExternalLinkIcon data-icon="inline-start" />
               {previewOpen ? `Close ${WINDOW_NAMES.preview}` : `Open ${WINDOW_NAMES.preview}`}
             </Button>

@@ -88,31 +88,20 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
             <Button
               data-testid="scene-update-saved"
               disabled={!canSaveScene}
-              size="sm"
               variant="outline"
               onClick={() => open({ kind: 'save', scene: active })}
             >
               Update “{active.name}”
             </Button>
           ) : null}
-          <Button
-            disabled={!canSaveScene}
-            size="sm"
-            variant="ghost"
-            onClick={() => open({ kind: 'save' })}
-          >
+          <Button disabled={!canSaveScene} variant="ghost" onClick={() => open({ kind: 'save' })}>
             Save scene
           </Button>
         </>
       ) : (
         <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-medium">Saved scenes</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!canSaveScene}
-            onClick={() => open({ kind: 'save' })}
-          >
+          <Button variant="ghost" disabled={!canSaveScene} onClick={() => open({ kind: 'save' })}>
             Save scene
           </Button>
         </div>

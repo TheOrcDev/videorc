@@ -138,7 +138,7 @@ export function ScenesGallery(): ReactElement {
               onValueChange={switchMode}
             />
           </DisabledReason>
-          <Button size="sm" variant="ghost" onClick={() => openStudioPanel('layouts')}>
+          <Button variant="ghost" onClick={() => openStudioPanel('layouts')}>
             Edit scene
           </Button>
         </div>

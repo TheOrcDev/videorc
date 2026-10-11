@@ -409,7 +409,7 @@ export function CohostPane({
       <Command
         ref={rootRef}
         aria-label="Buddy questions and flags"
-        className="min-h-0 flex-1 bg-transparent outline-none"
+        className="min-h-0 flex-1 bg-transparent outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
         shouldFilter={false}
         tabIndex={0}
         value={activeKey ?? ''}

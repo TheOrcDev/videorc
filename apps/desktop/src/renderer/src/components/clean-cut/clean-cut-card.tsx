@@ -449,7 +449,7 @@ function RecordingPicker({
 }): ReactElement {
   return (
     <Select value={selected.id} onValueChange={onSelect}>
-      <SelectTrigger aria-label="Recording" className="max-w-72 min-w-0" size="sm">
+      <SelectTrigger aria-label="Recording" className="max-w-72 min-w-0" size="xs">
         <SelectValue>
           <span className="truncate">{selected.title.trim() || UNTITLED}</span>
         </SelectValue>
@@ -506,7 +506,7 @@ function StatusActions({
 }): ReactElement | null {
   if (!job || status.kind === 'cancelled' || status.kind === 'none') {
     return (
-      <Button disabled={cannotStart} size="sm" type="button" onClick={onMake}>
+      <Button disabled={cannotStart} type="button" onClick={onMake}>
         <ClipIcon data-icon="inline-start" />
         {makeLabel}
       </Button>
@@ -516,11 +516,11 @@ function StatusActions({
     return (
       <>
         {status.canReview ? (
-          <Button size="sm" type="button" variant="ghost" onClick={() => onReview(job)}>
+          <Button type="button" variant="ghost" onClick={() => onReview(job)}>
             Review
           </Button>
         ) : null}
-        <Button size="sm" type="button" variant="ghost" onClick={() => onCancel(job)}>
+        <Button type="button" variant="ghost" onClick={() => onCancel(job)}>
           Cancel
         </Button>
       </>
@@ -530,14 +530,13 @@ function StatusActions({
   return (
     <>
       {status.canReview ? (
-        <Button size="sm" type="button" variant="outline" onClick={() => onReview(job)}>
+        <Button type="button" variant="outline" onClick={() => onReview(job)}>
           Review
         </Button>
       ) : null}
       {output ? (
         <>
           <Button
-            size="sm"
             type="button"
             variant="ghost"
             onClick={() => void window.videorc?.revealSession?.(output)}
@@ -545,7 +544,7 @@ function StatusActions({
             <FolderIcon data-icon="inline-start" />
             {revealInFileManagerLabel()}
           </Button>
-          <Button size="sm" type="button" variant="ghost" onClick={() => onOpenLibrary(output)}>
+          <Button type="button" variant="ghost" onClick={() => onOpenLibrary(output)}>
             <LibraryIcon data-icon="inline-start" />
             Open in Library
           </Button>

@@ -86,7 +86,7 @@ export function BuddyReactionsSection({
                 title={copy.title}
               >
                 <Select value={value} onValueChange={(next) => save(trigger, next)}>
-                  <SelectTrigger aria-label={label} className="w-40" size="sm">
+                  <SelectTrigger aria-label={label} className="w-40" size="xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>

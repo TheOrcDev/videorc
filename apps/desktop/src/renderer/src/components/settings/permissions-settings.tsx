@@ -35,7 +35,7 @@ export function PermissionsSettings(): ReactElement {
       description={`What ${settingsName} lets Videorc capture right now.`}
       title="System access"
       action={
-        <Button size="sm" variant="ghost" onClick={() => void refreshBackend()}>
+        <Button variant="ghost" onClick={() => void refreshBackend()}>
           <RefreshIcon data-icon="inline-start" />
           Refresh
         </Button>
@@ -55,7 +55,6 @@ export function PermissionsSettings(): ReactElement {
               label="Change a permission"
             >
               <Button
-                size="sm"
                 variant="outline"
                 onClick={() => void openSystemPermissionSettings('privacy')}
               >

@@ -386,7 +386,6 @@ export function CaptionsControls(): ReactElement {
           </p>
           <Button
             disabled={!captionsWindow.open && (locked || !captionsWindow.enabled)}
-            size="sm"
             variant="outline"
             onClick={() => void toggleCaptionsWindow()}
           >

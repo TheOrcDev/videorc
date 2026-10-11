@@ -7,13 +7,12 @@ import { cva } from 'class-variance-authority'
  * `tabs.tsx` there would pull Radix Tabs into the initial bundle.
  */
 const tabsListVariants = cva(
-  'group/tabs-list inline-flex w-fit items-center justify-center rounded-row p-0.5 text-muted-foreground group-data-horizontal/tabs:h-control group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col group-data-vertical/tabs:p-1 data-[variant=line]:rounded-none',
+  'group/tabs-list inline-flex w-fit items-center justify-center rounded-row p-0.5 text-muted-foreground group-data-horizontal/tabs:h-control group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col group-data-vertical/tabs:p-1',
   {
     variants: {
       variant: {
         // A glass segmented control (plan 050, D9): a recessed track.
-        default: 'bg-foreground/[0.05] ring-1 ring-border ring-inset',
-        line: 'gap-1 bg-transparent'
+        default: 'bg-foreground/[0.05] ring-1 ring-border ring-inset'
       }
     },
     defaultVariants: {

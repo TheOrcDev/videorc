@@ -478,7 +478,6 @@ export function DestinationCard({
                   <span className="flex flex-wrap items-center gap-2">
                     <Button
                       disabled={disabled}
-                      size="sm"
                       variant="outline"
                       onClick={() => onPatch(target.id, { authMode: 'manual-rtmp' })}
                     >
@@ -551,7 +550,6 @@ export function DestinationCard({
                     {fullUrl && fullUrlDraft.trim() ? (
                       <Button
                         disabled={disabled}
-                        size="sm"
                         onClick={() => requestManualKeySave(fullUrlDraft, 'full-url')}
                       >
                         Save URL
@@ -560,7 +558,6 @@ export function DestinationCard({
                     {fullUrl && target.streamKeyPresent ? (
                       <Button
                         disabled={disabled}
-                        size="sm"
                         variant="outline"
                         onClick={() => setConfirmingClear(true)}
                       >
@@ -605,7 +602,6 @@ export function DestinationCard({
                       {manualStreamKeyDraft.trim() ? (
                         <Button
                           disabled={disabled}
-                          size="sm"
                           onClick={() => requestManualKeySave(manualStreamKeyDraft, 'key')}
                         >
                           Save key
@@ -614,7 +610,6 @@ export function DestinationCard({
                       {target.streamKeyPresent ? (
                         <Button
                           disabled={disabled}
-                          size="sm"
                           variant="outline"
                           onClick={() => setConfirmingClear(true)}
                         >
@@ -634,7 +629,6 @@ export function DestinationCard({
                   <Button
                     className="w-fit"
                     disabled={disabled}
-                    size="sm"
                     variant="ghost"
                     onClick={() => void onRestorePreviousStreamKey(target.id)}
                   >
@@ -989,7 +983,6 @@ function OAuthAccountPanel({
               <Button
                 className="w-fit"
                 disabled={connectDisabled}
-                size="sm"
                 onClick={() => {
                   if (platform === 'youtube') {
                     setYoutubeConsentAccepted(false)
@@ -1118,17 +1111,12 @@ function OAuthAccountPanel({
           </InfoTooltip>
         ) : null}
         {status === 'reconnect' ? (
-          <Button disabled={disabled} size="sm" variant="outline" onClick={connect}>
+          <Button disabled={disabled} variant="outline" onClick={connect}>
             Reconnect
           </Button>
         ) : null}
         {shared ? null : (
-          <Button
-            disabled={disabled}
-            size="sm"
-            variant="ghost"
-            onClick={() => setDisconnectOpen(true)}
-          >
+          <Button disabled={disabled} variant="ghost" onClick={() => setDisconnectOpen(true)}>
             <SignOutIcon data-icon="inline-start" weight="bold" />
             Disconnect
           </Button>
@@ -1167,7 +1155,6 @@ function OAuthAccountPanel({
           <Button
             className="shrink-0"
             disabled={disabled}
-            size="sm"
             variant="outline"
             onClick={reconnectForPermissions}
           >
@@ -1216,7 +1203,7 @@ function OAuthAccountPanel({
                 <Button
                   aria-label="Refresh channels"
                   disabled={disabled || youtubeChannelsLoading}
-                  size="icon-sm"
+                  size="icon"
                   variant="outline"
                   onClick={() => void onRefreshYouTubeChannels(account.accountId)}
                 >
@@ -1251,7 +1238,6 @@ function OAuthAccountPanel({
             </Badge>
             <Button
               disabled={disabled || xNativeCapabilityLoading}
-              size="sm"
               variant="ghost"
               onClick={() => void onRefreshXNativeCapability(account.accountId)}
             >
@@ -1270,12 +1256,12 @@ function OAuthAccountPanel({
                   content="Opens x.com to approve live broadcasting for this account."
                   focusable={false}
                 >
-                  <Button disabled={disabled} size="sm" onClick={() => void onAuthorizeXLive()}>
+                  <Button disabled={disabled} onClick={() => void onAuthorizeXLive()}>
                     Authorize X Live
                   </Button>
                 </InfoTooltip>
               ) : null}
-              <Button disabled={disabled} size="sm" variant="outline" onClick={onUseManualRtmp}>
+              <Button disabled={disabled} variant="outline" onClick={onUseManualRtmp}>
                 Use a stream key instead
               </Button>
             </div>

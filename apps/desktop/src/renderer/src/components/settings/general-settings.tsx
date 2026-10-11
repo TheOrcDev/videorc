@@ -87,7 +87,6 @@ export function GeneralSettings(): ReactElement {
                   runtimeInfo.gpuFallback.source !== 'env' ? (
                     <Button
                       disabled={runtimeInfo.gpuFallback.retryScheduled}
-                      size="sm"
                       variant="outline"
                       onClick={() => void scheduleHardwareAccelerationRetry()}
                     >
@@ -138,7 +137,7 @@ export function GeneralSettings(): ReactElement {
               description="You see what comes across, and what doesn't, before anything changes."
               label="OBS Studio"
             >
-              <Button size="sm" variant="outline" onClick={() => setObsImportOpen(true)}>
+              <Button variant="outline" onClick={() => setObsImportOpen(true)}>
                 <DownloadIcon data-icon="inline-start" />
                 Import from OBS…
               </Button>

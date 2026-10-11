@@ -273,7 +273,7 @@ export function Sidebar({
             aria-keyshortcuts={shortcutAriaKeys(shortcutAccelerator('search'), platform)}
             aria-label="Search"
             className="text-muted-foreground [-webkit-app-region:no-drag]"
-            size="icon-sm"
+            size="icon"
             type="button"
             variant="ghost"
             onClick={onOpenCommand}

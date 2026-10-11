@@ -57,7 +57,6 @@ export function SourcePermissionAlertsView({
             <span className="flex flex-wrap gap-2">
               <Button
                 disabled={pending !== null}
-                size="sm"
                 variant="outline"
                 onClick={() => void open(alert.id)}
               >
@@ -65,7 +64,7 @@ export function SourcePermissionAlertsView({
                 {alert.actionLabel}
               </Button>
               {alert.revealLabel ? (
-                <Button size="sm" variant="ghost" onClick={onReveal}>
+                <Button variant="ghost" onClick={onReveal}>
                   <FolderIcon data-icon="inline-start" />
                   {alert.revealLabel}
                 </Button>

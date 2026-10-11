@@ -61,7 +61,7 @@ export function SceneCard({
         <button
           aria-pressed={pressed}
           className={cn(
-            'flex min-w-0 flex-1 flex-col rounded-row p-2 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed',
+            'flex min-w-0 flex-1 flex-col rounded-row p-2 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30',
             size === 'sm' ? 'gap-1.5' : 'gap-2'
           )}
           data-slot="scene-card-button"

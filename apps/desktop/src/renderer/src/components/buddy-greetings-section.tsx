@@ -180,7 +180,7 @@ function AddGreeting({
         if (kind) onAdd(kind as CohostActivityTemplateKind)
       }}
     >
-      <SelectTrigger aria-label="Add a greeting" className="w-44" size="sm">
+      <SelectTrigger aria-label="Add a greeting" className="w-44" size="xs">
         <SelectValue placeholder={disabled ? 'Remove one to add another' : 'Add a greeting…'} />
       </SelectTrigger>
       <SelectContent>
@@ -349,7 +349,7 @@ function GreetingEditor({
             })
           }
         >
-          <SelectTrigger aria-label="Platform" className="w-28" size="sm">
+          <SelectTrigger aria-label="Platform" className="w-28" size="xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -372,8 +372,7 @@ function GreetingEditor({
               {BUDDY_TEMPLATE_FIELDS.map((entry) => (
                 <li key={entry.field}>
                   <Button
-                    className="h-7 w-full justify-start gap-2 px-2"
-                    size="xs"
+                    className="w-full justify-start gap-2 px-2"
                     type="button"
                     variant="ghost"
                     onClick={() => insertField(entry.field)}

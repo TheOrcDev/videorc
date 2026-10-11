@@ -20,7 +20,6 @@ export function SupportBundleButton({ className }: { className?: string }): Reac
       className={className}
       data-testid="support-bundle-button"
       disabled={supportBundleExportPending}
-      size="sm"
       type="button"
       variant="outline"
       onClick={() => void exportSupportBundle()}

@@ -88,13 +88,12 @@ export function WhatsNewDialog({
         ) : null}
         <DialogFooter>
           <Button
-            size="sm"
             variant="ghost"
             onClick={() => openVideorcWebLink(releaseNotesUrl(entry.version))}
           >
             Full release notes
           </Button>
-          <Button ref={continueRef} size="sm" onClick={onClose}>
+          <Button ref={continueRef} onClick={onClose}>
             Continue
           </Button>
         </DialogFooter>

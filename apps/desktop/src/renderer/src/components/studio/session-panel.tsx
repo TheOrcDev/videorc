@@ -563,7 +563,6 @@ export function TakeoverSection(): ReactElement {
                   <Button
                     aria-pressed={isActive}
                     disabled={disconnected}
-                    size="sm"
                     // The line under the takeovers says what a click does.
                     variant={isActive ? 'default' : 'outline'}
                     onClick={() =>

@@ -78,9 +78,9 @@ function SessionChip({ badge }: { badge: StatItemModel['badge'] }): ReactElement
         </Badge>
       )
     case 'recording':
-      return <Badge variant="secondary">Recording</Badge>
+      return <Badge>Recording</Badge>
     case 'history':
-      return <Badge variant="secondary">History</Badge>
+      return <Badge>History</Badge>
     default:
       return null
   }

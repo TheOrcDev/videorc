@@ -40,7 +40,7 @@ export const IN_USE_RING = 'ring-2 ring-foreground/60'
 
 export function InUseChip({ className }: { className?: string }): ReactElement {
   return (
-    <Badge className={className} data-videorc-in-use="" variant="secondary">
+    <Badge className={className} data-videorc-in-use="">
       In use
     </Badge>
   )
@@ -80,7 +80,6 @@ export function TakeoverScreensSection(): ReactElement {
         action={
           <Button
             disabled={importDisabled}
-            size="sm"
             variant="outline"
             onClick={() => void importScreenImage()}
           >
@@ -326,7 +325,7 @@ function ScreenTile({
               aria-keyshortcuts={shortcutAriaKeys(MOVE_EARLIER_ACCELERATOR, platform)}
               aria-label="Move earlier"
               disabled={disabled || !canMoveEarlier}
-              size="icon-sm"
+              size="icon"
               type="button"
               variant="ghost"
               onClick={() => onMove(-1)}
@@ -343,7 +342,7 @@ function ScreenTile({
               aria-keyshortcuts={shortcutAriaKeys(MOVE_LATER_ACCELERATOR, platform)}
               aria-label="Move later"
               disabled={disabled || !canMoveLater}
-              size="icon-sm"
+              size="icon"
               type="button"
               variant="ghost"
               onClick={() => onMove(1)}
@@ -356,7 +355,7 @@ function ScreenTile({
               aria-label="Delete takeover"
               className="ml-auto"
               disabled={disabled}
-              size="icon-sm"
+              size="icon"
               type="button"
               variant="destructive"
               onClick={onDelete}

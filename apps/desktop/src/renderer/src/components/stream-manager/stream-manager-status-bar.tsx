@@ -332,7 +332,7 @@ export function StreamManagerStatusBar({
               <TooltipTrigger asChild>
                 <Button
                   aria-label="More Stream Manager actions"
-                  className={cn('size-6', NARROW_ONLY)}
+                  className={NARROW_ONLY}
                   size="icon-xs"
                   type="button"
                   variant="ghost"

@@ -223,7 +223,6 @@ export function BuddyLookSection({
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <Button
                 data-testid="buddy-look-make-alive"
-                size="sm"
                 type="button"
                 variant="outline"
                 onClick={() => openBuddyPetCreator({ reference: 'persona-idle' })}

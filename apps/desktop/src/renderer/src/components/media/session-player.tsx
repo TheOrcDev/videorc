@@ -493,17 +493,17 @@ export function SessionPlayerStatus({
         {retryable || externally || reveal ? (
           <EmptyContent className="flex-row flex-wrap justify-center gap-2">
             {retryable ? (
-              <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
+              <Button type="button" variant="secondary" onClick={onRetry}>
                 Try again
               </Button>
             ) : null}
             {externally ? (
-              <Button type="button" variant="secondary" size="sm" onClick={onOpenExternally}>
+              <Button type="button" variant="secondary" onClick={onOpenExternally}>
                 Open in default player
               </Button>
             ) : null}
             {reveal ? (
-              <Button type="button" variant="secondary" size="sm" onClick={onReveal}>
+              <Button type="button" variant="secondary" onClick={onReveal}>
                 {revealInFileManagerLabel()}
               </Button>
             ) : null}

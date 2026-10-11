@@ -21,16 +21,15 @@ const buttonVariants = cva(
         link: 'text-primary underline-offset-4 hover:underline'
       },
       size: {
-        // The desktop control height (plan 050, D4): 28 px everywhere.
+        // The desktop control height (plan 050, D4): 28 px everywhere. The
+        // one compact size is `xs` / `icon-xs` (24 px), only where the design
+        // skill allows it (plan 174 S4.1, J1-11).
         default:
           'h-control gap-1.5 px-3 has-data-[icon=inline-end]:pr-2.5 has-data-[icon=inline-start]:pl-2.5',
         xs: "h-6 gap-1 px-2.5 text-xs has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2 [&_svg:not([class*='size-'])]:size-3",
-        sm: 'h-control gap-1 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2',
         lg: 'h-8 gap-1.5 px-4 has-data-[icon=inline-end]:pr-3 has-data-[icon=inline-start]:pl-3',
         icon: 'size-control',
-        'icon-xs': "size-6 [&_svg:not([class*='size-'])]:size-3",
-        'icon-sm': 'size-control',
-        'icon-lg': 'size-8'
+        'icon-xs': "size-6 [&_svg:not([class*='size-'])]:size-3"
       }
     },
     defaultVariants: {

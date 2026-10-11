@@ -18,7 +18,6 @@ const badgeVariants = cva(
       variant: {
         // Neutral glass.
         default: 'glass-chip text-foreground',
-        secondary: 'glass-chip text-foreground',
         // Tag: the same glass with secondary text (9:16, beta, counts, Idle).
         outline: 'glass-chip text-muted-foreground',
         // Status: the tone lives in the dot, never in the text.
@@ -28,8 +27,7 @@ const badgeVariants = cva(
         // Emphasis: tinted glass for what must interrupt.
         destructive: 'glass-chip-tinted tone-destructive',
         live: 'glass-chip-tinted tone-live',
-        ghost: 'border-transparent text-muted-foreground',
-        link: 'border-transparent text-foreground underline-offset-4 hover:underline'
+        ghost: 'border-transparent text-muted-foreground'
       }
     },
     defaultVariants: {

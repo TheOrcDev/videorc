@@ -23,7 +23,7 @@ const STATUS_VARIANT: Record<
   PowerSliderStatusTone,
   NonNullable<ComponentProps<typeof Badge>['variant']>
 > = {
-  default: 'secondary',
+  default: 'default',
   success: 'success',
   warning: 'warning',
   destructive: 'destructive'
@@ -184,7 +184,7 @@ export function PowerSlider({
               <TooltipTrigger asChild>
                 <Button
                   aria-label={`Reset ${label}`}
-                  className="size-7 text-muted-foreground"
+                  className="text-muted-foreground"
                   disabled={disabled}
                   size="icon"
                   variant="ghost"

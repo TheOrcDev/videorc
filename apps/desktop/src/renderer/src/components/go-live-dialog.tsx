@@ -411,7 +411,6 @@ export function GoLiveConfirmationDialog({
                           <span className="flex flex-wrap items-center gap-2">
                             <Button
                               disabled={pending}
-                              size="sm"
                               variant="outline"
                               onClick={() => onResolveBlocker(failure.targetId, 'manual-rtmp')}
                             >
@@ -419,7 +418,6 @@ export function GoLiveConfirmationDialog({
                             </Button>
                             <Button
                               className="h-auto p-0 text-xs"
-                              size="sm"
                               variant="link"
                               onClick={() => openExternalUrl(YOUTUBE_STREAM_KEY_URL)}
                             >
@@ -559,12 +557,7 @@ export function GoLiveCaptionsStatus({
         <AlertTitle>Captions can&apos;t start</AlertTitle>
         <AlertDescription className="flex flex-col items-start gap-2">
           <span>{readiness.description}</span>
-          <Button
-            disabled={pending}
-            size="sm"
-            variant="outline"
-            onClick={onContinueWithoutCaptions}
-          >
+          <Button disabled={pending} variant="outline" onClick={onContinueWithoutCaptions}>
             Go live without captions
           </Button>
         </AlertDescription>
@@ -687,13 +680,12 @@ export function GoLiveDestinationRow({
           <div className="flex flex-wrap gap-2">
             {canSignIn && onReconnect ? (
               reconnected && onRecheck ? (
-                <Button disabled={pending} size="sm" variant="outline" onClick={onRecheck}>
+                <Button disabled={pending} variant="outline" onClick={onRecheck}>
                   Check again
                 </Button>
               ) : (
                 <Button
                   disabled={pending}
-                  size="sm"
                   variant="outline"
                   onClick={() => onReconnect(destination)}
                 >
@@ -705,7 +697,6 @@ export function GoLiveDestinationRow({
             {oauth ? (
               <Button
                 disabled={pending}
-                size="sm"
                 variant="outline"
                 onClick={() => onResolveBlocker(destination.targetId, 'manual-rtmp')}
               >
@@ -714,7 +705,6 @@ export function GoLiveDestinationRow({
             ) : null}
             <Button
               disabled={pending}
-              size="sm"
               variant="outline"
               onClick={() => onResolveBlocker(destination.targetId, 'exclude')}
             >
@@ -755,7 +745,7 @@ export function GoLiveExcludedRow({
       </ListRow>
       <div className="flex min-w-0 flex-wrap items-center gap-2 pr-3 pb-3 pl-13">
         <p className="min-w-0 flex-1 text-xs text-muted-foreground">{GO_LIVE_EXCLUDED_NOTE}</p>
-        <Button disabled={pending} size="sm" variant="outline" onClick={onInclude}>
+        <Button disabled={pending} variant="outline" onClick={onInclude}>
           Add back
         </Button>
       </div>

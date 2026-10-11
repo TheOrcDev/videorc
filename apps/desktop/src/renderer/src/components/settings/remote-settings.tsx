@@ -141,7 +141,6 @@ export function RemoteSettings(): ReactElement {
             >
               <Button
                 disabled={remotePending}
-                size="sm"
                 variant="outline"
                 onClick={() => setConfirmingRegenerate(true)}
               >

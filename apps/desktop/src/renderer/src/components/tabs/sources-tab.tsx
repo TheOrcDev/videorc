@@ -30,7 +30,6 @@ export function SourcesTab(): ReactElement {
                   button by them, and waits for it to come back enabled. */}
               <Button
                 disabled={refreshing}
-                size="sm"
                 variant="outline"
                 onClick={() => {
                   setRefreshing(true)

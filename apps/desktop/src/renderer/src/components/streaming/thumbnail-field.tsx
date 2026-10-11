@@ -81,13 +81,12 @@ export function ThumbnailField({
         </FieldDescription>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        <Button disabled={disabled} size="sm" variant="outline" onClick={choose}>
+        <Button disabled={disabled} variant="outline" onClick={choose}>
           {assetId ? 'Replace thumbnail' : 'Choose thumbnail'}
         </Button>
         {assetId && removable ? (
           <Button
             disabled={disabled}
-            size="sm"
             variant="ghost"
             onClick={() => {
               setError('')

@@ -99,7 +99,7 @@ describe('desktop scale', () => {
       // tier for tooltips, the dialog tier for dialogs (and the palette).
       expect(source, name).toMatch(
         name === 'tooltip.tsx'
-          ? /rounded-md border glass-float-tooltip /
+          ? /rounded-row border glass-float-tooltip /
           : /rounded-(lg|xl) border glass-float /
       )
       expect(source, name).not.toContain('bg-popover')
