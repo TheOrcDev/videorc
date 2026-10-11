@@ -93,8 +93,19 @@ PASS / WARN / FAIL / SKIP per check, non-zero exit on any FAIL. It spends 2
 lab quota units (one `channels.list` per role), charged to the lab quota
 ledger (`quota-ledger.json` next to the config, 0600, per Pacific day, cap
 8,000 units); "lab quota today" warns from 75% and fails when the day is
-spent. Checks for parts not built yet (build under test and its TCC grants,
-network fault rules) print SKIP with the slice that adds them.
+spent. Checks for parts not built yet (build under test and its TCC grants)
+print SKIP with the slice that adds them.
+
+On the lab machine the "network faults" check (plan 178 U13) reads the lab's
+pf anchor `com.videorc.live-lab` and dummynet pipe 2178 back with the allowed
+`sudo -n` commands. A leftover rule or pipe is a FAIL with the two cleanup
+commands, and the doctor flushes it itself when sudo lets it (then WARN: the
+previous run leaked). With `faults.network` off and no sudoers file it prints
+SKIP. Owner install, once, from the admin account: the root-owned rules file
+(`config/live-lab/pf.anchor.example`, header has the commands), the two
+`/etc/pf.conf` anchor lines, then `config/live-lab/sudoers.live-lab.example`
+(`visudo -cf` first). The harness never writes pf rules and never runs a
+command that is not in that file.
 
 `pnpm live:hookup --show` prints what is stored, fingerprints only.
 

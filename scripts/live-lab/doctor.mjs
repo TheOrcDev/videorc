@@ -38,6 +38,7 @@ import {
   evaluateGhAuth,
   evaluateKillSwitch,
   evaluateLabDisplay,
+  evaluateNetFaultsClean,
   evaluatePermissions,
   evaluateQuota,
   evaluatePolicyFile,
@@ -53,6 +54,16 @@ import {
   summarize
 } from './lib/doctor-checks.mjs'
 import { fetchControlFromUrl, stopFilePath } from './lib/kill-switch.mjs'
+import {
+  ALLOWED_COMMANDS,
+  PF_CONF,
+  createNetFaultRegistry,
+  netFaultResidue,
+  removeNetFaults,
+  residueIsClean,
+  sudoRefused,
+  sudoRunner
+} from './lib/net-fault.mjs'
 import { fetchMyChannel, refreshAccessToken } from './lib/oauth.mjs'
 import { createQuotaLedger } from './lib/quota-ledger.mjs'
 import { loadPolicy, policyPath, reportsRepoFromKillSwitchUrl } from './lib/policy.mjs'
@@ -201,6 +212,7 @@ async function machineChecks(displays) {
 
   const loaded = await loadPolicy({ path: policyPath() })
   results.push(evaluatePolicyFile(loaded))
+  results.push(await netFaultChecks(loaded.policy))
 
   const reports = loaded.policy ? reportsRepoFromKillSwitchUrl(loaded.policy.killSwitchUrl) : null
   const repos = [await repoAccess(MAIN_REPO, false)]
@@ -224,6 +236,44 @@ async function machineChecks(displays) {
   results.push(evaluateRunLock(lock, lock && !lock.corrupt ? processAlive(lock.pid) : false))
   results.push(evaluateStopFile(stopFilePath(work), await exists(stopFilePath(work))))
   return results
+}
+
+// Plan 178 U13 (plan 166 S9): a network fault must never outlive its run.
+// Reads the lab anchor and the pipe back with the allowed sudo commands; a
+// leftover is a FAIL, and when the read-back works the doctor flushes it
+// with the same commands and says so (WARN).
+async function readNetFaultState() {
+  const [rules, list] = await Promise.all([
+    sudoRunner(ALLOWED_COMMANDS.pfShowAnchorRules),
+    sudoRunner(ALLOWED_COMMANDS.dnList)
+  ])
+  if (sudoRefused(rules) || sudoRefused(list)) return null
+  return { pfRules: rules.stdout, dnctlList: list.stdout }
+}
+
+async function netFaultChecks(policy) {
+  const networkFaults = policy?.faults?.network ?? null
+  const first = await readNetFaultState()
+  if (!first) return evaluateNetFaultsClean(null, null, { networkFaults })
+  const pfConf = await readText(PF_CONF)
+  const verdict = evaluateNetFaultsClean(first.pfRules, first.dnctlList, { networkFaults, pfConf })
+  if (residueIsClean(netFaultResidue(first))) return verdict
+  try {
+    await removeNetFaults({ runner: sudoRunner, registry: createNetFaultRegistry() })
+  } catch (error) {
+    return check(
+      'network faults',
+      FAIL,
+      `${verdict.detail} (doctor cleanup failed: ${error.message})`
+    )
+  }
+  const again = await readNetFaultState()
+  if (!again) return verdict
+  return evaluateNetFaultsClean(again.pfRules, again.dnctlList, {
+    networkFaults,
+    pfConf,
+    cleaned: true
+  })
 }
 
 async function isLabMachine(argv) {
@@ -281,10 +331,6 @@ async function main() {
       'Version + TCC test recording arrive with the harness launch (plan 176 L2).'
     )
   )
-  results.push(
-    check('network fault rules', SKIP, 'Fault injection arrives with suite E (plan 176 L5).')
-  )
-
   if (await isLabMachine(process.argv.slice(2))) {
     results.push(...(await machineChecks(displays)))
   } else {
