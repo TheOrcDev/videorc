@@ -1,4 +1,4 @@
-import type { CohostPersona } from './backend'
+import type { AiCapabilities, CohostPersona } from './backend'
 import {
   BUDDY_ALIVE_CONSENT_OFF,
   BUDDY_ALIVE_NONE_LEFT,
@@ -54,15 +54,21 @@ export const BUDDY_PET_NONE_LEFT = BUDDY_ALIVE_NONE_LEFT
 /**
  * The Save step's line: where the new moves are kept, as the backend keeps
  * them (plan 172 D10, plan 174 G-6). A Buddy the streamer made, linked to
- * their library, sends its moves to the account; any other Buddy (an
- * official one, or one made only on this computer) keeps them here.
+ * their library, sends its moves to the account when the web keeps them
+ * (`buddyLibrary.alive`; QA 2026-10-11); any other Buddy (an official one,
+ * or one made only on this computer), or a web that keeps no packs, keeps
+ * them here.
  */
 export function buddyPetSaveDescription(
-  persona: Pick<CohostPersona, 'name' | 'libraryAvatarId'> | null
+  persona: Pick<CohostPersona, 'name' | 'libraryAvatarId'> | null,
+  capabilities: Pick<AiCapabilities, 'cohost'> | null = null
 ): string {
   const name = persona?.name.trim() || 'Buddy'
   const wears = `${name} wears them right away; switch back to Still any time.`
-  return isBuddyUserAvatarId(persona?.libraryAvatarId)
+  const synced =
+    isBuddyUserAvatarId(persona?.libraryAvatarId) &&
+    capabilities?.cohost?.buddyLibrary?.alive === true
+  return synced
     ? `Saved on this computer and in your Videorc account, so ${name} moves on any computer. ${wears}`
     : `Saved on this computer. ${wears}`
 }

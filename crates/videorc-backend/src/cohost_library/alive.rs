@@ -261,9 +261,13 @@ async fn run_official_download(
     if let Err(error) = install_pack(&api, None, &root, &dest, sources).await {
         return Err(CohostAvatarErrorDetail::new_owned(
             error.code,
-            format!(
-                "{} stays still for now: its moves could not be downloaded ({}). It tries again the next time you use it.",
-                official.name, error.message
+            moves_not_downloaded(
+                official.name,
+                &error.message,
+                &format!(
+                    "Videorc tries again the next time you use {}.",
+                    official.name
+                ),
             ),
         ));
     }
@@ -526,6 +530,22 @@ pub(crate) fn note_alive_seen(state: &AppState, avatar_id: &str, pack_id: Option
 
 /// A problem the job got past (the Buddy changed, its pack did not): shown
 /// as the library's error, the job itself succeeding.
+/// The line a failed pack download shows: what stays, why (its own sentence,
+/// never in brackets: the reason is a sentence with its own period), and when
+/// Videorc tries again.
+pub(crate) fn moves_not_downloaded(name: &str, why: &str, retry: &str) -> String {
+    let why = why.trim();
+    let end = if why.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
+    format!(
+        "{} stays still for now: its moves could not be downloaded. {why}{end} {retry}",
+        name.trim()
+    )
+}
+
 pub(crate) fn warn(state: &AppState, detail: CohostAvatarErrorDetail) {
     state.emit_log(
         "warn",
@@ -665,10 +685,10 @@ async fn run_follow(state: &AppState, avatar_id: &str) -> Result<(), CohostAvata
         .map_err(|error| {
             CohostAvatarErrorDetail::new_owned(
                 error.code,
-                format!(
-                    "{} is still here for now: its moves could not be downloaded ({}). It tries again at the next sync.",
-                    avatar.name.trim(),
-                    error.message
+                moves_not_downloaded(
+                    &avatar.name,
+                    &error.message,
+                    "Videorc tries again at the next sync.",
                 ),
             )
         })?;

@@ -56,6 +56,9 @@ const BuddyTestDialog = lazy(() => import('@/components/buddy-test-dialog'))
 export interface BuddyAvatarSectionProps {
   persona: CohostPersona
   pets: BuddyPets
+  /** The pack the account library keeps for this Buddy, if any (plan 172
+   * D10): removing it here removes it from the library too. */
+  accountPackId?: string | null
   /** Still, or Alive (which can show before a pack is worn: the empty state). */
   view: BuddyAvatarView
   /** Persists the choice when it can; a refusal shows under the section. */
@@ -103,6 +106,7 @@ function isTextEntry(target: EventTarget | null): boolean {
 export function BuddyAvatarSection({
   persona,
   pets,
+  accountPackId = null,
   view,
   onViewChange,
   previewPackId,
@@ -357,7 +361,9 @@ export function BuddyAvatarSection({
         confirmLabel="Remove"
         description={
           <>
-            Its files are deleted from this computer.
+            {removeTarget && removeTarget.packId === accountPackId
+              ? 'Its files are deleted from this computer and from your Videorc library, so no other computer gets them.'
+              : 'Its files are deleted from this computer.'}
             {removeTarget?.source === 'videorc-creator'
               ? ' Making it again uses one of your creations.'
               : ' You can import it again from its folder.'}

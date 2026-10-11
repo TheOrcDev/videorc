@@ -18,7 +18,8 @@
 //    sheets, the extras strip), each an image edit of the reference with the
 //    web's exact prompt and size, several at once (the web allows parallel
 //    sheets of one build).
-// 4. The app's builder through `cargo run --example buddy_pack`, which also
+// 4. The app's builder through `cargo run --features buddy-pack-example
+//    --example buddy_pack`, which also
 //    loads the result with the app's pack loader.
 // 5. Review: a contact sheet per gaze row and per reaction sheet with each
 //    cell's intended pose, the gaze grid, the pilot, and an animated WebP.
@@ -371,7 +372,19 @@ async function pool(items, limit, run) {
 function runExample(args) {
   const result = spawnSync(
     'cargo',
-    ['run', '-q', '-p', 'videorc-backend', '--example', 'buddy_pack', '--', ...args, '--json'],
+    [
+      'run',
+      '-q',
+      '-p',
+      'videorc-backend',
+      '--features',
+      'buddy-pack-example',
+      '--example',
+      'buddy_pack',
+      '--',
+      ...args,
+      '--json'
+    ],
     { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
   )
   const line = result.stdout.trim().split('\n').pop()

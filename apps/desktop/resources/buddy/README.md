@@ -18,7 +18,7 @@ pipeline headless: identity notes from `assets/brand/buddy/golem-master.png`
 pilot, then eight sheets as image edits of that reference with the creator's
 prompts (`openai/gpt-image-2.5-sunburst` through the Vercel AI Gateway),
 cut, registered and packed by the app's own builder
-(`cargo run -p videorc-backend --example buddy_pack`), which also loads the
+(`cargo run -p videorc-backend --features buddy-pack-example --example buddy_pack`), which also loads the
 result with the app's pack loader. `assets/brand/buddy/README.md` has the
 whole recipe.
 
