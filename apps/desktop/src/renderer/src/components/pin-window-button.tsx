@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react'
 
 import { PinIcon } from '@/components/icons'
-import { StatusBarAction } from '@/components/status-bar'
+import { StatusBarAction } from '@/components/status-bar-action'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
