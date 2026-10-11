@@ -1,10 +1,18 @@
-import { CaptionsIcon, ExternalLinkIcon, MicrophoneIcon, RefreshIcon } from '@/components/icons'
+import {
+  CaptionsIcon,
+  ExternalLinkIcon,
+  SceneIcon,
+  MicrophoneIcon,
+  RefreshIcon
+} from '@/components/icons'
 import type { ReactElement } from 'react'
 import { toastUserError } from '@/lib/user-error'
 
+import { GroupedList } from '@/components/list-row'
 import { LockAlert } from '@/components/lock-alert'
+import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
-import { StatusBadge, type StatusTone } from '@/components/status-badge'
+import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,7 +21,8 @@ import {
   FieldDescription,
   FieldGroup,
   FieldLabel,
-  FieldTitle
+  FieldTitle,
+  SettingsRow
 } from '@/components/ui/field'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import {
@@ -28,7 +37,7 @@ import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/s
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { CaptionStyleId, CaptionsStatus } from '@/lib/backend'
+import type { CaptionStyleId } from '@/lib/backend'
 import {
   CAPTION_STYLE_IDS,
   captionStyleDefinition,
@@ -39,13 +48,24 @@ import {
   captionsStatusIsActive,
   latestFinalCaptionText
 } from '@/lib/captions-ui'
+import {
+  CAPTIONS_OFF_HINT,
+  captionsAllowanceLabel,
+  captionsPlacementSummary,
+  captionsStatusDetail
+} from '@/lib/captions-page-view'
 import { livestreamCaptionsBlockerFor } from '@/lib/captions-preflight'
-import { simulcastArmed, type CaptionsCaptureSettings } from '@/lib/capture'
+import {
+  layoutPresetOrientation,
+  simulcastArmed,
+  type CaptionsCaptureSettings
+} from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
-import { unlockActionForGate } from '@/lib/lock-view'
+import { SESSION_LOCK_REASON, unlockActionForGate } from '@/lib/lock-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel, captionsStatusTone } from '@/lib/state-labels'
 import { cn } from '@/lib/utils'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 const LANGUAGES = [
@@ -63,58 +83,6 @@ const CAPTION_TEXT_SIZE_OPTIONS: SegmentedControlOption<CaptionTextSize>[] = [
   { value: 'm', label: 'Medium' },
   { value: 'l', label: 'Large' }
 ]
-
-type CaptionStatusPresentation = {
-  value: string
-  tone: StatusTone
-  detail: string
-}
-
-function captionsStatusPresentation(
-  status: CaptionsStatus,
-  enabled: boolean,
-  sessionActive: boolean
-): CaptionStatusPresentation {
-  // The word and its tone are the one captions vocabulary (plan 174 D-26);
-  // only the line under it is this page's own.
-  const options = { enabled, sessionActive }
-  return {
-    value: captionsStatusLabel(status, options),
-    tone: captionsStatusTone(status, options),
-    detail: captionsStatusDetail(status, enabled, sessionActive)
-  }
-}
-
-function captionsStatusDetail(
-  status: CaptionsStatus,
-  enabled: boolean,
-  sessionActive: boolean
-): string {
-  if (!enabled) return 'Turn on Live captions to transcribe your next recording or livestream.'
-  switch (status.state) {
-    case 'starting':
-      return 'Connecting to transcription…'
-    case 'listening':
-    case 'live':
-      return 'Microphone speech is being transcribed.'
-    case 'reconnecting':
-      return 'Trying to restore live captions.'
-    case 'degraded':
-      return status.message ?? 'Captions are continuing in 3-second chunks.'
-    case 'blocked':
-      return status.message ?? 'Captions need attention before they can start.'
-    case 'error':
-      return status.message ?? 'Captions stopped unexpectedly.'
-    case 'ready':
-      return sessionActive
-        ? 'Ready to listen for microphone speech.'
-        : 'Starts with your next recording or livestream.'
-    default:
-      return sessionActive
-        ? 'Waiting for the caption service.'
-        : 'Starts with your next recording or livestream.'
-  }
-}
 
 function StyleSwatch({ styleId }: { styleId: CaptionStyleId }): ReactElement {
   const style = captionStyleDefinition(styleId)
@@ -144,7 +112,6 @@ function StyleSwatch({ styleId }: { styleId: CaptionStyleId }): ReactElement {
 
 export function CaptionsControls(): ReactElement {
   const {
-    aiQuota,
     captionLines,
     captionsCommandPending,
     captionsStatus,
@@ -152,15 +119,26 @@ export function CaptionsControls(): ReactElement {
     captureConfig,
     entitlements,
     isSessionActive,
+    overlayLayout,
     runtimeInfo,
+    selectedMicrophone,
     setCaptureConfig,
     startCaptions,
     toggleCaptionsWindow
   } = useStudioCore()
   const captions = captureConfig.captions
   const gate = cloudAiUploadGate(entitlements)
+  // Locked means disabled, with one reason (S1.5): the lock leads and every
+  // control under it is off. A streamer who already has captions on may still
+  // turn them off.
+  const locked = !gate.allowed
   const runtimeActive = captionsStatusIsActive(captionsStatus)
-  const status = captionsStatusPresentation(captionsStatus, captions.enabled, isSessionActive)
+  const statusOptions = { enabled: captions.enabled, sessionActive: isSessionActive }
+  const allowance = captionsAllowanceLabel(captionsStatus.remainingSeconds)
+  // Captions hear the Sources microphone; "Off" when none is chosen.
+  const microphoneName = captureConfig.sources.microphoneId
+    ? (selectedMicrophone?.name ?? captureConfig.sources.microphoneName ?? 'Not connected')
+    : 'Off'
   const lines = captionStripLines(captionLines)
   const finalAnnouncement = latestFinalCaptionText(captionLines)
   // A vertical destination shares the recording's picture with the
@@ -209,31 +187,53 @@ export function CaptionsControls(): ReactElement {
 
   return (
     <PanelSection
-      action={<StatusBadge tone={status.tone} value={status.value} />}
       description="Transcribe your microphone during a recording or livestream. On a livestream, captions need 30 fps or less, and one stream quality when you also record."
       icon={CaptionsIcon}
       title="Live captions"
     >
       <FieldGroup>
         {/* Locked means disabled with one reason, and the lock leads (S1.5). */}
-        {!gate.allowed ? (
-          <LockAlert action={unlockActionForGate(gate)} reason={gate.reason} />
-        ) : null}
-        <Field orientation="horizontal">
-          <FieldContent>
-            <FieldTitle>Enable live captions</FieldTitle>
-            <FieldDescription>
-              Starts with your next recording or livestream. Turn it off at any time to stop sending
-              audio.
-            </FieldDescription>
-          </FieldContent>
-          <Switch
-            aria-label="Enable live captions"
-            checked={captions.enabled}
-            disabled={captionsCommandPending || !canEnable}
-            onCheckedChange={(enabled) => patchCaptions({ enabled })}
-          />
-        </Field>
+        {locked ? <LockAlert action={unlockActionForGate(gate)} reason={gate.reason} /> : null}
+        {/* One state signal (V-5): the switch says on or off; while on, one
+            dot names what captions are doing, with its line. */}
+        <FieldGroup variant="grouped">
+          <SettingsRow
+            data-testid="captions-enabled-row"
+            description={
+              captions.enabled ? (
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <StatusDot
+                    label={captionsStatusLabel(captionsStatus, statusOptions)}
+                    tone={captionsStatusTone(captionsStatus, statusOptions)}
+                  />
+                  <span>{captionsStatusDetail(captionsStatus, isSessionActive)}</span>
+                </span>
+              ) : (
+                CAPTIONS_OFF_HINT
+              )
+            }
+            label="Live captions"
+          >
+            <div className="flex shrink-0 items-center gap-2">
+              {showRetry ? (
+                <Button
+                  disabled={captionsCommandPending}
+                  size="xs"
+                  variant="outline"
+                  onClick={retry}
+                >
+                  <RefreshIcon data-icon="inline-start" />
+                  Retry
+                </Button>
+              ) : null}
+              <Switch
+                checked={captions.enabled}
+                disabled={captionsCommandPending || !canEnable}
+                onCheckedChange={(enabled) => patchCaptions({ enabled })}
+              />
+            </div>
+          </SettingsRow>
+        </FieldGroup>
         {livestreamBlocker ? (
           <Alert data-testid="captions-livestream-blocker" variant="warning">
             <AlertTitle>Captions can&apos;t go out on your next livestream</AlertTitle>
@@ -241,33 +241,34 @@ export function CaptionsControls(): ReactElement {
           </Alert>
         ) : null}
 
-        <div className="flex flex-col gap-3 rounded-row border border-border bg-inset p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2 text-sm">
-              <MicrophoneIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-              <span className="font-medium">Microphone</span>
-              <span className="text-muted-foreground">
-                · {captionsStatus.transport === 'realtime' ? 'Realtime' : 'Live transcription'}
-              </span>
-            </div>
-            {typeof (captionsStatus.remainingSeconds ?? aiQuota?.monthly.remaining) === 'number' ? (
-              <span className="text-xs text-muted-foreground">
-                {captionsStatus.remainingSeconds !== undefined
-                  ? `${Math.max(0, Math.ceil(captionsStatus.remainingSeconds / 60))} min left`
-                  : `${aiQuota?.monthly.remaining ?? 0} credits left`}
-              </span>
-            ) : null}
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-xs text-muted-foreground">{status.detail}</p>
-            {showRetry ? (
-              <Button disabled={captionsCommandPending} size="xs" variant="outline" onClick={retry}>
-                <RefreshIcon data-icon="inline-start" />
-                Retry
-              </Button>
-            ) : null}
-          </div>
-        </div>
+        {/* What captions listen to and where they show belong to Sources and
+            Scene (D-27): these rows say it and open the page. */}
+        <GroupedList aria-label="Captions on other pages" data-testid="captions-elsewhere">
+          <NavigableRow
+            icon={MicrophoneIcon}
+            label="Microphone"
+            value={microphoneName}
+            onNavigate={() => openWorkspaceTab('sources')}
+          />
+          <NavigableRow
+            icon={SceneIcon}
+            label="Placement"
+            value={captionsPlacementSummary(
+              overlayLayout.captions,
+              layoutPresetOrientation(captureConfig.layout.layoutPreset)
+            )}
+            onNavigate={() => openWorkspaceTab('layouts')}
+          />
+          {allowance ? (
+            <NavigableRow icon={CaptionsIcon} label="Allowance" value={allowance} />
+          ) : null}
+        </GroupedList>
+        {verticalLegArmed ? (
+          <FieldDescription>
+            A vertical destination shares the recording picture with the horizontal stream, so
+            captions on stream are in the recording too.
+          </FieldDescription>
+        ) : null}
 
         <Field>
           <FieldContent>
@@ -279,6 +280,7 @@ export function CaptionsControls(): ReactElement {
           <ToggleGroup
             aria-label="Caption style"
             className="grid w-full grid-cols-2 gap-2"
+            disabled={locked}
             type="single"
             value={captions.styleId}
             variant="outline"
@@ -319,6 +321,7 @@ export function CaptionsControls(): ReactElement {
             <SegmentedControl
               aria-label="Caption text size"
               className="w-full"
+              disabled={locked}
               options={CAPTION_TEXT_SIZE_OPTIONS}
               value={captions.textSize}
               onValueChange={(textSize) => patchCaptions({ textSize }, true)}
@@ -330,13 +333,11 @@ export function CaptionsControls(): ReactElement {
           <FieldContent>
             <FieldLabel htmlFor="caption-language">Spoken language</FieldLabel>
             <FieldDescription>
-              {isSessionActive
-                ? 'Locked while you’re recording or live. Changes apply the next time you record or go live.'
-                : 'Auto-detect works for most conversations.'}
+              {isSessionActive ? SESSION_LOCK_REASON : 'Auto-detect works for most conversations.'}
             </FieldDescription>
           </FieldContent>
           <Select
-            disabled={isSessionActive}
+            disabled={locked || isSessionActive}
             value={captions.language}
             onValueChange={(language) => patchCaptions({ language })}
           >
@@ -353,17 +354,6 @@ export function CaptionsControls(): ReactElement {
               </SelectGroup>
             </SelectContent>
           </Select>
-        </Field>
-
-        <Field>
-          <FieldContent>
-            <FieldTitle>Placement and output</FieldTitle>
-            <FieldDescription>
-              {verticalLegArmed
-                ? 'Live in Scene → Captions: where the bar sits and whether it is on the stream and in the recording. A vertical destination shares the recording picture with the horizontal stream.'
-                : 'Live in Scene → Captions: where the bar sits and whether it is on the stream and in the recording.'}
-            </FieldDescription>
-          </FieldContent>
         </Field>
 
         {(runtimeActive || lines.length > 0) && (
@@ -395,7 +385,7 @@ export function CaptionsControls(): ReactElement {
             service only while you record or go live.
           </p>
           <Button
-            disabled={!captionsWindow.enabled && !captionsWindow.open}
+            disabled={!captionsWindow.open && (locked || !captionsWindow.enabled)}
             size="sm"
             variant="outline"
             onClick={() => void toggleCaptionsWindow()}

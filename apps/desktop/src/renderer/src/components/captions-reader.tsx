@@ -1,10 +1,12 @@
 import { useEffect, useRef, type CSSProperties, type ReactElement } from 'react'
 
+import { ErrorIcon } from '@/components/icons'
 import { PinWindowButton } from '@/components/pin-window-button'
 import { StatusDot } from '@/components/status-dot'
 import { WindowHeader } from '@/components/window-frame'
 import type { CaptionStyleId, CaptionsStatus, CaptionsUpdate } from '@/lib/backend'
 import { captionStyleDefinition } from '@/lib/caption-overlay'
+import { captionsReaderNotice } from '@/lib/captions-page-view'
 import { latestFinalCaptionText } from '@/lib/captions-ui'
 import { captionsStatusLabel, captionsStatusTone } from '@/lib/state-labels'
 import { cn } from '@/lib/utils'
@@ -13,8 +15,9 @@ import { WINDOW_NAMES } from '../../../shared/window-names'
 /**
  * Big-text caption display for the detached Captions reader window: a dark glass
  * reader meant for a second monitor — or to be captured into the scene as a
- * caption bar. Minimal chrome (the window header and its pin); the newest
- * line is emphasized.
+ * caption bar. Minimal chrome (the window header: its name, one status dot and
+ * Keep on top); the newest line is emphasized, and the body says what is
+ * happening while there is nothing to read.
  */
 export function CaptionsReader({
   lines,
@@ -44,6 +47,9 @@ export function CaptionsReader({
   }, [lines])
 
   const recent = lines.slice(-8)
+  // The body follows the state (D-25, J2-18): off, waiting, starting, or a
+  // failure with its reason, which shows even over earlier captions.
+  const notice = captionsReaderNotice(status, recent.length)
   const latestFinal = latestFinalCaptionText(lines)
   const statusLabel = captionsStatusLabel(status)
   const latestTextClass = textSize === 's' ? 'text-xl' : textSize === 'l' ? 'text-4xl' : 'text-3xl'
@@ -69,35 +75,47 @@ export function CaptionsReader({
         )}
         ref={feedRef}
       >
-        {recent.length === 0 ? (
-          <p className="text-lg text-muted-foreground">
-            Waiting for captions. Turn on Live captions, then record or go live. Captions transcribe
-            your microphone while you record or go live.
+        {notice ? (
+          <p
+            className={cn(
+              'flex items-start gap-2 text-lg select-text',
+              notice.failed ? 'text-foreground' : 'text-muted-foreground'
+            )}
+            data-testid="captions-reader-notice"
+            role={notice.failed ? 'alert' : undefined}
+          >
+            {notice.failed ? (
+              <ErrorIcon
+                aria-hidden
+                className="mt-1 size-4 shrink-0 text-destructive"
+                weight="fill"
+              />
+            ) : null}
+            <span>{notice.text}</span>
           </p>
-        ) : (
-          recent.map((line, index) => {
-            const latest = index === recent.length - 1
-            return (
-              <p
-                className={cn(
-                  'leading-snug transition-colors',
-                  latest ? latestTextClass : 'text-xl text-muted-foreground',
-                  latest && 'font-semibold text-foreground',
-                  latest && line.kind === 'partial' && 'text-muted-foreground',
-                  latest && readerAppearance.className
-                )}
-                key={`${line.sessionClientId}-${line.seq}`}
-                style={
-                  latest
-                    ? { ...readerAppearance.style, opacity: line.kind === 'partial' ? 0.72 : 1 }
-                    : undefined
-                }
-              >
-                {line.text}
-              </p>
-            )
-          })
-        )}
+        ) : null}
+        {recent.map((line, index) => {
+          const latest = index === recent.length - 1
+          return (
+            <p
+              className={cn(
+                'leading-snug transition-colors',
+                latest ? latestTextClass : 'text-xl text-muted-foreground',
+                latest && 'font-semibold text-foreground',
+                latest && line.kind === 'partial' && 'text-muted-foreground',
+                latest && readerAppearance.className
+              )}
+              key={`${line.sessionClientId}-${line.seq}`}
+              style={
+                latest
+                  ? { ...readerAppearance.style, opacity: line.kind === 'partial' ? 0.72 : 1 }
+                  : undefined
+              }
+            >
+              {line.text}
+            </p>
+          )
+        })}
       </div>
       <span aria-live="polite" className="sr-only">
         {latestFinal ? `Final caption: ${latestFinal}` : ''}

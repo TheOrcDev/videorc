@@ -4,7 +4,6 @@ import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
 import { AboutSettings } from '@/components/settings/about-settings'
 import { GeneralSettings } from '@/components/settings/general-settings'
 import { PermissionsSettings } from '@/components/settings/permissions-settings'
-import { RecordingSettings } from '@/components/settings/recording-settings'
 import { RemoteSettings } from '@/components/settings/remote-settings'
 import { ShortcutsSettings } from '@/components/settings/shortcuts-settings'
 import { PageTabs } from '@/components/page-tabs'
@@ -13,11 +12,13 @@ import { useStudioCore } from '@/hooks/use-studio'
 import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
 
 /**
- * Settings (plan 064): six tabs in a segmented strip under the toolbar, one
- * tab's sections below it (Buddy's moved to the Buddy tab, plan 119). The
- * strip never scrolls away (`PageTabs`: the page owns its scroll and only the
- * region under the strip scrolls). The selected tab lives in app-shell, so
- * links can open a named tab and Settings reopens on the one used last.
+ * Settings (plan 064): five tabs in a segmented strip under the toolbar, one
+ * tab's sections below it (Buddy's moved to the Buddy tab, plan 119; the
+ * Recording tab's settings moved to Output, Sources and Health, plan 174
+ * S3.6). The strip never scrolls away (`PageTabs`: the page owns its scroll
+ * and only the region under the strip scrolls). The selected tab lives in
+ * app-shell, so links can open a named tab and Settings reopens on the one
+ * used last.
  */
 export function SettingsTab({
   tab,
@@ -50,11 +51,6 @@ export function SettingsTab({
         <ConfigGrid className={CONFIG_GRID_PAIR}>
           <GeneralSettings />
         </ConfigGrid>
-      </TabsContent>
-      <TabsContent className="flex flex-col" value="recording">
-        <PageStack>
-          <RecordingSettings />
-        </PageStack>
       </TabsContent>
       <TabsContent className="flex flex-col" value="permissions">
         <PageStack>

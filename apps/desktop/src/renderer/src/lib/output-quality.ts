@@ -1,5 +1,12 @@
 import type { StreamingSettings, StreamTargetSettings, VideoPreset, VideoSettings } from './backend'
-import { videoPresets, type LayoutOrientation } from './capture'
+import {
+  legacyVideoPresetOptions,
+  recordingVideoPresetOptions,
+  streamingVideoPresetOptions,
+  videoPresets,
+  type LayoutOrientation,
+  type VideoPresetOption
+} from './capture'
 import { formatVideoQuality } from './format-video'
 
 // The one video spelling (plan 174 S1.4): "1080p · 30 fps", never "Full HD".
@@ -65,6 +72,36 @@ export function pickRecordingResolution(
     preset: 'custom',
     bitrateKbps: standardRate && next ? next.bitrateKbps : video.bitrateKbps
   }
+}
+
+/**
+ * The Output page's preset list (plan 174 S3.6, D-28): the recording presets
+ * that fit the scene's orientation, never the streaming ones. A preset picked
+ * some other way (the performance check's 1080p60 rung, an older app's
+ * streaming preset) joins the list while it is the setting, so the field
+ * never reads blank. Custom is the select's own last item.
+ */
+export function recordingPresetOptions(
+  current: VideoPreset,
+  orientation: LayoutOrientation
+): VideoPresetOption[] {
+  const fits = recordingVideoPresetOptions.filter(({ value }) => {
+    const { width, height } = videoPresets[value]
+    return orientation === 'vertical' ? height > width : width >= height
+  })
+  if (current === 'custom' || fits.some(({ value }) => value === current)) return fits
+  const named = [
+    ...recordingVideoPresetOptions,
+    ...streamingVideoPresetOptions,
+    ...legacyVideoPresetOptions
+  ].find(({ value }) => value === current)
+  return [
+    ...fits,
+    named ?? {
+      value: current,
+      label: formatVideoQuality(videoPresets[current], { bitrate: true })
+    }
+  ]
 }
 
 /** The Output page's typed fields (plan 174, D-1). */

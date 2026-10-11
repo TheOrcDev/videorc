@@ -20,6 +20,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { MuteToggle } from '@/components/ui/channel-toggle'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { SettingsRow } from '@/components/ui/field'
 import { Fader, FaderRange, FaderThumb, FaderTrack } from '@/components/ui/fader'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import {
@@ -68,6 +69,7 @@ import {
   type MeterInput
 } from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
+import { microphoneIndicatorCopy } from '@/lib/platform-copy'
 import type { MicMonitorState } from '@/lib/state-labels'
 import {
   microphoneStatus,
@@ -136,6 +138,14 @@ function MixerRow({ children }: { children: ReactNode }): ReactElement {
   return <div data-slot="channel-strip">{children}</div>
 }
 
+/**
+ * "Keep microphone ready"'s line (plan 174 S3.6, D5: it moved here from
+ * Settings → Recording). Who shows the open microphone is the platform's.
+ */
+export function keepMicrophoneReadyHint(platform: string | undefined): string {
+  return `Opens the microphone while Studio is on screen, so Record starts at once. ${microphoneIndicatorCopy(platform)} while it's open; hiding the window releases it.`
+}
+
 /** The Sources "Audio" column: the Microphone, then System audio. */
 export function SourcesAudioMixer(): ReactElement {
   const {
@@ -148,6 +158,7 @@ export function SourcesAudioMixer(): ReactElement {
     sourceSwitchReason,
     switchSourceDeviceLive,
     settings,
+    setSettings,
     runtimeInfo,
     wsStatus,
     systemAudioConfirmed,
@@ -195,6 +206,12 @@ export function SourcesAudioMixer(): ReactElement {
                   ) : null
                 }
                 gainDb={audio.microphoneGainDb}
+                keepReady={{
+                  checked: settings.keepMicrophoneWarm !== false,
+                  description: keepMicrophoneReadyHint(platform),
+                  onCheckedChange: (keepMicrophoneWarm) =>
+                    setSettings((current) => ({ ...current, keepMicrophoneWarm }))
+                }}
                 meter={microphone.meter}
                 microphoneSelected={Boolean(selectedMicrophone)}
                 monitorState={microphone.monitorState}
@@ -286,7 +303,8 @@ export function SourcesAudioMixer(): ReactElement {
 
 /**
  * The Microphone row: Mute in the header; the picker, its level and Gain in
- * the body; Sync (and, in development builds, Calibrate) folded into More.
+ * the body; Sync, Keep microphone ready (and, in development builds,
+ * Calibrate) folded into More.
  * Markup from props, so the tests render it.
  */
 export function MicrophoneChannel({
@@ -304,6 +322,7 @@ export function MicrophoneChannel({
   syncUserSet,
   sessionActive,
   calibration,
+  keepReady,
   defaultMoreOpen,
   onGainChange,
   onMutedChange,
@@ -326,6 +345,8 @@ export function MicrophoneChannel({
   sessionActive: boolean
   /** Calibrate, in development builds only (plan 173, D3); null otherwise. */
   calibration: ReactNode
+  /** Keep the microphone open while Studio is on screen (plan 174 S3.6, D5). */
+  keepReady?: { checked: boolean; description: string; onCheckedChange: (checked: boolean) => void }
   defaultMoreOpen?: boolean
   onGainChange: (gainDb: number) => void
   onMutedChange: (muted: boolean) => void
@@ -384,6 +405,19 @@ export function MicrophoneChannel({
                 {sessionActive ? ' Applies from the next recording or stream.' : null}
               </ParameterSliderDescription>
             </ParameterSlider>
+            {keepReady ? (
+              <SettingsRow
+                data-videorc-mic-keep-ready=""
+                description={keepReady.description}
+                label="Keep microphone ready"
+              >
+                <Switch
+                  checked={keepReady.checked}
+                  size="sm"
+                  onCheckedChange={keepReady.onCheckedChange}
+                />
+              </SettingsRow>
+            ) : null}
             {calibration}
           </>
         }

@@ -360,9 +360,9 @@ function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
     if (health && !health.ffmpeg.available) {
       return {
         title: "Videorc's recorder isn't available",
-        jumpTo: 'settings',
-        settingsTab: 'recording',
-        jumpLabel: 'Open Settings'
+        // Health says why and what to do (plan 174 S3.6: Settings → Recording is gone).
+        jumpTo: 'diagnostics',
+        jumpLabel: OPEN_HEALTH_LABEL
       }
     }
     return null

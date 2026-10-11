@@ -27,6 +27,11 @@ describe('Settings entry points', () => {
     expect(readWorkspaceNavigation({ tab: 'settings', settingsTab: 'nope' })).toEqual({
       tab: 'settings'
     })
+    // A link to the removed Recording tab opens General (plan 174 S3.6, D5).
+    expect(readWorkspaceNavigation({ tab: 'settings', settingsTab: 'recording' })).toEqual({
+      tab: 'settings',
+      settingsTab: 'general'
+    })
     expect(appShell).toContain('onOpenSettings={openSettings}')
   })
 
@@ -43,10 +48,13 @@ describe('Settings entry points', () => {
     expect(palette).toContain('onSelect={() => run(() => openSettings(tab.id))}')
   })
 
-  it('sends the FFmpeg blocker to Recording, where FFmpeg status lives', () => {
+  it('sends the FFmpeg blocker to Health, where the FFmpeg line lives (plan 174 S3.6)', () => {
     const studio = read('./studio-tab.tsx')
     const ffmpeg = studio.slice(studio.indexOf('title: "Videorc\'s recorder isn\'t available"'))
-    expect(ffmpeg.slice(0, ffmpeg.indexOf('}'))).toContain("settingsTab: 'recording'")
+    const blocker = ffmpeg.slice(0, ffmpeg.indexOf('}'))
+    expect(blocker).toContain("jumpTo: 'diagnostics'")
+    expect(blocker).toContain('jumpLabel: OPEN_HEALTH_LABEL')
+    expect(read('./diagnostics-tab.tsx')).toContain('label="FFmpeg"')
 
     // The reason line under the transport (plan 174 S3.2) still opens the
     // Settings tab the jump names, never a page by that name.

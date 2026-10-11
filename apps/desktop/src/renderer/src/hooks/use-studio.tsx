@@ -13428,7 +13428,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : null
           if (settings.outputDirectoryHandle && !outputDirectory) {
             throw new Error(
-              'The selected output folder is unavailable. Choose it again in Settings → Recording.'
+              'The recordings folder you chose isn’t available. Choose it again in Output → Where recordings go.'
             )
           }
           const sessionParams = buildStartSessionParams({
@@ -14747,7 +14747,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       : null
     if (settings.outputDirectoryHandle && !outputDirectory) {
       throw new UserFacingError(
-        'The selected output folder is unavailable. Choose it again in Settings → Recording.'
+        'The recordings folder you chose isn’t available. Choose it again in Output → Where recordings go.'
       )
     }
     // Blank means the platform default — the backend resolves and creates it,

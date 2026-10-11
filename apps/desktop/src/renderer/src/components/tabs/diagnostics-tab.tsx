@@ -22,6 +22,7 @@ import type {
   DiagnosticStats,
   SessionLogEntry,
   SystemPermissionPane,
+  ToolStatus,
   WebSocketQueueDiagnosticStats
 } from '@/lib/backend'
 import { backendCrashView, latestBackendCrash } from '@/lib/backend-crash-view'
@@ -74,7 +75,8 @@ export function DiagnosticsTab(): ReactElement {
     captureConfig,
     deviceList,
     mediaAccess,
-    runtimeInfo
+    runtimeInfo,
+    health
   } = useStudioCore()
   const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
@@ -163,6 +165,8 @@ export function DiagnosticsTab(): ReactElement {
   const pipelineFailed = Boolean(
     recording.pipeline?.stages.some((stage) => stage.state === 'failed')
   )
+  // The FFmpeg line lives here since Settings → Recording went (plan 174 S3.6).
+  const ffmpegMissing = Boolean(health && !health.ffmpeg.available)
 
   return (
     <div className="flex min-w-0 flex-col" data-testid="health-page">
@@ -182,6 +186,16 @@ export function DiagnosticsTab(): ReactElement {
             onFix={() => void handleSystemPermission(warning.pane)}
           />
         ))}
+        {ffmpegMissing ? (
+          <Alert data-testid="health-ffmpeg-missing" variant="warning">
+            <AlertTitle>Videorc&apos;s recorder isn&apos;t available</AlertTitle>
+            <AlertDescription>
+              {import.meta.env.DEV
+                ? 'For local development, install FFmpeg with “brew install ffmpeg”.'
+                : 'It ships with Videorc, so this usually means the install is damaged. Reinstall Videorc.'}
+            </AlertDescription>
+          </Alert>
+        ) : null}
         <CheckList checks={checks} />
       </PanelSection>
 
@@ -238,8 +252,11 @@ export function DiagnosticsTab(): ReactElement {
         >
           <PreviewMetrics macOS={isMacPlatform(platform ?? 'darwin')} />
         </MetricGroup>
-        <MetricGroup attention={needs('recording', 'encoder')} title="Recording and encoder">
-          <EncoderMetrics macOS={isMacPlatform(platform ?? 'darwin')} />
+        <MetricGroup
+          attention={needs('recording', 'encoder') || ffmpegMissing}
+          title="Recording and encoder"
+        >
+          <EncoderMetrics ffmpeg={health?.ffmpeg} macOS={isMacPlatform(platform ?? 'darwin')} />
         </MetricGroup>
         <MetricGroup attention={needs('sources', 'memory')} title="System and sources">
           <SystemMetrics stats={diagnosticStats} />
@@ -663,10 +680,17 @@ function PreviewMetrics({ macOS }: { macOS: boolean }): ReactElement {
   )
 }
 
-function EncoderMetrics({ macOS }: { macOS: boolean }): ReactElement {
+function EncoderMetrics({
+  ffmpeg,
+  macOS
+}: {
+  ffmpeg: ToolStatus | undefined
+  macOS: boolean
+}): ReactElement {
   const { diagnosticStats: stats, streamHealth } = useStudioDiagnostics()
   return (
     <MetricGrid>
+      <DiagnosticMetric label="FFmpeg" value={formatFfmpegStatus(ffmpeg)} />
       <DiagnosticMetric label="Microphone drops" value={stats.micDroppedFrames.toString()} />
       <DiagnosticMetric
         label="Microphone coverage"
@@ -938,6 +962,13 @@ function formatPreviewSourceStatus(
 ): string {
   const fps = typeof sourceFps === 'number' ? `${sourceFps.toFixed(1)} fps` : NO_VALUE
   return `${previewSourceStateLabel(state)}, ${fps}, ${plural(droppedFrames ?? 0, 'drop')}`
+}
+
+/** The recorder's version, or that it is missing (plan 174 S3.6). */
+function formatFfmpegStatus(ffmpeg: ToolStatus | undefined): string {
+  if (!ffmpeg) return 'Checking…'
+  if (!ffmpeg.available) return 'Missing'
+  return ffmpeg.version ? `Ready · ${ffmpeg.version}` : 'Ready'
 }
 
 function formatFfmpegWork(stats: DiagnosticStats): string {

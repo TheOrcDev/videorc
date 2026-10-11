@@ -16,7 +16,6 @@ const pageTabsSource = read('../page-tabs.tsx')
 /** The panel component each tab renders, and the file it lives in. */
 const PANEL_FILES: Record<string, string> = {
   GeneralSettings: '../settings/general-settings.tsx',
-  RecordingSettings: '../settings/recording-settings.tsx',
   PermissionsSettings: '../settings/permissions-settings.tsx',
   ShortcutsSettings: '../settings/shortcuts-settings.tsx',
   RemoteSettings: '../settings/remote-settings.tsx',
@@ -118,7 +117,6 @@ describe('Settings layout', () => {
       Object.fromEntries(tabPanels().map((panel) => [panel.value, sectionTitles(panel.jsx)]))
     ).toEqual({
       general: ['Appearance', 'Stream Manager', 'Import', 'Elsewhere'],
-      recording: ['Recording & storage'],
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
       remote: ['Remote control', 'Phone remote'],
