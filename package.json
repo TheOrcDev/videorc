@@ -15,6 +15,7 @@
     "live:hookup": "node scripts/live-lab/hookup.mjs",
     "live:doctor": "node scripts/live-lab/doctor.mjs",
     "live:install": "node scripts/live-lab/install.mjs",
+    "live:run": "node scripts/live-lab/run.mjs",
     "live:schedule": "node scripts/live-lab/schedule.mjs",
     "dev": "pnpm --filter @videorc/desktop dev",
     "dev:zerocopy": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_ZEROCOPY_SOURCES=1 -- pnpm --filter @videorc/desktop dev",
