@@ -1,4 +1,10 @@
-import type { OverlayItem, OverlayLayout, OverlayOrientation, OverlayRect } from '@/lib/backend'
+import type {
+  OverlayItem,
+  OverlayItemLayout,
+  OverlayLayout,
+  OverlayOrientation,
+  OverlayRect
+} from '@/lib/backend'
 import { OVERLAY_ITEMS } from '@/lib/backend'
 import type { WsStatus } from '@/lib/capture'
 import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
@@ -47,20 +53,32 @@ export interface OverlayStageItem {
   stageId: string
   label: string
   rect: StageRect
-  badge: 'stream only' | 'recording only' | null
+  /** What the chip says after the name: off, or which output alone shows it. */
+  badge: 'off' | 'stream only' | 'recording only' | null
+  /** Both output switches are off: the stage draws the item dimmed (plan 174, C-13). */
+  off: boolean
+}
+
+/** An item neither output shows. */
+export function overlayItemOff(item: OverlayItemLayout): boolean {
+  return !item.showOnStream && !item.showInRecording
 }
 
 export function overlayStageItems(
   layout: OverlayLayout,
   orientation: OverlayOrientation
 ): OverlayStageItem[] {
-  return OVERLAY_ITEMS.map((item) => ({
-    item,
-    stageId: overlayStageId(item),
-    label: OVERLAY_ITEM_LABELS[item],
-    rect: overlayRectToStage(layout[item][orientation]),
-    badge: overlayItemOutputBadge(layout[item])
-  }))
+  return OVERLAY_ITEMS.map((item) => {
+    const off = overlayItemOff(layout[item])
+    return {
+      item,
+      stageId: overlayStageId(item),
+      label: OVERLAY_ITEM_LABELS[item],
+      rect: overlayRectToStage(layout[item][orientation]),
+      badge: off ? 'off' : overlayItemOutputBadge(layout[item]),
+      off
+    }
+  })
 }
 
 /** The whole layout with one item's rect replaced on one orientation. */

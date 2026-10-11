@@ -80,17 +80,44 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
   }
   return (
     <>
-      <div className="flex items-center justify-between gap-2">
-        {!toolbar ? <span className="text-sm font-medium">Saved scenes</span> : null}
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={!canSaveScene}
-          onClick={() => open({ kind: 'save' })}
-        >
-          Save scene
-        </Button>
-      </div>
+      {toolbar ? (
+        // The Scene page's section actions (plan 174 S3.9, C-23 and V-10):
+        // "Update “{name}”" once the applied saved scene drifts, then Save
+        // scene. The section's own description names the scene and its state.
+        <>
+          {active && savedSceneModified ? (
+            <Button
+              data-testid="scene-update-saved"
+              disabled={!canSaveScene}
+              size="sm"
+              variant="outline"
+              onClick={() => open({ kind: 'save', scene: active })}
+            >
+              Update “{active.name}”
+            </Button>
+          ) : null}
+          <Button
+            disabled={!canSaveScene}
+            size="sm"
+            variant="ghost"
+            onClick={() => open({ kind: 'save' })}
+          >
+            Save scene
+          </Button>
+        </>
+      ) : (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium">Saved scenes</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!canSaveScene}
+            onClick={() => open({ kind: 'save' })}
+          >
+            Save scene
+          </Button>
+        </div>
+      )}
       {!toolbar ? (
         <>
           {sceneLibraryError ? (
@@ -193,11 +220,6 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
             })}
           </div>
         </>
-      ) : active ? (
-        <span className="text-xs text-muted-foreground">
-          {active.name}
-          {savedSceneModified ? ' · Modified' : ''}
-        </span>
       ) : null}
       {/* The delete is the model confirm (plan 174 S0.3): what is lost, in
           one sentence, behind the one recipe. */}

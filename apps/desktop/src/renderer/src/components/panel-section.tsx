@@ -26,7 +26,8 @@ export function PanelSection({
   description?: ReactNode
   icon?: AppIcon
   action?: ReactNode
-  children: ReactNode
+  /** Optional: a section that is only its header (a title and what it says) has no content box. */
+  children?: ReactNode
   className?: string
   contentClassName?: string
   /** The outline level of the title: 2 (the default) under the page, 3 when nested. */
@@ -61,7 +62,9 @@ export function PanelSection({
           {action ? <div className="flex h-5 shrink-0 items-center gap-2">{action}</div> : null}
         </header>
       ) : null}
-      <div className={cn('flex flex-col gap-3', contentClassName)}>{children}</div>
+      {children !== null && children !== undefined && children !== false ? (
+        <div className={cn('flex flex-col gap-3', contentClassName)}>{children}</div>
+      ) : null}
     </section>
   )
 }

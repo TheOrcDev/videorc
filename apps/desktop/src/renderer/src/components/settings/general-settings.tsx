@@ -2,6 +2,7 @@ import { DownloadIcon, RefreshIcon } from '@/components/icons'
 import { useTheme } from 'next-themes'
 import { useState, type ReactElement } from 'react'
 
+import { NavigableRow } from '@/components/navigable-row'
 import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { ChatEmoteSettingsFields } from '@/components/settings/seventv-emotes-field'
@@ -13,6 +14,7 @@ import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { RuntimeInfo } from '@/lib/backend'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 const THEME_OPTIONS = [
   { value: 'light', label: 'Light' },
@@ -63,26 +65,14 @@ export function GeneralSettings(): ReactElement {
             </Field>
           ) : null}
           {runtimeInfo?.commentsWindowEnabled !== false ? <ChatEmoteSettingsFields /> : null}
-          {/* Plan 064: a studio behavior, not a storage setting, so it moved
-              here from Recording. */}
-          <Field>
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex min-w-0 flex-col gap-0.5">
-                <FieldLabel htmlFor="animate-scene-changes">Animate scene changes</FieldLabel>
-                <p className="text-xs text-muted-foreground">
-                  Layout switches glide into place instead of cutting, visible live on stream and in
-                  recordings.
-                </p>
-              </div>
-              <Switch
-                checked={settings.animateSceneChanges === true}
-                id="animate-scene-changes"
-                onCheckedChange={(checked) =>
-                  setSettings((current) => ({ ...current, animateSceneChanges: checked }))
-                }
-              />
-            </div>
-          </Field>
+          {/* "Animate scene changes" changes what viewers see, so its one home
+              is the Scene page (plan 174 S3.9, D17); this row points there. */}
+          <NavigableRow
+            className="rounded-none"
+            label="Animate scene changes"
+            value="Scene"
+            onNavigate={() => openWorkspaceTab('layouts')}
+          />
           {runtimeInfo?.platform === 'win32' ? (
             <Field>
               <div className="flex items-center justify-between gap-3">
