@@ -1,6 +1,6 @@
 import { CaptionsIcon, ExternalLinkIcon, MicrophoneIcon, RefreshIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
-import { toast } from '@/lib/toast'
+import { toastUserError } from '@/lib/user-error'
 
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
@@ -199,9 +199,11 @@ export function CaptionsControls(): ReactElement {
 
   const retry = (): void => {
     void startCaptions(captions.language).catch((error: unknown) => {
-      toast.error('Live captions could not start', {
-        description: error instanceof Error ? error.message : 'The caption service is unavailable.'
-      })
+      toastUserError(
+        error,
+        { action: 'start', object: 'live captions' },
+        { id: 'captions-start', action: { label: 'Retry', onClick: retry } }
+      )
     })
   }
 

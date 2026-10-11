@@ -14,7 +14,13 @@ const sonner = vi.hoisted(() => {
 })
 vi.mock('sonner', () => ({ toast: sonner }))
 
-import { TOAST_DETAILS_IN_DIAGNOSTICS, guardToastText, toast } from '@/lib/toast'
+import {
+  TOAST_DETAILS_IN_DIAGNOSTICS,
+  TOAST_WITH_DESCRIPTION_MS,
+  defaultToastDuration,
+  guardToastText,
+  toast
+} from '@/lib/toast'
 
 // The exact texts from the owner's 2026-10-02 screenshot (Stop) and the
 // other user's screen recording (YouTube connect).
@@ -65,7 +71,8 @@ describe('toast wrapper', () => {
   it('guards the description and the title on every kind', () => {
     toast.error('Could not complete YouTube on YouTube.', { description: OWNER_STOP_BODY })
     expect(sonner.error).toHaveBeenCalledWith('Could not complete YouTube on YouTube.', {
-      description: TOAST_DETAILS_IN_DIAGNOSTICS
+      description: TOAST_DETAILS_IN_DIAGNOSTICS,
+      duration: TOAST_WITH_DESCRIPTION_MS
     })
     toast.warning(CONNECT_BODY, { id: 'x' })
     const [title, options] = sonner.warning.mock.calls[0] as [string, { id: string }]
@@ -78,5 +85,52 @@ describe('toast wrapper', () => {
     toast.dismiss('p')
     expect(sonner.dismiss).toHaveBeenCalledWith('p')
     expect(console.warn).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('the IPC wrapper backstop (plan 174 S2.4)', () => {
+  it("strips Electron's remote-method wrapper and keeps the handler's words", () => {
+    expect(
+      guardToastText("Error invoking remote method 'comments-window:clear': Error: Clear failed.")
+    ).toEqual({
+      text: 'Clear failed.',
+      withheld: "Error invoking remote method 'comments-window:clear': Error: Clear failed."
+    })
+  })
+})
+
+describe('toast durations by shape (plan 174 S2.4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('keeps 4 s for a one-liner, 8 s with a description, and stays with an action', () => {
+    expect(defaultToastDuration(undefined)).toBeUndefined()
+    expect(defaultToastDuration({ id: 'x' })).toBeUndefined()
+    expect(defaultToastDuration({ description: 'Why.' })).toBe(8_000)
+    expect(defaultToastDuration({ action: { label: 'Retry', onClick: () => {} } })).toBe(Infinity)
+    expect(defaultToastDuration({ cancel: { label: 'Show', onClick: () => {} } })).toBe(Infinity)
+    expect(defaultToastDuration({ description: 'Why.', duration: 12_000 })).toBe(12_000)
+  })
+
+  it('applies them on every kind but loading, and never overrides an explicit duration', () => {
+    toast.warning('Degraded', { description: 'Why.' })
+    expect(sonner.warning).toHaveBeenCalledWith('Degraded', {
+      description: 'Why.',
+      duration: 8_000
+    })
+    toast.loading('Saving…', { id: 'l', description: 'Long recordings take minutes.' })
+    expect(sonner.loading).toHaveBeenCalledWith('Saving…', {
+      id: 'l',
+      description: 'Long recordings take minutes.'
+    })
+    toast.success('Recording saved', {
+      duration: 12_000,
+      action: { label: 'Play', onClick: () => {} }
+    })
+    expect(sonner.success).toHaveBeenCalledWith('Recording saved', {
+      duration: 12_000,
+      action: expect.objectContaining({ label: 'Play' })
+    })
   })
 })

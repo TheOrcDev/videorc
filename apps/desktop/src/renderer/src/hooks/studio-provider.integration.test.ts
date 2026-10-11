@@ -3305,7 +3305,7 @@ describe('real StudioProvider lifecycle', () => {
         id: 'recording-stopped-unexpectedly',
         description: failedStatus.message,
         duration: Infinity,
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -3547,7 +3547,7 @@ describe('real StudioProvider lifecycle', () => {
         id: 'recording-stopped-unexpectedly',
         description: failureEvent.message,
         duration: Infinity,
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -3639,7 +3639,7 @@ describe('real StudioProvider lifecycle', () => {
       'Live session stopped unexpectedly',
       expect.objectContaining({
         description: failedSnapshotEvent.message,
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -5553,7 +5553,7 @@ describe('real StudioProvider lifecycle', () => {
         // validates discovery before admitting its layout to the backend.
         expect(button(unavailable).disabled).toBe(false)
         await act(async () => button(unavailable).click())
-        await waitForObservation(() => toastSpies.error.mock.calls.length > 0)
+        await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
       }
       expect(
         backend.sentCommands.filter((command) => command.method === 'scene.layout.apply_live')
@@ -5784,14 +5784,16 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(await latest().applySavedScene(saved.id)).toBe(true)
     })
-    await waitForObservation(
-      () => latest().canSaveScene && toastSpies.warning.mock.calls.length > 0
-    )
+    // Plan 174 S2.4: a lagging preview is neutral news, so info.
+    await waitForObservation(() => latest().canSaveScene && toastSpies.info.mock.calls.length > 0)
     expect(latest().activeSavedSceneId).toBe(saved.id)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
     expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(saved.id)
-    expect(toastSpies.warning).toHaveBeenCalled()
+    expect(toastSpies.info).toHaveBeenCalledWith(
+      'The preview may be behind',
+      expect.objectContaining({ id: expect.stringContaining('layout-preview-proof-lag') })
+    )
     showPreview = false
     api.getNativePreviewSurfaceStatus = async () => nativePreviewStatus()
     await act(async () => {
@@ -6094,8 +6096,10 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(latest()?.core.captureConfig.sources.screenId).toBe(sources.screenId)
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
-    expect(toastSpies.error).toHaveBeenCalledWith('The selected display is unavailable.', {
-      id: expect.stringContaining('source-switch-')
+    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't switch the screen", {
+      id: expect.stringContaining('source-switch-'),
+      description: 'The selected display is unavailable. Choose it again in Sources.',
+      duration: 8_000
     })
     expect(toastSpies.success).not.toHaveBeenCalled()
   }, 10_000)
@@ -8836,7 +8840,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(requestMediaAccess).not.toHaveBeenCalled()
     expect(openSystemPermissions).not.toHaveBeenCalled()
     expect(toastSpies.error).toHaveBeenCalledWith('Could not check Camera permission.', {
-      description: 'Try again before changing access.'
+      description: 'Try again before changing access.',
+      duration: 8_000
     })
   })
 

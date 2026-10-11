@@ -241,7 +241,7 @@ describe('scene presets', () => {
     })
     expect(missing.sources.cameraOff).toBe(false)
     expect(sceneSourceProblems(missing, devices)).toEqual([
-      'Camera unavailable. Choose a replacement.'
+      'Camera unavailable. Choose a replacement in Sources.'
     ])
     expect(reconcileSourceSelection(missing.sources, devices).cameraId).toBe('cam')
   })

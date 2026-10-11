@@ -57,8 +57,8 @@ export function recordingStartupHealthToast(
     return {
       variant: 'warning',
       id: RECORDING_STARTUP_UNSTEADY_TOAST_ID,
-      title: 'Recording started on an unsteady compositor',
-      description: event.message,
+      title: 'The first seconds may stutter',
+      description: 'Videorc took a moment to settle when the recording started. Check its start.',
       duration: 15000
     }
   }

@@ -71,7 +71,8 @@ describe('RemoveMessagesReconnectRows (plan 140, S5)', () => {
   it('confirms the browser opened in plain words', () => {
     expect(removeMessagesReconnectStarted('twitch')).toEqual({
       title: 'Approve the Twitch permission in your browser',
-      description: 'Buddy can remove messages once Twitch confirms.'
+      description: 'Buddy can remove messages once Twitch confirms.',
+      platformName: 'Twitch'
     })
     expect(removeMessagesReconnectStarted('kick').title).toBe(
       'Approve the Kick permission in your browser'

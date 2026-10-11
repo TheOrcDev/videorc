@@ -1,6 +1,12 @@
-import { isGlobalShortcutAction, type GlobalShortcutAction } from '../../../shared/global-shortcuts'
+import {
+  globalShortcutLayout,
+  isGlobalShortcutAction,
+  type GlobalShortcutAction
+} from '../../../shared/global-shortcuts'
 export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 import { toast } from '@/lib/toast'
+import { layoutPresetLabel } from '@/lib/layout-labels'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 import type { DeviceStatus, GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
 import { openSettingsTab } from '@/lib/settings-tabs'
@@ -43,9 +49,10 @@ export function executeGlobalShortcut(
     } else if (context.streamEnabled) {
       void context.startSession()
     } else {
-      toast.error('Streaming is not configured', {
+      // A refusal with its one fix, so a warning (plan 174 S2.4).
+      toast.warning('Set up a destination to go live', {
         id: 'global-shortcut-stream',
-        description: 'Enable streaming in the Studio before using the Go Live shortcut.'
+        action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
       })
     }
     return
@@ -74,6 +81,24 @@ function toggleSystemAudio(context: GlobalShortcutContext): void {
       id: 'global-shortcut-system-audio'
     })
   }
+}
+
+const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
+  'record-toggle': 'Record / stop recording',
+  'stream-toggle': 'Go Live / end livestream',
+  'mic-toggle': 'Mute / unmute microphone',
+  'system-audio-toggle': 'Turn system audio on or off',
+  'clip-mark': 'Mark a clip',
+  'layout-next': 'Next scene',
+  'layout-previous': 'Previous scene'
+}
+
+/** Pure. What a global shortcut does, in words, never its id (plan 174 A-22). */
+export function globalShortcutLabel(action: string): string {
+  if (!isGlobalShortcutAction(action)) return action
+  const layout = globalShortcutLayout(action)
+  if (layout) return layoutPresetLabel(layout)
+  return GLOBAL_SHORTCUT_LABELS[action] ?? action
 }
 
 // Plan 062: the latest per-action registration outcome, so Settings can mark
@@ -159,20 +184,26 @@ export class GlobalShortcutsRegistrar {
           .filter(([, ok]) => !ok)
           .map(([action]) => action)
         if (failed.length > 0) {
-          toast.error('Some global shortcuts could not be registered', {
-            id: 'global-shortcuts-conflict',
-            description: `${failed.join(', ')}: invalid, duplicate or already used by another app. Pick different bindings in Settings → Shortcuts.`,
-            action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
-          })
+          toast.error(
+            failed.length === 1
+              ? "A global shortcut didn't register"
+              : "Some global shortcuts didn't register",
+            {
+              id: 'global-shortcuts-conflict',
+              description: `${failed.map(globalShortcutLabel).join(', ')}: another app uses ${failed.length === 1 ? 'it' : 'them'}, or the keys are taken twice. Choose different keys in Settings → Shortcuts.`,
+              action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
+            }
+          )
         }
       })
       .catch((error: unknown) => {
         // The IPC itself failed — the user's shortcuts silently not working
         // is the one thing this must never do quietly.
         console.error('[global-shortcuts] registration failed', error)
-        toast.error('Global shortcuts could not be registered', {
+        toast.error("Global shortcuts didn't register", {
           id: 'global-shortcuts-conflict',
-          description: 'Videorc could not reach the system shortcut registry. Try again.'
+          description: "Restart Videorc if they still don't work.",
+          action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
         })
       })
   }

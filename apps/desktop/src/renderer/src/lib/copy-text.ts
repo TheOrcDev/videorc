@@ -10,18 +10,25 @@ import { toast } from '@/lib/toast'
 /** How long a control says "Copied" after a copy. */
 export const COPIED_FEEDBACK_MS = 1500
 
+/** A failure toast's title, or its title with the way out (plan 174 S2.4). */
+export type CopyFailure = string | { title: string; description: string }
+
 /**
  * Copies `text` to the clipboard. Resolves true when it landed; on failure it
  * toasts `failure` and resolves false. It never throws.
  */
-export async function copyText(text: string, failure = "Couldn't copy that."): Promise<boolean> {
+export async function copyText(
+  text: string,
+  failure: CopyFailure = "Couldn't copy that."
+): Promise<boolean> {
   try {
     if (!navigator.clipboard) throw new Error('clipboard unavailable')
     await navigator.clipboard.writeText(text)
     return true
   } catch (error) {
     console.warn('[copy] copy failed', error)
-    toast.error(failure)
+    if (typeof failure === 'string') toast.error(failure)
+    else toast.error(failure.title, { description: failure.description })
     return false
   }
 }
@@ -32,11 +39,11 @@ export async function copyText(text: string, failure = "Couldn't copy that."): P
  */
 export function useCopyText(): {
   copied: boolean
-  copy: (text: string, failure?: string) => Promise<boolean>
+  copy: (text: string, failure?: CopyFailure) => Promise<boolean>
 } {
   const [copied, setCopied] = useState(false)
   const timerRef = useRef<number | null>(null)
-  const copy = useCallback(async (text: string, failure?: string): Promise<boolean> => {
+  const copy = useCallback(async (text: string, failure?: CopyFailure): Promise<boolean> => {
     const landed = await copyText(text, failure)
     if (!landed) return false
     if (timerRef.current !== null) window.clearTimeout(timerRef.current)

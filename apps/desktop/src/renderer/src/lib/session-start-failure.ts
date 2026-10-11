@@ -14,10 +14,17 @@ import type { RecordingStatus } from './backend'
 
 /** Sonner key for the start-failure toast: re-reporting updates it in place. */
 export const SESSION_START_FAILED_TOAST_ID = 'session-start-failed'
-/** Shared title: sonner merges an update over the existing toast by id, so the
+/** Shared shape: sonner merges an update over the existing toast by id, so the
  * health-event toast and the RPC-rejection toast must use the same shape
- * (title + description) or the older description lingers under a new title. */
-export const SESSION_START_FAILED_TOAST_TITLE = 'Could not start'
+ * (title + description) or the older description lingers under a new title.
+ * The health event can't tell a recording from a livestream, so its title is
+ * the neutral one; the rejection that follows names which (plan 174 S2.4). */
+export const SESSION_START_FAILED_TOAST_TITLE = "Couldn't start"
+
+/** "Couldn't start recording" or "Couldn't go live". */
+export function sessionStartFailedTitle(goLive: boolean): string {
+  return goLive ? "Couldn't go live" : "Couldn't start recording"
+}
 
 export interface SessionStartFailure {
   /** Backend / preflight reason, verbatim — it already reads as a sentence. */
@@ -94,7 +101,7 @@ export interface SessionStartFailureToastOptions {
  * Persistent (`duration: Infinity`) and keyed so repeated failures never stack;
  * Retry re-runs the exact start that failed. Dismissing the toast also clears
  * the Session-panel line so the two surfaces never disagree. Render with
- * `toast.error(SESSION_START_FAILED_TOAST_TITLE, options)`.
+ * `toast.error(sessionStartFailedTitle(goLive), options)`.
  */
 export function sessionStartFailureToastOptions(
   message: string,

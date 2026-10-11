@@ -1,5 +1,7 @@
 import { toast as sonner, type ExternalToast } from 'sonner'
 
+import { stripIpcPrefix } from '@/lib/ipc-error-message'
+
 // Plan 094 (S3): the one door to sonner for Videorc's renderer. Every toast
 // text passes `guardToastText` first, so a provider's raw error can never
 // reach the streamer as HTML, escaped entities or a JSON blob (the owner's
@@ -41,8 +43,10 @@ export type GuardedToastText = {
  * still looks like a JSON blob with "Details are in diagnostics.".
  */
 export function guardToastText(raw: string): GuardedToastText {
-  let text = raw
-  let altered = false
+  // Plan 174 S2.4: a backstop behind `userErrorMessage`. The wrapper is
+  // transport noise ("Error invoking remote method 'x': Error: …").
+  let text = stripIpcPrefix(raw)
+  let altered = text !== raw
   if (HTML_TAG.test(text)) {
     text = text.replace(HTML_TAG, ' ')
     altered = true
@@ -71,12 +75,30 @@ export function guardToastText(raw: string): GuardedToastText {
 
 type ToastTitle = Parameters<typeof sonner>[0]
 
+/** How long a toast with a description stays up at least (plan 174 S2.4). */
+export const TOAST_WITH_DESCRIPTION_MS = 8_000
+
+/**
+ * Pure. Plan 174 S2.4's durations: a one-liner keeps sonner's 4 s, a toast with
+ * a description stays at least 8 s, and one with an action stays until it is
+ * acted on or closed. An explicit duration always wins.
+ */
+export function defaultToastDuration(options: ExternalToast | undefined): number | undefined {
+  if (!options || options.duration !== undefined) return options?.duration
+  if (options.action || options.cancel) return Infinity
+  if (options.description) return TOAST_WITH_DESCRIPTION_MS
+  return undefined
+}
+
 function guardOptions(
   title: ToastTitle,
-  options: ExternalToast | undefined
+  options: ExternalToast | undefined,
+  timed: boolean
 ): { title: ToastTitle; options: ExternalToast | undefined } {
   let nextTitle = title
   let nextOptions = options
+  const duration = timed ? defaultToastDuration(options) : options?.duration
+  if (options && duration !== options.duration) nextOptions = { ...options, duration }
   if (typeof title === 'string') {
     const guarded = guardToastText(title)
     if (guarded.withheld !== null) {
@@ -88,7 +110,7 @@ function guardOptions(
     const guarded = guardToastText(options.description)
     if (guarded.withheld !== null) {
       console.warn('[toast] withheld raw provider text from a toast description:', guarded.withheld)
-      nextOptions = { ...options, description: guarded.text }
+      nextOptions = { ...nextOptions, description: guarded.text }
     }
   }
   return { title: nextTitle, options: nextOptions }
@@ -98,9 +120,10 @@ type Show = (title: ToastTitle, options?: ExternalToast) => string | number
 
 // Call with exactly the arguments the caller gave: a trailing `undefined`
 // would change what tests that spy on sonner observe.
-function guarded(show: Show): Show {
+// A loading toast never times out on its own, so it takes no default duration.
+function guarded(show: Show, timed = true): Show {
   return (title, options) => {
-    const next = guardOptions(title, options)
+    const next = guardOptions(title, options, timed)
     return next.options === undefined ? show(next.title) : show(next.title, next.options)
   }
 }
@@ -114,6 +137,6 @@ export const toast = Object.assign(base, {
   warning: guarded((...args) => sonner.warning(...args)),
   info: guarded((...args) => sonner.info(...args)),
   message: guarded((...args) => sonner.message(...args)),
-  loading: guarded((...args) => sonner.loading(...args)),
+  loading: guarded((...args) => sonner.loading(...args), false),
   dismiss: (id?: string | number) => sonner.dismiss(id)
 })

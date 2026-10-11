@@ -1,6 +1,6 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { copyText } from '@/lib/copy-text'
-import { toast } from '@/lib/toast'
+import { toastUserError } from '@/lib/user-error'
 import { CopyIcon, DeleteIcon, EditIcon, ExternalLinkIcon, LinkIcon } from '@/components/icons'
 import { useScheduledStreams } from '@/hooks/use-scheduled-streams'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -96,7 +96,7 @@ export function ScheduledStreams(): ReactElement {
       setRecovering(event)
       setCandidateId('')
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error))
+      toastUserError(error, { action: 'recover', object: 'the event' })
     }
   }
   const sections = scheduledProviderSections(state.events, state.capabilities, history)
@@ -329,8 +329,8 @@ export function ScheduledStreams(): ReactElement {
                   setCaptureConfig((current) =>
                     selectScheduledStreamForTarget(current, targetId, starting)
                   )
+                  // The Livestream alert shows the chosen event (plan 174 J2-11).
                   setStarting(null)
-                  toast.success('Saved event selected. Click Go Live in Studio when ready.')
                 }
               }}
             >

@@ -23,7 +23,10 @@ export function useScenePresets() {
       setState(current.current)
       return true
     } catch {
-      toast.error('Scene could not be saved. Storage is unavailable or full.')
+      toast.error("Couldn't save the scene", {
+        id: 'scene-save-storage',
+        description: 'Free up disk space, then save it again.'
+      })
       return false
     }
   }, [])
