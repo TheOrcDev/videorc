@@ -6,6 +6,15 @@ import {
   formatMode,
   sameHandle
 } from './config.mjs'
+import {
+  DN_PIPE,
+  PF_ANCHOR,
+  PF_CONF,
+  cleanupCommandLines,
+  netFaultResidue,
+  pfConfHooksAnchor,
+  residueIsClean
+} from './net-fault.mjs'
 
 // Plan 176 L0. Pure verdicts for live:doctor, so each failure mode can be
 // tested without a Mac, a network or a Google account.
@@ -445,6 +454,65 @@ export function evaluateStopFile(path, present) {
   return present
     ? check('stop file', WARN, `${path} present. Every run is refused until it is removed.`)
     : check('stop file', PASS, 'absent')
+}
+
+// Plan 178 U13: between runs the lab's pf anchor must hold no rule and its
+// dummynet pipe must not exist. `pfRules` and `dnctlList` are the read-backs
+// (`pfctl -a <anchor> -s rules`, `dnctl list`), null when sudo refused them.
+// `networkFaults` is the policy flag, `pfConf` the text of /etc/pf.conf (the
+// anchor must be hooked there for a fault to bite), `cleaned` says the doctor
+// already flushed a leftover this run.
+export function evaluateNetFaultsClean(
+  pfRules,
+  dnctlList,
+  { networkFaults = null, pfConf = null, cleaned = false } = {}
+) {
+  const name = 'network faults'
+  if (pfRules === null || dnctlList === null) {
+    return networkFaults
+      ? check(
+          name,
+          FAIL,
+          'faults.network is on but sudo refused the read-back. Install config/live-lab/sudoers.live-lab.example (owner step).'
+        )
+      : check(name, SKIP, 'faults.network is off and the sudoers file is not installed.')
+  }
+  const residue = netFaultResidue({ pfRules, dnctlList })
+  if (!residueIsClean(residue)) {
+    const parts = []
+    if (residue.rules.length) parts.push(`${residue.rules.length} rule(s) in anchor ${PF_ANCHOR}`)
+    if (residue.pipes.length) parts.push(`pipe ${DN_PIPE} still configured`)
+    return check(
+      name,
+      FAIL,
+      `${parts.join(', ')}: a fault outlived its run. Run: ${cleanupCommandLines().join(' && ')}`
+    )
+  }
+  if (networkFaults && pfConf !== null) {
+    const hooks = pfConfHooksAnchor(pfConf)
+    const missing = [
+      hooks.dummynetAnchor ? null : `dummynet-anchor "${PF_ANCHOR}"`,
+      hooks.anchor ? null : `anchor "${PF_ANCHOR}"`
+    ].filter(Boolean)
+    if (missing.length) {
+      return check(
+        name,
+        FAIL,
+        `${PF_CONF} lacks ${missing.join(' and ')}; faults would load into an anchor pf never consults. See config/live-lab/pf.anchor.example.`
+      )
+    }
+  }
+  if (cleaned) {
+    return check(
+      name,
+      WARN,
+      'a leftover fault was flushed by this doctor run. The previous run leaked; read its log.'
+    )
+  }
+  const detail = `anchor ${PF_ANCHOR} empty, pipe ${DN_PIPE} absent${
+    networkFaults ? `, ${PF_CONF} hooks the anchor` : ''
+  }`
+  return check(name, PASS, detail)
 }
 
 export function summarize(results) {
