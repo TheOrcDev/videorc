@@ -127,8 +127,8 @@ describe('Buddy tab copy (plan 119 S2)', () => {
 })
 
 describe('buddyLiveSettingsPatch', () => {
-  it('turns Buddy on with listening in one patch, and off without touching listening', () => {
-    expect(buddyLiveSettingsPatch(true)).toEqual({ enabled: true, listen: true })
+  it('turns Buddy on and off without touching listening (plan 174 S3.14a, D7)', () => {
+    expect(buddyLiveSettingsPatch(true)).toEqual({ enabled: true })
     expect(buddyLiveSettingsPatch(false)).toEqual({ enabled: false })
   })
 })

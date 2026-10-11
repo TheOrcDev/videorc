@@ -22,7 +22,7 @@ import {
   BuddyUtteranceCards,
   openProposedUtterances
 } from '@/components/stream-manager/buddy-utterance-cards'
-import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
+import { BuddyLiveSwitch, CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
 import { ActivityPane } from '@/components/stream-manager/activity-pane'
 import {
   ChatPane,
@@ -290,15 +290,19 @@ export interface StreamManagerProps {
   onBuddyShowOnStream?: (showOnStream: boolean) => void
   /** A reaction chip (plan 168 S-D3), through the Studio relay. */
   onBuddyReact?: (reaction: string) => void
-  /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's mode
-   * control and behaviour switches; unknown hides them. */
+  /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's
+   * posting mode control and behaviour chips; unknown hides them. */
   cohostAutoChat?: CohostAutoChat
+  /** The posting mode (plan 174 S3.14a): `{mode}` alone, never `enabled`. */
   onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
+  /** The behaviour chips' link to Buddy → Chat, their one home (plan 174 D7). */
+  onCohostOpenChatSettings?: () => void
   /** The Buddy's proposed cards (plan 164 S-D2): Send and Dismiss. */
   onCohostUtteranceApprove?: (utterance: CohostUtterance) => void
   onCohostUtteranceDismiss?: (utterance: CohostUtterance) => void
-  /** Buddy Live's one switch (plan 119), from the status popover and the
-   * nudge: on means Buddy reads chat and hears you, off only stops it. */
+  /** The Buddy Live switch in the pane header and the nudge (plan 174
+   * S3.14a): on and off, nothing else. Without cloud-AI consent, on opens
+   * the consent dialog (`onCohostEnableConsent`) instead. */
   onCohostEnable?: (enabled: boolean) => void
   /** Turn listening on from the one-time card (plan 068 D3). */
   onCohostListenOn?: () => void
@@ -375,6 +379,7 @@ export function StreamManager({
   onBuddyReact,
   cohostAutoChat,
   onCohostAutoChatChange,
+  onCohostOpenChatSettings,
   onCohostUtteranceApprove,
   onCohostUtteranceDismiss,
   onCohostEnable,
@@ -750,6 +755,20 @@ export function StreamManager({
     if (message) onHighlight?.(message)
   }
 
+  // The Buddy Live switch (plan 174 S3.14a, D7): on and off, nothing else.
+  // Without cloud-AI consent, on opens the consent dialog, whose Allow grants
+  // consent and turns Buddy on (never the microphone). A locked account can
+  // still turn Buddy off, never on.
+  const buddyLiveReason =
+    cohostGate && !cohostGate.allowed && !cohostEnabled ? cohostGate.reason : null
+  const requestBuddyLive = (on: boolean): void => {
+    if (on && !cohostConsented) {
+      onCohostEnableConsent?.()
+      return
+    }
+    onCohostEnable?.(on)
+  }
+
   const buddyPane = cohostPresent ? (
     <div className="flex min-h-0 flex-1 flex-col" data-slot="buddy-pane">
       <div
@@ -764,28 +783,29 @@ export function StreamManager({
         {cohostVisible ? <CohostListeningIndicator listening={cohostState?.listening} /> : null}
         <span className="flex-1" />
         <CohostStatus
-          consented={cohostConsented}
-          enabled={cohostEnabled}
           flash={cohostFlash}
-          gate={cohostGate!}
           nowMs={nowMs}
           starting={cohostStarting}
           state={cohostState}
-          onEnable={onCohostEnable}
-          onEnableConsent={onCohostEnableConsent}
-          onOpenPane={() => setCohostExpand((value) => value + 1)}
-          onUpgrade={onCohostUpgrade}
+          onOpenPane={cohostVisible ? () => setCohostExpand((value) => value + 1) : undefined}
         />
+        {onCohostEnable ? (
+          <BuddyLiveSwitch
+            checked={cohostEnabled}
+            disabledReason={buddyLiveReason}
+            onCheckedChange={requestBuddyLive}
+          />
+        ) : null}
       </div>
-      {/* Plan 164 S-D6: the chat mode and the three behaviours. The pane's
-          enable is the mode: Off means the Buddy does not join. */}
+      {/* Plan 164 S-D6, plan 174 S3.14a: the posting mode governs only what
+          Buddy posts; the behaviours are read-only chips linking to Buddy →
+          Chat. Neither touches Buddy Live. */}
       {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
         <BuddyChatControls
           autoChat={cohostAutoChat}
-          consented={cohostConsented}
-          gate={cohostGate!}
           name={buddyName}
-          onChange={onCohostAutoChatChange}
+          onModeChange={(mode) => onCohostAutoChatChange({ mode })}
+          onOpenChatSettings={onCohostOpenChatSettings}
         />
       ) : null}
       {/* Plan 164 S-D2: what the Buddy wants to post as you (Suggest), and

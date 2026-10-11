@@ -177,6 +177,7 @@ export const electronInvokeApiMethods = {
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
+  'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
   'comments-window:moderation': 'moderateFromCommentsWindow',
   'comments-window:moderation-result-push': 'pushModerationResult',
   'comments-window:viewers-push': 'pushViewerSample',
@@ -241,6 +242,12 @@ export type { GlobalShortcutAction } from './global-shortcuts'
 /** Plan 170 D18: what a `videorc://buddy` link asks the main window to show. */
 export interface BuddyDeepLinkNavigation {
   openCreator: boolean
+  /**
+   * The Buddy page's tab to open (plan 174 S3.14a): the Stream Manager's
+   * behaviour chips ask for `chat`. Absent opens the first tab. The shell
+   * validates the id; main only bounds it.
+   */
+  tab?: string
 }
 
 export interface ElectronIpcEventMap {
@@ -1304,6 +1311,17 @@ const specificRuntimeInvokeContracts = {
     ]),
     booleanSchema
   ),
+  // Plan 174 S3.14a: the window names a Buddy tab and nothing else; the shell
+  // decides whether the id is one of its tabs.
+  'comments-window:open-buddy-tab': invokeContract(
+    tupleSchema([
+      objectSchema(
+        { requestId: boundedIdentifier, tab: stringSchema({ minLength: 1, maxLength: 32 }) },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
+  ),
   // Plan 140, S6: one manual removal or one card answer, relayed to Studio.
   'comments-window:moderation': invokeContract(
     tupleSchema([commentsModerationCommandSchema]),
@@ -1601,8 +1619,16 @@ const specificRuntimeEventSchemas = {
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
   // Plan 170 D18: `videorc://buddy` opens the Buddy tab; `openCreator` also
-  // opens the creator once the "Make it Alive" avatar is worn.
-  'buddy:deep-link': objectSchema({ openCreator: booleanSchema }, { allowUnknown: false }),
+  // opens the creator once the "Make it Alive" avatar is worn. Plan 174
+  // S3.14a: `tab` names the Buddy page's tab to open (the Stream Manager's
+  // behaviour chips ask for Chat).
+  'buddy:deep-link': objectSchema(
+    {
+      openCreator: booleanSchema,
+      tab: optionalSchema(stringSchema({ minLength: 1, maxLength: 32 }))
+    },
+    { allowUnknown: false }
+  ),
   // Whether the command modifier is physically down. Main is the only place
   // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
   // never receives those chords — nor, in practice, the keyup that ends them.

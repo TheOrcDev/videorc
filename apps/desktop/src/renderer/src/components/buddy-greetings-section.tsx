@@ -94,7 +94,9 @@ export function BuddyGreetingsSection(): ReactElement | null {
         <Field>
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-0.5">
-              <FieldLabel htmlFor="buddy-greetings-enabled">Greet activity</FieldLabel>
+              {/* One name everywhere (plan 174 F-24): the Stream Manager's
+                  summary chip says "Greetings" too. */}
+              <FieldLabel htmlFor="buddy-greetings-enabled">Greetings</FieldLabel>
               <FieldDescription>
                 Follows, subs, cheers, raids and the rest, each with its own line.
               </FieldDescription>

@@ -151,6 +151,9 @@ export const BUDDY_CHAT_FREE_NOTE = 'Greetings are free.'
 export const BUDDY_CONSENT_OFF_REASON =
   "Cloud AI isn't allowed, so Buddy can't read chat or hear you. Allow it under Cloud AI."
 
+/** Why the Buddy Live switch waits before the backend has answered. */
+export const BUDDY_LIVE_LOADING_REASON = 'Loading your Buddy settings…'
+
 function status(
   kind: BuddyLiveStatusKind,
   reason: string | null = null,

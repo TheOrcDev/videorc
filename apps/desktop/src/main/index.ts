@@ -14919,6 +14919,9 @@ app.whenReady().then(async () => {
       if (command.listen !== undefined && typeof command.listen !== 'boolean') {
         return Promise.reject(new Error('Buddy listening must be a boolean.'))
       }
+      if (command.grantListen !== undefined && typeof command.grantListen !== 'boolean') {
+        return Promise.reject(new Error('Buddy listening grant must be a boolean.'))
+      }
       // Plan 164 S-D6: the mode and the three switches, nothing else.
       const autoChat = cohostAutoChatRelayPatch(command.autoChat)
       if (autoChat === false) {
@@ -14931,10 +14934,29 @@ app.whenReady().then(async () => {
           enabled: command.enabled,
           ...(command.grantConsent === true ? { grantConsent: true } : {}),
           ...(typeof command.listen === 'boolean' ? { listen: command.listen } : {}),
+          ...(command.grantListen === true ? { grantListen: true } : {}),
           ...(autoChat ? { autoChat } : {})
         })
         return true
       })
+    }
+  )
+  // Plan 174 S3.14a: the Buddy pane's read-only behaviour chips link to their
+  // one home, Buddy → Chat in the main window. The same door as a
+  // `videorc://buddy` link: main shows the window, the shell opens the tab.
+  secureIpcHandle(
+    'comments-window:open-buddy-tab',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can open a Buddy tab.')
+      }
+      commentsCommandRequestId(value)
+      const tab = (value as { tab?: unknown }).tab
+      if (typeof tab !== 'string' || !tab.trim()) {
+        throw new Error('Opening a Buddy tab requires its id.')
+      }
+      sendBuddyNavigation({ openCreator: false, tab })
+      return true
     }
   )
   secureIpcHandle(

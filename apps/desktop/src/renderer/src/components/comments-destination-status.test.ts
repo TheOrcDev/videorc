@@ -132,48 +132,12 @@ describe('comments destination status', () => {
   })
 })
 
-describe('co-host status chip', () => {
-  const cohost = {
-    sessionId: 'session-1',
-    status: 'listening' as const,
-    reason: null,
-    questions: [],
-    flags: [],
-    mood: null,
-    lastTickAt: null,
-    tickSeq: 3,
-    partial: false
-  }
-
-  it('sits in the destination strip and only goes live-green while listening', () => {
-    const listening = renderToStaticMarkup(
-      createElement(CommentsDestinationStatus, { cohostState: cohost, providers })
+describe('Buddy in the strip (plan 174 S3.14a)', () => {
+  it("names chat destinations only: Buddy's status lives in its pane header", () => {
+    const markup = renderToStaticMarkup(createElement(CommentsDestinationStatus, { providers }))
+    expect(markup).not.toContain('Buddy')
+    expect(renderToStaticMarkup(createElement(CommentsDestinationStatus, { providers: [] }))).toBe(
+      ''
     )
-    expect(listening).toContain('data-testid="cohost-status-chip"')
-    expect(listening).toContain('Buddy: listening')
-    expect(listening).toContain('data-variant="success"')
-
-    const paused = renderToStaticMarkup(
-      createElement(CommentsDestinationStatus, {
-        cohostState: { ...cohost, status: 'paused' as const, reason: 'quota-exhausted' as const },
-        providers: []
-      })
-    )
-    expect(paused).toContain('Buddy: paused · quota')
-    expect(paused).not.toContain('data-variant="success"')
-  })
-
-  it('stays out of the strip entirely when there is no co-host state', () => {
-    const markup = renderToStaticMarkup(
-      createElement(CommentsDestinationStatus, { providers, cohostState: null })
-    )
-    expect(markup).not.toContain('data-testid="cohost-status-chip"')
-  })
-
-  it('still renders the chip for a session with no chat providers at all', () => {
-    const markup = renderToStaticMarkup(
-      createElement(CommentsDestinationStatus, { cohostState: cohost, providers: [] })
-    )
-    expect(markup).toContain('data-testid="cohost-status-chip"')
   })
 })

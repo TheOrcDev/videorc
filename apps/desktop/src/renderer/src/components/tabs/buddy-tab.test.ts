@@ -198,12 +198,12 @@ async function render({
   })
 }
 
-/** Plan 164 S-D6: the switch moved to Stream Manager; the tab points there. */
-function livePointer(): HTMLElement {
-  const pointer = document.querySelector('[data-testid="buddy-live-pointer"]') as HTMLElement | null
-  expect(pointer).toBeTruthy()
-  expect(document.getElementById('buddy-live-switch')).toBeNull()
-  return pointer!
+/** Plan 174 S3.14a: the Buddy Live switch is back on the tab, beside the status. */
+function liveSwitch(): HTMLButtonElement {
+  const control = document.getElementById('buddy-live-switch') as HTMLButtonElement | null
+  expect(control).toBeTruthy()
+  expect(document.querySelector('[data-testid="buddy-live-pointer"]')).toBeNull()
+  return control!
 }
 
 function button(label: string): HTMLButtonElement {
@@ -304,22 +304,37 @@ describe('Buddy tab (plan 119 S2)', () => {
       expect(text).toContain(power.title)
       expect(text).toContain(power.description)
     }
-    expect(livePointer().textContent).toContain(
-      'Turn on Buddy Live in Stream Manager: in the Buddy pane, set Chat to Suggest or Auto.'
-    )
+    expect(liveSwitch().getAttribute('aria-checked')).toBe('false')
+    expect(text).not.toContain('set Chat to Suggest or Auto')
     expect(statusLine().getAttribute('data-status')).toBe('off')
-    // Plan 164 S-D6: the Stream Manager is where the Buddy is turned on, so
-    // the way there is always offered.
+    // The Stream Manager is where Buddy works, so the way there is always offered.
     expect(text).toContain('Open Stream Manager')
   })
 
-  it('has no switch of its own any more: the Stream Manager mode turns Buddy on', async () => {
+  it('turns Buddy Live on and off with its own switch, and nothing else (plan 174 S3.14a)', async () => {
     await render()
-    livePointer()
-    expect(calls.setBuddyLive).not.toHaveBeenCalled()
+    await act(async () => liveSwitch().click())
+    expect(calls.setBuddyLive).toHaveBeenLastCalledWith(true)
     await render({ cohost: settings({ enabled: true, listen: true }) })
     expect(statusLine().textContent).toContain('On, joins your next stream')
+    expect(liveSwitch().getAttribute('aria-checked')).toBe('true')
+    await act(async () => liveSwitch().click())
+    expect(calls.setBuddyLive).toHaveBeenLastCalledWith(false)
+    // The switch never writes settings itself: the provider owns the save.
     expect(calls.patchCohostSettings).not.toHaveBeenCalled()
+  })
+
+  it('locks the switch off, with the reason, for an account that cannot turn Buddy on', async () => {
+    await render({ gate: basic })
+    const control = liveSwitch()
+    expect(control.disabled).toBe(true)
+    const wrapper = control.closest<HTMLElement>('[data-slot="disabled-reason"]')
+    expect(
+      document.getElementById(wrapper?.getAttribute('aria-describedby') ?? '')?.textContent
+    ).toBe('Buddy Live is part of Videorc Premium.')
+    // On already: a locked account can still turn Buddy off.
+    await render({ gate: basic, cohost: settings({ enabled: true }) })
+    expect(liveSwitch().disabled).toBe(false)
   })
 
   it('asks for consent in a dialog that names every cloud use, and answers it', async () => {
@@ -350,7 +365,8 @@ describe('Buddy tab (plan 119 S2)', () => {
     await render({ signedIn: false, gate: basic })
     const unlock = document.querySelector('[data-testid="buddy-live-unlock"]')
     expect(unlock?.textContent).toContain('Sign in to use Buddy Live, part of Videorc Premium.')
-    livePointer()
+    // Locked means disabled with one reason: the switch cannot turn Buddy on.
+    expect(liveSwitch().disabled).toBe(true)
     await act(async () => button('Sign in').click())
     expect(calls.signIn).toHaveBeenCalledTimes(1)
   })
@@ -360,7 +376,7 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(document.querySelector('[data-testid="buddy-live-unlock"]')?.textContent).toContain(
       'Buddy Live is part of Videorc Premium.'
     )
-    livePointer()
+    expect(liveSwitch().disabled).toBe(true)
     await act(async () => button('View Premium').click())
     expect(calls.openOAuthUrl).toHaveBeenCalledWith('https://www.videorc.com/premium')
   })
@@ -408,8 +424,8 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(block.querySelector('[data-slot="buddy-emblem"]')?.getAttribute('src')).toContain(
       'buddy-emblem-112'
     )
-    expect(block.querySelector('#buddy-live-switch')).toBeNull()
-    expect(block.querySelector('[data-testid="buddy-live-pointer"]')).toBeTruthy()
+    expect(block.querySelector('#buddy-live-switch')).toBeTruthy()
+    expect(block.querySelector('[data-testid="buddy-live-pointer"]')).toBeNull()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
     // The three-column pitch is gone; Live lists what Buddy does as rows.
     expect(document.querySelector('ul[aria-label="What Buddy does"]')).toBeNull()

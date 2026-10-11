@@ -18,6 +18,7 @@ import { BuddyPetCreator } from '@/components/buddy-pet-creator'
 import { BuddyPetSettings } from '@/components/buddy-pet-settings'
 import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
 import { BuddyEmblem } from '@/components/buddy-emblem'
+import { BuddyLiveSwitch } from '@/components/cohost-status'
 import { BuddyReportCard } from '@/components/buddy-report-card'
 import { BuddyVoiceCommands } from '@/components/buddy-voice-commands'
 import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
@@ -50,6 +51,7 @@ import {
   CLOUD_AI_KEEPS,
   CLOUD_AI_USES,
   BUDDY_CHAT_FREE_NOTE,
+  BUDDY_LIVE_LOADING_REASON,
   BUDDY_LIVE_POWERS,
   buddyLiveView,
   type BuddyLiveStatus
@@ -311,22 +313,29 @@ function BuddyVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
 }
 
 /**
- * The Live tab's left column (plan 150): Buddy's emblem beside its name and
- * Buddy Live's status, then why it is locked, the Stream Manager, and whether
- * Buddy hears you. The switch moved to Stream Manager (plan 164 S-D6): the
- * Buddy pane's Chat leaving Off is what turns Buddy Live on, so this column
- * points at it until plan 174 S3.14a gives Buddy Live its own switch.
+ * The Live tab's left column (plan 150): Buddy's emblem beside its name,
+ * Buddy Live's status and its switch (plan 174 S3.14a, D7), then why it is
+ * locked, the Stream Manager, and whether Buddy hears you. The switch turns
+ * Buddy on and off and nothing else: without cloud-AI consent it asks first,
+ * and listening stays its own switch under it.
  */
 function BuddyLiveSection(): ReactElement {
-  const { cohostSettings, runtimeInfo } = useStudioCore()
+  const { cohostSettings, runtimeInfo, setBuddyLive } = useStudioCore()
   const { openCommentsWindow } = useStudioShell()
   const view = useBuddyLive()
   const buddyName = buddyDisplayName(cohostSettings?.persona.name)
+  const turnBuddyLive = (on: boolean): void => {
+    void setBuddyLive(on).catch((error: unknown) =>
+      toast.error('Could not change Buddy Live', {
+        description: error instanceof Error ? error.message : undefined
+      })
+    )
+  }
 
   return (
     <PanelSection
       action={<Badge variant="outline">Alpha</Badge>}
-      description={`Buddy reads your chat and hears you while you stream. ${BUDDY_POSTS_PROMISE}`}
+      description={`Buddy reads your chat while you stream. ${BUDDY_POSTS_PROMISE}`}
       title="Buddy Live"
     >
       <div className="flex items-center gap-3" data-slot="buddy-live-status-block">
@@ -335,10 +344,15 @@ function BuddyLiveSection(): ReactElement {
           <FieldContent>
             <FieldTitle>{buddyName}</FieldTitle>
             <BuddyLiveStatusLine status={view.status} />
-            <FieldDescription data-testid="buddy-live-pointer">
-              Turn on Buddy Live in Stream Manager: in the Buddy pane, set Chat to Suggest or Auto.
-            </FieldDescription>
           </FieldContent>
+          <BuddyLiveSwitch
+            checked={view.checked}
+            disabledReason={
+              view.switchDisabled ? (view.unlock?.reason ?? BUDDY_LIVE_LOADING_REASON) : null
+            }
+            size="default"
+            onCheckedChange={turnBuddyLive}
+          />
         </Field>
       </div>
 

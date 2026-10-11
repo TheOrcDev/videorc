@@ -1185,16 +1185,17 @@ export type StudioContextValue = {
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
   /**
-   * Buddy Live's one switch (plan 119). On without cloud-AI consent only
-   * raises `buddyConsentRequested` (the Buddy tab's consent dialog) and writes
-   * nothing; on with consent writes `{enabled: true, listen: true}` in one
-   * `cohost.settings.set`; off writes `{enabled: false}`.
+   * The Buddy Live switch (plan 174 S3.14a, D7). On without cloud-AI consent
+   * only raises `buddyConsentRequested` (the Buddy page's consent dialog) and
+   * writes nothing; on with consent writes `{enabled: true}`; off writes
+   * `{enabled: false}`. Never listening: the microphone is its own switch.
    */
   setBuddyLive: (on: boolean) => Promise<void>
   /** The consent dialog Buddy Live asked for is waiting for an answer. */
   buddyConsentRequested: boolean
-  /** Accept: grant cloud-AI consent, then the one Buddy Live patch. Decline:
-   * close the dialog and change nothing. */
+  /** Accept: grant cloud-AI consent, then `{enabled: true}` alone (never
+   * listening in the same click). Decline: close the dialog and change
+   * nothing. */
   answerBuddyConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
   dismissCohostQuestion: (questionId: string, sessionId?: string) => void
@@ -4402,9 +4403,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client]
   )
 
-  // Buddy Live's one switch (plan 119 S2). Consent comes first: on without it
-  // only asks (the Buddy tab's consent dialog), and nothing is written until
-  // the streamer accepts. On is one save: chat and listening together.
+  // The Buddy Live switch (plan 174 S3.14a, D7). Consent comes first: on
+  // without it only asks (the Buddy page's consent dialog), and nothing is
+  // written until the streamer accepts. On is `{enabled: true}` alone: one
+  // click never grants consent and the microphone at once, so listening
+  // keeps its own switch and its own disclosure.
   const [buddyConsentRequested, setBuddyConsentRequested] = useState(false)
   const setBuddyLive = useCallback(
     async (on: boolean): Promise<void> => {
@@ -4699,14 +4702,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void window.videorc?.pushCohostWindowState?.(cohostWindowState)
   }, [cohostWindowState])
 
-  // Buddy's settings from the Comments window (plan 119): its presence
-  // popover, nudge, consent dialog and one-time listening card, and the chat
-  // mode and behaviour switches (plan 164 S-D6). The settings and cloud-AI
+  // Buddy's settings from the Comments window (plan 119): its Buddy Live
+  // switch, nudge, consent dialog and one-time listening card, and the
+  // posting mode (plan 164 S-D6, plan 174 S3.14a). The settings and cloud-AI
   // consent are main-renderer owned, so the window asks and gets the resolved
-  // window state back. The save is `cohostEnableRelayPatch` (plan 174 S0.2):
-  // `enabled` only when it changes and `listen: true` only when the command
-  // names it, so a behaviour switch saves `{autoChat}` alone and the consent
-  // dialog's accept grants consent without turning listening on.
+  // window state back. The save is `cohostEnableRelayPatch` (plan 174 S0.2,
+  // S3.14a): `enabled` only when it changes, and `listen: true` only in the
+  // command that turns Buddy on or one that carries `grantListen` (the
+  // listening card), so a mode change saves `{autoChat}` alone and the
+  // consent dialog's accept grants consent without turning listening on.
   useEffect(() => {
     const off = window.videorc?.onCohostEnableRequest?.((command: CohostEnableCommand) => {
       void (async () => {

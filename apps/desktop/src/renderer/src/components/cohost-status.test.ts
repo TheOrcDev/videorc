@@ -2,13 +2,12 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
+import { BuddyLiveSwitch, CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import type { CohostListening, CohostQuestion, CohostState } from '@/lib/backend'
 import { offCohostState } from '@/lib/backend'
-import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 const NOW = Date.parse('2026-08-24T12:00:00.000Z')
-const ALLOWED: EntitlementUiGate = { allowed: true }
 
 function question(overrides: Partial<CohostQuestion> = {}): CohostQuestion {
   return {
@@ -42,9 +41,6 @@ function listening(overrides: Partial<CohostState> = {}): CohostState {
 function renderStatus(props: Partial<Parameters<typeof CohostStatus>[0]> = {}): string {
   return renderToStaticMarkup(
     createElement(CohostStatus, {
-      consented: true,
-      enabled: true,
-      gate: ALLOWED,
       nowMs: NOW,
       state: listening(),
       ...props
@@ -54,15 +50,26 @@ function renderStatus(props: Partial<Parameters<typeof CohostStatus>[0]> = {}): 
 
 describe('CohostStatus', () => {
   it('always renders, including for an off engine', () => {
-    const markup = renderStatus({ state: offCohostState(), enabled: false })
+    const markup = renderStatus({ state: offCohostState() })
     expect(markup).toContain('data-testid="cohost-status"')
     expect(markup).toContain('data-state-kind="off"')
     expect(markup).toContain('Buddy off')
     expect(markup).toContain('data-tone="muted"')
+    // Plan 174 S3.14a: no popover and no switch of its own; turning Buddy on
+    // is the BuddyLiveSwitch beside it.
+    expect(markup).not.toContain('cohost-status-enable')
+    expect(markup).not.toContain('role="switch"')
   })
 
   it('renders the same element for a null state — presence is unconditional', () => {
-    expect(renderStatus({ state: null, enabled: false })).toContain('Buddy off')
+    expect(renderStatus({ state: null })).toContain('Buddy off')
+  })
+
+  it('is a button only when there is a pane to go to, else a status line', () => {
+    expect(renderStatus({ onOpenPane: () => undefined })).toMatch(
+      /<button[^>]*data-testid="cohost-status"/
+    )
+    expect(renderStatus()).toMatch(/<span[^>]*data-testid="cohost-status"[^>]*role="status"/)
   })
 
   it('earns the live dot only while listening', () => {
@@ -154,6 +161,37 @@ describe('CohostStatus', () => {
 
   it('keeps the trigger draggable-safe in the frameless window header', () => {
     expect(renderStatus()).toContain('[-webkit-app-region:no-drag]')
+  })
+})
+
+describe('BuddyLiveSwitch (plan 174 S3.14a, D7)', () => {
+  const render = (props: Partial<Parameters<typeof BuddyLiveSwitch>[0]> = {}): string =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(BuddyLiveSwitch, {
+          checked: false,
+          onCheckedChange: () => undefined,
+          ...props
+        })
+      )
+    )
+
+  it('is one labelled switch named Buddy Live', () => {
+    const markup = render({ checked: true })
+    expect(markup).toContain('data-slot="buddy-live-switch"')
+    expect(markup).toMatch(/<label[^>]*for="buddy-live-switch"[^>]*>Buddy Live<\/label>/)
+    expect(markup).toMatch(/role="switch"[^>]*aria-checked="true"[^>]*id="buddy-live-switch"/)
+    expect(markup).not.toContain('disabled=""')
+  })
+
+  it('says why it cannot move while it cannot, and is otherwise undescribed', () => {
+    const locked = render({ disabledReason: 'Buddy Live is part of Videorc Premium.' })
+    expect(locked).toContain('disabled=""')
+    expect(locked).toContain('data-slot="disabled-reason"')
+    expect(locked).toContain('Buddy Live is part of Videorc Premium.')
+    expect(render()).not.toContain('data-slot="disabled-reason"')
   })
 })
 

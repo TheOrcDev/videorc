@@ -1,52 +1,34 @@
-import { MicrophoneIcon, BuddyIcon } from '@/components/icons'
-import { useState, type ReactElement } from 'react'
+import { MicrophoneIcon } from '@/components/icons'
+import type { ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Label } from '@/components/ui/label'
-import {
-  Popover,
-  PopoverContent,
-  PopoverDescription,
-  PopoverHeader,
-  PopoverTitle,
-  PopoverTrigger
-} from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import type { CohostListening, CohostState } from '@/lib/backend'
 import { cohostPresenceView, type CohostPresenceView } from '@/lib/cohost-presence'
-import { COHOST_CONSENT_SENTENCE, cohostListeningView } from '@/lib/cohost-view'
+import { cohostListeningView } from '@/lib/cohost-view'
 import { CHAT_HEADER_TIGHT_HIDDEN, CHAT_HEADER_TIGHT_SR_ONLY } from '@/lib/chat-header-tiers'
-import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { cn } from '@/lib/utils'
 
 /**
- * The PERMANENT co-host presence element in the Comments window toolbar. It is
- * always rendered — the whole point of W2 is that "is the co-host even there?"
- * is never a question a streamer has to ask mid-stream.
+ * The PERMANENT co-host presence element in the Stream Manager's Buddy pane
+ * header. It is always rendered: the whole point of W2 is that "is the
+ * co-host even there?" is never a question a streamer has to ask mid-stream.
  *
- * Click behaviour splits on one axis: a co-host that exists takes you to it
- * (scroll + expand the pane); a co-host that is OFF offers the one action that
- * changes that, in a popover, gated exactly like the pane is.
+ * With a pane to go to it is a button that takes you there (scroll + expand);
+ * otherwise it is a plain status line. Turning Buddy on and off is the
+ * `BuddyLiveSwitch` beside it (plan 174 S3.14a), never a popover here.
  */
 export function CohostStatus({
   state,
-  gate,
-  consented,
-  enabled,
   nowMs,
   starting = false,
   unread = 0,
   flash = null,
-  onOpenPane,
-  onEnable,
-  onEnableConsent,
-  onUpgrade
+  onOpenPane
 }: {
   state: CohostState | null
-  gate: EntitlementUiGate
-  consented: boolean
-  enabled: boolean
   /** Ticking clock for the relative tooltip lines. */
   nowMs: number
   starting?: boolean
@@ -54,20 +36,15 @@ export function CohostStatus({
   /** One-shot "grouped 2 questions" delta, shown in place of the label. */
   flash?: string | null
   onOpenPane?: () => void
-  onEnable?: (enabled: boolean) => void
-  onEnableConsent?: () => void
-  onUpgrade?: (url: string) => void
 }): ReactElement {
-  const [open, setOpen] = useState(false)
   const view = cohostPresenceView(state, nowMs, { starting, unread })
   // The label leads the tooltip: in a narrow Chat header the dot is all that
   // shows, and hovering it must still say what the co-host is doing.
   const tooltip = [flash ?? view.label, ...view.tooltipLines].join('\n')
-  const offPopover = view.kind === 'off'
 
   const body = <CohostStatusBody flash={flash} label={view.label} view={view} />
 
-  if (!offPopover) {
+  if (onOpenPane) {
     return (
       <button
         aria-label={view.label}
@@ -84,78 +61,59 @@ export function CohostStatus({
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger
-        aria-label={view.label}
-        className={STATUS_TRIGGER}
-        data-testid="cohost-status"
-        data-state-kind={view.kind}
-        title={tooltip}
-      >
-        {body}
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-72">
-        <PopoverHeader>
-          <PopoverTitle className="flex items-center gap-2 text-sm">
-            <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
-            Buddy
-          </PopoverTitle>
-          <PopoverDescription>
-            Groups the questions your chat is repeating and drafts a reply for each. It posts only
-            in the modes you turn on.
-          </PopoverDescription>
-        </PopoverHeader>
-        {!gate.allowed ? (
-          <div className="flex flex-col gap-2">
-            <p className="text-xs text-muted-foreground">{gate.reason}</p>
-            {gate.upgradeUrl && onUpgrade ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setOpen(false)
-                  onUpgrade(gate.upgradeUrl as string)
-                }}
-              >
-                View Premium
-              </Button>
-            ) : null}
-          </div>
-        ) : !consented ? (
-          <div className="flex flex-col gap-2">
-            <p className="text-xs text-muted-foreground">
-              {COHOST_CONSENT_SENTENCE} Allow cloud AI to use it.
-            </p>
-            {onEnableConsent ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setOpen(false)
-                  onEnableConsent()
-                }}
-              >
-                Allow cloud AI…
-              </Button>
-            ) : null}
-          </div>
-        ) : (
-          // Buddy Live's one switch (plan 119): on means Buddy reads chat and
-          // hears you, the same as the Buddy tab's switch.
-          <div className="flex items-center gap-3">
-            <Label className="min-w-0 flex-1 text-xs font-normal" htmlFor="cohost-status-enable">
-              Buddy Live
-            </Label>
-            <Switch
-              checked={enabled}
-              disabled={!onEnable}
-              id="cohost-status-enable"
-              onCheckedChange={(next) => onEnable?.(next)}
-            />
-          </div>
-        )}
-      </PopoverContent>
-    </Popover>
+    <span
+      aria-label={view.label}
+      className={STATUS_TRIGGER}
+      data-testid="cohost-status"
+      data-state-kind={view.kind}
+      role="status"
+      title={tooltip}
+    >
+      {body}
+    </span>
+  )
+}
+
+/**
+ * The Buddy Live switch (plan 174 S3.14a, D7): on and off, nothing else. It
+ * never grants cloud AI or the microphone: without consent the caller opens
+ * the consent dialog instead, and listening has its own switch and card. A
+ * locked account can still turn Buddy off, never on, and the switch says why.
+ */
+export function BuddyLiveSwitch({
+  checked,
+  disabledReason = null,
+  id = 'buddy-live-switch',
+  size = 'sm',
+  className,
+  onCheckedChange
+}: {
+  checked: boolean
+  /** Why the switch cannot move, while it cannot (Premium, loading). */
+  disabledReason?: string | null
+  id?: string
+  size?: 'sm' | 'default'
+  className?: string
+  onCheckedChange: (on: boolean) => void
+}): ReactElement {
+  return (
+    <div
+      className={cn('flex shrink-0 items-center gap-1.5', className)}
+      data-slot="buddy-live-switch"
+    >
+      <Label className="text-xs font-medium text-foreground" htmlFor={id}>
+        Buddy Live
+      </Label>
+      <DisabledReason reason={disabledReason}>
+        <Switch
+          checked={checked}
+          disabled={disabledReason !== null}
+          id={id}
+          size={size}
+          onCheckedChange={onCheckedChange}
+        />
+      </DisabledReason>
+    </div>
   )
 }
 

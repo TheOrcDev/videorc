@@ -302,6 +302,79 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
   })
 })
 
+describe('StreamManager Buddy Live and chat posting (plan 174 S3.14a, D7)', () => {
+  const autoChat = {
+    mode: 'suggest' as const,
+    greetings: { enabled: true, templates: [] },
+    answers: { enabled: false, cooldownSeconds: 20 },
+    banter: { enabled: false, cooldownSeconds: 240 }
+  }
+  const renderWith = (patch: Partial<StreamManagerProps>): string =>
+    renderToStaticMarkup(
+      createElement(StreamManager, {
+        snapshot,
+        dashboard: null,
+        cohostGate: { allowed: true },
+        cohostConsented: true,
+        cohostEnabled: false,
+        cohostState: EMPTY_COHOST_STATE,
+        cohostAutoChat: autoChat,
+        onCohostAutoChatChange: () => undefined,
+        onCohostEnable: () => undefined,
+        ...patch
+      })
+    )
+
+  it('puts the Buddy Live switch in the pane header, with no popover and no second home', () => {
+    const markup = renderWith({})
+    const header = between(
+      markup,
+      'data-slot="buddy-pane-header"',
+      'data-slot="buddy-chat-controls"'
+    )
+    expect(header).toContain('data-slot="buddy-live-switch"')
+    expect(header).toMatch(/role="switch"[^>]*aria-checked="false"/)
+    expect(header).not.toContain('cohost-status-enable')
+    expect(markup.match(/data-slot="buddy-live-switch"/g)).toHaveLength(1)
+    // Off: the status says so, and the pane shows only its header and controls.
+    expect(header).toContain('Buddy off')
+    expect(renderWith({ cohostEnabled: true })).toMatch(
+      /data-slot="buddy-live-switch"[\s\S]*?aria-checked="true"/
+    )
+  })
+
+  it('shows the posting mode and the read-only behaviour chips under the header', () => {
+    const markup = renderWith({ onCohostOpenChatSettings: () => undefined })
+    const controls = between(
+      markup,
+      'data-slot="buddy-chat-controls"',
+      'data-slot="buddy-mode-hint"'
+    )
+    expect(controls).toContain('Chat posting')
+    expect(controls).toMatch(/data-buddy-mode="suggest"[^>]*aria-checked="true"/)
+    expect(controls).not.toContain('role="switch"')
+    expect(controls).toContain('Greetings on')
+    expect(controls).toContain('Answers off')
+    expect(controls).toContain('Banter off')
+    expect(markup).toContain('Each message is a card here; one click sends it.')
+  })
+
+  it('locks the switch off, with the Premium reason, for a Basic account that has Buddy off', () => {
+    const basic = {
+      allowed: false as const,
+      featureId: 'live-cohost' as const,
+      reason: 'Buddy requires Videorc Premium.',
+      upgradeUrl: 'https://www.videorc.com/premium'
+    }
+    const locked = renderWith({ cohostGate: basic })
+    expect(locked).toMatch(/data-slot="buddy-live-switch"[\s\S]*?data-slot="disabled-reason"/)
+    expect(locked).toMatch(/role="switch"[^>]*disabled=""/)
+    // On already: the lock never keeps a streamer from turning Buddy off.
+    const on = renderWith({ cohostGate: basic, cohostEnabled: true })
+    expect(on).not.toMatch(/role="switch"[^>]*disabled=""/)
+  })
+})
+
 it('uses confirmed whole-session stats only for the visible session owner', () => {
   const totals = {
     status: 'available' as const,
