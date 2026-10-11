@@ -5,21 +5,20 @@ import WebSocket from 'ws'
 
 import { BUDDY_COMMAND_FINALS, startFakeCaptionService } from './fake-caption-service.mjs'
 
+const SESSION_TOKEN = 'fake-caption-session'
+const REALTIME_TOKEN = 'fake-caption-realtime'
+
 describe('fake caption service', () => {
   it(
     'holds a scripted speech completion behind an explicit response barrier',
     { timeout: 10_000 },
     async () => {
-      const token = 'fake-caption-realtime'
       const fake = await startFakeCaptionService({
-        smokeSessionToken: 'fake-caption-session',
-        smokeRealtimeToken: token,
+        smokeSessionToken: SESSION_TOKEN,
+        smokeRealtimeToken: REALTIME_TOKEN,
         autoTranscript: false
       })
-      const socket = new WebSocket(`${fake.httpOrigin.replace('http:', 'ws:')}/realtime`, [
-        'ai-gateway-realtime.v1',
-        `ai-gateway-auth.${token}`
-      ])
+      const socket = new WebSocket(gatewayUrl(fake), gatewayProtocols(REALTIME_TOKEN))
       const received = []
       let held
       let completed
@@ -33,16 +32,12 @@ describe('fake caption service', () => {
       try {
         await waitFor(() => socket.readyState === WebSocket.OPEN || socketError)
         if (socketError) throw socketError
-        // Provider VAD offsets follow appended pcm16 duration, independently of
-        // wall-clock delays before a scripted transcript is released.
-        for (const bytes of [640, 320]) {
-          socket.send(
-            JSON.stringify({
-              type: 'input_audio_buffer.append',
-              audio: Buffer.alloc(bytes).toString('base64')
-            })
-          )
-        }
+        socket.send(JSON.stringify(startFrame()))
+        await waitFor(() => received.some((part) => part.type === 'stream-start'))
+        // Utterance starts follow the binary PCM duration (16 kHz s16le: 640
+        // bytes = 20 ms), independently of wall-clock delays before a
+        // scripted transcript is released.
+        for (const bytes of [640, 320]) socket.send(Buffer.alloc(bytes))
         await waitFor(() => fake.state.audioAppends === 2)
         held = fake.holdNextRealtimeFinal()
         held.arrived.then((value) => {
@@ -55,21 +50,19 @@ describe('fake caption service', () => {
         await waitFor(() => admission || completionError)
         if (completionError) throw completionError
         assert.equal(admission.text, 'Delayed speech.')
-        await waitFor(() => received.some((event) => event.type === 'speech-started'))
+        await waitFor(() => received.some((part) => part.type === 'transcript-partial'))
+        const opening = received.find((part) => part.type === 'transcript-partial')
+        assert.equal(opening.startSecond, 0.02)
+        assert.equal(opening.text, '')
         assert.equal(
-          received.find((event) => event.type === 'speech-started').raw.audio_start_ms,
-          20
-        )
-        assert.equal(
-          received.some((event) => event.type === 'input-transcription-completed'),
+          received.some((part) => part.type === 'transcript-final'),
           false
         )
         held.release()
         assert.equal(await completed, 1)
-        await waitFor(() =>
-          received.some((event) => event.type === 'input-transcription-completed')
-        )
-        assert.equal(received.at(-1).transcript, 'Delayed speech.')
+        await waitFor(() => received.some((part) => part.type === 'transcript-final'))
+        assert.equal(received.at(-1).text, 'Delayed speech.')
+        assert.equal(received.at(-1).id, opening.id)
       } finally {
         held?.release()
         if (completed) await Promise.allSettled([completed])
@@ -81,8 +74,8 @@ describe('fake caption service', () => {
 
   it('streams opt-in partial progress while keeping held scripted finals authoritative', async () => {
     const fake = await startFakeCaptionService({
-      smokeSessionToken: 'fake-caption-session',
-      smokeRealtimeToken: 'fake-caption-realtime',
+      smokeSessionToken: SESSION_TOKEN,
+      smokeRealtimeToken: REALTIME_TOKEN,
       autoTranscript: false
     })
     const sockets = []
@@ -141,23 +134,19 @@ describe('fake caption service', () => {
       }
     }
 
+    // Progress partials carry text; a scripted utterance opens with an empty one.
     const partials = (rows) =>
-      rows.filter(
-        (event) => event.rawType === 'conversation.item.input_audio_transcription.updated'
-      )
-    const finals = (rows) => rows.filter((event) => event.type === 'input-transcription-completed')
+      rows.filter((part) => part.type === 'transcript-partial' && part.text !== '')
+    const finals = (rows) => rows.filter((part) => part.type === 'transcript-final')
     assert.equal(
       partials(observations.first).length,
       1,
       'accepted PCM must produce an opt-in partial'
     )
-    const progressStart = observations.first.find((event) => event.type === 'speech-started')
-    assert.equal(progressStart.raw.audio_start_ms, 0)
-    assert.equal(partials(observations.first)[0].raw.item_id, progressStart.itemId)
+    const progressStart = partials(observations.first)[0]
+    assert.equal(progressStart.startSecond, 0)
     assert.equal(partials(observations.held).length, 2)
-    assert.ok(
-      partials(observations.held).every((event) => event.raw.item_id === progressStart.itemId)
-    )
+    assert.ok(partials(observations.held).every((part) => part.id === progressStart.id))
     assert.equal(finals(observations.held).length, 0, 'progress must not complete held speech')
     assert.equal(observations.heldFinals, 0)
     assert.equal(
@@ -167,10 +156,7 @@ describe('fake caption service', () => {
     )
     assert.equal(observations.reached, 1)
     assert.equal(finals(observations.released).length, 1)
-    assert.equal(
-      finals(observations.released)[0].transcript,
-      'The held scripted utterance is exact.'
-    )
+    assert.equal(finals(observations.released)[0].text, 'The held scripted utterance is exact.')
     assert.equal(
       observations.emittedFinals.length,
       1,
@@ -178,18 +164,15 @@ describe('fake caption service', () => {
     )
     assert.equal(observations.closedReached, 0)
     assert.equal(partials(observations.second).length, 1)
-    assert.equal(
-      observations.second.find((event) => event.type === 'speech-started').raw.audio_start_ms,
-      0
-    )
+    assert.equal(partials(observations.second)[0].startSecond, 0)
     assert.equal(finals(observations.second).length, 0)
     assert.equal(observations.audioAppends, 4)
   })
 
   it('keeps partial progress disabled for an ordinary scripted-only socket', async () => {
     const fake = await startFakeCaptionService({
-      smokeSessionToken: 'fake-caption-session',
-      smokeRealtimeToken: 'fake-caption-realtime',
+      smokeSessionToken: SESSION_TOKEN,
+      smokeRealtimeToken: REALTIME_TOKEN,
       autoTranscript: false
     })
     let socket
@@ -213,66 +196,139 @@ describe('fake caption service', () => {
       }
     }
     assert.deepEqual(
-      received.map((event) => event.type),
-      ['session-updated']
+      received.map((part) => part.type),
+      ['stream-start']
     )
     assert.equal(fake.state.audioAppends, 1)
     assert.equal(fake.state.emittedFinals.length, 0)
   })
 
-  it('accepts legacy Bearer and current Gateway subprotocol realtime upgrades', async () => {
-    const sessionToken = 'fake-caption-session'
-    const realtimeToken = 'fake-caption-realtime'
+  it('mints leased transcription tokens and refuses desktops without the dialect', async () => {
     const fake = await startFakeCaptionService({
-      smokeSessionToken: sessionToken,
-      smokeRealtimeToken: realtimeToken
+      smokeSessionToken: SESSION_TOKEN,
+      smokeRealtimeToken: REALTIME_TOKEN
     })
 
     try {
-      const tokenResponse = await fetch(`${fake.httpOrigin}/api/ai/captions/realtime-token`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${sessionToken}`,
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({ sessionClientId: 'fake-service-test' })
+      const legacy = await mint(fake, { sessionClientId: 'fake-service-test' })
+      assert.equal(legacy.status, 503)
+      assert.equal((await legacy.json()).error.code, 'captions-realtime-unavailable')
+
+      const response = await mint(fake, {
+        sessionClientId: 'fake-service-test',
+        transport: 'transcription',
+        language: 'en'
       })
-      assert.equal(tokenResponse.status, 200)
-      const minted = await tokenResponse.json()
-
-      const legacy = new WebSocket(minted.url, {
-        headers: { authorization: `Bearer ${realtimeToken}` }
+      assert.equal(response.status, 200)
+      const minted = await response.json()
+      assert.equal(minted.transport, 'transcription')
+      assert.equal(minted.leaseSeconds, 600)
+      assert.match(minted.leaseId, /^smoke-lease-/)
+      assert.deepEqual(minted.inputAudioFormat, { type: 'audio/pcm', rate: 16_000 })
+      assert.deepEqual(minted.subprotocols, gatewayProtocols(REALTIME_TOKEN))
+      assert.match(minted.url, /\/v4\/ai\/transcription-model\?ai-model-id=/)
+      assert.deepEqual(fake.state.mintBodies.at(-1), {
+        transport: 'transcription',
+        language: 'en',
+        hasSessionClientId: true
       })
-      await configureAndClose(legacy)
 
-      const gateway = new WebSocket(minted.url, [
-        'ai-gateway-realtime.v1',
-        `ai-gateway-auth.${realtimeToken}`
-      ])
-      await configureAndClose(gateway)
+      fake.state.realtimeDialect = 'voice'
+      const voice = await (await mint(fake, { sessionClientId: 'fake-service-test' })).json()
+      assert.equal(voice.transport, undefined)
+      assert.match(voice.url, /\/realtime-model/)
 
-      assert.equal(fake.state.realtimeTokenRequests, 1)
-      assert.equal(fake.state.realtimeUpgradeAttempts, 2)
-      assert.equal(fake.state.realtimeConnections, 2)
-      assert.equal(fake.state.configurations.length, 2)
+      const gateway = new WebSocket(minted.url, minted.subprotocols)
+      const finish = await startAndFinish(gateway)
+      assert.equal(finish.type, 'finish')
+      assert.equal(finish.durationInSeconds, 0.02)
+
+      assert.equal(fake.state.realtimeTokenRequests, 3)
+      assert.equal(fake.state.leases.length, 1)
+      assert.equal(fake.state.realtimeConnections, 1)
+      assert.equal(fake.state.configurations.length, 1)
+      assert.equal(fake.state.audioDoneFrames, 1)
     } finally {
       await fake.close()
     }
   })
 
-  it('rejects an unauthenticated realtime upgrade without exposing token material', async () => {
+  it('closes a socket whose first frame is not the stream start', async () => {
     const fake = await startFakeCaptionService({
-      smokeSessionToken: 'fake-caption-session',
-      smokeRealtimeToken: 'fake-caption-realtime'
+      smokeSessionToken: SESSION_TOKEN,
+      smokeRealtimeToken: REALTIME_TOKEN
+    })
+    try {
+      const socket = new WebSocket(gatewayUrl(fake), gatewayProtocols(REALTIME_TOKEN))
+      await new Promise((resolveOpen, rejectOpen) => {
+        socket.once('open', resolveOpen)
+        socket.once('error', rejectOpen)
+      })
+      const closed = new Promise((resolveClose) =>
+        socket.once('close', (code) => resolveClose(code))
+      )
+      socket.send(JSON.stringify({ type: 'session.update', session: {} }))
+      assert.equal(await boundedFixture(closed, 'policy close'), 1008)
+      assert.equal(fake.state.invalidStarts, 1)
+      assert.equal(fake.state.configurations.length, 0)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  it('settles leases by id, clamps them, and keeps the retired body refused', async () => {
+    const fake = await startFakeCaptionService({
+      smokeSessionToken: SESSION_TOKEN,
+      smokeRealtimeToken: REALTIME_TOKEN
+    })
+    try {
+      const minted = await (
+        await mint(fake, { sessionClientId: 'fake-service-test', transport: 'transcription' })
+      ).json()
+      const legacy = await settle(fake, { sessionClientId: 'fake-service-test', seconds: 9 })
+      assert.equal(legacy.status, 503)
+      assert.equal((await legacy.json()).error.code, 'captions-realtime-metering-unavailable')
+      const unknown = await settle(fake, { leaseId: 'nope', durationSeconds: 3 })
+      assert.equal(unknown.status, 404)
+      const settled = await (
+        await settle(fake, { leaseId: minted.leaseId, durationSeconds: 12.2 })
+      ).json()
+      assert.deepEqual(settled, {
+        leaseId: minted.leaseId,
+        refundedSeconds: 587,
+        settledSeconds: 13
+      })
+      const clamped = await (
+        await settle(fake, { leaseId: minted.leaseId, durationSeconds: 9_999 })
+      ).json()
+      assert.equal(clamped.settledSeconds, 600)
+      assert.equal(fake.state.settlements.length, 2)
+      assert.equal(fake.state.legacyUsageReports, 1)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  it('rejects an unauthenticated streaming upgrade without exposing token material', async () => {
+    const fake = await startFakeCaptionService({
+      smokeSessionToken: SESSION_TOKEN,
+      smokeRealtimeToken: REALTIME_TOKEN
     })
 
     try {
-      const socket = new WebSocket(`${fake.httpOrigin.replace('http:', 'ws:')}/realtime`)
-      const error = await new Promise((resolveError) => {
-        socket.once('error', resolveError)
-      })
-      assert.match(String(error), /401/)
-      assert.equal(fake.state.realtimeUpgradeAttempts, 1)
+      for (const [url, protocols] of [
+        [gatewayUrl(fake), undefined],
+        [`${fake.httpOrigin.replace('http:', 'ws:')}/realtime`, gatewayProtocols(REALTIME_TOKEN)],
+        [gatewayUrl(fake), ['ai-gateway-realtime.v1', `ai-gateway-auth.${REALTIME_TOKEN}`]]
+      ]) {
+        const socket = new WebSocket(url, protocols)
+        const error = await new Promise((resolveError) => {
+          socket.once('error', resolveError)
+        })
+        assert.match(String(error), /401/)
+        assert.doesNotMatch(String(error), new RegExp(REALTIME_TOKEN))
+      }
+      assert.equal(fake.state.realtimeUpgradeAttempts, 3)
       assert.equal(fake.state.realtimeConnections, 0)
     } finally {
       await fake.close()
@@ -280,57 +336,56 @@ describe('fake caption service', () => {
   })
 
   it('pushes scripted realtime finals and can skip the canned transcript', async () => {
-    const realtimeToken = 'fake-caption-realtime'
     const fake = await startFakeCaptionService({
-      smokeSessionToken: 'fake-caption-session',
-      smokeRealtimeToken: realtimeToken,
+      smokeSessionToken: SESSION_TOKEN,
+      smokeRealtimeToken: REALTIME_TOKEN,
       autoTranscript: false
     })
 
     try {
       assert.equal(await fake.emitRealtimeFinal('Nobody is listening.'), 0)
-      const socket = new WebSocket(`${fake.httpOrigin.replace('http:', 'ws:')}/realtime`, [
-        'ai-gateway-realtime.v1',
-        `ai-gateway-auth.${realtimeToken}`
-      ])
+      const socket = new WebSocket(gatewayUrl(fake), gatewayProtocols(REALTIME_TOKEN))
       const received = []
       socket.on('message', (data) => received.push(JSON.parse(data.toString())))
       await new Promise((resolveOpen, rejectOpen) => {
         socket.once('open', resolveOpen)
         socket.once('error', rejectOpen)
       })
-      socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: 'AAAA' }))
+      socket.send(JSON.stringify(startFrame()))
+      socket.send(Buffer.alloc(4))
       await waitFor(() => fake.state.audioAppends === 1)
+      const parts = () => received.filter((part) => part.type !== 'stream-start')
 
       assert.equal(await fake.emitRealtimeFinal('First scripted final.'), 1)
       assert.equal(await fake.emitRealtimeFinal('Second scripted final.'), 1)
-      await waitFor(() => received.length === 4)
+      await waitFor(() => parts().length === 4)
       // Plan 140 S9: one spoken command split across two finals, in order.
       const split = BUDDY_COMMAND_FINALS.highlightByNameSplit
       assert.deepEqual(await fake.emitRealtimeFinals(split, { gapMs: 5 }), [1, 1])
-      await waitFor(() => received.length === 8)
+      await waitFor(() => parts().length === 8)
       assert.deepEqual(
-        received
-          .filter((event) => event.type === 'input-transcription-completed')
+        parts()
+          .filter((part) => part.type === 'transcript-final')
           .slice(2)
-          .map((event) => event.transcript),
+          .map((part) => part.text),
         ['Buddy, highlight the comment', 'from coders X.']
       )
       socket.close()
 
+      const first = parts().slice(0, 4)
       assert.deepEqual(
-        received.slice(0, 4).map((event) => [event.type, event.itemId]),
+        first.map((part) => [part.type, part.id]),
         [
-          ['speech-started', 'scripted-item-2'],
-          ['input-transcription-completed', 'scripted-item-2'],
-          ['speech-started', 'scripted-item-3'],
-          ['input-transcription-completed', 'scripted-item-3']
+          ['transcript-partial', 'scripted-item-2'],
+          ['transcript-final', 'scripted-item-2'],
+          ['transcript-partial', 'scripted-item-3'],
+          ['transcript-final', 'scripted-item-3']
         ]
       )
-      assert.equal(received[1].transcript, 'First scripted final.')
-      assert.equal(received[3].transcript, 'Second scripted final.')
-      assert.equal(received[0].raw.item_id, 'scripted-item-2')
-      assert.ok(received[0].raw.audio_start_ms >= 0)
+      assert.equal(first[1].text, 'First scripted final.')
+      assert.equal(first[3].text, 'Second scripted final.')
+      assert.equal(first[0].text, '')
+      assert.ok(first[0].startSecond >= 0)
       assert.deepEqual(
         fake.state.emittedFinals.map((final) => [final.text, final.reached]),
         [
@@ -469,11 +524,36 @@ async function boundedFixture(promise, label) {
   }
 }
 
+function gatewayUrl(fake) {
+  return `${fake.httpOrigin.replace('http:', 'ws:')}/v4/ai/transcription-model?ai-model-id=smoke`
+}
+
+function gatewayProtocols(token) {
+  return ['ai-gateway-transcription.v1', `ai-gateway-auth.${token}`]
+}
+
+function startFrame(rate = 16_000) {
+  return { type: 'transcription-stream.start', inputAudioFormat: { type: 'audio/pcm', rate } }
+}
+
+function mint(fake, body) {
+  return fetch(`${fake.httpOrigin}/api/ai/captions/realtime-token`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${SESSION_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+}
+
+function settle(fake, body) {
+  return fetch(`${fake.httpOrigin}/api/ai/captions/usage`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${SESSION_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+}
+
 async function openProgressSocket(fake) {
-  const socket = new WebSocket(`${fake.httpOrigin.replace('http:', 'ws:')}/realtime`, [
-    'ai-gateway-realtime.v1',
-    'ai-gateway-auth.fake-caption-realtime'
-  ])
+  const socket = new WebSocket(gatewayUrl(fake), gatewayProtocols(REALTIME_TOKEN))
   const received = []
   socket.on('message', (data) => received.push(JSON.parse(data.toString())))
   const opened = new Promise((resolve, reject) => {
@@ -482,9 +562,7 @@ async function openProgressSocket(fake) {
   })
   try {
     await boundedFixture(opened, 'owned socket readiness')
-    socket.send(
-      JSON.stringify({ type: 'session.update', session: { input_audio_format: 'pcm16' } })
-    )
+    socket.send(JSON.stringify(startFrame()))
     await progressSocketBarrier(socket)
     return { socket, received }
   } catch (error) {
@@ -504,12 +582,7 @@ async function progressSocketBarrier(socket) {
 }
 
 async function appendProgressFrame(socket) {
-  socket.send(
-    JSON.stringify({
-      type: 'input_audio_buffer.append',
-      audio: Buffer.alloc(640, 1).toString('base64')
-    })
-  )
+  socket.send(Buffer.alloc(640, 1))
   await progressSocketBarrier(socket)
 }
 
@@ -532,39 +605,34 @@ async function closeProgressSocket(socket, force = false) {
   }
 }
 
-function configureAndClose(socket) {
-  return new Promise((resolveConfigured, rejectConfigured) => {
+/** Start a stream, send 20 ms of PCM, end it, and return the `finish` part. */
+function startAndFinish(socket) {
+  return new Promise((resolveFinish, rejectFinish) => {
     const timeout = setTimeout(() => {
       socket.terminate()
-      rejectConfigured(new Error('Timed out waiting for fake caption configuration ack.'))
+      rejectFinish(new Error('Timed out waiting for the fake stream to finish.'))
     }, 5_000)
-
+    let finish
     socket.once('error', (error) => {
       clearTimeout(timeout)
-      rejectConfigured(error)
+      rejectFinish(error)
     })
-    socket.once('open', () => {
-      socket.send(
-        JSON.stringify({
-          type: 'session.update',
-          session: {
-            input_audio_format: 'pcm16',
-            input_audio_transcription: { enabled: true },
-            turn_detection: {
-              type: 'server_vad',
-              create_response: false,
-              interrupt_response: false
-            }
-          }
-        })
-      )
+    socket.once('open', () => socket.send(JSON.stringify(startFrame())))
+    socket.on('message', (data) => {
+      const part = JSON.parse(data.toString())
+      if (part.type === 'stream-start') {
+        socket.send(Buffer.alloc(640))
+        socket.send(JSON.stringify({ type: 'transcription-stream.audio-done' }))
+      }
+      if (part.type === 'finish') finish = part
     })
-    socket.once('message', (data) => {
+    socket.once('close', (code) => {
       clearTimeout(timeout)
-      const message = JSON.parse(data.toString())
-      assert.equal(message.type, 'session-updated')
-      socket.once('close', resolveConfigured)
-      socket.close()
+      if (code !== 1000 || !finish) {
+        rejectFinish(new Error(`The fake stream closed ${code} without a finish part.`))
+        return
+      }
+      resolveFinish(finish)
     })
   })
 }

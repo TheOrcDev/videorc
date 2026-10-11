@@ -171,8 +171,8 @@ export function decideGoLiveCaptionsReadiness(input: {
     title: 'Captions ready',
     description:
       captions.preferredTransport === 'realtime'
-        ? 'Realtime microphone transcription is ready.'
-        : 'Caption transcription is ready with a slightly higher delay.',
+        ? 'Live microphone transcription is ready.'
+        : 'Caption transcription is ready in 3-second chunks, a few seconds behind.',
     transport: captions.preferredTransport
   }
 }

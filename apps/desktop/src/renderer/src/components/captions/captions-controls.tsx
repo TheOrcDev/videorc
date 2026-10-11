@@ -100,7 +100,7 @@ function captionsStatusDetail(
     case 'reconnecting':
       return 'Trying to restore live captions.'
     case 'degraded':
-      return status.message ?? 'Captions are continuing with a longer delay.'
+      return status.message ?? 'Captions are continuing in 3-second chunks.'
     case 'blocked':
       return status.message ?? 'Captions need attention before they can start.'
     case 'error':
