@@ -55,7 +55,7 @@ export const CLOUD_AI_USES: readonly string[] = [
   'Buddy reads your live chat.',
   "Buddy hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
   "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
-  "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI; the pictures are kept on this computer.",
+  "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer, and in your Videorc account when the Buddy is in your library, until you remove them or delete the Buddy or your account.",
   "Buddy replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
   "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
 ]

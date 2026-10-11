@@ -209,7 +209,7 @@ computer.
 | Feature                                          | Needs                                  |
 | ------------------------------------------------ | -------------------------------------- |
 | Name, personality, uploaded images, bubble style | Nothing                                |
-| The official Buddies                              | Nothing                                |
+| The official Buddies                             | Nothing                                |
 | Your Buddy library across the web and computers  | A Videorc account                      |
 | The Buddy on stream and in the recording         | Nothing                                |
 | Greetings (your own templates, no AI)            | Nothing                                |
@@ -429,14 +429,18 @@ What Cloud AI covers (`CLOUD_AI_USES`, one list everywhere):
 - Buddy reads your live chat.
 - Buddy hears you while you're live: your microphone audio goes to Videorc's
   cloud speech-to-text and comes back as text (even with live captions off).
-- Buddy's avatar images: your description, and its idle picture for the
-  other states, go to Videorc's cloud AI; the pictures are kept on this
-  computer.
+- Creating a Buddy: your description and any picture you add go to
+  Videorc's cloud AI, and the picture is used once and not kept. The
+  Buddies you create (their pictures, name, personality and About you) are
+  kept in your Videorc account so you can use them on any computer, until
+  you delete them or your account.
 - Buddy replies in chat as you: with Answers or Banter on, its replies are
   drafted by Videorc's cloud AI and posted on your own account, only in the
   modes you turn on.
 - Creating an Alive Buddy: your reference picture and its description go
-  to Videorc's cloud AI; the pictures are kept on this computer.
+  to Videorc's cloud AI. Its moves are kept on this computer, and in your
+  Videorc account when the Buddy is in your library, until you remove them
+  or delete the Buddy or your account.
 - Clean cut uploads a recording's audio, never the video, in short chunks
   for a word-by-word transcript, and sends its sentences to Videorc's cloud
   AI to find retakes. Neither is kept on Videorc servers after the job

@@ -288,6 +288,16 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(mocked.signIn).toHaveBeenCalledOnce()
   })
 
+  it('a library it could not list says why, not that it is empty', async () => {
+    // QA 2026-10-11: offline, My Buddies said "Buddies you create show up
+    // here" while the account had three.
+    const message = 'Could not reach Videorc. Check your connection and try again.'
+    await render(fakeBackend(library({ mine: null, error: { code: 'network', message } })).client)
+    const mine = byTestId('buddy-library-mine')!
+    expect(mine.textContent).not.toContain(BUDDY_LIBRARY_COPY.emptyMine)
+    expect(byTestId('buddy-library-error')?.textContent).toBe(message)
+  })
+
   it('an empty library says where your Buddies will show up', async () => {
     await render(fakeBackend(library({ mine: [] })).client)
     expect(byTestId('buddy-library-empty')?.textContent).toBe(BUDDY_LIBRARY_COPY.emptyMine)
@@ -427,6 +437,10 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
       BUDDY_LIBRARY_COPY.alive,
       null
     ])
+    // QA 2026-10-11: the tag floats on the art (Nib's ear ran through it), so
+    // it is the opaque floating tier, never see-through glass.
+    const tag = card('official:golem').querySelector('[data-testid="buddy-library-alive-tag"]')!
+    expect(tag.className.split(/\s+/)).toContain('glass-float')
     // An alive official Buddy has nothing more to offer; one without a pack does.
     expect(card('official:orc').querySelector('[data-testid="buddy-library-more"]')).toBeNull()
     const labels = (items: HTMLElement[]) => items.map((item) => item.textContent?.trim())

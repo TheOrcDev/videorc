@@ -70,6 +70,7 @@ import {
   buddyPetNotesFromDraft,
   buddyPetPilotsLeft,
   buddyPetRowMarked,
+  buddyPetSaveNote,
   buddyPetSheetPhase,
   type BuddyPetCreatorStepId,
   type BuddyPetNotesDraft,
@@ -397,6 +398,10 @@ export function BuddyPetCreator({
           <SaveStep
             disabled={controlsOff || working}
             name={name}
+            note={buddyPetSaveNote({
+              persona,
+              capabilities: connection.capabilities ?? aiCapabilities ?? null
+            })}
             onBack={() => setNaming(false)}
             onName={setName}
           />
@@ -1437,11 +1442,14 @@ function ReviewRow({
 
 function SaveStep({
   name,
+  note,
   disabled,
   onName,
   onBack
 }: {
   name: string
+  /** Where the pack is kept (`buddyPetSaveNote`). */
+  note: string
   disabled: boolean
   onName: (name: string) => void
   onBack: () => void
@@ -1454,7 +1462,7 @@ function SaveStep({
           Back to review
         </Button>
       }
-      description="Kept on this computer. Your Buddy wears it right away; switch back to Still any time."
+      description={note}
       title="Name it"
     >
       <div className="flex flex-col gap-1">

@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
 import type { BuddyPets } from '@/hooks/use-buddy-pets'
-import type { AiCapabilities, CohostSettings, BuddyPetSummary } from '@/lib/backend'
+import type {
+  AiCapabilities,
+  BuddyLibraryState,
+  CohostSettings,
+  BuddyPetSummary
+} from '@/lib/backend'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 import { BuddyPetSettings } from './buddy-pet-settings'
@@ -121,12 +126,14 @@ afterEach(async () => {
 async function render({
   cohost = settings(),
   list = pets(),
+  library = null,
   importFolder,
   capabilities = petOn as AiCapabilities | null,
   consented = true
 }: {
   cohost?: CohostSettings
   list?: BuddyPets
+  library?: BuddyLibraryState | null
   importFolder?: (personaId: string) => Promise<never>
   capabilities?: AiCapabilities | null
   consented?: boolean
@@ -140,7 +147,9 @@ async function render({
     patchCohostSettings,
     runtimeInfo: { platform: 'darwin' }
   }
-  await act(async () => root.render(createElement(BuddyPetSettings, { pets: list, importFolder })))
+  await act(async () =>
+    root.render(createElement(BuddyPetSettings, { pets: list, library, importFolder }))
+  )
 }
 
 function kindButton(label: 'Still' | 'Alive'): HTMLButtonElement {
@@ -208,6 +217,26 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(row.textContent).toContain('32 poses · Imported')
     await act(async () => kindButton('Still').click())
     expect(lastPersona().avatar).toEqual({ kind: 'still' })
+  })
+
+  it('lists the packs again once when the Buddy wears one the list does not have (an official download, a synced pack)', async () => {
+    // QA 2026-10-11: using Golmar downloaded official:orc and the Buddy wore
+    // it, but Packs still listed only Buddy (read when the tab opened), no
+    // row was checked and Remove stayed off until the tab was reopened.
+    const list = pets([{ ...PACK_B, packId: 'bundled:buddy', name: 'Buddy' }])
+    const worn = settings({ avatar: { kind: 'alive', packId: 'official:orc' } })
+    await render({ cohost: worn, list })
+    expect(list.refresh).toHaveBeenCalledTimes(1)
+    // The same missing pack is not listed again on every render.
+    await render({ cohost: worn, list })
+    expect(list.refresh).toHaveBeenCalledTimes(1)
+    // A pack the list has needs nothing.
+    const known = pets([PACK_A])
+    await render({
+      cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
+      list: known
+    })
+    expect(known.refresh).not.toHaveBeenCalled()
   })
 
   it('shows the empty state with Create and Import when there is no pack to wear', async () => {
@@ -286,6 +315,47 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await act(async () => button('buddy-pack-remove-confirm').click())
     expect(lastPersona().avatar).toEqual({ kind: 'still' })
     expect(list.remove).toHaveBeenCalledWith(PACK_A.packId)
+  })
+
+  it('says the confirm also removes the moves from the library when the account keeps that pack (plan 172 D10)', async () => {
+    // QA 2026-10-11: removing Ember QA's moves on one computer removed them
+    // from the account, while the confirm only said "from this computer".
+    const LINKED = '0c211fd7-75db-4900-afbc-0fb0ef84eadc'
+    const library = {
+      signedIn: true,
+      official: [],
+      mine: [
+        {
+          id: LINKED,
+          name: 'Grum',
+          description: '',
+          personality: '',
+          context: '',
+          createdAt: '2026-10-09T10:00:00.000Z',
+          updatedAt: '2026-10-09T10:00:00.000Z',
+          poses: { idle: null, talk: null, laugh: null, think: null },
+          alive: { packId: PACK_A.packId, cellSize: 640 }
+        }
+      ],
+      activeAvatarId: LINKED,
+      serverActiveAvatarId: null,
+      limit: 30,
+      busy: null
+    } as unknown as BuddyLibraryState
+    const description = async (cohost: CohostSettings): Promise<string> => {
+      await render({ cohost, list: pets([PACK_A]), library })
+      await act(async () => button('buddy-pack-remove').click())
+      return document.querySelector('[data-slot="dialog-description"]')?.textContent ?? ''
+    }
+    const worn = { avatar: { kind: 'alive', packId: PACK_A.packId } } as const
+    expect(await description(settings({ ...worn, libraryAvatarId: LINKED }))).toContain(
+      'Its files are deleted from this computer and from your Videorc library, so no other computer gets them.'
+    )
+    await act(async () =>
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    )
+    // Not the account's pack (made only here, or another pack): this computer only.
+    expect(await description(settings(worn))).not.toContain('Videorc library')
   })
 })
 

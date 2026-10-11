@@ -1,4 +1,4 @@
-import type { AiCapabilities } from './backend'
+import type { AiCapabilities, CohostPersona } from './backend'
 import type { EntitlementUiGate } from './entitlement-ui'
 import {
   BUDDY_PET_ATLAS_SHEETS,
@@ -14,6 +14,7 @@ import {
   type BuddyPetIdentityNotes,
   type BuddyPetSheetKey
 } from '../../../shared/buddy-pet-creator'
+import { isBuddyUserAvatarId } from '../../../shared/buddy-library'
 
 // The Buddy pet creator wizard (plan 168 S-F5): pure derivations the wizard
 // and its tests share. The backend owns the creation; these only read it.
@@ -316,6 +317,27 @@ export function buddyPetGazeArrow(
     degrees: Math.round((Math.atan2(y, x) * 180) / Math.PI),
     label: `Looking ${strength}${direction}`
   }
+}
+
+/**
+ * Where a saved pack is kept, the Save step's line (plan 172 D10): a Buddy
+ * from the account library sends its moves to the account when the web
+ * keeps them; any other Buddy keeps them on this computer only.
+ */
+export function buddyPetSaveNote({
+  persona,
+  capabilities
+}: {
+  persona: Pick<CohostPersona, 'name' | 'libraryAvatarId'> | null
+  capabilities: Pick<AiCapabilities, 'cohost'> | null
+}): string {
+  const wears = 'Your Buddy wears it right away; switch back to Still any time.'
+  const synced =
+    isBuddyUserAvatarId(persona?.libraryAvatarId) &&
+    capabilities?.cohost?.buddyLibrary?.alive === true
+  if (!synced) return `Kept on this computer. ${wears}`
+  const name = persona?.name.trim() || 'your Buddy'
+  return `Saved with ${name} in your Videorc library, so it moves on every computer you sign in to. ${wears}`
 }
 
 /** The pack name as it would be saved, or null when it cannot be. */

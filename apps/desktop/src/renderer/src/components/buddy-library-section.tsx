@@ -317,7 +317,9 @@ export function BuddyLibrarySection({
                 <Skeleton className="aspect-[3/4] rounded-row" />
                 <Skeleton className="aspect-[3/4] rounded-row" />
               </CardGrid>
-            ) : (
+            ) : view.error ? null : (
+              // Not listed and no failure: the library is off. Listing failed:
+              // the error line below says why, never that the library is empty.
               <p className="text-xs text-subtle">{BUDDY_LIBRARY_COPY.emptyMine}</p>
             )
           ) : view.mine.length === 0 ? (
@@ -455,7 +457,9 @@ function BuddyCard({
         )}
         {card.alive ? (
           <Badge
-            className="absolute top-1.5 left-1.5"
+            // It floats on the art: the opaque floating tier (glass-float)
+            // keeps it readable where the character runs under it.
+            className="absolute top-1.5 left-1.5 glass-float"
             data-testid="buddy-library-alive-tag"
             variant="outline"
           >

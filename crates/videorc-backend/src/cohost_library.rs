@@ -1202,19 +1202,33 @@ async fn run_sync(state: &AppState) -> Result<(), CohostAvatarErrorDetail> {
     let shared = state.buddy_library.clone();
     shared.cache().last_sync = Some(Instant::now());
     let env = shared.env();
-    let web = env.web().filter(|_| shared.enabled());
-    let Some((api, token)) = web else {
+    // Signed in, but the web's capability was never read in this process
+    // (the web was unreachable when the app started): the list is tried
+    // anyway, so an unreachable web says so instead of the library looking
+    // empty. A library the web says is off stays quiet.
+    let unread = !shared.enabled() && !shared.known_disabled();
+    let web = env.web().filter(|_| shared.enabled() || unread);
+    let off = |shared: &LibraryShared| {
         // Signed out or the library off: nothing changes, nothing is listed.
         let mut cache = shared.cache();
         cache.web = None;
         cache.poses.clear();
         cache.offer = None;
+    };
+    let Some((api, token)) = web else {
+        off(&shared);
         return Ok(());
     };
-    let list = api
-        .get_buddy_library(&token)
-        .await
-        .map_err(|error| library_error(&error))?;
+    let list = match api.get_buddy_library(&token).await {
+        Ok(list) => list,
+        // Not read, and the web answered but has no library for us (an older
+        // web, storage off): as before, the library is off.
+        Err(error) if unread && error.kind != CohostApiErrorKind::Network => {
+            off(&shared);
+            return Ok(());
+        }
+        Err(error) => return Err(library_error(&error)),
+    };
     let avatars: Vec<BuddyLibraryWebAvatar> =
         list.avatars.into_iter().filter(web_avatar_ok).collect();
     let poses = match env.root.clone() {
@@ -1844,10 +1858,10 @@ async fn apply_account_avatar(
             state,
             CohostAvatarErrorDetail::new_owned(
                 error.code,
-                format!(
-                    "{} is still for now: its moves could not be downloaded ({}). It tries again at the next sync.",
-                    avatar.name.trim(),
-                    error.message
+                alive::moves_not_downloaded(
+                    &avatar.name,
+                    &error.message,
+                    "Videorc tries again at the next sync.",
                 ),
             ),
         ),
