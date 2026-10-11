@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildDockSlotReport,
+  clipRectOf,
   dockSlotReportChanged,
   measureDockSlot,
   overlaysOccludeSlot,
@@ -32,6 +33,42 @@ describe('measureDockSlot', () => {
       measureDockSlot({ x: 0, y: -500, width: 800, height: 450 }, viewport).visibleFraction
     ).toBe(0)
     expect(measureDockSlot({ x: 0, y: 0, width: 0, height: 450 }, viewport).visibleFraction).toBe(0)
+  })
+
+  // The pane that scrolls starts under the 40 px toolbar: a slot scrolled a
+  // little under its top edge is still inside the window, and the native
+  // surface (clipped by no DOM) would paint over the toolbar unless the
+  // pane's clip counts (probe:preview-window, dock-scroll-edge).
+  it('counts the clipping pane, not only the viewport', () => {
+    const pane = { x: 0, y: 40, width: 1180, height: 714 }
+    const slot = { x: 224, y: 12, width: 619, height: 348 }
+    expect(measureDockSlot(slot, viewport).visibleFraction).toBe(1)
+    expect(measureDockSlot(slot, viewport, pane).visibleFraction).toBeCloseTo((348 - 28) / 348, 5)
+  })
+
+  it('shows nothing of a slot its ancestors clip away entirely', () => {
+    const slot = { x: 224, y: 56, width: 619, height: 348 }
+    expect(
+      measureDockSlot(slot, viewport, { x: 0, y: 0, width: 0, height: 0 }).visibleFraction
+    ).toBe(0)
+  })
+})
+
+describe('clipRectOf', () => {
+  it('intersects nested boxes and reports no area for disjoint ones', () => {
+    expect(
+      clipRectOf([
+        { x: 0, y: 40, width: 1180, height: 714 },
+        { x: 100, y: 0, width: 600, height: 400 }
+      ])
+    ).toEqual({ x: 100, y: 40, width: 600, height: 360 })
+    expect(
+      clipRectOf([
+        { x: 0, y: 0, width: 100, height: 100 },
+        { x: 200, y: 200, width: 100, height: 100 }
+      ])
+    ).toBeNull()
+    expect(clipRectOf([])).toBeNull()
   })
 })
 

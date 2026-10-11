@@ -382,57 +382,113 @@ async function main() {
   await waitForDockedSurfaceAtSlot('dock-overlay-close: surface returns when the overlay closes')
 
   // Scrolled-away slots hide with a stated reason instead of clipping. Drive
-  // the REAL reporter — actually scroll the slot's container out of view —
-  // rather than injecting a fraction, which the live reporter would overwrite
-  // with the true (fully visible) value within a frame.
-  const scrolled = await smokeCommand('eval-js', {
-    code: `
-      const slot = document.querySelector('[data-videorc-dock-slot]')
-      if (!slot) return { scrolled: false }
-      let node = slot.parentElement
-      while (node) {
-        const style = getComputedStyle(node)
-        if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) break
-        node = node.parentElement
-      }
-      const scroller = node ?? document.scrollingElement ?? document.documentElement
-      scroller.scrollTop = scroller.scrollHeight
-      await sleep(120)
-      return { scrolled: true, top: scroller.scrollTop }
-    `
-  })
-  if (scrolled.result?.scrolled && scrolled.result.top > 0) {
-    const scrolledHidden = await waitFor(
+  // the REAL reporter — actually scroll the slot's pane — rather than
+  // injecting a fraction, which the live reporter would overwrite with the
+  // true value within a frame. Two scrolls, both against the pane's own
+  // geometry (the page's overflow is whatever the Studio inspector adds up to
+  // on this build, never a stand-in for "far enough"):
+  //   edge  the slot slips a little under the pane's top edge while it is
+  //         still inside the window. The native surface is clipped by no
+  //         DOM, so a viewport-only measurement would paint it over the
+  //         toolbar (found when plan 174 S3.3 made Studio overflow at this
+  //         size by 21 px: the surface stayed, 5 px over the toolbar).
+  //   away  the pane scrolled as far as it goes.
+  // When the page does not overflow enough for the edge scroll, the main
+  // window shrinks to its minimum height for the step and grows back after.
+  const SLOT_PANE_JS = `
+    const slot = document.querySelector('[data-videorc-dock-slot="studio"]')
+    if (!slot) return null
+    let node = slot.parentElement
+    while (node && !/(auto|scroll)/.test(getComputedStyle(node).overflowY)) node = node.parentElement
+    const pane = node ?? document.scrollingElement ?? document.documentElement
+  `
+  const measureSlotPane = async () => {
+    const measured = await smokeCommand('eval-js', {
+      code: `
+        ${SLOT_PANE_JS}
+        const slotRect = slot.getBoundingClientRect()
+        return {
+          top: pane.scrollTop,
+          maxScroll: Math.max(0, pane.scrollHeight - pane.clientHeight),
+          clipTop: node ? node.getBoundingClientRect().top : 0,
+          slotTop: slotRect.top,
+          slotHeight: slotRect.height
+        }
+      `
+    })
+    return measured.result
+  }
+  const scrollSlotPane = async (top) => {
+    await smokeCommand('eval-js', {
+      code: `
+        ${SLOT_PANE_JS}
+        pane.scrollTop = ${Number(top)}
+        await sleep(120)
+        return { top: pane.scrollTop }
+      `
+    })
+  }
+  const expectScrolledAway = async (label, geometry) => {
+    const hidden = await waitFor(
       async () => smokeCommand('preview-window-state'),
       (s) => s.visible === false && s.dockHiddenReason === 'scrolled-away',
       8000
     )
-    assertProbe(
-      scrolledHidden.ok,
-      'dock-scroll: surface hides when the slot scrolls mostly away',
-      JSON.stringify(scrolledHidden.last)
+    assertProbe(hidden.ok, label, JSON.stringify({ geometry, last: hidden.last }))
+  }
+  let pane = await measureSlotPane()
+  // The edge scroll clips 8 % of the slot under the pane's top edge (the
+  // 0.98 show/hide threshold needs more than 2 %), capped so the slot's top
+  // stays inside the window: that is the case a viewport-only measure misses.
+  const edgeScrollFor = (geometry) =>
+    Math.min(
+      geometry.slotTop,
+      Math.ceil(geometry.slotTop - geometry.clipTop + geometry.slotHeight * 0.08)
     )
-    await smokeCommand('eval-js', {
-      code: `
-        const slot = document.querySelector('[data-videorc-dock-slot]')
-        let node = slot?.parentElement ?? null
-        while (node) {
-          const style = getComputedStyle(node)
-          if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) break
-          node = node.parentElement
-        }
-        ;(node ?? document.scrollingElement ?? document.documentElement).scrollTop = 0
-        await sleep(120)
-        return { restored: true }
-      `
+  let windowShrunk = false
+  if (pane && pane.maxScroll < edgeScrollFor(pane)) {
+    await smokeCommand('main-window-set-bounds', { height: 660 })
+    windowShrunk = true
+    await waitForDockedSurfaceAtSlot(
+      'dock-scroll-setup: surface at the slot in the minimum-height window'
+    )
+    pane = await measureSlotPane()
+  }
+  if (pane && pane.maxScroll >= edgeScrollFor(pane) && pane.clipTop > 0) {
+    const edge = edgeScrollFor(pane)
+    await scrollSlotPane(edge)
+    await expectScrolledAway(
+      'dock-scroll-edge: surface hides when the slot slips under the pane edge (still inside the window)',
+      { ...pane, scrolledTo: edge }
+    )
+    await scrollSlotPane(0)
+    await waitForDockedSurfaceAtSlot(
+      'dock-scroll-edge-back: surface returns when the slot is whole again'
+    )
+    await scrollSlotPane(pane.maxScroll)
+    await expectScrolledAway('dock-scroll: surface hides when the slot scrolls away', {
+      ...pane,
+      scrolledTo: pane.maxScroll
     })
+    await scrollSlotPane(0)
     await waitForDockedSurfaceAtSlot(
       'dock-scroll-back: surface returns when the slot is visible again'
     )
   } else {
-    // The Studio page fit without scrolling on this run (short content / tall
-    // window) — the scrolled-away decision is covered by dock-slot unit tests.
-    assertProbe(true, 'dock-scroll: skipped — Studio page did not overflow', '')
+    // Even the minimum-height window did not make the Studio page overflow
+    // past the slot's edge on this run: say so (the decision itself is
+    // covered by dock-slot unit tests), never pass a scroll that moved nothing.
+    assertProbe(
+      true,
+      'dock-scroll: skipped — Studio page does not overflow past the slot edge',
+      JSON.stringify(pane)
+    )
+  }
+  if (windowShrunk) {
+    await smokeCommand('main-window-set-bounds', { height: 780 })
+    await waitForDockedSurfaceAtSlot(
+      'dock-scroll-restore: surface at the slot once the window grows back'
+    )
   }
 
   // Tab switch: the docked preview must FULLY leave the screen — including

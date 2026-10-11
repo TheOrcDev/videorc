@@ -14,20 +14,46 @@ export interface SlotRect {
 }
 
 // Rect + visible fraction from one getBoundingClientRect measurement. The
-// fraction is the slot area inside the viewport: docked previews hide (with a
-// stated reason) instead of clipping when the slot scrolls away.
+// fraction is the slot area inside the viewport AND inside every scroll
+// container that clips the slot: docked previews hide (with a stated reason)
+// instead of clipping when the slot scrolls away. The viewport alone is not
+// enough: the pane that scrolls starts under a 40 px toolbar, so a slot that
+// has scrolled a little under it is still inside the window while the native
+// surface, which no DOM clips, paints over the toolbar.
 export function measureDockSlot(
   rect: SlotRect,
-  viewport: { width: number; height: number }
+  viewport: { width: number; height: number },
+  clip: SlotRect | null = null
 ): { rect: SlotRect; visibleFraction: number } {
   const area = rect.width * rect.height
   if (area <= 0) {
     return { rect, visibleFraction: 0 }
   }
-  const visibleWidth = Math.min(rect.x + rect.width, viewport.width) - Math.max(rect.x, 0)
-  const visibleHeight = Math.min(rect.y + rect.height, viewport.height) - Math.max(rect.y, 0)
-  const visibleArea = Math.max(0, visibleWidth) * Math.max(0, visibleHeight)
+  const window: SlotRect = { x: 0, y: 0, width: viewport.width, height: viewport.height }
+  const visible = clipRectOf([rect, window, ...(clip ? [clip] : [])])
+  const visibleArea = visible ? visible.width * visible.height : 0
   return { rect, visibleFraction: Math.min(1, visibleArea / area) }
+}
+
+/** The intersection of the rects (a slot and its clipping ancestors), or null
+ * when they share no area or there are none. */
+export function clipRectOf(rects: SlotRect[]): SlotRect | null {
+  let clip: SlotRect | null = null
+  for (const rect of rects) {
+    if (!clip) {
+      clip = { ...rect }
+      continue
+    }
+    const x = Math.max(clip.x, rect.x)
+    const y = Math.max(clip.y, rect.y)
+    const right = Math.min(clip.x + clip.width, rect.x + rect.width)
+    const bottom = Math.min(clip.y + clip.height, rect.y + rect.height)
+    clip = { x, y, width: right - x, height: bottom - y }
+  }
+  if (!clip) {
+    return null
+  }
+  return clip.width > 0 && clip.height > 0 ? clip : null
 }
 
 export function buildDockSlotReport(

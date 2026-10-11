@@ -23,6 +23,7 @@ import {
   withOverlayRect
 } from '@/components/scene/overlay-stage'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
+import { stageUndoControl } from '@/components/scene/stage-undo-control'
 import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
 import { ScreenFramingControl } from '@/components/studio/scenes-gallery'
@@ -389,9 +390,16 @@ export function LayoutTab(): ReactElement {
   // page both ask for the layout the last change replaced. The key yields to
   // text fields (the Edit menu's undo role owns those), dialogs, menus and a
   // stage gesture or commit in flight; it does nothing while a scene switch
-  // is still warming, so it never races the latest-intent engine.
-  const undoAvailable =
-    peekLayoutUndo() !== null && !sceneSwitchPending && !stageBusy && !preciseEditPending
+  // is still warming, so it never races the latest-intent engine. The footer
+  // button stays mounted through all of that and only disables: a footer
+  // that reflows at pointerdown cancels the gesture (stage-undo-control.ts).
+  const undoControl = stageUndoControl({
+    hasUndo: peekLayoutUndo() !== null,
+    phase: stagePhase,
+    sceneSwitchPending,
+    preciseEditPending
+  })
+  const undoAvailable = undoControl.enabled
   const undoAvailableRef = useRef(undoAvailable)
   undoAvailableRef.current = undoAvailable
   const undoLayout = useCallback(() => {
@@ -710,7 +718,8 @@ export function LayoutTab(): ReactElement {
                 isFreeform ? undefined : (cameraCorner) => applyCameraPreset({ cameraCorner })
               }
               onTogglePreview={() => void togglePreviewWindow()}
-              onUndo={undoAvailable ? undoLayout : undefined}
+              onUndo={undoControl.shown ? undoLayout : undefined}
+              undoEnabled={undoControl.enabled}
             />
           </PanelSection>
 
@@ -812,12 +821,14 @@ export function LayoutTab(): ReactElement {
                 className="min-w-0"
                 // Disabled arrows must say why: silent dead controls read as
                 // a broken app (2026-07-02 report on the full-canvas screen).
+                // One line of copy whether or not editing has started: the
+                // first pointerdown on the stage starts it, and a line that
+                // left then would shrink the page under the pointer and
+                // cancel that very gesture (stage-undo-control.ts).
                 description={
-                  !sceneEditMode
-                    ? 'Click the source on the stage to start editing, then nudge with the arrows.'
-                    : isSessionActive
-                      ? SCENE_POSITION_LOCK_REASON
-                      : undefined
+                  isSessionActive
+                    ? SCENE_POSITION_LOCK_REASON
+                    : 'Click the source on the stage to edit it: drag it, or nudge it with the arrows.'
                 }
                 headingLevel={3}
                 title="Placement"
