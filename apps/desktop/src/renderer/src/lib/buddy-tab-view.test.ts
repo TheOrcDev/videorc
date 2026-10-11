@@ -14,14 +14,18 @@ import {
   BUDDY_VOICE_PREMIUM,
   buddyVoicePhrasesLabel,
   removeMessagesRows,
+  CLOUD_AI_CLEAN_CUT_USE,
   CLOUD_AI_KEEPS,
   CLOUD_AI_USES,
+  BUDDY_CHAT_FREE_NOTE,
   BUDDY_CONSENT_OFF_REASON,
   BUDDY_LIVE_POWERS,
+  BUDDY_LIVE_PREMIUM_REASON,
   BUDDY_LIVE_STATUS_LABELS,
   BUDDY_SIGNED_OUT_REASON,
   buddyLiveUnlock,
   buddyLiveView,
+  cloudAiUsesLedBy,
   type BuddyLiveViewInput
 } from './buddy-tab-view'
 
@@ -76,7 +80,9 @@ describe('Buddy tab copy (plan 119 S2)', () => {
       ...CLOUD_AI_USES,
       CLOUD_AI_KEEPS,
       BUDDY_SIGNED_OUT_REASON,
-      BUDDY_CONSENT_OFF_REASON
+      BUDDY_CONSENT_OFF_REASON,
+      BUDDY_LIVE_PREMIUM_REASON,
+      BUDDY_CHAT_FREE_NOTE
     ]
     for (const line of [...lines, ...Object.values(BUDDY_LIVE_STATUS_LABELS)]) {
       expect(line).not.toContain('—')
@@ -87,16 +93,36 @@ describe('Buddy tab copy (plan 119 S2)', () => {
 
   it('names every cloud use and what is kept, the one list consent shows', () => {
     expect(CLOUD_AI_USES).toEqual([
-      'Buddy reads your live chat.',
+      "Buddy reads your live chat with Videorc's cloud AI.",
       "Buddy hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
       // Plan 170 D17: created Buddies live in the account; the inspiration picture is not kept.
       "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
-      "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI; the pictures are kept on this computer.",
+      // Plan 172 D10 (plan 174 G-6): a library Buddy's moves join the account.
+      "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that is in your library, in your Videorc account too, so it moves on any computer.",
       "Buddy replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
       "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
     expect(CLOUD_AI_KEEPS).toContain("Videorc servers don't keep your chat or your audio.")
     expect(CLOUD_AI_KEEPS).toContain('A short report of each stream is saved on this computer.')
+  })
+
+  it("leads a feature's consent with its own line, and still names every other use", () => {
+    const uses = cloudAiUsesLedBy(CLOUD_AI_CLEAN_CUT_USE)
+    expect(uses.lead).toBe(CLOUD_AI_CLEAN_CUT_USE)
+    expect(uses.others).not.toContain(CLOUD_AI_CLEAN_CUT_USE)
+    expect([uses.lead, ...uses.others].sort()).toEqual([...CLOUD_AI_USES].sort())
+  })
+
+  it('never says Buddy acts on its own while Auto posts (plan 174 F-19)', () => {
+    for (const power of BUDDY_LIVE_POWERS) expect(power.description).not.toMatch(/on its own/)
+    expect(BUDDY_LIVE_POWERS.find((power) => power.title === 'Chat stays safe')?.description).toBe(
+      'Spam, scams and abuse are flagged against your own rules. Buddy removes a comment only when you tell it to.'
+    )
+  })
+
+  it('points cloud AI off at the Cloud AI section, never a retired tab (plan 174 F-5)', () => {
+    expect(BUDDY_CONSENT_OFF_REASON).toContain('under Cloud AI')
+    expect(BUDDY_CONSENT_OFF_REASON).not.toMatch(/Customize/)
   })
 })
 
@@ -116,10 +142,10 @@ describe('buddyLiveUnlock', () => {
     expect(buddyLiveUnlock(false, premium)?.action).toEqual({ kind: 'sign-in' })
   })
 
-  it('offers Premium to a signed-in Basic account, with the gate reason', () => {
+  it('offers Premium to a signed-in Basic account, in the one Premium sentence', () => {
     expect(buddyLiveUnlock(true, basic)).toEqual({
       action: { kind: 'view-premium', url: 'https://www.videorc.com/premium' },
-      reason: 'Buddy requires Videorc Premium.'
+      reason: 'Buddy Live is part of Videorc Premium.'
     })
   })
 
@@ -245,7 +271,7 @@ describe('buddyLiveView', () => {
     expect(basicOn.switchDisabled).toBe(false)
     expect(basicOn.status).toMatchObject({
       kind: 'attention',
-      reason: 'Buddy requires Videorc Premium.'
+      reason: BUDDY_LIVE_PREMIUM_REASON
     })
   })
 
@@ -284,14 +310,14 @@ describe('Voice commands (plan 140, S6 part A)', () => {
   it('keeps the promises plain: posts only in your modes, 20 seconds, 10 a minute, free removal', () => {
     // Plan 164 D4 replaced "never acts on its own" with the per-mode promise.
     expect(COHOST_ACTS_ON_ASK_COPY).toBe(
-      'The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+      'Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
     )
     expect(BUDDY_REMOVAL_LIMITS).toContain('20 seconds')
     expect(BUDDY_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')
     expect(BUDDY_REMOVAL_FALLBACK).toBe(
       'If the platform cannot remove it, Buddy hides it in Videorc and tells you viewers may still see it.'
     )
-    expect(BUDDY_VOICE_PREMIUM).toContain('Premium')
+    expect(BUDDY_VOICE_PREMIUM).toContain('Voice commands are part of Videorc Premium.')
     expect(BUDDY_VOICE_PREMIUM).toContain('free for everyone')
     for (const line of [
       BUDDY_VOICE_COMMANDS_DESCRIPTION,

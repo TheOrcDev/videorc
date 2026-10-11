@@ -13,7 +13,7 @@ import {
   type CleanCutCapabilities
 } from '@/lib/clean-cut-view'
 import { DEFAULT_BASIC_ENTITLEMENTS } from '@/lib/entitlements'
-import { CLOUD_AI_USES } from '@/lib/buddy-tab-view'
+import { CLOUD_AI_CLEAN_CUT_USE, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 
 import { CleanCutCard, type CleanCutFocus } from './clean-cut-card'
 
@@ -238,15 +238,35 @@ describe('Clean cut card (plan 119 S14)', () => {
     await act(async () => autoSwitch().click())
     const dialog = document.querySelector('[role="dialog"]')
     expect(dialog?.textContent).toContain('Turn on Clean cut?')
-    expect(dialog?.textContent).toContain(
-      "Clean cut uploads your recording's audio, never the video"
+    // Plan 174 E-13: Clean cut's own line leads, then every other use.
+    expect(dialog?.querySelector('[data-slot="dialog-description"]')?.textContent).toBe(
+      CLOUD_AI_CLEAN_CUT_USE
     )
+    expect(dialog?.textContent).toContain('Allowing cloud AI also covers Buddy:')
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     await act(async () => button('Not now').click())
     expect(setAiConsent).not.toHaveBeenCalled()
     expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBeNull()
 
     await act(async () => autoSwitch().click())
+    await act(async () => button('Allow and turn on').click())
+    expect(setAiConsent).toHaveBeenCalledWith(true)
+    expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
+  })
+
+  it('offers "Allow cloud AI…" when every recording is on but cloud AI was revoked (plan 174 E-6)', async () => {
+    localStorage.setItem(CLEAN_CUT_AUTO_STORAGE_KEY, '1')
+    await render({ consented: false })
+    const status = document.querySelector('[data-slot="clean-cut-auto-status"]')
+    expect(status?.getAttribute('data-status')).toBe('attention')
+    expect(status?.textContent).toContain("Cloud AI isn't allowed, so Clean cut can't run.")
+    expect(status?.textContent).not.toMatch(/Customize/)
+    const allow = document.querySelector(
+      '[data-testid="clean-cut-allow-cloud-ai"]'
+    ) as HTMLButtonElement | null
+    expect(allow?.textContent).toBe('Allow cloud AI…')
+    await act(async () => allow!.click())
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Turn on Clean cut?')
     await act(async () => button('Allow and turn on').click())
     expect(setAiConsent).toHaveBeenCalledWith(true)
     expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')

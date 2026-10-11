@@ -190,7 +190,7 @@ export function BuddyRepliesSection({
             and cloud AI, like the rest of this tab. */}
         <CohostCooldownField
           cooldown={autoChat.answers.cooldownSeconds}
-          description="A reply when a viewer asks the Buddy by name, at most one per cooldown."
+          description="A reply when a viewer asks Buddy by name, at most one per cooldown."
           enabled={autoChat.answers.enabled}
           id="cohost-answers"
           label="Answers"

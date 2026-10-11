@@ -74,7 +74,7 @@ export const BUDDY_ONBOARDING_STEP3 = {
   aboutLabel: 'About you (optional)',
   aboutPlaceholder:
     'I stream indie games on Tuesdays and Fridays at 8 pm. My shop is at example.com/shop.',
-  aboutHelp: "Your Buddy answers viewers' questions from this."
+  aboutHelp: "Buddy answers viewers' questions from this."
 } as const
 
 export const BUDDY_ONBOARDING_STEP4 = {
@@ -84,7 +84,7 @@ export const BUDDY_ONBOARDING_STEP4 = {
   summaryAbout: 'About you',
   notSet: 'Not set',
   primary: 'Create my Buddy',
-  working: 'Drawing your Buddy. This takes one to three minutes.',
+  working: 'Drawing the pictures. This takes one to three minutes.',
   poseLabels: { idle: 'Idle', talk: 'Talk', laugh: 'Laugh', think: 'Think' },
   done: 'Saved to your library.',
   use: 'Use as my Buddy',
@@ -96,13 +96,13 @@ export const BUDDY_ONBOARDING_STEP4 = {
 
 /** Step 4 and the library: why creating is not possible now, and its actions. */
 export const BUDDY_ONBOARDING_GATES = {
-  signedOut: 'Sign in to create your Buddy.',
+  signedOut: 'Sign in to create a Buddy.',
   signIn: 'Sign in',
   free: 'Creating your own Buddy is part of Videorc Premium.',
-  seePremium: 'See Premium',
+  seePremium: 'View Premium',
   startFromOurs: 'Start from one of ours',
   allowanceUsed: "You've used today's images. You get more tomorrow.",
-  failed: 'Your Buddy could not be drawn. Nothing was used from your allowance. Try again.',
+  failed: "Couldn't draw the pictures. Nothing was used from your allowance. Try again.",
   cloudAiOff: 'Allow cloud AI to create a Buddy.'
 } as const
 
@@ -116,7 +116,8 @@ export const BUDDY_LIBRARY_COPY = {
   editPersonality: 'Edit personality',
   delete: 'Delete',
   makeAlive: 'Make it Alive',
-  newBuddy: 'New Buddy',
+  /** Opens the onboarding, which asks for more: an ellipsis (docs/ui-copy.md). */
+  newBuddy: 'New Buddy…',
   emptyMine: 'Buddies you create show up here, on videorc.com and in the app.',
   deleteBody: 'Its pictures are removed from your Videorc account.',
   cancel: 'Cancel',

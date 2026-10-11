@@ -300,7 +300,7 @@ describe('Test your Buddy (plan 169 D14)', () => {
     expect(stage()).toMatchObject({ pose: null })
     expect(mocked.log).toContain('react:laugh')
     expect(byTestId('buddy-test-note').textContent).toBe(
-      'This pack has no laugh drawing, so it hops instead.'
+      'These moves have no laugh drawing, so Buddy hops instead.'
     )
   })
 

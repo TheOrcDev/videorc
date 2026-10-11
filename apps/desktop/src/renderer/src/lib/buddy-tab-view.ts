@@ -1,7 +1,12 @@
 import type { CohostSettings, CohostState, PlatformAccount } from './backend'
 import { removeMessagesReadiness } from '../../../shared/platform-scopes'
 import { COHOST_ERROR_TOAST_MESSAGES, cohostErrorDetail } from './cohost-state'
-import { cohostErrorDetailText, cohostListeningView } from './cohost-view'
+import {
+  BUDDY_HEARS_YOU_USE,
+  COHOST_CHAT_CONSENT_SENTENCE,
+  cohostErrorDetailText,
+  cohostListeningView
+} from './cohost-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 import type { BuddyTabId } from './buddy-tabs'
 import { platformLabel } from './platform-copy'
@@ -30,7 +35,7 @@ export const BUDDY_LIVE_POWERS: readonly {
   {
     title: 'Chat stays safe',
     description:
-      'Spam, scams and abuse are flagged against your own rules. Buddy never acts on its own.',
+      'Spam, scams and abuse are flagged against your own rules. Buddy removes a comment only when you tell it to.',
     tab: 'chat'
   },
   {
@@ -46,20 +51,34 @@ export const BUDDY_LIVE_POWERS: readonly {
   }
 ]
 
+/** Clean cut's line of the list: its consent dialog leads with it (plan 174 E-13). */
+export const CLOUD_AI_CLEAN_CUT_USE =
+  "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
+
 /**
  * What Cloud AI covers, one line per use (plan 119 decision 3). Every consent
  * dialog (Buddy Live, Clean cut) and the Cloud AI row show this one list, so a
  * feature that needs cloud AI extends the consent here, never in a second
- * store.
+ * store. The lines say what is sent and kept as it is today: an Alive
+ * Buddy's moves join the account for a Buddy in your library (plan 172 D10,
+ * plan 174 G-6).
  */
 export const CLOUD_AI_USES: readonly string[] = [
-  'Buddy reads your live chat.',
-  "Buddy hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
+  COHOST_CHAT_CONSENT_SENTENCE,
+  BUDDY_HEARS_YOU_USE,
   "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
-  "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI; the pictures are kept on this computer.",
+  "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that is in your library, in your Videorc account too, so it moves on any computer.",
   "Buddy replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
-  "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
+  CLOUD_AI_CLEAN_CUT_USE
 ]
+
+/**
+ * The same list led by one use: a feature's own consent names its own line
+ * first, then everything else the one switch also allows.
+ */
+export function cloudAiUsesLedBy(lead: string): { lead: string; others: string[] } {
+  return { lead, others: CLOUD_AI_USES.filter((use) => use !== lead) }
+}
 
 /** What is kept, and where, after the list of uses. */
 export const CLOUD_AI_KEEPS =
@@ -118,8 +137,19 @@ export interface BuddyLiveView {
 
 export const BUDDY_SIGNED_OUT_REASON = 'Sign in to use Buddy Live, part of Videorc Premium.'
 
+/**
+ * The Premium sentence for Buddy Live (docs/ui-copy.md), in place of the
+ * server's "Buddy requires Videorc Premium.": picking a Buddy, greetings,
+ * Say and reactions stay free, so the lock names what it locks (plan 174 F-19).
+ */
+export const BUDDY_LIVE_PREMIUM_REASON = 'Buddy Live is part of Videorc Premium.'
+
+/** The Chat tab's lock adds what stays free under it. */
+export const BUDDY_CHAT_FREE_NOTE = 'Greetings are free.'
+
+/** Points at the Cloud AI section beside the status (plan 174 E-6, F-5). */
 export const BUDDY_CONSENT_OFF_REASON =
-  "Cloud AI is off, so Buddy can't read chat or hear you. Allow it under Customize."
+  "Cloud AI isn't allowed, so Buddy can't read chat or hear you. Allow it under Cloud AI."
 
 function status(
   kind: BuddyLiveStatusKind,
@@ -135,10 +165,13 @@ export function buddyLiveUnlock(
 ): BuddyLiveUnlock | null {
   if (!signedIn) return { action: { kind: 'sign-in' }, reason: BUDDY_SIGNED_OUT_REASON }
   if (gate.allowed) return null
-  return {
-    action: gate.upgradeUrl ? { kind: 'view-premium', url: gate.upgradeUrl } : null,
-    reason: gate.reason
+  if (gate.upgradeUrl) {
+    return {
+      action: { kind: 'view-premium', url: gate.upgradeUrl },
+      reason: BUDDY_LIVE_PREMIUM_REASON
+    }
   }
+  return { action: null, reason: gate.reason }
 }
 
 /**
@@ -258,7 +291,7 @@ export const BUDDY_REMOVAL_FALLBACK =
   'If the platform cannot remove it, Buddy hides it in Videorc and tells you viewers may still see it.'
 
 export const BUDDY_VOICE_PREMIUM =
-  "Voice commands are part of Buddy, which is Premium. Remove from chat in a comment's menu is free for everyone."
+  "Voice commands are part of Videorc Premium. Remove from chat, in a comment's menu, is free for everyone."
 
 export const BUDDY_REMOVE_MESSAGES_NO_ACCOUNT =
   'Connect YouTube, Twitch, Kick or X under Livestream to remove their chat messages.'

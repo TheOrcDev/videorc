@@ -42,7 +42,7 @@ and points at Stream Manager; it has no switch of its own any more.
   chat and in voice.
 - **Personality** (up to 1,200 characters), free text. Three example chips
   fill it. The personality rides every cloud tick with the name.
-- **A new look** (plan 170): **New Buddy** in My Buddies (below) opens the
+- **A new look** (plan 170): **New Buddy…** in My Buddies (below) opens the
   four-step onboarding, the same steps as on videorc.com/buddy/create:
   _Meet your sidekick_ (a stream demo, the official five, what it does),
   _Describe it_ (words, a picture for inspiration such as a pet, a logo or a
@@ -117,7 +117,7 @@ The Avatar section of the Buddy tab picks how the Buddy looks:
 The preview in the tab is the real pet: it follows your pointer across the
 window, reacts when you click it, blinks, breathes and falls asleep. Packs:
 
-- **Import pack…** (I) takes any complete-character page-pet pack folder
+- **Import moves…** (I) takes any complete-character page-pet pack folder
   (`manifest.json` plus its PNG or WebP sheets). Importing is free. Two-layer
   legacy packs and AVIF sheets are refused with the reason. Guards: 32 MB per
   file, 128 MB per pack, at most 64 frames, sheets up to 8192 px.
@@ -271,7 +271,7 @@ so the Buddy reads your chat and hears you. Off saves `{enabled: false}` and
 `mode: off`; your other settings stay as they are. A behaviour switch
 (Greetings, Answers, Banter) saves `{autoChat}` alone: it never turns the
 Buddy, or its microphone, back on (plan 174 S0.2). Where Cloud AI consent is
-missing, the Buddy pane says what consent covers and "Turn on cloud AI…"
+missing, the Buddy pane says what consent covers and "Allow cloud AI…"
 opens the consent dialog; its Allow grants consent and turns the Buddy on,
 and the listening card then asks about the microphone separately.
 

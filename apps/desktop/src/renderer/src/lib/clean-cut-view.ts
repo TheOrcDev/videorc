@@ -85,8 +85,8 @@ export const CLEAN_CUT_AUTO_LABEL = 'Make a clean cut of every recording'
 
 export const CLEAN_CUT_SIGNED_OUT_REASON = 'Sign in to use Clean cut, part of Videorc Premium.'
 
-export const CLEAN_CUT_CONSENT_OFF_REASON =
-  "Cloud AI is off, so Clean cut can't run. Allow it under Customize."
+/** Its fix is the status line's "Allow cloud AI…" (plan 174 E-6). */
+export const CLEAN_CUT_CONSENT_OFF_REASON = "Cloud AI isn't allowed, so Clean cut can't run."
 
 export const CLEAN_CUT_NO_RECORDINGS =
   'Record something, and its clean cut shows up here when you stop.'
@@ -463,6 +463,8 @@ export interface CleanCutAutoStatus {
   kind: CleanCutAutoStatusKind
   label: string
   reason: string | null
+  /** The one fix the line offers: cloud AI consent, asked in its dialog. */
+  fix?: 'allow-cloud-ai'
 }
 
 /** The status line under "Make a clean cut of every recording". */
@@ -480,7 +482,12 @@ export function cleanCutAutoStatus({
   if (!on) return { kind: 'off', label: 'Off', reason: null }
   if (unlock) return { kind: 'attention', label: 'Needs attention', reason: unlock.reason }
   if (!consented) {
-    return { kind: 'attention', label: 'Needs attention', reason: CLEAN_CUT_CONSENT_OFF_REASON }
+    return {
+      kind: 'attention',
+      label: 'Needs attention',
+      reason: CLEAN_CUT_CONSENT_OFF_REASON,
+      fix: 'allow-cloud-ai'
+    }
   }
   return {
     kind: 'on',

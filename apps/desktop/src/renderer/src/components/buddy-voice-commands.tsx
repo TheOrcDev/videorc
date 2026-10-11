@@ -33,6 +33,7 @@ import {
   removeMessagesRows,
   type RemoveMessagesRow
 } from '@/lib/buddy-tab-view'
+import { buddyTabLabel } from '@/lib/buddy-tabs'
 import { toast } from '@/lib/toast'
 import { permissionReconnectOptions } from '../../../shared/platform-scopes'
 
@@ -57,7 +58,7 @@ export function BuddyVoiceCommands({
 }: {
   /** The tab's locked alert, given only while Buddy is locked (plan 150, D7). */
   lead?: ReactNode
-  /** Opens the Live tab, from the "turn on Buddy Live" alert. */
+  /** Opens the first tab, where Buddy Live lives, from the "turn on Buddy Live" alert. */
   onOpenLive?: () => void
 }): ReactElement {
   const {
@@ -115,7 +116,7 @@ export function BuddyVoiceCommands({
               {onOpenLive ? (
                 <AlertAction>
                   <Button size="xs" type="button" variant="outline" onClick={onOpenLive}>
-                    Go to Live
+                    Go to {buddyTabLabel('live')}
                   </Button>
                 </AlertAction>
               ) : null}

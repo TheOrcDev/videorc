@@ -85,7 +85,7 @@ export function BuddyGreetingsSection(): ReactElement | null {
 
   return (
     <PanelSection
-      description="What the Buddy posts as you when chat does something, in your own words. Free. Greetings go out only in the modes you turn on in Stream Manager, at most six a minute per platform."
+      description="What Buddy posts as you when chat does something, in your own words. Free. Greetings go out only in the modes you turn on in Stream Manager, at most six a minute per platform."
       title="Greetings"
     >
       {/* A settings row sits in a grouped card like every Settings row (plan

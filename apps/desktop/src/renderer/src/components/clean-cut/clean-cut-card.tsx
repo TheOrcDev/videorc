@@ -260,7 +260,10 @@ export function CleanCutCard({
         <Field orientation="horizontal">
           <FieldContent>
             <FieldLabel htmlFor="clean-cut-auto-switch">{CLEAN_CUT_AUTO_LABEL}</FieldLabel>
-            <CleanCutAutoStatusLine status={autoStatus} />
+            <CleanCutAutoStatusLine
+              status={autoStatus}
+              onAllowCloudAi={() => setAsk({ kind: 'auto' })}
+            />
           </FieldContent>
           <Switch
             checked={auto}
@@ -534,8 +537,17 @@ const AUTO_TONE: Record<CleanCutAutoStatus['kind'], string> = {
   attention: 'tone-warning'
 }
 
-/** The glass dot carries the tone; the words stay monochrome. */
-function CleanCutAutoStatusLine({ status }: { status: CleanCutAutoStatus }): ReactElement {
+/**
+ * The glass dot carries the tone; the words stay monochrome. A status with a
+ * fix offers it: cloud AI off asks for consent in the one dialog (E-6).
+ */
+function CleanCutAutoStatusLine({
+  status,
+  onAllowCloudAi
+}: {
+  status: CleanCutAutoStatus
+  onAllowCloudAi: () => void
+}): ReactElement {
   return (
     <p
       className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground"
@@ -552,6 +564,18 @@ function CleanCutAutoStatusLine({ status }: { status: CleanCutAutoStatus }): Rea
           <span aria-hidden>·</span>
           <span>{status.reason}</span>
         </>
+      ) : null}
+      {status.fix === 'allow-cloud-ai' ? (
+        <Button
+          className="ml-1"
+          data-testid="clean-cut-allow-cloud-ai"
+          size="xs"
+          type="button"
+          variant="outline"
+          onClick={onAllowCloudAi}
+        >
+          Allow cloud AI…
+        </Button>
       ) : null}
     </p>
   )

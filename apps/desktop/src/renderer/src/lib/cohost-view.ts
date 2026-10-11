@@ -22,6 +22,7 @@ import { shortcutLabel } from './platform'
 import { shortcutAccelerator } from './shortcuts'
 import { formatRelativeTime } from './format-time'
 import { cohostErrorDetail } from './cohost-state'
+import { buddyDisplayName } from './buddy-auto-chat-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 
 export {
@@ -43,31 +44,46 @@ export {
 // destination chip and the detached Comments window cannot disagree.
 
 /** What Buddy does with chat, the half of the consent every Buddy user gets. */
-export const COHOST_CHAT_CONSENT_SENTENCE = 'Buddy reads live chat with Videorc cloud AI.'
+export const COHOST_CHAT_CONSENT_SENTENCE = "Buddy reads your live chat with Videorc's cloud AI."
 
 /**
- * What Buddy sends (plan 060 D11, plan 068 D3). The consent surfaces that stand
- * alone (the pane notice, the status popover) repeat it verbatim. Turning
- * Buddy on also turns listening on (Buddy Live, plan 119), so the sentence
- * names both halves as what happens, not as an option.
+ * What listening sends, in one wording on every surface (plan 174 F-26): the
+ * consent list, the listening switch, the pane's one-time card and the
+ * status popover all build on these two halves.
  */
+const MIC_TO_TEXT =
+  "your microphone audio goes to Videorc's cloud speech-to-text and comes back as text"
+const MIC_KEPT =
+  "Videorc servers don't keep it. The transcript is saved with your recording on this computer."
+
+/** The listening line of the one list of cloud uses (`CLOUD_AI_USES`). */
+export const BUDDY_HEARS_YOU_USE = `Buddy hears you while you're live: ${MIC_TO_TEXT}.`
+
+/** The pane's one-time "Buddy can hear you" card, under its title. */
+export const COHOST_LISTEN_DISCLOSURE = `${MIC_TO_TEXT.charAt(0).toUpperCase()}${MIC_TO_TEXT.slice(1)}. ${MIC_KEPT}`
+
 /**
  * Buddy acts only when asked (plan 140). The full sentence is the Buddy tab's
  * and the pane hint's tooltip; the pane's action bar shows its first half.
  */
 export const COHOST_ACTS_ON_ASK_COPY =
-  'The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+  'Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
 export const COHOST_ACTS_ON_ASK_HINT = 'Posts only in the modes you turn on.'
 
 /** The flag row's "Remove from chat" key (plan 140, S6): ⌫ alone dismisses. */
 export const COHOST_REMOVE_FLAGGED_KEY = 'Shift+Backspace'
 
-export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} While you're live it also hears you: your microphone audio goes to Videorc's cloud speech-to-text to be turned into text. Videorc servers don't keep it. The transcript is saved with your recording on this computer.`
+/**
+ * What Buddy sends (plan 060 D11, plan 068 D3). The consent surfaces that stand
+ * alone (the status popover) repeat it verbatim. Turning Buddy on also turns
+ * listening on (Buddy Live, plan 119), so the sentence names both halves as
+ * what happens, not as an option.
+ */
+export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} While you're live it also hears you: ${MIC_TO_TEXT}. ${MIC_KEPT}`
 
-/** The listening half, as the description of the listening switch under the
- * Buddy tab's Customize. */
-export const COHOST_LISTEN_CONSENT_SENTENCE =
-  "While you're live, your microphone audio goes to Videorc's cloud speech-to-text to be turned into text, even with live captions off. Videorc servers don't keep it. The transcript is saved with your recording on this computer."
+/** The listening half, as the description of the listening switch beside
+ * Buddy Live on the Buddy tab. */
+export const COHOST_LISTEN_CONSENT_SENTENCE = `While you're live, ${MIC_TO_TEXT}, even with live captions off. ${MIC_KEPT}`
 
 export const EMPTY_COHOST_STATE: CohostState = {
   sessionId: null,
@@ -196,10 +212,11 @@ export type CohostPaneMode =
   | { kind: 'live' }
 
 /**
- * The Buddy tab's key in running copy: ⌘9 on macOS, Ctrl+9 elsewhere, for
- * the platform every shortcut prints for (plan 174 H-22).
+ * Where Buddy Live is turned on today, in the pane's own words: the Buddy
+ * pane's Chat control leaving Off (plan 164 S-D6). Plan 174 S3.14a gives
+ * Buddy Live a switch of its own; this line follows it there.
  */
-const BUDDY_TAB_KEY = shortcutLabel(shortcutAccelerator('nav-ai'))
+export const BUDDY_LIVE_OFF_REASON = 'Buddy Live is off. Set Chat to Suggest or Auto to turn it on.'
 
 /**
  * Which single-line explanation (if any) replaces the pane. Premium is checked
@@ -226,15 +243,11 @@ export function cohostPaneMode({
   if (!consented) {
     return {
       kind: 'consent',
-      reason: `${COHOST_CONSENT_SENTENCE} Turn on cloud AI to use it.`
+      reason: `${COHOST_CONSENT_SENTENCE} Allow cloud AI to use it.`
     }
   }
   if (!enabled) {
-    // The Comments window cannot switch the main window's tab: copy only.
-    return {
-      kind: 'disabled',
-      reason: `Buddy is off. Turn it on in the Buddy tab (${BUDDY_TAB_KEY}).`
-    }
+    return { kind: 'disabled', reason: BUDDY_LIVE_OFF_REASON }
   }
   return { kind: 'live' }
 }
@@ -546,11 +559,17 @@ export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
 
 const COHOST_QUESTION_TOAST_TEXT_CAP = 64
 
-/** "Buddy: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows). */
+/**
+ * "Grum: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows).
+ * The character speaks, so the toast carries the streamer's name for it
+ * (plan 174 J2-20); "Buddy" until one is known.
+ */
 export function cohostQuestionToastMessage(
   question: CohostQuestion,
-  shortcut = shortcutLabel(shortcutAccelerator('cohost-focus'))
+  shortcut = shortcutLabel(shortcutAccelerator('cohost-focus')),
+  name?: string | null
 ): string {
+  const speaker = buddyDisplayName(name)
   const askers = question.askers.length
   const who =
     askers > 1
@@ -559,7 +578,7 @@ export function cohostQuestionToastMessage(
         ? `${question.askers[0]} is asking`
         : 'a new question'
   const text = trimDraftToCap(question.text, COHOST_QUESTION_TOAST_TEXT_CAP)
-  return text ? `Buddy: ${who}: ${text} · ${shortcut}` : `Buddy: ${who} · ${shortcut}`
+  return text ? `${speaker}: ${who}: ${text} · ${shortcut}` : `${speaker}: ${who} · ${shortcut}`
 }
 
 export interface CohostQuestionToast {
@@ -579,7 +598,8 @@ export function cohostQuestionToast({
   paneOpen,
   lastToastAtMs,
   nowMs,
-  shortcut
+  shortcut,
+  name
 }: {
   previous: CohostState | null
   next: CohostState
@@ -588,6 +608,8 @@ export function cohostQuestionToast({
   nowMs: number
   /** The key that focuses Buddy, as this platform writes it. */
   shortcut?: string
+  /** The streamer's name for Buddy (`persona.name`), when the window knows it. */
+  name?: string | null
 }): CohostQuestionToast | null {
   if (paneOpen) return null
   if (next.status !== 'listening') return null
@@ -603,7 +625,7 @@ export function cohostQuestionToast({
     (question) => question.priority === 'high' && !known.has(question.id)
   )
   if (!candidate) return null
-  return { message: cohostQuestionToastMessage(candidate, shortcut), atMs: nowMs }
+  return { message: cohostQuestionToastMessage(candidate, shortcut, name), atMs: nowMs }
 }
 
 // --- Promises and recaps (plan 068 D8) --------------------------------------
@@ -742,7 +764,7 @@ const COHOST_LISTEN_BLOCKED_REASONS: ReadonlyMap<string, string> = new Map([
   ['signing-out', 'signing out'],
   ['shutting-down', 'Videorc is closing'],
   ['service-unavailable', "can't reach Videorc"],
-  ['consent-required', 'turn on cloud AI'],
+  ['consent-required', 'allow cloud AI'],
   ['cloud-ai-premium-required', 'needs Premium'],
   ['listen-monthly-quota-exhausted', 'monthly listening time used up'],
   ['captions-monthly-quota-exhausted', 'monthly caption time used up'],

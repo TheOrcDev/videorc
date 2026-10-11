@@ -444,7 +444,14 @@ describe('cleanCutAutoStatus', () => {
     ).toBe('On, cuts this recording when you stop')
     expect(
       cleanCutAutoStatus({ on: true, unlock: null, consented: false, captureActive: false })
-    ).toEqual({ kind: 'attention', label: 'Needs attention', reason: CLEAN_CUT_CONSENT_OFF_REASON })
+    ).toEqual({
+      kind: 'attention',
+      label: 'Needs attention',
+      reason: CLEAN_CUT_CONSENT_OFF_REASON,
+      // Plan 174 E-6: the line offers its fix, never a pointer to a retired tab.
+      fix: 'allow-cloud-ai'
+    })
+    expect(CLEAN_CUT_CONSENT_OFF_REASON).toBe("Cloud AI isn't allowed, so Clean cut can't run.")
     expect(
       cleanCutAutoStatus({
         on: true,

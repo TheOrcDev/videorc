@@ -59,9 +59,12 @@ import {
   sortedCohostFlags,
   sortedCohostQuestions,
   trimDraftToCap,
+  BUDDY_HEARS_YOU_USE,
+  BUDDY_LIVE_OFF_REASON,
   COHOST_CHAT_CONSENT_SENTENCE,
   COHOST_CONSENT_SENTENCE,
   COHOST_LISTEN_CONSENT_SENTENCE,
+  COHOST_LISTEN_DISCLOSURE,
   COHOST_LISTEN_PROMPT_STORAGE_KEY,
   COHOST_QUESTION_TOAST_THROTTLE_MS,
   EMPTY_COHOST_STATE,
@@ -320,10 +323,11 @@ describe('cohostPaneMode', () => {
     )
   })
 
-  it('points a disabled Buddy at the Buddy tab, its one home since Settings lost it', () => {
+  it("points Buddy Live off at the pane's own Chat control, where it is turned on (plan 174 F-5)", () => {
     const mode = cohostPaneMode({ gate: { allowed: true }, consented: true, enabled: false })
-    expect(mode.kind === 'disabled' ? mode.reason : null).toMatch(
-      /^Buddy is off\. Turn it on in the Buddy tab \((?:⌘|Ctrl\+)9\)\.$/
+    expect(mode.kind === 'disabled' ? mode.reason : null).toBe(BUDDY_LIVE_OFF_REASON)
+    expect(BUDDY_LIVE_OFF_REASON).toBe(
+      'Buddy Live is off. Set Chat to Suggest or Auto to turn it on.'
     )
   })
 
@@ -683,6 +687,31 @@ describe('cohostQuestionToast', () => {
     )
   })
 
+  it("speaks as the streamer's Buddy when the window knows its name (plan 174 J2-20)", () => {
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo'] }), '⌘J', 'Grum')).toBe(
+      'Grum: 2 people asking: What keyboard is that? · ⌘J'
+    )
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), '⌘J', '  ')).toBe(
+      'Buddy: Ada is asking: What keyboard is that? · ⌘J'
+    )
+    expect(
+      cohostQuestionToast({
+        previous: null,
+        next: {
+          ...EMPTY_COHOST_STATE,
+          sessionId: 'live-1',
+          status: 'listening',
+          questions: [question({ askers: ['Ada'], priority: 'high' })]
+        },
+        paneOpen: false,
+        lastToastAtMs: null,
+        nowMs: 1_000,
+        shortcut: '⌘J',
+        name: 'Grum'
+      })?.message
+    ).toBe('Grum: Ada is asking: What keyboard is that? · ⌘J')
+  })
+
   it('writes the shortcut the way the platform does (Ctrl+J on Windows)', () => {
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), 'Ctrl+J')).toBe(
       'Buddy: Ada is asking: What keyboard is that? · Ctrl+J'
@@ -893,7 +922,7 @@ describe('listening (plan 068)', () => {
     expect(label('listen-monthly-quota-exhausted')).toBe(
       'Not listening: monthly listening time used up'
     )
-    expect(label('consent-required')).toBe('Not listening: turn on cloud AI')
+    expect(label('consent-required')).toBe('Not listening: allow cloud AI')
     expect(label('no-capture')).toBe('Not listening: not live')
     expect(label('service-unavailable')).toBe("Not listening: can't reach Videorc")
     expect(label('signing-out')).toBe('Not listening: signing out')
@@ -1001,18 +1030,26 @@ describe('listening (plan 068)', () => {
     // Turning Buddy on turns listening on (plan 119), so hearing is not an option.
     expect(COHOST_CONSENT_SENTENCE).toContain("While you're live it also hears you")
     expect(COHOST_CONSENT_SENTENCE).not.toContain('If you turn on listening')
-    for (const sentence of [COHOST_CONSENT_SENTENCE, COHOST_LISTEN_CONSENT_SENTENCE]) {
+    // Plan 174 F-26: the microphone is disclosed in one wording everywhere.
+    for (const sentence of [
+      COHOST_CONSENT_SENTENCE,
+      COHOST_LISTEN_CONSENT_SENTENCE,
+      COHOST_LISTEN_DISCLOSURE
+    ]) {
       expect(sentence).toContain('microphone audio')
       expect(sentence).toContain("goes to Videorc's cloud speech-to-text")
-      expect(sentence).toContain('turned into text')
+      expect(sentence).toContain('comes back as text')
       expect(sentence).toContain("Videorc servers don't keep it.")
       expect(sentence).toContain('The transcript is saved with your recording on this computer.')
       expect(sentence).not.toContain('never stored as audio')
     }
     expect(cohostPaneMode({ gate: { allowed: true }, consented: false, enabled: true })).toEqual({
       kind: 'consent',
-      reason: `${COHOST_CONSENT_SENTENCE} Turn on cloud AI to use it.`
+      reason: `${COHOST_CONSENT_SENTENCE} Allow cloud AI to use it.`
     })
+    expect(BUDDY_HEARS_YOU_USE).toBe(
+      "Buddy hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text."
+    )
   })
 })
 

@@ -398,7 +398,7 @@ describe('step 4 gates (plan 170 D15)', () => {
   it('checks in the order a streamer can fix them, each with its line and actions', () => {
     expect(buddyCreateGate({ ...allowed, signedIn: false, gate: free, consented: false })).toEqual({
       kind: 'signed-out',
-      line: 'Sign in to create your Buddy.',
+      line: 'Sign in to create a Buddy.',
       actions: ['sign-in']
     })
     expect(buddyCreateGate({ ...allowed, gate: free, consented: false })).toEqual({
@@ -443,7 +443,7 @@ describe('step 4 gates (plan 170 D15)', () => {
       "You've used today's images. You get more tomorrow."
     )
     expect(buddyCreateFailureLine({ code: 'avatar-timeout' })).toBe(
-      'Your Buddy could not be drawn. Nothing was used from your allowance. Try again.'
+      "Couldn't draw the pictures. Nothing was used from your allowance. Try again."
     )
   })
 })

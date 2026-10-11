@@ -365,7 +365,7 @@ describe('CohostPane', () => {
     for (const use of CLOUD_AI_USES) expect(markup).toContain(use.replaceAll("'", '&#x27;'))
     expect(markup).toContain(CLOUD_AI_KEEPS.replaceAll("'", '&#x27;'))
     expect(markup).not.toContain('truncate')
-    expect(markup).toContain('Turn on cloud AI…')
+    expect(markup).toContain('Allow cloud AI…')
     expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
@@ -388,7 +388,7 @@ describe('CohostPane', () => {
     expect(markup).not.toContain('Nothing sends without you.')
     expect(markup).toContain('Posts only in the modes you turn on.')
     expect(markup).toContain(
-      'title="The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to."'
+      'title="Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to."'
     )
   })
 
@@ -505,7 +505,7 @@ describe('the one-time listening card (plan 068 D3)', () => {
     expect(markup).toContain('data-slot="cohost-listen-prompt"')
     expect(markup).toContain('Buddy can hear you while you&#x27;re live')
     // The consent names the cloud step and what is (not) kept (plan 068 D3).
-    expect(markup).toContain('goes to Videorc&#x27;s cloud speech-to-text to be turned into text')
+    expect(markup).toContain('goes to Videorc&#x27;s cloud speech-to-text and comes back as text')
     expect(markup).toContain('Videorc servers don&#x27;t keep it.')
     expect(markup).toContain('The transcript is saved with your recording on')
     expect(markup).toContain('>Turn on<')

@@ -1,5 +1,7 @@
-import type { AiCapabilities } from './backend'
+import type { AiCapabilities, CohostPersona } from './backend'
 import type { EntitlementUiGate } from './entitlement-ui'
+import { BUDDY_GENERATE_NOT_AVAILABLE } from './buddy-persona-view'
+import { buddyTabLabel } from './buddy-tabs'
 import {
   BUDDY_PET_ATLAS_SHEETS,
   BUDDY_PET_NOTES_ASYMMETRIC_MAX,
@@ -14,6 +16,7 @@ import {
   type BuddyPetIdentityNotes,
   type BuddyPetSheetKey
 } from '../../../shared/buddy-pet-creator'
+import { isBuddyUserAvatarId } from '../../../shared/buddy-library'
 
 // The Buddy pet creator wizard (plan 168 S-F5): pure derivations the wizard
 // and its tests share. The backend owns the creation; these only read it.
@@ -30,11 +33,28 @@ export const BUDDY_PET_CREATOR_STEPS: readonly { id: BuddyPetCreatorStepId; labe
   { id: 'save', label: 'Save' }
 ]
 
-export const BUDDY_PET_SIGNED_OUT = 'Sign in to create a Buddy.'
-export const BUDDY_PET_CONSENT_OFF =
-  'Cloud AI is off. Allow it under Cloud AI on the Buddy tab to create a Buddy.'
-export const BUDDY_PET_NOT_AVAILABLE = 'Not available yet'
+// The creating gate family (plan 174 G-15). The creator covers the page, so
+// its consent line names the tab that holds Cloud AI.
+export const BUDDY_PET_SIGNED_OUT = 'Sign in to create an Alive Buddy.'
+export const BUDDY_PET_CONSENT_OFF = `Allow cloud AI on the ${buddyTabLabel('live')} tab to create an Alive Buddy.`
+export const BUDDY_PET_NOT_AVAILABLE = BUDDY_GENERATE_NOT_AVAILABLE
 export const BUDDY_PET_NONE_LEFT = "This month's creations are used up."
+
+/**
+ * The Save step's line: where the new moves are kept, as the backend keeps
+ * them (plan 172 D10, plan 174 G-6). A Buddy the streamer made, linked to
+ * their library, sends its moves to the account; any other Buddy (an
+ * official one, or one made only on this computer) keeps them here.
+ */
+export function buddyPetSaveDescription(
+  persona: Pick<CohostPersona, 'name' | 'libraryAvatarId'> | null
+): string {
+  const name = persona?.name.trim() || 'Buddy'
+  const wears = `${name} wears them right away; switch back to Still any time.`
+  return isBuddyUserAvatarId(persona?.libraryAvatarId)
+    ? `Saved on this computer and in your Videorc account, so ${name} moves on any computer. ${wears}`
+    : `Saved on this computer. ${wears}`
+}
 
 export interface BuddyPetCreatorGate {
   /** The wizard works (continue a creation, build, save). */
@@ -119,7 +139,7 @@ export function buddyPetNotesFromDraft(
   const palette = splitList(draft.palette)
   const materials = splitList(draft.materials)
   for (const [items, what] of [
-    [palette, 'colours'],
+    [palette, 'colors'],
     [materials, 'materials']
   ] as const) {
     if (items.length > BUDDY_PET_NOTES_LIST_MAX) {

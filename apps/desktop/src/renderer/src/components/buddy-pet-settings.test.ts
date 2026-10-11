@@ -215,7 +215,7 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await act(async () => kindButton('Alive').click())
     expect(patchCohostSettings).not.toHaveBeenCalled()
     expect(document.querySelector('[data-testid="buddy-alive-empty"]')?.textContent).toContain(
-      'No living Buddy yet'
+      'No moves yet. Import them from a page-pet folder, or create them from a picture.'
     )
     expect(button('buddy-pack-create').disabled).toBe(false)
     expect(button('buddy-pack-import')).toBeTruthy()
@@ -228,11 +228,11 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await render({ list: pets([]), capabilities: { cohost: { tick: 4 } } as AiCapabilities })
     await act(async () => kindButton('Alive').click())
     expect(button('buddy-pack-create').disabled).toBe(true)
-    expect(button('buddy-create-hint').textContent).toBe('Not available yet')
+    expect(button('buddy-create-hint').textContent).toBe("Creating isn't available right now.")
     await render({ list: pets([]), consented: false })
     expect(button('buddy-pack-create').disabled).toBe(true)
     expect(button('buddy-create-hint').textContent).toBe(
-      'Allow cloud AI below to create a living Buddy.'
+      'Allow cloud AI below to create an Alive Buddy.'
     )
   })
 
@@ -257,7 +257,7 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await act(async () => kindButton('Alive').click())
     await act(async () => button('buddy-pack-import').click())
     const alert = document.querySelector('[data-testid="buddy-import-error"]')
-    expect(alert?.textContent).toContain('Could not import that pack')
+    expect(alert?.textContent).toContain("Couldn't import those moves")
     expect(alert?.textContent).toContain(
       'Two-layer packs (separate head and body) are not supported. Use a complete-character pack.'
     )
@@ -327,7 +327,7 @@ describe('BuddyPetSettings: Reactions and Motion (plan 168 S-D2)', () => {
       list: pets([PACK_A])
     })
     const follow = reactionRow('follow')
-    expect(follow.querySelector('[role="combobox"]')?.textContent).toBe('Wave (not in this pack)')
+    expect(follow.querySelector('[role="combobox"]')?.textContent).toBe('Wave (not in these moves)')
     await act(async () => (follow.querySelector('[role="combobox"]') as HTMLElement).click())
     const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
     await act(async () => options.find((option) => option.textContent === 'None')!.click())

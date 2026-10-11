@@ -175,7 +175,7 @@ describe('Show on stream automatically', () => {
   it('names the transcript in the listening consent sentence', async () => {
     await render(settings())
     expect(document.body.textContent).toContain(
-      "While you're live, your microphone audio goes to Videorc's cloud speech-to-text to be turned into text, even with live captions off. Videorc servers don't keep it. The transcript is saved with your recording on this computer."
+      "While you're live, your microphone audio goes to Videorc's cloud speech-to-text and comes back as text, even with live captions off. Videorc servers don't keep it. The transcript is saved with your recording on this computer."
     )
   })
 })
