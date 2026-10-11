@@ -96,3 +96,60 @@ rules) print SKIP with the slice that adds them.
 Tell Claude when it is OK to go live. Claude never starts a run on its own.
 
 Set `VIDEORC_LIVE_LAB_DIR` to use another config folder (the unit tests do).
+
+## 8. Test card and scripted speech (plan 178 U7)
+
+The lab streams a test card, not a desktop. `lib/card-server.mjs` serves
+`scripts/live-lab/card/` on `127.0.0.1` (no build step, no network assets,
+strict CSP) and pushes the card state over SSE. Look at it locally with:
+
+```sh
+node scripts/live-lab/card.mjs --demo     # prints http://127.0.0.1:<port>/
+```
+
+What viewers see: run id, scenario, app version, uptime, step, a large UTC
+clock with milliseconds, a dot that never stops moving, sparklines (memory
+per process, bitrate, dropped frames, encoder speed), the last 5 health
+event codes, the open incident count, and an "Automated test" label. Only
+allowlisted fields reach the page (`lib/card-state.mjs`); anything shaped
+like a key, token, email, stream URL or home path is dropped before it is
+drawn, and `card-view.test.mjs` fails if a hostile fixture leaks.
+
+**Sync pulse.** On every 10 s wall-clock boundary the whole card flashes
+white for 50 ms and the page plays a 1 kHz click (the same stimulus as
+`scripts/lib/av-sync-stimulus.mjs`), so `node scripts/measure-av-sync.mjs
+<recording>` measures lip sync on any recording or pulled clip. The click is
+audio played by the page, so:
+
+- Open the card in Chrome with `--autoplay-policy=no-user-gesture-required`
+  (fullscreen or `--app` on the lab display, `--force-device-scale-factor=1`).
+- The click must reach Videorc as **captured system audio**: turn System
+  audio on in the lab profile and keep the Mac's default output a real
+  device (the HDMI dummy or speakers), never BlackHole. BlackHole is the
+  microphone and carries only the scripted speech.
+- The stream mixes the microphone in, and `measure-av-sync` pairs any sound
+  onset within 500 ms of a flash. So scripted speech never plays within 1 s
+  of a pulse: wait `speechStartDelay(Date.now(), durationMs)` (from
+  `lib/speech.mjs`) before each phrase.
+- The page reports each pulse to `POST /pulse` (audio state, focus,
+  visibility); `card.lastPulse()` proves the card is running with live audio.
+
+**Markers.** `card/markers.json` documents fixed regions drawn in pure
+black and white above the flash layer: four corner fiducials (distinct L
+patterns, so a mirrored or flipped frame fails), a 4-bit scene id code and a
+10-bit step code (guard, data MSB first, even parity, guard). The harness
+sets them with `card.setStep({ index, total, name, sceneId })`.
+`decodeMarkers(rgbFrame, width, height)` in `lib/card-markers.mjs` reads
+them from an rgb24 frame (`ffmpeg -pix_fmt rgb24 -f rawvideo`) without OCR
+and reports `{ ok, aligned, step, sceneId, flash }`.
+
+**Speech.** `lib/speech.mjs` renders phrases with `say -o` and plays them
+into `BlackHole 2ch` with ffmpeg's AudioToolbox output
+(`-f audiotoolbox -audio_device_index N`, the index looked up by device
+name). Nothing extra to install: ffmpeg is already a lab dependency,
+`afplay` cannot choose a device, and switching the system output would move
+the card's click too. Each play is logged as
+`{ phraseId, text, playedAt, endedAt, device }` (no file paths).
+`scripts/live-lab/phrases.json` holds the voice command phrases, copied
+from the parser tests in `cohost_command.rs` and `clip_marks.rs`
+(`phrases.test.mjs` fails if they drift), and plain caption phrases.

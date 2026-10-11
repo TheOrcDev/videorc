@@ -369,6 +369,16 @@ checks the window list on that display).
 
 **Done when:** plan 176 L3's done-when.
 
+**BUILT (U7, branch `plan-178/u7`):** card (`scripts/live-lab/card/`,
+served by `lib/card-server.mjs`), allowlist (`lib/card-state.mjs`), markers
+(`card/markers.json`, `lib/card-markers.mjs` `decodeMarkers`), speech
+(`lib/speech.mjs`, `phrases.json`) + tests; a headless Chrome render of the
+card decodes (normal and flash frame). Owed on the lab machine: the 5-min
+recording through `measure-av-sync` + `recording-analyzer`, a scripted
+phrase landing as a caption and a voice command in the journal, and the
+doctor check that the card is the only window on the lab display (U3/U6
+doctor, not built here).
+
 ### U8a — Phase A acceptance
 
 No new code. `live:run --scenario first-light` (plan 176 suite A) on the
