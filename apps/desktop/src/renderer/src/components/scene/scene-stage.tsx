@@ -8,6 +8,7 @@ import {
   PreviewIcon
 } from '@/components/icons'
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -169,6 +170,7 @@ export function SceneStage({
   onRequestFreeform,
   onNudge,
   onUndo,
+  undoEnabled = true,
   overlays
 }: {
   scene: Scene | null
@@ -215,8 +217,13 @@ export function SceneStage({
   onRequestFreeform?: () => void
   /** Arrow keys on the focused canvas nudge the selected source (plan 174 S3.9, C-31). */
   onNudge?: (sourceId: string, directionX: number, directionY: number, large: boolean) => void
-  /** Present while there is a layout change to take back: the footer offers Undo (D15). */
+  /** Present while there is a layout change to take back: the footer offers
+   * Undo (D15). Its presence never follows the gesture: the footer must not
+   * reflow at pointerdown (see `stage-undo-control.ts`). */
   onUndo?: () => void
+  /** Undo can run now (no scene switch or precise edit in flight); the stage
+   * also disables it for its own gesture or pending commit. */
+  undoEnabled?: boolean
 }): ReactElement {
   const sources = scene?.sources ?? []
   const stageH =
@@ -350,6 +357,10 @@ export function SceneStage({
     window.addEventListener('keydown', key, true)
     window.addEventListener('blur', cancelGesture)
     window.addEventListener('resize', measure)
+    // Any scroll moves the stage under the pointer, so the gesture ends. A
+    // page that shrinks at pointerdown scrolls too (a pane at its end clamps
+    // its scrollTop): nothing on the page may change size when a gesture
+    // starts (the footer's Undo, the inspector's copy; see stage-undo-control).
     window.addEventListener('scroll', cancelGesture, true)
     return () => {
       mountedRef.current = false
@@ -823,7 +834,14 @@ export function SceneStage({
                   width = rect.width * STAGE_W,
                   height = rect.height * stageH
                 // The source's name on the schematic (plan 174 S3.9, C-34),
-                // clipped to its own box; a box too short for the chip has none.
+                // clipped to its own box; a box too short for the chip has
+                // none. It is a SIBLING of the source group, drawn right after
+                // it (so it stays under later sources): a clip hides the
+                // overflow of a long name in a narrow box, but SVG bounds
+                // ignore clips, and inside the group the name would widen
+                // the rect that `[data-videorc-stage-source]` reports to the
+                // smokes and probes as the source's own box (the portrait
+                // freeform matrix measured 79 px for a 43 px source).
                 const labelClipId = `${clipId}-source-${index}`
                 const labelled = height >= chipH + 2 * padPx
                 const shape = stageSourceShape(
@@ -846,57 +864,58 @@ export function SceneStage({
                   pointerEvents: 'none'
                 }
                 return (
-                  <g
-                    key={source.id}
-                    data-videorc-stage-source={source.id}
-                    className={
-                      dragEnabled && editable(source)
-                        ? 'cursor-grab active:cursor-grabbing'
-                        : 'cursor-default'
-                    }
-                    onClick={(event) => {
-                      if (
-                        event.button === 0 &&
-                        !externalPending &&
-                        (!edits.draft || edits.draft.sourceId === source.id)
-                      )
-                        onSelectSource(source.id)
-                    }}
-                    onPointerDown={(event) => beginGesture(source, 'move', event)}
-                  >
-                    {/* The transform owns picking and selection, including the
+                  <Fragment key={source.id}>
+                    <g
+                      data-videorc-stage-source={source.id}
+                      className={
+                        dragEnabled && editable(source)
+                          ? 'cursor-grab active:cursor-grabbing'
+                          : 'cursor-default'
+                      }
+                      onClick={(event) => {
+                        if (
+                          event.button === 0 &&
+                          !externalPending &&
+                          (!edits.draft || edits.draft.sourceId === source.id)
+                        )
+                          onSelectSource(source.id)
+                      }}
+                      onPointerDown={(event) => beginGesture(source, 'move', event)}
+                    >
+                      {/* The transform owns picking and selection, including the
                       empty corners around a circular camera mask. */}
-                    <rect
-                      data-videorc-stage-bounds
-                      x={rect.x * STAGE_W}
-                      y={rect.y * stageH}
-                      width={width}
-                      height={height}
-                      fill="transparent"
-                    />
-                    {shape.kind === 'circle' ? (
-                      <circle
-                        data-videorc-stage-painted-shape="circle"
-                        cx={shape.cx}
-                        cy={shape.cy}
-                        r={shape.r}
-                        {...paint}
-                      />
-                    ) : (
                       <rect
-                        data-videorc-stage-painted-shape={
-                          source.kind === 'camera' ? cameraShape : 'rectangle'
-                        }
-                        x={shape.x}
-                        y={shape.y}
-                        width={shape.width}
-                        height={shape.height}
-                        rx={shape.rx}
-                        {...paint}
+                        data-videorc-stage-bounds
+                        x={rect.x * STAGE_W}
+                        y={rect.y * stageH}
+                        width={width}
+                        height={height}
+                        fill="transparent"
                       />
-                    )}
+                      {shape.kind === 'circle' ? (
+                        <circle
+                          data-videorc-stage-painted-shape="circle"
+                          cx={shape.cx}
+                          cy={shape.cy}
+                          r={shape.r}
+                          {...paint}
+                        />
+                      ) : (
+                        <rect
+                          data-videorc-stage-painted-shape={
+                            source.kind === 'camera' ? cameraShape : 'rectangle'
+                          }
+                          x={shape.x}
+                          y={shape.y}
+                          width={shape.width}
+                          height={shape.height}
+                          rx={shape.rx}
+                          {...paint}
+                        />
+                      )}
+                    </g>
                     {labelled ? (
-                      <>
+                      <g pointerEvents="none">
                         <clipPath id={labelClipId}>
                           <rect
                             x={rect.x * STAGE_W}
@@ -911,7 +930,6 @@ export function SceneStage({
                             liveSurface && 'invisible'
                           )}
                           clipPath={`url(#${labelClipId})`}
-                          pointerEvents="none"
                           transform={`translate(${rect.x * STAGE_W + padPx} ${rect.y * stageH + padPx})`}
                         >
                           <text
@@ -926,9 +944,9 @@ export function SceneStage({
                             {source.name}
                           </text>
                         </g>
-                      </>
+                      </g>
                     ) : null}
-                  </g>
+                  </Fragment>
                 )
               })}
               {/* Overlay items (plan 164, D15): a second item layer after the
@@ -1146,10 +1164,20 @@ export function SceneStage({
         </div>
         <div className="flex h-7 items-center gap-1">
           {/* Single-level undo of the last layout change (plan 174 S3.9,
-              D15), here for the mouse; the key works anywhere on the page. */}
+              D15), here for the mouse; the key works anywhere on the page.
+              Disabled, never unmounted, for a gesture or a commit in flight:
+              a footer that reflows at pointerdown shrinks the page, a pane
+              scrolled to its end clamps its scrollTop, and that scroll is
+              the one the listener above cancels the gesture on. */}
           {onUndo ? (
             <>
-              <Button data-videorc-stage-undo size="sm" variant="ghost" onClick={onUndo}>
+              <Button
+                data-videorc-stage-undo
+                disabled={!undoEnabled || phase !== 'idle'}
+                size="sm"
+                variant="ghost"
+                onClick={onUndo}
+              >
                 Undo
                 <ShortcutKeys accelerator="CmdOrCtrl+Z" />
               </Button>
