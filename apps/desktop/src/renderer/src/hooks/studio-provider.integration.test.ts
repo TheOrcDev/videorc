@@ -116,6 +116,7 @@ import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlement
 import type { SessionStopOrigin } from '../lib/session-stop'
 import {
   buildCameraSources,
+  buildMicrophoneSources,
   defaultCaptureConfig,
   STORAGE_KEYS,
   videoPresets,
@@ -4943,6 +4944,74 @@ describe('real StudioProvider lifecycle', () => {
     expect(sent).toEqual(['devices.list'])
     expect(latest().deviceList.devices.some((device) => device.id === 'camera:plugged')).toBe(true)
   })
+
+  // Plan 0027: a scene click (any layout transaction) or a device refresh
+  // must not turn a microphone set to None back on before the next take.
+  it('keeps Microphone None through scene clicks, device refresh and a recording', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await waitForObservation(() => latest().captureConfig.sources.microphoneId === 'mic:1')
+    const microphones = latest().deviceList.devices.filter((device) => device.kind === 'microphone')
+    await act(async () =>
+      latest().switchSourceDeviceLive(
+        'microphone',
+        buildMicrophoneSources(latest().captureConfig.sources, microphones, undefined)
+      )
+    )
+    await waitForObservation(() => latest().captureConfig.sources.microphoneOff === true)
+    const scenesFrom = backend.sentCommands.length
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () => latest().captureConfig.layout.layoutPreset === 'screen-only' && latest().canSaveScene
+    )
+    // The same scene again: still a layout transaction that reconciles sources.
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(() => latest().canSaveScene)
+    expect(latest().captureConfig.sources.microphoneId).toBeUndefined()
+    expect(latest().captureConfig.sources.microphoneOff).toBe(true)
+    for (const command of backend.sentCommands.slice(scenesFrom)) {
+      if (!command.method.startsWith('scene.layout.apply_')) continue
+      const sources = (command.params as { sources?: { microphoneId?: string } }).sources
+      expect(sources?.microphoneId).toBeUndefined()
+    }
+    backend.deviceList.devices.unshift({
+      id: 'mic:new',
+      name: 'USB Microphone',
+      kind: 'microphone',
+      status: 'available'
+    })
+    await act(async () => latest().refreshBackend({ fresh: true }))
+    expect(latest().captureConfig.sources.microphoneId).toBeUndefined()
+    await act(async () => latest().startSession())
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(
+      (start?.params as { sources?: { microphoneId?: string } }).sources?.microphoneId
+    ).toBeUndefined()
+    expect(backend.confirmedSources.microphoneId).toBeUndefined()
+    await act(async () => {
+      expect(await latest().stopSession()).toBe(true)
+    })
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'idle')
+    expect(latest().captureConfig.sources.microphoneOff).toBe(true)
+    expect(latest().captureConfig.sources.microphoneId).toBeUndefined()
+  }, 15_000)
 
   it('restores saved Camera Off after On through device discovery and a finished session', async () => {
     const backend = new StudioBackend()

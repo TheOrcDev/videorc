@@ -1067,6 +1067,7 @@ const sourceSelectionSchema = objectSchema(
     cameraOff: optionalSchema(booleanSchema),
     microphoneId: optionalText,
     microphoneName: optionalText,
+    microphoneOff: optionalSchema(booleanSchema),
     testPattern: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
