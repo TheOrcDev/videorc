@@ -1,4 +1,5 @@
 import type { CohostAvatarState, CohostBubbleStyle, CohostPersona } from './backend'
+import { BUDDY_DEFAULT_OFFICIAL_ID, officialBuddy } from '../../../shared/buddy-library'
 import { BUDDY_MOTION_DEFAULTS } from '../../../shared/buddy-pet'
 
 // The Buddy creation screen (plan 164 S-A4): pure derivations the section
@@ -43,6 +44,15 @@ export function buddyNameToSave(draft: string): string | null {
   return [...name].length > BUDDY_NAME_MAX_CHARS ? null : name
 }
 
+/**
+ * What the default Buddy wears (plan 172 D5): Alive with the pack the app
+ * ships with it, as a fresh install and Use on its official card give.
+ */
+function defaultBuddyAvatar(): CohostPersona['avatar'] {
+  const alive = officialBuddy(BUDDY_DEFAULT_OFFICIAL_ID)?.alive
+  return alive?.bundled ? { kind: 'alive', packId: alive.packId } : { kind: 'still' }
+}
+
 /** A fresh persona for "Start over": a new id, the default name and pack. */
 export function freshBuddyPersona(id: string): CohostPersona {
   return {
@@ -52,7 +62,7 @@ export function freshBuddyPersona(id: string): CohostPersona {
     bubbleStyle: 'speech',
     images: {},
     source: 'default',
-    avatar: { kind: 'still' },
+    avatar: defaultBuddyAvatar(),
     motion: { ...BUDDY_MOTION_DEFAULTS },
     reactions: {}
   }

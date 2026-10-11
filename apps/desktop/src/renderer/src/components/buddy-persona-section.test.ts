@@ -207,5 +207,10 @@ describe('BuddyPersonaSection', () => {
     )[0]
     expect(saved.persona.id).not.toBe('p-1')
     expect(saved.persona).toMatchObject({ name: 'Buddy', images: {}, source: 'default' })
+    // Plan 172 D5 (QA 2026-10-11): the fresh Buddy is the default one, Alive
+    // with the pack the app ships, as on a fresh install and as Use on the
+    // official Buddy card gives; it used to come back Still while its card
+    // said Alive.
+    expect(saved.persona.avatar).toEqual({ kind: 'alive', packId: 'bundled:buddy' })
   })
 })
