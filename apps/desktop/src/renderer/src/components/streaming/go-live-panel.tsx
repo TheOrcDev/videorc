@@ -326,13 +326,14 @@ export function ReadyToGoLive({
       ) : null}
       {ffmpegReady ? null : (
         // A row that goes where FFmpeg is fixed (D-24), like Studio's
-        // "Videorc's recorder isn't available".
+        // "Videorc's recorder isn't available": Health, since S3.6 removed
+        // Settings → Recording.
         <NavigableRow
           className="-mx-3 w-[calc(100%+1.5rem)]"
           icon={AlertIcon}
           label="FFmpeg"
           value="Missing"
-          onNavigate={() => openWorkspaceTab('settings', 'recording')}
+          onNavigate={() => openWorkspaceTab('diagnostics')}
         />
       )}
     </PanelSection>
