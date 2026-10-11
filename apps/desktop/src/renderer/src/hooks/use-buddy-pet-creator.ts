@@ -57,6 +57,14 @@ const INITIAL: BuddyPetCreatorState = {
   saved: null
 }
 
+/**
+ * Creations whose sheets this window is making. The loop runs in the
+ * creator, which closes with the Buddy tab: a creator opened again picks the
+ * loop up where it was instead of waiting at "Make the sheets" (QA
+ * 2026-10-11). It lives as long as the window.
+ */
+const sheetsWanted = new Set<string>()
+
 /** The accept calls answer at once; the long work rides events. */
 const ACCEPT_TIMEOUT_MS = 15_000
 const START_TIMEOUT_MS = 25_000
@@ -121,9 +129,19 @@ export function createBuddyPetCreatorController(
         { timeoutMs: ACCEPT_TIMEOUT_MS }
       )
       set({ loading: false, creation: status.creation })
+      resumeSheets()
     } catch (error) {
       set({ loading: false, problem: problemOf(error) })
     }
+  }
+
+  /** A creation this window was making sheets for, seen by a fresh
+   * controller: carry on (the sheet in flight, if any, continues it). */
+  const resumeSheets = (): void => {
+    const creation = state.creation
+    if (disposed || state.autoSheets || !creation || !sheetsWanted.has(creation.buildId)) return
+    set({ autoSheets: true })
+    if (!creation.running) void continueSheets()
   }
 
   const generate = async (
@@ -161,6 +179,7 @@ export function createBuddyPetCreatorController(
         sheetErrors: { ...state.sheetErrors, [key]: problem.message },
         problem
       })
+      sheetsWanted.delete(id)
       autoBuild = false
       return false
     }
@@ -191,6 +210,7 @@ export function createBuddyPetCreatorController(
       await generate(next.key, false)
       return
     }
+    sheetsWanted.delete(creation.buildId)
     set({ autoSheets: false })
     if (!creation.build?.fresh) await build()
   }
@@ -207,6 +227,7 @@ export function createBuddyPetCreatorController(
       if (event.error) {
         sheetErrors[event.sheet] = event.error.message
         autoBuild = false
+        sheetsWanted.delete(event.buildId)
         set({ pending: null, autoSheets: false, sheetErrors, problem: event.error })
         void refresh()
         return
@@ -286,6 +307,8 @@ export function createBuddyPetCreatorController(
       await generate('pilot', false, notes)
     },
     makeSheets: async () => {
+      const id = buildId()
+      if (id) sheetsWanted.add(id)
       set({ autoSheets: true, sheetErrors: {} })
       await continueSheets()
     },
@@ -314,6 +337,7 @@ export function createBuddyPetCreatorController(
     cancel: async () => {
       const id = buildId()
       if (!id) return
+      sheetsWanted.delete(id)
       set({ pending: 'cancel', problem: null, autoSheets: false })
       autoBuild = false
       try {

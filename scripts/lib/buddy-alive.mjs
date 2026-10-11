@@ -10,7 +10,10 @@
 // with the web source before any generation; change both together and bump
 // the version on both sides for any wording change.
 
-import { join } from 'node:path'
+// Paths stay forward-slashed on every OS (tests pin them; Windows CI);
+// Windows accepts forward slashes in file paths.
+import { posix } from 'node:path'
+const { join } = posix
 import { BUDDY_HOUSE_STYLE } from './buddy-official.mjs'
 
 /**

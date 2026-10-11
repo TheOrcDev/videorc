@@ -422,7 +422,10 @@ export function BuddyPetCreator({
           />
         ) : step === 'save' ? (
           <SaveStep
-            description={buddyPetSaveDescription(persona)}
+            description={buddyPetSaveDescription(
+              persona,
+              connection.capabilities ?? aiCapabilities ?? null
+            )}
             disabled={controlsOff || working}
             name={name}
             onBack={() => setNaming(false)}

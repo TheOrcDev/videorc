@@ -130,27 +130,32 @@ describe('buddyPetCreatorGate (plan 168 S-F5; the one gate model of plan 174 G-5
   })
 })
 
-describe('buddyPetSaveDescription (plan 174 G-6)', () => {
+describe('buddyPetSaveDescription (plan 174 G-6; plan 172 D10, QA 2026-10-11)', () => {
   const wears = 'wears them right away; switch back to Still any time.'
+  const keeps = { cohost: { tick: 4, buddyLibrary: { alive: true } } } as unknown as AiCapabilities
+  const linked = { name: 'Grum', libraryAvatarId: '2f1c8e4a-5b6d-4c7e-8f90-a1b2c3d4e5f6' }
 
-  it('says the moves join the account for a Buddy the streamer made, in the library', () => {
-    expect(
-      buddyPetSaveDescription({
-        name: 'Grum',
-        libraryAvatarId: '2f1c8e4a-5b6d-4c7e-8f90-a1b2c3d4e5f6'
-      })
-    ).toBe(
+  it('says the moves join the account for a Buddy the streamer made, in the library, when the web keeps them', () => {
+    // QA 2026-10-11: saving Ember QA's moves said "Kept on this computer."
+    // while the app sent them to the account library.
+    expect(buddyPetSaveDescription(linked, keeps)).toBe(
       `Saved on this computer and in your Videorc account, so Grum moves on any computer. Grum ${wears}`
     )
   })
 
-  it('keeps them on this computer for an official Buddy or one made only here', () => {
-    expect(buddyPetSaveDescription({ name: 'Nib', libraryAvatarId: 'official:orc' })).toBe(
+  it('keeps them on this computer for an official Buddy, one made only here, or a web that keeps no packs', () => {
+    expect(buddyPetSaveDescription({ name: 'Nib', libraryAvatarId: 'official:orc' }, keeps)).toBe(
       `Saved on this computer. Nib ${wears}`
     )
-    expect(buddyPetSaveDescription({ name: 'Mossback' })).toBe(
+    expect(buddyPetSaveDescription({ name: 'Mossback' }, keeps)).toBe(
       `Saved on this computer. Mossback ${wears}`
     )
+    expect(
+      buddyPetSaveDescription(linked, {
+        cohost: { tick: 4, buddyLibrary: { alive: false } }
+      } as unknown as AiCapabilities)
+    ).toBe(`Saved on this computer. Grum ${wears}`)
+    expect(buddyPetSaveDescription(linked, null)).toBe(`Saved on this computer. Grum ${wears}`)
     expect(buddyPetSaveDescription(null)).toBe(`Saved on this computer. Buddy ${wears}`)
   })
 })

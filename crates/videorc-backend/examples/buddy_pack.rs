@@ -5,9 +5,9 @@
 //! (`load_pack_dir`), so a pack this prints `ok` for is a pack the app opens.
 //!
 //! ```sh
-//! cargo run -p videorc-backend --example buddy_pack -- <sources> <out> \
+//! cargo run -p videorc-backend --features buddy-pack-example --example buddy_pack -- <sources> <out> \
 //!   [--name <name>] [--cell-size <px>] [--created-at <rfc3339>] [--json]
-//! cargo run -p videorc-backend --example buddy_pack -- --verify <pack> [--json]
+//! cargo run -p videorc-backend --features buddy-pack-example --example buddy_pack -- --verify <pack> [--json]
 //! ```
 //!
 //! `<sources>` holds the reference and the generated sheets the way a

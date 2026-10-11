@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { BuddyAvatarSection, type BuddyAvatarView } from '@/components/buddy-avatar-section'
 import { BuddyLookSection } from '@/components/buddy-look-section'
@@ -6,10 +6,11 @@ import { BuddyMotionSection } from '@/components/buddy-motion-section'
 import type { BuddyPetPreviewHandle, BuddyPetPreviewInfo } from '@/components/buddy-pet-preview'
 import { BuddyReactionsSection } from '@/components/buddy-reactions-section'
 import { ConfigGrid } from '@/components/page'
+import { useBuddyLibrary } from '@/hooks/use-buddy-library'
 import { useBuddyLook, useBuddyLookClient } from '@/hooks/use-buddy-look'
 import { useBuddyPets, type BuddyPets } from '@/hooks/use-buddy-pets'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { CohostPersona, BuddyPetImportResult } from '@/lib/backend'
+import type { BuddyLibraryState, CohostPersona, BuddyPetImportResult } from '@/lib/backend'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
 import { buddyPackToWear, writeBuddyWornPack } from '@/lib/buddy-worn-pack'
 import { BUDDY_STILL_REACTION_IDS, type BuddyMotionSettings } from '../../../shared/buddy-pet'
@@ -22,19 +23,31 @@ import { BUDDY_STILL_REACTION_IDS, type BuddyMotionSettings } from '../../../sha
  */
 export function BuddyPetSettings({
   pets: injectedPets,
+  library: injectedLibrary,
   importFolder
 }: {
   /** Tests inject the pack list; the app reads `cohost.pet.list`. */
   pets?: BuddyPets
+  /** Tests inject the account library; the app shares the Buddy tab's client. */
+  library?: BuddyLibraryState | null
   importFolder?: (personaId: string) => Promise<BuddyPetImportResult | null>
 }): ReactElement | null {
   const { cohostSettings, patchCohostSettings } = useStudioCore()
   const connectedPets = useBuddyPets()
   const pets = injectedPets ?? connectedPets
+  const client = useBuddyLookClient()
+  const { state: libraryState } = useBuddyLibrary(injectedLibrary === undefined ? client : null)
+  const library = injectedLibrary === undefined ? libraryState.library : injectedLibrary
   const persona = cohostSettings?.persona ?? null
+  // The pack the account keeps for the linked Buddy (plan 172 D10): removing
+  // it here removes it there too, and the confirm says so.
+  const accountPackId =
+    (persona?.libraryAvatarId &&
+      library?.mine?.find((entry) => entry.id === persona.libraryAvatarId)?.alive?.packId) ||
+    null
   // The Still panel's look (shared with My Buddies): Alive says when a new
   // one is being drawn or waits under Still (plan 174 G-10).
-  const { state: look } = useBuddyLook(useBuddyLookClient())
+  const { state: look } = useBuddyLook(client)
   const lookPending =
     look.pending === 'create' || look.running?.kind === 'create'
       ? 'working'
@@ -47,6 +60,20 @@ export function BuddyPetSettings({
   const [aliveDraft, setAliveDraft] = useState(false)
   const [motionDraft, setMotionDraft] = useState<BuddyMotionSettings | null>(null)
   const [previewInfo, setPreviewInfo] = useState<BuddyPetPreviewInfo | null>(null)
+  // The list is read when the tab opens, but the backend also installs packs
+  // by itself: an official Buddy's first use downloads its pack, a library
+  // Buddy brings its own, the creator saves one. When the Buddy wears a pack
+  // the list does not have, list again (once for that pack), so its row
+  // shows checked and Remove works without reopening the tab.
+  const wornNow = persona?.avatar.kind === 'alive' ? persona.avatar.packId : null
+  const unlistedPackId =
+    wornNow !== null && pets.packs !== null && !pets.packs.some((pack) => pack.packId === wornNow)
+      ? wornNow
+      : null
+  const relistPets = pets.refresh
+  useEffect(() => {
+    if (unlistedPackId) void relistPets()
+  }, [unlistedPackId, relistPets])
   if (!persona) return null
 
   const save = (next: CohostPersona): Promise<void> => patchCohostSettings({ persona: next })
@@ -86,6 +113,7 @@ export function BuddyPetSettings({
   return (
     <>
       <BuddyAvatarSection
+        accountPackId={accountPackId}
         importFolder={importFolder}
         lookPending={lookPending}
         motion={motionDraft ?? persona.motion}
