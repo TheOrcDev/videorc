@@ -1,83 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { AiCapabilities, CohostAvatarDraft } from './backend'
-import type { EntitlementUiGate } from './entitlement-ui'
+import type { CohostAvatarDraft } from './backend'
 import {
   BUDDY_LOOK_PICTURE_SIZE_ERROR,
   BUDDY_LOOK_PICTURE_TOO_LARGE,
   BUDDY_LOOK_PICTURE_TYPE_ERROR,
   BUDDY_LOOK_SEND_MAX_BYTES,
-  buddyLookAvailability,
   buddyLookDraftImages,
   buddyLookFit,
   prepareBuddyLookPicture,
   type BuddyLookPictureDeps
 } from './buddy-look-view'
-import {
-  BUDDY_GENERATE_CONSENT_OFF,
-  BUDDY_GENERATE_NOT_AVAILABLE,
-  BUDDY_GENERATE_QUOTA,
-  BUDDY_GENERATE_SIGNED_OUT
-} from './buddy-persona-view'
 
-const premium: EntitlementUiGate = { allowed: true }
-const basic: EntitlementUiGate = {
-  allowed: false,
-  featureId: 'live-cohost',
-  reason: 'Buddy requires Videorc Premium.',
-  upgradeUrl: 'https://www.videorc.com/premium'
-}
-const left = (remainingToday: number): AiCapabilities =>
-  ({
-    cohost: { tick: 4, avatar: { enabled: true, remainingToday, dailyLimit: 24 } }
-  }) as unknown as AiCapabilities
-
-describe('buddyLookAvailability (plan 169 D13)', () => {
-  const on = { signedIn: true, gate: premium, consented: true, capabilities: left(24) }
-
-  it('names the one reason Create is off, in the order a streamer fixes them', () => {
-    expect(buddyLookAvailability(on)).toEqual({
-      allowed: true,
-      redoAllowed: true,
-      reason: null,
-      remaining: 24
-    })
-    expect(buddyLookAvailability({ ...on, signedIn: false }).reason).toBe(BUDDY_GENERATE_SIGNED_OUT)
-    expect(buddyLookAvailability({ ...on, gate: basic }).reason).toBe(basic.reason)
-    expect(buddyLookAvailability({ ...on, consented: false }).reason).toBe(
-      BUDDY_GENERATE_CONSENT_OFF
-    )
-    expect(buddyLookAvailability({ ...on, capabilities: null }).reason).toBe(
-      BUDDY_GENERATE_NOT_AVAILABLE
-    )
-    expect(
-      buddyLookAvailability({
-        ...on,
-        capabilities: {
-          cohost: { avatar: { enabled: false, remainingToday: 24, dailyLimit: 24 } }
-        } as AiCapabilities
-      }).reason
-    ).toBe(BUDDY_GENERATE_NOT_AVAILABLE)
-    expect(buddyLookAvailability({ ...on, capabilities: left(0) }).reason).toBe(
-      BUDDY_GENERATE_QUOTA
-    )
-  })
-
-  it('needs four images for a new look and one for a redo', () => {
-    const three = buddyLookAvailability({ ...on, capabilities: left(3) })
-    expect(three).toEqual({
-      allowed: false,
-      redoAllowed: true,
-      reason: 'A new look uses 4 images; 3 images left today.',
-      remaining: 3
-    })
-    expect(buddyLookAvailability({ ...on, capabilities: left(1) }).reason).toBe(
-      'A new look uses 4 images; 1 image left today.'
-    )
-    expect(buddyLookAvailability({ ...on, capabilities: left(0) }).redoAllowed).toBe(false)
-    expect(buddyLookAvailability({ ...on, capabilities: left(4) }).allowed).toBe(true)
-  })
-})
+// Whether a look can be made is the one gate model (`buddy-create-gate.ts`,
+// plan 174 G-5) and its tests.
 
 describe('buddyLookDraftImages', () => {
   const draft: CohostAvatarDraft = {

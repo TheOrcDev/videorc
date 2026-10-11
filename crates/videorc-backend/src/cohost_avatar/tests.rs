@@ -763,6 +763,69 @@ async fn buddy_look_failed_idle_leaves_no_draft() {
 }
 
 #[tokio::test]
+async fn buddy_look_cancel_during_create_drops_the_late_pictures() {
+    // Plan 174 G-14: a discard of the running create's id cancels it. The
+    // web's answer, arriving later, lands nowhere, and the run ends with a
+    // cancelled idle so the app stops waiting.
+    let state = test_state();
+    let root = temp_root();
+    let web = spawn_fake_web().await;
+    web.inner.lock().unwrap().delay = Duration::from_millis(400);
+    let env = env_for(&root, &web, Arc::new(AvatarShared::default()));
+    web.answer(Canned::Set {
+        round: 0,
+        made: ALL_STATES.to_vec(),
+    });
+    let mut events = state.events.subscribe();
+    let accepted = create_in(&state, env.clone(), describe("a golem"))
+        .await
+        .unwrap();
+    assert!(env.shared.running().is_some());
+    let status = discard_in(
+        &state,
+        env.clone(),
+        CohostAvatarRequestIdParams {
+            request_id: accepted.request_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    // The slot is free at once, before the web answers.
+    assert!(status.running.is_none());
+    assert!(status.draft.is_none());
+    assert!(env.shared.running().is_none());
+    let (progress, draft) = run_until_end(&mut events, None).await;
+    assert!(draft.is_none());
+    let last = progress.last().unwrap();
+    assert_eq!(last.state, CohostAvatarState::Idle);
+    assert_eq!(last.phase, CohostAvatarPhase::Failed);
+    assert_eq!(
+        last.error.as_ref().unwrap().code,
+        COHOST_AVATAR_CANCELLED,
+        "the late pictures are dropped as cancelled"
+    );
+    assert_eq!(web.seen().len(), 1);
+    assert!(draft_entries(&root).is_empty());
+    assert!(
+        draft_status_in(&state, env.clone())
+            .await
+            .unwrap()
+            .draft
+            .is_none()
+    );
+    // A new look can start right away.
+    web.inner.lock().unwrap().delay = Duration::ZERO;
+    web.answer(Canned::Set {
+        round: 1,
+        made: ALL_STATES.to_vec(),
+    });
+    let (second, _, made) = create_and_wait(&state, &env, describe("a goblin")).await;
+    assert_eq!(made.unwrap().request_id, second);
+    assert_eq!(draft_entries(&root), vec![second]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn buddy_look_restart_offers_the_draft_on_disk_again() {
     let state = test_state();
     let root = temp_root();

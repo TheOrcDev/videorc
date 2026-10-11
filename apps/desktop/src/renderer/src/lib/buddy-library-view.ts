@@ -4,7 +4,6 @@ import type {
   CohostPersona,
   BuddyLibraryState
 } from './backend'
-import type { EntitlementUiGate } from './entitlement-ui'
 import {
   BUDDY_ONBOARDING_GATES,
   BUDDY_ONBOARDING_STEP_COUNT,
@@ -14,8 +13,6 @@ import {
   buddyLibraryImporting,
   buddyOnboardingAllowance
 } from './buddy-onboarding-copy'
-import { BUDDY_GENERATE_NOT_AVAILABLE } from './buddy-persona-view'
-import { BUDDY_LOOK_CREATE_IMAGES } from './buddy-look-view'
 import {
   BUDDY_DEFAULT_OFFICIAL_ID,
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
@@ -412,67 +409,8 @@ export function buddyOnboardingCreateParams(
 }
 
 // --- Step 4's gates (D15) ----------------------------------------------------
-
-export type BuddyCreateGateAction = 'sign-in' | 'see-premium' | 'start-from-ours' | 'allow-cloud-ai'
-
-export interface BuddyCreateGate {
-  kind: 'signed-out' | 'premium' | 'cloud-ai' | 'full' | 'unavailable' | 'allowance'
-  line: string
-  actions: BuddyCreateGateAction[]
-}
-
-/**
- * Why "Create my Buddy" cannot run now, or null when it can. The checks run
- * in the order a streamer can fix them: the account, Premium, Cloud AI
- * consent, room in the library, a web that offers the look, then today's
- * images (a Buddy is four).
- */
-export function buddyCreateGate({
-  signedIn,
-  gate,
-  consented,
-  capabilities,
-  library
-}: {
-  signedIn: boolean
-  gate: EntitlementUiGate
-  consented: boolean
-  capabilities: Pick<AiCapabilities, 'cohost'> | null
-  library: Pick<BuddyLibraryState, 'limit' | 'mine'> | null
-}): BuddyCreateGate | null {
-  if (!signedIn) {
-    return { kind: 'signed-out', line: BUDDY_ONBOARDING_GATES.signedOut, actions: ['sign-in'] }
-  }
-  if (!gate.allowed) {
-    return {
-      kind: 'premium',
-      line: BUDDY_ONBOARDING_GATES.free,
-      actions: ['see-premium', 'start-from-ours']
-    }
-  }
-  if (!consented) {
-    return {
-      kind: 'cloud-ai',
-      line: BUDDY_ONBOARDING_GATES.cloudAiOff,
-      actions: ['allow-cloud-ai']
-    }
-  }
-  if (buddyLibraryIsFull(capabilities, library)) {
-    return {
-      kind: 'full',
-      line: buddyLibraryFullLine(buddyLibraryLimit(capabilities, library)),
-      actions: []
-    }
-  }
-  const avatar = capabilities?.cohost?.avatar
-  if (!avatar?.enabled) {
-    return { kind: 'unavailable', line: BUDDY_GENERATE_NOT_AVAILABLE, actions: [] }
-  }
-  if (avatar.remainingToday < BUDDY_LOOK_CREATE_IMAGES) {
-    return { kind: 'allowance', line: BUDDY_ONBOARDING_GATES.allowanceUsed, actions: [] }
-  }
-  return null
-}
+// Why creating is off now lives in `buddy-create-gate.ts` (plan 174 G-5): one
+// model for the look and the Alive creator.
 
 /** "Uses 4 of your 20 images left today.", when the web reported today's images. */
 export function buddyOnboardingAllowanceLine(
@@ -486,7 +424,8 @@ export function buddyOnboardingAllowanceLine(
 /**
  * The one line for a create that made nothing, by the web's code: a gate
  * the app could not see coming gets the gate's own line, anything else the
- * plain failure (a failed idle meters nothing).
+ * plain failure (a failed idle meters nothing). A create the streamer
+ * cancelled (plan 174 G-14) says nothing: they asked for it.
  */
 export function buddyCreateFailureLine(
   problem: { code: string } | null,
@@ -494,6 +433,8 @@ export function buddyCreateFailureLine(
 ): string | null {
   if (!problem) return null
   switch (problem.code) {
+    case 'cohost-avatar-cancelled':
+      return null
     case 'buddy-library-full':
       return buddyLibraryFullLine(limit)
     case 'quota-exhausted':

@@ -5,8 +5,7 @@ import {
   CloseIcon,
   DeleteIcon,
   ImageIcon,
-  InfoIcon,
-  LockIcon,
+  ResetIcon,
   SparkleIcon
 } from '@/components/icons'
 import {
@@ -18,9 +17,16 @@ import {
   type ReactNode
 } from 'react'
 
-import { BuddyPoseTiles, type BuddyPoseTilesCopy } from '@/components/buddy-look-tiles'
+import { BuddyCreateGateAlert } from '@/components/buddy-create-gate-alert'
+import { BuddyExampleChips } from '@/components/buddy-example-chips'
+import {
+  BuddyLookWorkingLine,
+  BuddyPoseTiles,
+  type BuddyPoseTilesCopy
+} from '@/components/buddy-look-tiles'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import { BuddyStreamDemo } from '@/components/buddy-stream-demo'
+import { CloudAiConsentDialog } from '@/components/cloud-ai-consent-dialog'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { GroupedList } from '@/components/list-row'
 import { Alert, AlertTitle } from '@/components/ui/alert'
@@ -29,7 +35,6 @@ import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle
@@ -40,15 +45,19 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { Spinner } from '@/components/ui/spinner'
-import { useVideorcAccount } from '@/hooks/use-account'
 import type { BuddyLibraryController } from '@/hooks/use-buddy-library'
 import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyLibraryState } from '@/lib/backend'
 import {
+  buddyImagesLeftLine,
+  buddyLookCreateGate,
+  buddyLookRedoGate,
+  type BuddyCreateGate
+} from '@/lib/buddy-create-gate'
+import {
   EMPTY_BUDDY_ONBOARDING_INPUT,
   buddyCreateFailureLine,
-  buddyCreateGate,
   buddyLibraryLimit,
   buddyLibraryView,
   buddyOnboardingAllowanceLine,
@@ -59,19 +68,26 @@ import {
   buddyOnboardingName,
   buddyOnboardingReachable,
   buddyTextLength,
-  type BuddyCreateGate,
   type BuddyLibraryCard,
   type BuddyOnboardingInput,
   type BuddyOnboardingStep
 } from '@/lib/buddy-library-view'
 import {
   BUDDY_LOOK_PICTURE_TYPES,
-  buddyLookAvailability,
   buddyLookDraftImages,
   prepareBuddyLookPicture,
   type BuddyLookPicture
 } from '@/lib/buddy-look-view'
 import { BUDDY_OFFICIAL_ART } from '@/lib/buddy-official-art'
+import {
+  buddyOnboardingDraftDirty,
+  clearBuddyOnboardingDraft,
+  patchBuddyOnboardingDraft,
+  patchBuddyOnboardingInput,
+  readBuddyOnboardingDraft,
+  useBuddyOnboardingDraft,
+  type BuddyOnboardingPicture
+} from '@/lib/buddy-onboarding-store'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
 import {
@@ -88,11 +104,8 @@ import {
   buddyOnboardingCounter,
   buddyOnboardingProgress
 } from '@/lib/buddy-onboarding-copy'
-import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
-import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
-import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import {
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
   BUDDY_LIBRARY_DESCRIPTION_MAX_CHARS,
@@ -112,17 +125,14 @@ const ONBOARDING_TILES_COPY: BuddyPoseTilesCopy = {
   failed: () => BUDDY_ONBOARDING_STEP4.poseFailed
 }
 
-interface ChosenPicture {
-  name: string
-  /** An object URL of the original file, for the thumbnail. */
-  url: string
-  prepared: BuddyLookPicture
-}
+/** "Start a new one" (plan 174 G-13): leave the waiting Buddy and begin again. */
+const START_NEW_LABEL = 'Start a new one'
 
 export interface BuddyOnboardingProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** Bumped by every open: the sheet starts again at `initialStep`, or at
+  /** Bumped by every open: the sheet reopens where the streamer left it (as far
+   * as what they typed allows), at `initialStep` when nothing was typed, or at
    * step 4 while a Buddy is being made or waits as a draft. */
   openNonce: number
   initialStep?: BuddyOnboardingStep
@@ -135,16 +145,29 @@ export interface BuddyOnboardingProps {
   preparePicture?: (file: File) => Promise<BuddyLookPicture>
 }
 
+/** Where a fresh open lands: step 4 for a Buddy in progress, else where the typing left off. */
+function reopenStep(inProgress: boolean, initialStep: BuddyOnboardingStep): BuddyOnboardingStep {
+  if (inProgress) return 4
+  const stored = readBuddyOnboardingDraft()
+  return buddyOnboardingDraftDirty(stored)
+    ? buddyOnboardingReachable(stored.step, stored.input)
+    : initialStep
+}
+
 /**
  * The four-step onboarding (plan 170 D14, D15), the same steps and words as
  * videorc.com/buddy/create: meet the sidekick (a live demo, the official
  * five, what it does), describe it (and an optional picture), give it a
  * personality, then create it. Step 4 is plan 169's look flow on the
- * account library: the four poses fill in, Redo remakes talk, laugh or
- * think, and "Use as my Buddy" keeps it; "Make it Alive" (plan 172 D12)
- * keeps it too, then opens the Alive creator with it. A full-height sheet
- * over the Buddy tab; what was typed survives closing it until a Buddy is
- * used.
+ * account library: the four poses fill in (Cancel stops waiting), Redo
+ * remakes talk, laugh or think for one image, and "Use as my Buddy" keeps
+ * it; "Make it Alive" (plan 172 D12) keeps it too, then opens the Alive
+ * creator with it. A full-height sheet over the Buddy tab.
+ *
+ * Plan 174 S3.15a: what was typed lives in `buddy-onboarding-store` (G-12),
+ * so a tab switch, a stray click outside the sheet or closing it loses
+ * nothing until a Buddy is used; why creating is off shows at step 1 with
+ * its one action (G-5); a waiting draft can be left for a new one (G-13).
  */
 export function BuddyOnboarding({
   open,
@@ -166,32 +189,41 @@ export function BuddyOnboarding({
     runtimeInfo,
     setAiConsent
   } = useStudioCore()
-  const { signIn } = useVideorcAccount()
   const connected = useBuddyLookClient()
   const client = injectedClient !== undefined ? injectedClient : connected
   const { state: look, controller: lookController } = useBuddyLook(client)
   const platform = runtimeInfo?.platform
   const sheetRef = useRef<HTMLDivElement>(null)
+  const stored = useBuddyOnboardingDraft()
+  const input = stored.input
+  const picture = stored.picture
 
   const creating = look.pending === 'create' || look.running?.kind === 'create'
+  // A draft the streamer left for a new one (G-13) is the look panel's, not this sheet's.
+  const draft = look.draft && look.draft.requestId !== stored.leftBehindDraftId ? look.draft : null
   const lookBusy = look.pending !== null || look.running !== null
-  const inProgress = creating || look.draft !== null
+  const inProgress = creating || draft !== null
 
-  const [step, setStep] = useState<BuddyOnboardingStep>(() => (inProgress ? 4 : initialStep))
+  const [step, setStepState] = useState<BuddyOnboardingStep>(() =>
+    reopenStep(inProgress, initialStep)
+  )
   const [appliedNonce, setAppliedNonce] = useState(openNonce)
   if (openNonce !== appliedNonce) {
     setAppliedNonce(openNonce)
-    setStep(inProgress ? 4 : initialStep)
+    setStepState(reopenStep(inProgress, initialStep))
   }
   // A Buddy being made or waiting as a draft is step 4's: the sheet goes
   // there when one shows up (the backend's state arriving, a job picked up).
   const [wasInProgress, setWasInProgress] = useState(inProgress)
   if (inProgress !== wasInProgress) {
     setWasInProgress(inProgress)
-    if (inProgress) setStep(4)
+    if (inProgress) setStepState(4)
   }
-  const [input, setInput] = useState<BuddyOnboardingInput>(EMPTY_BUDDY_ONBOARDING_INPUT)
-  const [picture, setPicture] = useState<ChosenPicture | null>(null)
+  const setStep = (next: BuddyOnboardingStep): void => {
+    setStepState(next)
+    patchBuddyOnboardingDraft({ step: next })
+  }
+
   const [preparing, setPreparing] = useState(false)
   const [pictureError, setPictureError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -201,26 +233,20 @@ export function BuddyOnboarding({
   const [deleteOpen, setDeleteOpen] = useState(false)
   const draftName =
     buddyOnboardingName(input.name) ??
-    library?.mine?.find((entry) => entry.id === look.draft?.libraryAvatarId)?.name ??
+    library?.mine?.find((entry) => entry.id === draft?.libraryAvatarId)?.name ??
     null
 
-  const patch = (next: Partial<BuddyOnboardingInput>): void =>
-    setInput((current) => ({ ...current, ...next }))
+  const patch = (next: Partial<BuddyOnboardingInput>): void => patchBuddyOnboardingInput(next)
 
   const capabilities = look.capabilities ?? aiCapabilities ?? null
-  const gate = buddyCreateGate({
-    signedIn: account?.status === 'signed-in',
-    gate: cohostGate,
-    consented: aiConsent,
-    capabilities,
-    library
-  })
-  const redoAllowed = buddyLookAvailability({
+  const gateInput = {
     signedIn: account?.status === 'signed-in',
     gate: cohostGate,
     consented: aiConsent,
     capabilities
-  }).redoAllowed
+  }
+  const gate = buddyLookCreateGate({ ...gateInput, library })
+  const redoGate = buddyLookRedoGate(gateInput)
 
   const goTo = (target: BuddyOnboardingStep): void => {
     setActionError(null)
@@ -254,7 +280,7 @@ export function BuddyOnboarding({
   /** Keep the draft as the Buddy; with `alive`, then open the Alive creator
    * with its idle as the reference and the description as notes. */
   const keepAsMyBuddy = async (alive = false): Promise<void> => {
-    if (!lookController || !look.draft || lookBusy) return
+    if (!lookController || !draft || lookBusy) return
     setActionError(null)
     const description = input.description.trim()
     const settings = await lookController.keep()
@@ -268,8 +294,7 @@ export function BuddyOnboarding({
     }
     void libraryController?.refresh()
     if (picture) URL.revokeObjectURL(picture.url)
-    setPicture(null)
-    setInput(EMPTY_BUDDY_ONBOARDING_INPUT)
+    clearBuddyOnboardingDraft()
     onOpenChange(false)
     if (alive) {
       openBuddyPetCreator({
@@ -277,6 +302,18 @@ export function BuddyOnboarding({
         ...(description ? { notes: description } : {})
       })
     }
+  }
+  /** Leave the waiting Buddy where it is (the look panel still offers it) and begin again. */
+  const startNew = (): void => {
+    if (!draft) return
+    if (picture) URL.revokeObjectURL(picture.url)
+    setActionError(null)
+    patchBuddyOnboardingDraft({
+      input: EMPTY_BUDDY_ONBOARDING_INPUT,
+      picture: null,
+      leftBehindDraftId: draft.requestId
+    })
+    setStep(2)
   }
   const pickOfficial = async (card: BuddyLibraryCard): Promise<void> => {
     if (!libraryController) return
@@ -295,9 +332,12 @@ export function BuddyOnboarding({
     setPreparing(true)
     try {
       const prepared = await preparePicture(file)
-      if (picture) URL.revokeObjectURL(picture.url)
-      setPicture({ name: file.name, url: URL.createObjectURL(file), prepared })
-      patch({ hasPicture: true })
+      const previous = readBuddyOnboardingDraft().picture
+      if (previous) URL.revokeObjectURL(previous.url)
+      patchBuddyOnboardingDraft({
+        picture: { name: file.name, url: URL.createObjectURL(file), prepared },
+        input: { ...readBuddyOnboardingDraft().input, hasPicture: true }
+      })
     } catch {
       setPictureError(BUDDY_ONBOARDING_STEP2.pictureUnreadable)
     } finally {
@@ -306,24 +346,26 @@ export function BuddyOnboarding({
   }
   const clearPicture = (): void => {
     if (picture) URL.revokeObjectURL(picture.url)
-    setPicture(null)
     setPictureError(null)
-    patch({ hasPicture: false })
+    patchBuddyOnboardingDraft({ picture: null, input: { ...input, hasPicture: false } })
   }
 
-  // ⌘↵ runs the step's primary action, as its key chip says.
+  // ⌘↵ runs the step's primary action, as its key chip says. Only from the
+  // sheet itself: a confirm or a menu over it keeps its own keys (G-19).
   const primary = (): void => {
-    if (step === 1) goTo(2)
+    if (step === 1) next()
     else if (step < 4) next()
-    else if (look.draft && !creating) void keepAsMyBuddy()
+    else if (draft && !creating) void keepAsMyBuddy()
     else create()
   }
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return
+    if (!event.currentTarget.contains(event.target as Node)) return
     event.preventDefault()
     primary()
   }
 
+  const dirty = buddyOnboardingDraftDirty(stored)
   const title = BUDDY_ONBOARDING_STEP_TITLES[step - 1]!
 
   return (
@@ -335,6 +377,11 @@ export function BuddyOnboarding({
         size="xl"
         data-step={step}
         data-testid="buddy-onboarding"
+        onInteractOutside={(event) => {
+          // A stray click outside never closes a sheet with typing in it, or
+          // one drawing a Buddy (G-12); Escape and the close button still do.
+          if (dirty || creating) event.preventDefault()
+        }}
         onKeyDown={onKeyDown}
         onOpenAutoFocus={(event) => {
           // The sheet itself takes the focus (⌘↵ works at once), never the
@@ -364,7 +411,9 @@ export function BuddyOnboarding({
           {step === 1 ? (
             <MeetStep
               busy={Boolean(library?.busy) || !libraryController}
+              gate={gate}
               library={library}
+              onAllowCloudAi={() => setConsentOpen(true)}
               onUse={(card) => void pickOfficial(card)}
             />
           ) : step === 2 ? (
@@ -385,24 +434,16 @@ export function BuddyOnboarding({
               busy={lookBusy}
               capabilities={capabilities}
               creating={creating}
+              draft={draft}
               gate={gate}
               input={input}
               limit={buddyLibraryLimit(capabilities, library)}
-              persona={cohostSettings?.persona ?? null}
               look={look}
               lookController={lookController}
+              persona={cohostSettings?.persona ?? null}
               picture={picture}
-              redoAllowed={redoAllowed}
+              redoGate={redoGate}
               onAllowCloudAi={() => setConsentOpen(true)}
-              onSeePremium={() =>
-                openVideorcWebLink(
-                  !cohostGate.allowed && cohostGate.upgradeUrl
-                    ? cohostGate.upgradeUrl
-                    : VIDEORC_PREMIUM_URL
-                )
-              }
-              onSignIn={signIn}
-              onStartFromOurs={() => goTo(1)}
             />
           )}
           {actionError ? (
@@ -427,17 +468,29 @@ export function BuddyOnboarding({
                 {BUDDY_ONBOARDING_BUTTONS.back}
               </Button>
             ) : null}
-            {step === 4 && look.draft && !creating ? (
-              <Button
-                data-testid="buddy-onboarding-discard"
-                disabled={!lookController || lookBusy}
-                type="button"
-                variant="ghost"
-                onClick={() => setDeleteOpen(true)}
-              >
-                <DeleteIcon data-icon="inline-start" />
-                Delete…
-              </Button>
+            {step === 4 && draft && !creating ? (
+              <>
+                <Button
+                  data-testid="buddy-onboarding-discard"
+                  disabled={!lookController || lookBusy}
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  <DeleteIcon data-icon="inline-start" />
+                  Delete…
+                </Button>
+                <Button
+                  data-testid="buddy-onboarding-start-new"
+                  disabled={lookBusy}
+                  type="button"
+                  variant="ghost"
+                  onClick={startNew}
+                >
+                  <ResetIcon data-icon="inline-start" />
+                  {START_NEW_LABEL}
+                </Button>
+              </>
             ) : null}
             <ConfirmDialog
               cancelLabel="Keep it"
@@ -452,11 +505,6 @@ export function BuddyOnboarding({
                 void lookController?.discard()
               }}
             />
-            {step === 1 ? (
-              <span className="text-xs text-muted-foreground">
-                {BUDDY_ONBOARDING_STEP1.premiumNote}
-              </span>
-            ) : null}
             {step === 2 && !canAdvance ? (
               <span className="text-xs text-muted-foreground" data-testid="buddy-onboarding-hint">
                 {BUDDY_ONBOARDING_STEP2.nextHint}
@@ -465,7 +513,7 @@ export function BuddyOnboarding({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {step === 1 ? (
-              <Button data-testid="buddy-onboarding-create-own" type="button" onClick={primary}>
+              <Button data-testid="buddy-onboarding-create-own" type="button" onClick={next}>
                 <SparkleIcon data-icon="inline-start" />
                 {BUDDY_ONBOARDING_STEP1.primary}
                 <ShortcutKeys
@@ -500,8 +548,19 @@ export function BuddyOnboarding({
                   />
                 </Button>
               </>
-            ) : look.draft && !creating ? (
+            ) : draft && !creating ? (
               <>
+                {/* The primary action sits rightmost (the G owner item). */}
+                <Button
+                  data-testid="buddy-onboarding-make-alive"
+                  disabled={!lookController || lookBusy}
+                  type="button"
+                  variant="outline"
+                  onClick={() => void keepAsMyBuddy(true)}
+                >
+                  <SparkleIcon data-icon="inline-start" />
+                  {BUDDY_ONBOARDING_STEP4.makeAlive}
+                </Button>
                 <Button
                   data-testid="buddy-onboarding-use"
                   disabled={!lookController || lookBusy}
@@ -514,16 +573,6 @@ export function BuddyOnboarding({
                     className="ml-0.5"
                     platform={platform}
                   />
-                </Button>
-                <Button
-                  data-testid="buddy-onboarding-make-alive"
-                  disabled={!lookController || lookBusy}
-                  type="button"
-                  variant="outline"
-                  onClick={() => void keepAsMyBuddy(true)}
-                >
-                  <SparkleIcon data-icon="inline-start" />
-                  {BUDDY_ONBOARDING_STEP4.makeAlive}
                 </Button>
               </>
             ) : (
@@ -551,6 +600,7 @@ export function BuddyOnboarding({
       </DialogContent>
       <CloudAiConsentDialog
         open={consentOpen}
+        testId="buddy-onboarding-consent"
         onAnswer={(accepted) => {
           setConsentOpen(false)
           if (accepted) setAiConsent(true)
@@ -593,11 +643,16 @@ function SubHeading({ children, note }: { children: ReactNode; note?: ReactNode 
 function MeetStep({
   library,
   busy,
-  onUse
+  gate,
+  onUse,
+  onAllowCloudAi
 }: {
   library: BuddyLibraryState | null
   busy: boolean
+  /** Why creating your own is off now (G-5): said here, before any typing. */
+  gate: BuddyCreateGate | null
   onUse: (card: BuddyLibraryCard) => void
+  onAllowCloudAi: () => void
 }): ReactElement {
   const official = buddyLibraryView({ library, persona: null }).official
   return (
@@ -678,6 +733,13 @@ function MeetStep({
           ))}
         </div>
       </section>
+      {gate ? (
+        <BuddyCreateGateAlert
+          data-testid="buddy-onboarding-gate"
+          gate={gate}
+          onAllowCloudAi={onAllowCloudAi}
+        />
+      ) : null}
     </div>
   )
 }
@@ -702,33 +764,6 @@ function Counter({ value, max }: { value: string; max: number }): ReactElement {
   )
 }
 
-function Chips({
-  examples,
-  onPick,
-  disabled = false
-}: {
-  examples: readonly string[]
-  onPick: (example: string) => void
-  disabled?: boolean
-}): ReactElement {
-  return (
-    <>
-      {examples.map((example) => (
-        <Button
-          key={example}
-          disabled={disabled}
-          size="xs"
-          type="button"
-          variant="outline"
-          onClick={() => onPick(example)}
-        >
-          {example}
-        </Button>
-      ))}
-    </>
-  )
-}
-
 function DescribeStep({
   input,
   picture,
@@ -740,7 +775,7 @@ function DescribeStep({
   onClear
 }: {
   input: BuddyOnboardingInput
-  picture: ChosenPicture | null
+  picture: BuddyOnboardingPicture | null
   preparing: boolean
   pictureError: string | null
   disabled: boolean
@@ -773,10 +808,12 @@ function DescribeStep({
           onChange={(event) => onPatch({ description: event.target.value })}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <Chips
+          <BuddyExampleChips
             disabled={disabled}
             examples={BUDDY_ONBOARDING_STEP2.examples}
-            onPick={(example) => onPatch({ description: example })}
+            value={input.description}
+            what="description"
+            onFill={(example) => onPatch({ description: example })}
           />
           <Counter max={BUDDY_LIBRARY_DESCRIPTION_MAX_CHARS} value={input.description.trim()} />
         </div>
@@ -908,9 +945,11 @@ function PersonalityStep({
           onChange={(event) => onPatch({ personality: event.target.value })}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <Chips
+          <BuddyExampleChips
             examples={BUDDY_ONBOARDING_STEP3.personalityExamples}
-            onPick={(example) => onPatch({ personality: example })}
+            value={input.personality}
+            what="personality"
+            onFill={(example) => onPatch({ personality: example })}
           />
           <Counter max={BUDDY_LIBRARY_PERSONALITY_MAX_CHARS} value={input.personality} />
         </div>
@@ -973,44 +1012,41 @@ function CreateStep({
   picture,
   look,
   lookController,
+  draft,
   creating,
   busy,
-  redoAllowed,
+  redoGate,
   gate,
   capabilities,
   limit,
-  onSignIn,
-  onSeePremium,
-  onStartFromOurs,
   onAllowCloudAi
 }: {
   input: BuddyOnboardingInput
   persona: CohostPersona | null
-  picture: ChosenPicture | null
+  picture: BuddyOnboardingPicture | null
   look: ReturnType<typeof useBuddyLook>['state']
   lookController: ReturnType<typeof useBuddyLook>['controller']
+  /** The draft this sheet offers (not one the streamer left for a new one). */
+  draft: ReturnType<typeof useBuddyLook>['state']['draft']
   creating: boolean
   busy: boolean
-  redoAllowed: boolean
+  redoGate: BuddyCreateGate | null
   gate: BuddyCreateGate | null
   capabilities: Parameters<typeof buddyOnboardingAllowanceLine>[0]
   limit: number
-  onSignIn: () => void
-  onSeePremium: () => void
-  onStartFromOurs: () => void
   onAllowCloudAi: () => void
 }): ReactElement {
-  const view = creating ? 'working' : look.draft ? 'draft' : 'empty'
+  const view = creating ? 'working' : draft ? 'draft' : 'empty'
   const failure = view === 'empty' ? buddyCreateFailureLine(look.problem, limit) : null
   const allowance = buddyOnboardingAllowanceLine(capabilities)
   const skipped = input.skipDetails
-  // A job picked up after the sheet was closed (or the app restarted) has no
-  // inputs here: its summary would only say "Not set".
   // The living preview is a bonus: a draft it cannot draw keeps the tiles
   // and the line, without an empty box.
-  const previewKey = look.draft ? `${look.draft.requestId}:${look.revision}` : null
+  const previewKey = draft ? `${draft.requestId}:${look.revision}` : null
   const [previewFailed, setPreviewFailed] = useState<string | null>(null)
   const showPreview = Boolean(persona) && previewKey !== null && previewFailed !== previewKey
+  // A job picked up after the sheet was closed (or the app restarted) has no
+  // inputs here: its summary would only say "Not set".
   const summary =
     view === 'empty' ||
     (view === 'working' && (buddyOnboardingHasLook(input) || input.name.trim().length > 0))
@@ -1054,21 +1090,22 @@ function CreateStep({
         busy={busy}
         controller={lookController}
         copy={ONBOARDING_TILES_COPY}
-        redoAllowed={redoAllowed}
+        imagesLeft={buddyImagesLeftLine(capabilities)}
+        redoAllowed={redoGate === null}
+        redoReason={redoGate?.reason ?? null}
         state={look}
         view={view}
       />
 
       {view === 'working' ? (
-        <p
-          className="flex items-center gap-2 text-sm text-muted-foreground"
-          data-testid="buddy-onboarding-working"
-          role="status"
-        >
-          <Spinner aria-hidden className="size-4" />
-          {BUDDY_ONBOARDING_STEP4.working}
-        </p>
-      ) : view === 'draft' && look.draft ? (
+        <BuddyLookWorkingLine
+          cancelling={look.pending === 'cancel'}
+          line={BUDDY_ONBOARDING_STEP4.working}
+          startedAt={look.startedAt}
+          testId="buddy-onboarding-working"
+          onCancel={lookController ? () => void lookController.cancel() : undefined}
+        />
+      ) : view === 'draft' && draft ? (
         <div className="flex items-center gap-4" data-testid="buddy-onboarding-result">
           {persona && showPreview ? (
             <LazyBuddyPetPreview
@@ -1080,11 +1117,11 @@ function CreateStep({
               personaId={persona.id}
               placeholder={<Skeleton className="size-full rounded-row" />}
               size={RESULT_PREVIEW_PX}
-              stillImages={buddyLookDraftImages(look.draft, look.revision)}
+              stillImages={buddyLookDraftImages(draft, look.revision)}
             />
           ) : null}
           <div className="flex min-w-0 flex-col gap-1">
-            {look.draft.libraryAvatarId ? (
+            {draft.libraryAvatarId ? (
               <p
                 className="flex items-center gap-2 text-sm text-foreground"
                 data-testid="buddy-onboarding-saved"
@@ -1102,12 +1139,10 @@ function CreateStep({
         </div>
       ) : gate ? (
         // The gate is now; a failure was the last attempt.
-        <GateRow
+        <BuddyCreateGateAlert
+          data-testid="buddy-onboarding-gate"
           gate={gate}
           onAllowCloudAi={onAllowCloudAi}
-          onSeePremium={onSeePremium}
-          onSignIn={onSignIn}
-          onStartFromOurs={onStartFromOurs}
         />
       ) : failure ? (
         <Alert data-testid="buddy-onboarding-failed" variant="destructive">
@@ -1122,107 +1157,5 @@ function CreateStep({
         </p>
       ) : null}
     </div>
-  )
-}
-
-const GATE_ACTION_LABELS = {
-  'sign-in': BUDDY_ONBOARDING_GATES.signIn,
-  'see-premium': BUDDY_ONBOARDING_GATES.seePremium,
-  'start-from-ours': BUDDY_ONBOARDING_GATES.startFromOurs,
-  // The Cloud AI switch's own label (Buddy tab, Cloud AI section).
-  'allow-cloud-ai': 'Allow cloud AI'
-} as const
-
-/** Why Create does not work now: the copy document's line and its actions. */
-function GateRow({
-  gate,
-  onSignIn,
-  onSeePremium,
-  onStartFromOurs,
-  onAllowCloudAi
-}: {
-  gate: BuddyCreateGate
-  onSignIn: () => void
-  onSeePremium: () => void
-  onStartFromOurs: () => void
-  onAllowCloudAi: () => void
-}): ReactElement {
-  const run = {
-    'sign-in': onSignIn,
-    'see-premium': onSeePremium,
-    'start-from-ours': onStartFromOurs,
-    'allow-cloud-ai': onAllowCloudAi
-  } as const
-  const Icon = gate.kind === 'signed-out' || gate.kind === 'premium' ? LockIcon : InfoIcon
-  return (
-    <div
-      className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-row bg-foreground/[0.04] px-3 py-2.5"
-      data-gate={gate.kind}
-      data-testid="buddy-onboarding-gate"
-      role="status"
-    >
-      <Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 flex-1 text-sm text-foreground">{gate.line}</span>
-      {gate.actions.length > 0 ? (
-        <div className="flex shrink-0 items-center gap-2">
-          {gate.actions.map((action, index) => (
-            <Button
-              key={action}
-              data-action={action}
-              data-testid="buddy-onboarding-gate-action"
-              size="xs"
-              type="button"
-              variant={index === 0 ? 'outline' : 'ghost'}
-              onClick={run[action]}
-            >
-              {GATE_ACTION_LABELS[action]}
-            </Button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-/**
- * Cloud AI consent where creating needs it (plan 119 decision 3): the same
- * one flag and the same list of uses as the Buddy tab's Cloud AI switch,
- * so nothing is granted that the list does not name. The safe choice has
- * the focus.
- */
-function CloudAiConsentDialog({
-  open,
-  onAnswer
-}: {
-  open: boolean
-  onAnswer: (accepted: boolean) => void
-}): ReactElement {
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) onAnswer(false)
-      }}
-    >
-      <DialogContent data-testid="buddy-onboarding-consent" showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>{GATE_ACTION_LABELS['allow-cloud-ai']}</DialogTitle>
-          <DialogDescription>{CLOUD_AI_KEEPS}</DialogDescription>
-        </DialogHeader>
-        <ul className="flex list-disc flex-col gap-1 pl-4 text-sm text-muted-foreground">
-          {CLOUD_AI_USES.map((use) => (
-            <li key={use}>{use}</li>
-          ))}
-        </ul>
-        <DialogFooter>
-          <Button autoFocus type="button" variant="ghost" onClick={() => onAnswer(false)}>
-            Not now
-          </Button>
-          <Button type="button" onClick={() => onAnswer(true)}>
-            {GATE_ACTION_LABELS['allow-cloud-ai']}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }

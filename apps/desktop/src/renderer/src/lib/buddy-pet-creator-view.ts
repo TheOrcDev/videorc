@@ -1,7 +1,13 @@
-import type { AiCapabilities, CohostPersona } from './backend'
-import type { EntitlementUiGate } from './entitlement-ui'
+import type { CohostPersona } from './backend'
+import {
+  BUDDY_ALIVE_CONSENT_OFF,
+  BUDDY_ALIVE_NONE_LEFT,
+  BUDDY_ALIVE_SIGNED_OUT,
+  buddyAliveCreateGate,
+  type BuddyCreateGate,
+  type BuddyCreateGateInput
+} from './buddy-create-gate'
 import { BUDDY_GENERATE_NOT_AVAILABLE } from './buddy-persona-view'
-import { buddyTabLabel } from './buddy-tabs'
 import {
   BUDDY_PET_ATLAS_SHEETS,
   BUDDY_PET_NOTES_ASYMMETRIC_MAX,
@@ -25,20 +31,25 @@ export type BuddyPetAtlasKey = BuddyPetAtlasSheet['key']
 
 export type BuddyPetCreatorStepId = 'reference' | 'pilot' | 'build' | 'review' | 'save'
 
+/**
+ * The five steps in a streamer's words (plan 174 S3.15a, the creator-names
+ * owner item): the ids stay the backend's, the labels drop the jargon
+ * (Reference, Pilot, Build, Review, sheets, pack).
+ */
 export const BUDDY_PET_CREATOR_STEPS: readonly { id: BuddyPetCreatorStepId; label: string }[] = [
-  { id: 'reference', label: 'Reference' },
-  { id: 'pilot', label: 'Pilot' },
-  { id: 'build', label: 'Build' },
-  { id: 'review', label: 'Review' },
+  { id: 'reference', label: 'Picture' },
+  { id: 'pilot', label: 'First poses' },
+  { id: 'build', label: 'All poses' },
+  { id: 'review', label: 'Check' },
   { id: 'save', label: 'Save' }
 ]
 
-// The creating gate family (plan 174 G-15). The creator covers the page, so
-// its consent line names the tab that holds Cloud AI.
-export const BUDDY_PET_SIGNED_OUT = 'Sign in to create an Alive Buddy.'
-export const BUDDY_PET_CONSENT_OFF = `Allow cloud AI on the ${buddyTabLabel('live')} tab to create an Alive Buddy.`
+// The creating gate family (plan 174 G-15, one model in G-5): the creator's
+// lines are `buddy-create-gate.ts`'s, re-exported under their old names.
+export const BUDDY_PET_SIGNED_OUT = BUDDY_ALIVE_SIGNED_OUT
+export const BUDDY_PET_CONSENT_OFF = BUDDY_ALIVE_CONSENT_OFF
 export const BUDDY_PET_NOT_AVAILABLE = BUDDY_GENERATE_NOT_AVAILABLE
-export const BUDDY_PET_NONE_LEFT = "This month's creations are used up."
+export const BUDDY_PET_NONE_LEFT = BUDDY_ALIVE_NONE_LEFT
 
 /**
  * The Save step's line: where the new moves are kept, as the backend keeps
@@ -57,10 +68,8 @@ export function buddyPetSaveDescription(
 }
 
 export interface BuddyPetCreatorGate {
-  /** The wizard works (continue a creation, build, save). */
-  allowed: boolean
-  /** The one line that says why not; null when allowed. */
-  reason: string | null
+  /** Why the whole wizard is off (continue, build, save alike); null when it works. */
+  gate: BuddyCreateGate | null
   /** A new creation can start (one is left this month). */
   canStart: boolean
   /** This month's creations, when the web reported them. */
@@ -68,37 +77,23 @@ export interface BuddyPetCreatorGate {
 }
 
 /**
- * Whether the creator works for this account (plan 168 D20): signed in,
- * Premium, cloud AI allowed, and a web that offers pet creation. The checks
- * run in the order a streamer can fix them. Starting a new creation also
- * needs one left this month; a creation already open carries on.
+ * Whether the creator works for this account (plan 168 D20): the one gate
+ * model (plan 174 G-5), signed in, Premium, cloud AI allowed, and a web that
+ * offers pet creation. Starting a new creation also needs one left this
+ * month; a creation already open carries on, so the month's allowance never
+ * locks the wizard itself.
  */
-export function buddyPetCreatorGate({
-  signedIn,
-  gate,
-  consented,
-  capabilities
-}: {
-  signedIn: boolean
-  gate: EntitlementUiGate
-  consented: boolean
-  capabilities: Pick<AiCapabilities, 'cohost'> | null
-}): BuddyPetCreatorGate {
-  const pet = capabilities?.cohost?.pet
+export function buddyPetCreatorGate(input: BuddyCreateGateInput): BuddyPetCreatorGate {
+  const pet = input.capabilities?.cohost?.pet
   const allowance = pet?.enabled
     ? { left: pet.creationsRemainingThisMonth, limit: pet.monthlyLimit }
     : null
-  const refuse = (reason: string): BuddyPetCreatorGate => ({
-    allowed: false,
-    reason,
-    canStart: false,
+  const gate = buddyAliveCreateGate(input)
+  return {
+    gate: gate?.kind === 'allowance' ? null : gate,
+    canStart: gate === null,
     allowance
-  })
-  if (!signedIn) return refuse(BUDDY_PET_SIGNED_OUT)
-  if (!gate.allowed) return refuse(gate.reason)
-  if (!consented) return refuse(BUDDY_PET_CONSENT_OFF)
-  if (!pet?.enabled) return refuse(BUDDY_PET_NOT_AVAILABLE)
-  return { allowed: true, reason: null, canStart: pet.creationsRemainingThisMonth > 0, allowance }
+  }
 }
 
 /** "2 of 3 left this month". */
@@ -175,7 +170,7 @@ export function buddyPetNotesFromDraft(
 // --- Sheets ---------------------------------------------------------------------
 
 export const BUDDY_PET_SHEET_LABELS: Record<BuddyPetSheetKey, string> = {
-  pilot: 'Pilot',
+  pilot: 'First poses',
   'gaze-up2': 'Looking up',
   'gaze-up1': 'Looking a little up',
   'gaze-level': 'Looking ahead',

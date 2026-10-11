@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
 import type { BuddyPets } from '@/hooks/use-buddy-pets'
 import type { AiCapabilities, CohostSettings, BuddyPetSummary } from '@/lib/backend'
+import { writeBuddyWornPack } from '@/lib/buddy-worn-pack'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 import { BuddyPetSettings } from './buddy-pet-settings'
@@ -30,6 +31,7 @@ vi.mock('@/components/buddy-pet-preview-lazy', () => ({
 let root: Root
 let container: HTMLDivElement
 const patchCohostSettings = vi.fn(async () => undefined)
+const setAiConsent = vi.fn()
 
 const PACK_A: BuddyPetSummary = {
   packId: '0b9c6c34-5d7e-4b4f-9a7e-3c2d1e0f9a8b',
@@ -103,9 +105,11 @@ const petOn = {
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   patchCohostSettings.mockClear()
+  setAiConsent.mockClear()
   mocked.react.mockClear()
   mocked.openCreator.mockClear()
   mocked.previews.length = 0
+  localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -138,7 +142,8 @@ async function render({
     cohostGate: premium,
     cohostSettings: cohost,
     patchCohostSettings,
-    runtimeInfo: { platform: 'darwin' }
+    runtimeInfo: { platform: 'darwin' },
+    setAiConsent
   }
   await act(async () => root.render(createElement(BuddyPetSettings, { pets: list, importFolder })))
 }
@@ -192,10 +197,22 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(document.querySelector('[data-testid="buddy-preview-zoom-dialog"]')).toBeNull()
   })
 
+  it('wears the pack worn last when Alive comes back (plan 174 G-10)', async () => {
+    writeBuddyWornPack('p-1', PACK_B.packId)
+    await render({ list: pets([PACK_A, PACK_B]) })
+    await act(async () => kindButton('Alive').click())
+    expect(lastPersona().avatar).toEqual({ kind: 'alive', packId: PACK_B.packId })
+    // Arrow keys browse without switching what viewers see: Enter does.
+    expect(document.querySelector('[data-testid="buddy-avatar-kind"]')?.getAttribute('role')).toBe(
+      'radiogroup'
+    )
+  })
+
   it('persists Alive with the first own pack, and Still again', async () => {
     await render({ list: pets([PACK_A, { ...PACK_B, packId: 'bundled:buddy' }]) })
     await act(async () => kindButton('Alive').click())
     expect(lastPersona().avatar).toEqual({ kind: 'alive', packId: PACK_A.packId })
+    expect(localStorage.getItem('videorc.buddyWornPack:p-1')).toBe(PACK_A.packId)
 
     await render({
       cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
@@ -224,16 +241,27 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(mocked.openCreator).toHaveBeenCalledTimes(1)
   })
 
-  it('disables Create with its one reason when the web offers no creator or consent is off', async () => {
+  it('locks Create with one Alert and its one action when the web offers no creator or consent is off (plan 174 G-5)', async () => {
     await render({ list: pets([]), capabilities: { cohost: { tick: 4 } } as AiCapabilities })
     await act(async () => kindButton('Alive').click())
     expect(button('buddy-pack-create').disabled).toBe(true)
-    expect(button('buddy-create-hint').textContent).toBe("Creating isn't available right now.")
+    const gate = (): HTMLElement =>
+      document.querySelector('[data-testid="buddy-create-gate"]') as HTMLElement
+    expect(gate().textContent).toBe("Creating isn't available right now.")
+    expect(gate().dataset.gate).toBe('unavailable')
+    expect(document.querySelector('[data-testid="buddy-create-hint"]')).toBeNull()
     await render({ list: pets([]), consented: false })
     expect(button('buddy-pack-create').disabled).toBe(true)
-    expect(button('buddy-create-hint').textContent).toBe(
-      'Allow cloud AI below to create an Alive Buddy.'
+    expect(gate().textContent).toContain('Allow cloud AI to create an Alive Buddy.')
+    // The one action opens the one consent dialog; accepting grants consent.
+    await act(async () => gate().querySelector('button')!.click())
+    const consent = document.querySelector('[data-testid="buddy-avatar-consent"]')!
+    await act(async () =>
+      [...consent.querySelectorAll('button')]
+        .find((candidate) => candidate.textContent === 'Allow cloud AI')!
+        .click()
     )
+    expect(setAiConsent).toHaveBeenCalledWith(true)
   })
 
   it('imports a pack and wears it', async () => {

@@ -1,5 +1,5 @@
-import { AlertIcon, CloseIcon } from '@/components/icons'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { CloseIcon } from '@/components/icons'
+import { useEffect, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -13,20 +13,18 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Slider } from '@/components/ui/slider'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
-import { Textarea } from '@/components/ui/textarea'
 import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
 import type { CohostAutoChat, CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
 import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
+import { buddyTabLabel } from '@/lib/buddy-tabs'
 import {
   COHOST_LISTEN_CONSENT_SENTENCE,
   COHOST_SENSITIVITIES,
   COHOST_SENSITIVITY_LABELS,
   cohostListenAllowanceLabel
 } from '@/lib/cohost-view'
-import { cn } from '@/lib/utils'
 
-export const COHOST_NOTES_MAX_CHARS = 4000
 /** Mirrors the backend caps (`COHOST_RULES_MAX` / `COHOST_RULE_MAX_CHARS`). */
 export const COHOST_RULES_MAX = 10
 export const COHOST_RULE_MAX_CHARS = 120
@@ -152,8 +150,9 @@ export function CohostListenField({
 }
 
 /**
- * Replies (plan 150, Chat tab): how Buddy drafts the replies you approve, and
- * the facts it answers from.
+ * Replies (plan 150, Chat tab): how Buddy drafts the replies you approve.
+ * The facts it answers from are "About you", under Name and personality
+ * (plan 174 G-9): one name, one home.
  */
 export function BuddyRepliesSection({
   locked: lockedByTab = false
@@ -162,27 +161,14 @@ export function BuddyRepliesSection({
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
-  const [notesDraft, setNotesDraft] = useState('')
-  const savedNotesRef = useRef<string | null>(null)
-  // Follow the backend value until the streamer starts typing; after that the
-  // draft is the truth until it is saved.
-  useEffect(() => {
-    const notes = cohostSettings?.notes ?? ''
-    if (savedNotesRef.current === notes) return
-    savedNotesRef.current = notes
-    setNotesDraft(notes)
-  }, [cohostSettings?.notes])
   if (!cohostSettings) {
     return null
   }
-  const notesOverLimit = notesDraft.length > COHOST_NOTES_MAX_CHARS
-  const notesDirty = notesDraft !== (cohostSettings.notes ?? '')
-  const notesError = error
   const autoChat = cohostSettings.autoChat
   const saveAutoChat = (next: CohostAutoChat): void => save({ autoChat: next })
   return (
     <PanelSection
-      description="How Buddy drafts the replies you approve, and the facts it answers from. Answers and Banter post as you, only in the modes you turn on in Stream Manager."
+      description={`How Buddy drafts the replies you approve. It answers from About you, under Name and personality on the ${buddyTabLabel('live')} tab. Answers and Banter post as you, only in the modes you turn on in Stream Manager.`}
       title="Replies"
     >
       <FieldGroup variant="grouped">
@@ -221,52 +207,8 @@ export function BuddyRepliesSection({
             onValueChange={(tone) => save({ tone })}
           />
         </Field>
-        <Field>
-          <FieldLabel htmlFor="cohost-notes">Buddy notes</FieldLabel>
-          <FieldDescription>
-            Facts Buddy answers from, one per line. For example:
-            <br />
-            <span className="text-subtle">Keyboard: Keychron Q1 with Boba U4T switches.</span>
-            <br />
-            <span className="text-subtle">
-              Streaming schedule: Tuesdays and Fridays, 19:00 CET.
-            </span>
-          </FieldDescription>
-          <Textarea
-            className="min-h-28"
-            disabled={locked}
-            id="cohost-notes"
-            maxLength={COHOST_NOTES_MAX_CHARS}
-            placeholder="What people keep asking you: gear, schedule, links, prices…"
-            value={notesDraft}
-            onBlur={() => {
-              if (!notesDirty || notesOverLimit) return
-              savedNotesRef.current = notesDraft
-              save({ notes: notesDraft })
-            }}
-            onChange={(event) => setNotesDraft(event.target.value)}
-          />
-          <div className="flex items-center gap-2">
-            {/* Over the limit, the icon carries the tone and the count stays
-                monochrome (plan 174 S1.8). */}
-            <span
-              className={cn(
-                'flex items-center gap-1 text-xs tabular-nums',
-                notesOverLimit ? 'font-medium text-foreground' : 'text-muted-foreground'
-              )}
-            >
-              {notesOverLimit ? (
-                <AlertIcon aria-hidden className="size-3 text-destructive" weight="fill" />
-              ) : null}
-              {notesDraft.length}/{COHOST_NOTES_MAX_CHARS}
-            </span>
-            {notesDirty ? (
-              <span className="text-xs text-muted-foreground">Unsaved. Click away to save.</span>
-            ) : null}
-            {notesError ? <FieldError>{notesError}</FieldError> : null}
-          </div>
-        </Field>
       </FieldGroup>
+      <SaveError error={error} />
     </PanelSection>
   )
 }

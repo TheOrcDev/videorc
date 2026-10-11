@@ -136,6 +136,52 @@ describe('BuddyPersonaSection', () => {
     })
   })
 
+  it('fills an empty personality from a chip at once, and asks before replacing one (plan 174 G-3)', async () => {
+    await render()
+    const chip = (text: string): HTMLButtonElement =>
+      [...document.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-example-chip"]')].find(
+        (button) => button.textContent === text
+      )!
+    await act(async () => chip('Cheerful goblin merchant').click())
+    expect(patchCohostSettings).toHaveBeenLastCalledWith({
+      persona: { ...settings().persona, personality: 'Cheerful goblin merchant' }
+    })
+    patchCohostSettings.mockClear()
+    const personality = document.getElementById('buddy-personality') as HTMLTextAreaElement
+    await type(personality, 'My own words')
+    await act(async () => chip('Grumpy old orc who secretly loves chat').click())
+    expect(patchCohostSettings).not.toHaveBeenCalled()
+    const dialog = document.querySelector('[data-testid="buddy-example-replace-dialog"]')
+    expect(dialog?.textContent).toContain('Replace your personality?')
+    await act(async () =>
+      (
+        document.querySelector('[data-testid="buddy-example-replace-cancel"]') as HTMLElement
+      ).click()
+    )
+    expect(personality.value).toBe('My own words')
+    await act(async () => chip('Grumpy old orc who secretly loves chat').click())
+    await act(async () =>
+      (
+        document.querySelector('[data-testid="buddy-example-replace-confirm"]') as HTMLElement
+      ).click()
+    )
+    expect(patchCohostSettings).toHaveBeenLastCalledWith({
+      persona: { ...settings().persona, personality: 'Grumpy old orc who secretly loves chat' }
+    })
+  })
+
+  it('keeps About you under Personality and saves it as the notes on blur (plan 174 G-9)', async () => {
+    await render({ cohost: { ...settings(), notes: 'Keyboard: Keychron Q1.' } })
+    const about = document.getElementById('cohost-notes') as HTMLTextAreaElement
+    expect(about.value).toBe('Keyboard: Keychron Q1.')
+    expect(document.body.textContent).toContain('About you')
+    expect(document.body.textContent).not.toContain('Buddy notes')
+    await type(about, 'I stream on Fridays.')
+    expect(document.body.textContent).toContain('Unsaved. Click away to save.')
+    await blur(about)
+    expect(patchCohostSettings).toHaveBeenLastCalledWith({ notes: 'I stream on Fridays.' })
+  })
+
   it('saves the bubble style on change and shows its sample', async () => {
     await render()
     expect(

@@ -5,6 +5,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import {
+  BuddyLookWorkingLine,
   BuddyPoseTile,
   BuddyPoseTiles,
   type BuddyPoseTilesCopy
@@ -16,8 +17,10 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
 import { useStudioCore } from '@/hooks/use-studio'
 import { COHOST_AVATAR_STATES } from '@/lib/backend'
+import { buddyImagesLeftLine, buddyLookRedoGate } from '@/lib/buddy-create-gate'
 import { BUDDY_DEFAULT_PACK, buddyStateImageUrl } from '@/lib/buddy-default-pack'
-import { buddyLookAvailability, buddyLookDraftImages } from '@/lib/buddy-look-view'
+import { buddyLookDraftImages } from '@/lib/buddy-look-view'
+import { BUDDY_ONBOARDING_STEP4 } from '@/lib/buddy-onboarding-copy'
 import { BUDDY_STATE_LABELS } from '@/lib/buddy-persona-view'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
@@ -42,9 +45,10 @@ const LOOK_PANEL_TILES_COPY: BuddyPoseTilesCopy = {
  * panel. Since plan 170 a new look is made in the four-step onboarding
  * (New Buddy, under My Buddies); this panel shows the active look and, while
  * a look is being made or waits as a draft (the onboarding closed before
- * deciding), the same four tiles: Redo (R on a focused tile), Keep this
- * look (⌘↵) and Discard. Make it Alive opens the Alive creator with the
- * current look. Nothing toasts: the tiles are the confirmation.
+ * deciding), the same four tiles: Cancel while it is drawn (plan 174 G-14),
+ * Redo for one image (R on a focused tile), Keep this look (⌘↵) and Delete.
+ * Make it Alive opens the Alive creator with the current look. Nothing
+ * toasts: the tiles are the confirmation.
  */
 export interface BuddyLookSectionProps {
   /** Tests inject the backend; the app shares the Buddy tab's client. */
@@ -67,11 +71,12 @@ export function BuddyLookSection({
   const client = injectedClient !== undefined ? injectedClient : connected
   const { state, controller } = useBuddyLook(client)
   const persona = cohostSettings?.persona ?? null
-  const availability = buddyLookAvailability({
+  const capabilities = state.capabilities ?? aiCapabilities ?? null
+  const redoGate = buddyLookRedoGate({
     signedIn: account?.status === 'signed-in',
     gate: cohostGate,
     consented: aiConsent,
-    capabilities: state.capabilities ?? aiCapabilities ?? null
+    capabilities
   })
   const platform = runtimeInfo?.platform
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -146,11 +151,22 @@ export function BuddyLookSection({
               busy={busy}
               controller={controller}
               copy={LOOK_PANEL_TILES_COPY}
-              redoAllowed={availability.redoAllowed}
+              imagesLeft={buddyImagesLeftLine(capabilities)}
+              redoAllowed={redoGate === null}
+              redoReason={redoGate?.reason ?? null}
               state={state}
               view={view}
             />
           )}
+          {view === 'working' ? (
+            <BuddyLookWorkingLine
+              cancelling={state.pending === 'cancel'}
+              line={BUDDY_ONBOARDING_STEP4.working}
+              startedAt={state.startedAt}
+              testId="buddy-look-working"
+              onCancel={controller ? () => void controller.cancel() : undefined}
+            />
+          ) : null}
           {view === 'draft' && state.draft ? (
             <div
               className="flex flex-wrap items-center gap-4"

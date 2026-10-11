@@ -6,10 +6,12 @@ import { BuddyMotionSection } from '@/components/buddy-motion-section'
 import type { BuddyPetPreviewHandle, BuddyPetPreviewInfo } from '@/components/buddy-pet-preview'
 import { BuddyReactionsSection } from '@/components/buddy-reactions-section'
 import { ConfigGrid } from '@/components/page'
+import { useBuddyLook, useBuddyLookClient } from '@/hooks/use-buddy-look'
 import { useBuddyPets, type BuddyPets } from '@/hooks/use-buddy-pets'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyPetImportResult } from '@/lib/backend'
-import { BUDDY_STILL_PACK_ID, buddyFirstPack } from '@/lib/buddy-pet-view'
+import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
+import { buddyPackToWear, writeBuddyWornPack } from '@/lib/buddy-worn-pack'
 import { BUDDY_STILL_REACTION_IDS, type BuddyMotionSettings } from '../../../shared/buddy-pet'
 
 /**
@@ -30,6 +32,15 @@ export function BuddyPetSettings({
   const connectedPets = useBuddyPets()
   const pets = injectedPets ?? connectedPets
   const persona = cohostSettings?.persona ?? null
+  // The Still panel's look (shared with My Buddies): Alive says when a new
+  // one is being drawn or waits under Still (plan 174 G-10).
+  const { state: look } = useBuddyLook(useBuddyLookClient())
+  const lookPending =
+    look.pending === 'create' || look.running?.kind === 'create'
+      ? 'working'
+      : look.draft
+        ? 'draft'
+        : null
   const previewRef = useRef<BuddyPetPreviewHandle>(null)
   // Alive picked with nothing to wear yet: the empty state, unsaved (the
   // wire's Alive always names a pack).
@@ -45,6 +56,8 @@ export function BuddyPetSettings({
 
   const wear = async (packId: string): Promise<void> => {
     await save({ ...persona, avatar: { kind: 'alive', packId } })
+    // Still forgets the pack on the wire; Alive comes back to this one (G-10).
+    writeBuddyWornPack(persona.id, packId)
     setAliveDraft(false)
   }
   const changeView = async (next: BuddyAvatarView): Promise<void> => {
@@ -54,13 +67,14 @@ export function BuddyPetSettings({
       if (persona.avatar.kind !== 'still') await save({ ...persona, avatar: { kind: 'still' } })
       return
     }
-    // Alive wears a pack at once when there is one; else the empty state.
-    const first = buddyFirstPack(pets.packs ?? [])
-    if (!first) {
+    // Alive wears a pack at once when there is one (the one worn last, else
+    // the first own pack); else the empty state.
+    const pack = buddyPackToWear(persona.id, pets.packs ?? [])
+    if (!pack) {
       setAliveDraft(true)
       return
     }
-    await wear(first.packId)
+    await wear(pack.packId)
   }
 
   const activeReactions: readonly string[] =
@@ -73,6 +87,7 @@ export function BuddyPetSettings({
     <>
       <BuddyAvatarSection
         importFolder={importFolder}
+        lookPending={lookPending}
         motion={motionDraft ?? persona.motion}
         persona={persona}
         pets={pets}

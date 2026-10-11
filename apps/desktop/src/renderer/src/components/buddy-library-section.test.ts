@@ -13,6 +13,11 @@ import type {
 } from '@/lib/backend'
 import { BUDDY_INVITATION_STORAGE_KEY } from '@/lib/buddy-library-view'
 import { BUDDY_LIBRARY_COPY } from '@/lib/buddy-onboarding-copy'
+import {
+  clearBuddyOnboardingDraft,
+  clearBuddyOnboardingRequest,
+  requestBuddyOnboarding
+} from '@/lib/buddy-onboarding-store'
 import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from '../../../shared/buddy-library'
 
 import { BuddyLibrarySection } from './buddy-library-section'
@@ -149,6 +154,8 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   mocked.signIn.mockClear()
   mocked.openCreator.mockClear()
+  clearBuddyOnboardingDraft()
+  clearBuddyOnboardingRequest()
   localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
@@ -329,7 +336,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(labels(await openMenu('official:goblin'))).toEqual(['Make it Alive'])
   })
 
-  it('renames one of yours', async () => {
+  it('renames one of yours, and the dialog closes only once the save is accepted (plan 174 G-24)', async () => {
     const backend = fakeBackend()
     await render(backend.client)
     const items = await openMenu(PEBBLE)
@@ -345,8 +352,36 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
       )
       input.dispatchEvent(new Event('input', { bubbles: true }))
     })
+    // A refusal keeps the dialog up, with the reason inside it and the name kept.
+    backend.requestTyped.mockImplementationOnce(async () => {
+      throw new Refused('cohost-library-offline', 'Videorc is reconnecting. Try again in a moment.')
+    })
     await click(save)
-    expect(backend.calls('cohost.library.update')).toEqual([{ avatarId: PEBBLE, name: 'Rocky' }])
+    expect(byTestId('buddy-library-edit-dialog')).not.toBeNull()
+    expect(byTestId('buddy-library-edit-error')?.textContent).toBe(
+      'Videorc is reconnecting. Try again in a moment.'
+    )
+    expect((document.getElementById('buddy-library-name') as HTMLInputElement).value).toBe(
+      ' Rocky '
+    )
+    await click(byTestId('buddy-library-save'))
+    expect(backend.calls('cohost.library.update')).toEqual([
+      { avatarId: PEBBLE, name: 'Rocky' },
+      { avatarId: PEBBLE, name: 'Rocky' }
+    ])
+    expect(byTestId('buddy-library-edit-dialog')).toBeNull()
+  })
+
+  it('opens the onboarding when another surface asks for it (plan 174 G-4)', async () => {
+    await render(fakeBackend().client)
+    expect(byTestId('buddy-onboarding')).toBeNull()
+    await act(async () => requestBuddyOnboarding())
+    const sheet = await vi.waitFor(() => {
+      const element = byTestId('buddy-onboarding')
+      expect(element).not.toBeNull()
+      return element!
+    })
+    expect(sheet.dataset.step).toBe('1')
   })
 
   it('edits the personality and About you of one of yours', async () => {

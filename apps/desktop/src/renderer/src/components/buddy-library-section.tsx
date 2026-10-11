@@ -53,6 +53,7 @@ import {
   type BuddyOnboardingStep
 } from '@/lib/buddy-library-view'
 import { BUDDY_OFFICIAL_ART } from '@/lib/buddy-official-art'
+import { useBuddyOnboardingRequest } from '@/lib/buddy-onboarding-store'
 import {
   BUDDY_LIBRARY_COPY,
   BUDDY_ONBOARDING_GATES,
@@ -136,6 +137,14 @@ export function BuddyLibrarySection({
   } | null>(null)
   const openOnboarding = (step: BuddyOnboardingStep): void =>
     setOnboarding((current) => ({ open: true, nonce: (current?.nonce ?? 0) + 1, step }))
+  // Another surface asked for the onboarding (the Alive creator's New Buddy…,
+  // plan 174 G-4): this section hosts the sheet, so it opens it.
+  const request = useBuddyOnboardingRequest()
+  const [appliedRequest, setAppliedRequest] = useState<number | null>(null)
+  if (request && request.nonce !== appliedRequest) {
+    setAppliedRequest(request.nonce)
+    openOnboarding(request.step)
+  }
 
   const [edit, setEdit] = useState<EditTarget | null>(null)
   const [editOpen, setEditOpen] = useState(false)
@@ -344,14 +353,18 @@ export function BuddyLibrarySection({
       <EditDialog
         open={editOpen}
         target={edit}
+        problem={state.problem?.message ?? null}
         onClose={() => setEditOpen(false)}
         onDelete={async (card) => {
-          setEditOpen(false)
-          await controller?.remove(card.id)
+          // Plan 174 G-24: the dialog closes only once the backend accepted.
+          const accepted = (await controller?.remove(card.id)) ?? false
+          if (accepted) setEditOpen(false)
+          return accepted
         }}
         onUpdate={async (params) => {
-          setEditOpen(false)
-          await controller?.update(params)
+          const accepted = (await controller?.update(params)) ?? false
+          if (accepted) setEditOpen(false)
+          return accepted
         }}
         context={library?.mine?.find((entry) => entry.id === edit?.card.id)?.context ?? ''}
         personality={library?.mine?.find((entry) => entry.id === edit?.card.id)?.personality ?? ''}
@@ -544,15 +557,25 @@ function BuddyCard({
   )
 }
 
+type EditParams = {
+  avatarId: string
+  name?: string
+  personality?: string
+  context?: string
+}
+
 /**
  * Rename, Edit personality (with About you) and the Delete confirm for one
- * of your own Buddies. The target stays set while the dialog fades out.
+ * of your own Buddies. The target stays set while the dialog fades out. A
+ * dialog closes only when the backend accepted (plan 174 G-24); a refusal
+ * shows inside it, with the fields still filled.
  */
 function EditDialog({
   open,
   target,
   personality,
   context,
+  problem,
   onClose,
   onUpdate,
   onDelete
@@ -561,30 +584,37 @@ function EditDialog({
   target: EditTarget | null
   personality: string
   context: string
+  /** The library's last refusal, in the backend's words. */
+  problem: string | null
   onClose: () => void
-  onUpdate: (params: {
-    avatarId: string
-    name?: string
-    personality?: string
-    context?: string
-  }) => Promise<void>
-  onDelete: (card: BuddyLibraryCard) => Promise<void>
+  /** True when the backend accepted the change. */
+  onUpdate: (params: EditParams) => Promise<boolean>
+  onDelete: (card: BuddyLibraryCard) => Promise<boolean>
 }): ReactElement {
   const deleting = target?.kind === 'delete' ? target : null
+  const [deletePending, setDeletePending] = useState(false)
   return (
     <>
       <ConfirmDialog
+        cancelDisabled={deletePending}
         cancelLabel={BUDDY_LIBRARY_COPY.cancel}
-        confirmLabel={BUDDY_LIBRARY_COPY.delete}
+        confirmDisabled={deletePending}
+        confirmLabel={deletePending ? 'Deleting…' : BUDDY_LIBRARY_COPY.delete}
         description={BUDDY_LIBRARY_COPY.deleteBody}
         open={open && deleting !== null}
         testId="buddy-library-delete"
         title={deleting ? buddyLibraryDeleteTitle(deleting.card.name) : ''}
         onCancel={onClose}
         onConfirm={() => {
-          if (deleting) void onDelete(deleting.card)
+          if (!deleting || deletePending) return
+          setDeletePending(true)
+          void onDelete(deleting.card).finally(() => setDeletePending(false))
         }}
-      />
+      >
+        {deleting && problem && !deletePending ? (
+          <FieldError data-testid="buddy-library-delete-error">{problem}</FieldError>
+        ) : null}
+      </ConfirmDialog>
       <Dialog
         open={open && deleting === null}
         onOpenChange={(next) => {
@@ -597,6 +627,7 @@ function EditDialog({
             key={`${target.kind}:${target.card.id}:${String(open)}`}
             context={context}
             personality={personality}
+            problem={problem}
             target={target}
             onClose={onClose}
             onUpdate={onUpdate}
@@ -611,23 +642,23 @@ function EditForm({
   target,
   personality: savedPersonality,
   context: savedContext,
+  problem,
   onClose,
   onUpdate
 }: {
   target: EditTarget
   personality: string
   context: string
+  problem: string | null
   onClose: () => void
-  onUpdate: (params: {
-    avatarId: string
-    name?: string
-    personality?: string
-    context?: string
-  }) => Promise<void>
+  onUpdate: (params: EditParams) => Promise<boolean>
 }): ReactElement {
   const [name, setName] = useState(target.card.name)
   const [personality, setPersonality] = useState(savedPersonality)
   const [context, setContext] = useState(savedContext)
+  const [saving, setSaving] = useState(false)
+  // The refusal shows only for a save asked from this form, never a stale one.
+  const [refused, setRefused] = useState(false)
   const rename = target.kind === 'rename'
   const nameToSave = buddyOnboardingName(name)
   const changed = rename
@@ -638,7 +669,9 @@ function EditForm({
     : buddyTextLength(personality) <= BUDDY_LIBRARY_PERSONALITY_MAX_CHARS &&
       buddyTextLength(context) <= BUDDY_LIBRARY_CONTEXT_MAX_CHARS
   const save = (): void => {
-    if (!changed || !valid) return
+    if (!changed || !valid || saving) return
+    setSaving(true)
+    setRefused(false)
     void onUpdate(
       rename
         ? { avatarId: target.card.id, name: nameToSave ?? undefined }
@@ -647,7 +680,10 @@ function EditForm({
             ...(personality !== savedPersonality ? { personality: personality.trim() } : {}),
             ...(context !== savedContext ? { context: context.trim() } : {})
           }
-    )
+    ).then((accepted) => {
+      setSaving(false)
+      if (!accepted) setRefused(true)
+    })
   }
   return (
     <DialogContent
@@ -724,12 +760,19 @@ function EditForm({
             </Field>
           </FieldGroup>
         )}
+        {refused && problem ? (
+          <FieldError data-testid="buddy-library-edit-error">{problem}</FieldError>
+        ) : null}
         <DialogFooter>
-          <Button type="button" variant="ghost" onClick={onClose}>
+          <Button disabled={saving} type="button" variant="ghost" onClick={onClose}>
             {BUDDY_LIBRARY_COPY.cancel}
           </Button>
-          <Button data-testid="buddy-library-save" disabled={!changed || !valid} type="submit">
-            Save
+          <Button
+            data-testid="buddy-library-save"
+            disabled={!changed || !valid || saving}
+            type="submit"
+          >
+            {saving ? 'Saving…' : 'Save'}
           </Button>
         </DialogFooter>
       </form>

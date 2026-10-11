@@ -7,12 +7,21 @@ import {
   CrosshairIcon,
   ImageIcon,
   RefreshIcon,
+  SparkleIcon,
   UploadIcon
 } from '@/components/icons'
-import { useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type ReactElement
+} from 'react'
 
+import { BuddyCreateGateAlert } from '@/components/buddy-create-gate-alert'
+import { CloudAiConsentDialog } from '@/components/cloud-ai-consent-dialog'
 import { GroupedList, ListRow } from '@/components/list-row'
-import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -43,11 +52,13 @@ import {
 } from '@/hooks/use-buddy-pet-creator'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyPetCreation, BuddyPetReference } from '@/lib/backend'
+import { BUDDY_ALIVE_NONE_LEFT_GATE } from '@/lib/buddy-create-gate'
 import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import { BUDDY_LIBRARY_COPY } from '@/lib/buddy-onboarding-copy'
+import { requestBuddyOnboarding } from '@/lib/buddy-onboarding-store'
 import { useBuddyPetCreatorOptions } from '@/lib/buddy-pet-creator-nav'
 import {
   BUDDY_PET_CREATOR_STEPS,
-  BUDDY_PET_NONE_LEFT,
   BUDDY_PET_PILOT_POSES,
   BUDDY_PET_REVIEW_ROWS,
   BUDDY_PET_SHEET_LABELS,
@@ -72,7 +83,11 @@ import {
   type BuddyPetReviewMarks,
   type BuddyPetReviewRow
 } from '@/lib/buddy-pet-creator-view'
-import { unlockActionForReason } from '@/lib/lock-view'
+import {
+  forgetBuddyPetReviewMarks,
+  readBuddyPetReviewMarks,
+  writeBuddyPetReviewMarks
+} from '@/lib/buddy-pet-review-marks'
 import { cn } from '@/lib/utils'
 import {
   BUDDY_PET_ATLAS_SHEETS,
@@ -80,9 +95,6 @@ import {
   BUDDY_PET_REFERENCE_UPLOAD_MAX_BYTES,
   type BuddyPetSheetKey
 } from '../../../shared/buddy-pet-creator'
-
-// The marks survive closing and reopening the wizard in one app session.
-const reviewMarksByBuild = new Map<string, BuddyPetReviewMarks>()
 
 type ReferenceSource = 'persona' | 'upload'
 
@@ -100,22 +112,24 @@ interface PrimaryAction {
 
 /**
  * The Buddy pet creator (plan 168 S-F5): a sub-view of the Buddy tab that
- * turns one picture into an Alive Buddy. Reference (the persona's idle image
- * or an upload; the identity notes as editable sentences),
- * Pilot (four poses, made again at most three times), Build (eight sheets,
- * one at a time, then the pack built on this computer), Review (every row
- * marked "Looks right"; a redo clears that row's mark) and Save (named; the
- * persona wears it). Everything lives in the backend's creation folder, so
- * closing the wizard or the app picks up where it was.
+ * turns one picture into an Alive Buddy. Picture (the persona's idle image
+ * or an upload; the identity notes as editable sentences), First poses
+ * (four poses, drawn again at most three times), All poses (eight sets,
+ * one at a time, then the moves put together on this computer), Check
+ * (every row marked "Looks right"; a redo clears that row's mark) and Save
+ * (named; the persona wears it). Everything lives in the backend's creation
+ * folder, so closing the wizard or the app picks up where it was; the
+ * "Looks right" marks are kept on this device too (plan 174 S3.15a).
  *
- * Premium, cloud AI consent and a web that offers pet creation gate it;
- * when one is missing, one Alert names it and the controls are disabled.
+ * Premium, cloud AI consent and a web that offers pet creation gate it:
+ * one Alert names the one reason with its one action (plan 174 G-5), and
+ * the controls are disabled under it.
  *
  * Plan 169 D11: the look panel's Make it Alive opens it with the kept look
- * as the reference (`persona-idle`, selected at the Reference step, its
- * "Read my Buddy" focused) and the look's description shown beside it. The
- * identity call takes no description, so it is context for the streamer,
- * not sent.
+ * as the reference (`persona-idle`, selected at the Picture step, its
+ * "Read the picture" focused) and the look's description shown beside it.
+ * The identity call takes no description, so it is context for the
+ * streamer, not sent.
  */
 export function BuddyPetCreator({
   onClose,
@@ -132,7 +146,8 @@ export function BuddyPetCreator({
     cohostGate,
     cohostSettings,
     patchCohostSettings,
-    runtimeInfo
+    runtimeInfo,
+    setAiConsent
   } = useStudioCore()
   const connection = useBuddyPetCreatorConnection()
   const client = injectedClient !== undefined ? injectedClient : connection.client
@@ -146,17 +161,22 @@ export function BuddyPetCreator({
     capabilities: connection.capabilities ?? aiCapabilities
   })
   const platform = runtimeInfo?.platform
+  const rootRef = useRef<HTMLDivElement>(null)
 
   const [naming, setNaming] = useState(false)
   const [cancelOpen, setCancelOpen] = useState(false)
+  const [consentOpen, setConsentOpen] = useState(false)
+  // The marks survive closing the wizard and the app (plan 174 S3.15a).
   const [marksByBuild, setMarksByBuild] = useState<Record<string, BuddyPetReviewMarks>>(() =>
-    Object.fromEntries(reviewMarksByBuild)
+    readBuddyPetReviewMarks()
   )
   const marks: BuddyPetReviewMarks = creation ? (marksByBuild[creation.buildId] ?? {}) : {}
   const setMarks = (next: BuddyPetReviewMarks): void => {
     if (!creation) return
-    reviewMarksByBuild.set(creation.buildId, next)
-    setMarksByBuild((current) => ({ ...current, [creation.buildId]: next }))
+    setMarksByBuild(writeBuddyPetReviewMarks(creation.buildId, next))
+  }
+  const forgetMarks = (buildId: string): void => {
+    setMarksByBuild(forgetBuddyPetReviewMarks(buildId))
   }
 
   // The notes draft follows the backend's notes until the streamer edits.
@@ -174,8 +194,8 @@ export function BuddyPetCreator({
   const [source, setSource] = useState<ReferenceSource>('persona')
   const [upload, setUpload] = useState<{ name: string; url: string; base64: string } | null>(null)
   const [choosingPicture, setChoosingPicture] = useState(false)
-  // A row redone from Review keeps Review on screen while it is made and
-  // the pack is built again; a failed build shows the Build step instead.
+  // A row redone from Check keeps Check on screen while it is drawn and the
+  // moves are made again; a failed make shows the All poses step instead.
   const [redoKey, setRedoKey] = useState<BuddyPetSheetKey | null>(null)
   const [name, setName] = useState(() => persona?.name ?? 'Buddy')
 
@@ -189,7 +209,11 @@ export function BuddyPetCreator({
         ? 'review'
         : buddyPetCreatorStep(creation, naming)
   const showNotes = step === 'reference' && Boolean(creation?.notes) && !choosingPicture
-  const controlsOff = !gate.allowed || !controller
+  const locked = gate.gate !== null
+  const controlsOff = locked || !controller
+  // The month's allowance stops only a new creation; the lock everything.
+  const shownGate =
+    gate.gate ?? (!creation && !state.loading && !gate.canStart ? BUDDY_ALIVE_NONE_LEFT_GATE : null)
   const reference: BuddyPetReference | null =
     source === 'upload'
       ? upload
@@ -202,7 +226,7 @@ export function BuddyPetCreator({
     if (!pack || !controller) return
     const saved = await controller.save(pack)
     if (!saved) return
-    if (creation) reviewMarksByBuild.delete(creation.buildId)
+    if (creation) forgetMarks(creation.buildId)
     // The provider's copy of the persona follows the backend's (Alive now).
     await patchCohostSettings({ persona: saved.settings.persona }).catch(() => undefined)
     onClose()
@@ -213,7 +237,7 @@ export function BuddyPetCreator({
     creation,
     state,
     controller,
-    gateOk: gate.allowed,
+    gateOk: !locked,
     canStart: gate.canStart,
     working,
     showNotes,
@@ -233,11 +257,8 @@ export function BuddyPetCreator({
     onSave: () => void save()
   })
 
-  // ⌘↵ continues, wherever the focus is inside the window.
-  const primaryRef = useRef(primary)
-  primaryRef.current = primary
   // Opened from the look (D11): the kept look is the reference, so its
-  // "Read my Buddy" takes the focus once it can run.
+  // "Read the picture" takes the focus once it can run.
   const primaryButtonRef = useRef<HTMLButtonElement>(null)
   const focusedFromLook = useRef(false)
   const readyToRead =
@@ -252,20 +273,26 @@ export function BuddyPetCreator({
     focusedFromLook.current = true
     primaryButtonRef.current?.focus()
   }, [readyToRead])
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return
-      const action = primaryRef.current
-      if (!action || action.disabled) return
-      event.preventDefault()
-      action.run()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
+
+  // ⌘↵ continues, from anywhere inside the creator itself (plan 174 G-19):
+  // a confirm, a menu or ⌘K over it keeps its own keys, so a paid step never
+  // starts from behind them.
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return
+    if (!rootRef.current?.contains(event.target as Node)) return
+    if (!primary || primary.disabled) return
+    event.preventDefault()
+    primary.run()
+  }
+
+  const newBuddy = (): void => {
+    // The onboarding lives under My Buddies, behind this view (G-4).
+    onClose()
+    requestBuddyOnboarding()
+  }
 
   const problem = state.problem
-  // An expired creation still builds and saves; only making pictures is over.
+  // An expired creation still makes the moves and saves; only drawing is over.
   const expired =
     Boolean(creation?.expired) &&
     (step === 'reference' ||
@@ -273,7 +300,12 @@ export function BuddyPetCreator({
       (step === 'build' && creation !== null && buddyPetNextSheet(creation) !== null))
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col" data-testid="buddy-pet-creator">
+    <div
+      ref={rootRef}
+      className="flex min-h-0 flex-1 flex-col"
+      data-testid="buddy-pet-creator"
+      onKeyDown={onKeyDown}
+    >
       <div className="flex shrink-0 flex-col gap-2 border-b border-border px-gutter py-3">
         <div className="flex items-center gap-3">
           <Button size="sm" type="button" variant="ghost" onClick={onClose}>
@@ -294,17 +326,13 @@ export function BuddyPetCreator({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
-        {!gate.allowed ? (
+        {shownGate ? (
           <div className="px-gutter pt-gutter">
-            <LockAlert
-              action={unlockActionForReason(gate.reason)}
+            <BuddyCreateGateAlert
               data-testid="buddy-pet-gate"
-              reason={gate.reason}
+              gate={shownGate}
+              onAllowCloudAi={() => setConsentOpen(true)}
             />
-          </div>
-        ) : !creation && !state.loading && !gate.canStart ? (
-          <div className="px-gutter pt-gutter">
-            <LockAlert data-testid="buddy-pet-gate" reason={BUDDY_PET_NONE_LEFT} />
           </div>
         ) : null}
         {expired || (problem && buddyPetNeedsNewCreation(problem.code)) ? (
@@ -349,6 +377,7 @@ export function BuddyPetCreator({
             persona={persona}
             source={source}
             upload={upload}
+            onNewBuddy={newBuddy}
             onSource={setSource}
             onUpload={setUpload}
           />
@@ -432,7 +461,7 @@ export function BuddyPetCreator({
       <ConfirmDialog
         cancelLabel="Keep it"
         confirmLabel="Cancel creation"
-        description="Its pictures and any built pack are deleted from this computer. Once a sheet after the pilot was made, it still counts against this month."
+        description="Its pictures and any moves made from them are deleted from this computer. Once a set of poses after the first was drawn, it still counts against this month."
         open={cancelOpen}
         testId="buddy-pet-cancel"
         title="Cancel this creation?"
@@ -441,8 +470,16 @@ export function BuddyPetCreator({
           setCancelOpen(false)
           setNaming(false)
           setRedoKey(null)
-          if (creation) reviewMarksByBuild.delete(creation.buildId)
+          if (creation) forgetMarks(creation.buildId)
           void controller?.cancel()
+        }}
+      />
+      <CloudAiConsentDialog
+        open={consentOpen}
+        testId="buddy-pet-consent"
+        onAnswer={(accepted) => {
+          setConsentOpen(false)
+          if (accepted) setAiConsent(true)
         }}
       />
     </div>
@@ -490,7 +527,7 @@ function primaryAction({
     case 'reference':
       if (showNotes) {
         return {
-          label: state.pending === 'sheet' ? 'Making the pilot…' : 'Make the pilot',
+          label: state.pending === 'sheet' ? 'Drawing the first poses…' : 'Draw the first poses',
           disabled: off || !notesReady || !web,
           run: onPilot,
           testId: 'buddy-pet-make-pilot'
@@ -517,14 +554,18 @@ function primaryAction({
       const missing = buddyPetNextSheet(creation) !== null
       if (missing) {
         return {
-          label: working ? 'Making the sheets…' : 'Make the sheets',
+          label: working ? 'Drawing the poses…' : 'Draw the poses',
           disabled: off || !web,
           run: () => void controller?.makeSheets(),
           testId: 'buddy-pet-make-sheets'
         }
       }
       return {
-        label: working ? 'Building…' : creation.build ? 'Build again' : 'Build',
+        label: working
+          ? 'Making the moves…'
+          : creation.build
+            ? 'Make the moves again'
+            : 'Make the moves',
         disabled: off,
         run: () => void controller?.build(),
         testId: 'buddy-pet-build'
@@ -616,7 +657,7 @@ interface CreationAtlas {
   neutral: string
 }
 
-/** The built pack (`pack/manifest.json` and its atlas), reloaded per build. */
+/** The made moves (`pack/manifest.json` and its atlas), reloaded per make. */
 function useCreationAtlas(personaId: string, creation: BuddyPetCreation): CreationAtlas | null {
   const stamp = creation.build?.state === 'built' ? creation.build.finishedAt : null
   const url = useCreationFileUrl(
@@ -705,6 +746,7 @@ function ReferenceStep({
   disabled,
   identityError,
   lookNotes,
+  onNewBuddy,
   onSource,
   onUpload
 }: {
@@ -715,6 +757,8 @@ function ReferenceStep({
   identityError: string | null
   /** The look's description when Make it Alive opened the creator (D11). */
   lookNotes?: string
+  /** A new look starts in the onboarding, behind this view (plan 174 G-4). */
+  onNewBuddy: () => void
   onSource: (source: ReferenceSource) => void
   onUpload: (upload: { name: string; url: string; base64: string } | null) => void
 }): ReactElement {
@@ -778,10 +822,21 @@ function ReferenceStep({
           />
           {source === 'persona' ? (
             <div className="flex flex-col gap-1">
-              <p className="text-xs text-muted-foreground">
-                The idle picture from the current look. To make a new look, use Create my Buddy in
-                the Avatar section first.
-              </p>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <p className="text-xs text-muted-foreground">
+                  The idle picture from the current look.
+                </p>
+                <Button
+                  data-testid="buddy-pet-new-buddy"
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                  onClick={onNewBuddy}
+                >
+                  <SparkleIcon data-icon="inline-start" />
+                  {BUDDY_LIBRARY_COPY.newBuddy}
+                </Button>
+              </div>
               {lookNotes ? (
                 <p
                   className="text-xs text-muted-foreground select-text"
@@ -1034,17 +1089,17 @@ function PilotStep({
             onClick={onRedo}
           >
             <RefreshIcon data-icon="inline-start" />
-            Make another pilot ({left} left)
+            Draw them again ({left} left)
           </Button>
         }
-        description="Four poses before the rest: neutral, turned left, turned right and laughing. If this looks right, every other sheet follows it."
-        title="Pilot"
+        description="Four poses before the rest: neutral, turned left, turned right and laughing. If these look right, every other pose follows them."
+        title="First poses"
       >
         {making ? (
           <Skeleton className="aspect-square w-full max-w-80 rounded-row" />
         ) : url ? (
           <img
-            alt={`Pilot: ${BUDDY_PET_PILOT_POSES.join(', ')}`}
+            alt={`First poses: ${BUDDY_PET_PILOT_POSES.join(', ')}`}
             className="aspect-square w-full max-w-80 rounded-row border border-border bg-muted/30 object-contain"
             data-testid="buddy-pet-pilot"
             draggable={false}
@@ -1055,12 +1110,12 @@ function PilotStep({
         )}
         {pilot?.opaque ? (
           <p className="text-xs text-muted-foreground">
-            This pilot came back without transparency. Make another one.
+            These poses came back without transparency. Draw them again.
           </p>
         ) : null}
       </PanelSection>
       <PanelSection
-        description="A new pilot uses these words. They are fixed once the pilot looks right."
+        description="New first poses use these words. They are fixed once the poses look right."
         title="What Videorc sees"
       >
         <NotesEditor disabled={disabled} draft={draft} error={notesError} onChange={onDraft} />
@@ -1091,8 +1146,8 @@ function BuildStep({
   return (
     <>
       <PanelSection
-        description={`Eight sheets, one at a time; each takes up to two minutes. ${creation.sheetsRemaining} sheets and ${creation.redosRemaining} redos left in this creation.`}
-        title="Sheets"
+        description={`Eight sets of poses, one at a time; each takes up to two minutes. ${creation.sheetsRemaining} sets and ${creation.redosRemaining} redos left in this creation.`}
+        title="Poses"
       >
         <GroupedList>
           {BUDDY_PET_ATLAS_SHEETS.map((sheet) => {
@@ -1121,7 +1176,7 @@ function BuildStep({
                 }
                 meta={
                   row.phase === 'making'
-                    ? 'Making…'
+                    ? 'Drawing…'
                     : row.phase === 'done'
                       ? row.version && row.version > 1
                         ? `Redone ${row.version - 1}×`
@@ -1153,13 +1208,13 @@ function BuildStep({
         </GroupedList>
       </PanelSection>
       <PanelSection
-        description="Built on this computer from the sheets: each pose is cut out, stood on its feet and packed."
-        title="Pack"
+        description="Put together on this computer from the poses: each one is cut out, stood on its feet and packed into the moves."
+        title="Moves"
       >
         {building ? (
           <div className="flex flex-col gap-1.5" data-testid="buddy-pet-build-progress">
             <Progress
-              aria-label="Build progress"
+              aria-label="Making the moves"
               className="max-w-md"
               max={progress && progress.total > 0 ? progress.total : 1}
               value={progress?.done ?? 0}
@@ -1192,8 +1247,8 @@ function BuildStep({
         ) : (
           <p className="text-xs text-muted-foreground">
             {buddyPetNextSheet(creation)
-              ? 'Builds once every sheet is made.'
-              : 'Every sheet is made. Build the pack to review it.'}
+              ? 'The moves are made once every pose is drawn.'
+              : 'Every pose is drawn. Make the moves to check them.'}
           </p>
         )}
         {state.problem &&
@@ -1236,7 +1291,7 @@ function ReviewStep({
   controller: BuddyPetCreatorController | null
   marks: BuddyPetReviewMarks
   disabled: boolean
-  /** The row being redone and built again. */
+  /** The row being redone and made again. */
   busyRow: BuddyPetSheetKey | null
   onMarks: (marks: BuddyPetReviewMarks) => void
   onRedo: (key: BuddyPetSheetKey) => void
@@ -1249,7 +1304,7 @@ function ReviewStep({
   return (
     <PanelSection
       description="Check every row: each pose looks where its arrow points, and every pose looks like the same Buddy. Redo a row that is wrong; it counts against this creation's redos."
-      title="Review"
+      title="Check"
     >
       <div className="flex flex-wrap items-start gap-6">
         <div className="flex min-w-0 flex-1 flex-col gap-4" data-testid="buddy-pet-review">
@@ -1416,7 +1471,7 @@ function SaveStep({
     <PanelSection
       action={
         <Button disabled={disabled} size="xs" type="button" variant="ghost" onClick={onBack}>
-          Back to review
+          Back to Check
         </Button>
       }
       description={description}
@@ -1425,7 +1480,7 @@ function SaveStep({
       <div className="flex flex-col gap-1">
         <Input
           aria-invalid={invalid || undefined}
-          aria-label="Pack name"
+          aria-label="Name of the moves"
           className="max-w-72"
           data-testid="buddy-pet-name"
           disabled={disabled}
@@ -1433,7 +1488,7 @@ function SaveStep({
           value={name}
           onChange={(event) => onName(event.target.value)}
         />
-        {invalid ? <FieldError>The pack needs a name.</FieldError> : null}
+        {invalid ? <FieldError>The moves need a name.</FieldError> : null}
       </div>
     </PanelSection>
   )

@@ -10,6 +10,11 @@ import type {
   BuddyPetCreationSource
 } from '@/lib/backend'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
+import { BUDDY_PET_REVIEW_MARKS_STORAGE_KEY } from '@/lib/buddy-pet-review-marks'
+import {
+  clearBuddyOnboardingRequest,
+  readBuddyOnboardingRequest
+} from '@/lib/buddy-onboarding-store'
 import { BUDDY_PET_REVIEW_ROWS } from '@/lib/buddy-pet-creator-view'
 import { closeBuddyPetCreator, openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import type { BuddyPetCreatorClient } from '@/hooks/use-buddy-pet-creator'
@@ -186,6 +191,8 @@ beforeEach(() => {
   onClose.mockClear()
   patchCohostSettings.mockClear()
   readBuddyCreationFile.mockClear()
+  localStorage.clear()
+  clearBuddyOnboardingRequest()
   Object.assign(window, { videorc: { readBuddyCreationFile } })
   Object.assign(URL, { createObjectURL: () => 'blob:atlas', revokeObjectURL: () => undefined })
   container = document.createElement('div')
@@ -217,6 +224,7 @@ async function render({
     cohostSettings: settings(),
     patchCohostSettings,
     runtimeInfo: { platform: 'darwin' },
+    setAiConsent: vi.fn(),
     connection: null,
     wsStatus: 'disconnected'
   }
@@ -244,12 +252,53 @@ async function click(element: HTMLElement | null): Promise<void> {
 }
 
 describe('BuddyPetCreator (plan 168 S-F5)', () => {
-  it('is locked with one reason for Basic, every control off', async () => {
+  it('is locked with one reason and one action for Basic, every control off (plan 174 G-5)', async () => {
     const backend = fakeBackend(null)
     await render({ client: backend.client, gate: basic })
-    expect(byTestId('buddy-pet-gate')?.textContent).toContain(basic.reason)
+    const gate = byTestId('buddy-pet-gate')!
+    expect(gate.textContent).toContain('Creating an Alive Buddy is part of Videorc Premium.')
+    expect(gate.dataset.gate).toBe('premium')
+    expect([...gate.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
+      'View Premium'
+    ])
     expect(byTestId<HTMLButtonElement>('buddy-pet-read')?.disabled).toBe(true)
     expect(byTestId('buddy-pet-step-reference')?.getAttribute('aria-current')).toBe('step')
+    // The steps read as a streamer's words, not the pipeline's.
+    expect(
+      [...document.querySelectorAll('[aria-label="Steps"] li')].map((item) =>
+        item.textContent?.replace(/^\d/, '').trim()
+      )
+    ).toEqual(['Picture', 'First poses', 'All poses', 'Check', 'Save'])
+  })
+
+  it('points a new look at the onboarding, not at a section hidden behind it (plan 174 G-4)', async () => {
+    await render({ client: fakeBackend(null).client })
+    expect(document.body.textContent).not.toContain('Avatar section')
+    await click(byTestId('buddy-pet-new-buddy'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(readBuddyOnboardingRequest()).toMatchObject({ step: 1 })
+  })
+
+  it('runs ⌘↵ from inside the creator only (plan 174 G-19)', async () => {
+    const backend = fakeBackend(null)
+    await render({ client: backend.client })
+    const started = (): boolean =>
+      backend.requestTyped.mock.calls.some(([method]) => method === 'cohost.pet.creation.start')
+    // A key from outside the creator (a dialog over it, ⌘K) starts nothing.
+    await act(async () =>
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true })
+      )
+    )
+    await settle()
+    expect(started()).toBe(false)
+    await act(async () =>
+      byTestId('buddy-pet-read')!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true })
+      )
+    )
+    await settle()
+    expect(started()).toBe(true)
   })
 
   it('opened by Make it Alive: the kept look is the reference, with its description', async () => {
@@ -307,6 +356,10 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
     await click(byTestId('buddy-pet-mark-extras'))
     expect(byTestId('buddy-pet-mark-extras')?.getAttribute('aria-pressed')).toBe('true')
     expect(next().disabled).toBe(false)
+    // The marks are kept on this device, by build (plan 174 S3.15a).
+    expect(JSON.parse(localStorage.getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY) ?? '{}')).toEqual({
+      [BUILD]: Object.fromEntries(BUDDY_PET_REVIEW_ROWS.map((row) => [row.key, 1]))
+    })
 
     // Redo a row: its mark goes at once and the creator asks for a redo.
     await click(byTestId('buddy-pet-redo-reactions-a'))
@@ -378,6 +431,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
       persona: expect.objectContaining({ avatar: { kind: 'alive', packId: PACK } })
     })
     expect(onClose).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY)).toBeNull()
     // The cells and the pack come from the creation folder, through main.
     expect(readBuddyCreationFile).toHaveBeenCalledWith('default', BUILD, 'pack/manifest.json')
     expect(readBuddyCreationFile).toHaveBeenCalledWith('default', BUILD, 'pack/mascot.webp')

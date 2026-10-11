@@ -196,7 +196,9 @@ describe('under the Buddy tab', () => {
       ...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')
     ]
     expect(replies.querySelector('#cohost-tone')).toBeTruthy()
-    expect(replies.querySelector('#cohost-notes')).toBeTruthy()
+    // "About you" lives under Name and personality now (plan 174 G-9).
+    expect(replies.querySelector('#cohost-notes')).toBeNull()
+    expect(document.body.textContent).not.toContain('Buddy notes')
     expect(moderation.querySelector('#cohost-rule-new')).toBeTruthy()
     expect(moderation.querySelector('#cohost-sensitivity')).toBeTruthy()
     expect(moderation.querySelector('#cohost-show-on-stream')).toBeTruthy()
@@ -214,7 +216,7 @@ describe('under the Buddy tab', () => {
     })
     expect(document.body.textContent).not.toContain('View Premium')
     expect((document.getElementById('cohost-listen') as HTMLButtonElement).disabled).toBe(true)
-    expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
+    expect((document.getElementById('cohost-answers') as HTMLButtonElement).disabled).toBe(true)
   })
 })
 
@@ -304,7 +306,7 @@ function px(value: string): number {
 // `data-slot="field"`. Answers and Banter once replaced that slot with their
 // own and sat flush against the card's edges and the hairline above them.
 describe('grouped cards (plan 168 Phase 0)', () => {
-  it('pads Answers and Banter exactly like Reply tone and Buddy notes', async () => {
+  it('pads Answers and Banter exactly like Reply tone', async () => {
     await render(settings())
     const replies = [...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')].find(
       (section) => section.querySelector('h2')?.textContent === 'Replies'
@@ -314,8 +316,7 @@ describe('grouped cards (plan 168 Phase 0)', () => {
     expect(rows.map((row) => row.querySelector('label')?.textContent)).toEqual([
       'Answers',
       'Banter',
-      'Reply tone',
-      'Buddy notes'
+      'Reply tone'
     ])
     await applyTailwind(document.body)
     for (const row of rows) {

@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import type { AiCapabilities, BuddyLibraryEntry, BuddyLibraryState } from '@/lib/backend'
-import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 import {
   EMPTY_BUDDY_ONBOARDING_INPUT,
   BUDDY_INVITATION_STORAGE_KEY,
   buddyCreateFailureLine,
-  buddyCreateGate,
   buddyInvitationVisible,
   buddyLibraryBusyLine,
   buddyLibraryIsFull,
@@ -62,13 +60,6 @@ function library(patch: Partial<BuddyLibraryState> = {}): BuddyLibraryState {
   }
 }
 
-const premium: EntitlementUiGate = { allowed: true }
-const free: EntitlementUiGate = {
-  allowed: false,
-  featureId: 'live-cohost',
-  reason: 'Premium',
-  upgradeUrl: 'https://example.test/premium'
-}
 function caps(
   remainingToday = 24,
   buddyLibrary?: { enabled: boolean; count: number; limit: number; alive?: boolean },
@@ -380,58 +371,10 @@ describe('the onboarding steps (plan 170 D14)', () => {
   })
 })
 
-describe('step 4 gates (plan 170 D15)', () => {
-  const allowed = {
-    signedIn: true,
-    gate: premium,
-    consented: true,
-    capabilities: caps(),
-    library: library()
-  }
-
-  it('lets a Premium account with consent, room and images create', () => {
-    expect(buddyCreateGate(allowed)).toBeNull()
+describe('step 4 lines (plan 170 D15; the gate itself is buddy-create-gate.ts)', () => {
+  it("counts today's images", () => {
     expect(buddyOnboardingAllowanceLine(caps(20))).toBe('Uses 4 of your 20 images left today.')
     expect(buddyOnboardingAllowanceLine(null)).toBeNull()
-  })
-
-  it('checks in the order a streamer can fix them, each with its line and actions', () => {
-    expect(buddyCreateGate({ ...allowed, signedIn: false, gate: free, consented: false })).toEqual({
-      kind: 'signed-out',
-      line: 'Sign in to create a Buddy.',
-      actions: ['sign-in']
-    })
-    expect(buddyCreateGate({ ...allowed, gate: free, consented: false })).toEqual({
-      kind: 'premium',
-      line: 'Creating your own Buddy is part of Videorc Premium.',
-      actions: ['see-premium', 'start-from-ours']
-    })
-    expect(buddyCreateGate({ ...allowed, consented: false })).toEqual({
-      kind: 'cloud-ai',
-      line: 'Allow cloud AI to create a Buddy.',
-      actions: ['allow-cloud-ai']
-    })
-    expect(
-      buddyCreateGate({
-        ...allowed,
-        capabilities: caps(0, { enabled: true, count: 30, limit: 30 })
-      })
-    ).toEqual({
-      kind: 'full',
-      line: 'Your library is full (30 Buddies). Delete one to make room.',
-      actions: []
-    })
-    expect(buddyCreateGate({ ...allowed, capabilities: caps(24, undefined, false) })?.kind).toBe(
-      'unavailable'
-    )
-    expect(buddyCreateGate({ ...allowed, capabilities: null })?.kind).toBe('unavailable')
-    // A Buddy is four images: three left is not enough.
-    expect(buddyCreateGate({ ...allowed, capabilities: caps(3) })).toEqual({
-      kind: 'allowance',
-      line: "You've used today's images. You get more tomorrow.",
-      actions: []
-    })
-    expect(buddyCreateGate({ ...allowed, capabilities: caps(4) })).toBeNull()
   })
 
   it('says why a create made nothing, in the gate words when the web named one', () => {
@@ -445,5 +388,7 @@ describe('step 4 gates (plan 170 D15)', () => {
     expect(buddyCreateFailureLine({ code: 'avatar-timeout' })).toBe(
       "Couldn't draw the pictures. Nothing was used from your allowance. Try again."
     )
+    // A create the streamer cancelled says nothing (plan 174 G-14).
+    expect(buddyCreateFailureLine({ code: 'cohost-avatar-cancelled' })).toBeNull()
   })
 })

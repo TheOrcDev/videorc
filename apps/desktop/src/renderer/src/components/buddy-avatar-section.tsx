@@ -9,11 +9,13 @@ import {
   type Ref
 } from 'react'
 
+import { BuddyCreateGateAlert } from '@/components/buddy-create-gate-alert'
 import type { BuddyPetPreviewHandle, BuddyPetPreviewInfo } from '@/components/buddy-pet-preview'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
+import { CloudAiConsentDialog } from '@/components/cloud-ai-consent-dialog'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
@@ -32,20 +34,23 @@ import type { BuddyPets } from '@/hooks/use-buddy-pets'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyPetImportResult, BuddyPetSummary } from '@/lib/backend'
 import { buddyDisplayName } from '@/lib/buddy-auto-chat-view'
+import { buddyAliveCreateGate, type BuddyCreateGate } from '@/lib/buddy-create-gate'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
   BUDDY_AVATAR_KIND_LABELS,
   BUDDY_TAB_PREVIEW_PX,
-  buddyPetCreateAvailability,
+  buddyPetAllowanceLine,
   buddyPetPosesLabel,
   buddyPetSourceLabel,
-  isBuddyShippedPack,
-  type BuddyPetCreateAvailability
+  isBuddyShippedPack
 } from '@/lib/buddy-pet-view'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import type { BuddyMotionSettings } from '../../../shared/buddy-pet'
 
 export type BuddyAvatarView = 'still' | 'alive'
+
+/** A look under Still that Alive would hide (plan 174 G-10): being drawn, or waiting. */
+export type BuddyLookPending = 'working' | 'draft'
 
 // Test your Buddy (plan 169 D14) is its own chunk, loaded on first open.
 const BuddyTestDialog = lazy(() => import('@/components/buddy-test-dialog'))
@@ -68,6 +73,8 @@ export interface BuddyAvatarSectionProps {
   onPreviewLoad?: (info: BuddyPetPreviewInfo) => void
   /** The Still panel: the four state images (`BuddyStillLooks`). */
   stillPanel: ReactNode
+  /** A new look under Still while Alive shows (plan 174 G-10); null when none. */
+  lookPending?: BuddyLookPending | null
   /** Wear a pack (persists `persona.avatar`). */
   onWear: (packId: string) => Promise<void>
   /** The worn pack is being removed: the Buddy goes back to Still, the view stays Alive. */
@@ -94,7 +101,8 @@ function isTextEntry(target: EventTarget | null): boolean {
  * folder (free, `Kbd` I) or made with the creator (Premium, Phase F).
  * Everything persists through `patchCohostSettings` with no success toast:
  * the preview is the confirmation. Refusals show inline in the backend's
- * words.
+ * words. Why Create is off is the one gate model's Alert (plan 174 G-5),
+ * and a new look hidden under Still says so above (G-10).
  */
 export function BuddyAvatarSection({
   persona,
@@ -106,17 +114,20 @@ export function BuddyAvatarSection({
   motion,
   onPreviewLoad,
   stillPanel,
+  lookPending = null,
   onWear,
   onUnwear,
   importFolder
 }: BuddyAvatarSectionProps): ReactElement {
-  const { account, aiCapabilities, aiConsent, cohostGate } = useStudioCore()
-  const create = buddyPetCreateAvailability({
+  const { account, aiCapabilities, aiConsent, cohostGate, setAiConsent } = useStudioCore()
+  const createGate = buddyAliveCreateGate({
     signedIn: account?.status === 'signed-in',
     gate: cohostGate,
     consented: aiConsent,
     capabilities: aiCapabilities ?? null
   })
+  const allowance = buddyPetAllowanceLine(aiCapabilities)
+  const [consentOpen, setConsentOpen] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
@@ -170,6 +181,13 @@ export function BuddyAvatarSection({
     }
   }
 
+  const changeView = (next: BuddyAvatarView): void => {
+    setActionError(null)
+    onViewChange(next).catch((failure: unknown) =>
+      setActionError(failure instanceof Error ? failure.message : "Couldn't switch the avatar.")
+    )
+  }
+
   const openTest = (): void => {
     setTestSession((session) => session + 1)
     setTestOpen(true)
@@ -192,7 +210,10 @@ export function BuddyAvatarSection({
   return (
     <PanelSection
       action={
+        // Manual activation: this choice changes what viewers see, so arrow
+        // keys browse and Space or Enter switches (plan 174 G-10).
         <SegmentedControl
+          activationMode="manual"
           aria-label="Avatar"
           data-testid="buddy-avatar-kind"
           options={(['still', 'alive'] as const).map((kind) => ({
@@ -201,19 +222,26 @@ export function BuddyAvatarSection({
           }))}
           size="sm"
           value={view}
-          onValueChange={(next) => {
-            setActionError(null)
-            onViewChange(next).catch((failure: unknown) =>
-              setActionError(
-                failure instanceof Error ? failure.message : "Couldn't switch the avatar."
-              )
-            )
-          }}
+          onValueChange={changeView}
         />
       }
       description={`How ${buddyDisplayName(persona.name)} looks on stream and here. Still is your four pictures. Alive moves: it looks around and reacts. Importing moves is free; creating them is part of Videorc Premium.`}
       title="Avatar"
     >
+      {view === 'alive' && lookPending ? (
+        <Alert data-testid="buddy-avatar-look-pending" icon={SparkleIcon}>
+          <AlertTitle>
+            {lookPending === 'working'
+              ? `A new look for ${persona.name} is being drawn under Still.`
+              : `A new look for ${persona.name} is waiting under Still.`}
+          </AlertTitle>
+          <AlertAction>
+            <Button size="xs" type="button" variant="outline" onClick={() => changeView('still')}>
+              Switch to Still
+            </Button>
+          </AlertAction>
+        </Alert>
+      ) : null}
       <div
         className="group/avatar flex flex-col gap-4 sm:flex-row sm:items-start"
         data-testid="buddy-avatar"
@@ -284,12 +312,14 @@ export function BuddyAvatarSection({
             stillPanel
           ) : (
             <AlivePanel
-              create={create}
+              allowance={allowance}
+              gate={createGate}
               importError={importError}
               importing={importing}
               pets={pets}
               wornPack={wornPack}
               wornPackId={wornPackId}
+              onAllowCloudAi={() => setConsentOpen(true)}
               onImport={() => void importPack()}
               onRemove={(pack) => {
                 setRemoveTarget(pack)
@@ -351,6 +381,15 @@ export function BuddyAvatarSection({
         </Suspense>
       ) : null}
 
+      <CloudAiConsentDialog
+        open={consentOpen}
+        testId="buddy-avatar-consent"
+        onAnswer={(accepted) => {
+          setConsentOpen(false)
+          if (accepted) setAiConsent(true)
+        }}
+      />
+
       <ConfirmDialog
         cancelLabel="Keep it"
         confirmLabel="Remove"
@@ -379,9 +418,11 @@ function AlivePanel({
   pets,
   wornPack,
   wornPackId,
-  create,
+  gate,
+  allowance,
   importing,
   importError,
+  onAllowCloudAi,
   onWear,
   onImport,
   onRemove
@@ -389,9 +430,13 @@ function AlivePanel({
   pets: BuddyPets
   wornPack: BuddyPetSummary | null
   wornPackId: string | null
-  create: BuddyPetCreateAvailability
+  /** Why Create is off (plan 174 G-5); null when it works. */
+  gate: BuddyCreateGate | null
+  /** "2 of 3 left this month", when the web reports the numbers. */
+  allowance: string | null
   importing: boolean
   importError: string | null
+  onAllowCloudAi: () => void
   onWear: (pack: BuddyPetSummary) => void
   onImport: () => void
   onRemove: (pack: BuddyPetSummary) => void
@@ -400,7 +445,7 @@ function AlivePanel({
   const createButton = (
     <Button
       data-testid="buddy-pack-create"
-      disabled={!create.allowed}
+      disabled={gate !== null}
       type="button"
       variant="outline"
       onClick={openBuddyPetCreator}
@@ -422,9 +467,15 @@ function AlivePanel({
       <Kbd className="ml-0.5">I</Kbd>
     </Button>
   )
-  const createHint = create.reason ?? create.allowance
   return (
     <>
+      {gate ? (
+        <BuddyCreateGateAlert
+          data-testid="buddy-create-gate"
+          gate={gate}
+          onAllowCloudAi={onAllowCloudAi}
+        />
+      ) : null}
       {pets.error ? (
         <Alert data-testid="buddy-packs-error" variant="destructive">
           <AlertTitle>Couldn&apos;t list your moves</AlertTitle>
@@ -493,9 +544,9 @@ function AlivePanel({
           </div>
         </>
       )}
-      {createHint ? (
+      {allowance ? (
         <p className="text-xs tabular-nums text-muted-foreground" data-testid="buddy-create-hint">
-          {createHint}
+          {allowance}
         </p>
       ) : null}
       {importError ? (
