@@ -11,6 +11,14 @@ ordered checkpoints, human gates, and resuming partial releases. Follow its
 linked runbooks; do not invent a shorter release path from package scripts.
 An explanation or edit of the release process is not permission to publish.
 
+## Live Tests On YouTube
+
+Only when the user explicitly asks for a real live test ("test it live",
+"live lab", "go live on the test channel"), read
+`.agents/skills/videorc-live-lab/SKILL.md` first. Ordinary e2e and smoke
+verification never goes live. Nothing streams without the owner's go in the
+current session.
+
 ## Verification Gates
 
 Use the smallest gate that proves the change, then run the broader gate before handing off risky work.
