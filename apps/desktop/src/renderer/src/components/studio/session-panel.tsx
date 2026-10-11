@@ -9,35 +9,41 @@ import {
   RecordIcon,
   StopIcon
 } from '@/components/icons'
-import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
+import { useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { CohostPresenceDot } from '@/components/cohost-status'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
+import { StatusDot } from '@/components/status-dot'
 import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { useWorkspaceNav } from '@/components/workspace-nav'
+import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav'
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import {
   useStudioChat,
   useStudioCore,
+  useStudioDiagnostics,
   useStudioRecording,
   useStudioShell
 } from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
+import { activeCohostAlerts, cohostAlertLabel } from '@/lib/cohost-view'
 import { formatVideoQuality } from '@/lib/format-video'
-import { GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
+import { liveDestinationsView, streamHealthFact } from '@/lib/live-session-view'
+import { classifyStreamHealthAttribution } from '@/lib/stream-health-attribution'
+import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import {
+  STOP_FINALIZE_OVERRUN_ALERT,
   sessionAlsoRecords,
   sessionClockLabel,
   sessionStatusGlyph,
@@ -62,9 +68,13 @@ export function SessionTransport({
   canStop,
   stopLabel,
   stopNote,
+  stopOverrun = false,
   startRequestPending,
+  goLivePending = false,
   recordBlockedReason,
   liveStreamBlockedReason,
+  blockedReason = null,
+  blockedJump = null,
   status,
   onRecord,
   onLiveStream,
@@ -75,15 +85,27 @@ export function SessionTransport({
   stopLabel: string
   /** What Stop does beyond its label, said visibly ("Your recording stops too."). */
   stopNote?: string
+  /** The stop overran its finalize window (plan 174 S3.1, B-16): explain Force stop. */
+  stopOverrun?: boolean
   startRequestPending: boolean
+  /** Go Live's first checks are running (B-7): the button reads "Checking…" from the click. */
+  goLivePending?: boolean
   recordBlockedReason: string | null
   liveStreamBlockedReason: string | null
+  /**
+   * The one inline line under the buttons (plan 174 S3.2, B-9): why
+   * whichever button is off is off, Record's first, with the jump to the
+   * page that fixes it. Hover and focus still carry each button's own.
+   */
+  blockedReason?: string | null
+  blockedJump?: BlockedJump | null
   /** The session status chip (and the mic sliver that rides with it). */
   status: ReactNode
   onRecord: () => void
   onLiveStream: () => void
   onStop: () => void
 }): ReactElement {
+  const startsBusy = startRequestPending || goLivePending
   return (
     <section
       aria-label="Session controls"
@@ -113,7 +135,7 @@ export function SessionTransport({
             <DisabledReason className="flex-1" reason={recordBlockedReason}>
               <Button
                 className="flex-1"
-                disabled={Boolean(recordBlockedReason) || startRequestPending}
+                disabled={Boolean(recordBlockedReason) || startsBusy}
                 size="lg"
                 variant="destructive"
                 onClick={onRecord}
@@ -126,16 +148,20 @@ export function SessionTransport({
                 />
               </Button>
             </DisabledReason>
-            <DisabledReason className="flex-1" reason={liveStreamBlockedReason}>
+            <DisabledReason
+              className="flex-1"
+              reason={goLivePending ? null : liveStreamBlockedReason}
+            >
               <Button
                 className="flex-1"
-                disabled={Boolean(liveStreamBlockedReason) || startRequestPending}
+                data-testid="go-live-button"
+                disabled={Boolean(liveStreamBlockedReason) || startsBusy}
                 size="lg"
                 variant="outline"
                 onClick={onLiveStream}
               >
                 <LivestreamIcon data-icon="inline-start" weight="fill" />
-                {GO_LIVE_LABEL}
+                {goLivePending ? GO_LIVE_CHECKING_LABEL : GO_LIVE_LABEL}
               </Button>
             </DisabledReason>
           </>
@@ -148,7 +174,61 @@ export function SessionTransport({
           {stopNote}
         </p>
       ) : null}
+      {!active && blockedReason ? (
+        <BlockedReasonLine jump={blockedJump} reason={blockedReason} />
+      ) : null}
+      {/* B-16: a stop that drags on says what is happening and what Force
+          stop does, instead of a bare "Stopping…" that strands the streamer. */}
+      {active && stopOverrun ? (
+        <Alert data-testid="session-stop-overrun" variant="warning">
+          <AlertTitle>{STOP_FINALIZE_OVERRUN_ALERT.title}</AlertTitle>
+          <AlertDescription>{STOP_FINALIZE_OVERRUN_ALERT.description}</AlertDescription>
+        </Alert>
+      ) : null}
     </section>
+  )
+}
+
+type BlockedJump = {
+  label: string
+  to: Parameters<ReturnType<typeof useWorkspaceNav>['setActive']>[0]
+  /** With `to: 'settings'`, the Settings tab to open (plan 064). */
+  settingsTab?: SettingsTabId
+}
+
+/**
+ * Why a start cannot run right now, as one quiet line under the transport
+ * (plan 174 S3.2, B-9; never the yellow top banner of post-0.9.4 F8), with
+ * the jump to the page that owns the fix. Without the shell's navigation
+ * (a bare transport under test) the line stands alone.
+ */
+function BlockedReasonLine({
+  reason,
+  jump
+}: {
+  reason: string
+  jump: BlockedJump | null
+}): ReactElement {
+  const nav = useContext(WorkspaceNavContext)
+  return (
+    <div
+      className="flex items-center gap-1.5 text-xs text-muted-foreground"
+      data-slot="session-blocked-reason"
+    >
+      <InfoIcon className="size-3.5 shrink-0" />
+      <span className="min-w-0">{reason}</span>
+      {jump && nav ? (
+        <button
+          className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
+          type="button"
+          onClick={() =>
+            jump.to === 'settings' ? nav.openSettings(jump.settingsTab) : nav.setActive(jump.to)
+          }
+        >
+          {jump.label}
+        </button>
+      ) : null}
+    </div>
   )
 }
 
@@ -224,9 +304,8 @@ function SessionClock(): ReactElement {
  */
 export function SessionPanel({
   active,
+  live = false,
   startRequestPending,
-  blockedReason = null,
-  blockedJump = null,
   startFailure = null,
   runtimeNotice = null,
   onRetryStart,
@@ -234,16 +313,9 @@ export function SessionPanel({
   onDismissRuntimeNotice
 }: {
   active: boolean
+  /** On air (plan 174 S3.2): the live dashboard rows exist only then. */
+  live?: boolean
   startRequestPending: boolean
-  /** Why the session cannot start right now (hard block): a quiet inline
-   * line, never the yellow top banner (post-0.9.4 fix batch F8). */
-  blockedReason?: string | null
-  blockedJump?: {
-    label: string
-    to: Parameters<ReturnType<typeof useWorkspaceNav>['setActive']>[0]
-    /** With `to: 'settings'`, the Settings tab to open (plan 064). */
-    settingsTab?: SettingsTabId
-  } | null
   /** The last refused Record / Go Live (B0): stays until the user starts
    * again or dismisses it; a 4s toast was the only signal. */
   startFailure?: SessionStartFailure | null
@@ -255,7 +327,7 @@ export function SessionPanel({
   onDismissRuntimeNotice?: () => void
 }): ReactElement {
   const { captureConfig } = useStudioCore()
-  const { openStudioPanel, setActive, openSettings } = useWorkspaceNav()
+  const { openStudioPanel, setActive } = useWorkspaceNav()
   const video = captureConfig.video
 
   return (
@@ -264,7 +336,7 @@ export function SessionPanel({
         <NavigableRow
           icon={LivestreamIcon}
           label="Livestream"
-          value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
+          value={streamingSummary(captureConfig.streaming.targets)}
           onNavigate={() => openStudioPanel('live')}
         />
         <NavigableRow
@@ -273,31 +345,17 @@ export function SessionPanel({
           value={formatVideoQuality(video)}
           onNavigate={() => openStudioPanel('recording')}
         />
-        {/* Presence W3: while a session runs, whether the co-host is reading
-            chat is a session fact, knowable without the Comments window.
-            Streaming only: the co-host reads LIVE chat, so a record-only
-            session has no chat for it to read. */}
-        {active && captureConfig.streamEnabled ? <CohostSessionRow /> : null}
+        {/* The live dashboard (plan 174 S3.2, B-4): every destination and the
+            stream's health, quiet when fine and specific when not, so a
+            dropped leg is never only a toast. On air only: a recording
+            streams nowhere. */}
+        {live ? <LiveDestinationRows /> : null}
+        {live ? <LiveStreamHealthRow /> : null}
+        {/* Presence W3: while on air, whether Buddy is reading chat is a
+            session fact, knowable without the Stream Manager; a recording
+            has no chat for it to read. */}
+        {live ? <CohostSessionRow /> : null}
       </GroupedList>
-      {!active && blockedReason ? (
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <InfoIcon className="size-3.5 shrink-0" />
-          <span className="min-w-0">{blockedReason}</span>
-          {blockedJump ? (
-            <button
-              className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
-              type="button"
-              onClick={() =>
-                blockedJump.to === 'settings'
-                  ? openSettings(blockedJump.settingsTab)
-                  : setActive(blockedJump.to)
-              }
-            >
-              {blockedJump.label}
-            </button>
-          ) : null}
-        </div>
-      ) : null}
       {/* A refused start is the ONE place destructive red is allowed on chrome:
           it is status, it persists, and it carries the backend's reason
           verbatim (the toast can be missed mid-stream; this line cannot). */}
@@ -348,9 +406,89 @@ export function SessionPanel({
 }
 
 /**
+ * The destinations while on air (plan 174 S3.2, B-4): one quiet "3 of 3 on
+ * air" row when every leg is live, else that count and one row per problem
+ * ("Twitch · Stopped"), each a door to the Livestream page. Nothing until the
+ * backend has reported the session's legs: never an unmeasured zero.
+ */
+function LiveDestinationRows(): ReactElement | null {
+  const { streamTargets } = useStudioCore()
+  const { openStudioPanel } = useWorkspaceNav()
+  const view = liveDestinationsView(streamTargets)
+  if (!view) {
+    return null
+  }
+  return (
+    <>
+      <NavigableRow
+        icon={LivestreamIcon}
+        label="Destinations"
+        value={
+          <span data-testid="session-destinations-summary">
+            <StatusDot
+              className="text-sm text-foreground"
+              label={view.summary}
+              tone={view.kind === 'quiet' ? 'live' : 'warn'}
+            />
+          </span>
+        }
+        onNavigate={() => openStudioPanel('live')}
+      />
+      {view.kind === 'problems'
+        ? view.problems.map((problem) => (
+            <NavigableRow
+              key={problem.targetId}
+              className="pl-9.5"
+              label={problem.label}
+              value={
+                <span data-testid="session-destination-problem">
+                  <StatusDot
+                    className="text-sm text-foreground"
+                    label={problem.word}
+                    tone={problem.tone}
+                  />
+                </span>
+              }
+              onNavigate={() => openStudioPanel('live')}
+            />
+          ))
+        : null}
+    </>
+  )
+}
+
+/**
+ * One "Stream" fact from the same classifier the Livestream page uses (plan
+ * 174 S3.2, B-4): "Healthy" quietly, the earliest failing stage in a few
+ * words when not. It opens Health, where the numbers behind it live.
+ */
+function LiveStreamHealthRow(): ReactElement {
+  const { streamTargets } = useStudioCore()
+  const { diagnosticStats, streamHealth } = useStudioDiagnostics()
+  const { setActive } = useWorkspaceNav()
+  const fact = streamHealthFact(
+    classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets)
+  )
+  return (
+    <NavigableRow
+      icon={AlertIcon}
+      label="Stream"
+      value={
+        <span data-testid="session-stream-health">
+          <StatusDot className="text-sm text-foreground" label={fact.label} tone={fact.tone} />
+        </span>
+      }
+      onNavigate={() => setActive('diagnostics')}
+    />
+  )
+}
+
+/**
  * One co-host line, same derivation as the Stream Manager's Buddy pane so the two
  * surfaces cannot disagree. Dot + label only: this panel is a fact list, not a
- * working surface, so the typing shimmer stays where the work is read.
+ * working surface, so the typing shimmer stays where the work is read. What
+ * viewers report through Buddy ("Chat says: no audio · 3 viewers") shows here
+ * too (plan 174 S3.2, F-7): a problem the streamer cannot see is news.
  */
 function CohostSessionRow(): ReactElement {
   const { cohostState } = useStudioChat()
@@ -363,17 +501,25 @@ function CohostSessionRow(): ReactElement {
   }, [])
 
   const view = cohostPresenceView(cohostState, nowMs)
+  const alerts = activeCohostAlerts(cohostState, nowMs)
+  const alertLabels = alerts.map((alert) => cohostAlertLabel(alert))
 
   return (
     <NavigableRow
       icon={BuddyIcon}
       label="Buddy"
-      title={view.tooltipLines.join('\n') || undefined}
+      title={[...alertLabels, ...view.tooltipLines].join('\n') || undefined}
       value={
-        <span className="flex min-w-0 items-center gap-1.5">
-          <CohostPresenceDot view={view} />
-          <span className="truncate">{view.label.replace(/^Buddy\s*(·\s*)?/, '')}</span>
-        </span>
+        alertLabels.length > 0 ? (
+          <span data-testid="session-buddy-alert">
+            <StatusDot className="text-sm text-foreground" label={alertLabels[0]} tone="warn" />
+          </span>
+        ) : (
+          <span className="flex min-w-0 items-center gap-1.5">
+            <CohostPresenceDot view={view} />
+            <span className="truncate">{view.label.replace(/^Buddy\s*(·\s*)?/, '')}</span>
+          </span>
+        )
       }
       onNavigate={() => void openCommentsWindow()}
     />

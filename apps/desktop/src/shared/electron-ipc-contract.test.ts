@@ -51,9 +51,11 @@ describe('Electron IPC contract', () => {
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
     // 130: plan 169 D10 retired buddy-assets:import-image (no per-state uploads).
+    // 132: plan 174 S3.1 adds app:exit (the renderer's answer to a quit or
+    // close asked while on air).
     // 131: plan 174 S3.18 adds resource:reveal-support-bundle (Show in Finder).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(131)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(131)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(132)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(132)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -804,6 +806,13 @@ describe('Electron IPC contract', () => {
       })
     ).toThrow('complete provider OAuth callback URL')
     expect(() => validateElectronEventPayload('shortcut:navigate', 'F12')).toThrow('one of 1, 2, 3')
+    // Plan 174 S3.1 (D2): the exit question and its answer are one of two words.
+    expect(validateElectronEventPayload('app:exit-request', 'quit')).toBe('quit')
+    expect(() => validateElectronEventPayload('app:exit-request', 'restart')).toThrow(
+      'one of quit, close'
+    )
+    expect(validateElectronInvokeArgs('app:exit', ['close'])).toEqual(['close'])
+    expect(() => validateElectronInvokeArgs('app:exit', ['kill'])).toThrow('one of quit, close')
   })
 
   it('bounds every fallback contract and Notes persistence payload', () => {

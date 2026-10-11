@@ -5,10 +5,39 @@ import {
   captureStateAfterTransportLoss,
   captureStateBlocksInterruption,
   isActiveRecordingState,
+  livestreamOnAirFromPayload,
   recordingStateFromPayload,
   sessionActivity,
   type MainCaptureState
 } from './capture-state'
+
+// Plan 174 S3.1 (D2): main asks before a quit or a window close ends a
+// livestream, so it reads "on air" straight from the status payload.
+describe('livestreamOnAirFromPayload', () => {
+  it('is on air for a stream-only session and for Go Live (record+stream)', () => {
+    expect(
+      livestreamOnAirFromPayload({ state: 'streaming', streamUrl: 'rtmp://127.0.0.1/live/***' })
+    ).toBe(true)
+    expect(
+      livestreamOnAirFromPayload({ state: 'recording', streamUrl: 'rtmp://127.0.0.1/live/***' })
+    ).toBe(true)
+    expect(livestreamOnAirFromPayload({ state: 'streaming' })).toBe(true)
+  })
+
+  it('is never on air for a recording, a transition, or a malformed status', () => {
+    expect(livestreamOnAirFromPayload({ state: 'recording' })).toBe(false)
+    expect(livestreamOnAirFromPayload({ state: 'recording', streamUrl: null })).toBe(false)
+    expect(livestreamOnAirFromPayload({ state: 'recording', streamUrl: 7 })).toBe(false)
+    for (const state of ['idle', 'starting', 'stopping', 'failed']) {
+      expect(livestreamOnAirFromPayload({ state, streamUrl: 'rtmp://127.0.0.1/live/***' })).toBe(
+        false
+      )
+    }
+    expect(livestreamOnAirFromPayload({ state: 'bogus', streamUrl: 'rtmp://x' })).toBe(false)
+    expect(livestreamOnAirFromPayload(null)).toBe(false)
+    expect(livestreamOnAirFromPayload('recording')).toBe(false)
+  })
+})
 
 // Plan 174 B-6: Go Live (record+stream) reports `recording` with a stream URL,
 // and its notices must speak of the live session while it still saves a file.

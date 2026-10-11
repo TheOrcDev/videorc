@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  GO_LIVE_CHECKING_LABEL,
   GO_LIVE_COMMAND,
   GO_LIVE_DIALOG_TITLE,
   GO_LIVE_LABEL,
+  GO_LIVE_NO_DESTINATION_TITLE,
   GO_LIVE_SHORTCUT_LABEL,
+  OPEN_LIVESTREAM_LABEL,
   RECORD_LABEL,
   RECORD_SHORTCUT_LABEL,
   START_RECORDING_COMMAND,
@@ -25,6 +28,12 @@ describe('the going-live vocabulary (plan 174 D3)', () => {
     ])
     expect(USE_FOR_GO_LIVE_LABEL).toBe('Use for Go Live…')
     expect(GO_LIVE_DIALOG_TITLE).toBe('Go live')
+  })
+
+  it('refuses a Go Live with no destination with one fix, and checks from the first click (S3.1)', () => {
+    expect(GO_LIVE_NO_DESTINATION_TITLE).toBe('Set up a destination to go live')
+    expect(OPEN_LIVESTREAM_LABEL).toBe('Open Livestream')
+    expect(GO_LIVE_CHECKING_LABEL).toBe('Checking…')
   })
 
   it('says how many destinations the Go Live dialog starts, past one', () => {

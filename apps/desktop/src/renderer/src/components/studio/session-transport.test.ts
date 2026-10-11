@@ -238,3 +238,119 @@ describe('SessionStatusPill (plan 174 S1.3)', () => {
     expect(iconCount()).toBe(1)
   })
 })
+
+// Plan 174 S3.1: Go Live reads "Checking…" from the first click (B-7), and a
+// stop that overran its finalize window explains Force stop (B-16).
+describe('SessionTransport in flight (plan 174 S3.1)', () => {
+  it('reads Checking… while the Go Live preflight runs and holds both starts', () => {
+    act(() =>
+      root.render(
+        createElement(SessionTransport, {
+          active: false,
+          canStop: false,
+          stopLabel: 'Stop recording',
+          startRequestPending: false,
+          goLivePending: true,
+          recordBlockedReason: null,
+          liveStreamBlockedReason: null,
+          status: null,
+          onRecord: noop,
+          onLiveStream: noop,
+          onStop: noop
+        })
+      )
+    )
+    const buttons = [...container.querySelectorAll('button')]
+    expect(buttons.map((button) => button.disabled)).toEqual([true, true])
+    expect(buttons[1]?.textContent?.trim()).toBe('Checking…')
+    expect(container.querySelector('[data-slot="disabled-reason"]')).toBeNull()
+  })
+
+  it('explains Force stop once the stop overran, as a polite warning', () => {
+    const stopping = { state: 'stopping', sessionId: 's', startedAt: STARTED_AT } as const
+    act(() =>
+      root.render(
+        createElement(
+          StudioContextProviders,
+          {
+            core: unused,
+            recordingState: { recording: stopping },
+            recording: { recording: stopping },
+            preview: unused,
+            diagnostics: unused,
+            chat: unused,
+            audio: unused
+          },
+          createElement(SessionTransport, {
+            active: true,
+            canStop: true,
+            stopLabel: 'Force stop',
+            stopOverrun: true,
+            startRequestPending: false,
+            recordBlockedReason: null,
+            liveStreamBlockedReason: null,
+            status: null,
+            onRecord: noop,
+            onLiveStream: noop,
+            onStop: noop
+          })
+        )
+      )
+    )
+    const alert = container.querySelector('[data-testid="session-stop-overrun"]')
+    expect(alert?.getAttribute('role')).toBe('status')
+    expect(alert?.getAttribute('data-variant')).toBe('warning')
+    expect(alert?.textContent).toContain('Stopping is taking longer than expected')
+    expect(alert?.textContent).toContain('Force stop ends it now; the last seconds may be lost.')
+    expect(text('button')).toContain('Force stop')
+  })
+})
+
+// Plan 174 S3.2 (B-9): one inline line under the transport says why whichever
+// button is off is off. Without the shell's navigation the line stands alone.
+describe('SessionTransport reason line (plan 174 S3.2)', () => {
+  it('shows the one reason under the buttons while idle, and never while a session runs', () => {
+    const recording = { state: 'recording', sessionId: 's', startedAt: STARTED_AT } as const
+    const render = (active: boolean): void =>
+      act(() =>
+        root.render(
+          createElement(
+            StudioContextProviders,
+            {
+              core: unused,
+              recordingState: { recording },
+              recording: { recording },
+              preview: unused,
+              diagnostics: unused,
+              chat: unused,
+              audio: unused
+            },
+            createElement(SessionTransport, {
+              active,
+              canStop: active,
+              stopLabel: 'Stop recording',
+              startRequestPending: false,
+              recordBlockedReason: null,
+              liveStreamBlockedReason:
+                'Enable at least one livestream destination before streaming.',
+              blockedReason: 'Enable at least one livestream destination before streaming.',
+              blockedJump: { label: 'Open Livestream', to: 'live' },
+              status: null,
+              onRecord: noop,
+              onLiveStream: noop,
+              onStop: noop
+            })
+          )
+        )
+      )
+    render(false)
+    const line = container.querySelector('[data-slot="session-blocked-reason"]')
+    expect(line?.textContent).toContain(
+      'Enable at least one livestream destination before streaming.'
+    )
+    // No navigation provider here: the jump button is left out, not broken.
+    expect(line?.querySelector('button')).toBeNull()
+    render(true)
+    expect(container.querySelector('[data-slot="session-blocked-reason"]')).toBeNull()
+  })
+})

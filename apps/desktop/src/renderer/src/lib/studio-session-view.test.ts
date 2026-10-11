@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  RECORDING_STOP_FINALIZE_OVERRUN_CODE,
+  STOP_FINALIZE_OVERRUN_ALERT,
   sessionMode,
   isSessionTransportActive,
   sessionAlsoRecords,
@@ -35,15 +37,25 @@ describe('streamingSummary', () => {
   const yt = { enabled: true, label: 'YouTube', platform: 'youtube' }
   const tw = { enabled: true, label: '', platform: 'twitch' }
 
-  it('reads Disabled when streaming is off', () => {
-    expect(streamingSummary(false, [yt])).toBe('Disabled')
-  })
+  // Plan 174 S3.1 (B-3): the row shows what is set up whatever the last mode
+  // was; Go Live is an explicit start, so there is no "Disabled" any more.
   it('handles zero / one / many enabled destinations', () => {
-    expect(streamingSummary(true, [])).toBe('No destinations')
-    expect(streamingSummary(true, [{ ...yt, enabled: false }])).toBe('No destinations')
-    expect(streamingSummary(true, [yt])).toBe('YouTube')
-    expect(streamingSummary(true, [tw])).toBe('twitch') // falls back to platform when unlabeled
-    expect(streamingSummary(true, [yt, tw])).toBe('2 destinations')
+    expect(streamingSummary([])).toBe('No destinations')
+    expect(streamingSummary([{ ...yt, enabled: false }])).toBe('No destinations')
+    expect(streamingSummary([yt])).toBe('YouTube')
+    expect(streamingSummary([tw])).toBe('twitch') // falls back to platform when unlabeled
+    expect(streamingSummary([yt, tw])).toBe('2 destinations')
+  })
+})
+
+describe('STOP_FINALIZE_OVERRUN_ALERT (plan 174 S3.1, B-16)', () => {
+  it('explains Force stop in the streamer’s words, with the backend code it answers', () => {
+    expect(RECORDING_STOP_FINALIZE_OVERRUN_CODE).toBe('recording-stop-finalize-overrun')
+    expect(STOP_FINALIZE_OVERRUN_ALERT.title).toBe('Stopping is taking longer than expected')
+    expect(STOP_FINALIZE_OVERRUN_ALERT.description).toContain(
+      'Force stop ends it now; the last seconds may be lost.'
+    )
+    expect(STOP_FINALIZE_OVERRUN_ALERT.description).not.toMatch(/session|endpoint/i)
   })
 })
 

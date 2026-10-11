@@ -68,6 +68,21 @@ export function captureStateAfterStatusPayload(payload: unknown): MainCaptureSta
   return recordingStateFromPayload(payload) ?? 'unknown'
 }
 
+/**
+ * Main's own reading of "on air" from a `recording.status` payload (plan 174
+ * S3.1, D2): quitting or closing the main window while a livestream runs asks
+ * first, so main needs the fact without a round trip. A malformed status is
+ * not on air: there is nothing a question could protect.
+ */
+export function livestreamOnAirFromPayload(payload: unknown): boolean {
+  const state = recordingStateFromPayload(payload)
+  if (!state) {
+    return false
+  }
+  const streamUrl = (payload as Partial<RecordingStatus>).streamUrl
+  return sessionIsLive({ state, streamUrl: typeof streamUrl === 'string' ? streamUrl : null })
+}
+
 /** Losing the main-process event socket invalidates the last sampled status,
  * even while the backend process itself remains connected. */
 export function captureStateAfterTransportLoss(): MainCaptureState {

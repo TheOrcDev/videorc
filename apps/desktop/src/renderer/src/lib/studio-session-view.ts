@@ -28,11 +28,13 @@ export function sessionMode(recordEnabled: boolean, streamEnabled: boolean): str
   return 'No output'
 }
 
-/** "Disabled" off-air, else the single destination's name or a count. */
-export function streamingSummary(streamEnabled: boolean, targets: SessionTarget[]): string {
-  if (!streamEnabled) {
-    return 'Disabled'
-  }
+/**
+ * The Session row's Livestream fact: the single destination's name or a
+ * count, whatever the last mode was (plan 174 S3.1, B-3). Go Live is an
+ * explicit start, so there is no "Disabled" mode to report any more; what a
+ * streamer needs to know is what is set up.
+ */
+export function streamingSummary(targets: readonly SessionTarget[]): string {
   const enabled = targets.filter((target) => target.enabled)
   if (enabled.length === 0) {
     return 'No destinations'
@@ -58,6 +60,20 @@ export function isSessionTransportActive(state: string): boolean {
 export function sessionAlsoRecords(status: SessionStatusView): boolean {
   return status.state === 'recording' && sessionIsLive(status)
 }
+
+/** The backend's health code when a stop overran its finalize window (recording.rs). */
+export const RECORDING_STOP_FINALIZE_OVERRUN_CODE = 'recording-stop-finalize-overrun'
+
+/**
+ * The warning under Force stop once a stop overran its finalize window
+ * (plan 174 S3.1, B-16): what is happening, and what Force stop does, in
+ * the streamer's words rather than the backend's.
+ */
+export const STOP_FINALIZE_OVERRUN_ALERT = Object.freeze({
+  title: 'Stopping is taking longer than expected',
+  description:
+    "A destination isn't responding, so Videorc is finishing the stop in the background. Force stop ends it now; the last seconds may be lost."
+})
 
 /**
  * Milliseconds since the session started, from `recording.startedAt` (plan

@@ -130,7 +130,10 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     ])
     // The microphone has one home, the Microphone section above (plan 092);
     // Output is the Session row (plan 174 S3.3, B-15).
-    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio', 'Captions'])
+    // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
+    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio'])
+    expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
+    expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
     expect(markup).toContain('title="Display 2"')
     expect(markup).toContain('title="MacBook Pro Camera"')
@@ -146,7 +149,9 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     expect(sources).toContain('>Open Sources</button>')
     expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
     expect(captions).not.toContain('<h2')
-    expect(rowLabels(captions ?? '')).toEqual(['Captions'])
+    // Captions is a door to its page there (plan 174 S3.2, B-13), not a switch row.
+    expect(rowLabels(captions ?? '')).toEqual([])
+    expect(captions).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
   })
 
   it('opens Screen and Camera with one click: the row control is the dropdown', () => {

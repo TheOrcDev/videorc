@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import {
   END_LIVESTREAM_ARM_WINDOW_MS,
+  END_LIVESTREAM_LABEL,
+  END_LIVESTREAM_TITLE,
   endLivestreamBody,
+  endLivestreamConfirmLabel,
+  endLivestreamTitle,
+  exitForStopOrigin,
   listNames,
   stopDecision,
   type SessionStopOrigin
@@ -15,7 +20,9 @@ const ORIGINS: SessionStopOrigin[] = [
   'global-hotkey',
   'remote-control',
   'phone-remote',
-  'failure-banner'
+  'failure-banner',
+  'quit',
+  'close-window'
 ]
 
 describe('stopDecision (plan 174 S0.1, D2)', () => {
@@ -27,8 +34,15 @@ describe('stopDecision (plan 174 S0.1, D2)', () => {
     }
   })
 
-  it('asks first for every in-app stop while live', () => {
-    for (const origin of ['button', 'space', 'palette', 'failure-banner'] as const) {
+  it('asks first for every in-app stop while live, and when the app is leaving (S3.1)', () => {
+    for (const origin of [
+      'button',
+      'space',
+      'palette',
+      'failure-banner',
+      'quit',
+      'close-window'
+    ] as const) {
       expect(stopDecision({ origin, live: true, armedAt: null, now: 1000 })).toBe('confirm')
       // In-app origins never read the hotkey arm.
       expect(stopDecision({ origin, live: true, armedAt: 999, now: 1000 })).toBe('confirm')
@@ -92,5 +106,26 @@ describe('End livestream copy', () => {
     expect(endLivestreamBody({ platforms: [], alsoRecords: true })).toBe(
       'Your viewers are disconnected. Your recording stops too and is saved to the Library.'
     )
+  })
+
+  // Plan 174 S3.1 (D2): ⌘Q and ⌘W while on air ask first, and the question
+  // names what follows. "Keep streaming" is the same answer everywhere.
+  it('names the exit in the title and the button when the app is leaving', () => {
+    expect(endLivestreamTitle('quit')).toBe('End livestream and quit?')
+    expect(endLivestreamConfirmLabel('quit')).toBe('End livestream and quit')
+    expect(endLivestreamTitle('close-window')).toBe('End livestream and close?')
+    expect(endLivestreamConfirmLabel('close-window')).toBe('End livestream and close')
+    for (const origin of ['button', 'space', 'palette', 'failure-banner'] as const) {
+      expect(endLivestreamTitle(origin)).toBe(END_LIVESTREAM_TITLE)
+      expect(endLivestreamConfirmLabel(origin)).toBe(END_LIVESTREAM_LABEL)
+    }
+  })
+
+  it('continues with the exit only for a quit or close question', () => {
+    expect(exitForStopOrigin('quit')).toBe('quit')
+    expect(exitForStopOrigin('close-window')).toBe('close')
+    for (const origin of ORIGINS.filter((o) => o !== 'quit' && o !== 'close-window')) {
+      expect(exitForStopOrigin(origin)).toBeNull()
+    }
   })
 })

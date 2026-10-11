@@ -4,7 +4,11 @@
 // stop runs now, waits for the End livestream dialog, or arms a global hotkey
 // for a second press.
 
-/** Where a stop request came from. */
+/**
+ * Where a stop request came from. `quit` and `close-window` are the app
+ * leaving while on air (⌘Q, the Dock, ⌘W; plan 174 S3.1, D2): the question
+ * says so, and the answer ends the livestream and then lets the app go.
+ */
 export type SessionStopOrigin =
   | 'button'
   | 'space'
@@ -13,8 +17,25 @@ export type SessionStopOrigin =
   | 'remote-control'
   | 'phone-remote'
   | 'failure-banner'
+  | 'quit'
+  | 'close-window'
 
 export type SessionStopDecision = 'stop' | 'confirm' | 'arm'
+
+/** What the app does once the livestream ended for a quit or close question. */
+export type SessionStopExit = 'quit' | 'close'
+
+/** The exit a confirmed stop continues with, or null for an in-app stop. */
+export function exitForStopOrigin(origin: SessionStopOrigin): SessionStopExit | null {
+  switch (origin) {
+    case 'quit':
+      return 'quit'
+    case 'close-window':
+      return 'close'
+    default:
+      return null
+  }
+}
 
 /** What the studio provider holds while the End livestream dialog waits. */
 export interface SessionStopConfirmation {
@@ -42,11 +63,38 @@ export const END_LIVESTREAM_LABEL = 'End livestream'
 export const RECORDING_STOPS_TOO = 'Your recording stops too.'
 
 /**
+ * The dialog's title names the consequence when the app is leaving (D2:
+ * "End livestream and quit?"); an in-app stop asks the plain question.
+ */
+export function endLivestreamTitle(origin: SessionStopOrigin): string {
+  switch (origin) {
+    case 'quit':
+      return 'End livestream and quit?'
+    case 'close-window':
+      return 'End livestream and close?'
+    default:
+      return END_LIVESTREAM_TITLE
+  }
+}
+
+/** The destructive button says everything it does; "Keep streaming" never changes. */
+export function endLivestreamConfirmLabel(origin: SessionStopOrigin): string {
+  switch (origin) {
+    case 'quit':
+      return 'End livestream and quit'
+    case 'close-window':
+      return 'End livestream and close'
+    default:
+      return END_LIVESTREAM_LABEL
+  }
+}
+
+/**
  * What a stop request does.
  *
  * - A recording that is not live stops at once from every origin.
  * - While live, an in-app stop (the button, Space, the palette, the failure
- *   banner) asks first.
+ *   banner) asks first, and so does the app leaving (quit, close window).
  * - A global hotkey arms on the first press and stops on a second press
  *   within `END_LIVESTREAM_ARM_WINDOW_MS`; an expired arm starts over.
  * - Stream Deck and phone intents are deliberate device actions (the phone

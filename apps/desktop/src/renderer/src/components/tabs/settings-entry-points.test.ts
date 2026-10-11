@@ -48,9 +48,11 @@ describe('Settings entry points', () => {
     const ffmpeg = studio.slice(studio.indexOf('title: "Videorc\'s recorder isn\'t available"'))
     expect(ffmpeg.slice(0, ffmpeg.indexOf('}'))).toContain("settingsTab: 'recording'")
 
+    // The reason line under the transport (plan 174 S3.2) still opens the
+    // Settings tab the jump names, never a page by that name.
     const sessionPanel = read('../studio/session-panel.tsx')
     expect(sessionPanel).toContain(
-      "blockedJump.to === 'settings'\n                  ? openSettings(blockedJump.settingsTab)"
+      "jump.to === 'settings' ? nav.openSettings(jump.settingsTab) : nav.setActive(jump.to)"
     )
   })
 })

@@ -9,14 +9,13 @@ import type { ReactElement, ReactNode } from 'react'
 
 import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
+import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { CaptionsStatus } from '@/lib/backend'
-import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
 import { captionsStatusLabel, systemAudioIssueLabel } from '@/lib/state-labels'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -27,17 +26,6 @@ import {
   systemAudioSwitchView,
   type SystemAudioSwitchView
 } from '@/lib/system-audio'
-
-function compactCaptionsStatus(
-  status: CaptionsStatus,
-  enabled: boolean,
-  sessionActive: boolean,
-  premiumAllowed: boolean
-): string {
-  // A locked switch says why; otherwise the one captions vocabulary (plan 174 D-26).
-  if (!enabled && !premiumAllowed) return 'Premium'
-  return captionsStatusLabel(status, { enabled, sessionActive })
-}
 
 /**
  * The Studio inspector's mirrors of controls that own their own pages (SD2):
@@ -60,15 +48,13 @@ export function QuickSettings(): ReactElement {
     selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
-    entitlements,
     captionsStatus,
-    captionsCommandPending,
     wsStatus,
     systemAudioConfirmed,
     systemAudioIssue,
     runtimeInfo
   } = useStudioCore()
-  const { openSettings } = useWorkspaceNav()
+  const { openSettings, openStudioPanel } = useWorkspaceNav()
   const systemAudio = systemAudioSwitchView({
     device: systemAudioDevice(deviceList),
     requested: captureConfig.audio.systemAudioEnabled,
@@ -79,8 +65,6 @@ export function QuickSettings(): ReactElement {
   // Q6 (plan 022): before the backend reports devices, selects say "Finding
   // devices…" instead of rendering blank.
   const discoveryPending = wsStatus !== 'connected'
-  const captionsGate = cloudAiUploadGate(entitlements)
-  const captionsEnabled = captureConfig.captions.enabled
 
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
@@ -178,31 +162,18 @@ export function QuickSettings(): ReactElement {
         names it, and a captions switch is not a source (B-15). */}
       <PanelSection>
         <GroupedList>
-          {/* CAPTIONS — live-safe premium toggle mirroring the Streaming tab's
-          Live captions section (the config home, incl. the consent copy). */}
-          <InspectorRow icon={CaptionsIcon} label="Captions">
-            <div className="flex h-control items-center justify-end gap-2.5 px-2">
-              <span className="min-w-0 truncate text-sm font-medium">
-                {compactCaptionsStatus(
-                  captionsStatus,
-                  captionsEnabled,
-                  isSessionActive,
-                  captionsGate.allowed
-                )}
-              </span>
-              <Switch
-                aria-label="Enable live captions"
-                checked={captionsEnabled}
-                disabled={captionsCommandPending || (!captionsEnabled && !captionsGate.allowed)}
-                onCheckedChange={(enabled) =>
-                  setCaptureConfig((current) => ({
-                    ...current,
-                    captions: { ...current.captions, enabled }
-                  }))
-                }
-              />
-            </div>
-          </InspectorRow>
+          {/* CAPTIONS — a door to the Captions page (plan 174 S3.2, B-13), where
+            the switch sits beside its upload disclosure. A switch here turned
+            on cloud audio upload with no word about it. */}
+          <NavigableRow
+            icon={CaptionsIcon}
+            label="Captions"
+            value={captionsStatusLabel(captionsStatus, {
+              enabled: captureConfig.captions.enabled,
+              sessionActive: isSessionActive
+            })}
+            onNavigate={() => openStudioPanel('captions')}
+          />
         </GroupedList>
       </PanelSection>
     </>

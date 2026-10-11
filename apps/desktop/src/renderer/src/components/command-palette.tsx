@@ -217,7 +217,7 @@ export function CommandPalette({
                 value={START_RECORDING_COMMAND}
                 keywords={['record']}
                 disabled={busy}
-                onSelect={() => run(startRecording)}
+                onSelect={() => run(() => void startRecording())}
               >
                 <RecordIcon className="size-4" />
                 {START_RECORDING_COMMAND}
@@ -226,7 +226,7 @@ export function CommandPalette({
                 value={GO_LIVE_COMMAND}
                 keywords={['stream', 'livestream', 'broadcast']}
                 disabled={busy}
-                onSelect={() => run(startLivestream)}
+                onSelect={() => run(() => void startLivestream())}
               >
                 <LivestreamIcon className="size-4" />
                 {GO_LIVE_COMMAND}
