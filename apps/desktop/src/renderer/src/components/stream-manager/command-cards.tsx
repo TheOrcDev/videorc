@@ -171,7 +171,6 @@ function CommandChooser({
               className="h-auto w-full min-w-0 justify-start gap-2 px-1.5 py-1 text-left whitespace-normal"
               data-testid="command-candidate"
               size="xs"
-              title={`Pick ${candidate.authorName} (${candidate.key})`}
               type="button"
               variant="ghost"
               onClick={() => onAnswer({ action: 'choose', index: candidate.index })}

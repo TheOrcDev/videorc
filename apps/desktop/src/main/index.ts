@@ -11405,7 +11405,7 @@ async function runSmokePreviewMotionCommand(
           composerDisabled: composer?.disabled ?? null,
           headerTitle: document.querySelector('[data-slot="window-header-title"]')?.textContent ?? '',
           highlightPositionControl:
-            document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('title') ?? null,
+            document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('aria-description') ?? null,
           windowFrame: document.querySelector('[data-slot="window-frame"]') !== null,
           highlightActionCount: document.querySelectorAll('[data-message-id] button[aria-description^="Shows it on stream"]').length,
           destinationStatus: document.querySelector('[data-slot="comments-destination-status"]')?.textContent ?? '',
@@ -11420,7 +11420,7 @@ async function runSmokePreviewMotionCommand(
           ])),
           highlightReasons: Object.fromEntries(rows.map((row) => [
             row.getAttribute('data-message-id'),
-            row.querySelector('[data-testid="highlight-failed"]')?.getAttribute('title') ?? null
+            row.querySelector('[data-testid="highlight-failed-reason"]')?.textContent ?? null
           ]))
         };
       })()`,

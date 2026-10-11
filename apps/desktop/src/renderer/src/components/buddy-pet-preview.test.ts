@@ -310,7 +310,11 @@ describe('BuddyPetPreview (plan 168 S-D1)', () => {
     await render({ onError, placeholder: createElement('img', { alt: 'Buddy' }) })
     expect(onError).toHaveBeenCalledWith('This pack is missing pet.webp. Import it again.')
     expect(preview().dataset.status).toBe('error')
-    expect(preview().getAttribute('title')).toBe('This pack is missing pet.webp. Import it again.')
+    // On hover and read aloud, never a native title (plan 174 S1.10).
+    expect(preview().hasAttribute('title')).toBe(false)
+    expect(
+      preview().querySelector('[data-slot="buddy-pet-preview-error"]')?.getAttribute('aria-label')
+    ).toBe('This pack is missing pet.webp. Import it again.')
     expect(preview().querySelector('img')).toBeTruthy()
     expect(frames.size).toBe(0)
   })

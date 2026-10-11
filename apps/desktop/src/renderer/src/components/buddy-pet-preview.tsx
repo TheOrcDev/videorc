@@ -9,6 +9,7 @@ import {
 } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { smoothScrollBehavior, useReducedMotion } from '@/hooks/use-reduced-motion'
 import type { CohostPersona } from '@/lib/backend'
 import { BUDDY_PREVIEW_TICK_MS, BuddyPetPlayer } from '@/lib/buddy-pet-player'
@@ -435,7 +436,6 @@ export function BuddyPetPreview({
       data-status={status}
       data-testid="buddy-pet-preview"
       style={{ width: size, height: size }}
-      title={error ?? undefined}
     >
       {!showCanvas ? (
         <div aria-hidden className="absolute inset-0 flex items-center justify-center">
@@ -472,6 +472,21 @@ export function BuddyPetPreview({
             if (event.key === 'Escape' && playerRef.current?.center()) kickRef.current?.()
           }}
         />
+      ) : null}
+      {error ? (
+        // Why the pack did not load, on hover and read aloud: the tile is too
+        // small for the sentence (plan 174 S1.10).
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              aria-label={error}
+              className="absolute inset-0"
+              data-slot="buddy-pet-preview-error"
+              role="img"
+            />
+          </TooltipTrigger>
+          <TooltipContent>{error}</TooltipContent>
+        </Tooltip>
       ) : null}
     </div>
   )

@@ -47,8 +47,10 @@ import {
   InputGroupInput
 } from '@/components/ui/input-group'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type {
   CohostFlag,
   CommentHighlightState,
@@ -501,21 +503,17 @@ export function ChatPane({
             }
           >
             {questionMessageIds.size > 0 || filter.questions ? (
-              <ToggleGroupItem
-                className="text-xs"
-                title="Messages behind Buddy's open questions"
-                value="questions"
-              >
-                Questions
-              </ToggleGroupItem>
+              <ShortcutTooltip label="Messages behind Buddy's open questions">
+                <ToggleGroupItem className="text-xs" value="questions">
+                  Questions
+                </ToggleGroupItem>
+              </ShortcutTooltip>
             ) : null}
-            <ToggleGroupItem
-              className="text-xs"
-              title="Messages that @mention your channel"
-              value="mentions"
-            >
-              Mentions
-            </ToggleGroupItem>
+            <ShortcutTooltip label="Messages that @mention your channel">
+              <ToggleGroupItem className="text-xs" value="mentions">
+                Mentions
+              </ToggleGroupItem>
+            </ShortcutTooltip>
           </ToggleGroup>
         </div>
         {/* Below 640 px the same filters live in one menu. */}
@@ -1145,9 +1143,14 @@ function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): Re
   if (operation.phase !== 'sending') return null
   return (
     <div aria-label="Latest message delivery" className="mt-1.5 flex">
-      <Badge className="max-w-full truncate" title={operation.text} variant="secondary">
-        Sending…
-      </Badge>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge className="max-w-full truncate" variant="secondary">
+            Sending…
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>{operation.text}</TooltipContent>
+      </Tooltip>
     </div>
   )
 }

@@ -131,7 +131,11 @@ describe('Stream Manager chat pane', () => {
     expect(markup).not.toContain('Replying to')
     expect(markup).toContain('data-testid="comment-mention"')
     expect(markup).toContain('@you')
-    expect(markup).toContain('title="Mentions you"')
+    // "Mentions you" is the chip's tooltip, never a native title (S1.10).
+    expect(markup).not.toContain('title="Mentions you"')
+    expect(markup).toMatch(
+      /<span(?=[^>]*data-testid="comment-mention")(?=[^>]*data-state="closed")/
+    )
     expect(markup).toContain('data-testid="comment-role"')
     expect(markup).toContain('VIP')
   })

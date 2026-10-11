@@ -1,10 +1,11 @@
 import { MicrophoneIcon } from '@/components/icons'
-import type { ReactElement } from 'react'
+import { useId, type ComponentProps, type ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { CohostListening, CohostState } from '@/lib/backend'
 import { cohostPresenceView, type CohostPresenceView } from '@/lib/cohost-presence'
 import { cohostListeningView } from '@/lib/cohost-view'
@@ -38,39 +39,56 @@ export function CohostStatus({
   onOpenPane?: () => void
 }): ReactElement {
   const view = cohostPresenceView(state, nowMs, { starting, unread })
+  const descriptionId = useId()
   // The label leads the tooltip: in a narrow Chat header the dot is all that
-  // shows, and hovering it must still say what the co-host is doing.
-  const tooltip = [flash ?? view.label, ...view.tooltipLines].join('\n')
+  // shows, and hovering it must still say what the co-host is doing. The
+  // facts after it are the trigger's description too (plan 174 S1.10).
+  const lines = [flash ?? view.label, ...view.tooltipLines]
 
   const body = <CohostStatusBody flash={flash} label={view.label} view={view} />
+  const described = view.tooltipLines.length > 0 ? descriptionId : undefined
 
-  if (onOpenPane) {
-    return (
-      <button
-        aria-label={view.label}
-        className={STATUS_TRIGGER}
-        data-testid="cohost-status"
-        data-state-kind={view.kind}
-        title={tooltip}
-        type="button"
-        onClick={onOpenPane}
-      >
-        {body}
-      </button>
-    )
-  }
-
-  return (
+  const trigger = onOpenPane ? (
+    <button
+      aria-describedby={described}
+      aria-label={view.label}
+      className={STATUS_TRIGGER}
+      data-testid="cohost-status"
+      data-state-kind={view.kind}
+      type="button"
+      onClick={onOpenPane}
+    >
+      {body}
+    </button>
+  ) : (
     <span
+      aria-describedby={described}
       aria-label={view.label}
       className={STATUS_TRIGGER}
       data-testid="cohost-status"
       data-state-kind={view.kind}
       role="status"
-      title={tooltip}
     >
       {body}
     </span>
+  )
+
+  return (
+    <>
+      <Tooltip>
+        <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+        <TooltipContent className="flex-col items-start gap-0.5" side="bottom">
+          {lines.map((line, index) => (
+            <span key={`${line}:${index}`}>{line}</span>
+          ))}
+        </TooltipContent>
+      </Tooltip>
+      {described ? (
+        <span data-slot="cohost-status-detail" hidden id={descriptionId}>
+          {view.tooltipLines.join('. ')}
+        </span>
+      ) : null}
+    </>
   )
 }
 
@@ -204,12 +222,32 @@ export function CohostListeningIndicator({
 }): ReactElement | null {
   const view = cohostListeningView(listening)
   if (!view) return null
+  // The words fold to the icon in a tight header; the sentence stays the
+  // tooltip and, for a screen reader, text beside the label (plan 174 S1.10).
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <ListeningChip className={className} view={view} />
+      </TooltipTrigger>
+      <TooltipContent>{view.detail}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+function ListeningChip({
+  view,
+  className,
+  ...props
+}: {
+  view: NonNullable<ReturnType<typeof cohostListeningView>>
+  className?: string
+} & Omit<ComponentProps<'span'>, 'children'>): ReactElement {
   return (
     <span
+      {...props}
       className={cn('flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground', className)}
       data-listening-state={view.state}
       data-slot="cohost-listening"
-      title={view.detail}
     >
       <MicrophoneIcon
         aria-hidden
@@ -224,6 +262,7 @@ export function CohostListeningIndicator({
         weight={view.state === 'on' ? 'fill' : 'regular'}
       />
       <span className={cn('min-w-0 truncate', CHAT_HEADER_TIGHT_SR_ONLY)}>{view.label}</span>
+      {view.detail ? <span className="sr-only">{`. ${view.detail}`}</span> : null}
     </span>
   )
 }

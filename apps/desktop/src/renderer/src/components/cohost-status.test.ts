@@ -155,8 +155,10 @@ describe('CohostStatus', () => {
       /class="[^"]*@max-\[330px\]\/chat-header:sr-only[^"]*"[^>]*data-slot="cohost-status-label"/
     )
     expect(markup).toContain('aria-label="Paused: daily AI allowance used up')
-    // Hovering the lone dot still says what Buddy is doing.
-    expect(markup).toMatch(/title="Paused: daily AI allowance used up/)
+    // Hovering the lone dot still says what Buddy is doing: a tooltip, never
+    // a native title (plan 174 S1.10).
+    expect(markup).not.toContain('title=')
+    expect(markup).toMatch(/<span(?=[^>]*data-testid="cohost-status")(?=[^>]*data-state="closed")/)
   })
 
   it('keeps the trigger draggable-safe in the frameless window header', () => {
@@ -210,7 +212,8 @@ describe('CohostListeningIndicator (plan 068)', () => {
     expect(markup).toContain('data-listening-state="on"')
     expect(markup).toContain('>Listening<')
     expect(markup).toContain('text-success')
-    expect(markup).toContain('title="Buddy hears your microphone as text."')
+    expect(markup).not.toContain('title=')
+    expect(markup).toContain('. Buddy hears your microphone as text.')
   })
 
   it('says Starting to listen without a tone', () => {
@@ -228,7 +231,8 @@ describe('CohostListeningIndicator (plan 068)', () => {
     })
     expect(markup).toContain('>Not listening: no microphone selected<')
     expect(markup).toContain('text-warning')
-    expect(markup).toContain('title="Select a microphone so Buddy can hear you."')
+    expect(markup).not.toContain('title=')
+    expect(markup).toContain('. Select a microphone so Buddy can hear you.')
   })
 
   it('keeps only the microphone in a tight header', () => {

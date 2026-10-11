@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { STAT_NAMES } from '@/components/stream-manager/stats-bar'
 import type { AudienceSnapshot, CommentHighlightAnchor, LiveChatProviderState } from '@/lib/backend'
 import { shortcutAccelerator } from '@/lib/shortcuts'
@@ -323,18 +324,24 @@ export function StreamManagerStatusBar({
           ) : null}
         </div>
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="More Stream Manager actions"
-              className={cn('size-6', NARROW_ONLY)}
-              size="icon-xs"
-              title="More Stream Manager actions"
-              type="button"
-              variant="ghost"
-            >
-              <MoreIcon data-icon="inline-start" weight="bold" />
-            </Button>
-          </DropdownMenuTrigger>
+          {/* The menu's trigger outside the tooltip's: the menu's open state
+              is the one the button carries. */}
+          <Tooltip>
+            <DropdownMenuTrigger asChild>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="More Stream Manager actions"
+                  className={cn('size-6', NARROW_ONLY)}
+                  size="icon-xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  <MoreIcon data-icon="inline-start" weight="bold" />
+                </Button>
+              </TooltipTrigger>
+            </DropdownMenuTrigger>
+            <TooltipContent side="top">More Stream Manager actions</TooltipContent>
+          </Tooltip>
           <DropdownMenuContent align="end" className="w-56" side="top">
             {hints.length > 0 ? (
               <>

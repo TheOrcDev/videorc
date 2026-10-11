@@ -43,6 +43,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { WindowHeader } from '@/components/window-frame'
 import type {
   CohostAutoChat,
@@ -238,10 +239,15 @@ function PaneLabel({
         </span>
       ) : null}
       {onStream ? (
-        <span className="flex" data-slot="pane-on-stream" title="On stream">
-          <StatusDot tone="good" />
-          <span className="sr-only">On stream:</span>
-        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="flex" data-slot="pane-on-stream">
+              <StatusDot tone="good" />
+              <span className="sr-only">On stream:</span>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>On stream</TooltipContent>
+        </Tooltip>
       ) : null}
       {label}
       {unseen.count > 0 || unseen.incomplete ? (

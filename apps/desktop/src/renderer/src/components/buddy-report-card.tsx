@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { Spinner } from '@/components/ui/spinner'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Select,
   SelectContent,
@@ -360,17 +361,20 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
             data-slot="buddy-report-platforms"
           >
             {view.chat.platforms.map((entry) => (
-              <span
-                key={entry.platform}
-                aria-label={entry.label}
-                className="inline-flex items-center gap-1 tabular-nums"
-                role="img"
-                title={entry.label}
-              >
-                <ChatPlatformIcon decorative platform={entry.platform} />
-                {/* One platform's count is the total already said. */}
-                {view.chat.platforms.length > 1 ? formatReportCount(entry.messages) : null}
-              </span>
+              <Tooltip key={entry.platform}>
+                <TooltipTrigger asChild>
+                  <span
+                    aria-label={entry.label}
+                    className="inline-flex items-center gap-1 tabular-nums"
+                    role="img"
+                  >
+                    <ChatPlatformIcon decorative platform={entry.platform} />
+                    {/* One platform's count is the total already said. */}
+                    {view.chat.platforms.length > 1 ? formatReportCount(entry.messages) : null}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{entry.label}</TooltipContent>
+              </Tooltip>
             ))}
           </span>
         ) : null}

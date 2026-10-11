@@ -4,7 +4,6 @@ import type { AppIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { shortcutLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 // The one Buddy card (plan 174 S3.14c, H-23): every card that waits on the
@@ -145,7 +144,6 @@ export function BuddyCard({
               data-testid={primary.testId}
               disabled={busy}
               size="xs"
-              title={`${primary.label} (${shortcutLabel('Enter')})`}
               type="button"
               variant={primary.variant ?? 'secondary'}
               onClick={onPrimary}
@@ -159,7 +157,6 @@ export function BuddyCard({
               data-testid={decline.testId}
               disabled={busy}
               size="xs"
-              title={`${decline.label} (${shortcutLabel('Escape')})`}
               type="button"
               variant={decline.variant ?? 'ghost'}
               onClick={onDecline}

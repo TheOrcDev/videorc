@@ -4,6 +4,7 @@ import type { ReactElement } from 'react'
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { Badge } from '@/components/ui/badge'
 import { CommandItem, CommandShortcut } from '@/components/ui/command'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { CohostQuestion } from '@/lib/backend'
 import {
   cohostAgeLabel,
@@ -70,14 +71,18 @@ export function CohostQuestionRow({
       ) : null}
       <span className="min-w-0 flex-1 truncate text-foreground">{question.text}</span>
       {question.onTopic === true ? (
-        <Badge
-          className="shrink-0 text-muted-foreground"
-          data-testid="cohost-on-topic"
-          title="About what you are talking about right now"
-          variant="outline"
-        >
-          On topic
-        </Badge>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge
+              className="shrink-0 text-muted-foreground"
+              data-testid="cohost-on-topic"
+              variant="outline"
+            >
+              On topic
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>About what you are talking about right now</TooltipContent>
+        </Tooltip>
       ) : null}
       {question.fromNotes ? (
         <NoteIcon
@@ -95,16 +100,20 @@ export function CohostQuestionRow({
         <span className="max-w-32 shrink-0 truncate text-xs text-muted-foreground">{askers}</span>
       ) : null}
       {talkingAbout ? (
-        <Badge
-          aria-label="Talking about this"
-          className="shrink-0"
-          data-testid="cohost-talking-about"
-          title="You are talking about this question"
-          variant="outline"
-        >
-          <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
-          <span className="@max-[400px]/cohost-pane:hidden">Talking about this</span>
-        </Badge>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge
+              aria-label="Talking about this"
+              className="shrink-0"
+              data-testid="cohost-talking-about"
+              variant="outline"
+            >
+              <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
+              <span className="@max-[400px]/cohost-pane:hidden">Talking about this</span>
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>You are talking about this question</TooltipContent>
+        </Tooltip>
       ) : null}
       {onStream ? <Badge variant="success">On stream</Badge> : null}
       <CommandShortcut className="tabular-nums">{age}</CommandShortcut>

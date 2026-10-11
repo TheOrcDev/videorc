@@ -96,6 +96,11 @@ describe('comments destination status', () => {
     )
     expect(markup).toContain('Paused')
     expect(markup).not.toContain('Waiting')
+    // The resume time is visible text under the badge, never a title (S1.10).
+    expect(markup).not.toContain('title=')
+    expect(markup.replaceAll('<!-- -->', '')).toMatch(
+      /data-slot="comments-destination-detail">YouTube: YouTube chat is paused[^<]*It resumes at /
+    )
   })
 
   it('renders provider and failure status with the shared badge contract', () => {

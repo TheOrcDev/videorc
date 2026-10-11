@@ -678,7 +678,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
     expect(rows[0].textContent).toContain('Ready')
     expect(rows[0].querySelector('button')).toBeNull()
     // One line per row: the short status shows, the whole fix is the button's
-    // name and tooltip.
+    // name and tooltip (a Tooltip, never a native title: plan 174 S1.10).
     expect(rows[1].textContent).toContain('Needs access')
     expect(rows[1].textContent).not.toContain('to let Buddy remove messages')
     const reconnect = rows[1].querySelector('button')!
@@ -686,14 +686,15 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
     expect(reconnect.getAttribute('aria-label')).toBe(
       'Reconnect Twitch to let Buddy remove messages.'
     )
-    expect(reconnect.title).toBe('Reconnect Twitch to let Buddy remove messages.')
+    expect(reconnect.hasAttribute('title')).toBe(false)
+    expect(reconnect.getAttribute('data-state')).toBe('closed')
     const authorize = rows[2].querySelector('button')!
     expect(rows[2].textContent).toContain('Needs access')
     expect(authorize.textContent).toBe('Authorize X Live')
     expect(authorize.getAttribute('aria-label')).toBe(
       'Authorize X Live to let Buddy remove messages.'
     )
-    expect(authorize.title).toBe('Authorize X Live to let Buddy remove messages.')
+    expect(authorize.hasAttribute('title')).toBe(false)
 
     await act(async () => rows[1].querySelector('button')!.click())
     // A permission reconnect asks for every optional Twitch permission.

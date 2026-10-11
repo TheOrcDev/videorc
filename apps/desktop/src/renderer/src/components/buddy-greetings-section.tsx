@@ -42,7 +42,6 @@ import {
   newGreetingTemplate,
   resolveGreetingPreview
 } from '@/lib/buddy-auto-chat-view'
-import { shortcutLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 /** A greeting's editor adds a variant from the keyboard too (G-23). */
@@ -392,7 +391,6 @@ function GreetingEditor({
         <span className="flex-1" />
         <Button
           size="xs"
-          title={`Add variant (${shortcutLabel(ADD_VARIANT_ACCELERATOR)})`}
           type="button"
           variant="ghost"
           onClick={() => {

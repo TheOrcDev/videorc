@@ -4,6 +4,7 @@ import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import {
   HighlightStatus,
   commentHighlightPresentationForMessage,
+  highlightProblem,
   type CommentHighlightPresentation
 } from '@/components/comment-row'
 import {
@@ -40,8 +41,10 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type {
   AudienceSnapshot,
   CommentHighlightState,
@@ -256,6 +259,9 @@ function ActivityRow({
     onShowFollowNames
   })
   const status = highlight.phase !== 'idle'
+  // The full sentence, when it says more than the short fact.
+  const sentence = item.short && item.line !== item.short ? item.line : null
+  const problem = highlightProblem(highlight)
   // One row contract with chat (plan 174 S3.16a, H-19): no hover highlight on
   // a row that is not a button, the ⋯ waits for the pointer, and the time
   // does too while live.
@@ -287,19 +293,30 @@ function ActivityRow({
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-1.5">
-          <span
-            className="max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground"
-            title={item.short ? undefined : item.line}
-          >
-            {item.name}
-          </span>
-          <span
-            className="min-w-0 truncate text-sm text-muted-foreground"
-            data-slot="activity-line"
-            title={item.line}
-          >
-            {item.short}
-          </span>
+          {/* Facts, not sentences (plan 057, D3): the sentence is the short
+              fact's tooltip, or the name's when there is no fact, and what a
+              screen reader hears (plan 174 S1.10). */}
+          <SentenceHint line={item.short ? null : item.line}>
+            <span className="max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground">
+              {item.name}
+            </span>
+          </SentenceHint>
+          {item.short ? (
+            <SentenceHint line={sentence}>
+              <span
+                aria-hidden={sentence ? true : undefined}
+                className="min-w-0 truncate text-sm text-muted-foreground"
+                data-slot="activity-line"
+              >
+                {item.short}
+              </span>
+            </SentenceHint>
+          ) : null}
+          {sentence || !item.short ? (
+            <span className="sr-only" data-slot="activity-sentence">
+              {item.line}
+            </span>
+          ) : null}
           {status ? (
             <span className="ml-auto shrink-0 pl-1" data-slot="activity-highlight">
               <HighlightStatus status={highlight} />
@@ -325,6 +342,12 @@ function ActivityRow({
             {item.message}
           </span>
         ) : null}
+        {problem ? (
+          // Why it did not go on stream, while the badge says Failed (H-16).
+          <span className="text-xs text-muted-foreground" data-testid="highlight-failed-reason">
+            {problem}
+          </span>
+        ) : null}
       </span>
       <KebabMenu
         className="-mr-1 shrink-0"
@@ -333,6 +356,24 @@ function ActivityRow({
         reveal="hover"
       />
     </li>
+  )
+}
+
+/** An Activity row's full sentence on hover (plan 174 S1.10): never a
+ * native `title`. Nothing to add, no tooltip. */
+function SentenceHint({
+  line,
+  children
+}: {
+  line: string | null
+  children: ReactElement
+}): ReactElement {
+  if (!line) return children
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{line}</TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -411,15 +452,14 @@ export function ActivityPane({
             {/* A chip shows once it has rows, with its count: the pane's
                 old "This stream: …" sentence, where it can be clicked. */}
             {shownFilters.map((option) => (
-              <ToggleGroupItem
-                key={option.id}
-                className="gap-1 text-xs"
-                title={option.title}
-                value={option.id}
-              >
-                {option.label}
-                <span className="text-muted-foreground tabular-nums">{counts[option.id]}</span>
-              </ToggleGroupItem>
+              // ShortcutTooltip wraps the chip: a trigger's own data-state
+              // would overwrite the item's on/off state.
+              <ShortcutTooltip key={option.id} label={option.title}>
+                <ToggleGroupItem className="gap-1 text-xs" value={option.id}>
+                  {option.label}
+                  <span className="text-muted-foreground tabular-nums">{counts[option.id]}</span>
+                </ToggleGroupItem>
+              </ShortcutTooltip>
             ))}
           </ToggleGroup>
           {/* The same platform filter as chat (plan 174 S3.16a, H-19). */}
@@ -482,19 +522,24 @@ export function ActivityPane({
             raids and streaks pop onto the stream as the highlight card, hands-free.
             Manual picks always win; the switch only feeds an idle slot. */}
         {onAutoShowChange ? (
-          <label
-            className="ml-auto flex h-6 shrink-0 items-center gap-1.5 text-xs text-muted-foreground select-none"
-            title="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream for a few seconds"
-          >
-            Auto-show
-            <Switch
-              aria-label="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream"
-              checked={autoShow}
-              data-testid="activity-auto-show"
-              size="sm"
-              onCheckedChange={onAutoShowChange}
-            />
-          </label>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <label className="ml-auto flex h-6 shrink-0 items-center gap-1.5 text-xs text-muted-foreground select-none">
+                Auto-show
+                <Switch
+                  aria-label="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream"
+                  checked={autoShow}
+                  data-testid="activity-auto-show"
+                  size="sm"
+                  onCheckedChange={onAutoShowChange}
+                />
+              </label>
+            </TooltipTrigger>
+            <TooltipContent>
+              Shows new follows, subs, gifts, tips, rewards, raids and streaks on stream for a few
+              seconds
+            </TooltipContent>
+          </Tooltip>
         ) : null}
       </div>
       {/* Plan 162: Power-ups and redemptions arrive with no row of their own
