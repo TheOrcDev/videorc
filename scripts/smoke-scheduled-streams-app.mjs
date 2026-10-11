@@ -156,7 +156,9 @@ try {
     await evaluate(`document.querySelector('[role="option"]').click();return true`)
     for (const theme of ['dark', 'light']) {
       await evaluate(
-        `if(document.documentElement.classList.contains('dark')!==${theme === 'dark'}) document.dispatchEvent(new KeyboardEvent('keydown',{key:'d',bubbles:true})); return true`
+        // The D key is gated while a dialog is open (plan 174 A-2), so set the
+        // theme the way another window would: next-themes follows storage events.
+        `localStorage.setItem('videorc.theme', '${theme}'); window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: '${theme}' })); return true`
       )
       await waitFor(
         () =>
