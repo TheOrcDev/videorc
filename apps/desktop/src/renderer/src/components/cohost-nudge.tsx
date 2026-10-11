@@ -19,7 +19,7 @@ export function CohostNudge({
 }): ReactElement {
   return (
     <div
-      className="mt-1.5 flex items-center gap-2 rounded-row border border-border/60 bg-card/30 px-2.5 py-1.5 text-[11px] text-muted-foreground"
+      className="mt-1.5 flex items-center gap-2 px-0.5 py-1 text-[11px] text-muted-foreground"
       data-slot="cohost-nudge"
     >
       <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />

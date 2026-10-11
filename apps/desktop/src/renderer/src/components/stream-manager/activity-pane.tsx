@@ -6,7 +6,13 @@ import {
   commentHighlightPresentationForMessage,
   type CommentHighlightPresentation
 } from '@/components/comment-row'
-import { ChevronDownIcon, CopyIcon, PreviewIcon, SendIcon, type AppIcon } from '@/components/icons'
+import {
+  ChevronDownIcon,
+  CopyIcon,
+  LivestreamIcon,
+  SendIcon,
+  type AppIcon
+} from '@/components/icons'
 import {
   AnnouncementIcon,
   FollowIcon,
@@ -145,6 +151,9 @@ export function activityCapabilityNote(
 
 const IDLE: CommentHighlightPresentation = { phase: 'idle' }
 
+/** The one label for every Twitch permission ask in the window (plan 174 H-14). */
+export const TWITCH_RECONNECT_LABEL = 'Reconnect Twitch'
+
 /** What the stream shows for this row (plan 095, S2): the same slot and id as
  * chat, so a row with a chat message behind it reads exactly like that chat
  * row. Rows without one (destinations, counts) are never on stream. */
@@ -190,7 +199,7 @@ export function activityRowActions(
           {
             id: 'show',
             label: highlight.phase === 'live' ? 'Take off stream' : 'Show on stream',
-            icon: PreviewIcon,
+            icon: LivestreamIcon,
             disabled: highlight.phase === 'applying',
             onSelect: () => onShowOnStream(item)
           }
@@ -200,12 +209,13 @@ export function activityRowActions(
       ? [{ id: 'thank', label: 'Thank in chat', icon: SendIcon, onSelect: () => onThank(item) }]
       : []),
     // A Twitch count without names: one click opens the reconnect that
-    // grants the follow permission (plan 071, S2).
+    // grants the follow permission (plan 071, S2), under the one name every
+    // Twitch permission ask carries (plan 174 H-14).
     ...(onShowFollowNames && item.unnamed && item.platform === 'twitch'
       ? [
           {
             id: 'follow-names',
-            label: 'Show who followed',
+            label: TWITCH_RECONNECT_LABEL,
             icon: FollowIcon,
             onSelect: onShowFollowNames
           }
@@ -395,7 +405,7 @@ export function ActivityPane({
             value={filter}
             onValueChange={(value) => setFilter((value || 'all') as ActivityFilter | 'all')}
           >
-            <ToggleGroupItem className="h-6 px-2 text-xs" value="all">
+            <ToggleGroupItem className="text-xs" value="all">
               All
             </ToggleGroupItem>
             {/* A chip shows once it has rows, with its count: the pane's
@@ -403,7 +413,7 @@ export function ActivityPane({
             {shownFilters.map((option) => (
               <ToggleGroupItem
                 key={option.id}
-                className="h-6 gap-1 px-2 text-xs"
+                className="gap-1 text-xs"
                 title={option.title}
                 value={option.id}
               >
@@ -498,7 +508,7 @@ export function ActivityPane({
             Power-ups and channel points need one more Twitch permission.
           </span>
           <Button className="shrink-0" size="xs" variant="outline" onClick={onShowFollowNames}>
-            Reconnect Twitch
+            {TWITCH_RECONNECT_LABEL}
           </Button>
         </div>
       ) : null}
@@ -540,7 +550,7 @@ export function ActivityPane({
                   variant="outline"
                   onClick={onShowFollowNames}
                 >
-                  Show who followed
+                  {TWITCH_RECONNECT_LABEL}
                 </Button>
               ) : null}
             </EmptyHeader>

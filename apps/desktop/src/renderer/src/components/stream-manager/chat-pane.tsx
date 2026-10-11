@@ -39,7 +39,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
+import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import {
   InputGroup,
   InputGroupAddon,
@@ -502,7 +502,7 @@ export function ChatPane({
           >
             {questionMessageIds.size > 0 || filter.questions ? (
               <ToggleGroupItem
-                className="h-6 px-2 text-xs"
+                className="text-xs"
                 title="Messages behind Buddy's open questions"
                 value="questions"
               >
@@ -510,7 +510,7 @@ export function ChatPane({
               </ToggleGroupItem>
             ) : null}
             <ToggleGroupItem
-              className="h-6 px-2 text-xs"
+              className="text-xs"
               title="Messages that @mention your channel"
               value="mentions"
             >
@@ -530,7 +530,7 @@ export function ChatPane({
             >
               Filters
               {activeFilterCount > 0 ? (
-                <Badge className="h-4 px-1.5" variant="outline">
+                <Badge className="px-1.5" variant="outline">
                   {activeFilterCount}
                 </Badge>
               ) : null}
@@ -606,7 +606,7 @@ export function ChatPane({
                 </EmptyHeader>
               </Empty>
             ) : (
-              <OffAir providers={providers} />
+              <OffAir live={live} providers={providers} />
             )
           ) : (
             <ol
@@ -672,17 +672,18 @@ export function ChatPane({
           )}
         </ScrollArea>
         {!pinned && (unread > 0 || incomplete) ? (
-          <Button
-            aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
-            className="absolute inset-x-0 bottom-2 mx-auto h-6 w-fit rounded-full px-2.5 text-xs text-foreground glass-chip hover:text-foreground"
-            data-testid="chat-paused"
-            size="sm"
-            type="button"
-            variant="ghost"
-            onClick={jumpToLatest}
-          >
-            {incomplete ? 'New chat' : `${unread} new`} ↓
-          </Button>
+          // A glass chip, not an ad-hoc pill (plan 174 H-17): the Badge is
+          // the button.
+          <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto" variant="secondary">
+            <button
+              aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
+              data-testid="chat-paused"
+              type="button"
+              onClick={jumpToLatest}
+            >
+              {incomplete ? 'New chat' : `${unread} new`} ↓
+            </button>
+          </Badge>
         ) : null}
       </div>
 
@@ -889,8 +890,9 @@ export function Composer({
         : targets.map((provider) => CHAT_PLATFORM_LABELS[provider.platform]).join(', ')
 
   return (
-    <div className="shrink-0 px-2 pt-1 pb-2" data-slot="chat-composer">
-      <div className="flex flex-col rounded-panel border border-border bg-foreground/[0.04] p-2">
+    // A flush region under a hairline (plan 174 H-18): no box, no card inside.
+    <div className="shrink-0 border-t border-border px-2 py-2" data-slot="chat-composer">
+      <div className="flex flex-col">
         <InputGroup>
           {local ? (
             <InputGroupAddon>
@@ -1054,14 +1056,14 @@ export function Composer({
             </CommandList>
           </Command>
         ) : null}
-        {markerContext?.available ? (
+        {/* Only while it matters (plan 174 H-24): Buddy still connecting to
+            hear markers, or why it cannot. Working, or off, says nothing. */}
+        {markerContext?.available &&
+        (markerContext.voice?.state === 'starting' || markerContext.voice?.message) ? (
           <p className="mt-1 text-[11px] text-muted-foreground" data-slot="marker-voice-status">
-            {markerContext.voice?.state === 'on'
-              ? 'Buddy hears marker commands.'
-              : markerContext.voice?.state === 'starting'
-                ? 'Buddy is connecting to hear marker commands…'
-                : (markerContext.voice?.message ??
-                  'Typed /marker commands are available. Turn on Buddy listening for voice markers.')}
+            {markerContext.voice?.state === 'starting'
+              ? 'Buddy is connecting to hear marker commands…'
+              : markerContext.voice?.message}
           </p>
         ) : null}
         {notice ? (
@@ -1150,17 +1152,29 @@ function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): Re
   )
 }
 
-function OffAir({ providers }: { providers: readonly LiveChatProviderState[] }): ReactElement {
+/**
+ * The empty chat (plan 174 H-12): one short line that is true now. While
+ * live it says chat is connected (or what a destination still needs); off
+ * air it says how chat starts.
+ */
+function OffAir({
+  live,
+  providers
+}: {
+  live: boolean
+  providers: readonly LiveChatProviderState[]
+}): ReactElement {
+  const text = live
+    ? liveChatEmptyMessage(
+        { providers: [...providers] },
+        'No destination on this livestream has chat.',
+        'Chat is connected. New messages appear here.'
+      )
+    : 'Start a livestream to see chat here.'
   return (
     <Empty className="h-full">
       <EmptyHeader>
-        <EmptyTitle>No messages yet</EmptyTitle>
-        <EmptyDescription>
-          {liveChatEmptyMessage(
-            { providers: [...providers] },
-            'Start a livestream to see chat here.'
-          )}
-        </EmptyDescription>
+        <EmptyDescription data-testid="chat-empty">{text}</EmptyDescription>
       </EmptyHeader>
       <CommentsDestinationStatus providers={[...providers]} />
     </Empty>

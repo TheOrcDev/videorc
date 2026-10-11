@@ -24,8 +24,8 @@ import {
   CopyIcon,
   DeleteIcon,
   ExternalLinkIcon,
+  LivestreamIcon,
   MicrophoneIcon,
-  PreviewIcon,
   SendIcon,
   SparkleIcon
 } from '@/components/icons'
@@ -197,13 +197,15 @@ function CohostMarks({
     return (
       <span className="flex min-w-0 items-center gap-1" data-slot="cohost-comment-flag">
         <Badge
-          className={cn('max-w-40', flag.severity !== 'high' && 'text-subtle')}
+          className="max-w-40"
           title={cohostFlagDetail(flag)}
           variant={flag.severity === 'high' ? 'destructive' : 'outline'}
         >
           <span className="truncate">{cohostFlagChipLabel(flag)}</span>
         </Badge>
-        {action ? <span className="shrink-0 text-[11px] text-subtle">{action}</span> : null}
+        {action ? (
+          <span className="shrink-0 text-[11px] text-muted-foreground">{action}</span>
+        ) : null}
       </span>
     )
   }
@@ -281,7 +283,7 @@ function AffiliationBadge({
   return (
     <img
       alt={label}
-      className="size-4 shrink-0 rounded-[4px] object-cover"
+      className="size-4 shrink-0 rounded-sm object-cover"
       data-slot="comment-affiliation"
       draggable={false}
       src={localUrl}
@@ -366,7 +368,7 @@ function ChatGif({
     localUrl && mode === 'animated' ? (
       <img
         alt={title}
-        className="h-full w-auto max-w-full rounded-md object-contain"
+        className="h-full w-auto max-w-full rounded-chip object-contain"
         data-slot="comment-gif-image"
         draggable={false}
         src={localUrl}
@@ -421,7 +423,7 @@ function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
   return (
     <canvas
       aria-label={alt}
-      className="h-full w-auto max-w-full rounded-md object-contain"
+      className="h-full w-auto max-w-full rounded-chip object-contain"
       data-slot="comment-gif-still"
       ref={canvasRef}
       role="img"
@@ -804,7 +806,7 @@ export function commentRowMenu({
           {
             id: 'show',
             label: highlightPhase === 'live' ? 'Take off stream' : 'Show on stream',
-            icon: PreviewIcon,
+            icon: LivestreamIcon,
             onSelect: () => onHighlight?.(message)
           }
         ]

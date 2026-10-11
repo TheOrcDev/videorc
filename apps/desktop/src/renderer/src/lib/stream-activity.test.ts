@@ -380,7 +380,7 @@ describe('stream activity', () => {
       ['twitch', 'New follower', 'follows']
     ])
     expect(items[1].line).toBe("3 new followers. X didn't say who followed.")
-    expect(items[0].line).toBe('2 new followers. Show who followed to name them from now on.')
+    expect(items[0].line).toBe('2 new followers. Reconnect Twitch to name them from now on.')
     expect(thankYouDraft(items[1])).toBe('Thanks for the follows, and welcome in!')
     expect(activityFilterCounts(items).follows).toBe(3)
     // While Twitch's follow subscription is live it sends named follow rows;

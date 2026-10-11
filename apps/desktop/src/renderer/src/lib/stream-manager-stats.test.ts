@@ -698,8 +698,10 @@ describe('stats bar items (plan 057)', () => {
         providers: [provider('twitch')],
         nowMs: T0
       })
-      expect(find(items, 'supporters')).toMatchObject({ value: '–' })
-      expect(find(items, 'tips')).toMatchObject({ value: '–' })
+      // Unmeasured subs and tips are not in the bar at all (plan 174 V-8):
+      // never a run of placeholders, and never a retained row's count.
+      expect(find(items, 'supporters')).toBeUndefined()
+      expect(find(items, 'tips')).toBeUndefined()
       expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '–' })
     }
   })

@@ -37,7 +37,9 @@ export function PlatformFilter({
       value={value}
       onValueChange={(next) => onValueChange((next || 'all') as PlatformFilterValue)}
     >
-      <ToggleGroupItem value="all">All</ToggleGroupItem>
+      <ToggleGroupItem className="text-xs" value="all">
+        All
+      </ToggleGroupItem>
       {platforms.map((platform) => (
         <ToggleGroupItem
           key={platform}

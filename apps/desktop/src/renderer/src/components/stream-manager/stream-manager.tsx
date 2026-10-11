@@ -186,21 +186,46 @@ function cohostTone(state: CohostState | null): StatusDotTone {
   }
 }
 
+/** The Buddy tab's dot in words, for a screen reader (plan 174 H-15). */
+function cohostDotLabel(state: CohostState | null): string | null {
+  switch (state?.status) {
+    case 'listening':
+      return 'Buddy is listening'
+    case 'paused':
+      return 'Buddy is paused'
+    case 'error':
+      return 'Buddy has a problem'
+    default:
+      return null
+  }
+}
+
 function PaneLabel({
   label,
   unseen,
   dot,
+  dotLabel = null,
   onStream = false
 }: {
   label: string
   unseen: { count: number; incomplete: boolean }
   dot?: StatusDotTone
+  /** What the dot means, read aloud (never colour alone). */
+  dotLabel?: string | null
   /** Something only this pane shows is on stream (plan 095, D1). */
   onStream?: boolean
 }): ReactElement {
   return (
     <span className="flex items-center gap-1.5">
-      {dot ? <StatusDot tone={dot} /> : null}
+      {dot ? (
+        <span
+          aria-label={dotLabel ?? undefined}
+          className="flex"
+          role={dotLabel ? 'img' : undefined}
+        >
+          <StatusDot tone={dot} />
+        </span>
+      ) : null}
       {onStream ? (
         <span className="flex" data-slot="pane-on-stream" title="On stream">
           <StatusDot tone="good" />
@@ -209,7 +234,7 @@ function PaneLabel({
       ) : null}
       {label}
       {unseen.count > 0 || unseen.incomplete ? (
-        <Badge className="h-4 px-1.5 tabular-nums" data-testid="pane-unseen" variant="outline">
+        <Badge className="px-1.5 tabular-nums" data-testid="pane-unseen" variant="outline">
           {unseen.incomplete ? 'New' : unseen.count > 99 ? '99+' : unseen.count}
         </Badge>
       ) : null}
@@ -988,7 +1013,12 @@ export function StreamManager({
               </TabsTrigger>
               {cohostPresent ? (
                 <TabsTrigger value="buddy">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Buddy" unseen={buddyUnseen} />
+                  <PaneLabel
+                    dot={cohostTone(cohostState)}
+                    dotLabel={cohostDotLabel(cohostState)}
+                    label="Buddy"
+                    unseen={buddyUnseen}
+                  />
                 </TabsTrigger>
               ) : null}
             </TabsList>
@@ -1012,7 +1042,12 @@ export function StreamManager({
               </TabsTrigger>
               {cohostPresent ? (
                 <TabsTrigger value="buddy">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Buddy" unseen={buddyUnseen} />
+                  <PaneLabel
+                    dot={cohostTone(cohostState)}
+                    dotLabel={cohostDotLabel(cohostState)}
+                    label="Buddy"
+                    unseen={buddyUnseen}
+                  />
                 </TabsTrigger>
               ) : null}
             </TabsList>
@@ -1109,7 +1144,9 @@ export function StreamManager({
         onMarkClip={onAir ? onMarkClip : undefined}
         onOpenPreview={onOpenPreview}
         onSearchChat={searchChat}
+        onStatsLayoutChange={changeStatsLayout}
         onToggleAlwaysOnTop={onToggleAlwaysOnTop}
+        statsLayout={statsLayout}
       />
     </div>
   )

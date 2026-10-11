@@ -423,7 +423,9 @@ export function chatNeedsConnectionAction(providers: LiveChatProviderState[]): b
 
 export function liveChatEmptyMessage(
   snapshot: Pick<LiveChatSnapshot, 'providers'>,
-  noProviderMessage = 'Connect YouTube, Twitch, or X to read live comments.'
+  noProviderMessage = 'Connect YouTube, Twitch, or X to read live comments.',
+  /** What an empty chat says when no destination needs anything (plan 174 H-12). */
+  healthyMessage = 'No messages yet. Chat appears here once you go live.'
 ): string {
   if (snapshot.providers.length === 0) {
     return noProviderMessage
@@ -431,7 +433,7 @@ export function liveChatEmptyMessage(
   const provider = snapshot.providers
     .filter(providerNeedsAction)
     .sort((left, right) => providerStatePriority(left) - providerStatePriority(right))[0]
-  return provider?.message ?? 'No messages yet. Chat appears here once you go live.'
+  return provider?.message ?? healthyMessage
 }
 
 /**

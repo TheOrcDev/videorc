@@ -742,9 +742,10 @@ function CommentsWindowApp(): ReactElement {
               })
               .then(() =>
                 // A step to take, so info (plan 174 S2.4, H-32).
-                toast.info('Approve the follow permission in your browser', {
+                toast.info('Approve the Twitch permissions in your browser', {
                   id: 'follow-names',
-                  description: 'New Twitch followers show by name once Twitch confirms.'
+                  description:
+                    'Follower names, Power-ups and channel points show once Twitch confirms.'
                 })
               )
               .catch((error) =>

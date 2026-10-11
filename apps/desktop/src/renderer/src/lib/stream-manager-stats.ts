@@ -82,21 +82,6 @@ function confirmedTotals(input: StatsInput): SessionChatTotals | null {
   return totals && totals.sessionId === owner ? totals : null
 }
 
-function missingTotal(id: 'supporters' | 'tips', input: StatsInput): StatItemModel {
-  const reason =
-    confirmedTotals(input)?.status === 'legacy-unavailable'
-      ? 'This earlier session has no complete total.'
-      : 'Session total not available yet.'
-  return {
-    id,
-    label: id === 'supporters' ? 'Supporters this stream' : 'Tips this stream',
-    value: '–',
-    tone: 'subtle',
-    details: [{ label: 'This stream', value: 'Not available', note: reason }],
-    description: reason
-  }
-}
-
 /** The bar's order when the streamer has not rearranged it (plan 057, D2). */
 export const DEFAULT_STAT_ORDER: readonly StatId[] = [
   'session',
@@ -568,13 +553,11 @@ export function statItems(input: StatsInput): StatItemModel[] {
       input.history ? (input.history.stats?.audience ?? null) : (dashboard?.audience ?? null)
     )
   ]
-  if ([...chatPlatforms].some((platform) => TIP_PLATFORMS.has(platform))) {
-    items.push(
-      totals
-        ? supportersItem(totals, chatPlatforms, dashboard?.audience ?? null)
-        : missingTotal('supporters', input),
-      totals ? tipsItem(totals) : missingTotal('tips', input)
-    )
+  // Subs and tips exist once their total is measured (plan 174 V-8): until
+  // the session's totals arrive the bar shows nothing for them, never a run
+  // of placeholders.
+  if (totals && [...chatPlatforms].some((platform) => TIP_PLATFORMS.has(platform))) {
+    items.push(supportersItem(totals, chatPlatforms, dashboard?.audience ?? null), tipsItem(totals))
   }
   if (input.providers.length > 0 || input.messages.length > 0 || (totals?.messageCount ?? 0) > 0)
     items.push(chatItem(input))
