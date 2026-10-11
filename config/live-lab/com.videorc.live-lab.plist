@@ -4,18 +4,22 @@
   Plan 178 U11: the live lab schedule agent. Template; the lab user installs it
   with
 
-    cp ~/videorc/config/live-lab/com.videorc.live-lab.plist ~/Library/LaunchAgents/
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.videorc.live-lab.plist
+    pnpm live:schedule install-agent
+
+  which renders it into ~/Library/LaunchAgents/ with this checkout's paths,
+  creates ~/videorc-live-lab/logs (launchd does not create the folder of
+  StandardOutPath) and bootstraps it into gui/$(id -u).
 
   It runs `scripts/live-lab/schedule.mjs tick` every 300 s in the lab user's
   GUI session (capture needs the Aqua session, not a daemon). The tick decides
-  what is due from the policy, the lock and the schedule table; a missed slot
-  is skipped, never piled up. Nothing here holds a secret: the stream keys and
-  tokens stay in ~/.videorc-live-lab/config.json (0600) and the policy stays
-  owner-owned under /Library/Application Support/VideorcLab/.
+  what is due from the policy, the lock and config/live-lab/schedule.json; a
+  missed slot is skipped, never piled up. Nothing here holds a secret: the
+  stream keys and tokens stay in ~/.videorc-live-lab/config.json (0600) and the
+  policy stays owner-owned under /Library/Application Support/VideorcLab/.
 
   Paths assume the lab user `videorc-lab` with the repo at ~/videorc and
-  Homebrew node at /opt/homebrew/bin (Apple Silicon).
+  Homebrew node at /opt/homebrew/bin (Apple Silicon); install-agent swaps in
+  the real ones.
 -->
 <plist version="1.0">
 <dict>
@@ -51,15 +55,33 @@
   <key>RunAtLoad</key>
   <true/>
 
+  <!--
+    The tick's own lines. Each slot's run output goes to
+    logs/schedule-<date>.log next to it (30 days kept).
+  -->
   <key>StandardOutPath</key>
   <string>/Users/videorc-lab/videorc-live-lab/logs/schedule.log</string>
   <key>StandardErrorPath</key>
   <string>/Users/videorc-lab/videorc-live-lab/logs/schedule.log</string>
 
-  <!-- A tick that is already running (a live run) must not be started twice. -->
+  <!--
+    A tick that is already running (a live run) is never started twice:
+    launchd runs one instance per label, and a StartInterval firing while the
+    job runs is skipped (launchd.plist(5)). The tick also holds its own lock
+    against a hand-typed `live:schedule tick`. It runs each due slot to
+    completion, so a marathon keeps this job alive for hours; that is expected.
+  -->
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>Nice</key>
   <integer>0</integer>
+
+  <!--
+    On bootout or logout launchd sends SIGTERM; the tick forwards it to the
+    run, which ends the stream and tears down (the kill switch budget is 60 s).
+    Give it 90 s before SIGKILL instead of the default 20 s.
+  -->
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
 </dict>
 </plist>
