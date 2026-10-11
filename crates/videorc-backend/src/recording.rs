@@ -12840,6 +12840,7 @@ pub fn stream_output_topology_probe_log_line(
                 result
                     .fallback_reason
                     .as_deref()
+                    .or(result.encoder_selection_reason.as_deref())
                     .map(|reason| format!(" reason={reason}"))
                     .unwrap_or_default(),
             )
@@ -15298,11 +15299,38 @@ pub async fn probe_stream_output_topology(
         effective_bridge_output: stream_output_bridge(decision.effective),
         effective_encode_backend: decision.effective_encode_backend,
         probe_state: decision.probe_state,
-        fallback_reason: combined_output_fallback_reason(
+        fallback_reason: topology_result_fallback_reason(
+            decision.probe_state,
+            decision.requested != decision.effective,
             decision.fallback_reason,
-            decision.encoder_selection_fallback_reason,
+            decision.encoder_selection_fallback_reason.clone(),
         ),
+        encoder_selection_reason: decision
+            .encoder_selection_fallback_reason
+            .as_deref()
+            .map(bounded_stream_output_topology_fallback_reason),
     })
+}
+
+/// The wire `fallbackReason` is a topology verdict (plan 0015): a passed or
+/// not-required probe on its requested bridge carries none, even when the raw
+/// path's encoder was itself a fallback (Linux OpenH264, VAAPI rejected).
+/// That encoder note travels as `encoderSelectionReason` instead; the shared
+/// contract rejects a `fallbackReason` on a healthy topology.
+fn topology_result_fallback_reason(
+    probe_state: StreamOutputTopologyProbeState,
+    bridge_changed: bool,
+    bridge: Option<String>,
+    encoder_selection: Option<String>,
+) -> Option<String> {
+    let fallback_verdict = matches!(
+        probe_state,
+        StreamOutputTopologyProbeState::Rejected | StreamOutputTopologyProbeState::Unsupported
+    );
+    if !fallback_verdict && !bridge_changed {
+        return None;
+    }
+    combined_output_fallback_reason(bridge, encoder_selection)
 }
 
 /// Why the session is not on its requested path. When the bridge was rejected
@@ -25187,6 +25215,7 @@ mod tests {
             effective_encode_backend: EncodeBackend::HardwareQsv,
             probe_state: StreamOutputTopologyProbeState::Rejected,
             fallback_reason: Some("stage=process-output HRESULT=0x8000FFFF".to_string()),
+            encoder_selection_reason: None,
         };
         let line = stream_output_topology_probe_log_line(
             std::time::Duration::from_millis(18_250),
@@ -25243,6 +25272,64 @@ mod tests {
             Some(encoder)
         );
         assert_eq!(combined_output_fallback_reason(None, None), None);
+    }
+
+    #[test]
+    fn a_healthy_topology_never_carries_the_encoder_note_as_its_fallback_reason() {
+        // Plan 0015: Linux OpenH264 is not-required on the raw path it asked
+        // for; its "selected explicitly" note made the renderer reject the
+        // whole check and block Go Live.
+        let encoder = "OpenH264 software encoding was selected explicitly for this session.";
+        for state in [
+            StreamOutputTopologyProbeState::NotRequired,
+            StreamOutputTopologyProbeState::Passed,
+        ] {
+            assert_eq!(
+                topology_result_fallback_reason(state, false, None, Some(encoder.to_string())),
+                None
+            );
+        }
+        assert_eq!(
+            topology_result_fallback_reason(
+                StreamOutputTopologyProbeState::NotRequired,
+                true,
+                Some("bridge changed".to_string()),
+                None
+            )
+            .as_deref(),
+            Some("bridge changed")
+        );
+        let rejected = topology_result_fallback_reason(
+            StreamOutputTopologyProbeState::Rejected,
+            true,
+            Some("Media Foundation rejected".to_string()),
+            Some(encoder.to_string()),
+        )
+        .unwrap();
+        assert!(rejected.starts_with("OpenH264 software"), "{rejected}");
+
+        let video = qsv_test_video();
+        let result = StreamOutputTopologyProbeResult {
+            capability_key: "stream-output-topology-v1:test".to_string(),
+            stream_profile: video.clone(),
+            recording_profile: None,
+            output_roles: vec![StreamOutputTopologyRole::Shared],
+            requested_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_encode_backend: EncodeBackend::SoftwareOpenH264,
+            probe_state: StreamOutputTopologyProbeState::NotRequired,
+            fallback_reason: None,
+            encoder_selection_reason: Some(encoder.to_string()),
+        };
+        let wire = serde_json::to_value(&result).unwrap();
+        assert!(wire.get("fallbackReason").is_none(), "{wire}");
+        assert_eq!(wire["encoderSelectionReason"], encoder);
+        let line =
+            stream_output_topology_probe_log_line(std::time::Duration::from_millis(0), Ok(&result));
+        assert!(
+            line.contains("probe=not-required reason=OpenH264"),
+            "{line}"
+        );
     }
 
     #[test]
