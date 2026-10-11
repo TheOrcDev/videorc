@@ -71,7 +71,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-11** · P2 · Windows/actions have 3–5 names (Captions window: "Videorc Captions"/"Live captions"/"Open captions reader"/"Open reader"; Preview; "Chat closed for this recording"); Session actions (Record/Stream/Confirm Go Live/Resolve Blockers First/End livestream/Start session/Start-stop the session/Go live-end stream) — partly fixed in #647 (S2.2 `ae1e6788`, session actions); windows in S2.3a; fixed in #647 (S2.2 `ae1e6788`, S2.3a `490d7f6a`)
   - Evidence: captions.html:10; captions-reader.tsx:62; command-palette.tsx:200-233; shortcuts.ts:28-32; use-studio.tsx:10178
   - Fix: canonical names
-- **A-12** · P2 · ⌘J: main window toggles (closes) Stream Manager; inside SM focuses Buddy (documented as Focus Buddy); no ⇧⌘J inside SM; undocumented p, arrows, R; no ⌘/ reference — partly fixed in #647 (S3.21 `5bee0e0d`, ⌘J shows Stream Manager, ⇧⌘J toggles, ⌘/ Shortcuts); focusing Buddy from the main window needs a new main→window push (deferred)
+- **A-12** · P2 · ⌘J: main window toggles (closes) Stream Manager; inside SM focuses Buddy (documented as Focus Buddy); no ⇧⌘J inside SM; undocumented p, arrows, R; no ⌘/ reference — partly fixed in #647 (S3.21 `5bee0e0d`, ⌘J shows Stream Manager, ⇧⌘J toggles, ⌘/ Shortcuts); focusing Buddy from the main window needs a new main→window push (deferred); deferred (S4.3): focusing Buddy from the main window needs a new main→Stream Manager push (`comments-window:focus-buddy`), a STOP condition; propose it as a follow-up
   - Evidence: app-shell.tsx:324; shortcuts.ts:31,37; stream-manager.tsx:672; use-studio.tsx:14846-14876
   - Fix: scope by window; ⌘/ → Shortcuts
 - **A-13** · P2 · ⌘K below palette scale (16px input, 20px icon, 12.5px headings), no footer/metadata/icons on some rows; group order; 4 names for palette — fixed in #647 (S3.21 `5bee0e0d`)
@@ -97,7 +97,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-20** · P2 · Toasts say "Details are in diagnostics." (no such place) — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: lib/toast.ts:10
   - Fix: "Details were saved for support" + Export action
-- **A-21** · P2 · Account trigger aria-label "Open account menu" over visible "Sign in" (WCAG 2.5.3); promised status dot missing; Sign out disabled w/o reason; 7px initials — partly fixed in #647 (S0.5 `e0140afc`, trigger name); status dot, Sign out reason and initials size open
+- **A-21** · P2 · Account trigger aria-label "Open account menu" over visible "Sign in" (WCAG 2.5.3); promised status dot missing; Sign out disabled w/o reason; 7px initials — partly fixed in #647 (S0.5 `e0140afc`, trigger name); status dot, Sign out reason and initials size open; fixed in #647 (S0.5 `e0140afc`, S4.1 `d131443b`: 11 px initials, the Sign out reason; the status dot was dropped because the status bar opens Health)
   - Evidence: account-menu.tsx:32,86,95,152 |
 - **A-22** · P2 · Shortcut conflict toast lists ids ("record-toggle, layout:camera-only") — fixed in #647 (S2.4 `4929496f`)
   - Evidence: global-shortcuts.ts:158
@@ -260,7 +260,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **C-16** · P2 · Inspector segmented controls unnamed; labels "Top L/Bot R", "S/M/L", "Rect/Round", "Wide" (wrong for portrait camera); corners named 2 ways — partly fixed in #647 (S0.5 `e0140afc`, accessible names); rest in S3.9; fixed in #647 (S3.9 `c3cf6b59`)
   - Evidence: layout-tab.tsx:527-896; assets-tab.tsx:500; ui/field.tsx:86
   - Fix: aria-labelledby; full words
-- **C-17** · P2 · Takeover reorder drag-only (WCAG 2.1.1/2.5.7); dropped image files silently ignored on both galleries — partly fixed in #647 (S3.10 `31c121b0`, keyboard reorder); file drop deferred: it needs a preload/main IPC the plan doesn't name
+- **C-17** · P2 · Takeover reorder drag-only (WCAG 2.1.1/2.5.7); dropped image files silently ignored on both galleries — partly fixed in #647 (S3.10 `31c121b0`, keyboard reorder); file drop deferred: it needs a preload/main IPC the plan doesn't name; deferred (S4.3): takeover file drop needs a preload/main IPC the plan doesn't name (STOP); keyboard reorder shipped
   - Evidence: takeover-screens-section.tsx:15-165; assets-tab.tsx
   - Fix: Move earlier/later; file drop import
 - **C-18** · P2 · "Reset camera settings" resets 18 values instantly, even live; no undo — fixed in #647 (S0.3 `1aeee1f1`)
@@ -784,7 +784,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **H-31** · P3 · Skill/docs out of date vs code by owner calls (activity mark far right; SM status bar 32px; Mark clip/Clear labelled) — fixed in #647 (S4.2 `9f2f2fc8`)
   - Evidence: SKILL.md:170,225,268; docs/buddy.md:413
   - Fix: amend skill
-- **H-32** · P3 · Success toasts for "do this in your browser"; Mark clip toast w/o Undo vs /marker inline Undo — partly fixed in #647 (S2.4 `4929496f`, browser steps as info); Mark clip Undo needs an RPC the plan doesn't name (deferred); deferred: Mark clip Undo needs an RPC the plan doesn't name (S2.4, S3.16b)
+- **H-32** · P3 · Success toasts for "do this in your browser"; Mark clip toast w/o Undo vs /marker inline Undo — partly fixed in #647 (S2.4 `4929496f`, browser steps as info); Mark clip Undo needs an RPC the plan doesn't name (deferred); deferred: Mark clip Undo needs an RPC the plan doesn't name (S2.4, S3.16b); deferred (S4.3): Mark clip Undo needs an RPC the plan doesn't name (STOP)
   - Evidence: comments/main.tsx:656,680,697 |
 - **H-33** · P3 · "Questions" chip shown when Buddy off; Buddy jump wipes filters silently — fixed in #647 (S3.16a `aeddb652`)
   - Evidence: chat-pane.tsx:309,404 |
@@ -798,7 +798,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **I-NEW** · P1 ✔ · "Chat is not connected" toast action "Open Livestream" dispatches {tab:'streaming'} → isWorkspaceTab rejects → does nothing (plan 064 noted, unfixed) — fixed in #647 (S0.4a `d0dca074`)
   - Evidence: use-studio.tsx:2457-2461
   - Fix: typed openWorkspaceTab('live'); replace raw CustomEvents
-- **I-1** · P1 · Support bundle: written to hidden app-data folder; toast shows filename only, no reveal; no support contact anywhere; jargon error when backend down; two different buttons (About outline BugIcon vs Health primary ExternalLink) — partly fixed in #647 (S1.6b `1bd4865c`, one SupportBundleButton); reveal in S3.18; Contact support needs an owner-supplied address; partly fixed in #647 (S1.6b, S2.4, S3.18 `6e3546dd`: one button, reveal); Contact support needs an owner-supplied address
+- **I-1** · P1 · Support bundle: written to hidden app-data folder; toast shows filename only, no reveal; no support contact anywhere; jargon error when backend down; two different buttons (About outline BugIcon vs Health primary ExternalLink) — partly fixed in #647 (S1.6b `1bd4865c`, one SupportBundleButton); reveal in S3.18; Contact support needs an owner-supplied address; partly fixed in #647 (S1.6b, S2.4, S3.18 `6e3546dd`: one button, reveal); Contact support needs an owner-supplied address; owner call (S4.3): "Contact support…" needs a support address the app doesn't have
   - Evidence: use-studio.tsx:10369,10397; support_bundle.rs:151; about-settings.tsx:33-46; diagnostics-tab.tsx:702
   - Fix: save panel / reveal action; Contact support; one SupportBundleButton
 - **I-2** · P1 · Notes never says it's hidden from capture; protection failure only logged to console (notes may appear on stream) — fixed in #647 (S0.6 `159c1155`)
@@ -913,15 +913,15 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J1-8** · P2 · Alert role=alert always; 5 warning icon treatments; no info/locked variant (overrides x2+) — fixed in #647 (S1.5 `905ea8fe`)
   - Evidence: ui/alert.tsx:33; buddy-tab.tsx:295; clean-cut-card.tsx:277
   - Fix: role by variant; default icon per variant; locked variant
-- **J1-9** · P2 · TabsContent outline-none but tabIndex 0 (13 invisible tab stops); Accordion trigger no focus style; Command tabIndex 0 outline-none; destination row nested switch; transcript role=button spans unfocusable; marker pins 16×24
+- **J1-9** · P2 · TabsContent outline-none but tabIndex 0 (13 invisible tab stops); Accordion trigger no focus style; Command tabIndex 0 outline-none; destination row nested switch; transcript role=button spans unfocusable; marker pins 16×24 — fixed in #647 (S0.5, S3.13, S3.12, S4.1 `d131443b`: visible focus on TabsContent, the accordion trigger and the Buddy triage list)
   - Evidence: ui/tabs.tsx:76; ui/accordion.tsx:39; cohost-pane.tsx:504; destination-card.tsx:309; marker-pins.tsx:21 |
 - **J1-10** · P2 · Input/Textarea text-base md:text-sm (mobile rule) → 16px text in narrow Stream Manager/Notes/Captions windows; per-call overrides fail — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: ui/input.tsx:7; ui/textarea.tsx:10; notes-window.tsx:24; cohost-pane.tsx:814
   - Fix: text-sm
-- **J1-11** · P2 · One control height eroded: 30% 24px buttons; sm == default; icon-sm == icon; Toggle sm == default → 9 h-6 overrides; InputGroup icon-sm 32px in 28px group
+- **J1-11** · P2 · One control height eroded: 30% 24px buttons; sm == default; icon-sm == icon; Toggle sm == default → 9 h-6 overrides; InputGroup icon-sm 32px in 28px group — fixed in #647 (S4.1 `d131443b`: one xs 24 px compact size)
   - Evidence: ui/button.tsx:27-32; ui/toggle.tsx:20; ui/input-group.tsx:72
   - Fix: sanctioned xs (24px) where allowed; delete redundant sizes
-- **J1-12** · P2 · Arbitrary type sizes: tokens --text-label 11/600, --text-section 13/600, --text-meta 12; --radius-tag 7px; FieldDescription → text-xs; metadata 10–11px → 12px — partly fixed in #647 (S1.6a `b5e1c5b7`, tokens); guards in S4.1
+- **J1-12** · P2 · Arbitrary type sizes: tokens --text-label 11/600, --text-section 13/600, --text-meta 12; --radius-tag 7px; FieldDescription → text-xs; metadata 10–11px → 12px — partly fixed in #647 (S1.6a `b5e1c5b7`, tokens); guards in S4.1; fixed in #647 (S1.6a `b5e1c5b7` tokens, S4.1 `d131443b` guards)
   - Evidence: ui/field.tsx:138; ui/badge.tsx:15 |
 - **J1-13** · P2 · Empty primitive off-skill (text-lg title, icon tile, secondary desc); 4 empty looks — fixed in #647 (S1.5 `905ea8fe`)
   - Evidence: ui/empty.tsx:34-73
@@ -949,12 +949,12 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: size prop + DialogBody
 - **J1-21** · P2 · No Spinner/Progress/Table: 19 ad-hoc spinners w/o role=status; 2 progress bars; Library CSS-grid table w/o semantics; native datetime-local; loading copy drift — partly fixed in #647 (S1.5 `905ea8fe`, Spinner and Progress); table semantics in S3.11; fixed in #647 (S1.5 `905ea8fe`, S3.11 `3c129b55`)
   - Evidence: | install Spinner/Progress; Table semantics; copy rule
-- **J1-22** · P3 · ClipIcon (scissors) = Clean cut AND Markers AND Mark clip; unused licence slots (VerifiedIcon, BrainIcon, FastIcon); inline status icons 14 vs 16; ⋯ triggers 24/28 bold/regular — partly fixed in #647 (S3.12 `e4f8da11`, MarkerIcon); inline icon sizes open
+- **J1-22** · P3 · ClipIcon (scissors) = Clean cut AND Markers AND Mark clip; unused licence slots (VerifiedIcon, BrainIcon, FastIcon); inline status icons 14 vs 16; ⋯ triggers 24/28 bold/regular — partly fixed in #647 (S3.12 `e4f8da11`, MarkerIcon); inline icon sizes open; partly fixed in #647 (S3.12 MarkerIcon, S4.1 `d131443b` ⋯ triggers); inline status icons 14 vs 16 px deferred (a judgement per context); deferred (S4.3): inline status icon size (14 vs 16 px) is a per-context judgement, not a mechanical change
   - Evidence: icons.tsx:178,265,267; library-tab.tsx:965,970
   - Fix: MarkerIcon; remove dead slots
 - **J1-23** · P3 · Float motion zoom-in-95 + slide vs skill 0.98; smooth scroll ignores reduced motion; transition-all; duration-200 — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: ui/select.tsx:70 etc. |
-- **J1-24** · P3 · Dead variants/tokens/classes; cursor-not-allowed x12 (never shows); palette scale; tracking-widest; skill drift (gutter) — partly fixed in #647 (S4.2 `9f2f2fc8`, skill drift); compact-size rule in S4.1
+- **J1-24** · P3 · Dead variants/tokens/classes; cursor-not-allowed x12 (never shows); palette scale; tracking-widest; skill drift (gutter) — partly fixed in #647 (S4.2 `9f2f2fc8`, skill drift); compact-size rule in S4.1; fixed in #647 (S4.2 `9f2f2fc8` skill drift, S4.1 `d131443b` dead variants and the compact-size rule)
   - Evidence: |
 
 **Owner decisions raised by this review:** Radix-free SegmentedControl respecting eager budget; raise --subtle + rule "essential info never tertiary"; delete borderless Input ghost variant (fails 2.4.7)
@@ -989,7 +989,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-8** · P1 · Library/Takeovers claim "No sessions yet"/"No takeovers yet" before data loads or while offline (sessions starts []) — partly fixed in #647 (S3.11 `3c129b55`, sessions); takeovers in S3.10; fixed in #647 (S3.11 `3c129b55`, S3.10 `31c121b0`)
   - Evidence: library-tab.tsx:356; use-studio.tsx:2145; takeover-screens-section.tsx:50; session-panel.tsx:363
   - Fix: sessionsLoaded/screensLoaded; Skeleton; offline Alert
-- **J2-9** · P1 · ~85% of 333 disabled controls show no reason; 7 wordings/4 styles of "locked while live" — partly fixed in #647 (S1.5 `905ea8fe`, SessionLockAlert); per-control reasons in S1.10, toasts in S2.4
+- **J2-9** · P1 · ~85% of 333 disabled controls show no reason; 7 wordings/4 styles of "locked while live" — partly fixed in #647 (S1.5 `905ea8fe`, SessionLockAlert); per-control reasons in S1.10, toasts in S2.4; deferred (S4.3) for the rest: the cited sites, every title= reason (S1.10) and the locked-while-live wording are fixed; a full audit of the remaining disabled controls without a visible reason is a follow-up
   - Evidence: layout-tab.tsx:316; library-tab.tsx:337,938,1023-1051; recording-tab.tsx:62,74,81; quick-settings.tsx:222; account-menu.tsx:153; takeover-screens-section.tsx:33,46; streaming-tab.tsx:221; captions-controls.tsx:357; scenes-gallery.tsx:85; use-studio.tsx:11402
   - Fix: SessionLockAlert; offline alert; disabledReason tooltips
 - **J2-10** · P1 · Terminology map: going live; stream vs livestream; on-air state; recording vs session; Output; scene/layout/preset; source/input/device; destination/account/channel/stream key (never target/provider); Stream Manager vs chat/comments; Health vs diagnostics; takeover vs Screen; Import vs Upload; Stream details vs Broadcast info/metadata; Premium phrasing x6 ("{Feature} is part of Videorc Premium." + View Premium); remove/delete/discard/clear; microphone vs mic — fixed in #647 (S2.1 `e6379d71`, glossary in CONTEXT.md)
