@@ -314,6 +314,13 @@ lock held, unreachable control file); the skill diff reads correctly cold.
 
 ### U5 — Build delivery: release and signed candidates
 
+**BUILT** (branch `plan-178/u5`): workflow + `live:install` (release,
+candidate, rollback) with offline tests; version override via
+`extraMetadata.version`. Owed: a first dispatch after merge (dispatch needs
+the file on main), then both installs, a TCC-survives-swap check and the
+ad-hoc refusal on the lab machine. Candidates must launch with
+`VIDEORC_DISABLE_AUTO_UPDATE=1` (U6), or the updater swaps in the release.
+
 **Files:** `.github/workflows/lab-candidate-macos.yml` (new),
 `scripts/live-lab/install.mjs` + tests, `package.json` script
 `live:install`.
