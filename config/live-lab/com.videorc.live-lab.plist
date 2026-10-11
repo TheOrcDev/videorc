@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Plan 178 U11: the live lab schedule agent. Template; the lab user installs it
+  with
+
+    cp ~/videorc/config/live-lab/com.videorc.live-lab.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.videorc.live-lab.plist
+
+  It runs `scripts/live-lab/schedule.mjs tick` every 300 s in the lab user's
+  GUI session (capture needs the Aqua session, not a daemon). The tick decides
+  what is due from the policy, the lock and the schedule table; a missed slot
+  is skipped, never piled up. Nothing here holds a secret: the stream keys and
+  tokens stay in ~/.videorc-live-lab/config.json (0600) and the policy stays
+  owner-owned under /Library/Application Support/VideorcLab/.
+
+  Paths assume the lab user `videorc-lab` with the repo at ~/videorc and
+  Homebrew node at /opt/homebrew/bin (Apple Silicon).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.videorc.live-lab</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/videorc-lab/videorc/scripts/live-lab/schedule.mjs</string>
+    <string>tick</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/videorc-lab/videorc</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/videorc-lab</string>
+  </dict>
+
+  <!-- GUI session only: a tick in a non-Aqua session could never capture. -->
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- One tick at login too, so the post-reboot doctor run (U11 step 3) happens. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/videorc-lab/videorc-live-lab/logs/schedule.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/videorc-lab/videorc-live-lab/logs/schedule.log</string>
+
+  <!-- A tick that is already running (a live run) must not be started twice. -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>Nice</key>
+  <integer>0</integer>
+</dict>
+</plist>

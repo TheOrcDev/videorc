@@ -6,30 +6,60 @@
 // of a secret.
 
 import { execFile } from 'node:child_process'
+import { access, readFile } from 'node:fs/promises'
+import { homedir, userInfo } from 'node:os'
+import { join } from 'node:path'
 import { connect } from 'node:tls'
 import { promisify } from 'node:util'
 
-import { ROLES, configPath, inspectPermissions, labDir, readConfig, redact } from './lib/config.mjs'
+import {
+  LAB_USER,
+  ROLES,
+  configPath,
+  inspectPermissions,
+  labDir,
+  readConfig,
+  redact,
+  workDir
+} from './lib/config.mjs'
 import {
   FAIL,
   PASS,
   SKIP,
+  WARN,
   check,
+  evaluateAutoLogin,
   evaluateBlackHole,
   evaluateChannelIdentity,
   evaluateClient,
+  evaluateDiskFree,
+  evaluateDisplayAwake,
+  evaluateFocus,
+  evaluateGhAuth,
+  evaluateKillSwitch,
   evaluateLabDisplay,
   evaluatePermissions,
+  evaluatePolicyFile,
+  evaluateRunLock,
+  evaluateScreenLock,
+  evaluateSigningIdentities,
+  evaluateSleep,
+  evaluateStopFile,
   evaluateStreamKeys,
   evaluateTokenAge,
   evaluateTool,
   formatResult,
   summarize
 } from './lib/doctor-checks.mjs'
+import { fetchControlFromUrl, stopFilePath } from './lib/kill-switch.mjs'
 import { fetchMyChannel, refreshAccessToken } from './lib/oauth.mjs'
+import { loadPolicy, policyPath, reportsRepoFromKillSwitchUrl } from './lib/policy.mjs'
+import { processAlive, readRunLock } from './lib/run-lock.mjs'
 
 const execFileAsync = promisify(execFile)
 const RTMPS_HOST = 'a.rtmps.youtube.com'
+const MAIN_REPO = 'TheOrcDev/videorc'
+const FOCUS_ASSERTIONS = join(homedir(), 'Library', 'DoNotDisturb', 'DB', 'Assertions.json')
 
 async function run(command, args) {
   try {
@@ -98,6 +128,13 @@ async function roleChecks(role, config, broadcasterChannelId) {
         broadcasterChannelId
       })
     )
+    // The refresh just worked, so an old token is a project in production
+    // (plan 178 D2), not an expired Testing-mode grant. Age is then advice.
+    const age = results.find((entry) => entry.name === `${role} token age`)
+    if (age?.status === FAIL) {
+      age.status = WARN
+      age.detail = `${age.detail.split(':')[0]}: the refresh still works (production project). Rerun hookup only if a refresh fails.`
+    }
     return { results, channelId: channel.channelId }
   } catch (error) {
     const hint =
@@ -109,6 +146,88 @@ async function roleChecks(role, config, broadcasterChannelId) {
     )
     return { results, channelId: null }
   }
+}
+
+async function exists(path) {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function readText(path) {
+  try {
+    return await readFile(path, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+async function repoAccess(name, needWrite) {
+  return {
+    name,
+    json: await run('gh', ['repo', 'view', name, '--json', 'viewerPermission']),
+    needWrite
+  }
+}
+
+// Plan 178 U3. Runs on the lab machine (the lab user, or a policy file in
+// place), or anywhere with --machine. Every check is a pure verdict over
+// what a command printed; see doctor-checks.mjs for the broken-on-purpose
+// cases.
+async function machineChecks(displays) {
+  const results = []
+  const [autoLogin, screenLock, pmset, df, identities, focus, ghStatus] = await Promise.all([
+    run('defaults', ['read', '/Library/Preferences/com.apple.loginwindow', 'autoLoginUser']),
+    run('sysadminctl', ['-screenLock', 'status']),
+    run('pmset', ['-g']),
+    run('df', ['-k', homedir()]),
+    run('security', ['find-identity', '-v', '-p', 'codesigning']),
+    readText(FOCUS_ASSERTIONS),
+    run('gh', ['auth', 'status'])
+  ])
+  results.push(evaluateAutoLogin(autoLogin, LAB_USER))
+  results.push(evaluateScreenLock(screenLock))
+  results.push(evaluateSleep(pmset))
+  results.push(evaluateDisplayAwake(displays))
+  results.push(evaluateFocus(focus))
+  results.push(evaluateDiskFree(df))
+  results.push(evaluateSigningIdentities(identities))
+
+  const loaded = await loadPolicy({ path: policyPath() })
+  results.push(evaluatePolicyFile(loaded))
+
+  const reports = loaded.policy ? reportsRepoFromKillSwitchUrl(loaded.policy.killSwitchUrl) : null
+  const repos = [await repoAccess(MAIN_REPO, false)]
+  if (reports) repos.unshift(await repoAccess(reports.name, true))
+  results.push(evaluateGhAuth(ghStatus, repos))
+
+  if (loaded.policy) {
+    let outcome
+    try {
+      outcome = await fetchControlFromUrl(loaded.policy.killSwitchUrl)
+    } catch (error) {
+      outcome = { error: error.message }
+    }
+    results.push(evaluateKillSwitch(loaded.policy.killSwitchUrl, outcome))
+  } else {
+    results.push(check('kill switch', SKIP, 'No valid policy, so no kill switch URL to check.'))
+  }
+
+  const work = workDir()
+  const lock = await readRunLock({ dir: work })
+  results.push(evaluateRunLock(lock, lock && !lock.corrupt ? processAlive(lock.pid) : false))
+  results.push(evaluateStopFile(stopFilePath(work), await exists(stopFilePath(work))))
+  return results
+}
+
+async function isLabMachine(argv) {
+  if (argv.includes('--machine')) return true
+  if (argv.includes('--no-machine')) return false
+  if (userInfo().username === LAB_USER) return true
+  return exists(policyPath())
 }
 
 async function main() {
@@ -159,6 +278,18 @@ async function main() {
   results.push(
     check('network fault rules', SKIP, 'Fault injection arrives with suite E (plan 176 L5).')
   )
+
+  if (await isLabMachine(process.argv.slice(2))) {
+    results.push(...(await machineChecks(displays)))
+  } else {
+    results.push(
+      check(
+        'machine',
+        SKIP,
+        'Not the lab machine (no policy file). Pass --machine to run its checks.'
+      )
+    )
+  }
 
   for (const result of results) {
     console.log(formatResult({ ...result, detail: redact(result.detail, config) }))

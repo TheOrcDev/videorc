@@ -156,9 +156,14 @@ directory not writable by the lab user. Example defaults (D5):
   "quota": { "labProjectMaxUnitsPerDay": 8000, "bundledClientMaxUnitsPerDay": 0 },
   "faults": { "network": false, "process": true },
   "camera": false,
+  "clipPull": false,
   "killSwitchUrl": "https://raw.githubusercontent.com/<reports-repo>/main/control.json"
 }
 ```
+
+`clipPull` is optional (false when absent): YouTube's Terms do not expressly
+permit recording our own live output with `yt-dlp`, so clip pulling (U8)
+stays off until the owner turns it on here.
 
 The harness refuses to start, and stops a running stream within 60 s, when
 any of these is true: policy missing, unparsable or writable by the lab
@@ -252,7 +257,13 @@ env, redacted per-session FFmpeg stderr when the journal is on, Electron
 **STOP if:** `crashReporter` changes entitlements or needs a new signing
 step.
 
-### U3 — Lab machine runbook and machine checks
+### U3 — Lab machine runbook and machine checks — BUILT
+
+Built on branch `plan-178/u3u4`: `docs/live-lab-machine.md`, the three
+`config/live-lab/` templates, and the doctor machine section (12 checks,
+pure verdicts in `lib/doctor-checks.mjs`, auto-on for the lab user or a
+policy file, `--machine` elsewhere). Owed on the lab machine: the visit
+itself, an all-PASS doctor, and the three broken-on-purpose FAILs by eye.
 
 **Files:** `docs/live-lab-machine.md` (new),
 `scripts/live-lab/doctor.mjs` (machine section), `config/live-lab/`
@@ -285,7 +296,17 @@ asleep).
 **STOP if:** capture fails with the display awake and unlocked under
 auto-login (product bug; file it).
 
-### U4 — Policy, run lock, kill switches, skill update
+### U4 — Policy, run lock, kill switches, skill update — BUILT
+
+Built on branch `plan-178/u3u4`: `lib/policy.mjs` (`loadPolicy`,
+`canStart`, `mustStop`, schema v1 with optional `clipPull`),
+`lib/run-lock.mjs`, `lib/kill-switch.mjs` (STOP file, `control.json` every
+60 s via `gh api` for the private reports repo, 5-minute unreachable stop,
+Studio-ended hook, SIGINT/SIGTERM, policy reload mid-run), unit tests for
+every refusal and stop reason, the skill's Unattended mode, `AGENTS.md` and
+`docs/live-lab.md` pointers. Owed: U6 wires `createKillSwitch` and the lock
+into `live:run`; U8 calls `notifyStudioEnded`; the owner's acceptance flip of
+`control.json`.
 
 **Files:** `scripts/live-lab/lib/{policy,run-lock,kill-switch}.mjs` +
 tests, `.agents/skills/videorc-live-lab/SKILL.md`, `AGENTS.md` pointer,

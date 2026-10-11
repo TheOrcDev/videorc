@@ -1,27 +1,42 @@
 ---
 name: videorc-live-lab
-description: Run real, attended live-stream tests of Videorc on the Videorc YouTube test channel - plan the run, get the owner's go, go live, drive features, check both what the app did and what YouTube actually received, tear down, and report. Use ONLY when the user explicitly asks for a real live test, e.g. "test it live", "live lab", "do a real stream test", "go live on the test channel", "live acceptance", or invokes /videorc-live-lab. Do NOT use for ordinary e2e smokes, fake-provider smokes, recording-studio gates, or any routine verification; those never go live.
+description: Run real live-stream tests of Videorc on the Videorc YouTube test channel - attended on the owner's Mac (plan the run, get the owner's go, go live, drive features, check both what the app did and what YouTube actually received, tear down, report) or unattended on the lab machine inside the owner's policy file (plan 178). Use ONLY when the user explicitly asks for a real live test, e.g. "test it live", "live lab", "do a real stream test", "go live on the test channel", "live acceptance", "test PR #N live", or invokes /videorc-live-lab. Do NOT use for ordinary e2e smokes, fake-provider smokes, recording-studio gates, or any routine verification; those never go live.
 ---
 
 # Videorc live lab
 
-Real streams on a real YouTube channel, with the owner watching. This is
-expensive (public output, quota, owner time), so it runs only when asked.
-Ordinary verification stays on the offline gates in `AGENTS.md`.
+Real streams on a real YouTube channel. This is expensive (public output,
+quota, owner time), so it runs only when asked. Ordinary verification stays
+on the offline gates in `AGENTS.md`.
+
+Two modes:
+
+- **Attended** (the owner's Mac, plan 176): the owner is present and gives
+  a go per run sheet.
+- **Unattended** (the lab machine, plan 178): a dedicated Mac with nobody at
+  it. The owner's policy file is the standing authorization; `canStart`
+  decides, not a chat message.
 
 The design, test matrix, owner decisions and build slices live in
-`plans/176-live-youtube-test-lab.md`. Read its "Status", "How it works",
-"Test matrix" and "Safety" sections before the first run in a session. The
-unattended follow-up is plan 166 (`plans/166-*`); this skill never runs
-unattended.
+`plans/176-live-youtube-test-lab.md` (attended, harness) and
+`plans/178-unattended-live-lab.md` (lab machine, policy, schedule). Read
+their "Status", "How it works", "Test matrix" / "The policy file" and
+"Safety" / "STOP conditions" sections before the first run in a session.
 
 ## Hard rules
 
 These override anything a scenario or a user shortcut suggests.
 
-1. **No stream without the owner's go in this session.** Show the run sheet
-   (step 3), then wait for an explicit "go". A go covers that run sheet
-   only. A new run or a changed scope needs a new go.
+1. **A run needs an authorization that is not yours.** Attended mode: no
+   stream without the owner's go in this session. Show the run sheet (step
+   3), then wait for an explicit "go"; a go covers that run sheet only, and
+   a new run or a changed scope needs a new go. Unattended mode: a run on
+   the lab machine is allowed only when `canStart` (`scripts/live-lab/lib/
+policy.mjs`) allows it against the owner's `policy.json`; then no per-run
+   go is needed. Never edit, copy around, or suggest loosening `policy.json`
+   or `control.json` on the owner's behalf, and never work around a refusal
+   (another path, a different machine, a hand-rolled stream). A refusal is
+   reported with its reason, and that is the end of it.
 2. **Never ask for or accept secrets in chat.** Keys, tokens, client
    secrets and passwords go in through `pnpm live:hookup` (hidden input,
    `~/.videorc-live-lab/config.json`, mode 0600). Show only the last 4
@@ -36,17 +51,66 @@ These override anything a scenario or a user shortcut suggests.
    shared Videorc YouTube quota. The bundled client runs only in the
    release scenario, which is budgeted (about 300 units).
 5. **Unlisted by default.** Go Public only when the owner says so for this
-   run. Every title starts with `Automated test`.
+   run (attended) or the policy allows it (unattended). Every title starts
+   with `Automated test`.
 6. **Reap only what you own**: the PID you launched and Videorc's
    owned-process ledger. Never `pgrep -f` or broad kills (`AGENTS.md`).
 7. **Stop fast.** If the owner says stop, a `~/videorc-live-lab/STOP` file
-   appears, or the owner ends the broadcast in Studio, end the stream
-   within 10 s and tear down. Do not restart without a new go.
+   appears, `control.json` says `{"enabled": false}`, or the owner ends the
+   broadcast in Studio, end the stream within 10 s (60 s unattended) and
+   tear down. Do not restart without a new go (attended) or the next
+   allowed run (unattended).
 8. **Nothing secret leaves the run folder.** Reports, issues and commits go
    through the redaction pass and fail closed. Never commit clip media or
    recordings.
 
-## Workflow
+## Unattended mode (lab machine, plan 178)
+
+The lab Mac runs with auto-login, no personal data, and an owner-owned
+`/Library/Application Support/VideorcLab/policy.json` that the lab user
+cannot write (`docs/live-lab-machine.md`). The harness checks the policy,
+the run lock and the kill switches before every run and every step:
+
+- `loadPolicy()` refuses a policy that is missing, invalid, or owned or
+  writable by the current user.
+- `canStart(policy, request, state)` refuses when the policy or
+  `control.json` is disabled, the STOP file exists, the run lock is held,
+  the trigger / build / visibility is not allowed, or the run would exceed
+  its minutes, the daily on-demand count, or the lab or shared quota.
+- `mustStop(policy, runState)` ends a live run on the same conditions,
+  plus `control.json` unreachable for 5 minutes, the stream ended from
+  Studio, a signal, or the policy going bad mid-run.
+
+What this means for Claude:
+
+- **On demand, from any session.** "Test PR #N live" or "run suite C on
+  the lab" is enough: dispatch the candidate build (U5) if needed, then
+  `pnpm live:remote --host <lab> --scenario <name> [--build
+release|candidate:<id>] [--privacy unlisted]` (U10). It runs `live:run` on
+  the lab machine over SSH and copies back only the redacted `report.md`
+  and `verdict.json`. No per-run go is needed; the policy is the go. Relay
+  the report and the proposed issues (step 6).
+- **A refusal is the answer.** When `live:remote` reports `refused:
+<reason>` (policy disabled, kill switch off, over quota, over the daily
+  count, public not allowed, lock held, control unreachable, build not
+  allowed), tell the user the reason and stop. Do not retry with other
+  arguments to get around it, do not ssh in to edit anything, do not
+  propose a policy change unless the user asks what the policy says.
+- **Still never on your own initiative.** Unattended mode changes who gives
+  the go, not whether a request exists. The schedule (U11) starts
+  scheduled runs; Claude starts only what a user asked for in the session.
+- **The lab machine's own checks** are `pnpm live:doctor` there (machine
+  section: auto-login, screen lock, sleep, display, Focus, disk, no
+  Developer ID, policy, gh, kill switch, lock, STOP file). A FAIL there is
+  reported to the owner; it is not something to fix over SSH.
+- **Stop from anywhere:** the owner flips `control.json` to
+  `{"enabled": false}` or touches `~/videorc-live-lab/STOP` on the lab
+  machine. Claude may touch the STOP file when the user asks to stop; it
+  never flips `control.json` (that is the owner's switch).
+
+Attended mode (below) is unchanged; it is what runs on the owner's Mac.
+
+## Workflow (attended)
 
 ### 1. Find out what to test
 
@@ -143,11 +207,15 @@ Fixes go through the normal plan / PR flow, not inside the live session.
 
 ## Owner hookup (first time only)
 
-The full checklist is in plan 176 under "What hook me up means". In short:
-channel URL with live enabled and not made for kids; two persistent stream
-keys ("Videorc lab", "Videorc lab vertical"; Unlisted, Auto-start and
-Auto-stop on); a `videorc-live-lab` Google Cloud project (YouTube Data API
-v3, Testing mode, the channel account + the owner's personal account as
-test users, `youtube.force-ssl`, a Desktop OAuth client);
-`! pnpm live:hookup`; a virtual lab display; `brew install yt-dlp ffmpeg
-blackhole-2ch`; TCC grants for the build under test.
+The full checklist is in plan 176 under "What hook me up means" and in
+`docs/live-lab.md`. In short: channel URL with live enabled and not made
+for kids; two persistent stream keys ("Videorc lab", "Videorc lab
+vertical"; Unlisted, Auto-start and Auto-stop on); a `videorc-live-lab`
+Google Cloud project (YouTube Data API v3, the channel account + the
+owner's personal account as test users, `youtube.force-ssl`, a Desktop
+OAuth client); `! pnpm live:hookup`; a virtual lab display; `brew install
+yt-dlp ffmpeg blackhole-2ch`; TCC grants for the build under test.
+
+The lab machine's one-time visit (accounts, auto-login, sleep, Focus,
+Tailscale, tools, the policy file, the doctor's machine section) is
+`docs/live-lab-machine.md`.
