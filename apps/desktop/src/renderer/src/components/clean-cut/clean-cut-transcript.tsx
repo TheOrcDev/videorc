@@ -75,7 +75,24 @@ export interface CleanCutTranscriptProps {
   onToggleRemoval: (id: string) => void
   onSeek: (ms: number) => void
   onToggleBlock: (block: CondensedBlock) => void
+  /** The word indexes a text selection in the transcript covers (E-14). */
+  onSelectWords?: (wordIndexes: readonly number[]) => void
   className?: string
+}
+
+const NO_WORDS: readonly number[] = []
+
+/** The words a selection covers inside `root`, by their `data-word` index. */
+function selectedWordIndexes(root: HTMLElement): readonly number[] {
+  const selection = window.getSelection?.()
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return NO_WORDS
+  const range = selection.getRangeAt(0)
+  if (!root.contains(range.commonAncestorContainer)) return NO_WORDS
+  const indexes: number[] = []
+  for (const element of root.querySelectorAll<HTMLElement>('[data-word]')) {
+    if (range.intersectsNode(element)) indexes.push(Number(element.dataset.word))
+  }
+  return indexes
 }
 
 /**
@@ -94,6 +111,7 @@ export function CleanCutTranscript({
   onToggleRemoval,
   onSeek,
   onToggleBlock,
+  onSelectWords,
   className
 }: CleanCutTranscriptProps): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null)
@@ -110,6 +128,17 @@ export function CleanCutTranscript({
     overscan: 6,
     getItemKey: (index) => items[index]?.key ?? index
   })
+
+  // A drag over the words selects them for "Cut selection".
+  useEffect(() => {
+    if (!onSelectWords) return
+    const read = (): void => {
+      const root = rootRef.current
+      onSelectWords(root ? selectedWordIndexes(root) : NO_WORDS)
+    }
+    document.addEventListener('selectionchange', read)
+    return () => document.removeEventListener('selectionchange', read)
+  }, [onSelectWords])
 
   useEffect(() => {
     if (!scrollRequest) return
@@ -309,6 +338,7 @@ function renderTokens(
             token.index === activeWord && 'bg-accent-pressed'
           )}
           data-seek-ms={token.startMs}
+          data-word={token.index}
         >
           {token.text}
         </span>,
@@ -345,7 +375,11 @@ function renderTokens(
         title={removalTitle(state.removal, state.cut)}
       >
         {words.map((word, position) => (
-          <span key={word.index} className={cn(word.index === activeWord && 'bg-accent-pressed')}>
+          <span
+            key={word.index}
+            className={cn(word.index === activeWord && 'bg-accent-pressed')}
+            data-word={word.index}
+          >
             {position > 0 ? ' ' : null}
             {word.text}
           </span>

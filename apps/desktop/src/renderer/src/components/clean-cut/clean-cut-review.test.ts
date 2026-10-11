@@ -21,6 +21,7 @@ const mocked = vi.hoisted(() => ({
     unknown
   >,
   skipRanges: [] as Array<unknown>,
+  onTimeUpdate: null as ((ms: number) => void) | null,
   player: {
     togglePlayback: vi.fn(),
     seekTo: vi.fn((_ms: number) => undefined),
@@ -55,13 +56,16 @@ vi.mock('@tanstack/react-virtual', () => ({
 vi.mock('@/components/media/session-player', () => ({
   SessionPlayer: ({
     handleRef,
-    skipRanges
+    skipRanges,
+    onTimeUpdate
   }: {
     handleRef?: Ref<unknown>
     skipRanges?: Array<unknown>
+    onTimeUpdate?: (ms: number) => void
   }) => {
     useImperativeHandle(handleRef, () => mocked.player, [])
     mocked.skipRanges = skipRanges ?? []
+    mocked.onTimeUpdate = onTimeUpdate ?? null
     return createElement('div', { 'data-slot': 'player-stub' })
   }
 }))
@@ -543,6 +547,71 @@ describe('Clean cut review (plan 119 S14)', () => {
       document.querySelector('[data-testid="clean-cut-review-waiting"]')?.textContent
     ).toContain('Transcribing 40%')
     expect(current.transcript).not.toHaveBeenCalled()
+  })
+})
+
+describe('Transcript editing (plan 174 E-14)', () => {
+  function word(text: string): HTMLElement {
+    const element = [...document.querySelectorAll<HTMLElement>('[data-word]')].find(
+      (candidate) => candidate.textContent === text
+    )
+    expect(element, text).toBeTruthy()
+    return element!
+  }
+
+  it('undoes and redoes with ⌘Z and ⇧⌘Z', async () => {
+    await render()
+    await act(async () => cut('r2').click())
+    expect(footer()).toBe('1 unsaved change')
+    await key('z', { metaKey: true })
+    expect(cut('r2').getAttribute('data-cut')).toBe('on')
+    expect(footer()).not.toContain('unsaved')
+    await key('z', { metaKey: true, shiftKey: true })
+    expect(cut('r2').getAttribute('data-cut')).toBe('off')
+    // The buttons say the same, and Discard is one more undoable change.
+    await act(async () => button('Discard').click())
+    expect(cut('r2').getAttribute('data-cut')).toBe('on')
+    await act(async () => button('Undo').click())
+    expect(cut('r2').getAttribute('data-cut')).toBe('off')
+  })
+
+  it('cuts the selected words with ⌫, struck at once and saved as a new cut', async () => {
+    await render()
+    const cutButton = (): HTMLButtonElement =>
+      document.querySelector('[data-testid="clean-cut-cut-selection"]') as HTMLButtonElement
+    expect(cutButton().disabled).toBe(true)
+    const range = document.createRange()
+    range.setStart(word('again.').firstChild!, 0)
+    range.setEnd(word('again.').firstChild!, 6)
+    await act(async () => {
+      const selection = window.getSelection()!
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+    })
+    expect(cutButton().disabled).toBe(false)
+    await key('Backspace')
+    expect(footer()).toBe('1 unsaved change')
+    expect(word('again.').closest('[data-removal-id]')?.getAttribute('data-cut')).toBe('on')
+    await act(async () => button('Save changes').click())
+    await settle()
+    const againWord = WORDS.find((entry) => entry.text === 'again.')!
+    expect(current.updateEdl).toHaveBeenCalledWith({
+      jobId: 'job-1',
+      revision: 3,
+      addManual: [{ startMs: againWord.startMs, endMs: againWord.endMs }]
+    })
+  })
+
+  it('follows the playhead, unless following is off', async () => {
+    await render()
+    mocked.scrollToIndex.mockClear()
+    await act(async () => mocked.onTimeUpdate?.(6_400))
+    expect(mocked.scrollToIndex).toHaveBeenLastCalledWith(1, { align: 'auto' })
+    await act(async () => (document.getElementById('clean-cut-follow') as HTMLElement).click())
+    mocked.scrollToIndex.mockClear()
+    await act(async () => mocked.onTimeUpdate?.(1_000))
+    expect(mocked.scrollToIndex).not.toHaveBeenCalledWith(0, { align: 'auto' })
   })
 })
 

@@ -41,6 +41,7 @@ import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/s
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Spinner } from '@/components/ui/spinner'
+import { Switch } from '@/components/ui/switch'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { useBuddyReport } from '@/hooks/use-buddy-report'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
@@ -66,6 +67,15 @@ import {
   normalizeTranscriptWords,
   prerollMs,
   rebaseDraft,
+  addDraftManual,
+  draftManualRemovals,
+  EMPTY_CLEAN_CUT_HISTORY,
+  formatCutLength,
+  recordCleanCutEdit,
+  redoCleanCutEdit,
+  selectionCutRange,
+  undoCleanCutEdit,
+  wordRows,
   removalAnnouncement,
   removalRowIndex,
   stepRemoval,
@@ -74,6 +84,7 @@ import {
   toggleRemoval,
   updateEdlPayload,
   type CleanCutDraft,
+  type CleanCutHistory,
   type CleanCutKindChip,
   type CleanCutKindGroupId,
   type CleanCutPin,
@@ -92,6 +103,7 @@ import {
   type CleanCutTranscript as CleanCutTranscriptData
 } from '@/lib/clean-cut-view'
 import { isActiveRecordingState, plural } from '@/lib/format'
+import { isCommandKey } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
@@ -146,6 +158,11 @@ function pickDetail(
 }
 
 const EMPTY_WORDS: CleanCutTranscriptData['words'] = []
+const NO_WORDS: readonly number[] = []
+
+function sameWords(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
 const EMPTY_SEGMENTS: CleanCutTranscriptData['segments'] = []
 
 /**
@@ -185,6 +202,12 @@ export function CleanCutReview({
   const [draftJob, setDraftJob] = useState<string | null>(null)
   // What a screen reader hears after a key or a click (E-15).
   const [announcement, setAnnouncement] = useState('')
+  // E-14: undo and redo over the draft, the words selected in the
+  // transcript, and the transcript following the playhead.
+  const [history, setHistory] = useState<CleanCutHistory>(EMPTY_CLEAN_CUT_HISTORY)
+  const [selectedWords, setSelectedWords] = useState<readonly number[]>(NO_WORDS)
+  const [follow, setFollow] = useState(true)
+  const followedRowRef = useRef<number | null>(null)
   const [preview, setPreview] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [positionMs, setPositionMs] = useState(0)
@@ -266,6 +289,7 @@ export function CleanCutReview({
   if (data && data.job.id !== draftJob) {
     setDraftJob(data.job.id)
     setDraft(rebaseDraft(readCleanCutDraft(data.job.id), data.edl.removals))
+    setHistory(EMPTY_CLEAN_CUT_HISTORY)
     setSelectedId(null)
   }
   // Every change is kept at once, so no way out of the review loses it.
@@ -297,19 +321,29 @@ export function CleanCutReview({
         : null,
     [condensedMode, durationMs, keeps, saved, words]
   )
+  // A cut made from a selection is struck like the saved ones (Clean only:
+  // Condensed lays out from the saved parts, so a toggle never re-runs it).
+  const addManual = draft.addManual
+  const layoutRemovals = useMemo(
+    () =>
+      saved && !condensedMode && addManual.length > 0
+        ? [...saved, ...draftManualRemovals({ ...EMPTY_CLEAN_CUT_DRAFT, addManual })]
+        : saved,
+    [addManual, condensedMode, saved]
+  )
   const paragraphs = useMemo(
     () =>
-      saved
+      layoutRemovals
         ? buildCleanCutParagraphs({
             words,
             segments,
-            removals: saved,
+            removals: layoutRemovals,
             pins,
             breaksMs: savedBlocks?.map((block) => block.startMs) ?? [],
             skipKinds: condensedMode ? ['condensed'] : []
           })
         : [],
-    [condensedMode, pins, saved, savedBlocks, segments, words]
+    [condensedMode, layoutRemovals, pins, savedBlocks, segments, words]
   )
   const blocks = useMemo(
     () => (condensedMode ? condensedBlocks({ durationMs, keeps, effective, words }) : null),
@@ -317,6 +351,7 @@ export function CleanCutReview({
   )
   const items = useMemo(() => cleanCutTranscriptItems(paragraphs, blocks), [blocks, paragraphs])
   const rows = useMemo(() => removalRowIndex(items), [items])
+  const rowsByWord = useMemo(() => wordRows(items), [items])
   const order = useMemo(() => navigableRemovals(effective, rows), [effective, rows])
   const chips = useMemo(() => cleanCutKindChips(effective), [effective])
   const skipRanges = useMemo(
@@ -375,11 +410,65 @@ export function CleanCutReview({
     [order, removalsById, rows]
   )
 
+  /** Every change to the draft: undoable, and it clears a stale notice. */
+  const edit = (next: CleanCutDraft): void => {
+    if (next === draft) return
+    setHistory((current) => recordCleanCutEdit(current, draft))
+    setDraft(next)
+    setNotice(null)
+  }
+
+  const undo = (): void => {
+    const step = undoCleanCutEdit(history, draft)
+    if (!step) return
+    setHistory(step.history)
+    setDraft(step.draft)
+    setNotice(null)
+    setAnnouncement('Undid the last change.')
+  }
+
+  const redo = (): void => {
+    const step = redoCleanCutEdit(history, draft)
+    if (!step) return
+    setHistory(step.history)
+    setDraft(step.draft)
+    setNotice(null)
+    setAnnouncement('Redid the change.')
+  }
+
+  // "Cut selection": the words selected in the transcript become one cut.
+  const selectionRange = condensedMode ? null : selectionCutRange(words, selectedWords)
+  const cutSelection = (): void => {
+    if (!selectionRange || !saved) return
+    edit(addDraftManual(draft, selectionRange))
+    window.getSelection?.()?.removeAllRanges()
+    setSelectedWords(NO_WORDS)
+    setAnnouncement(
+      `Cut ${formatCutLength(selectionRange.endMs - selectionRange.startMs)}. Undo brings it back.`
+    )
+  }
+  const onSelectWords = useCallback((indexes: readonly number[]): void => {
+    setSelectedWords((current) => (sameWords(current, indexes) ? current : indexes))
+  }, [])
+
+  // Following: the row under the playhead scrolls into view as it plays.
+  const onTimeUpdate = (ms: number): void => {
+    setPositionMs(ms)
+    if (!follow) return
+    const row = rowsByWord.get(activeWordIndex(words, ms))
+    if (row === undefined || row === followedRowRef.current) return
+    followedRowRef.current = row
+    setScrollRequest({ row, nonce: Date.now() })
+  }
+
   const toggle = useCallback(
     (id: string): void => {
       if (!saved) return
       const next = toggleRemoval(draft, saved, id)
-      setDraft(next)
+      if (next !== draft) {
+        setHistory((current) => recordCleanCutEdit(current, draft))
+        setDraft(next)
+      }
       setSelectedId(id)
       setNotice(null)
       const removal = effectiveRemovals(saved, next).find((entry) => entry.id === id)
@@ -398,18 +487,13 @@ export function CleanCutReview({
 
   const toggleGroup = (groupId: CleanCutKindGroupId): void => {
     if (!saved) return
-    setDraft((current) => toggleKindGroup(current, saved, groupId))
-    setNotice(null)
+    edit(toggleKindGroup(draft, saved, groupId))
   }
 
-  const toggleBlock = useCallback(
-    (block: CondensedBlock): void => {
-      if (!saved) return
-      setDraft((current) => toggleCondensedBlock(current, saved, block))
-      setNotice(null)
-    },
-    [saved]
-  )
+  const toggleBlock = (block: CondensedBlock): void => {
+    if (!saved) return
+    edit(toggleCondensedBlock(draft, saved, block))
+  }
 
   const seek = useCallback((ms: number): void => playerRef.current?.seekTo(ms), [])
 
@@ -435,6 +519,7 @@ export function CleanCutReview({
           : current
       )
       setDraft(EMPTY_CLEAN_CUT_DRAFT)
+      setHistory(EMPTY_CLEAN_CUT_HISTORY)
       try {
         const rendered = await client.render(jobIdToSave)
         setLoad((current) =>
@@ -472,6 +557,7 @@ export function CleanCutReview({
           : current
       )
       setDraft((current) => rebaseDraft(current, edl.removals))
+      setHistory(EMPTY_CLEAN_CUT_HISTORY)
       setNotice(
         'The cut list changed while you edited. Your changes are on the newest one; save again.'
       )
@@ -522,7 +608,21 @@ export function CleanCutReview({
       void save()
       return
     }
+    // ⌘Z / ⇧⌘Z (Ctrl elsewhere) undo and redo the draft; never behind the
+    // leave guard.
+    if (key.toLowerCase() === 'z' && !event.altKey && isCommandKey(event, platform)) {
+      if (leaving) return
+      event.preventDefault()
+      if (event.shiftKey) redo()
+      else undo()
+      return
+    }
     if (event.metaKey || event.ctrlKey || event.altKey) return
+    if ((key === 'Backspace' || key === 'Delete') && selectionRange && !leaving) {
+      event.preventDefault()
+      cutSelection()
+      return
+    }
     const onControl = Boolean(
       element?.closest('button, [role="tab"], [role="slider"], [role="radio"]')
     )
@@ -624,7 +724,7 @@ export function CleanCutReview({
                     handleRef={playerRef}
                     sessionId={target.sessionId}
                     skipRanges={skipRanges}
-                    onTimeUpdate={setPositionMs}
+                    onTimeUpdate={onTimeUpdate}
                   />
                 </Suspense>
               ) : (
@@ -646,9 +746,84 @@ export function CleanCutReview({
           <div className="flex min-h-0 flex-1 flex-col">
             <PaneStrip className="flex flex-col gap-1.5">
               <KindChips chips={chips} onToggle={toggleGroup} />
+              <div
+                className="flex flex-wrap items-center gap-x-1.5 gap-y-1"
+                data-slot="clean-cut-edit-bar"
+              >
+                {condensedMode ? null : (
+                  <DisabledReason
+                    reason={selectionRange ? null : 'Select words in the transcript first.'}
+                  >
+                    {/* The press keeps the text selection it cuts. */}
+                    <Button
+                      data-testid="clean-cut-cut-selection"
+                      disabled={!selectionRange}
+                      size="xs"
+                      type="button"
+                      variant="outline"
+                      onClick={cutSelection}
+                      onMouseDown={(event) => event.preventDefault()}
+                    >
+                      <ClipIcon data-icon="inline-start" />
+                      Cut selection
+                      <ShortcutKeys
+                        accelerator="Backspace"
+                        className="ml-0.5"
+                        platform={platform}
+                      />
+                    </Button>
+                  </DisabledReason>
+                )}
+                <DisabledReason reason={history.past.length === 0 ? 'Nothing to undo yet.' : null}>
+                  <Button
+                    disabled={history.past.length === 0}
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={undo}
+                  >
+                    Undo
+                    <ShortcutKeys
+                      accelerator="CmdOrCtrl+Z"
+                      className="ml-0.5"
+                      platform={platform}
+                    />
+                  </Button>
+                </DisabledReason>
+                <DisabledReason reason={history.future.length === 0 ? 'Nothing to redo.' : null}>
+                  <Button
+                    disabled={history.future.length === 0}
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={redo}
+                  >
+                    Redo
+                    <ShortcutKeys
+                      accelerator="CmdOrCtrl+Shift+Z"
+                      className="ml-0.5"
+                      platform={platform}
+                    />
+                  </Button>
+                </DisabledReason>
+                <div className="ml-auto flex items-center gap-2">
+                  <Switch
+                    checked={follow}
+                    id="clean-cut-follow"
+                    size="sm"
+                    onCheckedChange={(on) => {
+                      setFollow(on)
+                      followedRowRef.current = null
+                    }}
+                  />
+                  <label className="text-xs text-muted-foreground" htmlFor="clean-cut-follow">
+                    Follow playback
+                  </label>
+                </div>
+              </div>
               <p className="text-[11px] text-muted-foreground">
                 ↑ ↓ move between cuts · Enter keeps or cuts one · Space plays · click a word to jump
-                there
+                there · select words to cut them
               </p>
             </PaneStrip>
             {data.transcript ? null : (
@@ -684,6 +859,7 @@ export function CleanCutReview({
                 scrollRequest={scrollRequest}
                 selectedId={selectedId}
                 onSeek={seek}
+                onSelectWords={onSelectWords}
                 onToggleBlock={toggleBlock}
                 onToggleRemoval={toggle}
               />
@@ -763,10 +939,7 @@ export function CleanCutReview({
             size="sm"
             type="button"
             variant="ghost"
-            onClick={() => {
-              setDraft(EMPTY_CLEAN_CUT_DRAFT)
-              setNotice(null)
-            }}
+            onClick={() => edit(EMPTY_CLEAN_CUT_DRAFT)}
           >
             Discard
           </Button>
