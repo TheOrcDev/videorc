@@ -196,6 +196,257 @@ export function evaluateQuota(today, error = null) {
   return check('lab quota today', PASS, detail)
 }
 
+// ---------------------------------------------------------------------------
+// Plan 178 U3: the lab machine section. Each check is a pure function over the
+// text or JSON a command printed, so "fails clearly when broken on purpose"
+// is tested here and only re-checked by eye on the lab Mac.
+
+export const MIN_DISK_FREE_GB = 100
+
+// `defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser`
+export function evaluateAutoLogin(output, expectedUser) {
+  const user = String(output ?? '')
+    .split('\n')[0]
+    .trim()
+  if (!user || /does not exist/i.test(user)) {
+    return check(
+      'auto-login',
+      FAIL,
+      `Auto-login is off. System Settings > Users & Groups > Automatic login: ${expectedUser}.`
+    )
+  }
+  return user === expectedUser
+    ? check('auto-login', PASS, user)
+    : check('auto-login', FAIL, `Auto-login user is "${user}", must be ${expectedUser}.`)
+}
+
+// `sysadminctl -screenLock status` (prints to stderr)
+export function evaluateScreenLock(output) {
+  // sysadminctl logs with a "<date> sysadminctl[pid:tid] " prefix; keep the
+  // sentence only.
+  const line = String(output ?? '')
+    .split('\n')
+    .map((entry) => entry.trim())
+    .map((entry) => /screenLock.*/i.exec(entry)?.[0])
+    .find(Boolean)
+  if (!line) {
+    return check(
+      'screen lock',
+      FAIL,
+      'Could not read the screen lock state (sysadminctl -screenLock status).'
+    )
+  }
+  return /screenLock is off/i.test(line)
+    ? check('screen lock', PASS, 'off')
+    : check(
+        'screen lock',
+        FAIL,
+        `${line}. Turn it off: sysadminctl -screenLock off -password - (as the lab user).`
+      )
+}
+
+function pmsetValue(output, key) {
+  const match = new RegExp(`^\\s*${key}\\s+(\\d+)`, 'm').exec(String(output ?? ''))
+  return match ? Number(match[1]) : null
+}
+
+// `pmset -g` (the active profile). Both the display and the system must never
+// sleep: ScreenCaptureKit sees no display when the screen is off.
+export function evaluateSleep(output) {
+  const displaySleep = pmsetValue(output, 'displaysleep')
+  const systemSleep = pmsetValue(output, 'sleep')
+  if (displaySleep === null || systemSleep === null) {
+    return check('sleep', FAIL, 'Could not read pmset -g (no displaysleep / sleep lines).')
+  }
+  const problems = []
+  if (displaySleep !== 0) problems.push(`displaysleep is ${displaySleep} min`)
+  if (systemSleep !== 0) problems.push(`sleep is ${systemSleep} min`)
+  return problems.length
+    ? check('sleep', FAIL, `${problems.join(', ')}. Fix: sudo pmset -a displaysleep 0 sleep 0.`)
+    : check('sleep', PASS, 'display never, system never')
+}
+
+// `system_profiler -json SPDisplaysDataType`: at least one display online.
+export function evaluateDisplayAwake(profilerJson) {
+  const all = displays(profilerJson)
+  if (all.length === 0) {
+    return check('display awake', FAIL, 'No display attached. Plug in the HDMI dummy.')
+  }
+  const awake = all.filter(
+    (entry) => !entry.spdisplays_online || entry.spdisplays_online === 'spdisplays_yes'
+  )
+  if (awake.length === 0) {
+    return check(
+      'display awake',
+      FAIL,
+      `Every display is asleep or offline (${all.map((entry) => `"${entry._name}"`).join(', ')}).`
+    )
+  }
+  return check('display awake', PASS, awake.map((entry) => `"${entry._name}"`).join(', '))
+}
+
+// ~/Library/DoNotDisturb/DB/Assertions.json: a Focus is on while
+// storeAssertionRecords is non-empty.
+export function evaluateFocus(assertionsText) {
+  let parsed
+  try {
+    parsed = JSON.parse(String(assertionsText ?? ''))
+  } catch {
+    return check(
+      'focus',
+      FAIL,
+      'Focus is off (no Assertions.json). Turn on Do Not Disturb "until turned off".'
+    )
+  }
+  const records = (parsed?.data ?? []).flatMap((entry) => entry?.storeAssertionRecords ?? [])
+  if (records.length === 0) {
+    return check('focus', FAIL, 'Focus is off. Turn on Do Not Disturb "until turned off".')
+  }
+  const mode = records[0]?.assertionDetails?.assertionDetailsModeIdentifier ?? 'a Focus mode'
+  return check('focus', PASS, `${mode} on`)
+}
+
+// `df -k <dir>`: the Available column of the last line, in 1 K blocks.
+export function evaluateDiskFree(dfOutput, minGb = MIN_DISK_FREE_GB) {
+  const lines = String(dfOutput ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const columns = lines.length > 1 ? lines[lines.length - 1].split(/\s+/) : []
+  const availableKb = Number(columns[3])
+  if (!Number.isFinite(availableKb)) {
+    return check('disk free', FAIL, 'Could not read df -k.')
+  }
+  const gb = availableKb / (1024 * 1024)
+  const shown = `${gb.toFixed(0)} GB free`
+  return gb >= minGb
+    ? check('disk free', PASS, shown)
+    : check('disk free', FAIL, `${shown}, need ${minGb} GB. Prune ~/videorc-live-lab/runs.`)
+}
+
+// `security find-identity -v -p codesigning`: the lab user's keychains must
+// hold no Developer ID (the signing key never sits on the lab machine).
+export function evaluateSigningIdentities(output) {
+  const lines = String(output ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^\d+\)\s/.test(line))
+  const developerId = lines.filter((line) => /Developer ID/i.test(line))
+  if (developerId.length) {
+    return check(
+      'signing identity',
+      FAIL,
+      `${developerId.length} Developer ID identit${developerId.length === 1 ? 'y' : 'ies'} in the keychain. Delete it; candidates are signed in CI.`
+    )
+  }
+  return lines.length
+    ? check(
+        'signing identity',
+        WARN,
+        `${lines.length} non-Developer-ID identit${lines.length === 1 ? 'y' : 'ies'} in the keychain.`
+      )
+    : check('signing identity', PASS, 'no code-signing identity in the keychain')
+}
+
+// loadPolicy()'s answer.
+export function evaluatePolicyFile({ policy, problems, path }) {
+  if (!policy) {
+    return check('policy', FAIL, `${path}: ${problems.join('; ')}`)
+  }
+  const bits = [
+    policy.enabled ? 'enabled' : 'DISABLED',
+    `${policy.visibility.default}${policy.visibility.allowPublic ? ' (public allowed)' : ''}`,
+    `${policy.onDemand.maxRunsPerDay} runs/day`,
+    `${policy.onDemand.maxRunMinutes} min max`,
+    `${policy.quota.labProjectMaxUnitsPerDay} lab units/day`,
+    `schedule ${policy.schedule.enabled ? 'on' : 'off'}`,
+    `clip pull ${policy.clipPull ? 'on' : 'off'}`
+  ]
+  return check('policy', policy.enabled ? PASS : WARN, `${path}: ${bits.join(', ')}`)
+}
+
+// `gh auth status` plus `gh repo view <repo> --json viewerPermission` for the
+// reports repo (write: control.json, reports) and the main repo (issues).
+export function evaluateGhAuth(statusOutput, repoAccess) {
+  const status = String(statusOutput ?? '')
+  const login = /Logged in to github\.com (?:account|as) ([^\s(]+)/i.exec(status)
+  if (!login) {
+    return check(
+      'gh auth',
+      FAIL,
+      'gh is not logged in. Run gh auth login (as the lab user, a token scoped to the lab repos).'
+    )
+  }
+  const scopes = /Token scopes:\s*(.+)/i.exec(status)?.[1]
+  if (scopes && !/'repo'/.test(scopes) && !/\brepo\b/.test(scopes.replace(/'/g, ''))) {
+    return check(
+      'gh auth',
+      FAIL,
+      `Logged in as ${login[1]} but the token lacks the repo scope (${scopes.trim()}).`
+    )
+  }
+  const problems = []
+  for (const { name, json, needWrite } of repoAccess) {
+    let permission = null
+    try {
+      permission = JSON.parse(String(json ?? ''))?.viewerPermission ?? null
+    } catch {
+      permission = null
+    }
+    if (!permission) {
+      problems.push(`${name} not reachable`)
+    } else if (needWrite && !['WRITE', 'MAINTAIN', 'ADMIN'].includes(permission)) {
+      problems.push(`${name} is ${permission}, need WRITE`)
+    }
+  }
+  return problems.length
+    ? check('gh auth', FAIL, `Logged in as ${login[1]}; ${problems.join('; ')}.`)
+    : check(
+        'gh auth',
+        PASS,
+        `${login[1]}; ${repoAccess.map((entry) => `${entry.name} ${entry.needWrite ? 'write' : 'read'}`).join(', ')}`
+      )
+}
+
+// fetchControlFromUrl()'s answer, or the error it threw.
+export function evaluateKillSwitch(url, outcome) {
+  if (outcome?.error) {
+    return check('kill switch', FAIL, `${url} unreachable: ${outcome.error}`)
+  }
+  return outcome?.enabled
+    ? check('kill switch', PASS, `${url} says enabled: true`)
+    : check(
+        'kill switch',
+        WARN,
+        `${url} says enabled: false. Runs are refused until the owner flips it.`
+      )
+}
+
+// readRunLock()'s answer plus whether the holder's PID is alive.
+export function evaluateRunLock(lock, alive) {
+  if (lock === null) return check('run lock', PASS, 'free')
+  if (lock.corrupt) {
+    return check(
+      'run lock',
+      FAIL,
+      `${lock.path} unreadable (${lock.reason}). Remove it by hand after checking nothing is live.`
+    )
+  }
+  return alive
+    ? check('run lock', WARN, `held by ${lock.runId} (pid ${lock.pid}, since ${lock.startedAt})`)
+    : check(
+        'run lock',
+        WARN,
+        `stale: ${lock.runId} (pid ${lock.pid} is dead). The next run clears it.`
+      )
+}
+
+export function evaluateStopFile(path, present) {
+  return present
+    ? check('stop file', WARN, `${path} present. Every run is refused until it is removed.`)
+    : check('stop file', PASS, 'absent')
+}
+
 export function summarize(results) {
   const counts = { [PASS]: 0, [WARN]: 0, [FAIL]: 0, [SKIP]: 0 }
   for (const result of results) counts[result.status] += 1

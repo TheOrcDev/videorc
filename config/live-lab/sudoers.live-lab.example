@@ -1,0 +1,41 @@
+# Plan 178 U13: network fault injection on the lab machine. EXAMPLE ONLY.
+#
+# The lab user never gets a general sudo. This file allows the exact dummynet
+# and pf commands the faults scenario runs (30 s of loss, 30 s at 1 Mbit/s on
+# the RTMP port, then clean up) and nothing else. It is only installed when
+# the owner sets `faults.network` to true in policy.json; with it false the
+# harness never calls sudo at all.
+#
+# The owner installs it as root, from the admin account:
+#
+#   sudo visudo -cf /path/to/this/file            # syntax check first
+#   sudo install -o root -g wheel -m 0440 /path/to/this/file /etc/sudoers.d/videorc-live-lab
+#
+# The exact pipe number, bandwidth and anchor name are fixed by U13's
+# faults.mjs; when U13 lands, copy the lines it documents here verbatim. Every
+# command carries the full path. Wildcards are deliberately absent: a
+# `dnctl *` rule would let a compromised harness shape any interface.
+#
+# Placeholders: <LAB_USER> is videorc-lab; <ANCHOR> is the pf anchor U13
+# chooses (recommended com.videorc.live-lab); <RULES> is the rules file the
+# harness writes under ~/videorc-live-lab/ before each fault and removes after.
+
+# Cmnd_Alias LIVE_LAB_FAULTS = \
+#   /usr/sbin/dnctl pipe 1 config plr 1, \
+#   /usr/sbin/dnctl pipe 1 config bw 1Mbit/s, \
+#   /usr/sbin/dnctl pipe 1 delete, \
+#   /usr/sbin/dnctl -q flush, \
+#   /sbin/pfctl -a <ANCHOR> -f /Users/<LAB_USER>/videorc-live-lab/<RULES>, \
+#   /sbin/pfctl -a <ANCHOR> -F all, \
+#   /sbin/pfctl -a <ANCHOR> -s rules, \
+#   /sbin/pfctl -E
+#
+# <LAB_USER> ALL=(root) NOPASSWD: LIVE_LAB_FAULTS
+#
+# Not allowed on purpose: `pfctl -d` (would drop the firewall), `pfctl -f
+# /etc/pf.conf` (would reload system rules), any dnctl or pfctl without the
+# anchor or pipe number, and any other binary.
+#
+# Removal of a rule that outlived the harness: `pnpm live:doctor` reports a
+# leftover pipe or anchor as FAIL and the next run's preflight flushes it with
+# the same allowed commands.

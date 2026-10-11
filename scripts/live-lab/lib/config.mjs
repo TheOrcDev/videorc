@@ -25,6 +25,16 @@ export function labDir(env = process.env) {
   return override ? override : join(homedir(), '.videorc-live-lab')
 }
 
+// Plan 178 U4. The non-secret working folder: run folders, run.lock, the
+// STOP file and schedule logs. Separate from labDir() so nothing that holds a
+// secret ever sits next to something a report copies out.
+export const LAB_USER = 'videorc-lab'
+
+export function workDir(env = process.env) {
+  const override = env.VIDEORC_LIVE_LAB_WORK_DIR?.trim()
+  return override ? override : join(homedir(), 'videorc-live-lab')
+}
+
 export function configPath(dir) {
   return join(dir, CONFIG_FILE)
 }

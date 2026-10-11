@@ -14,10 +14,14 @@ An explanation or edit of the release process is not permission to publish.
 ## Live Tests On YouTube
 
 Only when the user explicitly asks for a real live test ("test it live",
-"live lab", "go live on the test channel"), read
+"live lab", "go live on the test channel", "test PR #N live"), read
 `.agents/skills/videorc-live-lab/SKILL.md` first. Ordinary e2e and smoke
-verification never goes live. Nothing streams without the owner's go in the
-current session.
+verification never goes live. Attended runs on the owner's Mac need the
+owner's go in the current session. Unattended runs on the lab machine are
+allowed only when the owner's policy file allows them (`canStart` in
+`scripts/live-lab/lib/policy.mjs`, plan 178); never edit or loosen
+`policy.json` or `control.json`, and report a refusal instead of working
+around it.
 
 ## Verification Gates
 

@@ -4,6 +4,11 @@ Plan 176 (`plans/176-live-youtube-test-lab.md`) runs real, attended live
 streams on the lab YouTube channel. This page is the one-time setup. The
 skill `videorc-live-lab` uses it; it runs only when a live test is asked for.
 
+For the dedicated lab machine that runs unattended (plan 178), do this
+hookup there as the lab user, then follow `docs/live-lab-machine.md` for the
+accounts, auto-login, sleep, Focus, tools, the owner's policy file and the
+doctor's machine section.
+
 **Never paste a key, token, secret or password into the chat.** Everything
 secret goes in through `pnpm live:hookup` and lands only in
 `~/.videorc-live-lab/config.json` (dir 0700, file 0600). The lab prints the
@@ -93,11 +98,26 @@ network fault rules) print SKIP with the slice that adds them.
 
 `pnpm live:hookup --show` prints what is stored, fingerprints only.
 
+On the lab machine the doctor also runs the machine section (auto-login,
+screen lock, sleep, display, Focus, disk, signing identity, policy, gh, kill
+switch, run lock, STOP file); elsewhere it prints one SKIP line unless you
+pass `--machine`. See `docs/live-lab-machine.md`.
+
 ## 7. Go windows
 
-Tell Claude when it is OK to go live. Claude never starts a run on its own.
+Attended (your Mac): tell Claude when it is OK to go live. Claude never
+starts a run on its own.
 
-Set `VIDEORC_LIVE_LAB_DIR` to use another config folder (the unit tests do).
+Unattended (the lab machine): your policy file is the go. Claude may start
+any run it allows, and reports a refusal instead of working around it. Stop
+everything from anywhere with `control.json` `{"enabled": false}` or
+`~/videorc-live-lab/STOP` on the lab machine.
+
+Set `VIDEORC_LIVE_LAB_DIR` to use another config folder and
+`VIDEORC_LIVE_LAB_WORK_DIR` for another run folder (the unit tests do).
+`VIDEORC_LIVE_LAB_POLICY` points the doctor and the tests at another policy
+file; a run never honours a policy the lab user could have written, whatever
+its path.
 
 ## 8. Build under test (plan 178 U5)
 
