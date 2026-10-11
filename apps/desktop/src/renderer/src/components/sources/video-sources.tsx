@@ -1,4 +1,4 @@
-import { CameraIcon, DisplayIcon, UploadIcon, WarningIcon } from '@/components/icons'
+import { CameraIcon, DisplayIcon, UploadIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { GroupedList } from '@/components/list-row'
@@ -84,7 +84,6 @@ export function VideoSourcesView({
     >
       {screenPermission ? (
         <Alert variant="warning">
-          <WarningIcon weight="fill" />
           <AlertTitle>
             Screen Recording permission is required for {screenPermission.targetName}.
           </AlertTitle>
@@ -102,7 +101,6 @@ export function VideoSourcesView({
       ) : null}
       {cameraPermission ? (
         <Alert variant="warning">
-          <WarningIcon weight="fill" />
           <AlertTitle>Camera permission is required for {cameraPermission.targetName}.</AlertTitle>
           <AlertDescription className="flex flex-wrap gap-2 pt-2">
             {cameraPermission.actionLabel ? (

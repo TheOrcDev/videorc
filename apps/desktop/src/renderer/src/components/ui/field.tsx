@@ -3,8 +3,14 @@
 import { useMemo } from 'react'
 import { cva, type VariantProps } from 'class-variance-authority'
 
+import { ErrorIcon } from '@/components/icons'
 import { cn } from '@/lib/utils'
-import { FieldIdsContext, useFieldIds, useFieldLabelIds } from '@/components/ui/field-context'
+import {
+  FieldIdsContext,
+  useFieldDescriptionId,
+  useFieldIds,
+  useFieldLabelIds
+} from '@/components/ui/field-context'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 
@@ -42,7 +48,7 @@ function FieldLegend({
 // Grouped (plan 050, D4): the macOS System Settings look. Fields become rows
 // in one inset group, split by hairlines.
 const FIELD_GROUP_GROUPED =
-  'gap-0 divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03] *:data-[slot=field]:px-3 *:data-[slot=field]:py-2.5'
+  'gap-0 divide-y divide-border overflow-hidden rounded-row border border-border bg-inset *:data-[slot=field]:px-3 *:data-[slot=field]:py-2.5'
 
 function FieldGroup({
   className,
@@ -139,18 +145,48 @@ function FieldTitle({ className, ...props }: React.ComponentProps<'div'>) {
   )
 }
 
-function FieldDescription({ className, ...props }: React.ComponentProps<'p'>) {
+// 12 px (plan 174 S1.6a, F-17): every description reads at the metadata
+// size. Inside a Field it describes the Field's controls (aria-describedby).
+function FieldDescription({ className, id, ...props }: React.ComponentProps<'p'>) {
+  const descriptionId = useFieldDescriptionId(id)
   return (
     <p
+      id={descriptionId}
       data-slot="field-description"
       className={cn(
-        'text-left text-sm leading-normal font-normal text-muted-foreground group-has-data-horizontal/field:text-balance [[data-variant=legend]+&]:-mt-1.5',
+        'text-left text-meta leading-normal font-normal text-muted-foreground group-has-data-horizontal/field:text-balance [[data-variant=legend]+&]:-mt-1.5',
         'last:mt-0 nth-last-2:-mt-1',
         '[&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary',
         className
       )}
       {...props}
     />
+  )
+}
+
+/**
+ * One settings row (plan 174 S1.6a, I-7): the label and its 12 px description
+ * on the left, the control on the right. A horizontal Field underneath, so
+ * the label names the control and the description describes it. Rows sit in
+ * a `FieldGroup variant="grouped"`.
+ */
+function SettingsRow({
+  label,
+  description,
+  children,
+  ...props
+}: Omit<React.ComponentProps<typeof Field>, 'orientation' | 'title'> & {
+  label: React.ReactNode
+  description?: React.ReactNode
+}) {
+  return (
+    <Field data-settings-row="" orientation="horizontal" {...props}>
+      <FieldContent>
+        <FieldLabel>{label}</FieldLabel>
+        {description ? <FieldDescription>{description}</FieldDescription> : null}
+      </FieldContent>
+      {children}
+    </Field>
   )
 }
 
@@ -218,14 +254,22 @@ function FieldError({
     return null
   }
 
+  // Monochrome words with the error glyph in the destructive tone (plan 174
+  // S1.5, J1-5/I-26): colour marks it, the text stays readable in both themes.
   return (
     <div
       role="alert"
       data-slot="field-error"
-      className={cn('text-sm font-normal text-destructive', className)}
+      className={cn('flex items-start gap-1.5 text-xs font-normal text-foreground', className)}
       {...props}
     >
-      {content}
+      <ErrorIcon
+        aria-hidden
+        className="mt-px size-3.5 shrink-0 text-destructive"
+        data-slot="field-error-icon"
+        weight="fill"
+      />
+      <div className="min-w-0">{content}</div>
     </div>
   )
 }
@@ -240,5 +284,6 @@ export {
   FieldSeparator,
   FieldSet,
   FieldContent,
-  FieldTitle
+  FieldTitle,
+  SettingsRow
 }

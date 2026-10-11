@@ -7,12 +7,12 @@ import {
   CrosshairIcon,
   ImageIcon,
   RefreshIcon,
-  SpinnerIcon,
   UploadIcon
 } from '@/components/icons'
 import { useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react'
 
 import { GroupedList, ListRow } from '@/components/list-row'
+import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -28,9 +28,11 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
+import { Spinner } from '@/components/ui/spinner'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import {
   useBuddyPetCreator,
@@ -69,6 +71,7 @@ import {
   type BuddyPetReviewMarks,
   type BuddyPetReviewRow
 } from '@/lib/buddy-pet-creator-view'
+import { unlockActionForReason } from '@/lib/lock-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import {
@@ -293,23 +296,20 @@ export function BuddyPetCreator({
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
         {!gate.allowed ? (
           <div className="px-gutter pt-gutter">
-            <Alert data-testid="buddy-pet-gate">
-              <AlertIcon />
-              <AlertTitle>{gate.reason}</AlertTitle>
-            </Alert>
+            <LockAlert
+              action={unlockActionForReason(gate.reason)}
+              data-testid="buddy-pet-gate"
+              reason={gate.reason}
+            />
           </div>
         ) : !creation && !state.loading && !gate.canStart ? (
           <div className="px-gutter pt-gutter">
-            <Alert data-testid="buddy-pet-gate">
-              <AlertIcon />
-              <AlertTitle>{BUDDY_PET_NONE_LEFT}</AlertTitle>
-            </Alert>
+            <LockAlert data-testid="buddy-pet-gate" reason={BUDDY_PET_NONE_LEFT} />
           </div>
         ) : null}
         {expired || (problem && buddyPetNeedsNewCreation(problem.code)) ? (
           <div className="px-gutter pt-gutter">
             <Alert variant="warning" data-testid="buddy-pet-expired">
-              <AlertIcon />
               <AlertTitle>
                 {problem && buddyPetNeedsNewCreation(problem.code)
                   ? problem.message
@@ -331,7 +331,6 @@ export function BuddyPetCreator({
         ) : problem && step !== 'build' ? (
           <div className="px-gutter pt-gutter">
             <Alert variant="destructive" data-testid="buddy-pet-problem">
-              <AlertIcon />
               <AlertTitle>{problem.message}</AlertTitle>
             </Alert>
           </div>
@@ -1110,7 +1109,7 @@ function BuildStep({
                 data-testid={`buddy-pet-sheet-${sheet.key}`}
                 icon={
                   row.phase === 'making' ? (
-                    <SpinnerIcon className="animate-spin text-muted-foreground" />
+                    <Spinner className="text-muted-foreground" />
                   ) : row.phase === 'done' ? (
                     <CheckIcon className="text-muted-foreground" />
                   ) : row.phase === 'failed' ? (
@@ -1119,7 +1118,6 @@ function BuildStep({
                     <span className="size-1.5 rounded-full bg-subtle" />
                   )
                 }
-                interactive={false}
                 meta={
                   row.phase === 'making'
                     ? 'Making…'
@@ -1159,21 +1157,12 @@ function BuildStep({
       >
         {building ? (
           <div className="flex flex-col gap-1.5" data-testid="buddy-pet-build-progress">
-            <div
+            <Progress
               aria-label="Build progress"
-              aria-valuemax={progress?.total ?? 1}
-              aria-valuemin={0}
-              aria-valuenow={progress?.done ?? 0}
-              className="h-1.5 w-full max-w-md overflow-hidden rounded-full bg-muted"
-              role="progressbar"
-            >
-              <div
-                className="h-full rounded-full bg-primary transition-[width] duration-150"
-                style={{
-                  width: `${progress && progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%`
-                }}
-              />
-            </div>
+              className="max-w-md"
+              max={progress && progress.total > 0 ? progress.total : 1}
+              value={progress?.done ?? 0}
+            />
             <span className="text-xs tabular-nums text-muted-foreground">
               {progress
                 ? `${buildStepCopy(progress.step)}${progress.sheet ? ` ${BUDDY_PET_SHEET_LABELS[progress.sheet as BuddyPetSheetKey] ?? progress.sheet}` : ''} · ${progress.done} of ${progress.total}`
@@ -1182,7 +1171,6 @@ function BuildStep({
           </div>
         ) : failure ? (
           <Alert data-testid="buddy-pet-build-failure" variant="destructive">
-            <AlertIcon />
             <AlertTitle>{failure.message}</AlertTitle>
             {failedSheet ? (
               <AlertAction>
@@ -1396,7 +1384,7 @@ function ReviewRow({
             onClick={onRedo}
           >
             {redoing ? (
-              <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+              <Spinner data-icon="inline-start" />
             ) : (
               <RefreshIcon data-icon="inline-start" />
             )}

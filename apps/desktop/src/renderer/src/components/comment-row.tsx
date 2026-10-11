@@ -27,8 +27,7 @@ import {
   MicrophoneIcon,
   PreviewIcon,
   SendIcon,
-  SparkleIcon,
-  SpinnerIcon
+  SparkleIcon
 } from '@/components/icons'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -41,6 +40,7 @@ import {
   ContextMenuLabel,
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
+import { Spinner } from '@/components/ui/spinner'
 import type {
   CohostFlag,
   CommentHighlightState,
@@ -156,12 +156,7 @@ export function RemovalStatus({
   if (status.kind === 'removing') {
     return (
       <Badge data-removal={status.kind} data-testid="removal-status" variant="secondary">
-        <SpinnerIcon
-          aria-hidden
-          className="motion-safe:animate-spin"
-          data-icon="inline-start"
-          weight="bold"
-        />
+        <Spinner aria-hidden data-icon="inline-start" weight="bold" />
         {status.label}
       </Badge>
     )

@@ -379,7 +379,7 @@ function DetachedPreviewCard({
       className={cn(
         // Output-aspect rect (same as the open/docked preview) so the layout
         // never jumps when the preview opens, docks, or closes.
-        'flex w-full flex-col items-center justify-center gap-3 rounded-panel bg-foreground/[0.03] px-6 text-center',
+        'flex w-full flex-col items-center justify-center gap-3 rounded-panel bg-inset px-6 text-center',
         className
       )}
       data-videorc-preview-card

@@ -13,7 +13,6 @@ import {
   ResetIcon,
   SearchIcon,
   SortIcon,
-  SpinnerIcon,
   SuccessIcon,
   UploadIcon,
   VideoFileIcon,
@@ -47,7 +46,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -57,6 +56,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { Spinner } from '@/components/ui/spinner'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import { useStudioCore, useStudioRecording, useStudioRecordingState } from '@/hooks/use-studio'
@@ -351,9 +351,6 @@ export function LibraryTab({
 
       {sessions.length === 0 ? (
         <Empty className="py-16">
-          <EmptyMedia variant="icon">
-            <VideoFileIcon weight="duotone" />
-          </EmptyMedia>
           <EmptyTitle>No sessions yet</EmptyTitle>
           <EmptyDescription>
             Record or stream from the Studio tab to populate the library.
@@ -609,7 +606,7 @@ function LibraryRow({
           <StatusDot pulse label={liveSessionLabel(recording)} tone="error" />
         ) : finalizing ? (
           <Badge variant="outline">
-            <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+            <Spinner data-icon="inline-start" />
             {finalizingBadgeLabel(session)}
           </Badge>
         ) : exportFailed ? (
@@ -1092,7 +1089,7 @@ export function NoiseCleanupDirectAction({
       {view.premiumLocked ? (
         <LockIcon data-icon="inline-start" />
       ) : view.busy ? (
-        <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+        <Spinner data-icon="inline-start" />
       ) : (
         <WaveformMutedIcon data-icon="inline-start" />
       )}

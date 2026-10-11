@@ -439,7 +439,7 @@ function BlockRow({
   return (
     <div
       className={cn(
-        'flex min-w-0 items-center gap-2 border-y border-border bg-foreground/[0.03] px-gutter py-1.5',
+        'flex min-w-0 items-center gap-2 border-y border-border bg-inset px-gutter py-1.5',
         block.removed && 'text-muted-foreground'
       )}
       data-block={block.kind}

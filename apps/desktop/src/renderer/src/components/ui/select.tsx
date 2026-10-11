@@ -4,7 +4,7 @@ import * as React from 'react'
 import { Select as SelectPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
-import { useFieldControlId } from '@/components/ui/field-context'
+import { useFieldControlId, useFieldDescribedBy } from '@/components/ui/field-context'
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from '@/components/icons'
 function containWheel(event: React.WheelEvent): void {
   event.stopPropagation()
@@ -45,9 +45,11 @@ function SelectTrigger({
   size?: 'sm' | 'default'
 }) {
   const controlId = useFieldControlId(id)
+  const describedBy = useFieldDescribedBy(props['aria-describedby'])
   return (
     <SelectPrimitive.Trigger
       id={controlId}
+      aria-describedby={describedBy}
       data-slot="select-trigger"
       data-size={size}
       className={cn(selectTriggerClassName, className)}

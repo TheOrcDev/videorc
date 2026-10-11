@@ -151,7 +151,7 @@ export function BuddyTestDialog({
         </DialogHeader>
 
         <div
-          className="relative flex h-[420px] items-end justify-center overflow-hidden rounded-row border border-border bg-foreground/[0.03] pb-6"
+          className="relative flex h-[420px] items-end justify-center overflow-hidden rounded-row border border-border bg-inset pb-6"
           data-buddy-state={selection.state}
           data-testid="buddy-test-stage"
         >

@@ -20,13 +20,19 @@ type FieldIds = {
   controlId?: string
   /** The FieldLabel: the default `aria-labelledby` of a group or a slider. */
   labelId?: string
+  /**
+   * Every FieldDescription in the Field, space-separated: the controls'
+   * default `aria-describedby` (plan 174 S1.6a, I-7).
+   */
+  describedBy?: string
   registerControl: Register
   registerLabel: Register
+  registerDescription: Register
 }
 
 const FieldIdsContext = React.createContext<FieldIds | null>(null)
 
-function useRegistry(): [string | undefined, Register] {
+function useRegistry(): [readonly string[], Register] {
   const [ids, setIds] = React.useState<readonly string[]>([])
   const register = React.useCallback<Register>((id) => {
     setIds((current) => [...current, id])
@@ -36,16 +42,27 @@ function useRegistry(): [string | undefined, Register] {
         return index < 0 ? current : [...current.slice(0, index), ...current.slice(index + 1)]
       })
   }, [])
-  return [ids[0], register]
+  return [ids, register]
 }
 
 /** The Field's side: what its label and its controls registered. */
 function useFieldIds(): FieldIds {
-  const [controlId, registerControl] = useRegistry()
-  const [labelId, registerLabel] = useRegistry()
+  const [controlIds, registerControl] = useRegistry()
+  const [labelIds, registerLabel] = useRegistry()
+  const [descriptionIds, registerDescription] = useRegistry()
+  const controlId = controlIds[0]
+  const labelId = labelIds[0]
+  const describedBy = descriptionIds.length > 0 ? descriptionIds.join(' ') : undefined
   return React.useMemo(
-    () => ({ controlId, labelId, registerControl, registerLabel }),
-    [controlId, labelId, registerControl, registerLabel]
+    () => ({
+      controlId,
+      labelId,
+      describedBy,
+      registerControl,
+      registerLabel,
+      registerDescription
+    }),
+    [controlId, labelId, describedBy, registerControl, registerLabel, registerDescription]
   )
 }
 
@@ -74,6 +91,20 @@ function useFieldLabelIds(id: string | undefined): { id?: string; htmlFor?: stri
   return { id: useRegisteredId(id, field?.registerLabel), htmlFor: field?.controlId }
 }
 
+/** A FieldDescription's id, registered so the Field's controls are described by it. */
+function useFieldDescriptionId(id: string | undefined): string | undefined {
+  return useRegisteredId(id, React.useContext(FieldIdsContext)?.registerDescription)
+}
+
+/**
+ * `aria-describedby` for a control: its own when it has one, else its Field's
+ * descriptions (plan 174 S1.6a). Outside a Field, its own or nothing.
+ */
+function useFieldDescribedBy(describedBy: string | undefined): string | undefined {
+  const field = React.useContext(FieldIdsContext)
+  return describedBy || field?.describedBy
+}
+
 /**
  * `aria-labelledby` for a control no label element can point at: its own, or
  * its Field's label unless it carries an `aria-label`.
@@ -86,4 +117,12 @@ function useFieldLabelledBy(
   return labelledBy || (label ? undefined : field?.labelId)
 }
 
-export { FieldIdsContext, useFieldControlId, useFieldIds, useFieldLabelIds, useFieldLabelledBy }
+export {
+  FieldIdsContext,
+  useFieldControlId,
+  useFieldDescribedBy,
+  useFieldDescriptionId,
+  useFieldIds,
+  useFieldLabelIds,
+  useFieldLabelledBy
+}

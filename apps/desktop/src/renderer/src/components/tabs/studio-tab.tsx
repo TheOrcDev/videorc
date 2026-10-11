@@ -1,4 +1,4 @@
-import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
+import { ExternalLinkIcon, PinIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useEffectEvent, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -293,7 +293,6 @@ function StudioPreviewPanel(): ReactElement {
   const healthErrorRow =
     previewHealth.tone === 'error' && previewHealth.detail ? (
       <Alert data-testid="capture-health-alert" variant="destructive">
-        <AlertIcon weight="fill" />
         <AlertTitle>{previewHealth.value}</AlertTitle>
         <AlertDescription className="min-w-0">
           <p className="line-clamp-3" title={previewHealth.detail}>

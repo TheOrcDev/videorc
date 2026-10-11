@@ -1,6 +1,7 @@
 import { LockIcon } from '@/components/icons'
 import { useRef, useState, type ReactElement } from 'react'
 
+import { SectionLabel } from '@/components/section-label'
 import { Button } from '@/components/ui/button'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { InputGroup, InputGroupInput, InputGroupAddon } from '@/components/ui/input-group'
@@ -79,9 +80,7 @@ export function SourceTransformFields({
   return (
     <div className="grid gap-2" data-videorc-transform-fields={source.id}>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[12.5px] leading-none font-medium text-subtle">
-          Position and size
-        </span>
+        <SectionLabel>Position and size</SectionLabel>
         <Button
           aria-label={aspectLocked ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
           aria-pressed={aspectLocked}

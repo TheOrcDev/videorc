@@ -223,7 +223,7 @@ export function BuddyAvatarSection({
           <div className="flex shrink-0 flex-col items-center gap-2 self-center sm:self-start">
             <LazyBuddyPetPreview
               ref={previewRef}
-              className="rounded-row border border-border bg-foreground/[0.03]"
+              className="rounded-row border border-border bg-inset"
               label={persona.name}
               motion={motion}
               packId={previewPackId}
@@ -316,7 +316,7 @@ export function BuddyAvatarSection({
             </DialogHeader>
             <div className="flex justify-center">
               <LazyBuddyPetPreview
-                className="rounded-row border border-border bg-foreground/[0.03]"
+                className="rounded-row border border-border bg-inset"
                 label={persona.name}
                 motion={motion}
                 packId={previewPackId}
@@ -434,8 +434,8 @@ function AlivePanel({
           Loading your packs…
         </p>
       ) : packs.length === 0 ? (
-        <Empty className="flex-none gap-3 p-6" data-testid="buddy-alive-empty">
-          <EmptyDescription className="text-xs text-subtle">
+        <Empty className="flex-none" data-testid="buddy-alive-empty">
+          <EmptyDescription>
             No living Buddy yet. Import a page-pet pack, or create one from your Buddy.
           </EmptyDescription>
           <EmptyContent className="max-w-none flex-row flex-wrap justify-center gap-2">
@@ -452,6 +452,7 @@ function AlivePanel({
                 return (
                   <ListRow
                     key={pack.packId}
+                    interactive
                     aria-checked={worn}
                     context={`${buddyPetPosesLabel(pack)} · ${buddyPetSourceLabel(pack)}`}
                     data-testid="buddy-pack-row"

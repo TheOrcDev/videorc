@@ -1,6 +1,7 @@
 import type { OverlayItem, OverlayLayout, OverlayOrientation, OverlayRect } from '@/lib/backend'
 import { OVERLAY_ITEMS } from '@/lib/backend'
 import type { WsStatus } from '@/lib/capture'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
 import {
   OVERLAY_ITEM_LABELS,
   clampOverlayRect,
@@ -86,9 +87,10 @@ export type OverlayCommit = (layout: OverlayLayout) => Promise<void>
 export type OverlayFailure = (error: unknown) => void
 
 /** The one reason the overlay controls are off: they need the backend
- * (plan 174, C-6). Null while it is connected. */
+ * (plan 174, C-6), in the app's one offline wording (S1.5). Null while it is
+ * connected. */
 export function overlayEditsBlockedReason(wsStatus: WsStatus): string | null {
-  return wsStatus === 'connected' ? null : "Overlays can't change until the backend is connected."
+  return wsStatus === 'connected' ? null : OFFLINE_LOCK_REASON
 }
 
 /** Serializes released overlay gestures: exactly one commit per gesture, the

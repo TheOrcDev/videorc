@@ -1,7 +1,6 @@
 import ScenePresetControls from '@/components/scene-presets'
 import {
   AdjustIcon,
-  AlertIcon,
   ArrowDownIcon,
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -11,6 +10,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
+import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
 import { CameraResetButton } from '@/components/scene/camera-reset-button'
@@ -23,7 +23,7 @@ import {
 import { SceneStage } from '@/components/scene/scene-stage'
 import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
-import { Alert, AlertTitle } from '@/components/ui/alert'
+import { SectionLabel } from '@/components/section-label'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Field, FieldContent, FieldLabel, FieldSet } from '@/components/ui/field'
@@ -580,9 +580,7 @@ export function LayoutTab(): ReactElement {
               </p>
             ) : selectedSource.kind === 'camera' ? (
               <>
-                <span className="text-[12.5px] leading-none font-medium text-subtle">
-                  Placement
-                </span>
+                <SectionLabel>Placement</SectionLabel>
                 {isFreeform ? (
                   <p className="text-sm text-muted-foreground">
                     Freeform scene: drag and resize the camera on the stage, or set exact numbers
@@ -752,9 +750,7 @@ export function LayoutTab(): ReactElement {
                   </>
                 ) : null}
 
-                <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">
-                  Lens
-                </span>
+                <SectionLabel className="pt-2">Lens</SectionLabel>
                 {/* Vertical bands and the full-canvas vertical camera ALWAYS
                   fill and crop — a "Fit frame" option would letterbox the
                   short-form frame (2026-07-13 fill-crop plan), so the toggle
@@ -828,9 +824,7 @@ export function LayoutTab(): ReactElement {
                   onCommit={(cameraOffsetY) => applyLayoutPatch({ cameraOffsetY })}
                 />
 
-                <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">
-                  Green screen
-                </span>
+                <SectionLabel className="pt-2">Green screen</SectionLabel>
                 <Field orientation="horizontal">
                   <FieldContent>
                     <FieldLabel htmlFor="camera-chroma-key">Key out background</FieldLabel>
@@ -1101,12 +1095,7 @@ export function OverlayItemInspector({
   const blocked = blockedReason !== null
   return (
     <div className="flex flex-col gap-4" data-videorc-overlay-inspector={item}>
-      {blockedReason ? (
-        <Alert variant="warning">
-          <AlertIcon />
-          <AlertTitle className="font-normal">{blockedReason}</AlertTitle>
-        </Alert>
-      ) : null}
+      {blockedReason ? <LockAlert reason={blockedReason} /> : null}
       <p className="text-sm text-muted-foreground">{OVERLAY_ITEM_DESCRIPTIONS[item]}</p>
       <Field orientation="horizontal">
         <FieldContent>

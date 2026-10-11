@@ -1,10 +1,4 @@
-import {
-  DownloadIcon,
-  RefreshIcon,
-  SpinnerIcon,
-  SuccessIcon,
-  WarningIcon
-} from '@/components/icons'
+import { DownloadIcon, RefreshIcon, SuccessIcon, WarningIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
@@ -12,6 +6,8 @@ import { PanelSection } from '@/components/panel-section'
 import { SupportBundleButton } from '@/components/support-bundle-button'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Progress } from '@/components/ui/progress'
+import { Spinner } from '@/components/ui/spinner'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { useUpdater } from '@/hooks/use-updater'
 import type { UpdateStatus } from '@/lib/backend'
@@ -111,7 +107,7 @@ function UpdateControl({
     case 'checking':
       return (
         <Button disabled className="w-fit" size="sm" variant="outline">
-          <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+          <Spinner data-icon="inline-start" />
           Checking for updates…
         </Button>
       )
@@ -129,19 +125,7 @@ function UpdateControl({
             <span>Downloading update…</span>
             <span className="font-mono">{status.percent}%</span>
           </div>
-          <div
-            aria-label="Update download progress"
-            aria-valuemax={100}
-            aria-valuemin={0}
-            aria-valuenow={status.percent}
-            className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-            role="progressbar"
-          >
-            <div
-              className="h-full rounded-full bg-primary transition-[width] duration-200"
-              style={{ width: `${status.percent}%` }}
-            />
-          </div>
+          <Progress aria-label="Update download progress" value={status.percent} />
         </div>
       )
     case 'downloaded':

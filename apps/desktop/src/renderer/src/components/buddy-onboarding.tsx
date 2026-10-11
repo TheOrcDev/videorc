@@ -7,8 +7,7 @@ import {
   ImageIcon,
   InfoIcon,
   LockIcon,
-  SparkleIcon,
-  SpinnerIcon
+  SparkleIcon
 } from '@/components/icons'
 import {
   useRef,
@@ -23,6 +22,7 @@ import { BuddyPoseTiles, type BuddyPoseTilesCopy } from '@/components/buddy-look
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import { BuddyStreamDemo } from '@/components/buddy-stream-demo'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { GroupedList } from '@/components/list-row'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -39,6 +39,7 @@ import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { Spinner } from '@/components/ui/spinner'
 import { useVideorcAccount } from '@/hooks/use-account'
 import type { BuddyLibraryController } from '@/hooks/use-buddy-library'
 import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
@@ -522,7 +523,7 @@ export function BuddyOnboarding({
                 onClick={create}
               >
                 {creating ? (
-                  <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+                  <Spinner data-icon="inline-start" />
                 ) : (
                   <SparkleIcon data-icon="inline-start" />
                 )}
@@ -767,12 +768,10 @@ function DescribeStep({
       </Field>
       <Field>
         <FieldLabel>{BUDDY_ONBOARDING_STEP2.pictureLabel}</FieldLabel>
-        <FieldDescription className="text-xs">
-          {BUDDY_ONBOARDING_STEP2.pictureHelp}
-        </FieldDescription>
+        <FieldDescription>{BUDDY_ONBOARDING_STEP2.pictureHelp}</FieldDescription>
         <div
           className={cn(
-            'flex items-center gap-3 rounded-row border border-border bg-foreground/[0.03] p-2',
+            'flex items-center gap-3 rounded-row border border-border bg-inset p-2',
             dragging && 'bg-accent'
           )}
           data-testid="buddy-onboarding-picture"
@@ -792,7 +791,7 @@ function DescribeStep({
                 src={picture.url}
               />
             ) : preparing ? (
-              <SpinnerIcon aria-hidden className="size-4 animate-spin text-muted-foreground" />
+              <Spinner aria-hidden className="size-4 text-muted-foreground" />
             ) : (
               <ImageIcon aria-hidden className="size-5 text-subtle" />
             )}
@@ -880,7 +879,7 @@ function PersonalityStep({
             }
           }}
         />
-        <FieldDescription className="text-xs">{BUDDY_ONBOARDING_STEP3.nameHelp}</FieldDescription>
+        <FieldDescription>{BUDDY_ONBOARDING_STEP3.nameHelp}</FieldDescription>
       </Field>
       <Field>
         <FieldLabel htmlFor="buddy-onboarding-personality">
@@ -913,9 +912,7 @@ function PersonalityStep({
           onChange={(event) => onPatch({ about: event.target.value })}
         />
         <div className="flex items-center gap-2">
-          <FieldDescription className="text-xs">
-            {BUDDY_ONBOARDING_STEP3.aboutHelp}
-          </FieldDescription>
+          <FieldDescription>{BUDDY_ONBOARDING_STEP3.aboutHelp}</FieldDescription>
           <Counter max={BUDDY_LIBRARY_CONTEXT_MAX_CHARS} value={input.about} />
         </div>
       </Field>
@@ -1005,10 +1002,7 @@ function CreateStep({
   return (
     <div className="flex flex-col gap-4" data-view={view}>
       {summary ? (
-        <div
-          className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]"
-          data-testid="buddy-onboarding-summary"
-        >
+        <GroupedList data-testid="buddy-onboarding-summary">
           <SummaryRow
             label={BUDDY_ONBOARDING_STEP4.summaryLook}
             testId="buddy-onboarding-summary-look"
@@ -1038,7 +1032,7 @@ function CreateStep({
             testId="buddy-onboarding-summary-about"
             value={skipped ? '' : input.about}
           />
-        </div>
+        </GroupedList>
       ) : null}
 
       <BuddyPoseTiles
@@ -1056,14 +1050,14 @@ function CreateStep({
           data-testid="buddy-onboarding-working"
           role="status"
         >
-          <SpinnerIcon aria-hidden className="size-4 animate-spin" />
+          <Spinner aria-hidden className="size-4" />
           {BUDDY_ONBOARDING_STEP4.working}
         </p>
       ) : view === 'draft' && look.draft ? (
         <div className="flex items-center gap-4" data-testid="buddy-onboarding-result">
           {persona && showPreview ? (
             <LazyBuddyPetPreview
-              className="rounded-row border border-border bg-foreground/[0.03]"
+              className="rounded-row border border-border bg-inset"
               label={`${persona.name}, new look`}
               onError={() => setPreviewFailed(previewKey)}
               motion={persona.motion}
@@ -1102,8 +1096,7 @@ function CreateStep({
         />
       ) : failure ? (
         <Alert data-testid="buddy-onboarding-failed" variant="destructive">
-          <AlertIcon />
-          <AlertTitle className="font-normal">{failure}</AlertTitle>
+          <AlertTitle>{failure}</AlertTitle>
         </Alert>
       ) : allowance ? (
         <p

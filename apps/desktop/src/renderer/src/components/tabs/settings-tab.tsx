@@ -1,6 +1,6 @@
 import { useEffect, type ReactElement } from 'react'
 
-import { ConfigGrid, PageStack } from '@/components/page'
+import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
 import { AboutSettings } from '@/components/settings/about-settings'
 import { GeneralSettings } from '@/components/settings/general-settings'
 import { PermissionsSettings } from '@/components/settings/permissions-settings'
@@ -11,16 +11,6 @@ import { PageTabs } from '@/components/page-tabs'
 import { TabsContent } from '@/components/ui/tabs'
 import { useStudioCore } from '@/hooks/use-studio'
 import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
-
-/**
- * A tab with two sections: side by side at `lg`, stacked below it with a
- * hairline between them. At `lg` the pair fills the visible height and its one
- * row stretches, so the config grid's column hairline runs the full height
- * however short the tab is, and neither section needs its bottom hairline.
- * Stacked, the rows keep their content height (stretching two rows would push
- * the hairline between them down the page).
- */
-const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
 
 /**
  * Settings (plan 064): six tabs in a segmented strip under the toolbar, one
@@ -59,7 +49,7 @@ export function SettingsTab({
       onValueChange={onTabChange}
     >
       <TabsContent className="flex flex-col" value="general">
-        <ConfigGrid className={SECTION_PAIR}>
+        <ConfigGrid className={CONFIG_GRID_PAIR}>
           <GeneralSettings />
         </ConfigGrid>
       </TabsContent>
@@ -74,17 +64,17 @@ export function SettingsTab({
         </PageStack>
       </TabsContent>
       <TabsContent className="flex flex-col" value="shortcuts">
-        <ConfigGrid className={SECTION_PAIR}>
+        <ConfigGrid className={CONFIG_GRID_PAIR}>
           <ShortcutsSettings />
         </ConfigGrid>
       </TabsContent>
       <TabsContent className="flex flex-col" value="remote">
-        <ConfigGrid className={SECTION_PAIR}>
+        <ConfigGrid className={CONFIG_GRID_PAIR}>
           <RemoteSettings />
         </ConfigGrid>
       </TabsContent>
       <TabsContent className="flex flex-col" value="about">
-        <ConfigGrid className={SECTION_PAIR}>
+        <ConfigGrid className={CONFIG_GRID_PAIR}>
           <AboutSettings onShowWhatsNew={onShowWhatsNew} />
         </ConfigGrid>
       </TabsContent>

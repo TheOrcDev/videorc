@@ -6,8 +6,7 @@ import {
   LinkIcon,
   ResetIcon,
   SignOutIcon,
-  SyncIcon,
-  WarningIcon
+  SyncIcon
 } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
 
@@ -313,6 +312,7 @@ export function DestinationCard({
           is its sibling, never inside a button (plan 174 S0.5, D-12). */}
       <ListRow
         className="relative h-auto min-h-10 py-1"
+        interactive
         icon={<PlatformGlyph platform={target.platform} />}
         title={
           <ListRowButton aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
@@ -425,7 +425,6 @@ export function DestinationCard({
 
             {youtubePaused ? (
               <Alert data-testid="youtube-quota-paused" variant="warning">
-                <WarningIcon />
                 <AlertDescription className="flex flex-col gap-2">
                   <span>{youtubeDestinationPausedMessage(youtubePaused)}</span>
                   <span className="flex flex-wrap items-center gap-2">
@@ -614,7 +613,6 @@ export function DestinationCard({
             >
               {pendingKeySave?.warning ? (
                 <Alert variant="warning">
-                  <WarningIcon />
                   <AlertDescription>{pendingKeySave.warning}</AlertDescription>
                 </Alert>
               ) : null}

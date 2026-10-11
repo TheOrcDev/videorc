@@ -176,16 +176,16 @@ describe('Settings layout', () => {
   it('pairs two-section tabs side by side and stacks single-section tabs', () => {
     // At `lg` the pair fills the visible height with one stretched row, so the
     // column hairline runs the full height; stacked, rows keep content height.
-    expect(shellSource).toContain(
-      "const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'"
-    )
+    // One pair class for every two-section tab (plan 174 S1.6a, I-33).
+    expect(shellSource).toContain('CONFIG_GRID_PAIR')
+    expect(shellSource).not.toContain('SECTION_PAIR')
     expect(shellSource.match(/<TabsContent className="flex flex-col" value="/g)).toHaveLength(
       SETTINGS_TABS.length
     )
     for (const panel of tabPanels()) {
       const wrapper =
         sectionTitles(panel.jsx).length === 2
-          ? '<ConfigGrid className={SECTION_PAIR}>'
+          ? '<ConfigGrid className={CONFIG_GRID_PAIR}>'
           : '<PageStack>'
       expect(panel.jsx.trim().startsWith(wrapper), `${panel.value} opens with ${wrapper}`).toBe(
         true

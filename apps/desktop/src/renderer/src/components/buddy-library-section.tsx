@@ -6,7 +6,6 @@ import {
   NoteIcon,
   SignInIcon,
   SparkleIcon,
-  SpinnerIcon,
   SyncIcon,
   UploadIcon
 } from '@/components/icons'
@@ -35,6 +34,7 @@ import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/c
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { Spinner } from '@/components/ui/spinner'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { useBuddyLibrary, type BuddyLibraryProblem } from '@/hooks/use-buddy-library'
 import { useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
@@ -169,11 +169,10 @@ export function BuddyLibrarySection({
       action={
         <>
           {view.syncing ? (
-            <SpinnerIcon
+            <Spinner
               aria-label="Syncing"
-              className="size-3.5 animate-spin text-subtle"
+              className="size-3.5 text-subtle"
               data-testid="buddy-library-syncing"
-              role="status"
             />
           ) : null}
           <Button
@@ -195,12 +194,10 @@ export function BuddyLibrarySection({
           <Alert
             className="has-data-[slot=alert-action]:pr-3"
             data-testid="buddy-library-invitation"
+            icon={SparkleIcon}
           >
-            <SparkleIcon />
             <div className="col-start-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-              <AlertTitle className="min-w-0 flex-1 font-normal text-foreground">
-                {BUDDY_LIBRARY_COPY.invitation}
-              </AlertTitle>
+              <AlertTitle className="min-w-0 flex-1">{BUDDY_LIBRARY_COPY.invitation}</AlertTitle>
               <div className="flex items-center gap-1">
                 <Button
                   data-testid="buddy-library-invitation-start"
@@ -231,10 +228,9 @@ export function BuddyLibrarySection({
         ) : null}
 
         {saveOffer ? (
-          <Alert data-testid="buddy-library-local-only">
-            <UploadIcon />
+          <Alert data-testid="buddy-library-local-only" icon={UploadIcon}>
             <div className="col-start-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-              <AlertTitle className="min-w-0 flex-1 font-normal text-foreground">
+              <AlertTitle className="min-w-0 flex-1">
                 {buddyLibraryLocalOnly(saveOffer.name)}
               </AlertTitle>
               <Button
@@ -257,16 +253,15 @@ export function BuddyLibrarySection({
             data-testid="buddy-library-busy"
             role="status"
           >
-            <SpinnerIcon aria-hidden className="size-3.5 shrink-0 animate-spin" />
+            <Spinner aria-hidden className="size-3.5 shrink-0" />
             <span className="min-w-0 truncate">{busyLine}</span>
           </div>
         ) : null}
 
         {view.pickedElsewhere ? (
-          <Alert data-testid="buddy-library-picked-elsewhere">
-            <SyncIcon />
+          <Alert data-testid="buddy-library-picked-elsewhere" icon={SyncIcon}>
             <div className="col-start-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-              <AlertTitle className="min-w-0 flex-1 font-normal text-foreground">
+              <AlertTitle className="min-w-0 flex-1">
                 {buddyLibraryPickedElsewhere(view.pickedElsewhere.name)}
               </AlertTitle>
               <Button
@@ -459,9 +454,9 @@ function BuddyCard({
           </Badge>
         ) : null}
         {card.busy ? (
-          <SpinnerIcon
+          <Spinner
             aria-hidden
-            className="absolute top-1.5 right-1.5 size-3.5 animate-spin text-muted-foreground"
+            className="absolute top-1.5 right-1.5 size-3.5 text-muted-foreground"
           />
         ) : null}
       </div>
@@ -683,9 +678,7 @@ function EditForm({
               value={name}
               onChange={(event) => setName(event.target.value)}
             />
-            <FieldDescription className="text-xs">
-              {BUDDY_ONBOARDING_STEP3.nameHelp}
-            </FieldDescription>
+            <FieldDescription>{BUDDY_ONBOARDING_STEP3.nameHelp}</FieldDescription>
           </Field>
         ) : (
           <FieldGroup className="gap-5">
@@ -720,9 +713,7 @@ function EditForm({
                 onChange={(event) => setContext(event.target.value)}
               />
               <div className="flex items-center gap-2">
-                <FieldDescription className="text-xs">
-                  {BUDDY_ONBOARDING_STEP3.aboutHelp}
-                </FieldDescription>
+                <FieldDescription>{BUDDY_ONBOARDING_STEP3.aboutHelp}</FieldDescription>
                 <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                   {buddyOnboardingCounter(
                     buddyTextLength(context),

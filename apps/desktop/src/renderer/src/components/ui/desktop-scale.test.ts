@@ -33,6 +33,24 @@ describe('desktop scale', () => {
     }
   })
 
+  it('defines the type tokens, the tag radius and the inset fill (plan 174 S1.6a)', () => {
+    for (const token of [
+      '--text-label: 0.6875rem; /* 11px */',
+      '--text-label--font-weight: 600;',
+      '--text-section: 0.8125rem; /* 13px */',
+      '--text-section--font-weight: 600;',
+      '--text-meta: 0.75rem; /* 12px */',
+      '--radius-tag: 7px;',
+      '--color-inset: color-mix(in oklab, var(--foreground) 3%, transparent);'
+    ]) {
+      expect(styles).toContain(token)
+    }
+    // The 3% inset fill has one name now; its ~30 copies moved onto it.
+    expect(read('field.tsx')).toContain('bg-inset')
+    expect(read('field.tsx')).not.toContain('bg-foreground/[0.03]')
+    expect(read('badge.tsx')).toContain('rounded-tag')
+  })
+
   it('makes 28 px the default control height', () => {
     const button = renderToStaticMarkup(createElement(Button, null, 'Save'))
     expect(button).toContain('h-control')
@@ -158,6 +176,19 @@ describe('desktop scale', () => {
       expect(markup).toContain('text-sm')
       expect(markup).not.toMatch(/text-base|md:text-/)
     }
+  })
+
+  it('keeps the feedback primitives on the desktop scale (plan 174 S1.5)', () => {
+    // Alert: a flush inline row on the row radius, never a card.
+    expect(read('alert.tsx')).toContain('rounded-row px-3 py-2.5')
+    expect(read('alert.tsx')).not.toMatch(/\bshadow|rounded-(lg|xl|panel)/)
+    // Empty: 14 px text, no media tile, no oversized title.
+    const empty = read('empty.tsx')
+    expect(empty).not.toContain('EmptyMedia')
+    expect(empty).not.toMatch(/text-(lg|base)|rounded-|border-dashed/)
+    // Spinner and Progress are the shadcn primitives on the registry glyph.
+    expect(read('spinner.tsx')).toContain("from '@/components/icons'")
+    expect(read('progress.tsx')).toContain('rounded-full')
   })
 
   it('mounts the tooltip provider with the desktop delay', () => {

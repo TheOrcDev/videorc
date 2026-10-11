@@ -1,6 +1,7 @@
 import { AlertIcon, CaptionsIcon, LivestreamIcon, SuccessIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
+import { LockAlert } from '@/components/lock-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -34,6 +35,7 @@ import type {
   VideoSettings
 } from '@/lib/backend'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
+import { unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
 import { OVERLAY_ITEM_LABELS, overlayStartNotices } from '@/lib/overlay-layout'
@@ -113,7 +115,6 @@ export function GoLiveConfirmationDialog({
     (target) => target.enabled && target.scheduledEventId
   )
   const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
-  const entitlementUpgradeUrl = entitlementBlocker?.upgradeUrl
   const errorIssues = preflight?.issues.filter((issue) => issue.severity === 'error') ?? []
   const warningIssues = preflight?.issues.filter((issue) => issue.severity === 'warning') ?? []
   const errorCount = errorIssues.length
@@ -148,10 +149,7 @@ export function GoLiveConfirmationDialog({
         <DialogBody>
           <div className="flex flex-col gap-4">
             {scheduledTargets.map((target) => (
-              <div
-                key={target.id}
-                className="rounded-row border border-border bg-foreground/[0.03] p-3"
-              >
+              <div key={target.id} className="rounded-row border border-border bg-inset p-3">
                 <p className="font-medium">
                   {target.label}:{' '}
                   {preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
@@ -269,7 +267,7 @@ export function GoLiveConfirmationDialog({
                     />
                   ))
                 ) : (
-                  <div className="rounded-row border border-border bg-foreground/[0.03] p-3 text-sm text-muted-foreground">
+                  <div className="rounded-row border border-border bg-inset p-3 text-sm text-muted-foreground">
                     No livestream destinations are enabled.
                   </div>
                 )}
@@ -279,23 +277,10 @@ export function GoLiveConfirmationDialog({
             <GoLiveSimulcastAdvisory />
 
             {entitlementBlocker ? (
-              <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <AlertIcon className="size-4 text-warning" weight="fill" />
-                  {entitlementUpgradeUrl ? 'Premium issue' : 'Streaming entitlement issue'}
-                </div>
-                <p className="text-sm text-muted-foreground">{entitlementBlocker.reason}</p>
-                {entitlementUpgradeUrl ? (
-                  <Button
-                    className="w-fit"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => openExternalUrl(entitlementUpgradeUrl)}
-                  >
-                    View Premium
-                  </Button>
-                ) : null}
-              </div>
+              <LockAlert
+                action={unlockActionForGate(entitlementBlocker)}
+                reason={entitlementBlocker.reason}
+              />
             ) : null}
 
             {errorIssues.length ? (
@@ -442,7 +427,6 @@ export function GoLiveOutputAdvice({
   if (advice?.kind === 'below-floor') {
     return (
       <Alert variant="warning">
-        <AlertIcon weight="fill" />
         <AlertTitle>This computer may not keep up</AlertTitle>
         <AlertDescription>
           Nothing held steady in its performance check, not even {outputLabel(advice.floor)}.
@@ -455,7 +439,6 @@ export function GoLiveOutputAdvice({
   if (advice?.kind === 'step-down') {
     return (
       <Alert>
-        <AlertIcon weight="fill" />
         <AlertTitle>Streaming at {outputLabel(advice.video)}</AlertTitle>
         <AlertDescription>
           This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
@@ -468,7 +451,6 @@ export function GoLiveOutputAdvice({
   if (sharedVideo && recordEnabled) {
     return (
       <Alert>
-        <AlertIcon weight="fill" />
         <AlertTitle>Recording will match the stream</AlertTitle>
         <AlertDescription>
           This computer can&apos;t encode a separate recording while streaming, so both use{' '}
@@ -496,7 +478,7 @@ export function GoLiveCaptionsStatus({
       className={
         blocked
           ? 'flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3'
-          : 'flex flex-col gap-2 rounded-row border border-border bg-foreground/[0.03] p-3'
+          : 'flex flex-col gap-2 rounded-row border border-border bg-inset p-3'
       }
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -545,7 +527,7 @@ function GoLiveDestinationRow({
   onResolveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => void
 }): ReactElement {
   return (
-    <div className="grid gap-2 rounded-row border border-border bg-foreground/[0.03] p-3 sm:grid-cols-[1fr_auto]">
+    <div className="grid gap-2 rounded-row border border-border bg-inset p-3 sm:grid-cols-[1fr_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{destination.label}</span>
@@ -741,7 +723,7 @@ function GoLiveSimulcastAdvisory(): ReactElement | null {
   const mbps = Math.max(1, Math.round(totalKbps / 1000))
   const hasInstagram = enabled.some((target) => target.platform === 'instagram')
   return (
-    <div className="flex flex-col gap-1 rounded-row border border-border bg-foreground/[0.03] p-3">
+    <div className="flex flex-col gap-1 rounded-row border border-border bg-inset p-3">
       <span className="text-sm font-medium">Streaming both orientations</span>
       <span className="text-xs text-muted-foreground">
         The horizontal scene streams to your landscape destinations while the saved vertical scene

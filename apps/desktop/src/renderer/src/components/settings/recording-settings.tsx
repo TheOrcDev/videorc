@@ -9,6 +9,7 @@ import {
 import { useEffect, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
+import { GroupedList } from '@/components/list-row'
 import { NavigableRow } from '@/components/navigable-row'
 import { EncoderPreferenceField } from '@/components/settings/encoder-preference-field'
 import { PanelSection } from '@/components/panel-section'
@@ -82,7 +83,7 @@ export function RecordingSettings(): ReactElement {
           <div className="flex gap-2">
             <div
               id="output-directory"
-              className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-foreground/[0.03] px-2.5 text-sm text-muted-foreground"
+              className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-inset px-2.5 text-sm text-muted-foreground"
             >
               {outputDirectory || 'Videorc default recordings folder'}
             </div>
@@ -179,7 +180,7 @@ export function RecordingSettings(): ReactElement {
         />
       </FieldGroup>
 
-      <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
+      <GroupedList>
         <NavigableRow
           icon={ClapperboardIcon}
           label="Recording preset"
@@ -192,7 +193,7 @@ export function RecordingSettings(): ReactElement {
           value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
           onNavigate={() => openStudioPanel('live')}
         />
-      </div>
+      </GroupedList>
 
       {/* FFmpeg ships bundled with the packaged app, so normal users never set
         a path. Show a quiet status; surface a friendly, actionable card only
@@ -206,7 +207,6 @@ export function RecordingSettings(): ReactElement {
         </div>
       ) : health ? (
         <Alert variant="warning">
-          <WarningIcon weight="fill" />
           <AlertTitle>Recording needs FFmpeg</AlertTitle>
           <AlertDescription>
             {import.meta.env.DEV
@@ -224,7 +224,7 @@ export function RecordingSettings(): ReactElement {
           <span>Advanced</span>
         </CollapsibleTrigger>
         <CollapsibleContent className="flex flex-col gap-3 pt-2">
-          <div className="flex items-center gap-2 rounded-row border border-border bg-foreground/[0.03] px-3 py-2 text-xs">
+          <div className="flex items-center gap-2 rounded-row border border-border bg-inset px-3 py-2 text-xs">
             <span className="shrink-0 font-medium">Session database</span>
             <span className="min-w-0 flex-1 truncate text-muted-foreground">
               Managed privately in Videorc app data

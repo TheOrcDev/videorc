@@ -1,11 +1,4 @@
-import {
-  AlertIcon,
-  type AppIcon,
-  ChatIcon,
-  ClipIcon,
-  InfoIcon,
-  MicrophoneIcon
-} from '@/components/icons'
+import { AlertIcon, type AppIcon, ChatIcon, ClipIcon, MicrophoneIcon } from '@/components/icons'
 import { useMemo, useState, lazy, Suspense, type ReactElement, type ReactNode } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -124,9 +117,8 @@ export function BuddyReportCard({
         data-state={loading ? 'loading' : view.kind === 'empty' ? 'empty' : view.kind}
       >
         {error ? (
-          <Alert role="status" variant="warning">
-            <AlertIcon />
-            <AlertTitle className="font-normal">{error}</AlertTitle>
+          <Alert variant="warning">
+            <AlertTitle>{error}</AlertTitle>
             <AlertAction>
               <Button size="xs" type="button" variant="outline" onClick={reload}>
                 Try again
@@ -194,7 +186,6 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
       <StreamLine view={view} />
       {view.note ? (
         <Alert data-testid="buddy-report-off" role="note">
-          <InfoIcon />
           <AlertTitle>{view.note.title}</AlertTitle>
           <AlertDescription className="text-xs">{view.note.hint}</AlertDescription>
         </Alert>
@@ -213,7 +204,6 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
             className="select-text"
             context={<span title={post.text}>{post.text}</span>}
             data-post-result={post.result}
-            interactive={false}
             meta={
               <span className="flex items-center gap-1.5">
                 {post.platforms.map((platform) => (
@@ -254,7 +244,6 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
                       <span title={question.askersTitle}>{question.askers}</span>
                     ) : undefined
                   }
-                  interactive={false}
                   meta={
                     question.at ? <span className="tabular-nums">{question.at}</span> : undefined
                   }
@@ -277,7 +266,6 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
                 <ListRow
                   key={promise.key}
                   className="select-text"
-                  interactive={false}
                   meta={promise.at ? <span className="tabular-nums">{promise.at}</span> : undefined}
                   title={<span title={promise.text}>{promise.text}</span>}
                 />
@@ -302,7 +290,6 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
                   }
                   data-moment={moment.kind}
                   icon={<MomentIcon kind={moment.kind} />}
-                  interactive={false}
                   meta={<span className="tabular-nums">{moment.range}</span>}
                   title={moment.label}
                 />
@@ -318,7 +305,6 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
                   className={LABEL_STAYS}
                   context={alert.viewers}
                   icon={<AlertIcon className="text-muted-foreground" />}
-                  interactive={false}
                   meta={alert.at ? <span className="tabular-nums">{alert.at}</span> : undefined}
                   title={alert.label}
                 />
@@ -390,7 +376,6 @@ function ReportCommands({ commands }: { commands: ShownReport['commands'] }): Re
             </span>
           }
           icon={<MicrophoneIcon aria-hidden className="text-muted-foreground" />}
-          interactive={false}
           meta={<span className="tabular-nums">{commands.total}</span>}
           title="Commands"
         />
@@ -416,7 +401,7 @@ function ReportStats({ stats }: { stats: readonly BuddyReportStat[] }): ReactEle
       {stats.map((stat) => (
         <div
           key={stat.id}
-          className="flex min-w-0 flex-col-reverse justify-end gap-0.5 rounded-row border border-border bg-foreground/[0.03] px-3 py-2.5"
+          className="flex min-w-0 flex-col-reverse justify-end gap-0.5 rounded-row border border-border bg-inset px-3 py-2.5"
           data-stat={stat.id}
         >
           <dt className="text-xs text-muted-foreground">{stat.label}</dt>

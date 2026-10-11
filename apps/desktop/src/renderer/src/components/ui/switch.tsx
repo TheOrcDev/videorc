@@ -2,7 +2,7 @@ import * as React from 'react'
 import { Switch as SwitchPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
-import { useFieldControlId } from '@/components/ui/field-context'
+import { useFieldControlId, useFieldDescribedBy } from '@/components/ui/field-context'
 
 function Switch({
   className,
@@ -13,9 +13,11 @@ function Switch({
   size?: 'sm' | 'default'
 }) {
   const controlId = useFieldControlId(id)
+  const describedBy = useFieldDescribedBy(props['aria-describedby'])
   return (
     <SwitchPrimitive.Root
       id={controlId}
+      aria-describedby={describedBy}
       data-slot="switch"
       data-size={size}
       className={cn(

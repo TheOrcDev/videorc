@@ -163,7 +163,7 @@ export function BuddyPersonaSection(): ReactElement | null {
             value={persona.bubbleStyle}
             onChange={setBubbleStyle}
           />
-          <div className="flex h-112 items-end justify-center rounded-row border border-border bg-foreground/[0.03] p-3">
+          <div className="flex h-112 items-end justify-center rounded-row border border-border bg-inset p-3">
             <BuddyBubbleSample persona={persona} size="zoomed" style={persona.bubbleStyle} />
           </div>
         </DialogContent>

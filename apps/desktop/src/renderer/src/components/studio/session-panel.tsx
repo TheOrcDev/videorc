@@ -1,7 +1,4 @@
 import {
-  AlertIcon,
-  type AppIcon,
-  ChevronRightIcon,
   FrameIcon,
   ImageIcon,
   InfoIcon,
@@ -14,6 +11,7 @@ import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { CohostPresenceDot } from '@/components/cohost-status'
 import { GroupedList } from '@/components/list-row'
+import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
 import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
@@ -233,13 +231,13 @@ export function SessionPanel({
   return (
     <PanelSection title="Session">
       <GroupedList>
-        <SessionRow
+        <NavigableRow
           icon={LivestreamIcon}
           label="Streaming"
           value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
           onNavigate={() => openStudioPanel('live')}
         />
-        <SessionRow
+        <NavigableRow
           icon={FrameIcon}
           label="Output"
           value={outputSummary(video)}
@@ -275,7 +273,6 @@ export function SessionPanel({
           verbatim (the toast can be missed mid-stream; this line cannot). */}
       {!active && startFailure ? (
         <Alert data-testid="session-start-failure" key={startFailure.at} variant="destructive">
-          <AlertIcon weight="fill" />
           <AlertTitle>Could not start.</AlertTitle>
           <AlertDescription className="min-w-0">
             <p className="line-clamp-3" title={startFailure.message}>
@@ -338,7 +335,7 @@ function CohostSessionRow(): ReactElement {
   const view = cohostPresenceView(cohostState, nowMs)
 
   return (
-    <SessionRow
+    <NavigableRow
       icon={BuddyIcon}
       label="Buddy"
       title={view.tooltipLines.join('\n') || undefined}
@@ -419,54 +416,5 @@ export function TakeoverSection(): ReactElement {
         </>
       )}
     </PanelSection>
-  )
-}
-
-// Label→value row in the Session group. Navigable rows render as a button with
-// a trailing caret and deep-link to the owning page; static facts render as a
-// div.
-function SessionRow({
-  icon: RowIcon,
-  label,
-  value,
-  title,
-  onNavigate
-}: {
-  icon: AppIcon
-  label: string
-  value: ReactNode
-  /** Native tooltip for rows whose value is a summary of more facts. */
-  title?: string
-  onNavigate?: () => void
-}): ReactElement {
-  const body = (
-    <>
-      <RowIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-      <span className="flex-1 truncate text-left text-muted-foreground">{label}</span>
-      <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
-        {typeof value === 'string' ? <span className="truncate">{value}</span> : value}
-        {onNavigate ? (
-          <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : null}
-      </span>
-    </>
-  )
-
-  if (onNavigate) {
-    return (
-      <button
-        className="flex h-row items-center gap-2.5 px-3 text-sm hover:bg-accent"
-        title={title}
-        type="button"
-        onClick={onNavigate}
-      >
-        {body}
-      </button>
-    )
-  }
-  return (
-    <div className="flex h-row items-center gap-2.5 px-3 text-sm" title={title}>
-      {body}
-    </div>
   )
 }

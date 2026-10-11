@@ -1,16 +1,10 @@
-import {
-  AlertIcon,
-  CaptionsIcon,
-  ExternalLinkIcon,
-  MicrophoneIcon,
-  RefreshIcon
-} from '@/components/icons'
+import { CaptionsIcon, ExternalLinkIcon, MicrophoneIcon, RefreshIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 import { toast } from '@/lib/toast'
 
+import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Field,
@@ -46,6 +40,7 @@ import {
 } from '@/lib/captions-ui'
 import { simulcastArmed, type CaptionsCaptureSettings } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
+import { unlockActionForGate } from '@/lib/lock-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
@@ -220,6 +215,10 @@ export function CaptionsControls(): ReactElement {
       title="Live captions"
     >
       <FieldGroup>
+        {/* Locked means disabled with one reason, and the lock leads (S1.5). */}
+        {!gate.allowed ? (
+          <LockAlert action={unlockActionForGate(gate)} reason={gate.reason} />
+        ) : null}
         <Field orientation="horizontal">
           <FieldContent>
             <FieldTitle>Enable live captions</FieldTitle>
@@ -236,27 +235,7 @@ export function CaptionsControls(): ReactElement {
           />
         </Field>
 
-        {!gate.allowed ? (
-          <Alert variant="warning">
-            <AlertIcon weight="fill" />
-            <AlertTitle>Premium captions</AlertTitle>
-            <AlertDescription>
-              {gate.reason}
-              {gate.upgradeUrl ? (
-                <Button
-                  className="ml-2 h-auto p-0 align-baseline"
-                  size="xs"
-                  variant="link"
-                  onClick={() => openExternalUrl(gate.upgradeUrl as string)}
-                >
-                  View Premium
-                </Button>
-              ) : null}
-            </AlertDescription>
-          </Alert>
-        ) : null}
-
-        <div className="flex flex-col gap-3 rounded-row border border-border bg-foreground/[0.03] p-3">
+        <div className="flex flex-col gap-3 rounded-row border border-border bg-inset p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <MicrophoneIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
@@ -382,7 +361,7 @@ export function CaptionsControls(): ReactElement {
         </Field>
 
         {(runtimeActive || lines.length > 0) && (
-          <div className="flex min-h-16 flex-col justify-end gap-1.5 rounded-row border border-border bg-foreground/[0.03] p-3">
+          <div className="flex min-h-16 flex-col justify-end gap-1.5 rounded-row border border-border bg-inset p-3">
             {lines.length === 0 ? (
               <span className="text-sm text-muted-foreground">Listening…</span>
             ) : (
@@ -427,13 +406,4 @@ export function CaptionsControls(): ReactElement {
       </FieldGroup>
     </PanelSection>
   )
-}
-
-function openExternalUrl(url: string): void {
-  const opener = window.videorc?.openOAuthUrl
-  if (opener) {
-    void opener(url)
-    return
-  }
-  window.open(url, '_blank', 'noopener,noreferrer')
 }

@@ -56,3 +56,17 @@ export function openVideorcWebLink(url: string): void {
 
   window.open(url, '_blank', 'noopener,noreferrer')
 }
+
+// Start a Videorc sign-in. Main owns the state + PKCE-bound /desktop/authorize/v2
+// transaction; the web app returns only an opaque, short-lived code through the
+// videorc:// deep-link. Browser-only development has no main-process
+// transaction owner: it keeps the link, but the web page rejects it without the
+// generated state/challenge instead of accepting an unbound callback.
+export function beginVideorcSignIn(): void {
+  const beginSignIn = window.videorc?.beginAccountSignIn
+  if (beginSignIn) {
+    void beginSignIn(VIDEORC_WEB_LINKS.desktopAuthorize)
+    return
+  }
+  openVideorcWebLink(VIDEORC_WEB_LINKS.desktopAuthorize)
+}

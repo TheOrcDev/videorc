@@ -8,6 +8,7 @@ const ScheduledStreams = lazy(() =>
 )
 
 import { GroupedList } from '@/components/list-row'
+import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { PanelSection } from '@/components/panel-section'
 import { DestinationCard } from '@/components/streaming/destination-card'
@@ -52,6 +53,7 @@ import type {
 import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
+import { unlockActionForReason } from '@/lib/lock-view'
 
 /**
  * Livestream (plan 174 S1.6b, A-14): Setup and Upcoming in a strip pinned
@@ -206,10 +208,10 @@ function StreamingSetup(): ReactElement {
         {showNotices ? (
           <div className="flex flex-col gap-2 border-b border-border p-gutter">
             {livestreamingEntitlementReason && !isSessionActive ? (
-              <Alert variant="warning">
-                <AlertIcon weight="fill" />
-                <AlertDescription>{livestreamingEntitlementReason}</AlertDescription>
-              </Alert>
+              <LockAlert
+                action={unlockActionForReason(livestreamingEntitlementReason)}
+                reason={livestreamingEntitlementReason}
+              />
             ) : null}
             {isSessionActive && problems.length > 0 && !dismissed ? (
               <StreamFailureBanner
@@ -218,11 +220,7 @@ function StreamingSetup(): ReactElement {
                 onEndLivestream={() => void requestStopSession('failure-banner')}
               />
             ) : null}
-            {isSessionActive ? (
-              <p className="text-xs text-muted-foreground">
-                Destination credentials are locked while a session is live.
-              </p>
-            ) : null}
+            {isSessionActive ? <SessionLockAlert /> : null}
             {scheduledTargets.map((target) => (
               <Alert key={`scheduled-${target.id}`}>
                 <AlertDescription className="flex flex-wrap items-center justify-between gap-2 text-foreground">
@@ -367,7 +365,6 @@ export function StreamFailureBanner({
 
   return (
     <Alert variant="warning">
-      <AlertIcon weight="fill" />
       <AlertTitle>Some destinations aren’t live</AlertTitle>
       <AlertDescription className="flex flex-col gap-1">
         {failed.length ? (
@@ -600,7 +597,6 @@ export function MetadataEditor({
 
           {validation && !validation.valid ? (
             <Alert variant="warning">
-              <AlertIcon weight="fill" />
               <AlertDescription>
                 {validation.issues.length} metadata warning
                 {validation.issues.length === 1 ? '' : 's'} before Go Live.

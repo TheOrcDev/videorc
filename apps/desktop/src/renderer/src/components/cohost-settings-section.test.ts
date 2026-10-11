@@ -188,7 +188,7 @@ describe('under the Buddy tab', () => {
     expect(document.getElementById('cohost-enabled')).toBeNull()
     expect(document.body.textContent).not.toContain('Enable Buddy')
     expect(document.body.textContent).not.toContain('Buddy (alpha)')
-    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
     expect(titles).toEqual(['Replies', 'Moderation'])
@@ -307,7 +307,7 @@ describe('grouped cards (plan 168 Phase 0)', () => {
   it('pads Answers and Banter exactly like Reply tone and Buddy notes', async () => {
     await render(settings())
     const replies = [...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')].find(
-      (section) => section.querySelector('h3')?.textContent === 'Replies'
+      (section) => section.querySelector('h2')?.textContent === 'Replies'
     )!
     const card = replies.querySelector<HTMLElement>('[data-variant="grouped"]')!
     const rows = [...card.children] as HTMLElement[]

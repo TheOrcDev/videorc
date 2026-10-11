@@ -892,7 +892,7 @@ export function StreamManager({
           />
         </div>
       ) : (
-        <Empty className="border-0 p-6">
+        <Empty>
           <EmptyHeader>
             <EmptyDescription>
               Buddy listens to chat during a live stream: questions, flags and the room's mood.

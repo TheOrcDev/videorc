@@ -34,9 +34,11 @@ describe('the overlay inspector (plan 174, C-6)', () => {
   it('turns every control off with one reason while the backend is away', () => {
     const reason = overlayEditsBlockedReason('closed')!
     const markup = render(reason)
-    // Once, and only once (the markup escapes the apostrophe in "can't").
-    expect(markup.split('change until the backend is connected.')).toHaveLength(2)
-    expect(markup).toContain('role="alert"')
+    // Once, and only once: the app's one offline wording, as a polite lock
+    // line (plan 174 S1.5), not an assertive alert.
+    expect(markup.split('These controls come back in a moment.')).toHaveLength(2)
+    expect(markup).toContain('data-variant="locked"')
+    expect(markup).toContain('role="status"')
     expect(switches(markup)).toHaveLength(2)
     for (const control of [...switches(markup), ...snaps(markup)]) {
       expect(control).toContain('disabled=""')
@@ -46,7 +48,7 @@ describe('the overlay inspector (plan 174, C-6)', () => {
 
   it('keeps the controls on, with no notice, while connected', () => {
     const markup = render(overlayEditsBlockedReason('connected'))
-    expect(markup).not.toContain('role="alert"')
+    expect(markup).not.toContain('data-slot="alert"')
     for (const control of [...switches(markup), ...snaps(markup)]) {
       expect(control).not.toContain('disabled=""')
     }

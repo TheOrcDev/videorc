@@ -1,4 +1,4 @@
-import { AlertIcon, DownloadIcon, ErrorIcon, SuccessIcon, WarningIcon } from '@/components/icons'
+import { DownloadIcon, ErrorIcon, SuccessIcon, WarningIcon } from '@/components/icons'
 import { useEffect, useId, useMemo, useRef, useState, type ReactElement } from 'react'
 import { toast } from '@/lib/toast'
 
@@ -249,10 +249,7 @@ export function ObsImportDialog({
 
         {discovery.state === 'failed' ? (
           <Alert variant="destructive">
-            <AlertIcon />
-            <AlertTitle className="font-normal">
-              Couldn&apos;t look for OBS Studio. {discovery.reason}
-            </AlertTitle>
+            <AlertTitle>Couldn&apos;t look for OBS Studio. {discovery.reason}</AlertTitle>
             <AlertAction>
               <Button
                 size="xs"
@@ -315,10 +312,7 @@ export function ObsImportDialog({
 
             {readFailure ? (
               <Alert variant="destructive">
-                <AlertIcon />
-                <AlertTitle className="font-normal">
-                  Couldn&apos;t read this OBS profile. {readFailure}
-                </AlertTitle>
+                <AlertTitle>Couldn&apos;t read this OBS profile. {readFailure}</AlertTitle>
                 <AlertAction>
                   <Button
                     size="xs"

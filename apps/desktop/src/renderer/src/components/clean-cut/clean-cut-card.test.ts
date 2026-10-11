@@ -27,6 +27,11 @@ vi.mock('@/hooks/use-studio', () => ({
 }))
 const signIn = vi.fn()
 vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => ({ signIn }) }))
+// The lock's Sign in (plan 174 S1.5, LockAlert) starts the same sign-in.
+vi.mock('@/lib/videorc-web-links', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/videorc-web-links')>()),
+  beginVideorcSignIn: () => signIn()
+}))
 
 const MIN = 60_000
 const PREMIUM = {
@@ -427,7 +432,7 @@ describe('Clean cut card (plan 119 S14)', () => {
 describe('Clean cut tab layout (plan 150 S7)', () => {
   it('sets the settings beside the recordings, in two titled columns', async () => {
     await render()
-    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
     expect(titles).toEqual(['Clean cut', 'Recordings'])

@@ -83,7 +83,6 @@ export function BuddyReactionsSection({
                 context={copy.detail}
                 data-testid="buddy-reaction-row"
                 data-trigger={trigger}
-                interactive={false}
                 title={copy.title}
               >
                 <Select value={value} onValueChange={(next) => save(trigger, next)}>

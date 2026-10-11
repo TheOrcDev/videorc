@@ -158,7 +158,7 @@ export function BuddyLookSection({
               data-testid="buddy-look-draft-actions"
             >
               <LazyBuddyPetPreview
-                className="rounded-row border border-border bg-foreground/[0.03]"
+                className="rounded-row border border-border bg-inset"
                 label={`${persona.name}, new look`}
                 motion={persona.motion}
                 packId={BUDDY_STILL_PACK_ID}
