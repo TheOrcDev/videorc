@@ -68,7 +68,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-10** · P2 · Single-item sidebar groups LIBRARY→Library, SYSTEM→Settings; stale "under Studio" comments
   - Evidence: sidebar.tsx:257-296
   - Fix: proposed IA (labels only for Setup; Settings bottom; Studio row live dot + clock; Buddy stays second under Studio, owner call D8)
-- **A-11** · P2 · Windows/actions have 3–5 names (Captions window: "Videorc Captions"/"Live captions"/"Open captions reader"/"Open reader"; Preview; "Chat closed for this recording"); Session actions (Record/Stream/Confirm Go Live/Resolve Blockers First/End livestream/Start session/Start-stop the session/Go live-end stream) — partly fixed in #647 (S2.2 `ae1e6788`, session actions); windows in S2.3a
+- **A-11** · P2 · Windows/actions have 3–5 names (Captions window: "Videorc Captions"/"Live captions"/"Open captions reader"/"Open reader"; Preview; "Chat closed for this recording"); Session actions (Record/Stream/Confirm Go Live/Resolve Blockers First/End livestream/Start session/Start-stop the session/Go live-end stream) — partly fixed in #647 (S2.2 `ae1e6788`, session actions); windows in S2.3a; fixed in #647 (S2.2 `ae1e6788`, S2.3a `490d7f6a`)
   - Evidence: captions.html:10; captions-reader.tsx:62; command-palette.tsx:200-233; shortcuts.ts:28-32; use-studio.tsx:10178
   - Fix: canonical names
 - **A-12** · P2 · ⌘J: main window toggles (closes) Stream Manager; inside SM focuses Buddy (documented as Focus Buddy); no ⇧⌘J inside SM; undocumented p, arrows, R; no ⌘/ reference
@@ -94,7 +94,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: focus h1; document.title
 - **A-19** · P2 · What's New autofocuses "Full release notes" (Return opens browser); only newest entry
   - Evidence: whats-new-dialog.tsx:57; use-whats-new.ts:53 |
-- **A-20** · P2 · Toasts say "Details are in diagnostics." (no such place)
+- **A-20** · P2 · Toasts say "Details are in diagnostics." (no such place) — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: lib/toast.ts:10
   - Fix: "Details were saved for support" + Export action
 - **A-21** · P2 · Account trigger aria-label "Open account menu" over visible "Sign in" (WCAG 2.5.3); promised status dot missing; Sign out disabled w/o reason; 7px initials — partly fixed in #647 (S0.5 `e0140afc`, trigger name); status dot, Sign out reason and initials size open
@@ -183,10 +183,10 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: one SceneCard; reason line
 - **B-21** · P2 · Mic picker lacks SourceSwitchStatus; two picker styles in inspector; raw "(permission-required)" in device names — partly fixed in #647 (S1.9 `819509ef`, one picker + mic status); rest in S3.3
   - Evidence: microphone-section.tsx:30,69; quick-settings.tsx:387-471; source-select.tsx:126 |
-- **B-22** · P2 · Jargon in start-blocking copy: "Backend socket is failed.", "Enable Record MKV, Stream RTMP…", "Checking FFmpeg…" (+34 Backend socket strings)
+- **B-22** · P2 · Jargon in start-blocking copy: "Backend socket is failed.", "Enable Record MKV, Stream RTMP…", "Checking FFmpeg…" (+34 Backend socket strings) — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: use-studio.tsx:12058-12087
   - Fix: copy table
-- **B-23** · P2 · Preview stage engineering labels ("Surface proof", "Electron proof", "Tearing down the detached preview surface"); promises "stick it into this panel" w/o action; header icons duplicate body buttons (3 phrasings); "Resolve permission" vs "Enable Camera"
+- **B-23** · P2 · Preview stage engineering labels ("Surface proof", "Electron proof", "Tearing down the detached preview surface"); promises "stick it into this panel" w/o action; header icons duplicate body buttons (3 phrasings); "Resolve permission" vs "Enable Camera" — partly fixed in #647 (S2.3a `490d7f6a`, copy); duplicate controls in S3.3
   - Evidence: preview-stage.tsx:147,263,406-633; studio-tab.tsx:330-359 |
 - **B-24** · P2 (= V-X3) · Built-in scenes have three name tables — fixed in #647 (S1.4 `215e6585`)
   - Evidence: scenes-gallery.tsx:25; layout-tab.tsx:65; layout-framing-memory.ts:4
@@ -309,9 +309,9 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: layout-tab.tsx:494,996 |
 - **C-36** · P3 · Rename toast (routine); "Deleted Screen." — fixed in #647 (S2.4 `4929496f`)
   - Evidence: use-studio.tsx:11412,11435 |
-- **C-37** · P3 · Jargon: "Vertical leg", "Its width is the rect", "Snap (horizontal)"; one-shot snaps as ToggleGroup; "Alt / ⌥" — partly fixed in #647 (S1.7 `466ff1e5`, snaps as buttons); keys in S1.2, copy in S2.3a
+- **C-37** · P3 · Jargon: "Vertical leg", "Its width is the rect", "Snap (horizontal)"; one-shot snaps as ToggleGroup; "Alt / ⌥" — partly fixed in #647 (S1.7 `466ff1e5`, snaps as buttons); keys in S1.2, copy in S2.3a; fixed in #647 (S1.2, S1.7, S2.3a `490d7f6a`)
   - Evidence: layout-tab.tsx:435,1139,1180-1196; scene-stage.tsx:1034 |
-- **C-38** · P3 · "Monitoring" idle state (no monitor bus); echo-guard label footnote; gain reset double-click only
+- **C-38** · P3 · "Monitoring" idle state (no monitor bus); echo-guard label footnote; gain reset double-click only — partly fixed in #647 (S2.3a `490d7f6a`); gain reset still double-click only
   - Evidence: mic-visual-gate.ts:43; sources-audio-mixer.tsx:667; fader.tsx:209 |
 - **C-39** · P3 (= A-6) · capitalize in StatusBadge — fixed in #647 (S1.3 `6bd8f9a2`)
   - Evidence: status-badge.tsx:58 |
@@ -393,7 +393,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **D-25** · P2 · Captions reader title 12px subtle; hand-rolled dot; body ignores status; 3 window names — partly fixed in #647 (S1.6b `1bd4865c`, WindowHeader); rest in S3.7
   - Evidence: captions-reader.tsx:61-99; index.ts:3846
   - Fix: WindowTitleBar; StatusDot
-- **D-26** · P2 · Captions status vocab x3 (Armed/Listening vs Live/Waiting vs Idle); green "Live" chip in preview
+- **D-26** · P2 · Captions status vocab x3 (Armed/Listening vs Live/Waiting vs Idle); green "Live" chip in preview — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: captions-controls.tsx:67; quick-settings.tsx:51; captions-reader.tsx:182; caption-preview.tsx:52
   - Fix: captionsStatusView()
 - **D-27** · P2 · Captions page: mic unnamed; "Realtime"/"Live transcription" jargon; Scene placement path w/o link; min vs credits units
@@ -419,7 +419,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **D-35** · P2 · Coloured status text (text-warning etc.) — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: go-live-panel.tsx:422; recording-tab.tsx:105; video-preset-select-items.tsx:95; recording-settings.tsx:112; go-live-dialog.tsx:283
   - Fix: icon/Badge carries tone
-- **D-36** · P3 · "X / Twitter" vs "X"; "Custom" vs "Custom RTMP"; "saving it to tiktok."; ellipses on progress labels; "Stopped" vs "Failed" — partly fixed in #647 (S1.4 `215e6585`); the "X / Twitter" default lives in Rust and saved configs (S2.3a)
+- **D-36** · P3 · "X / Twitter" vs "X"; "Custom" vs "Custom RTMP"; "saving it to tiktok."; ellipses on progress labels; "Stopped" vs "Failed" — partly fixed in #647 (S1.4 `215e6585`); the "X / Twitter" default lives in Rust and saved configs (S2.3a); fixed in #647 (S1.4 `215e6585`, S2.3a `490d7f6a`: Rust default "X", saved "X / Twitter" shown as "X")
   - Evidence: capture.ts:535; stream-key-format.ts:31
   - Fix: platformLabel()
 - **D-37** · P3 · rounded-[6px]; ListRow h-auto min-h-10; border-l-2; p-4 sm:p-6; hand-copied grouped classes; hand-built h3
@@ -518,7 +518,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-27** · P3 · Library row hover/selected off-token (accent/50, /60, ring, transition); paddings px-3/px-gutter/px-4; text-muted-foreground/50 — fixed in #647 (S3.11 `3c129b55`)
   - Evidence: library-tab.tsx:575,334,709
   - Fix: tokens
-- **E-28** · P3 · session vs recording; Noise Cleanup/cleanup case; "Clean noise" vs "Clean cut"; "New Recording" navigates; blank column header — fixed in #647 (S3.11 `3c129b55`)
+- **E-28** · P3 · session vs recording; Noise Cleanup/cleanup case; "Clean noise" vs "Clean cut"; "New Recording" navigates; blank column header — fixed in #647 (S3.11 `3c129b55`); fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: library-tab.tsx:281,315,328,361
   - Fix: vocabulary
 - **E-29** · P3 · Clean cut copy nits (loading ellipsis, "Make one from the Buddy tab" inside Buddy, back label)
@@ -732,7 +732,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **H-12** · P2 · Live chat empty says "Chat appears here once you go live" while live; icon+16px title empty
   - Evidence: chat-pane.tsx:526,1015; live-chat-view.ts:433
   - Fix: branch copy; plain Empty
-- **H-13** · P2 · Provider state words: "read-only" vs "receive-only"; "off" vs "Unavailable" vs "Idle"
+- **H-13** · P2 · Provider state words: "read-only" vs "receive-only"; "off" vs "Unavailable" vs "Idle" — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: stream-manager-status-bar.tsx:60,70; comments-destination-status.tsx:18,30,55,112
   - Fix: one helper, skill words
 - **H-14** · P2 · One Twitch reconnect with 3 labels ("Reconnect Twitch", "Show who followed", "Reconnect"); tooltip points to Livestream → Setup; toast about follower names
@@ -765,7 +765,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **H-24** · P2 · Composer marker line shown every session (standing upsell)
   - Evidence: chat-pane.tsx:932-941
   - Fix: only starting/blocked
-- **H-25** · P2 · "Suggests timeout/ban" — app can't do either
+- **H-25** · P2 · "Suggests timeout/ban" — app can't do either — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: cohost-view.ts:390-394
   - Fix: "Suggests removing"
 - **H-26** · P2 · Draft cleared before send result (lost on failure); Send aria-label ignores To: pick; red counter text
@@ -804,7 +804,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **I-2** · P1 · Notes never says it's hidden from capture; protection failure only logged to console (notes may appear on stream) — fixed in #647 (S0.6 `159c1155`)
   - Evidence: notes-window.tsx:91,219; main index.ts:2809
   - Fix: footer "Hidden from recordings and streams"; destructive Alert on failure
-- **I-3** · P1 (= A-20) · Copy points to places that don't exist: "Details are in diagnostics"; "Recording → Output"; phone "Settings → Phone remote" (tab is Remote); doc paths
+- **I-3** · P1 (= A-20) · Copy points to places that don't exist: "Details are in diagnostics"; "Recording → Output"; phone "Settings → Phone remote" (tab is Remote); doc paths — fixed in #647 (S2.3a `490d7f6a`; doc paths in S4.2)
   - Evidence: toast.ts:10; performance-check.ts:155; go-live-dialog.tsx:445; remote_web/index.html:32; app.js:511 |
 - **I-4** · P1 · Health "Verdicts" = 14–16 equal chips, raw enums ("Permission-needed"), jargon (OBS-native, Surface proof, Tick spike), amber for transitional; no overall answer; actionable warnings buried
   - Evidence: diagnostics-tab.tsx:169-248,695,1022,1242,1467
@@ -832,7 +832,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **I-13** · P2 · Phone "Microphone" key lit red when MUTED (reads as live)
   - Evidence: remote_web/app.js:428-434
   - Fix: "Mic muted"/"Mic on"
-- **I-14** · P2 · Phone vocabulary: Comments vs Chat; LIVE vs ON AIR; "Clear comment" vs "Take off stream"; scene names from ids ("Side By Side"); Deck/remote naming
+- **I-14** · P2 · Phone vocabulary: Comments vs Chat; LIVE vs ON AIR; "Clear comment" vs "Take off stream"; scene names from ids ("Side By Side"); Deck/remote naming — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: remote_web/index.html:15-56; app.js:286,329,446
   - Fix: send labels; Chat/Controls tabs
 - **I-15** · P2 · Regenerate token and Remove phone run immediately (disconnect mid-stream); no AlertDialog — fixed in #647 (S0.3 `1aeee1f1`)
@@ -974,7 +974,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-3** · P1 · Copy points at controls/pages that don't exist: "click Go Live in Studio" (button says Stream); "Enable Record MKV, Stream RTMP"; "Turn on Record in the Studio" (clip-marks.ts:42); "Recording → Output"; "Streaming settings"; "Customize" (x2); "Go to Live"; "Open Recording"/"Open Live"; "Library → Session actions → Markers"; "Details are in diagnostics" — fixed in #647 (S2.2 `ae1e6788`; two toasts in S2.4)
   - Evidence: scheduled-streams.tsx:307,345; global-shortcuts.ts:48; use-studio.tsx:12064,14595; shared/clip-marks.ts:42; performance-check.ts:155; clean-cut-view.ts:88; buddy-tab-view.ts:121; buddy-voice-commands.tsx:122; studio-tab.tsx:386-396; chat-pane.tsx:726; toast.ts:10
   - Fix: rewrites + test that quoted labels/paths match constants
-- **J2-4** · P1 · One state, several labels: destination failed="Stopped" vs "Failed"; stopped="Ended" vs "Stopped"; session raw ws enums vs pill; captions 3 label sets; "Live" = any session / source producing frames / on air
+- **J2-4** · P1 · One state, several labels: destination failed="Stopped" vs "Failed"; stopped="Ended" vs "Stopped"; session raw ws enums vs pill; captions 3 label sets; "Live" = any session / source producing frames / on air — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: destination-card.tsx:96-100,755; stream-manager-stats.ts:259; app-shell.tsx:421; captions-controls.tsx:73; quick-settings.tsx:51; captions-reader.tsx:182; mic-visual-gate.ts:63; sources-tab.tsx:43
   - Fix: destinationStateLabel/sessionStatusLabel/captionsStatusLabel; "On air" only for on air; source chip "Receiving"
 - **J2-5** · P1 (= B-3) · Start controls depend on hidden mode; "Streaming: Disabled" after a Record; Go Live shortcut refused — fixed in #647 (S2.2 `ae1e6788`)
@@ -1012,13 +1012,13 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-16** · P2 · Plurals ("1 viewers", "credits", "sheets/redos", "sessions loaded"; "(s)" hacks; 3 private plural()); durations (4 formats; Library "1 hour and 5 minutes"); unknown placeholders (-, --:--, –); relative time 3 styles; resolution formats; forced en-US numbers
   - Evidence: stream-manager-stats.ts:124,213,253; captions-controls.tsx:265; buddy-pet-creator.tsx:1119; library-tab.tsx:432,620; format.ts:36-63; seventv-status.ts:17
   - Fix: lib/format.ts helpers; locale
-- **J2-17** · P2 (= I-9, C-28) · Windows copy: "Reveal in Finder", "this Mac", "~/Movies/…", "system Trash", "Show in folder"
+- **J2-17** · P2 (= I-9, C-28) · Windows copy: "Reveal in Finder", "this Mac", "~/Movies/…", "system Trash", "Show in folder" — fixed in #647 (S1.4 `215e6585`, S2.3a `490d7f6a`)
   - Evidence: assets-tab.tsx:414; remote-settings.tsx:50,91; recording-settings.tsx:109; library-tab.tsx:500; use-studio.tsx:2177
   - Fix: platform helpers; trashName()
 - **J2-18** · P2 · State matrix: empty/loading/error presentations differ per page; several pages no loading/error state; ~57 coloured status text; Empty primitive drifts; Captions window "Error"/"Blocked" w/o reason; Notes "Save failed" 11px subtle; "Loading stream details" never times out
   - Evidence: (matrix in report)
   - Fix: Empty retune; Skeleton; Alert; FieldError
-- **J2-19** · P2 · "The other destinations keep streaming." shown even with one destination
+- **J2-19** · P2 · "The other destinations keep streaming." shown even with one destination — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: stream-target-notices.ts:33,41
   - Fix: count-aware copy
 - **J2-20** · P2 · Buddy naming in copy: persona name vs fixed "Buddy" in toasts; switch has 4 names ("Buddy Live", "Joins my streams", "chat mode"); "pet pack", "sheets" — fixed in #647 (S2.3b `21073ea6`)
@@ -1067,7 +1067,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **V-11** · P2 · First-run permissions: primary CTA reads "Continue without granting →" even when Screen Recording and Microphone are granted and only the camera is "checked on first use"; descriptions truncate — fixed in #647 (S3.17 `b88c8794`)
   - Evidence: permissions-onboarding-dialog.tsx:150-182
   - Fix: "Continue" when nothing required is missing; full descriptions (A-16)
-- **V-12** · P3 · Settings → General: "Open Stream Manager when I go live" (first person) beside second-person rows — partly fixed in #647 (S3.17 `b88c8794`, Settings copy)
+- **V-12** · P3 · Settings → General: "Open Stream Manager when I go live" (first person) beside second-person rows — partly fixed in #647 (S3.17 `b88c8794`, Settings copy); fixed in #647 (S3.17 `b88c8794`, S2.3a `490d7f6a`)
   - Evidence: settings/general-settings.tsx:44-62
   - Fix: "Open Stream Manager when you go live" (J2-21 voice)
 
