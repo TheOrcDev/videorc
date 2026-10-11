@@ -93,7 +93,7 @@ describe('loadBuddyPreviewPack: a pet pack', () => {
     const missing = deps({ 'manifest.json': encoder.encode(JSON.stringify(MANIFEST)) })
     await expect(
       loadBuddyPreviewPack({ personaId: 'p', packId: 'bundled:buddy', pixelSize: 64 }, missing.fake)
-    ).rejects.toThrow('This pack is missing pet.webp. Import it again.')
+    ).rejects.toThrow('These moves are missing a picture. Import them again.')
 
     const layered = deps({
       'manifest.json': encoder.encode(JSON.stringify({ ...MANIFEST, layers: { size: 256 } }))
@@ -117,7 +117,7 @@ describe('loadBuddyPreviewPack: a pet pack', () => {
     const none = deps({})
     await expect(
       loadBuddyPreviewPack({ personaId: 'p', packId: 'bundled:buddy', pixelSize: 64 }, none.fake)
-    ).rejects.toThrow('This pack has no manifest.json.')
+    ).rejects.toThrow('These moves are missing a file. Import them again.')
   })
 
   it('stops and frees what it decoded when the load is cancelled', async () => {

@@ -52,7 +52,7 @@ export function useBuddyPets(): BuddyPets {
       setPacks(await client.requestTyped('cohost.pet.list'))
       setError(null)
     } catch (failure: unknown) {
-      setError(failure instanceof Error ? failure.message : 'Could not list the Buddy packs.')
+      setError(failure instanceof Error ? failure.message : 'Try again in a moment.')
     }
   }, [client])
 

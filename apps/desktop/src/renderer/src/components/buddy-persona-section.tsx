@@ -50,7 +50,7 @@ export function BuddyPersonaSection(): ReactElement | null {
     try {
       await patchCohostSettings({ persona: next })
     } catch (failure: unknown) {
-      const message = failure instanceof Error ? failure.message : 'Could not save your Buddy.'
+      const message = failure instanceof Error ? failure.message : "Couldn't save the changes."
       setError(message)
       throw failure
     }
@@ -82,7 +82,7 @@ export function BuddyPersonaSection(): ReactElement | null {
   return (
     <PanelSection
       description="Name it, give it a personality and its looks. It answers to its name in chat and in voice; Stream Manager runs it while you're live."
-      title="Your Buddy"
+      title="Name and personality"
     >
       <div className="flex flex-wrap items-start gap-2" data-slot="buddy-header">
         <BuddyNameField persona={persona} onSave={saveQuietly} />
@@ -109,7 +109,7 @@ export function BuddyPersonaSection(): ReactElement | null {
         <Field>
           <FieldLabel>Bubble</FieldLabel>
           <FieldDescription>
-            How your Buddy talks on stream: no voice, a comic bubble above it.
+            How {persona.name} talks on stream: no voice, a comic bubble above it.
           </FieldDescription>
           <div className="flex flex-wrap items-center gap-4">
             <BuddyBubbleStyleToggle
@@ -172,7 +172,7 @@ export function BuddyPersonaSection(): ReactElement | null {
       <ConfirmDialog
         cancelLabel={`Keep ${persona.name}`}
         confirmLabel="Start over"
-        description={`${persona.name}'s name, personality, images and packs are deleted from this computer. Your greetings and chat settings stay.`}
+        description={`${persona.name}'s name, personality, pictures and moves are deleted from this computer. Your greetings and chat settings stay.`}
         open={startOverOpen}
         testId="buddy-start-over"
         title="Start over with a new Buddy?"
@@ -248,7 +248,7 @@ function BuddyNameField({
         className="text-base font-medium"
         id="buddy-name"
         maxLength={BUDDY_NAME_MAX_CHARS}
-        placeholder="Name your Buddy"
+        placeholder="Buddy"
         value={draft}
         onBlur={commit}
         onChange={(event) => {
@@ -290,7 +290,7 @@ function BuddyPersonalityField({
     <Field>
       <FieldLabel htmlFor="buddy-personality">Personality</FieldLabel>
       <FieldDescription>
-        Who your Buddy is. Its answers and remarks are written in this voice.
+        Who {persona.name} is. Its answers and remarks are written in this voice.
       </FieldDescription>
       <Textarea
         className="min-h-20"

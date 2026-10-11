@@ -467,6 +467,11 @@ export function StreamManager({
   const cohostPaneOpenRef = useRef(true)
   const previousCohostStateRef = useRef<CohostState | null>(null)
   const cohostToastAtRef = useRef<number | null>(null)
+  // The question toast speaks as the streamer's Buddy (plan 174 J2-20). A
+  // ref, so a rename never re-runs the state effect below.
+  const buddyName = cohostBuddy?.persona.name ?? null
+  const buddyNameRef = useRef(buddyName)
+  buddyNameRef.current = buddyName
   const deadAirToastKeyRef = useRef<string | null>(null)
   const [cohostNudgeDismissedSessionId, setCohostNudgeDismissedSessionId] = useState<string | null>(
     null
@@ -481,7 +486,8 @@ export function StreamManager({
       paneOpen: cohostPaneOpenRef.current,
       lastToastAtMs: cohostToastAtRef.current,
       nowMs: Date.now(),
-      shortcut: BUDDY_SHORTCUT
+      shortcut: BUDDY_SHORTCUT,
+      name: buddyNameRef.current
     })
     if (questionToast) {
       cohostToastAtRef.current = questionToast.atMs
@@ -778,6 +784,7 @@ export function StreamManager({
           autoChat={cohostAutoChat}
           consented={cohostConsented}
           gate={cohostGate!}
+          name={buddyName}
           onChange={onCohostAutoChatChange}
         />
       ) : null}
@@ -787,6 +794,7 @@ export function StreamManager({
       {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
         <BuddyUtteranceCards
           active={buddyVisible}
+          name={buddyName}
           pending={cohostActionPending}
           utterances={shownCohostState?.utterances ?? []}
           onApprove={onCohostUtteranceApprove}

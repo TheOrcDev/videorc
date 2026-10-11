@@ -60,7 +60,7 @@ export function buddyTestStatePlan(
     return {
       ...IDLE_PLAN,
       talking: true,
-      note: 'This pack has no talking drawings, so it bobs while it talks.'
+      note: 'These moves have no talking drawings, so Buddy bobs while it talks.'
     }
   }
   if (state === 'laugh') {
@@ -68,7 +68,7 @@ export function buddyTestStatePlan(
     return {
       ...IDLE_PLAN,
       react: 'laugh',
-      note: 'This pack has no laugh drawing, so it hops instead.'
+      note: 'These moves have no laugh drawing, so Buddy hops instead.'
     }
   }
   if (has('think')) return { ...IDLE_PLAN, pose: 'think' }
@@ -78,7 +78,7 @@ export function buddyTestStatePlan(
     BUDDY_THINK_GAZE[1]
   )
   if (upLeft && upLeft.id !== pack.neutral) return { ...IDLE_PLAN, pose: upLeft.id }
-  return { ...IDLE_PLAN, note: 'This pack has no thinking drawing.' }
+  return { ...IDLE_PLAN, note: 'These moves have no thinking drawing.' }
 }
 
 /** The Reactions row: every reaction the pack has, then the motion-only hop. */

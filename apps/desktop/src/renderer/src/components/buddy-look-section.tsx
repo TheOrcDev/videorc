@@ -90,7 +90,7 @@ export function BuddyLookSection({
     if (!settings) return
     // The provider's copy of the persona follows the backend's.
     await patchCohostSettings({ persona: settings.persona }).catch((error: unknown) =>
-      setSaveError(error instanceof Error ? error.message : 'Could not save your Buddy.')
+      setSaveError(error instanceof Error ? error.message : "Couldn't save the look.")
     )
   }
   const keepAllowed = Boolean(controller) && view === 'draft' && !busy
@@ -110,7 +110,7 @@ export function BuddyLookSection({
         <Field>
           <FieldLabel>
             {view === 'working'
-              ? 'Making your Buddy'
+              ? 'Making the new look'
               : view === 'draft'
                 ? 'Your new look'
                 : 'Current look'}
@@ -119,10 +119,10 @@ export function BuddyLookSection({
             {view === 'working'
               ? 'Idle first, then talking, laughing and thinking from it. About a minute.'
               : view === 'draft'
-                ? 'Keep it to make it your Buddy. Redo remakes one pose from this idle.'
+                ? `Keep it to give ${persona.name} this look. Redo remakes one pose from this idle.`
                 : persona.source === 'default'
                   ? 'The default Buddy until you create your own.'
-                  : 'What your Buddy wears on stream.'}
+                  : `What ${persona.name} wears on stream.`}
           </FieldDescription>
           {view === 'current' ? (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-testid="buddy-look-tiles">
@@ -168,7 +168,7 @@ export function BuddyLookSection({
               />
               <div className="flex min-w-48 flex-1 flex-col gap-2">
                 <p className="text-xs text-muted-foreground">
-                  The new look, alive. Click it to react.
+                  The new look in motion. Click it to react.
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button

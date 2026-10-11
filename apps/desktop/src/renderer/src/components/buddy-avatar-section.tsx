@@ -31,6 +31,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 import type { BuddyPets } from '@/hooks/use-buddy-pets'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyPetImportResult, BuddyPetSummary } from '@/lib/backend'
+import { buddyDisplayName } from '@/lib/buddy-auto-chat-view'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
   BUDDY_AVATAR_KIND_LABELS,
@@ -204,13 +205,13 @@ export function BuddyAvatarSection({
             setActionError(null)
             onViewChange(next).catch((failure: unknown) =>
               setActionError(
-                failure instanceof Error ? failure.message : 'Could not save your Buddy.'
+                failure instanceof Error ? failure.message : "Couldn't switch the avatar."
               )
             )
           }}
         />
       }
-      description="How your Buddy looks on stream and here. Still is your four images; Alive is a pet pack that looks around and reacts. Importing a pack is free; creating one is part of Premium."
+      description={`How ${buddyDisplayName(persona.name)} looks on stream and here. Still is your four pictures. Alive moves: it looks around and reacts. Importing moves is free; creating them is part of Videorc Premium.`}
       title="Avatar"
     >
       <div
@@ -364,7 +365,7 @@ export function BuddyAvatarSection({
         }
         open={removeOpen}
         testId="buddy-pack-remove"
-        title={`Remove ${removeTarget?.name ?? 'this pack'}?`}
+        title={`Remove ${removeTarget?.name ?? 'these moves'}?`}
         onCancel={() => setRemoveOpen(false)}
         onConfirm={() => {
           if (removeTarget) void remove(removeTarget)
@@ -417,7 +418,7 @@ function AlivePanel({
       onClick={onImport}
     >
       <FolderIcon data-icon="inline-start" />
-      {importing ? 'Importing…' : 'Import pack…'}
+      {importing ? 'Importing…' : 'Import moves…'}
       <Kbd className="ml-0.5">I</Kbd>
     </Button>
   )
@@ -426,17 +427,17 @@ function AlivePanel({
     <>
       {pets.error ? (
         <Alert data-testid="buddy-packs-error" variant="destructive">
-          <AlertTitle>Could not list your packs</AlertTitle>
+          <AlertTitle>Couldn&apos;t list your moves</AlertTitle>
           <AlertDescription>{pets.error}</AlertDescription>
         </Alert>
       ) : packs === null ? (
         <p className="text-xs text-muted-foreground" role="status">
-          Loading your packs…
+          Loading your moves…
         </p>
       ) : packs.length === 0 ? (
         <Empty className="flex-none" data-testid="buddy-alive-empty">
           <EmptyDescription>
-            No living Buddy yet. Import a page-pet pack, or create one from your Buddy.
+            No moves yet. Import them from a page-pet folder, or create them from a picture.
           </EmptyDescription>
           <EmptyContent className="max-w-none flex-row flex-wrap justify-center gap-2">
             {createButton}
@@ -445,8 +446,8 @@ function AlivePanel({
         </Empty>
       ) : (
         <>
-          <div aria-label="Your packs" role="radiogroup">
-            <GroupedList label="Packs">
+          <div aria-label="Your moves" role="radiogroup">
+            <GroupedList label="Moves">
               {packs.map((pack) => {
                 const worn = pack.packId === wornPackId
                 return (
@@ -499,7 +500,7 @@ function AlivePanel({
       ) : null}
       {importError ? (
         <Alert data-testid="buddy-import-error" variant="destructive">
-          <AlertTitle>Could not import that pack</AlertTitle>
+          <AlertTitle>Couldn&apos;t import those moves</AlertTitle>
           <AlertDescription>{importError}</AlertDescription>
         </Alert>
       ) : null}

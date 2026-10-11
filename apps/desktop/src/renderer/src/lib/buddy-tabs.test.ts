@@ -5,6 +5,7 @@ import { STORAGE_KEYS } from '@/lib/capture'
 import {
   DEFAULT_BUDDY_TAB,
   BUDDY_TABS,
+  buddyTabLabel,
   isBuddyTabId,
   openBuddyTab,
   readLastBuddyTab,
@@ -54,6 +55,10 @@ describe('BUDDY_TABS (plan 150)', () => {
       'Reports',
       'Clean cut'
     ])
+  })
+
+  it('names a tab the way the strip does, for copy that points at it (plan 174 F-5)', () => {
+    for (const tab of BUDDY_TABS) expect(buddyTabLabel(tab.id)).toBe(tab.label)
   })
 
   it('opens on Live by default', () => {

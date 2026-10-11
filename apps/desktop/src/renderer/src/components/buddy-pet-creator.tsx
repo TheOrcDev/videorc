@@ -65,6 +65,7 @@ import {
   buddyPetNotesFromDraft,
   buddyPetPilotsLeft,
   buddyPetRowMarked,
+  buddyPetSaveDescription,
   buddyPetSheetPhase,
   type BuddyPetCreatorStepId,
   type BuddyPetNotesDraft,
@@ -277,7 +278,7 @@ export function BuddyPetCreator({
         <div className="flex items-center gap-3">
           <Button size="sm" type="button" variant="ghost" onClick={onClose}>
             <ArrowLeftIcon data-icon="inline-start" />
-            Buddy
+            Back
           </Button>
           <h2 className="text-sm font-semibold text-foreground">Create an Alive Buddy</h2>
           {gate.allowance ? (
@@ -391,6 +392,7 @@ export function BuddyPetCreator({
           />
         ) : step === 'save' ? (
           <SaveStep
+            description={buddyPetSaveDescription(persona)}
             disabled={controlsOff || working}
             name={name}
             onBack={() => setNaming(false)}
@@ -497,8 +499,8 @@ function primaryAction({
       return {
         label:
           state.pending === 'start' || state.pending === 'identity'
-            ? 'Reading your Buddy…'
-            : 'Read my Buddy',
+            ? 'Reading the picture…'
+            : 'Read the picture',
         disabled: off || !reference || (!creation && !canStart) || !web,
         run: onRead,
         testId: 'buddy-pet-read'
@@ -747,7 +749,7 @@ function ReferenceStep({
 
   return (
     <PanelSection
-      description="One picture of the whole body, facing you, on a transparent background. Buddy reads its colours, materials and proportions from it, and every pose is drawn from it."
+      description="One picture of the whole body, facing you, on a transparent background. Videorc reads its colors, materials and proportions from it, and every pose is drawn from it."
       title="Start from one picture"
     >
       <div className="flex flex-wrap items-start gap-4">
@@ -777,8 +779,8 @@ function ReferenceStep({
           {source === 'persona' ? (
             <div className="flex flex-col gap-1">
               <p className="text-xs text-muted-foreground">
-                The idle picture from your Buddy&apos;s look. To make a new look, use Create my
-                Buddy in the Avatar section first.
+                The idle picture from the current look. To make a new look, use Create my Buddy in
+                the Avatar section first.
               </p>
               {lookNotes ? (
                 <p
@@ -850,7 +852,7 @@ function NotesEditor({
   return (
     <FieldGroup data-testid="buddy-pet-notes" variant="grouped">
       <Field>
-        <FieldLabel htmlFor="buddy-pet-palette">Its colours are</FieldLabel>
+        <FieldLabel htmlFor="buddy-pet-palette">Its colors are</FieldLabel>
         <Input
           disabled={disabled}
           id="buddy-pet-palette"
@@ -990,8 +992,8 @@ function NotesStep({
           Use another picture
         </Button>
       }
-      description="What Buddy read from your picture. Correct anything it got wrong: these words go with every pose it draws."
-      title="What Buddy sees"
+      description="What Videorc read from your picture. Correct anything it got wrong: these words go with every pose it draws."
+      title="What Videorc sees"
     >
       <NotesEditor disabled={disabled} draft={draft} error={error} onChange={onChange} />
     </PanelSection>
@@ -1035,7 +1037,7 @@ function PilotStep({
             Make another pilot ({left} left)
           </Button>
         }
-        description="Four poses before the rest: neutral, turned left, turned right and laughing. If this looks like your Buddy, every other sheet follows it."
+        description="Four poses before the rest: neutral, turned left, turned right and laughing. If this looks right, every other sheet follows it."
         title="Pilot"
       >
         {making ? (
@@ -1059,7 +1061,7 @@ function PilotStep({
       </PanelSection>
       <PanelSection
         description="A new pilot uses these words. They are fixed once the pilot looks right."
-        title="What Buddy sees"
+        title="What Videorc sees"
       >
         <NotesEditor disabled={disabled} draft={draft} error={notesError} onChange={onDraft} />
       </PanelSection>
@@ -1396,11 +1398,14 @@ function ReviewRow({
 }
 
 function SaveStep({
+  description,
   name,
   disabled,
   onName,
   onBack
 }: {
+  /** Where the moves are kept (`buddyPetSaveDescription`). */
+  description: string
   name: string
   disabled: boolean
   onName: (name: string) => void
@@ -1414,7 +1419,7 @@ function SaveStep({
           Back to review
         </Button>
       }
-      description="Kept on this computer. Your Buddy wears it right away; switch back to Still any time."
+      description={description}
       title="Name it"
     >
       <div className="flex flex-col gap-1">

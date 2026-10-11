@@ -73,6 +73,7 @@ import {
   sortedCohostQuestions,
   COHOST_ACTS_ON_ASK_COPY,
   COHOST_ACTS_ON_ASK_HINT,
+  COHOST_LISTEN_DISCLOSURE,
   COHOST_MOOD_LABELS,
   COHOST_REMOVE_FLAGGED_KEY,
   EMPTY_COHOST_UNREAD
@@ -328,7 +329,7 @@ export function CohostPane({
             {onEnableConsent ? (
               <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
                 <Button size="xs" type="button" variant="secondary" onClick={onEnableConsent}>
-                  Turn on cloud AI…
+                  Allow cloud AI…
                 </Button>
               </div>
             ) : null}
@@ -433,7 +434,7 @@ export function CohostPane({
           <span className="shrink-0 text-xs font-medium text-foreground">Buddy</span>
           {/* One tag, at the tag size (plan 174 S1.8, F-14: no 10 px text). */}
           <Badge className={cn('shrink-0', PANE_NARROW_HIDDEN)} variant="outline">
-            alpha
+            Alpha
           </Badge>
           <CohostPresenceDot view={presence} />
           <span
@@ -913,10 +914,7 @@ export function CohostListenPrompt({
     <div className="shrink-0 p-2" data-slot="cohost-listen-prompt">
       <Alert aria-label="Buddy can hear you while you're live" role="group" icon={MicrophoneIcon}>
         <AlertTitle className="text-xs">Buddy can hear you while you&apos;re live</AlertTitle>
-        <AlertDescription className="text-xs">
-          Your mic audio goes to Videorc&apos;s cloud speech-to-text to be turned into text. Videorc
-          servers don&apos;t keep it. The transcript is saved with your recording on this computer.
-        </AlertDescription>
+        <AlertDescription className="text-xs">{COHOST_LISTEN_DISCLOSURE}</AlertDescription>
         <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
           <Button
             size="xs"
@@ -1232,7 +1230,7 @@ function CohostNotice({ label, children }: { label: string; children: ReactNode 
     >
       <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
       <Badge className="shrink-0" variant="outline">
-        {label} alpha
+        {label} Alpha
       </Badge>
       {children}
     </div>

@@ -20,6 +20,7 @@ import {
   buddyPetNotesDraft,
   buddyPetNotesFromDraft,
   buddyPetRowMarked,
+  buddyPetSaveDescription,
   buddyPetSheetPhase,
   type BuddyPetReviewMarks
 } from './buddy-pet-creator-view'
@@ -109,6 +110,37 @@ describe('buddyPetCreatorGate (plan 168 S-F5)', () => {
     expect(buddyPetAllowanceCopy(used.allowance!)).toBe('0 of 3 left this month')
     expect(buddyPetAllowanceCopy({ left: 2, limit: 3 })).toBe('2 of 3 left this month')
   })
+
+  it('words its gates as one family, naming the tab that holds Cloud AI (plan 174 G-15)', () => {
+    expect(BUDDY_PET_SIGNED_OUT).toBe('Sign in to create an Alive Buddy.')
+    expect(BUDDY_PET_CONSENT_OFF).toBe('Allow cloud AI on the Buddy tab to create an Alive Buddy.')
+    expect(BUDDY_PET_NOT_AVAILABLE).toBe("Creating isn't available right now.")
+  })
+})
+
+describe('buddyPetSaveDescription (plan 174 G-6)', () => {
+  const wears = 'wears them right away; switch back to Still any time.'
+
+  it('says the moves join the account for a Buddy the streamer made, in the library', () => {
+    expect(
+      buddyPetSaveDescription({
+        name: 'Grum',
+        libraryAvatarId: '2f1c8e4a-5b6d-4c7e-8f90-a1b2c3d4e5f6'
+      })
+    ).toBe(
+      `Saved on this computer and in your Videorc account, so Grum moves on any computer. Grum ${wears}`
+    )
+  })
+
+  it('keeps them on this computer for an official Buddy or one made only here', () => {
+    expect(buddyPetSaveDescription({ name: 'Nib', libraryAvatarId: 'official:orc' })).toBe(
+      `Saved on this computer. Nib ${wears}`
+    )
+    expect(buddyPetSaveDescription({ name: 'Mossback' })).toBe(
+      `Saved on this computer. Mossback ${wears}`
+    )
+    expect(buddyPetSaveDescription(null)).toBe(`Saved on this computer. Buddy ${wears}`)
+  })
 })
 
 describe('identity notes as editable sentences', () => {
@@ -145,7 +177,7 @@ describe('identity notes as editable sentences', () => {
         ...draft,
         palette: Array.from({ length: 9 }, (_, n) => `c${n}`).join(',')
       })
-    ).toEqual({ error: 'List at most 8 colours.' })
+    ).toEqual({ error: 'List at most 8 colors.' })
     expect('error' in buddyPetNotesFromDraft({ ...draft, materials: 'x'.repeat(61) })).toBe(true)
   })
 })

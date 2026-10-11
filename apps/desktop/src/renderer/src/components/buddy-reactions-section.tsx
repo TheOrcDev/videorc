@@ -61,7 +61,7 @@ export function BuddyReactionsSection({
   }
   return (
     <PanelSection
-      description="What your Buddy does on stream when something happens. Try plays it here."
+      description={`What ${persona.name} does on stream when something happens. Try plays it here.`}
       title="Reactions"
     >
       {BUDDY_TRIGGER_SECTIONS.map((section) => (
@@ -104,7 +104,7 @@ export function BuddyReactionsSection({
                       ))}
                       {missing ? (
                         <SelectItem value={override}>
-                          {buddyReactionLabel(override)} (not in this pack)
+                          {buddyReactionLabel(override)} (not in these moves)
                         </SelectItem>
                       ) : null}
                       <SelectItem value={BUDDY_REACTION_NONE}>None</SelectItem>

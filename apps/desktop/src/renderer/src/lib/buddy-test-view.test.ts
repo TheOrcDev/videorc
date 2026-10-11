@@ -71,16 +71,16 @@ describe('the States row', () => {
     expect(buddyTestStatePlan('talk', BARE)).toMatchObject({
       pose: null,
       talking: true,
-      note: 'This pack has no talking drawings, so it bobs while it talks.'
+      note: 'These moves have no talking drawings, so Buddy bobs while it talks.'
     })
     expect(buddyTestStatePlan('laugh', BARE)).toMatchObject({
       pose: null,
       react: 'laugh',
-      note: 'This pack has no laugh drawing, so it hops instead.'
+      note: 'These moves have no laugh drawing, so Buddy hops instead.'
     })
     expect(buddyTestStatePlan('think', BARE)).toMatchObject({
       pose: null,
-      note: 'This pack has no thinking drawing.'
+      note: 'These moves have no thinking drawing.'
     })
     // Before the pack loads every state lives as Idle.
     expect(buddyTestStatePlan('laugh', null).pose).toBeNull()

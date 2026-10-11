@@ -274,14 +274,14 @@ async function loadPetPack(
   const { personaId, packId, signal } = request
   const manifestBytes = await deps.readPackFile(personaId, packId, 'manifest.json')
   if (signal?.aborted) throw abortError()
-  if (!manifestBytes) throw new Error('This pack has no manifest.json. Import it again.')
+  if (!manifestBytes) throw new Error('These moves are missing a file. Import them again.')
   const manifest = parseBuddyPetManifest(new TextDecoder().decode(manifestBytes))
   const sheets = new Map<string, BuddyPreviewImage>()
   try {
     for (const name of buddyPetSheetNames(manifest)) {
       const bytes = await deps.readPackFile(personaId, packId, name)
       if (signal?.aborted) throw abortError()
-      if (!bytes) throw new Error(`This pack is missing ${name}. Import it again.`)
+      if (!bytes) throw new Error('These moves are missing a picture. Import them again.')
       sheets.set(name, await deps.decode(bytes))
       if (signal?.aborted) throw abortError()
     }

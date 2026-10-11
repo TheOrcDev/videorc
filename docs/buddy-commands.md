@@ -1,11 +1,11 @@
 # Buddy voice commands
 
 Ask Buddy to put a comment on stream, take it down, or remove it from chat
-(plan 140). Buddy never acts on its own. It removes a comment only when you
-tell it to.
+(plan 140). Buddy posts only in the modes you turn on, and it removes a
+comment only when you tell it to.
 
-Voice commands are part of Buddy, which is Videorc Premium. **Remove from
-chat** in a comment's ⋯ menu is free for everyone. The binding shapes live in
+Voice commands are part of Videorc Premium. **Remove from chat** in a
+comment's ⋯ menu is free for everyone. The binding shapes live in
 [buddy-commands-contract.md](buddy-commands-contract.md); this page is how it
 works and how to check it.
 

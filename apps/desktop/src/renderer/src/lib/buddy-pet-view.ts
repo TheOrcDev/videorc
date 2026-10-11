@@ -189,9 +189,11 @@ export function buddyPetCapability(
   }
 }
 
-export const BUDDY_CREATE_SIGNED_OUT = 'Sign in to create a living Buddy.'
-export const BUDDY_CREATE_CONSENT_OFF = 'Allow cloud AI below to create a living Buddy.'
-export const BUDDY_CREATE_USED_UP = 'No creations left this month'
+// One gate family for creating (plan 174 G-15): "Sign in to…", "Allow cloud AI
+// … to…", "Creating isn't available right now.", then the allowance.
+export const BUDDY_CREATE_SIGNED_OUT = 'Sign in to create an Alive Buddy.'
+export const BUDDY_CREATE_CONSENT_OFF = 'Allow cloud AI below to create an Alive Buddy.'
+export const BUDDY_CREATE_USED_UP = "This month's creations are used up."
 
 export interface BuddyPetCreateAvailability {
   allowed: boolean

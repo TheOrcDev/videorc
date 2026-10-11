@@ -37,7 +37,7 @@ import {
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
-import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
+import { BUDDY_POSTS_PROMISE, buddyDisplayName } from '@/lib/buddy-auto-chat-view'
 import { useCleanCut } from '@/hooks/use-clean-cut'
 import { BuddyLookClientProvider } from '@/hooks/use-buddy-look'
 import {
@@ -49,6 +49,7 @@ import {
 import {
   CLOUD_AI_KEEPS,
   CLOUD_AI_USES,
+  BUDDY_CHAT_FREE_NOTE,
   BUDDY_LIVE_POWERS,
   buddyLiveView,
   type BuddyLiveStatus
@@ -258,13 +259,18 @@ function useBuddyLive(): ReturnType<typeof buddyLiveView> {
  * under it, and nothing live-looking sits beside it.
  */
 function BuddyUnlockAlert({
-  testId = 'buddy-live-unlock'
+  testId = 'buddy-live-unlock',
+  freeNote = null
 }: {
   testId?: string
+  /** What stays free under a Premium lock, after its reason (plan 174 F-19). */
+  freeNote?: string | null
 }): ReactElement | null {
   const view = useBuddyLive()
   if (!view.unlock) return null
-  return <LockAlert action={view.unlock.action} data-testid={testId} reason={view.unlock.reason} />
+  const premium = view.unlock.action?.kind === 'view-premium'
+  const reason = premium && freeNote ? `${view.unlock.reason} ${freeNote}` : view.unlock.reason
+  return <LockAlert action={view.unlock.action} data-testid={testId} reason={reason} />
 }
 
 /**
@@ -279,7 +285,7 @@ function BuddyChatTab(): ReactElement {
     <>
       {locked ? (
         <div className="border-b border-border p-gutter" data-slot="buddy-tab-lock">
-          <BuddyUnlockAlert testId="buddy-tab-unlock" />
+          <BuddyUnlockAlert freeNote={BUDDY_CHAT_FREE_NOTE} testId="buddy-tab-unlock" />
         </div>
       ) : null}
       <ConfigGrid className={CONFIG_GRID_PAIR}>
@@ -305,31 +311,32 @@ function BuddyVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
 }
 
 /**
- * The Live tab's left column (plan 150): Buddy's emblem beside its status,
- * then why it is locked, the Stream Manager, and whether Buddy hears you.
- * The switch moved to Stream Manager (plan 164 S-D6): the chat mode there
- * is what turns the Buddy on, so this column points at it.
+ * The Live tab's left column (plan 150): Buddy's emblem beside its name and
+ * Buddy Live's status, then why it is locked, the Stream Manager, and whether
+ * Buddy hears you. The switch moved to Stream Manager (plan 164 S-D6): the
+ * Buddy pane's Chat leaving Off is what turns Buddy Live on, so this column
+ * points at it until plan 174 S3.14a gives Buddy Live its own switch.
  */
 function BuddyLiveSection(): ReactElement {
   const { cohostSettings, runtimeInfo } = useStudioCore()
   const { openCommentsWindow } = useStudioShell()
   const view = useBuddyLive()
-  const buddyName = cohostSettings?.persona.name ?? 'Buddy'
+  const buddyName = buddyDisplayName(cohostSettings?.persona.name)
 
   return (
     <PanelSection
       action={<Badge variant="outline">Alpha</Badge>}
-      description={`Your Buddy reads your chat and hears you while you stream. ${BUDDY_POSTS_PROMISE}`}
-      title="Joins my streams"
+      description={`Buddy reads your chat and hears you while you stream. ${BUDDY_POSTS_PROMISE}`}
+      title="Buddy Live"
     >
       <div className="flex items-center gap-3" data-slot="buddy-live-status-block">
         <BuddyEmblem size="lg" />
         <Field className="min-w-0 flex-1" orientation="horizontal">
           <FieldContent>
-            <FieldTitle>{buddyName} joins my streams</FieldTitle>
+            <FieldTitle>{buddyName}</FieldTitle>
             <BuddyLiveStatusLine status={view.status} />
             <FieldDescription data-testid="buddy-live-pointer">
-              Turn it on in Stream Manager: the Buddy pane&apos;s chat mode, Suggest or Auto.
+              Turn on Buddy Live in Stream Manager: in the Buddy pane, set Chat to Suggest or Auto.
             </FieldDescription>
           </FieldContent>
         </Field>
@@ -370,7 +377,7 @@ function BuddyLivePowers({
 }): ReactElement {
   return (
     <PanelSection title="What Buddy does">
-      <FieldGroup aria-label="What Buddy Live does" role="list" variant="grouped">
+      <FieldGroup aria-label="What Buddy does" role="list" variant="grouped">
         {BUDDY_LIVE_POWERS.map((power) => {
           const label = BUDDY_TABS.find((entry) => entry.id === power.tab)?.label ?? power.tab
           return (

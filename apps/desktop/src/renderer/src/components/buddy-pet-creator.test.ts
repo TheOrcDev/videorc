@@ -408,7 +408,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
     const backend = fakeBackend(reviewCreation())
     await render({ client: backend.client })
     const back = [...document.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Buddy'
+      (button) => button.textContent === 'Back'
     )
     await click(back ?? null)
     expect(onClose).toHaveBeenCalledTimes(1)

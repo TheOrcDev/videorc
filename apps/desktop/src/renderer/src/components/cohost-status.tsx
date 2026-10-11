@@ -124,7 +124,7 @@ export function CohostStatus({
         ) : !consented ? (
           <div className="flex flex-col gap-2">
             <p className="text-xs text-muted-foreground">
-              {COHOST_CONSENT_SENTENCE} Turn on cloud AI to use it.
+              {COHOST_CONSENT_SENTENCE} Allow cloud AI to use it.
             </p>
             {onEnableConsent ? (
               <Button
@@ -135,7 +135,7 @@ export function CohostStatus({
                   onEnableConsent()
                 }}
               >
-                Turn on cloud AI…
+                Allow cloud AI…
               </Button>
             ) : null}
           </div>
@@ -144,7 +144,7 @@ export function CohostStatus({
           // hears you, the same as the Buddy tab's switch.
           <div className="flex items-center gap-3">
             <Label className="min-w-0 flex-1 text-xs font-normal" htmlFor="cohost-status-enable">
-              Buddy joins my streams
+              Buddy Live
             </Label>
             <Switch
               checked={enabled}

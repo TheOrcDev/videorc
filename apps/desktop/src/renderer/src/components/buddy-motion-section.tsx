@@ -54,7 +54,7 @@ export function BuddyMotionSection({
   }
   return (
     <PanelSection
-      description="How your Buddy moves on stream and here. Off keeps its poses and drops the bounce."
+      description={`How ${persona.name} moves on stream and here. Off keeps its poses and drops the bounce.`}
       title="Motion"
     >
       <FieldGroup variant="grouped">

@@ -7,7 +7,7 @@ import type { CohostAutoChat, CohostAutoChatRelayPatch } from '@/lib/backend'
 import {
   BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY,
   BUDDY_AUTO_CONFIRM_SENTENCE,
-  BUDDY_CONSENT_SENTENCE
+  buddyPostingConsentSentence
 } from '@/lib/buddy-auto-chat-view'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -55,7 +55,11 @@ function reasonFor(id: string): string | null {
 
 async function render(
   current: CohostAutoChat,
-  { allowed = true, consented = true }: { allowed?: boolean; consented?: boolean } = {}
+  {
+    allowed = true,
+    consented = true,
+    name
+  }: { allowed?: boolean; consented?: boolean; name?: string } = {}
 ): Promise<void> {
   await act(async () =>
     root.render(
@@ -72,6 +76,7 @@ async function render(
                 featureId: 'live-cohost',
                 reason: 'Buddy requires Videorc Premium.'
               },
+          name,
           onChange
         })
       )
@@ -108,7 +113,8 @@ describe('Buddy chat mode (plan 164 S-D6)', () => {
     await render(autoChat())
     await press(modeButton('suggest'))
     expect(onChange).not.toHaveBeenCalled()
-    expect(dialog()?.textContent).toContain(BUDDY_CONSENT_SENTENCE)
+    expect(dialog()?.textContent).toContain('Let Buddy post as you?')
+    expect(dialog()?.textContent).toContain(buddyPostingConsentSentence(null))
     await act(async () => dialogButton('buddy-chat-accept').click())
     expect(onChange).toHaveBeenLastCalledWith({ mode: 'suggest' })
     expect(dialog()).toBeNull()
@@ -118,7 +124,7 @@ describe('Buddy chat mode (plan 164 S-D6)', () => {
   it('never reaches Auto without the second explicit click', async () => {
     await render(autoChat())
     await press(modeButton('auto'))
-    expect(dialog()?.textContent).toContain(BUDDY_CONSENT_SENTENCE)
+    expect(dialog()?.textContent).toContain(buddyPostingConsentSentence(null))
     await act(async () => dialogButton('buddy-chat-accept').click())
     // Consent lands in Suggest; Auto still waits for its own sentence.
     expect(onChange).toHaveBeenCalledTimes(1)
@@ -140,6 +146,18 @@ describe('Buddy chat mode (plan 164 S-D6)', () => {
     await act(async () => notNow?.click())
     expect(onChange).not.toHaveBeenCalled()
     expect(dialog()).toBeNull()
+  })
+
+  it("asks in the streamer's name for Buddy, and names the control Chat posting (plan 174 J2-20)", async () => {
+    await render(autoChat(), { name: 'Grum' })
+    expect(
+      container.querySelector('[aria-label="Chat posting"]') ??
+        document.querySelector('[aria-label="Chat posting"]')
+    ).toBeTruthy()
+    await press(modeButton('suggest'))
+    expect(dialog()?.textContent).toContain('Let Grum post as you?')
+    expect(dialog()?.textContent).toContain(buddyPostingConsentSentence('Grum'))
+    expect(dialog()?.textContent).not.toMatch(/the Buddy/i)
   })
 
   it('turns Off without asking, and the switches write their one field', async () => {

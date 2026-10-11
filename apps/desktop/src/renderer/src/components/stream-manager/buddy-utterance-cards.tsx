@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import type { CohostUtterance } from '@/lib/backend'
-import { BUDDY_UTTERANCE_TRIGGER_LABELS } from '@/lib/buddy-auto-chat-view'
+import { BUDDY_UTTERANCE_TRIGGER_LABELS, buddyDisplayName } from '@/lib/buddy-auto-chat-view'
 import { cn } from '@/lib/utils'
 
 /** Recent lines shown under the cards. */
@@ -64,11 +64,14 @@ export function BuddyUtteranceCards({
   utterances,
   pending = false,
   active = false,
+  name = null,
   onApprove,
   onDismiss
 }: {
   utterances: readonly CohostUtterance[]
   pending?: boolean
+  /** The streamer's name for Buddy: a card is the character asking. */
+  name?: string | null
   /** The Buddy pane is on screen. The keys answer only then: a card behind
    * a tab never takes ↵ from whatever the streamer is doing. */
   active?: boolean
@@ -118,7 +121,7 @@ export function BuddyUtteranceCards({
           {proposed.map((utterance) => (
             <Alert
               key={utterance.id}
-              aria-label="The Buddy wants to post"
+              aria-label={`${buddyDisplayName(name)} wants to post`}
               data-testid="buddy-utterance-card"
               data-utterance-id={utterance.id}
               role="group"

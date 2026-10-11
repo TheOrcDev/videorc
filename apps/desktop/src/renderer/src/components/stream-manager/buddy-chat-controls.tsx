@@ -19,11 +19,12 @@ import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import {
   BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY,
   BUDDY_AUTO_CONFIRM_SENTENCE,
-  BUDDY_CONSENT_SENTENCE,
   BUDDY_MODE_HINTS,
   BUDDY_MODE_LABELS,
   BUDDY_MODES,
-  buddyModeChangeStep
+  buddyModeChangeStep,
+  buddyPostingConsentSentence,
+  buddyPostingConsentTitle
 } from '@/lib/buddy-auto-chat-view'
 import { cn } from '@/lib/utils'
 
@@ -38,6 +39,7 @@ export function BuddyChatControls({
   autoChat,
   gate,
   consented,
+  name = null,
   disabled = false,
   onChange
 }: {
@@ -45,6 +47,8 @@ export function BuddyChatControls({
   gate: EntitlementUiGate
   /** Cloud-AI consent: Answers and Banter send chat to the cloud. */
   consented: boolean
+  /** The streamer's name for Buddy: the consent dialog asks in its name. */
+  name?: string | null
   disabled?: boolean
   onChange: (patch: CohostAutoChatRelayPatch) => void
 }): ReactElement {
@@ -96,7 +100,7 @@ export function BuddyChatControls({
         <div className="flex min-w-0 items-center gap-2">
           <span className="shrink-0 text-[11px] font-semibold text-subtle">Chat</span>
           <SegmentedControl
-            aria-label="Buddy chat mode"
+            aria-label="Chat posting"
             disabled={disabled}
             options={BUDDY_MODES.map((mode) => ({
               value: mode,
@@ -124,7 +128,7 @@ export function BuddyChatControls({
             id="buddy-answers"
             label="Answers"
             reason={aiReason}
-            title="A reply when a viewer asks the Buddy by name."
+            title="A reply when a viewer asks Buddy by name."
             onCheckedChange={(answers) => onChange({ answers })}
           />
           <BuddyBehaviourSwitch
@@ -151,10 +155,12 @@ export function BuddyChatControls({
               <BuddyEmblem size="lg" />
               <div className="flex flex-col gap-1">
                 <DialogTitle>
-                  {step === 'confirm-auto' ? 'Turn on Auto?' : 'Let the Buddy post as you?'}
+                  {step === 'confirm-auto' ? 'Turn on Auto?' : buddyPostingConsentTitle(name)}
                 </DialogTitle>
                 <DialogDescription data-testid="buddy-chat-consent-sentence">
-                  {step === 'confirm-auto' ? BUDDY_AUTO_CONFIRM_SENTENCE : BUDDY_CONSENT_SENTENCE}
+                  {step === 'confirm-auto'
+                    ? BUDDY_AUTO_CONFIRM_SENTENCE
+                    : buddyPostingConsentSentence(name)}
                 </DialogDescription>
               </div>
             </div>
