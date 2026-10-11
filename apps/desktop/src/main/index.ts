@@ -37,6 +37,7 @@ import {
   BrowserWindow,
   clipboard,
   contentTracing,
+  crashReporter,
   desktopCapturer,
   dialog,
   globalShortcut,
@@ -245,7 +246,13 @@ import {
   readBackendCrashLog,
   shouldRecordBackendExit
 } from './backend-crash-log'
-import { RotatingLogFile, backendLogFilePath, formatBackendLogFileLine } from './backend-log-file'
+import {
+  RotatingLogFile,
+  backendLogFileLimitsFromEnv,
+  backendLogFilePath,
+  formatBackendLogFileLine
+} from './backend-log-file'
+import { startLocalCrashReporter } from './local-crash-reporter'
 import {
   GPU_RETRY_STABILITY_MS,
   clearGpuFallbackState,
@@ -966,6 +973,14 @@ const userDataDirOverride = process.env.VIDEORC_USER_DATA_DIR?.trim()
 if (userDataDirOverride) {
   app.setPath('userData', userDataDirOverride)
 }
+// Local minidumps for every Electron process (plan 166 S3); never uploaded.
+startLocalCrashReporter(app.getPath('userData'), {
+  setCrashDumpsPath: (path) => app.setPath('crashDumps', path),
+  start: (options) => crashReporter.start(options),
+  onError: (error) => {
+    safeConsole.warn(`Local crash reporter did not start: ${errorMessageText(error)}`)
+  }
+})
 // Perf harnesses attach CDP profilers to the renderer through this switch
 // (0 = pick a free port; Chromium prints "DevTools listening on ws://...").
 const remoteDebugPortOverride = process.env.VIDEORC_REMOTE_DEBUG_PORT?.trim()
@@ -1107,6 +1122,9 @@ const backendCrashLogFile = backendCrashLogPath(app.getPath('userData'))
 let backendCrashRecords = readBackendCrashLog(backendCrashLogFile)
 const backendLogFile = new RotatingLogFile({
   path: backendLogFilePath(app.getPath('userData')),
+  // Defaults 2 MB x 2; VIDEORC_BACKEND_LOG_MAX_BYTES / _FILES raise it for
+  // unattended runs, clamped to 100 MB x 20 (plan 166 S3).
+  ...backendLogFileLimitsFromEnv(process.env),
   onError: (error) => {
     safeConsole.warn(`Backend log file disabled: ${errorMessageText(error)}`)
   }
@@ -9086,6 +9104,9 @@ function startBackendWithRegistryLock(): void {
         : '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
+      // Metrics journal and per-session FFmpeg logs land beside backend.log
+      // (plan 166 S1/S3); the backend writes them only while the journal is on.
+      VIDEORC_LOGS_DIR: join(app.getPath('userData'), 'logs'),
       // The Buddy's avatar images (plan 164 S-A3): uploads land here through
       // main, generated images through the backend (S-A6). The first root is
       // the write root; the second is the read-only bundled pet root (plan

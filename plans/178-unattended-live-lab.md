@@ -236,7 +236,7 @@ owner runs these at the console during the U3 visit.
 
 **Done when:** plan 176 L0's done-when, run on the lab machine.
 
-### U1 — Metrics journal (plan 166 S1)
+### U1 — Metrics journal (plan 166 S1) — BUILT
 
 Exactly plan 166 S1: NDJSON every 5 s plus one line per health event,
 `VIDEORC_METRICS_JOURNAL=1` or setting `diagnostics.metricsJournal`, off by
@@ -247,7 +247,22 @@ hot path.
 **STOP if:** plan 166 S1's STOP condition (a lock on the encoder or
 compositor hot path).
 
-### U2 — Logs and crash dumps (plan 166 S3)
+**Built:** `crates/videorc-backend/src/metrics_journal.rs` subscribes to the
+existing event bus (`recording.status`, `stream.targets`, `stream.health`,
+`diagnostics.stats`, `health.event`), so it takes no encoder or compositor
+lock; a writer thread behind a 64-line bounded channel drops lines when full
+(`droppedLines`). Logs root is `VIDEORC_LOGS_DIR` (main passes
+`<userData>/logs`). Schema v1 locked by
+`protocol-fixtures/metrics-journal-v1.ndjson`; RPCs
+`diagnostics.metricsJournal.get` / `.set`; support bundle `metricsJournal`
+section (last 2 h) when on. Per-leg stats are the session FFmpeg process's
+progress values, `null` unless the leg is `live` or `warning`.
+**Owed:** `pnpm smoke:multistream` and `pnpm smoke:recording-studio` with
+`VIDEORC_METRICS_JOURNAL=1` (journal must not hurt them, and the streaming
+smoke should show a line every 5 s ±1 s); a lab-machine check that
+`<userData>/logs/metrics/` fills during a real run.
+
+### U2 — Logs and crash dumps (plan 166 S3) — BUILT
 
 Exactly plan 166 S3, all three steps: bounded `VIDEORC_BACKEND_LOG_MAX_*`
 env, redacted per-session FFmpeg stderr when the journal is on, Electron
@@ -256,6 +271,21 @@ env, redacted per-session FFmpeg stderr when the journal is on, Electron
 **Done when:** plan 166 S3's done-when.
 **STOP if:** `crashReporter` changes entitlements or needs a new signing
 step.
+
+**Built:** `backendLogFileLimitsFromEnv` in
+`apps/desktop/src/main/backend-log-file.ts` (defaults 2 MB x 2, clamped to
+100 MB x 20, unit-tested); while the journal is on, every raw FFmpeg stderr
+line of a session is teed to `<userData>/logs/ffmpeg/<sessionId>.log`
+through `redact_stream_urls` plus home-dir-to-`~` at write time (64 MB per
+file, 200 MB per dir, non-blocking); `local-crash-reporter.ts` starts
+`crashReporter` with `uploadToServer: false` and dumps in
+`<userData>/Crashpad`. No entitlement or signing change: Crashpad's handler
+already ships, signed, inside Electron's framework.
+**Owed:** a smoke run with the journal on showing the ffmpeg log exists with
+the key redacted (`pnpm smoke:multistream` with `VIDEORC_METRICS_JOURNAL=1`,
+then grep `<userData>/logs/ffmpeg/`); a dev-build forced renderer crash
+leaving a minidump in `<userData>/Crashpad`; a packaged-build check on the
+lab machine that the app still launches signed and notarized.
 
 ### U3 — Lab machine runbook and machine checks — BUILT
 

@@ -1742,6 +1742,23 @@ export interface EncoderPreferenceSetParams {
   preference: WindowsH264EncoderPreference
 }
 
+/**
+ * The metrics journal (plan 166 S1): an NDJSON time series under
+ * `<userData>/logs/metrics/` for unattended runs. Off by default.
+ */
+export interface MetricsJournalState {
+  /** The journal is writing right now. */
+  enabled: boolean
+  /** The saved `diagnostics.metricsJournal` setting. */
+  setting: boolean
+  /** `VIDEORC_METRICS_JOURNAL=1` forced it on; the setting is ignored. */
+  envOverride: boolean
+}
+
+export interface MetricsJournalSetParams {
+  enabled: boolean
+}
+
 /** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
 export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'
 
