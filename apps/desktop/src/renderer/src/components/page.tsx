@@ -1,4 +1,4 @@
-import type { ReactElement, ReactNode } from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 
@@ -80,20 +80,30 @@ export function ConfigGrid({
  */
 export const CONFIG_GRID_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
 
-/** Gallery archetype: picture cards that fill by available width. */
+/**
+ * Gallery archetype: picture cards that fill by available width. `dense`
+ * packs smaller cards (10 rem), for a picker inside a dialog (plan 174
+ * S3.15b: the Buddy onboarding's official five).
+ */
 export function Gallery({
   children,
-  className
-}: {
+  className,
+  dense = false,
+  ...props
+}: ComponentProps<'div'> & {
   children: ReactNode
-  className?: string
+  dense?: boolean
 }): ReactElement {
   return (
     <div
       className={cn(
-        'grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]',
+        'grid gap-3',
+        dense
+          ? '[grid-template-columns:repeat(auto-fill,minmax(10rem,1fr))]'
+          : '[grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]',
         className
       )}
+      {...props}
     >
       {children}
     </div>

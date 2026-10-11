@@ -239,7 +239,7 @@ describe('Test your Buddy (plan 169 D14)', () => {
 
   it('opens on T while the Avatar section has focus', async () => {
     await render()
-    await press('t', byTestId('buddy-preview-zoom'))
+    await press('t', byTestId('buddy-test-open'))
     await act(async () => {
       await vi.dynamicImportSettled()
     })

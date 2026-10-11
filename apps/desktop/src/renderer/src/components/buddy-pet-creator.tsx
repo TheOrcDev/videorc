@@ -1254,7 +1254,9 @@ function BuildStep({
         {state.problem &&
         !failure &&
         !Object.values(state.sheetErrors).includes(state.problem.message) ? (
-          <FieldError data-testid="buddy-pet-problem">{state.problem.message}</FieldError>
+          <Alert data-testid="buddy-pet-problem" variant="destructive">
+            <AlertTitle>{state.problem.message}</AlertTitle>
+          </Alert>
         ) : null}
       </PanelSection>
     </>

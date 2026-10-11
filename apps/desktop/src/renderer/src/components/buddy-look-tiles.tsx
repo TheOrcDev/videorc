@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
+import { FieldError } from '@/components/ui/field'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
@@ -12,6 +13,7 @@ import type { CohostAvatarPhase, CohostAvatarState } from '@/lib/backend'
 import { COHOST_AVATAR_STATES } from '@/lib/backend'
 import { buddyRedoLabel } from '@/lib/buddy-create-gate'
 import { buddyLookDraftImages, isBuddyLookRedoState } from '@/lib/buddy-look-view'
+import { BUDDY_ONBOARDING_STEP4 } from '@/lib/buddy-onboarding-copy'
 import { formatTimecode } from '@/lib/format-time'
 import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
@@ -30,6 +32,19 @@ export interface BuddyPoseTilesCopy {
 }
 
 export type BuddyPoseTilesView = 'working' | 'draft' | 'empty'
+
+/**
+ * The one copy for a draft, wherever it shows (plan 174 G-11): the shared
+ * document's pose names, Redo and the line for a pose that did not come
+ * out; skeletons alone while it is drawn (the working line says the rest).
+ */
+export const BUDDY_LOOK_TILES_COPY: BuddyPoseTilesCopy = {
+  labels: BUDDY_ONBOARDING_STEP4.poseLabels,
+  redo: BUDDY_ONBOARDING_STEP4.redo,
+  working: null,
+  redrawing: null,
+  failed: () => BUDDY_ONBOARDING_STEP4.poseFailed
+}
 
 /**
  * The four poses of a look being made (plan 169 D13, plan 170 D14 step 4):
@@ -202,7 +217,8 @@ export function BuddyLookWorkingLine({
 /**
  * One pose. Its own size container, because its width follows its column
  * (about 110 to 350 px): the R chip shows only where it fits beside Redo,
- * and only while the tile has the focus.
+ * and only while Redo has the focus. The tile itself is never a tab stop
+ * (plan 174 G-18): Redo is the one control, and R on it redoes too.
  */
 export function BuddyPoseTile({
   state,
@@ -229,19 +245,10 @@ export function BuddyPoseTile({
 }): ReactNode {
   return (
     <MediaCard
-      className="group/buddy-tile @container/buddy-tile gap-2 p-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="group/buddy-tile @container/buddy-tile gap-2 p-2"
       data-done={done || undefined}
       data-state={state}
       data-testid="buddy-look-tile"
-      tabIndex={redo ? 0 : undefined}
-      onKeyDown={(event) => {
-        if (!redo || redo.disabled || event.metaKey || event.ctrlKey || event.altKey) return
-        if (event.target !== event.currentTarget) return
-        if (event.key === 'r' || event.key === 'R') {
-          event.preventDefault()
-          redo.run()
-        }
-      }}
     >
       <div className="flex min-h-5 flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <span className="text-xs font-medium text-foreground">{label}</span>
@@ -275,11 +282,7 @@ export function BuddyPoseTile({
           {status}
         </p>
       ) : null}
-      {error ? (
-        <p className="text-xs text-muted-foreground" data-testid="buddy-look-tile-error">
-          {error}
-        </p>
-      ) : null}
+      {error ? <FieldError data-testid="buddy-look-tile-error">{error}</FieldError> : null}
       {redo ? (
         <DisabledReason className="w-full" reason={redo.disabled && !working ? redo.reason : null}>
           <Button
@@ -290,11 +293,18 @@ export function BuddyPoseTile({
             type="button"
             variant="ghost"
             onClick={redo.run}
+            onKeyDown={(event) => {
+              if (redo.disabled || working || event.metaKey || event.ctrlKey || event.altKey) return
+              if (event.key === 'r' || event.key === 'R') {
+                event.preventDefault()
+                redo.run()
+              }
+            }}
           >
             <RefreshIcon data-icon="inline-start" />
             {redo.label}
             {redo.disabled || working ? null : (
-              <Kbd className="ml-0.5 hidden @min-[7.5rem]/buddy-tile:group-focus/buddy-tile:inline-flex">
+              <Kbd className="ml-0.5 hidden @min-[7.5rem]/buddy-tile:group-focus-within/buddy-tile:inline-flex">
                 R
               </Kbd>
             )}

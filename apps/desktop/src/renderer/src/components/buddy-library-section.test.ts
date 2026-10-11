@@ -242,11 +242,21 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
         (element) => element.dataset.id
       )
     ).toEqual([GRUM, PEBBLE])
-    // The active one: badged, no Use.
-    expect(card(GRUM).querySelector('[data-testid="buddy-library-active"]')?.textContent).toBe(
+    // The active one: one signal (the card's own tag and aria-current), no Use.
+    expect(card(GRUM).querySelector('[data-testid="buddy-picture-card-active"]')?.textContent).toBe(
       'Active'
     )
+    expect(card(GRUM).getAttribute('aria-current')).toBe('true')
+    expect(card(PEBBLE).getAttribute('aria-current')).toBeNull()
     expect(card(GRUM).querySelector('[data-testid="buddy-library-use"]')).toBeNull()
+    // The personality is visible, not a tooltip (plan 174 G-17).
+    expect(card('official:orc').getAttribute('title')).toBeNull()
+    expect(
+      card('official:orc').querySelector('[data-testid="buddy-picture-card-detail"]')?.textContent
+    ).toBe(BUDDY_OFFICIAL_CATALOG[1]!.personality)
+    expect(card(GRUM).querySelector('img')?.getAttribute('alt')).toBe('')
+    // All five official Buddies move: the tag would say nothing (V-1).
+    expect(document.querySelector('[data-testid="buddy-picture-card-alive"]')).toBeNull()
     expect(card(GRUM).querySelector('img')?.getAttribute('src')).toBe(
       `videorc-asset://buddy/library/${GRUM}/idle-0a1b2c3d.png`
     )
@@ -449,7 +459,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
       ).client
     )
     const tagged = (id: string) =>
-      card(id).querySelector('[data-testid="buddy-library-alive-tag"]')?.textContent ?? null
+      card(id).querySelector('[data-testid="buddy-picture-card-alive"]')?.textContent ?? null
     expect(
       ['official:golem', 'official:orc', 'official:goblin', 'official:pirate', GRUM, PEBBLE].map(
         tagged

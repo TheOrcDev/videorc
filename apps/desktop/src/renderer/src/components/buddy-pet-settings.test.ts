@@ -14,7 +14,7 @@ import { BuddyPetSettings } from './buddy-pet-settings'
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
   react: vi.fn((_reaction: string) => true),
-  previews: [] as { packId: string; size: number }[],
+  previews: [] as { packId: string; size: number; paused?: boolean }[],
   openCreator: vi.fn()
 }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
@@ -23,7 +23,11 @@ vi.mock('@/lib/buddy-pet-creator-nav', () => ({ openBuddyPetCreator: mocked.open
 vi.mock('@/components/buddy-pet-preview-lazy', () => ({
   LazyBuddyPetPreview: (props: BuddyPetPreviewProps) => {
     useImperativeHandle(props.ref, () => ({ react: mocked.react }))
-    mocked.previews.push({ packId: props.packId, size: props.size })
+    mocked.previews.push({
+      packId: props.packId,
+      size: props.size,
+      ...(props.paused === undefined ? {} : { paused: props.paused })
+    })
     return createElement('div', { 'data-testid': 'buddy-pet-preview', 'data-pack': props.packId })
   }
 }))
@@ -170,31 +174,43 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await render()
     expect(kindButton('Still').getAttribute('data-state')).toBe('on')
     expect(document.querySelectorAll('[data-testid="buddy-look-tile"]')).toHaveLength(4)
-    expect(mocked.previews.at(-1)).toEqual({ packId: 'still', size: 160 })
+    expect(mocked.previews.at(-1)).toEqual({ packId: 'still', size: 160, paused: false })
   })
 
-  it('zooms the living preview into a dialog at 420 px, with the same pack', async () => {
+  it('folds Zoom into Test and pauses the living preview (plan 174 G-22, G-20)', async () => {
     await render({
       cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
       list: pets([PACK_A])
     })
-    const zoom = button('buddy-preview-zoom')
-    expect(zoom.getAttribute('aria-label')).toBe('Zoom in on Grum')
+    expect(document.querySelector('[data-testid="buddy-preview-zoom"]')).toBeNull()
     expect(document.querySelector('[data-testid="buddy-preview-zoom-dialog"]')).toBeNull()
-    mocked.previews.length = 0
-    await act(async () => zoom.click())
-    const dialog = document.querySelector('[data-testid="buddy-preview-zoom-dialog"]')!
-    expect(dialog.getAttribute('role')).toBe('dialog')
-    expect(
-      dialog.querySelector('[data-testid="buddy-pet-preview"]')?.getAttribute('data-pack')
-    ).toBe(PACK_A.packId)
-    expect(mocked.previews).toContainEqual({ packId: PACK_A.packId, size: 420 })
-    // The tab's own preview stays under it, at its own size.
-    expect(mocked.previews).toContainEqual({ packId: PACK_A.packId, size: 160 })
-    await act(async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(button('buddy-test-open')).toBeTruthy()
+    const pause = button('buddy-preview-pause')
+    expect(pause.getAttribute('aria-pressed')).toBe('false')
+    expect(mocked.previews.at(-1)).toEqual({ packId: PACK_A.packId, size: 160, paused: false })
+    await act(async () => pause.click())
+    expect(pause.getAttribute('aria-pressed')).toBe('true')
+    expect(mocked.previews.at(-1)).toEqual({ packId: PACK_A.packId, size: 160, paused: true })
+  })
+
+  it('moves through the moves with arrow keys and wears one with Enter (plan 174 G-18)', async () => {
+    await render({
+      cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
+      list: pets([PACK_A, PACK_B])
     })
-    expect(document.querySelector('[data-testid="buddy-preview-zoom-dialog"]')).toBeNull()
+    const rows = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-pack-row"]')]
+    expect(rows.map((row) => row.getAttribute('role'))).toEqual(['radio', 'radio'])
+    // One tab stop: the worn row.
+    expect(rows.map((row) => row.tabIndex)).toEqual([0, -1])
+    rows[0]!.focus()
+    await act(async () =>
+      rows[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    )
+    expect(document.activeElement).toBe(rows[1])
+    // Browsing wears nothing; Enter does.
+    expect(patchCohostSettings).not.toHaveBeenCalled()
+    await act(async () => rows[1]!.click())
+    expect(lastPersona().avatar).toEqual({ kind: 'alive', packId: PACK_B.packId })
   })
 
   it('wears the pack worn last when Alive comes back (plan 174 G-10)', async () => {

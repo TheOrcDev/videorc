@@ -70,6 +70,8 @@ export interface BuddyPetPreviewProps {
   talking?: boolean
   /** The pet's name for assistive tech. */
   label?: string
+  /** Hold the current frame and stop the loop (plan 174 G-20, WCAG 2.2.2); the host draws the control. */
+  paused?: boolean
   /** Shown until the first frame is drawn, and when the pack cannot load. */
   placeholder?: ReactNode
   className?: string
@@ -114,6 +116,7 @@ export function BuddyPetPreview({
   pose = null,
   talking = false,
   label,
+  paused = false,
   placeholder,
   className,
   onLoad,
@@ -141,7 +144,8 @@ export function BuddyPetPreview({
   const margin = Math.ceil(size * MARGIN_RATIO)
   const pixelSize = Math.ceil(size * dpr)
   const stillKey = packId === BUDDY_STILL_PACK_ID ? JSON.stringify(stillImages ?? {}) : ''
-  const active = pack !== null && pageVisible && onscreen
+  // Paused reads like offscreen: the loop stops, the last frame stays drawn.
+  const active = pack !== null && pageVisible && onscreen && !paused
   activeRef.current = active
 
   const latest = useRef({
@@ -427,6 +431,7 @@ export function BuddyPetPreview({
       ref={wrapperRef}
       className={cn('relative shrink-0', className)}
       data-pack={packId}
+      data-paused={paused || undefined}
       data-status={status}
       data-testid="buddy-pet-preview"
       style={{ width: size, height: size }}

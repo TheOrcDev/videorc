@@ -9,6 +9,7 @@ import {
   SparkleIcon
 } from '@/components/icons'
 import {
+  useEffect,
   useRef,
   useState,
   type DragEvent,
@@ -20,17 +21,18 @@ import {
 import { BuddyCreateGateAlert } from '@/components/buddy-create-gate-alert'
 import { BuddyExampleChips } from '@/components/buddy-example-chips'
 import {
+  BUDDY_LOOK_TILES_COPY,
   BuddyLookWorkingLine,
-  BuddyPoseTiles,
-  type BuddyPoseTilesCopy
+  BuddyPoseTiles
 } from '@/components/buddy-look-tiles'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
+import { BuddyPictureCard } from '@/components/buddy-picture-card'
 import { BuddyStreamDemo } from '@/components/buddy-stream-demo'
 import { CloudAiConsentDialog } from '@/components/cloud-ai-consent-dialog'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { GroupedList } from '@/components/list-row'
+import { Gallery } from '@/components/page'
 import { Alert, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -104,7 +106,6 @@ import {
   buddyOnboardingCounter,
   buddyOnboardingProgress
 } from '@/lib/buddy-onboarding-copy'
-import { MediaCard } from '@/components/media-card'
 import { cn } from '@/lib/utils'
 import {
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
@@ -115,15 +116,6 @@ import {
 
 /** The result's living preview, like the look panel's draft preview. */
 const RESULT_PREVIEW_PX = 112
-
-/** Step 4's tiles in the shared copy: the pose names, Redo, and one line for a pose that failed. */
-const ONBOARDING_TILES_COPY: BuddyPoseTilesCopy = {
-  labels: BUDDY_ONBOARDING_STEP4.poseLabels,
-  redo: BUDDY_ONBOARDING_STEP4.redo,
-  working: null,
-  redrawing: null,
-  failed: () => BUDDY_ONBOARDING_STEP4.poseFailed
-}
 
 /** "Start a new one" (plan 174 G-13): leave the waiting Buddy and begin again. */
 const START_NEW_LABEL = 'Start a new one'
@@ -368,6 +360,16 @@ export function BuddyOnboarding({
   const dirty = buddyOnboardingDraftDirty(stored)
   const title = BUDDY_ONBOARDING_STEP_TITLES[step - 1]!
 
+  // A step with no field of its own (1, 4) would leave the focus on a button
+  // that just went away; the body takes it, so reading goes on from there
+  // (plan 174 G-21). Steps 2 and 3 focus their first field themselves.
+  const bodyRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const focused = document.activeElement
+    if (focused && focused !== document.body && sheetRef.current?.contains(focused)) return
+    bodyRef.current?.focus()
+  }, [step])
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -401,12 +403,23 @@ export function BuddyOnboarding({
             <StepMeter step={step} />
           </div>
           <DialogTitle className="text-base font-semibold">{title}</DialogTitle>
+          {/* A step change is announced (plan 174 G-21); the region stays put across steps. */}
+          <span
+            aria-atomic="true"
+            aria-live="polite"
+            className="sr-only"
+            data-testid="buddy-onboarding-announce"
+          >
+            {`${buddyOnboardingProgress(step)}: ${title}`}
+          </span>
         </DialogHeader>
 
         <div
           key={step}
-          className="@container/onboarding min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4"
+          ref={bodyRef}
+          className="@container/onboarding min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 outline-none"
           data-testid="buddy-onboarding-body"
+          tabIndex={-1}
         >
           {step === 1 ? (
             <MeetStep
@@ -447,9 +460,9 @@ export function BuddyOnboarding({
             />
           )}
           {actionError ? (
-            <FieldError className="mt-3" data-testid="buddy-onboarding-error">
-              {actionError}
-            </FieldError>
+            <Alert className="mt-3" data-testid="buddy-onboarding-error" variant="destructive">
+              <AlertTitle>{actionError}</AlertTitle>
+            </Alert>
           ) : null}
         </div>
 
@@ -683,42 +696,21 @@ function MeetStep({
         <SubHeading note={BUDDY_ONBOARDING_STEP1.galleryNote}>
           {BUDDY_ONBOARDING_STEP1.galleryHeading}
         </SubHeading>
-        <div
-          className="grid grid-cols-2 gap-2 @lg/onboarding:grid-cols-3 @2xl/onboarding:grid-cols-5"
-          data-testid="buddy-onboarding-gallery"
-        >
+        <Gallery dense data-testid="buddy-onboarding-gallery">
           {official.map((card) => (
-            <MediaCard
+            <BuddyPictureCard
               key={card.id}
-              className="gap-1.5 p-1.5"
-              data-active={card.active || undefined}
+              active={card.active}
               data-id={card.id}
               data-testid="buddy-onboarding-official"
-              selected={card.active}
-              title={card.hint}
+              detail={card.hint}
+              name={card.name}
+              picture={card.slug ? BUDDY_OFFICIAL_ART[card.slug].idle : null}
+              subtitle={card.subtitle}
             >
-              <div className="aspect-square overflow-hidden rounded-chip bg-foreground/[0.04]">
-                <img
-                  alt={card.name}
-                  className="size-full object-contain p-1.5"
-                  decoding="async"
-                  draggable={false}
-                  src={card.slug ? BUDDY_OFFICIAL_ART[card.slug].idle : undefined}
-                />
-              </div>
-              <div className="flex min-w-0 flex-col gap-0.5 px-0.5">
-                <span className="truncate text-sm font-medium text-foreground">{card.name}</span>
-                <span className="line-clamp-2 min-h-8 text-xs text-muted-foreground">
-                  {card.subtitle}
-                </span>
-              </div>
-              {card.active ? (
-                <div className="flex h-6 items-center px-0.5">
-                  <Badge variant="success">{BUDDY_LIBRARY_COPY.active}</Badge>
-                </div>
-              ) : (
+              {card.active ? null : (
                 <Button
-                  className="w-full"
+                  className="flex-1"
                   data-testid="buddy-onboarding-use-official"
                   disabled={busy}
                   size="xs"
@@ -729,9 +721,9 @@ function MeetStep({
                   {BUDDY_ONBOARDING_STEP1.cardAction}
                 </Button>
               )}
-            </MediaCard>
+            </BuddyPictureCard>
           ))}
-        </div>
+        </Gallery>
       </section>
       {gate ? (
         <BuddyCreateGateAlert
@@ -1089,7 +1081,7 @@ function CreateStep({
       <BuddyPoseTiles
         busy={busy}
         controller={lookController}
-        copy={ONBOARDING_TILES_COPY}
+        copy={BUDDY_LOOK_TILES_COPY}
         imagesLeft={buddyImagesLeftLine(capabilities)}
         redoAllowed={redoGate === null}
         redoReason={redoGate?.reason ?? null}

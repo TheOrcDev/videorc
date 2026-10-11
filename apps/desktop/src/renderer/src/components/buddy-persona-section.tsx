@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { BuddyExampleChips } from '@/components/buddy-example-chips'
 import { PanelSection } from '@/components/panel-section'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
@@ -109,12 +110,13 @@ export function BuddyPersonaSection(): ReactElement | null {
           <ResetIcon data-icon="inline-start" />
           Start over
         </Button>
-        {error ? (
-          <FieldError className="mt-1" data-testid="buddy-save-error">
-            {error}
-          </FieldError>
-        ) : null}
       </div>
+      {/* A save that failed is the section's (plan 174 G-7). */}
+      {error ? (
+        <Alert data-testid="buddy-save-error" variant="destructive">
+          <AlertTitle>{error}</AlertTitle>
+        </Alert>
+      ) : null}
 
       <FieldGroup variant="grouped">
         <BuddyPersonalityField persona={persona} onSave={saveQuietly} />

@@ -219,8 +219,10 @@ describe('BuddyLookSection (plan 169 D13, plan 170 D14)', () => {
     await render({ client: backend.client })
     expect(byTestId('buddy-look')?.dataset.view).toBe('working')
     expect(document.querySelectorAll('[data-testid="buddy-look-skeleton"]')).toHaveLength(4)
-    expect(tiles()[0]!.textContent).toContain('Drawing the character')
-    expect(tiles()[1]!.textContent).toContain('Next, from idle')
+    // One copy for a draft wherever it shows (plan 174 G-11): the line is the onboarding's.
+    expect(byTestId('buddy-look-working')?.textContent).toBe(
+      'Drawing the pictures. This takes one to three minutes.'
+    )
     // Plan 174 G-14: the clock runs, and Cancel discards the running id.
     expect(byTestId('buddy-look-elapsed')?.textContent).toMatch(/^\d:\d\d$/)
     await click(byTestId('buddy-look-cancel'))
@@ -241,18 +243,27 @@ describe('BuddyLookSection (plan 169 D13, plan 170 D14)', () => {
       .filter((tile) => tile.querySelector('[data-testid="buddy-look-redo"]'))
       .map((tile) => tile.dataset.state)
     expect(withRedo).toEqual(['talk', 'laugh', 'think'])
-    // The failed pose says why; the made ones show their draft picture.
-    expect(tiles()[3]!.textContent).toContain('The model could not draw think.')
+    // The failed pose says so in the shared words; the made ones show their draft picture.
+    expect(tiles()[3]!.textContent).toContain('This pose did not come out. Redo it.')
+    expect(tiles().map((tile) => tile.querySelector('span')?.textContent)).toEqual([
+      'Idle',
+      'Talk',
+      'Laugh',
+      'Think'
+    ])
+    expect(byTestId('buddy-look-keep')?.textContent).toContain('Use as my Buddy')
     expect(tiles()[1]!.querySelector('img')?.getAttribute('src')).toBe(
       `videorc-asset://buddy/default/drafts/${ID}/talk.png`
     )
     expect(mocked.previews.at(-1)).toEqual({ packId: 'still', stillImages: draft().images })
 
-    // R on a focused tile redoes it.
+    // The tile is no tab stop (plan 174 G-18); R on its focused Redo redoes it.
     const laugh = tiles()[2]!
+    expect(laugh.hasAttribute('tabindex')).toBe(false)
+    const redo = laugh.querySelector<HTMLButtonElement>('[data-testid="buddy-look-redo"]')!
     await act(async () => {
-      laugh.focus()
-      laugh.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', bubbles: true }))
+      redo.focus()
+      redo.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', bubbles: true }))
     })
     await settle()
     expect(backend.requestTyped).toHaveBeenCalledWith(

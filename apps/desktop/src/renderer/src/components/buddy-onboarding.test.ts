@@ -322,10 +322,28 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
       'official:pirate',
       'official:robot'
     ])
-    // The active one is badged, the others offer "Use this one".
+    // The active one is marked by the one picture card, the others offer "Use this one".
     expect(cards[0]!.dataset.active).toBe('true')
+    expect(cards[0]!.getAttribute('aria-current')).toBe('true')
     expect(cards[0]!.querySelector('[data-testid="buddy-onboarding-use-official"]')).toBeNull()
     expect(cards[1]!.textContent).toContain(BUDDY_ONBOARDING_STEP1.cardAction)
+    expect(cards[1]!.querySelector('[data-testid="buddy-picture-card-detail"]')?.textContent).toBe(
+      BUDDY_OFFICIAL_CATALOG[1]!.personality
+    )
+    // The step is announced, and the demo's lines are in its name, with a pause (plan 174 G-20, G-21).
+    expect(byTestId('buddy-onboarding-announce')?.textContent).toBe(
+      'Step 1 of 4: Meet your sidekick'
+    )
+    expect(byTestId('buddy-stream-demo')?.getAttribute('aria-label')).toContain(
+      BUDDY_ONBOARDING_STEP1.demoBubbles[0]
+    )
+    const pause = byTestId<HTMLButtonElement>('buddy-stream-demo-pause')!
+    expect(pause.getAttribute('aria-pressed')).toBe('false')
+    await click(pause)
+    expect(byTestId('buddy-stream-demo')?.dataset.paused).toBe('true')
+    expect(pause.getAttribute('aria-pressed')).toBe('true')
+    await click(byTestId('buddy-onboarding-create-own'))
+    expect(byTestId('buddy-onboarding-announce')?.textContent).toBe('Step 2 of 4: Describe it')
   })
 
   it('shows one still frame with reduced motion: the greeting and the chip', async () => {
@@ -337,6 +355,8 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     await render({ client: fakeBackend().client })
     const demo = byTestId('buddy-stream-demo')!
     expect(demo.dataset.pose).toBe('talk')
+    // Nothing moves, so there is nothing to pause.
+    expect(byTestId('buddy-stream-demo-pause')).toBeNull()
     expect(byTestId('buddy-stream-demo-bubble')?.textContent).toBe(
       BUDDY_ONBOARDING_STEP1.demoBubbles[0]
     )

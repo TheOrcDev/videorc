@@ -60,6 +60,17 @@ export interface BuddyLibraryCard {
   canMakeAlive: boolean
 }
 
+/**
+ * Whether a group's "Alive" tag says anything (plan 174 V-1): only when the
+ * group holds Buddies that move and Buddies that do not. All five official
+ * Buddies move, so their cards carry no tag.
+ */
+export function buddyAliveTagDistinguishes(
+  cards: readonly Pick<BuddyLibraryCard, 'alive'>[]
+): boolean {
+  return cards.some((card) => card.alive) && cards.some((card) => !card.alive)
+}
+
 export interface BuddyLibraryView {
   signedIn: boolean
   official: BuddyLibraryCard[]

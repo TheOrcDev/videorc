@@ -5,6 +5,7 @@ import type { AiCapabilities, BuddyLibraryEntry, BuddyLibraryState } from '@/lib
 import {
   EMPTY_BUDDY_ONBOARDING_INPUT,
   BUDDY_INVITATION_STORAGE_KEY,
+  buddyAliveTagDistinguishes,
   buddyCreateFailureLine,
   buddyInvitationVisible,
   buddyLibraryBusyLine,
@@ -368,6 +369,15 @@ describe('the onboarding steps (plan 170 D14)', () => {
       inspirationBase64: 'pic',
       name: 'Grum'
     })
+  })
+})
+
+describe('the Alive tag (plan 174 V-1)', () => {
+  it('shows only where it tells cards apart', () => {
+    expect(buddyAliveTagDistinguishes([{ alive: true }, { alive: true }])).toBe(false)
+    expect(buddyAliveTagDistinguishes([{ alive: false }, { alive: false }])).toBe(false)
+    expect(buddyAliveTagDistinguishes([{ alive: true }, { alive: false }])).toBe(true)
+    expect(buddyAliveTagDistinguishes([])).toBe(false)
   })
 })
 

@@ -5,13 +5,14 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import {
+  BUDDY_LOOK_TILES_COPY,
   BuddyLookWorkingLine,
   BuddyPoseTile,
-  BuddyPoseTiles,
-  type BuddyPoseTilesCopy
+  BuddyPoseTiles
 } from '@/components/buddy-look-tiles'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
@@ -21,7 +22,6 @@ import { buddyImagesLeftLine, buddyLookRedoGate } from '@/lib/buddy-create-gate'
 import { BUDDY_DEFAULT_PACK, buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import { buddyLookDraftImages } from '@/lib/buddy-look-view'
 import { BUDDY_ONBOARDING_STEP4 } from '@/lib/buddy-onboarding-copy'
-import { BUDDY_STATE_LABELS } from '@/lib/buddy-persona-view'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
 
@@ -29,16 +29,6 @@ import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
 const DRAFT_PREVIEW_PX = 112
 
 type LookView = 'working' | 'draft' | 'current'
-
-/** Plan 169's words for the tiles in this panel. */
-const LOOK_PANEL_TILES_COPY: BuddyPoseTilesCopy = {
-  labels: BUDDY_STATE_LABELS,
-  redo: 'Redo',
-  working: (state, phase) =>
-    phase === 'done' ? 'Done' : state === 'idle' ? 'Drawing the character…' : 'Next, from idle',
-  redrawing: 'Redrawing…',
-  failed: (reason) => reason
-}
 
 /**
  * "Your Buddy's look" (plan 169 D10 to D13), the Avatar section's Still
@@ -122,9 +112,9 @@ export function BuddyLookSection({
           </FieldLabel>
           <FieldDescription>
             {view === 'working'
-              ? 'Idle first, then talking, laughing and thinking from it. About a minute.'
+              ? 'Idle first, then talk, laugh and think from it.'
               : view === 'draft'
-                ? `Keep it to give ${persona.name} this look. Redo remakes one pose from this idle.`
+                ? `Use it to give ${persona.name} this look. Redo remakes one pose from this idle.`
                 : persona.source === 'default'
                   ? 'The default Buddy until you create your own.'
                   : `What ${persona.name} wears on stream.`}
@@ -139,7 +129,7 @@ export function BuddyLookSection({
                   <BuddyPoseTile
                     key={avatarState}
                     badge={bundled ? 'Default' : fallsBack ? 'Uses idle' : undefined}
-                    label={BUDDY_STATE_LABELS[avatarState]}
+                    label={BUDDY_LOOK_TILES_COPY.labels[avatarState]}
                     state={avatarState}
                     url={url}
                   />
@@ -150,7 +140,7 @@ export function BuddyLookSection({
             <BuddyPoseTiles
               busy={busy}
               controller={controller}
-              copy={LOOK_PANEL_TILES_COPY}
+              copy={BUDDY_LOOK_TILES_COPY}
               imagesLeft={buddyImagesLeftLine(capabilities)}
               redoAllowed={redoGate === null}
               redoReason={redoGate?.reason ?? null}
@@ -193,7 +183,7 @@ export function BuddyLookSection({
                     type="button"
                     onClick={() => void keep()}
                   >
-                    Keep this look
+                    {BUDDY_ONBOARDING_STEP4.use}
                     <ShortcutKeys
                       accelerator="CmdOrCtrl+Enter"
                       className="ml-0.5"
@@ -246,7 +236,11 @@ export function BuddyLookSection({
               </span>
             </div>
           ) : null}
-          {problem ? <FieldError data-testid="buddy-look-error">{problem}</FieldError> : null}
+          {problem ? (
+            <Alert data-testid="buddy-look-error" variant="destructive">
+              <AlertTitle>{problem}</AlertTitle>
+            </Alert>
+          ) : null}
         </Field>
       </FieldGroup>
     </div>

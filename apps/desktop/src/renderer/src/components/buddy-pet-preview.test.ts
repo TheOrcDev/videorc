@@ -287,6 +287,21 @@ describe('BuddyPetPreview (plan 168 S-D1)', () => {
     expect(preview().dataset.frame).toBe('ahead')
   })
 
+  it('holds still while paused and plays again when told (plan 174 G-20)', async () => {
+    await render()
+    await flush()
+    expect(frames.size + vi.getTimerCount()).toBeGreaterThan(0)
+    await render({ paused: true })
+    expect(frames.size).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(preview().dataset.paused).toBe('true')
+    await act(async () => vi.advanceTimersByTime(1000))
+    expect(frames.size).toBe(0)
+    await render({ paused: false })
+    expect(frames.size).toBe(1)
+    expect(preview().dataset.paused).toBeUndefined()
+  })
+
   it('keeps the placeholder and names the reason when the pack cannot load', async () => {
     mocked.load.mockImplementation(async () => {
       throw new Error('This pack is missing pet.webp. Import it again.')
