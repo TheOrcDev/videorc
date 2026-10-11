@@ -7,7 +7,8 @@ import {
   activityCapabilityNote,
   activityHighlight,
   activityRowActions,
-  activityRowShowsPerson
+  activityRowShowsPerson,
+  activityRowTint
 } from '@/components/stream-manager/activity-pane'
 import type { CommentHighlightState, LiveChatProviderState } from '@/lib/backend'
 import type { ActivityItem } from '@/lib/stream-activity'
@@ -414,5 +415,84 @@ describe('ActivityPane on stream', () => {
     expect(activityRowActions(rows[0]!, { phase: 'live' }, {}).map(({ id }) => id)).toEqual([
       'copy'
     ])
+  })
+})
+
+// Plan 177: a channel point reward reads as a reward at a glance, and a long
+// one never pushes a row's ⋯ out of the pane.
+describe('ActivityPane reward rows', () => {
+  const reward: ActivityItem = {
+    id: 'reward',
+    kind: 'redemption',
+    filter: 'rewards',
+    platform: 'twitch',
+    name: 'radiumcoders',
+    line: 'Redeemed Hydrate the Orc before the raid · 1,000 Orc Gold',
+    short: 'Hydrate the Orc before the raid · 1,000 Orc Gold',
+    at: '2026-09-24T10:00:00Z',
+    messageId: 'm-reward'
+  }
+  const render = (props: Partial<Parameters<typeof ActivityPane>[0]> = {}): string =>
+    renderToStaticMarkup(
+      createElement(ActivityPane, {
+        items: [reward, ...items],
+        providers: [provider('twitch')],
+        nowMs: Date.parse('2026-09-24T10:01:00Z'),
+        ...props
+      })
+    )
+  const rowClasses = (markup: string, id: string): string[] => {
+    const at = markup.indexOf(`data-activity-id="${id}"`)
+    expect(at).toBeGreaterThan(-1)
+    const row = markup.slice(markup.lastIndexOf('<li', at), at)
+    return (row.match(/class="([^"]*)"/)?.[1] ?? '').split(' ')
+  }
+
+  it('paints the reward tint on reward rows only', () => {
+    const markup = render()
+    expect(rowClasses(markup, 'reward')).toContain('bg-reward/8')
+    expect(markup).toContain('data-row-tint="reward"')
+    expect(rowClasses(markup, 'a')).not.toContain('bg-reward/8')
+    expect(rowClasses(markup, 'b')).not.toContain('bg-reward/8')
+    expect(markup.match(/data-row-tint="reward"/g)).toHaveLength(1)
+  })
+
+  it('keeps hover, and gives way to the on-stream fill', () => {
+    const idle = rowClasses(render(), 'reward')
+    expect(idle).toContain('hover:bg-accent')
+    expect(idle).not.toContain('bg-accent')
+    const live = rowClasses(
+      render({
+        highlightState: { generation: 1, phase: 'live', messageId: 'm-reward' },
+        liveHighlightId: 'm-reward'
+      }),
+      'reward'
+    )
+    expect(live).toContain('bg-accent')
+    expect(live).not.toContain('bg-reward/8')
+  })
+
+  it('tints by kind and highlight phase', () => {
+    expect(activityRowTint(reward, { phase: 'idle' })).toBe('reward')
+    expect(activityRowTint(reward, { phase: 'applying' })).toBe('reward')
+    expect(activityRowTint(reward, { phase: 'live' })).toBeNull()
+    // A sub is support, never a tip: no tint.
+    expect(activityRowTint(items[0]!, { phase: 'idle' })).toBeNull()
+    expect(activityRowTint(items[1]!, { phase: 'idle' })).toBe('paid')
+    expect(activityRowTint(items[1]!, { phase: 'live' })).toBeNull()
+  })
+
+  it('lays rows out as a block, so a long reward truncates instead of widening every row', () => {
+    // The shared ScrollArea's viewport overrides Radix's table layout.
+    expect(render()).toMatch(/data-slot="scroll-area-viewport"[^>]*\[&amp;&gt;div\]:block!/)
+  })
+
+  it("paints chat's paid tint on tips, without its ring", () => {
+    const markup = render()
+    expect(rowClasses(markup, 'b')).toContain('bg-warning/10')
+    expect(rowClasses(markup, 'b')).not.toContain('ring-1')
+    expect(rowClasses(markup, 'a')).not.toContain('bg-warning/10')
+    expect(rowClasses(markup, 'reward')).not.toContain('bg-warning/10')
+    expect(markup).toContain('data-row-tint="paid"')
   })
 })

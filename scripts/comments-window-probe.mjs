@@ -31,6 +31,12 @@ const NEXT_LIVE_SESSION_ID = 'comments-window-probe-next-live'
 const LINK_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-link`
 // Plan 154: the member whose row must paint the member tint.
 const MEMBER_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:youtube:probe-member`
+// Plan 177: a long channel point reward, the row that once pushed its ⋯ out.
+const REWARD_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-reward`
+// Plan 177: a tip paints the paid tint in Activity, as it does in chat.
+const TIP_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-tip`
+// Plan 177: one unbroken token, the content that once widened a whole list.
+const LONG_LINK = `https://videorc.com/download?ref=${'orc'.repeat(40)}`
 const HISTORY_SESSION_ID = 'comments-window-probe-history'
 const HISTORY_MODE = {
   kind: 'history',
@@ -718,6 +724,45 @@ async function probeLinksAndStreaks() {
     'member: a member row paints the member tint and a plain row paints none',
     JSON.stringify(tinted.last?.rowTints)
   )
+  // Plan 177: a reward row paints the reward tint, a tip the paid tint, a
+  // streak row none; every Activity row's ⋯ stays whole inside the pane, and
+  // no list's content is wider than its pane (one long token once widened
+  // every row), in both tiers that show Activity beside chat and both themes.
+  for (const theme of ['light', 'dark']) {
+    await smokeCommand('comments-window-set-theme', { theme })
+    for (const width of [1280, 1040]) {
+      await layoutAt(width)
+      const tag = `rows ${theme} ${width}px`
+      const state = await waitFor(
+        () => smokeCommand('comments-window-reader-state'),
+        (s) => s.theme === theme && s.activityRows?.some((row) => row.id === REWARD_MESSAGE_ID),
+        5000
+      )
+      const rows = state.last?.activityRows ?? []
+      const tintOf = (match) => rows.find(match)?.rowTint
+      assertProbe(
+        state.ok &&
+          tintOf((row) => row.id === REWARD_MESSAGE_ID) === 'reward' &&
+          tintOf((row) => row.id === TIP_MESSAGE_ID) === 'paid' &&
+          tintOf((row) => row.kind === 'watch-streak') === null,
+        `${tag}: a reward paints the reward tint, a tip the paid tint, a streak none`,
+        JSON.stringify(rows)
+      )
+      const cut = rows.filter((row) => !row.menuInside || !row.menuOnTop)
+      assertProbe(
+        state.ok && rows.length > 0 && cut.length === 0,
+        `${tag}: every Activity row's ⋯ sits whole inside the pane`,
+        JSON.stringify(cut.length ? cut : rows)
+      )
+      assertProbe(
+        state.ok && state.last.scrollOverflow?.length === 0,
+        `${tag}: no list is wider than its pane`,
+        JSON.stringify(state.last?.scrollOverflow)
+      )
+    }
+    await layoutAt(1280)
+    await captureState(`activity-rows-${theme}`, `Activity rows, ${theme}`, 1280, 720)
+  }
   const menu = await smokeCommand('comments-window-context-click-link', {
     messageId: LINK_MESSAGE_ID
   })
@@ -1301,10 +1346,50 @@ function linksAndStreakSnapshot() {
           at: '2026-07-10T10:00:05Z'
         }),
         authorRoles: ['member']
-      }
+      },
+      {
+        ...messageFixture({
+          id: REWARD_MESSAGE_ID,
+          platform: 'twitch',
+          sessionId: NEXT_LIVE_SESSION_ID,
+          authorName: 'radiumcoders',
+          messageText: 'radiumcoders redeemed Hydrate the Orc before the raid',
+          at: '2026-07-10T10:00:06Z'
+        }),
+        eventType: 'redemption',
+        rawProviderType: 'channel.channel_points_custom_reward_redemption.add',
+        fragments: [],
+        details: {
+          kind: 'redemption',
+          reward: 'custom',
+          channelPoints: 1000,
+          title: 'Hydrate the Orc before the raid',
+          pointsName: 'Orc Gold'
+        }
+      },
+      {
+        ...messageFixture({
+          id: TIP_MESSAGE_ID,
+          platform: 'twitch',
+          sessionId: NEXT_LIVE_SESSION_ID,
+          authorName: 'sarzdotmd',
+          messageText: 'Cheer500 that transition was clean',
+          at: '2026-07-10T10:00:07Z'
+        }),
+        eventType: 'paid',
+        details: { kind: 'cheer', bits: 500 }
+      },
+      messageFixture({
+        id: `${NEXT_LIVE_SESSION_ID}:twitch:probe-long-link`,
+        platform: 'twitch',
+        sessionId: NEXT_LIVE_SESSION_ID,
+        authorName: 'Long Link',
+        messageText: LONG_LINK,
+        at: '2026-07-10T10:00:08Z'
+      })
     ],
     unreadCount: 4,
-    updatedAt: '2026-07-10T10:00:06Z'
+    updatedAt: '2026-07-10T10:00:09Z'
   }
 }
 

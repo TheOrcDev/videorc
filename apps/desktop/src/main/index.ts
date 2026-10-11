@@ -1854,6 +1854,25 @@ function restyleGlassWindows(): void {
   }
 }
 
+/** Vibrancy tints by OS appearance; the renderer's theme toggle drives it so
+ * the blur material always matches the in-app theme (videorc-design). */
+function applyNativeTheme(theme: string): void {
+  nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
+  repinDarkAlwaysWindows()
+  // AppKit rebuilds each material for the new appearance; the clear glass
+  // strips it again (plan 091).
+  restyleGlassWindows()
+  // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
+  // with the theme; the glass windows' material follows nativeTheme itself,
+  // and every window's page follows it through prefers-color-scheme.
+  for (const window of [mainWindow, commentsWindow, captionsWindow, notesWindow]) {
+    const applied = appliedGlass(window)
+    if (window && !window.isDestroyed() && applied?.mode.kind === 'solid') {
+      window.setBackgroundColor(solidWindowBase(applied.role, theme !== 'light'))
+    }
+  }
+}
+
 // Electron re-applies every window's appearance when nativeTheme.themeSource
 // changes, which drops the per-window pin (a light theme would lighten the
 // dark-always glass). Re-pin them after every theme change.
@@ -10619,6 +10638,13 @@ async function runSmokePreviewMotionCommand(
     return setCommentsWindowAutoShowActivity(params.on)
   }
 
+  if (command === 'comments-window-set-theme') {
+    // The renderer's theme toggle path (plan 177): the probe checks both
+    // themes, never dark alone.
+    applyNativeTheme(params.theme === 'light' ? 'light' : 'dark')
+    return { themeSource: nativeTheme.themeSource }
+  }
+
   if (command === 'comments-window-set-bounds') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
@@ -11187,7 +11213,38 @@ async function runSmokePreviewMotionCommand(
           highlightReasons: Object.fromEntries(rows.map((row) => [
             row.getAttribute('data-message-id'),
             row.querySelector('[data-slot="badge"][title]')?.getAttribute('title') ?? null
-          ]))
+          ])),
+          theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light',
+          // Plan 177: any scroll list whose content is wider than its pane
+          // (Radix's table layout let one long token widen every row). The
+          // viewport's scrollWidth also catches one descendant sticking out
+          // of a wrapper that fits.
+          scrollOverflow: Array.from(document.querySelectorAll('[data-slot="scroll-area-viewport"]'))
+            .filter((viewport) => viewport.clientWidth > 0)
+            .map((viewport) => ({
+              pane: viewport.closest('[data-pane]')?.getAttribute('data-pane') ?? viewport.closest('[data-slot$="-pane"]')?.getAttribute('data-slot') ?? null,
+              content: Math.round(Math.max(viewport.scrollWidth, viewport.firstElementChild?.getBoundingClientRect().width ?? 0)),
+              viewport: viewport.clientWidth
+            }))
+            .filter((list) => list.content > list.viewport + 1),
+          // Plan 177: each Activity row's tint, and whether its ⋯ sits whole
+          // inside the pane and on top (a long reward once pushed it out).
+          activityRows: (() => {
+            const pane = document.querySelector('[data-slot="activity-pane"]')?.getBoundingClientRect();
+            return Array.from(document.querySelectorAll('[data-slot="activity-row"]')).map((row) => {
+              const menu = row.querySelector('button[aria-label^="Actions for"]')?.getBoundingClientRect();
+              const top = menu ? document.elementFromPoint(menu.left + menu.width / 2, menu.top + menu.height / 2) : null;
+              return {
+                id: row.getAttribute('data-activity-id'),
+                kind: row.getAttribute('data-kind'),
+                rowTint: row.getAttribute('data-row-tint'),
+                menuInside: Boolean(pane && menu && menu.width > 0 && menu.left >= pane.left - 1 && menu.right <= pane.right + 1),
+                menuOnTop: Boolean(top?.closest('button[aria-label^="Actions for"]')),
+                menuRight: menu ? Math.round(menu.right) : null,
+                paneRight: pane ? Math.round(pane.right) : null
+              };
+            });
+          })()
         };
       })()`,
       true
@@ -14115,24 +14172,7 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('preview-surface:mode', () => nativePreviewSurfaceProofEnabled)
   secureIpcHandle('preview-surface:pump-mode', () => nativePreviewMainPumpActive)
-  // Vibrancy tints by OS appearance; the renderer's theme toggle drives it so
-  // the blur material always matches the in-app theme (videorc-design).
-  secureIpcHandle('app:set-native-theme', (_event, theme: string) => {
-    nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
-    repinDarkAlwaysWindows()
-    // AppKit rebuilds each material for the new appearance; the clear glass
-    // strips it again (plan 091).
-    restyleGlassWindows()
-    // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
-    // with the theme; the glass windows' material follows nativeTheme itself,
-    // and every window's page follows it through prefers-color-scheme.
-    for (const window of [mainWindow, commentsWindow, captionsWindow, notesWindow]) {
-      const applied = appliedGlass(window)
-      if (window && !window.isDestroyed() && applied?.mode.kind === 'solid') {
-        window.setBackgroundColor(solidWindowBase(applied.role, theme !== 'light'))
-      }
-    }
-  })
+  secureIpcHandle('app:set-native-theme', (_event, theme: string) => applyNativeTheme(theme))
   secureIpcHandle('preview-window:open', () => openPreviewWindow())
   secureIpcHandle('preview-window:close', () => closePreviewWindow())
   secureIpcHandle('preview-window:toggle', () => togglePreviewWindow())
