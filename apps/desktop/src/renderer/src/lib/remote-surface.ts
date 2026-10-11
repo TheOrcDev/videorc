@@ -244,6 +244,27 @@ export class RemoteSurfacePublisher {
   }
 }
 
+/** What a phone or a deck reads when Videorc refuses a key (plan 174 I-11). */
+export const REMOTE_INTENT_COPY = {
+  recordDidNotStart: "Recording didn't start. Check Studio on your computer.",
+  notRunning: "You're not recording or live.",
+  didNotStop: "Couldn't stop. Check Studio on your computer.",
+  toggleFailed: "That didn't work. Check Studio on your computer.",
+  streamNotSetUp: 'Use Go Live… on your computer first.',
+  streamDidNotStart: "The livestream didn't start. Finish going live on your computer.",
+  microphone: "Couldn't change the microphone.",
+  systemAudio: "System audio isn't available.",
+  sceneMissing: "That scene isn't available anymore.",
+  sceneFailed: "Couldn't switch the scene.",
+  takeoverMissing: "That takeover isn't available anymore.",
+  takeoverShow: "Couldn't show the takeover.",
+  takeoverHide: "Couldn't hide the takeover.",
+  windowMissing: "That window isn't available.",
+  messageMissing: 'Choose a message to put on stream.',
+  unsupported: "This version of Videorc can't do that. Update Videorc.",
+  failed: 'Something went wrong. Check Studio on your computer.'
+} as const
+
 /** Executes a remote intent through the Studio's existing action handlers. */
 export async function executeRemoteIntent(
   payload: unknown,
@@ -269,23 +290,22 @@ export async function executeRemoteIntent(
     }
   }
 
+  // Plan 174 I-11: phones and decks show these words as they are, so they
+  // are plain copy (docs/ui-copy.md): no ids, no "session", one next step.
+  const alreadyRunning = "You're already recording or live."
   try {
     switch (intent.kind) {
       case 'recordStart':
-        if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
+        if (context.sessionActive) return void (await ack(false, alreadyRunning))
         return void ((await context.startRecording())
           ? await ack(true)
-          : await ack(
-              false,
-              context.recordBlockedReason ??
-                'The capture session did not start. Check Studio for details.'
-            ))
+          : await ack(false, context.recordBlockedReason ?? REMOTE_INTENT_COPY.recordDidNotStart))
       case 'recordStop':
       case 'streamStop':
-        if (!context.sessionActive) return void (await ack(false, 'No active session.'))
+        if (!context.sessionActive) return void (await ack(false, REMOTE_INTENT_COPY.notRunning))
         return void ((await context.stopSession())
           ? await ack(true)
-          : await ack(false, 'The active session did not stop. Check Studio for details.'))
+          : await ack(false, REMOTE_INTENT_COPY.didNotStop))
       case 'recordToggle': {
         const stopping = context.sessionActive
         const committed = stopping ? await context.stopSession() : await context.startRecording()
@@ -293,18 +313,16 @@ export async function executeRemoteIntent(
           ? await ack(true)
           : await ack(
               false,
-              (!stopping && context.recordBlockedReason) ||
-                'The session toggle was not committed. Check Studio for details.'
+              (!stopping && context.recordBlockedReason) || REMOTE_INTENT_COPY.toggleFailed
             ))
       }
       case 'streamStart':
-        if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
+        if (context.sessionActive) return void (await ack(false, alreadyRunning))
         return void ((await context.startLivestream())
           ? await ack(true)
           : await ack(
               false,
-              context.liveStreamBlockedReason ??
-                'The stream did not start. Complete any required confirmation in Studio.'
+              context.liveStreamBlockedReason ?? REMOTE_INTENT_COPY.streamDidNotStart
             ))
       case 'micMute':
       case 'micUnmute':
@@ -313,7 +331,7 @@ export async function executeRemoteIntent(
           intent.kind === 'micToggle' ? 'toggle' : intent.kind === 'micMute' ? 'mute' : 'unmute'
         )
         if (!applied) {
-          return void (await ack(false, 'The microphone change was not applied.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.microphone))
         }
         return void (await ack(true))
       }
@@ -330,7 +348,7 @@ export async function executeRemoteIntent(
           status,
           shown
         )
-        if (target === null) return void (await ack(false, 'System audio is not available.'))
+        if (target === null) return void (await ack(false, REMOTE_INTENT_COPY.systemAudio))
         // Accepted = requested. The key renders the confirmed mix from
         // remote.state, which follows once the session reports it.
         context.setSystemAudioEnabled(target)
@@ -338,46 +356,46 @@ export async function executeRemoteIntent(
       }
       case 'sceneApply': {
         const layoutPreset = intent.layoutPreset as LayoutPreset | undefined
-        if (!layoutPreset) {
-          return void (await ack(false, 'Only layoutPreset scene switches are supported.'))
-        }
-        if (!(context.knownLayoutPresets as readonly string[]).includes(layoutPreset)) {
-          return void (await ack(false, `Unknown layout preset "${layoutPreset}".`))
+        if (
+          !layoutPreset ||
+          !(context.knownLayoutPresets as readonly string[]).includes(layoutPreset)
+        ) {
+          return void (await ack(false, REMOTE_INTENT_COPY.sceneMissing))
         }
         const committed = await context.applyLayoutPreset(layoutPreset)
         if (!committed) {
-          return void (await ack(false, 'The layout change was not committed.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.sceneFailed))
         }
         return void (await ack(true))
       }
       case 'takeoverShow': {
         const assetId = intent.assetId as string | undefined
         if (!assetId || !context.hasTakeover(assetId)) {
-          return void (await ack(false, 'No takeover with that id.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.takeoverMissing))
         }
         const activated = await context.activateTakeover(assetId)
         if (!activated) {
-          return void (await ack(false, 'The takeover was not activated.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.takeoverShow))
         }
         return void (await ack(true))
       }
       case 'takeoverHide': {
         const cleared = await context.clearTakeover()
         if (!cleared) {
-          return void (await ack(false, 'The takeover was not cleared.'))
+          return void (await ack(false, REMOTE_INTENT_COPY.takeoverHide))
         }
         return void (await ack(true))
       }
       case 'windowFront': {
         const windowName = intent.window as string | undefined
         if (!windowName || !(await context.openWindow(windowName))) {
-          return void (await ack(false, `Unknown window "${windowName}".`))
+          return void (await ack(false, REMOTE_INTENT_COPY.windowMissing))
         }
         return void (await ack(true))
       }
       case 'commentHighlight': {
         const messageId = intent.messageId as string | undefined
-        if (!messageId) return void (await ack(false, 'commentHighlight needs a messageId.'))
+        if (!messageId) return void (await ack(false, REMOTE_INTENT_COPY.messageMissing))
         const outcome = await context.showCommentHighlight(messageId)
         return void (await ack(outcome.ok, outcome.message))
       }
@@ -386,14 +404,16 @@ export async function executeRemoteIntent(
         return void (await ack(outcome.ok, outcome.message))
       }
       case 'clipMark': {
-        if (!context.sessionActive) return void (await ack(false, 'No active session.'))
+        if (!context.sessionActive) return void (await ack(false, REMOTE_INTENT_COPY.notRunning))
         const outcome = await context.markClip()
         return void (await ack(outcome.ok, outcome.message))
       }
       default:
-        return void (await ack(false, `Unsupported intent "${intent.kind}".`))
+        return void (await ack(false, REMOTE_INTENT_COPY.unsupported))
     }
   } catch (error) {
-    await ack(false, error instanceof Error ? error.message : 'Intent failed.')
+    // The raw error is for the console, never the phone (docs/ui-copy.md).
+    console.error('[remote-control] intent failed', intent.kind, error)
+    await ack(false, REMOTE_INTENT_COPY.failed)
   }
 }

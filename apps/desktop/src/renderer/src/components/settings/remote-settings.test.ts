@@ -81,6 +81,22 @@ const button = (text: string): HTMLButtonElement => {
 const remote = () =>
   (mocked.core as ReturnType<typeof core>).remoteControl as ReturnType<typeof core>['remoteControl']
 
+async function openPhoneMenu(name: string): Promise<void> {
+  const trigger = document.querySelector<HTMLButtonElement>(
+    `[aria-label="More actions for ${name}"]`
+  )!
+  await act(async () => {
+    trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  })
+}
+const menuItem = (text: string): HTMLElement => {
+  const found = [...document.querySelectorAll<HTMLElement>('[role=menuitem]')].find(
+    (entry) => entry.textContent?.trim() === text
+  )
+  expect(found, text).toBeTruthy()
+  return found!
+}
+
 async function render(): Promise<void> {
   await act(async () => root.render(createElement(RemoteSettings)))
 }
@@ -129,19 +145,36 @@ describe('RemoteSettings confirms', () => {
 
   it('asks before removing a phone', async () => {
     await render()
-    await act(async () =>
-      document.querySelector<HTMLButtonElement>('[aria-label="Remove Pixel"]')!.click()
-    )
+    await openPhoneMenu('Pixel')
+    await act(async () => menuItem('Remove…').click())
     const dialog = byTestId('phone-remove-dialog')
     expect(dialog?.textContent).toContain('Remove Pixel?')
     expect(dialog?.textContent).toContain('It is disconnected now')
     await act(async () => byTestId('phone-remove-cancel')!.click())
     expect(remote().phone.revokeDevice).not.toHaveBeenCalled()
-    await act(async () =>
-      document.querySelector<HTMLButtonElement>('[aria-label="Remove Pixel"]')!.click()
-    )
+    await openPhoneMenu('Pixel')
+    await act(async () => menuItem('Remove…').click())
     await act(async () => byTestId('phone-remove-confirm')!.click())
     expect(remote().phone.revokeDevice).toHaveBeenCalledExactlyOnceWith('phone-1')
+  })
+
+  it('renames a phone from its row (I-28)', async () => {
+    await render()
+    await openPhoneMenu('Pixel')
+    await act(async () => menuItem('Rename…').click())
+    const input = document.querySelector<HTMLInputElement>('#phone-rename-name')!
+    expect(input.value).toBe('Pixel')
+    const save = byTestId('phone-rename-save') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setValue.call(input, 'Desk phone')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(save.disabled).toBe(false)
+    await act(async () => save.click())
+    expect(remote().phone.renameDevice).toHaveBeenCalledExactlyOnceWith('phone-1', 'Desk phone')
+    expect(byTestId('phone-rename-dialog')).toBeNull()
   })
 })
 
@@ -175,7 +208,7 @@ describe('RemoteSettings rows (plan 174 S3.17)', () => {
   it('lists paired phones as rows with their state', async () => {
     await render()
     const list = document.querySelector(
-      '[data-slot="grouped-list"]:has([aria-label="Remove Pixel"])'
+      '[data-slot="grouped-list"]:has([aria-label="More actions for Pixel"])'
     )
     expect(list?.textContent).toContain('Pixel')
     expect(list?.textContent).toContain('Connected')

@@ -7985,7 +7985,7 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual({
       intentId: 'ri-test-mic-rejected',
       ok: false,
-      message: 'The microphone change was not applied.'
+      message: "Couldn't change the microphone."
     })
     expect(
       backend.sentCommands
@@ -8052,7 +8052,7 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual({
       intentId: 'ri-test-scene-rejected',
       ok: false,
-      message: 'The layout change was not committed.'
+      message: "Couldn't switch the scene."
     })
   })
 
@@ -8162,7 +8162,7 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual({
       intentId: 'ri-test-takeover-definite-failure',
       ok: false,
-      message: 'The takeover was not activated.'
+      message: "Couldn't show the takeover."
     })
     expect(backend.activeScreen).toBeNull()
 
@@ -8213,7 +8213,7 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual({
       intentId: 'ri-test-takeover-clear-outcome-unknown',
       ok: false,
-      message: 'The takeover was not cleared.'
+      message: "Couldn't hide the takeover."
     })
     expect(backend.activeScreen?.id).toBe(takeoverScreen.id)
   })
@@ -10262,7 +10262,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(ack('ri-sa-on')).toEqual({
       intentId: 'ri-sa-on',
       ok: false,
-      message: 'System audio is not available.'
+      message: "System audio isn't available."
     })
     await act(async () => {
       emit('onGlobalShortcut', 'system-audio-toggle')
