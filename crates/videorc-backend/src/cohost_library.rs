@@ -1858,10 +1858,10 @@ async fn apply_account_avatar(
             state,
             CohostAvatarErrorDetail::new_owned(
                 error.code,
-                format!(
-                    "{} is still for now: its moves could not be downloaded ({}). It tries again at the next sync.",
-                    avatar.name.trim(),
-                    error.message
+                alive::moves_not_downloaded(
+                    &avatar.name,
+                    &error.message,
+                    "Videorc tries again at the next sync.",
                 ),
             ),
         ),

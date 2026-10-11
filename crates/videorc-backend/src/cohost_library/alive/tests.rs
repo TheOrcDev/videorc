@@ -266,7 +266,14 @@ async fn buddy_official_pack_offline_stays_still_and_tries_again_on_next_use() {
         .await
         .unwrap();
     settle(&state, |library| library.error.is_some()).await;
-    assert_eq!(get(&state).await.error.unwrap().code, "network");
+    let error = get(&state).await.error.unwrap();
+    assert_eq!(error.code, "network");
+    // QA 2026-10-11: the reason used to sit in brackets with its own period:
+    // "... downloaded (Could not reach Videorc. Check ... try again.). It ...".
+    assert_eq!(
+        error.message,
+        "Golmar stays still for now: its moves could not be downloaded. Could not reach Videorc. Check your connection and try again. Videorc tries again the next time you use Golmar."
+    );
     assert_eq!(persona(&state).await.avatar, BuddyAvatar::Still);
     assert_eq!(
         persona(&state).await.name,
