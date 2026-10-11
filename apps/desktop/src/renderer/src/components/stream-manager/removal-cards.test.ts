@@ -117,13 +117,16 @@ describe('RemovalCards (plan 140, S6)', () => {
     for (const button of buttons(card)) expect(button.querySelector('button')).toBeNull()
   })
 
-  it('countdown: Removing in Ns, Cancel first, then Remove now', async () => {
+  it('countdown: Removing in Ns, the same button order, Cancel emphasised', async () => {
     await render([countdown()])
     const [card] = cards()
     expect(card.dataset.mode).toBe('countdown')
     expect(card.textContent).toContain('Removing in 4s')
-    expect(buttons(card).map((button) => button.textContent)).toEqual(['CancelEsc', 'Remove now↵'])
-    expect(buttons(card)[0].dataset.variant).toBe('secondary')
+    // Plan 174 H-23: one fixed order on every Buddy card; the mode only
+    // decides which button is emphasised.
+    expect(buttons(card).map((button) => button.textContent)).toEqual(['Remove now↵', 'CancelEsc'])
+    expect(buttons(card)[0].dataset.variant).toBe('ghost')
+    expect(buttons(card)[1].dataset.variant).toBe('secondary')
   })
 
   it('YouTube: confirm first, and the line that says why', async () => {

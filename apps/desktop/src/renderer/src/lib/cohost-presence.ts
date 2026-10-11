@@ -98,6 +98,11 @@ function presenceKind(
   return 'listening'
 }
 
+/**
+ * The one status vocabulary (plan 174 F-20): the Stream Manager's Buddy pane,
+ * the Studio's Buddy row and the Buddy page say the same words. Never
+ * "Buddy" in front: every surface already names Buddy beside its status.
+ */
 function presenceLabel(
   kind: CohostPresenceKind,
   state: CohostState | null,
@@ -105,24 +110,35 @@ function presenceLabel(
 ): string {
   switch (kind) {
     case 'off':
-      return 'Buddy off'
+      return 'Off'
     case 'starting':
-      return 'Buddy starting'
-    case 'reading': {
-      const pending = nonNegative(state?.pendingMessages)
-      return `Buddy · reading ${pending} new…`
-    }
+      return 'Starting…'
+    case 'reading':
+      return `Reading ${nonNegative(state?.pendingMessages)} new…`
     case 'thinking':
-      return 'Buddy · thinking…'
+      return 'Thinking…'
     case 'listening':
-      return openCount > 0 ? `Buddy · ${openCount} q` : 'Buddy is reading chat'
+      return openCount > 0 ? `${openCount} ${plural(openCount, 'question')}` : 'Reading chat'
     case 'paused': {
       const reason = cohostReasonLabel(state?.reason ?? null)
-      return reason ? `Buddy paused · ${reason}` : 'Buddy paused'
+      return reason ? `Paused: ${reason}` : 'Paused'
     }
-    case 'error':
-      return 'Buddy error'
+    case 'error': {
+      const reason = cohostReasonLabel(state?.reason ?? null)
+      return reason ? `Stopped: ${reason}` : 'Stopped'
+    }
   }
+}
+
+/**
+ * Buddy's status word alone, for a surface without a clock or a dot (the
+ * Buddy page's status row): the same words as `cohostPresenceView`.
+ */
+export function cohostStatusLabel(
+  state: CohostState | null,
+  options: CohostPresenceOptions = {}
+): string {
+  return presenceLabel(presenceKind(state, options), state, state?.questions.length ?? 0)
 }
 
 function presenceTooltip(

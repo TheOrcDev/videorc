@@ -21,7 +21,6 @@ import { chatDraftMaxChars } from './chat-send'
 import { shortcutLabel } from './platform'
 import { shortcutAccelerator } from './shortcuts'
 import { formatRelativeTime } from './format-time'
-import { cohostErrorDetail } from './cohost-state'
 import { buddyDisplayName } from './buddy-auto-chat-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 
@@ -48,8 +47,8 @@ export const COHOST_CHAT_CONSENT_SENTENCE = "Buddy reads your live chat with Vid
 
 /**
  * What listening sends, in one wording on every surface (plan 174 F-26): the
- * consent list, the listening switch, the pane's one-time card and the
- * status popover all build on these two halves.
+ * consent list, the listening switch and the pane's one-time card all build
+ * on these two halves.
  */
 const MIC_TO_TEXT =
   "your microphone audio goes to Videorc's cloud speech-to-text and comes back as text"
@@ -73,16 +72,9 @@ export const COHOST_ACTS_ON_ASK_HINT = 'Posts only in the modes you turn on.'
 /** The flag row's "Remove from chat" key (plan 140, S6): ⌫ alone dismisses. */
 export const COHOST_REMOVE_FLAGGED_KEY = 'Shift+Backspace'
 
-/**
- * What Buddy sends (plan 060 D11, plan 068 D3). The consent surfaces that stand
- * alone (the status popover) repeat it verbatim. Turning Buddy on also turns
- * listening on (Buddy Live, plan 119), so the sentence names both halves as
- * what happens, not as an option.
- */
-export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} While you're live it also hears you: ${MIC_TO_TEXT}. ${MIC_KEPT}`
-
 /** The listening half, as the description of the listening switch beside
- * Buddy Live on the Buddy tab. */
+ * Buddy Live on the Buddy tab. Listening is its own choice (plan 174 S3.14a,
+ * D7): turning Buddy Live on never turns it on. */
 export const COHOST_LISTEN_CONSENT_SENTENCE = `While you're live, ${MIC_TO_TEXT}, even with live captions off. ${MIC_KEPT}`
 
 export const EMPTY_COHOST_STATE: CohostState = {
@@ -124,20 +116,7 @@ export function sortedCohostFlags(flags: readonly CohostFlag[]): CohostFlag[] {
   })
 }
 
-// --- Status chip -----------------------------------------------------------
-
-export interface CohostChipView {
-  label: string
-  /** Only `listening` earns the live accent; every other state is monochrome. */
-  tone: 'live' | 'muted'
-  /**
-   * What the failed tick actually said — "ai-gateway-error (HTTP 502): The
-   * Buddy tick failed on every configured model." — for the chip's tooltip
-   * or a secondary line. Null while listening, off, or when the engine paused
-   * itself locally (signed out, Basic, consent).
-   */
-  detail: string | null
-}
+// --- Error detail and reasons ----------------------------------------------
 
 /**
  * One line a streamer can paste into a bug report: the server's envelope code,
@@ -152,71 +131,38 @@ export function cohostErrorDetailText(detail: CohostErrorDetail | null | undefin
   return message ? `${head}: ${message}` : head
 }
 
+/**
+ * Why Buddy paused or stopped, as the words after "Paused:" or "Stopped:" in
+ * the one status vocabulary (plan 174 F-20).
+ */
 const REASON_LABELS: Record<CohostReason, string> = {
-  'premium-required': 'Premium',
-  'consent-required': 'consent',
-  'session-expired': 'session expired',
+  'premium-required': 'Premium needed',
+  'consent-required': 'cloud AI is off',
+  'session-expired': 'sign-in expired',
   'signed-out': 'signed out',
-  'quota-exhausted': 'quota',
-  'server-unconfigured': 'unavailable',
-  network: 'offline',
-  'gateway-error': 'AI error'
+  'quota-exhausted': 'daily AI allowance used up',
+  'server-unconfigured': 'Videorc AI is unavailable',
+  network: 'no connection',
+  'gateway-error': 'Videorc AI error'
 }
 
 export function cohostReasonLabel(reason: CohostReason | null): string | null {
   return reason ? REASON_LABELS[reason] : null
 }
 
-/** Short, honest chip copy for the destination strip. */
-export function cohostChipView(state: CohostState | null): CohostChipView | null {
-  if (!state) return null
-  const reason = cohostReasonLabel(state.reason)
-  // The engine only sets `detail` on a failed tick, and clears it the moment
-  // it listens again; a stale detail on a listening/off state is never shown.
-  const detail =
-    state.status === 'error' || state.status === 'paused'
-      ? cohostErrorDetailText(cohostErrorDetail(state))
-      : null
-  switch (state.status) {
-    case 'off':
-      return { label: 'Buddy: off', tone: 'muted', detail: null }
-    case 'listening': {
-      const count = state.questions.length
-      return {
-        label: count > 0 ? `Buddy: listening · ${count} q` : 'Buddy: listening',
-        tone: 'live',
-        detail: null
-      }
-    }
-    case 'paused':
-      return {
-        label: reason ? `Buddy: paused · ${reason}` : 'Buddy: paused',
-        tone: 'muted',
-        detail
-      }
-    case 'error':
-      return {
-        label: reason ? `Buddy: error · ${reason}` : 'Buddy: error',
-        tone: 'muted',
-        detail
-      }
-  }
-}
-
 // --- Pane mode -------------------------------------------------------------
 
+/**
+ * What the Buddy pane shows under its header. `upsell` carries the Premium
+ * reason and link; `consent` shows the one cloud-AI disclosure (the pane
+ * draws it from `CLOUD_AI_USES`, so it carries no line of its own);
+ * `disabled` is Buddy Live off, which the header's switch already says.
+ */
 export type CohostPaneMode =
   | { kind: 'upsell'; reason: string; upgradeUrl?: string }
-  | { kind: 'consent'; reason: string }
-  | { kind: 'disabled'; reason: string }
+  | { kind: 'consent' }
+  | { kind: 'disabled' }
   | { kind: 'live' }
-
-/**
- * Where Buddy Live is turned on today, in the pane's own words: the Buddy
- * pane's Chat control leaving Off (plan 164 S-D6). Plan 174 S3.14a gives
- * Buddy Live a switch of its own; this line follows it there.
- */
-export const BUDDY_LIVE_OFF_REASON = 'Buddy Live is off. Set Chat to Suggest or Auto to turn it on.'
 
 /**
  * Which single-line explanation (if any) replaces the pane. Premium is checked
@@ -240,15 +186,8 @@ export function cohostPaneMode({
       ...(gate.upgradeUrl ? { upgradeUrl: gate.upgradeUrl } : {})
     }
   }
-  if (!consented) {
-    return {
-      kind: 'consent',
-      reason: `${COHOST_CONSENT_SENTENCE} Allow cloud AI to use it.`
-    }
-  }
-  if (!enabled) {
-    return { kind: 'disabled', reason: BUDDY_LIVE_OFF_REASON }
-  }
+  if (!consented) return { kind: 'consent' }
+  if (!enabled) return { kind: 'disabled' }
   return { kind: 'live' }
 }
 

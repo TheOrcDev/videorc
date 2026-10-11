@@ -168,6 +168,7 @@ async function render({
     cohostGate: gate,
     cohostSettings: cohost,
     runtimeInfo: { platform: 'darwin', commentsWindowEnabled: true },
+    overlayLayout: { buddy: { showOnStream: false } },
     buddyConsentRequested: consentRequested,
     setBuddyLive: calls.setBuddyLive,
     answerBuddyConsent: calls.answerBuddyConsent,
@@ -198,12 +199,12 @@ async function render({
   })
 }
 
-/** Plan 164 S-D6: the switch moved to Stream Manager; the tab points there. */
-function livePointer(): HTMLElement {
-  const pointer = document.querySelector('[data-testid="buddy-live-pointer"]') as HTMLElement | null
-  expect(pointer).toBeTruthy()
-  expect(document.getElementById('buddy-live-switch')).toBeNull()
-  return pointer!
+/** Plan 174 S3.14a: the Buddy Live switch is back on the tab, beside the status. */
+function liveSwitch(): HTMLButtonElement {
+  const control = document.getElementById('buddy-live-switch') as HTMLButtonElement | null
+  expect(control).toBeTruthy()
+  expect(document.querySelector('[data-testid="buddy-live-pointer"]')).toBeNull()
+  return control!
 }
 
 function button(label: string): HTMLButtonElement {
@@ -242,8 +243,9 @@ async function pressTab(id: BuddyTabId): Promise<void> {
 describe('Buddy tab strip (plan 150)', () => {
   it('lists five tabs like Settings and opens on Live', async () => {
     await render()
+    // Plan 174 D7: the page is Buddy, so its first tab is Profile.
     expect(stripTabs().map((tab) => tab.textContent)).toEqual([
-      'Buddy',
+      'Profile',
       'Chat',
       'Voice',
       'Reports',
@@ -279,14 +281,20 @@ describe('Buddy tab strip (plan 150)', () => {
 })
 
 describe('Buddy tab (plan 119 S2)', () => {
-  it('leads with the creation screen, then its status and its powers', async () => {
+  it('leads with the status row, then My Buddies and the creation screen, then its powers', async () => {
     await render()
     const text = document.body.textContent ?? ''
-    // Plan 170 D16: My Buddies leads the first tab, the creation screen under it.
+    // Plan 174 D7, F-4: the one status row leads; My Buddies and the creation
+    // screen follow it (plan 170 D16 kept their order).
+    const status = document.querySelector('[data-slot="buddy-profile-status"]')
     const library = document.querySelector('[data-testid="buddy-library"]')
     const header = document.querySelector('[data-slot="buddy-header"]')
+    expect(status).toBeTruthy()
     expect(library).toBeTruthy()
     expect(header).toBeTruthy()
+    expect(
+      status!.compareDocumentPosition(library!) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
     expect(
       library!.compareDocumentPosition(header!) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
@@ -297,29 +305,50 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(text).not.toMatch(/joins my streams/i)
     expect(text).toContain('Alpha')
     expect(
-      document.querySelector('[data-slot="buddy-live-status-block"] [data-slot="field-label"]')
-        ?.textContent
+      document.querySelector(
+        '[data-slot="buddy-live-status-block"] [data-slot="buddy-profile-name"]'
+      )?.textContent
     ).toBe('Buddy')
+    // Plan 174 G-2: how to put the Buddy on stream, while it is not.
+    expect(document.querySelector('[data-testid="buddy-on-stream-note"]')?.textContent).toContain(
+      'turn on “Buddy on stream”'
+    )
     for (const power of BUDDY_LIVE_POWERS) {
       expect(text).toContain(power.title)
       expect(text).toContain(power.description)
     }
-    expect(livePointer().textContent).toContain(
-      'Turn on Buddy Live in Stream Manager: in the Buddy pane, set Chat to Suggest or Auto.'
-    )
+    expect(liveSwitch().getAttribute('aria-checked')).toBe('false')
+    expect(text).not.toContain('set Chat to Suggest or Auto')
     expect(statusLine().getAttribute('data-status')).toBe('off')
-    // Plan 164 S-D6: the Stream Manager is where the Buddy is turned on, so
-    // the way there is always offered.
+    // The Stream Manager is where Buddy works, so the way there is always offered.
     expect(text).toContain('Open Stream Manager')
   })
 
-  it('has no switch of its own any more: the Stream Manager mode turns Buddy on', async () => {
+  it('turns Buddy Live on and off with its own switch, and nothing else (plan 174 S3.14a)', async () => {
     await render()
-    livePointer()
-    expect(calls.setBuddyLive).not.toHaveBeenCalled()
+    await act(async () => liveSwitch().click())
+    expect(calls.setBuddyLive).toHaveBeenLastCalledWith(true)
     await render({ cohost: settings({ enabled: true, listen: true }) })
-    expect(statusLine().textContent).toContain('On, joins your next stream')
+    expect(statusLine().textContent).toContain('On')
+    expect(statusLine().textContent).toContain('Joins your next stream')
+    expect(liveSwitch().getAttribute('aria-checked')).toBe('true')
+    await act(async () => liveSwitch().click())
+    expect(calls.setBuddyLive).toHaveBeenLastCalledWith(false)
+    // The switch never writes settings itself: the provider owns the save.
     expect(calls.patchCohostSettings).not.toHaveBeenCalled()
+  })
+
+  it('locks the switch off, with the reason, for an account that cannot turn Buddy on', async () => {
+    await render({ gate: basic })
+    const control = liveSwitch()
+    expect(control.disabled).toBe(true)
+    const wrapper = control.closest<HTMLElement>('[data-slot="disabled-reason"]')
+    expect(
+      document.getElementById(wrapper?.getAttribute('aria-describedby') ?? '')?.textContent
+    ).toBe('Buddy Live is part of Videorc Premium.')
+    // On already: a locked account can still turn Buddy off.
+    await render({ gate: basic, cohost: settings({ enabled: true }) })
+    expect(liveSwitch().disabled).toBe(false)
   })
 
   it('asks for consent in a dialog that names every cloud use, and answers it', async () => {
@@ -350,7 +379,8 @@ describe('Buddy tab (plan 119 S2)', () => {
     await render({ signedIn: false, gate: basic })
     const unlock = document.querySelector('[data-testid="buddy-live-unlock"]')
     expect(unlock?.textContent).toContain('Sign in to use Buddy Live, part of Videorc Premium.')
-    livePointer()
+    // Locked means disabled with one reason: the switch cannot turn Buddy on.
+    expect(liveSwitch().disabled).toBe(true)
     await act(async () => button('Sign in').click())
     expect(calls.signIn).toHaveBeenCalledTimes(1)
   })
@@ -360,7 +390,7 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(document.querySelector('[data-testid="buddy-live-unlock"]')?.textContent).toContain(
       'Buddy Live is part of Videorc Premium.'
     )
-    livePointer()
+    expect(liveSwitch().disabled).toBe(true)
     await act(async () => button('View Premium').click())
     expect(calls.openOAuthUrl).toHaveBeenCalledWith('https://www.videorc.com/premium')
   })
@@ -382,7 +412,8 @@ describe('Buddy tab (plan 119 S2)', () => {
       }
     })
     expect(statusLine().getAttribute('data-status')).toBe('live')
-    expect(statusLine().textContent).toContain('Live now')
+    // Plan 174 F-20: the words the Stream Manager says.
+    expect(statusLine().textContent).toContain('Reading chat')
     const open = [...document.querySelectorAll('button')].find((candidate) =>
       candidate.textContent?.includes('Open Stream Manager')
     )
@@ -408,8 +439,8 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(block.querySelector('[data-slot="buddy-emblem"]')?.getAttribute('src')).toContain(
       'buddy-emblem-112'
     )
-    expect(block.querySelector('#buddy-live-switch')).toBeNull()
-    expect(block.querySelector('[data-testid="buddy-live-pointer"]')).toBeTruthy()
+    expect(block.querySelector('#buddy-live-switch')).toBeTruthy()
+    expect(block.querySelector('[data-testid="buddy-live-pointer"]')).toBeNull()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
     // The three-column pitch is gone; Live lists what Buddy does as rows.
     expect(document.querySelector('ul[aria-label="What Buddy does"]')).toBeNull()
@@ -577,7 +608,11 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
     const text = voice.textContent ?? ''
     expect(text).toContain('Voice commands')
     expect(text).toContain('What you can say')
-    for (const title of ['Highlight', 'Clear', 'Remove', 'Answer']) expect(text).toContain(title)
+    for (const title of ['Highlight', 'Clear', 'Remove', 'Answer', 'Marker']) {
+      expect(text).toContain(title)
+    }
+    // Plan 174 F-16: the Buddy's own name starts a command too.
+    expect(text).toContain('Start with “Buddy”')
     expect(text).toContain('“Buddy, highlight the comment from coders X”')
     expect(text).toContain('“This one is toxic. Remove it from our chat.”')
     expect(text).toContain(
@@ -593,7 +628,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
     const off = section().querySelector('[data-testid="buddy-voice-commands-off"]') as HTMLElement
     expect(off.textContent).toContain('Turn on Buddy Live to use voice commands.')
     // Plan 174 F-5: the button names the tab as the strip does, never "Live".
-    expect(off.querySelector('button')?.textContent).toBe('Go to Buddy')
+    expect(off.querySelector('button')?.textContent).toBe('Go to Profile')
     await act(async () => off.querySelector('button')!.click())
     expect(calls.onTabChange).toHaveBeenLastCalledWith('live')
   })
@@ -613,9 +648,14 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
       (heading) => heading.textContent
     )
     expect(titles).toEqual(['Commands', 'Remove messages'])
+    // Plan 174 F-28: a ListRow (the command and what it does) over every
+    // phrase in plain text, none of them in a tooltip.
     const highlight = section().querySelector('[data-command="highlight"]') as HTMLElement
     expect(highlight.children).toHaveLength(2)
-    expect(highlight.lastElementChild?.textContent).toBe('Puts it on stream.')
+    expect(highlight.firstElementChild?.getAttribute('data-slot')).toBe('list-row')
+    expect(highlight.firstElementChild?.textContent).toContain('Puts it on stream.')
+    expect(highlight.lastElementChild?.textContent).toContain('“Buddy, put this one up”')
+    expect(highlight.querySelector('[title]')).toBeNull()
     expect(section().querySelector('[data-slot="buddy-voice-commands-premium"]')).toBeTruthy()
   })
 

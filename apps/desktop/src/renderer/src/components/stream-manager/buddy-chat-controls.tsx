@@ -1,8 +1,8 @@
 import { useState, type ReactElement } from 'react'
 
 import { BuddyEmblem } from '@/components/buddy-emblem'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   Dialog,
   DialogContent,
@@ -11,58 +11,57 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
 import { SegmentedControl } from '@/components/ui/segmented-control'
-import type { CohostAutoChat, CohostAutoChatMode, CohostAutoChatRelayPatch } from '@/lib/backend'
-import type { EntitlementUiGate } from '@/lib/entitlement-ui'
+import type { CohostAutoChat, CohostAutoChatMode } from '@/lib/backend'
 import {
   BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY,
   BUDDY_AUTO_CONFIRM_SENTENCE,
   BUDDY_MODE_HINTS,
   BUDDY_MODE_LABELS,
   BUDDY_MODES,
+  BUDDY_POSTING_LABEL,
+  buddyBehaviourChips,
   buddyModeChangeStep,
   buddyPostingConsentSentence,
   buddyPostingConsentTitle
 } from '@/lib/buddy-auto-chat-view'
-import { cn } from '@/lib/utils'
 
 /**
- * The Buddy pane's chat mode (plan 164 S-D6): one `Off | Suggest | Auto`
- * segmented control and the three behaviour switches. The first time the
+ * The Buddy pane's chat posting control (plan 164 S-D6, plan 174 S3.14a, D7):
+ * one `Off | Suggest | Auto` segmented control that governs only what Buddy
+ * posts as you, with the chosen mode's meaning as a line under it, never a
+ * tooltip. Whether Buddy runs at all is Buddy Live, its own switch in the
+ * pane header: this control never turns Buddy on or off. The first time the
  * mode leaves Off the consent dialog says what posting as you means; Auto
- * asks once more, every time. Greetings are free; Answers and Banter need
- * Premium and cloud AI, and read disabled with the reason until then.
+ * asks once more, every time.
+ *
+ * Greetings, Answers and Banter have one home, Buddy → Chat (plan 174 F-24):
+ * here they are read-only summary chips, each a way there.
  */
 export function BuddyChatControls({
   autoChat,
-  gate,
-  consented,
   name = null,
   disabled = false,
-  onChange
+  onModeChange,
+  onOpenChatSettings
 }: {
   autoChat: CohostAutoChat
-  gate: EntitlementUiGate
-  /** Cloud-AI consent: Answers and Banter send chat to the cloud. */
-  consented: boolean
   /** The streamer's name for Buddy: the consent dialog asks in its name. */
   name?: string | null
   disabled?: boolean
-  onChange: (patch: CohostAutoChatRelayPatch) => void
+  onModeChange: (mode: CohostAutoChatMode) => void
+  /** Opens Buddy → Chat in the main window. Absent, the chips are inert. */
+  onOpenChatSettings?: () => void
 }): ReactElement {
   const [postingConsented, setPostingConsented] = useState(() => readPostingConsent())
   const [pending, setPending] = useState<CohostAutoChatMode | null>(null)
   const [step, setStep] = useState<'consent' | 'confirm-auto' | null>(null)
 
-  const aiReason = !gate.allowed ? gate.reason : !consented ? 'Needs cloud AI.' : null
-
   const requestMode = (next: CohostAutoChatMode): void => {
     if (next === autoChat.mode) return
     const needed = buddyModeChangeStep({ next, consented: postingConsented })
     if (needed === 'apply') {
-      onChange({ mode: next })
+      onModeChange(next)
       return
     }
     setPending(next)
@@ -78,7 +77,7 @@ export function BuddyChatControls({
   const acceptConsent = (): void => {
     persistPostingConsent()
     setPostingConsented(true)
-    onChange({ mode: 'suggest' })
+    onModeChange('suggest')
     if (pending === 'auto') {
       setStep('confirm-auto')
       return
@@ -87,60 +86,72 @@ export function BuddyChatControls({
   }
 
   const confirmAuto = (): void => {
-    onChange({ mode: 'auto' })
+    onModeChange('auto')
     closeDialog()
   }
 
   return (
     <>
       <div
-        className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border px-3 py-1.5"
+        className="flex min-w-0 flex-col gap-1.5 border-b border-border px-3 py-2"
         data-slot="buddy-chat-controls"
       >
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="shrink-0 text-[11px] font-semibold text-subtle">Chat</span>
-          <SegmentedControl
-            aria-label="Chat posting"
-            disabled={disabled}
-            options={BUDDY_MODES.map((mode) => ({
-              value: mode,
-              label: BUDDY_MODE_LABELS[mode],
-              'data-buddy-mode': mode,
-              title: BUDDY_MODE_HINTS[mode]
-            }))}
-            size="sm"
-            value={autoChat.mode}
-            onValueChange={requestMode}
-          />
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="shrink-0 text-label text-subtle" id="buddy-chat-posting-label">
+              {BUDDY_POSTING_LABEL}
+            </span>
+            <SegmentedControl
+              aria-describedby="buddy-chat-posting-hint"
+              aria-labelledby="buddy-chat-posting-label"
+              disabled={disabled}
+              options={BUDDY_MODES.map((mode) => ({
+                value: mode,
+                label: BUDDY_MODE_LABELS[mode],
+                'data-buddy-mode': mode
+              }))}
+              size="sm"
+              value={autoChat.mode}
+              onValueChange={requestMode}
+            />
+          </div>
+          {/* Read-only: the behaviours are switched in Buddy → Chat, their
+              one home (plan 174 D7). The tone rides the dot, the words say
+              the state, and each chip is the way there. */}
+          <div
+            aria-label="What Buddy posts"
+            className="flex min-w-0 flex-wrap items-center gap-1"
+            data-slot="buddy-behaviour-chips"
+            role="group"
+          >
+            {buddyBehaviourChips(autoChat).map((chip) => (
+              <Badge
+                key={chip.id}
+                asChild
+                variant={chip.empty ? 'warning' : chip.on ? 'success' : 'neutral'}
+              >
+                <button
+                  aria-label={chip.name}
+                  data-behaviour={chip.id}
+                  data-on={chip.on || undefined}
+                  data-testid="buddy-behaviour-chip"
+                  disabled={!onOpenChatSettings}
+                  type="button"
+                  onClick={onOpenChatSettings}
+                >
+                  {chip.text}
+                </button>
+              </Badge>
+            ))}
+          </div>
         </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-          <BuddyBehaviourSwitch
-            checked={autoChat.greetings.enabled}
-            disabled={disabled}
-            id="buddy-greetings"
-            label="Greetings"
-            title="Your own templates for follows, subs, cheers, raids and the rest. Free."
-            onCheckedChange={(greetings) => onChange({ greetings })}
-          />
-          <BuddyBehaviourSwitch
-            checked={autoChat.answers.enabled}
-            disabled={disabled || aiReason !== null}
-            id="buddy-answers"
-            label="Answers"
-            reason={aiReason}
-            title="A reply when a viewer asks Buddy by name."
-            onCheckedChange={(answers) => onChange({ answers })}
-          />
-          <BuddyBehaviourSwitch
-            checked={autoChat.banter.enabled}
-            disabled={disabled || aiReason !== null}
-            id="buddy-banter"
-            label="Banter"
-            reason={aiReason}
-            title="A remark on dead air, rarely."
-            onCheckedChange={(banter) => onChange({ banter })}
-          />
-        </div>
+        <p
+          className="text-xs text-muted-foreground"
+          data-slot="buddy-mode-hint"
+          id="buddy-chat-posting-hint"
+        >
+          {BUDDY_MODE_HINTS[autoChat.mode]}
+        </p>
       </div>
 
       <Dialog
@@ -187,45 +198,6 @@ export function BuddyChatControls({
         </DialogContent>
       </Dialog>
     </>
-  )
-}
-
-function BuddyBehaviourSwitch({
-  id,
-  label,
-  title,
-  reason = null,
-  checked,
-  disabled,
-  onCheckedChange
-}: {
-  id: string
-  label: string
-  title: string
-  /** Why the switch is off limits (Premium, cloud AI), on hover and focus (plan 174 F-12). */
-  reason?: string | null
-  checked: boolean
-  disabled: boolean
-  onCheckedChange: (checked: boolean) => void
-}): ReactElement {
-  return (
-    <div
-      className={cn('flex items-center gap-1.5', disabled && 'opacity-70')}
-      title={disabled && reason ? undefined : title}
-    >
-      <DisabledReason reason={disabled ? reason : null}>
-        <Switch
-          checked={checked}
-          disabled={disabled}
-          id={id}
-          size="sm"
-          onCheckedChange={onCheckedChange}
-        />
-      </DisabledReason>
-      <Label className="text-xs font-normal text-muted-foreground" htmlFor={id}>
-        {label}
-      </Label>
-    </div>
   )
 }
 

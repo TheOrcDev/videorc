@@ -16,13 +16,20 @@ import {
 } from 'react'
 import { toast } from '@/lib/toast'
 
-import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
+import {
+  BuddyIdentity,
+  BuddySayFooter,
+  CohostListenPrompt,
+  CohostPane
+} from '@/components/cohost-pane'
+import type { BuddyPetPreviewHandle } from '@/components/buddy-pet-preview'
+import { BuddyCardsArea } from '@/components/stream-manager/buddy-cards-area'
 import { BuddyChatControls } from '@/components/stream-manager/buddy-chat-controls'
 import {
   BuddyUtteranceCards,
   openProposedUtterances
 } from '@/components/stream-manager/buddy-utterance-cards'
-import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
+import { BuddyLiveSwitch, CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
 import { ActivityPane } from '@/components/stream-manager/activity-pane'
 import {
   ChatPane,
@@ -65,6 +72,7 @@ import { useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { cohostGroupedDeltaFlash } from '@/lib/cohost-presence'
 import { activeCohostSpotlight, cohostCommentMarks } from '@/lib/cohost-marks'
 import {
+  activeCohostAlerts,
   cohostDeadAirToast,
   cohostNudgeVisible,
   cohostPromiseReminderToast,
@@ -76,7 +84,7 @@ import {
   COHOST_QUESTION_TOAST_ID
 } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
-import { CHAT_HEADER_CONTAINER } from '@/lib/chat-header-tiers'
+import { CHAT_HEADER_CONTAINER, CHAT_HEADER_TIGHT_HIDDEN } from '@/lib/chat-header-tiers'
 import { sortMessagesChronological } from '@/lib/live-chat-view'
 import { activityItems, thankYouDraft, type ActivityItem } from '@/lib/stream-activity'
 import { formatHistoryDate, statItems } from '@/lib/stream-manager-stats'
@@ -95,7 +103,7 @@ import {
   type StreamManagerPane,
   type StreamManagerRightPane
 } from '@/lib/stream-manager-layout'
-import { sendablePlatforms } from '@/lib/chat-send'
+import { chatDraftMaxChars, sendablePlatforms } from '@/lib/chat-send'
 import { shortcutLabel } from '@/lib/platform'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
@@ -174,7 +182,9 @@ function useUnseen(
   return visible ? { count: 0, incomplete: false } : unseen
 }
 
-function cohostTone(state: CohostState | null): StatusDotTone {
+/** The Buddy tab's dot: viewers reporting a problem outrank a healthy green (plan 174 F-7). */
+function cohostTone(state: CohostState | null, alerts: number): StatusDotTone {
+  if (alerts > 0) return 'warn'
   switch (state?.status) {
     case 'listening':
       return 'good'
@@ -316,15 +326,19 @@ export interface StreamManagerProps {
   onBuddyShowOnStream?: (showOnStream: boolean) => void
   /** A reaction chip (plan 168 S-D3), through the Studio relay. */
   onBuddyReact?: (reaction: string) => void
-  /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's mode
-   * control and behaviour switches; unknown hides them. */
+  /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's
+   * posting mode control and behaviour chips; unknown hides them. */
   cohostAutoChat?: CohostAutoChat
+  /** The posting mode (plan 174 S3.14a): `{mode}` alone, never `enabled`. */
   onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
+  /** The behaviour chips' link to Buddy → Chat, their one home (plan 174 D7). */
+  onCohostOpenChatSettings?: () => void
   /** The Buddy's proposed cards (plan 164 S-D2): Send and Dismiss. */
   onCohostUtteranceApprove?: (utterance: CohostUtterance) => void
   onCohostUtteranceDismiss?: (utterance: CohostUtterance) => void
-  /** Buddy Live's one switch (plan 119), from the status popover and the
-   * nudge: on means Buddy reads chat and hears you, off only stops it. */
+  /** The Buddy Live switch in the pane header and the nudge (plan 174
+   * S3.14a): on and off, nothing else. Without cloud-AI consent, on opens
+   * the consent dialog (`onCohostEnableConsent`) instead. */
   onCohostEnable?: (enabled: boolean) => void
   /** Turn listening on from the one-time card (plan 068 D3). */
   onCohostListenOn?: () => void
@@ -401,6 +415,7 @@ export function StreamManager({
   onBuddyReact,
   cohostAutoChat,
   onCohostAutoChatChange,
+  onCohostOpenChatSettings,
   onCohostUtteranceApprove,
   onCohostUtteranceDismiss,
   onCohostEnable,
@@ -496,6 +511,10 @@ export function StreamManager({
   // The question toast speaks as the streamer's Buddy (plan 174 J2-20). A
   // ref, so a rename never re-runs the state effect below.
   const buddyName = cohostBuddy?.persona.name ?? null
+  // The header's living preview and the footer's reaction chips share one
+  // handle and one reaction list (plan 174 S3.14c).
+  const buddyPreviewRef = useRef<BuddyPetPreviewHandle | null>(null)
+  const [buddyPackReactions, setBuddyPackReactions] = useState<readonly string[] | null>(null)
   const buddyNameRef = useRef(buddyName)
   buddyNameRef.current = buddyName
   const deadAirToastKeyRef = useRef<string | null>(null)
@@ -790,80 +809,139 @@ export function StreamManager({
     if (message) onHighlight?.(message)
   }
 
+  // The Buddy Live switch (plan 174 S3.14a, D7): on and off, nothing else.
+  // Without cloud-AI consent, on opens the consent dialog, whose Allow grants
+  // consent and turns Buddy on (never the microphone). A locked account can
+  // still turn Buddy off, never on.
+  const buddyLiveReason =
+    cohostGate && !cohostGate.allowed && !cohostEnabled ? cohostGate.reason : null
+  const requestBuddyLive = (on: boolean): void => {
+    if (on && !cohostConsented) {
+      onCohostEnableConsent?.()
+      return
+    }
+    onCohostEnable?.(on)
+  }
+
+  // The cards waiting on the streamer, for the pane's "N waiting" line and
+  // its polite live region (plan 174 H-20): a voice command, each removal,
+  // each proposed post.
+  const cardNotices = [
+    ...(commandCardId
+      ? [
+          {
+            id: commandCardId,
+            label: commandChooser
+              ? 'Buddy asks which comment you meant'
+              : 'Buddy asks whether to show a flagged comment'
+          }
+        ]
+      : []),
+    ...removalPane.cards.map((card) => ({
+      id: card.operationId,
+      label: `Buddy asks before removing ${card.authorName}'s message${card.timer ? `, ${card.timer}` : ''}`
+    })),
+    ...proposedUtteranceIds.map((id) => ({
+      id,
+      label: `${buddyName ?? 'Buddy'} wants to post, it expires soon`
+    }))
+  ]
+  const recentUtterances =
+    live &&
+    (shownCohostState?.utterances ?? NO_COHOST_UTTERANCES).some(
+      (utterance) => utterance.status !== 'proposed' && utterance.status !== 'dismissed'
+    )
+  const activeAlerts = activeCohostAlerts(shownCohostState, nowMs).length
+
   const buddyPane = cohostPresent ? (
     <div className="flex min-h-0 flex-1 flex-col" data-slot="buddy-pane">
+      {/* One pane header (plan 174 S3.14c, F-8, H-9): identity first, then the
+          one Alpha tag, listening, the status, and the Buddy Live switch. */}
       <div
         className={cn(
           CHAT_HEADER_CONTAINER,
-          'flex h-9 shrink-0 items-center gap-2 overflow-hidden border-b border-border px-3'
+          'flex min-h-9 shrink-0 items-center gap-2 overflow-hidden border-b border-border px-3 py-1'
         )}
         data-slot="buddy-pane-header"
       >
-        <span className="shrink-0 text-xs font-medium">Buddy</span>
+        {cohostBuddy ? (
+          <BuddyIdentity
+            buddy={cohostBuddy}
+            previewRef={buddyPreviewRef}
+            onPackReactions={setBuddyPackReactions}
+          />
+        ) : (
+          <span className="shrink-0 text-xs font-medium">Buddy</span>
+        )}
+        <Badge className={cn('shrink-0', CHAT_HEADER_TIGHT_HIDDEN)} variant="outline">
+          Alpha
+        </Badge>
         {/* Whether Buddy hears you (plan 068); nothing while listening is off. */}
         {cohostVisible ? <CohostListeningIndicator listening={cohostState?.listening} /> : null}
         <span className="flex-1" />
         <CohostStatus
-          consented={cohostConsented}
-          enabled={cohostEnabled}
           flash={cohostFlash}
-          gate={cohostGate!}
           nowMs={nowMs}
           starting={cohostStarting}
           state={cohostState}
-          onEnable={onCohostEnable}
-          onEnableConsent={onCohostEnableConsent}
-          onOpenPane={() => setCohostExpand((value) => value + 1)}
-          onUpgrade={onCohostUpgrade}
+          onOpenPane={cohostVisible ? () => setCohostExpand((value) => value + 1) : undefined}
         />
+        {onCohostEnable ? (
+          <BuddyLiveSwitch
+            checked={cohostEnabled}
+            disabledReason={buddyLiveReason}
+            onCheckedChange={requestBuddyLive}
+          />
+        ) : null}
       </div>
-      {/* Plan 164 S-D6: the chat mode and the three behaviours. The pane's
-          enable is the mode: Off means the Buddy does not join. */}
+      {/* Plan 164 S-D6, plan 174 S3.14a: the posting mode governs only what
+          Buddy posts; the behaviours are read-only chips linking to Buddy →
+          Chat. Neither touches Buddy Live. */}
       {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
         <BuddyChatControls
           autoChat={cohostAutoChat}
-          consented={cohostConsented}
-          gate={cohostGate!}
           name={buddyName}
-          onChange={onCohostAutoChatChange}
+          onModeChange={(mode) => onCohostAutoChatChange({ mode })}
+          onOpenChatSettings={onCohostOpenChatSettings}
         />
       ) : null}
-      {/* Plan 164 S-D2: what the Buddy wants to post as you (Suggest), and
-          the last lines it said. Its keys answer only while the pane is on
-          screen (plan 174 S0.2). */}
-      {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
-        <BuddyUtteranceCards
-          active={buddyVisible}
-          name={buddyName}
-          pending={cohostActionPending}
-          utterances={shownCohostState?.utterances ?? []}
-          onApprove={onCohostUtteranceApprove}
-          onDismiss={onCohostUtteranceDismiss}
-        />
-      ) : null}
-      {/* Plan 140, S6: what Buddy heard and did, what waits for an answer
-          (the chooser, "show it anyway?"), then what Buddy is about to remove
-          because you asked, and how to stop it. Above the scroll, so none of
-          it scrolls away. */}
-      <CommandStrip view={commandStrip} />
-      {onAnswerCommand ? (
-        <CommandCards
-          chooser={commandChooser}
-          confirm={commandConfirm}
-          onAnswer={onAnswerCommand}
-        />
-      ) : null}
-      {onAnswerRemoval ? (
-        <RemovalCards
-          view={removalPane}
-          onAnswer={(operationId, answer) => {
-            const operation = removalOperations.find(
-              (candidate) => candidate.operationId === operationId
-            )
-            if (operation) onAnswerRemoval(operation, answer)
-          }}
-        />
-      ) : null}
+      {/* Everything that waits on the streamer, in one capped scroll region
+          (plan 174 H-21): what Buddy heard and did, the chooser or "show it
+          anyway?", what it is about to remove because you asked, and what it
+          wants to post as you (Suggest), whose keys answer only while the
+          pane is on screen (plan 174 S0.2). */}
+      <BuddyCardsArea active={buddyCardsActive || recentUtterances} cards={cardNotices}>
+        <CommandStrip view={commandStrip} />
+        {onAnswerCommand ? (
+          <CommandCards
+            chooser={commandChooser}
+            confirm={commandConfirm}
+            onAnswer={onAnswerCommand}
+          />
+        ) : null}
+        {onAnswerRemoval ? (
+          <RemovalCards
+            view={removalPane}
+            onAnswer={(operationId, answer) => {
+              const operation = removalOperations.find(
+                (candidate) => candidate.operationId === operationId
+              )
+              if (operation) onAnswerRemoval(operation, answer)
+            }}
+          />
+        ) : null}
+        {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
+          <BuddyUtteranceCards
+            active={buddyVisible}
+            destinations={snapshot.providers}
+            name={buddyName}
+            pending={cohostActionPending}
+            utterances={shownCohostState?.utterances ?? []}
+            onApprove={onCohostUtteranceApprove}
+            onDismiss={onCohostUtteranceDismiss}
+          />
+        ) : null}
+      </BuddyCardsArea>
       {/* Plan 140, S5: a quiet row per platform whose account must be
           reconnected before Buddy can remove messages there. Live only. */}
       {live && onReconnectScopes ? (
@@ -883,71 +961,78 @@ export function StreamManager({
         />
       ) : null}
       {cohostVisible ? (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <CohostPane
-            actionPending={cohostActionPending}
-            consented={cohostConsented}
-            enabled={cohostEnabled}
-            buddy={cohostBuddy ?? null}
-            sayPending={buddyPending}
-            onSay={onBuddySay}
-            onShowOnStreamChange={onBuddyShowOnStream}
-            onReact={onBuddyReact}
-            expandSignal={cohostExpand}
-            flash={cohostFlash}
-            gate={cohostGate!}
-            highlightedMessageId={liveHighlightId}
-            starting={cohostStarting}
-            state={shownCohostState}
-            onAnswered={(question) => onCohostAnswered?.(question)}
-            onRestoreQuestion={
-              onCohostRestoreQuestion ? (question) => onCohostRestoreQuestion(question) : undefined
-            }
-            onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
-            onRemoveFlagged={onRemoveFromChat ? removeFlagged : undefined}
-            removableMessageIds={removableFlaggedIds}
-            onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
-            onEnableConsent={onCohostEnableConsent}
-            onJumpToMessage={(messageId) => {
-              setNarrowPane('chat')
-              setJumpTo((current) => ({ messageId, seq: (current?.seq ?? 0) + 1 }))
-            }}
-            onPromiseDismiss={onCohostPromiseDismiss}
-            onPromiseDone={onCohostPromiseDone}
-            onSayHiGreeted={onCohostAuthorGreeted}
-            onRecapDismiss={onCohostRecapDismiss}
-            onRecapDraft={
-              onCohostRecapDraft
-                ? () => {
-                    void onCohostRecapDraft().then((state) => {
-                      const text = state?.recap?.text
-                      if (text) prefillComposer(text)
-                    })
-                  }
-                : undefined
-            }
-            onRecapPost={(recap) => prefillComposer(recap.text)}
-            onReply={(question) => {
-              setPrefill((current) => ({
-                seq: (current?.seq ?? 0) + 1,
-                text: draftForQuestion(question, sendTargets),
-                questionId: question.id
-              }))
-              setNarrowPane('chat')
-            }}
-            onShowOnStream={onCohostShowOnStream}
-            onUpgrade={onCohostUpgrade}
-          />
-        </div>
+        <CohostPane
+          actionPending={cohostActionPending}
+          consented={cohostConsented}
+          enabled={cohostEnabled}
+          expandSignal={cohostExpand}
+          gate={cohostGate!}
+          highlightedMessageId={liveHighlightId}
+          starting={cohostStarting}
+          state={shownCohostState}
+          onAnswered={(question) => onCohostAnswered?.(question)}
+          onRestoreQuestion={
+            onCohostRestoreQuestion ? (question) => onCohostRestoreQuestion(question) : undefined
+          }
+          onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
+          onRemoveFlagged={onRemoveFromChat ? removeFlagged : undefined}
+          removableMessageIds={removableFlaggedIds}
+          onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
+          onEnableConsent={onCohostEnableConsent}
+          onJumpToMessage={(messageId) => {
+            setNarrowPane('chat')
+            setJumpTo((current) => ({ messageId, seq: (current?.seq ?? 0) + 1 }))
+          }}
+          onPromiseDismiss={onCohostPromiseDismiss}
+          onPromiseDone={onCohostPromiseDone}
+          onSayHiGreeted={onCohostAuthorGreeted}
+          onRecapDismiss={onCohostRecapDismiss}
+          onRecapDraft={
+            onCohostRecapDraft
+              ? () => {
+                  void onCohostRecapDraft().then((state) => {
+                    const text = state?.recap?.text
+                    if (text) prefillComposer(text)
+                  })
+                }
+              : undefined
+          }
+          onRecapPost={(recap) => prefillComposer(recap.text)}
+          onReply={(question) => {
+            setPrefill((current) => ({
+              seq: (current?.seq ?? 0) + 1,
+              text: draftForQuestion(question, sendTargets),
+              questionId: question.id
+            }))
+            setNarrowPane('chat')
+          }}
+          onShowOnStream={onCohostShowOnStream}
+          onUpgrade={onCohostUpgrade}
+        />
       ) : (
-        <Empty>
+        <Empty className="min-h-0 flex-1">
           <EmptyHeader>
             <EmptyDescription>
-              Buddy listens to chat during a live stream: questions, flags and the room's mood.
+              Buddy reads chat during a live stream: questions, flags and the room's mood.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
       )}
+      {/* The footer (plan 174 S3.14c, F-10): the Say box, the reactions and
+          the on-stream switch, on air and off. All of it is free (D6). */}
+      {cohostBuddy ? (
+        <BuddySayFooter
+          buddy={cohostBuddy}
+          packReactions={buddyPackReactions}
+          previewRef={buddyPreviewRef}
+          sayChatCap={sendTargets.length > 0 ? chatDraftMaxChars(sendTargets) : null}
+          sayPending={buddyPending}
+          sayPostsToChat={live && cohostAutoChat?.mode === 'auto'}
+          onReact={onBuddyReact}
+          onSay={onBuddySay}
+          onShowOnStreamChange={onBuddyShowOnStream}
+        />
+      ) : null}
     </div>
   ) : null
 
@@ -1015,7 +1100,7 @@ export function StreamManager({
               {cohostPresent ? (
                 <TabsTrigger value="buddy">
                   <PaneLabel
-                    dot={cohostTone(cohostState)}
+                    dot={cohostTone(cohostState, activeAlerts)}
                     dotLabel={cohostDotLabel(cohostState)}
                     label="Buddy"
                     unseen={buddyUnseen}
@@ -1044,7 +1129,7 @@ export function StreamManager({
               {cohostPresent ? (
                 <TabsTrigger value="buddy">
                   <PaneLabel
-                    dot={cohostTone(cohostState)}
+                    dot={cohostTone(cohostState, activeAlerts)}
                     dotLabel={cohostDotLabel(cohostState)}
                     label="Buddy"
                     unseen={buddyUnseen}

@@ -1,13 +1,12 @@
 // @vitest-environment happy-dom
-import { act, createElement, useEffect, useImperativeHandle } from 'react'
+import { act, createElement, createRef, useEffect, useImperativeHandle } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { CohostPane } from '@/components/cohost-pane'
+import { BuddyIdentity, BuddySayFooter } from '@/components/cohost-pane'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import type { BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
-import type { CohostState, CohostWindowBuddy } from '@/lib/backend'
-import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
+import type { BuddyPetPreviewHandle, BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
+import type { CohostWindowBuddy } from '@/lib/backend'
 
 // The living preview has its own test; here it is a stub that reports the
 // pack's reactions and records what the header asks of it (plan 168 S-D3).
@@ -58,10 +57,6 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-function state(overrides: Partial<CohostState> = {}): CohostState {
-  return { ...EMPTY_COHOST_STATE, sessionId: 'session-1', status: 'listening', ...overrides }
-}
-
 function buddy(overrides: Partial<CohostWindowBuddy> = {}): CohostWindowBuddy {
   return {
     persona: { id: 'default', name: 'Grum', images: {}, bubbleStyle: 'speech', source: 'default' },
@@ -72,26 +67,45 @@ function buddy(overrides: Partial<CohostWindowBuddy> = {}): CohostWindowBuddy {
   }
 }
 
-async function renderPane(props: Partial<Parameters<typeof CohostPane>[0]> = {}): Promise<void> {
-  await act(async () =>
-    root.render(
-      createElement(
-        TooltipProvider,
-        null,
-        createElement(CohostPane, {
-          consented: true,
-          enabled: true,
-          gate: { allowed: true },
-          state: state(),
-          onAnswered: () => undefined,
-          onDismissFlag: () => undefined,
-          onDismissQuestion: () => undefined,
-          onReply: () => undefined,
-          ...props
-        })
-      )
-    )
+/**
+ * The header's identity and the footer, wired the way the Stream Manager
+ * wires them (plan 174 S3.14c): one preview handle and one reaction list
+ * shared between the two.
+ */
+function Surfaces({
+  buddy: value,
+  footer = {}
+}: {
+  buddy: CohostWindowBuddy
+  footer?: Partial<Parameters<typeof BuddySayFooter>[0]>
+}): ReturnType<typeof createElement> {
+  const previewRef = createRef<BuddyPetPreviewHandle | null>()
+  return createElement(
+    TooltipProvider,
+    null,
+    createElement(BuddyIdentity, {
+      buddy: value,
+      previewRef,
+      onPackReactions: (reactions) => {
+        packReactions = reactions
+      }
+    }),
+    createElement(BuddySayFooter, {
+      buddy: value,
+      previewRef,
+      packReactions: preview.reactions,
+      ...footer
+    })
   )
+}
+
+let packReactions: readonly string[] | null = null
+
+async function render(
+  value: CohostWindowBuddy,
+  footer: Partial<Parameters<typeof BuddySayFooter>[0]> = {}
+): Promise<void> {
+  await act(async () => root.render(createElement(Surfaces, { buddy: value, footer })))
 }
 
 function sayInput(): HTMLInputElement {
@@ -116,19 +130,19 @@ async function press(input: HTMLInputElement, init: KeyboardEventInit = {}): Pro
   })
 }
 
-describe('CohostPane: the Buddy header (plan 164 S-C4)', () => {
-  it('shows the state image, the name and the switch above the AI rows', async () => {
-    await renderPane({ buddy: buddy({ state: 'laugh', bubble: 'Welcome to the horde' }) })
+describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', () => {
+  it('shows the state image, the name and the bubble in the header, the switch in the footer', async () => {
+    await render(buddy({ state: 'laugh', bubble: 'Welcome to the horde' }))
     const image = container.querySelector<HTMLImageElement>('[data-slot="buddy-state-image"]')
     expect(image?.getAttribute('data-state')).toBe('laugh')
     // The bundled pack's laughing drawing, not the idle one.
     const laughing = image?.getAttribute('src')
     expect(laughing).toBeTruthy()
-    await renderPane({ buddy: buddy({ state: 'idle' }) })
+    await render(buddy({ state: 'idle' }))
     const idle = container.querySelector<HTMLImageElement>('[data-slot="buddy-state-image"]')
     expect(idle?.getAttribute('data-state')).toBe('idle')
     expect(idle?.getAttribute('src')).not.toBe(laughing)
-    await renderPane({ buddy: buddy({ state: 'laugh', bubble: 'Welcome to the horde' }) })
+    await render(buddy({ state: 'laugh', bubble: 'Welcome to the horde' }))
     expect(container.querySelector('[data-slot="buddy-name"]')?.textContent).toBe('Grum')
     expect(container.querySelector('[data-slot="buddy-bubble"]')?.textContent).toContain(
       'Welcome to the horde'
@@ -137,36 +151,19 @@ describe('CohostPane: the Buddy header (plan 164 S-C4)', () => {
       '[data-testid="buddy-show-on-stream"]'
     )
     expect(toggle?.getAttribute('aria-checked')).toBe('true')
-    // The header comes first; the AI pane follows it.
+    // Plan 174 F-18: the overlay switch is named after the Buddy.
+    expect(toggle?.getAttribute('aria-label')).toBe('Grum on stream')
+    // Identity first, the footer last.
     const html = container.innerHTML
     expect(html.indexOf('data-slot="buddy-header"')).toBeLessThan(
-      html.indexOf('data-testid="cohost-pane"')
+      html.indexOf('data-slot="buddy-footer"')
     )
-  })
-
-  it('is absent without a Buddy, and stays alone when the AI side is off', async () => {
-    await renderPane()
-    expect(container.querySelector('[data-slot="buddy-header"]')).toBeNull()
-    await renderPane({ buddy: buddy(), enabled: false })
-    expect(container.querySelector('[data-slot="buddy-header"]')).toBeTruthy()
-    expect(container.querySelector('[data-testid="cohost-pane"]')).toBeNull()
-    // Not Premium: the header stays above the upsell line (the overlay is free).
-    await renderPane({
-      buddy: buddy(),
-      gate: {
-        allowed: false,
-        featureId: 'live-cohost',
-        reason: 'Buddy requires Videorc Premium.',
-        upgradeUrl: 'https://www.videorc.com/premium'
-      }
-    })
-    expect(container.querySelector('[data-slot="buddy-header"]')).toBeTruthy()
-    expect(container.querySelector('[data-slot="cohost-notice"]')).toBeTruthy()
+    expect(packReactions).toEqual(['laugh', 'proud', 'blink'])
   })
 
   it('says the draft talking on ↵ and laughing on ⌘↵, then clears it', async () => {
     const onSay = vi.fn(async () => undefined)
-    await renderPane({ buddy: buddy(), onSay })
+    await render(buddy(), { onSay })
     await type(sayInput(), '  Hello horde  ')
     await press(sayInput())
     expect(onSay).toHaveBeenLastCalledWith('Hello horde', 'talk')
@@ -180,22 +177,37 @@ describe('CohostPane: the Buddy header (plan 164 S-C4)', () => {
     // Nothing is said for an empty draft or while one is on its way.
     await press(sayInput())
     expect(onSay).toHaveBeenCalledTimes(3)
-    await renderPane({ buddy: buddy(), onSay, sayPending: true })
+    await render(buddy(), { onSay, sayPending: true })
     await type(sayInput(), 'wait')
     await press(sayInput())
     expect(onSay).toHaveBeenCalledTimes(3)
   })
 
+  it('says when a Say also posts to chat, and counts against the chat cap (plan 174 F-6)', async () => {
+    await render(buddy(), { onSay: vi.fn(), sayPostsToChat: true, sayChatCap: 5 })
+    expect(sayInput().getAttribute('placeholder')).toBe('Say something on stream and in chat')
+    const note = container.querySelector('[data-slot="buddy-say-posts"]')
+    expect(note?.textContent).toBe('Also posts to chat as you · 0/5')
+    expect(sayInput().getAttribute('aria-describedby')).toBe('buddy-say-posts')
+    await type(sayInput(), 'too long')
+    expect(
+      container.querySelector('[data-slot="buddy-say-posts"]')?.getAttribute('data-over-cap')
+    ).toBe('true')
+    await render(buddy(), { onSay: vi.fn() })
+    expect(sayInput().getAttribute('placeholder')).toBe('Say something on stream')
+    expect(container.querySelector('[data-slot="buddy-say-posts"]')).toBeNull()
+  })
+
   it('relays the switch and disables it without a handler', async () => {
     const onShowOnStreamChange = vi.fn()
-    await renderPane({ buddy: buddy({ showOnStream: false }), onShowOnStreamChange })
+    await render(buddy({ showOnStream: false }), { onShowOnStreamChange })
     const toggle = container.querySelector<HTMLButtonElement>(
       '[data-testid="buddy-show-on-stream"]'
     )!
     expect(toggle.getAttribute('aria-checked')).toBe('false')
     await act(async () => toggle.click())
     expect(onShowOnStreamChange).toHaveBeenCalledWith(true)
-    await renderPane({ buddy: buddy() })
+    await render(buddy())
     expect(
       container.querySelector<HTMLButtonElement>('[data-testid="buddy-show-on-stream"]')?.disabled
     ).toBe(true)
@@ -203,14 +215,14 @@ describe('CohostPane: the Buddy header (plan 164 S-C4)', () => {
   })
 })
 
-describe('CohostPane: the living Buddy header (plan 168 S-D3)', () => {
+describe('the living Buddy header (plan 168 S-D3)', () => {
   function chips(): HTMLButtonElement[] {
     return [...container.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-reaction-chip"]')]
   }
 
   it('shows the worn pack at 32 px, holding the frame of the state on air', async () => {
-    await renderPane({
-      buddy: buddy({
+    await render(
+      buddy({
         state: 'talk',
         persona: {
           id: 'p-1',
@@ -222,7 +234,7 @@ describe('CohostPane: the living Buddy header (plan 168 S-D3)', () => {
           motion: { intensity: 0.8, sleepAfterSeconds: 60, breathing: false }
         }
       })
-    })
+    )
     expect(preview.props).toMatchObject({
       personaId: 'p-1',
       packId: 'bundled:buddy',
@@ -234,13 +246,13 @@ describe('CohostPane: the living Buddy header (plan 168 S-D3)', () => {
       'talk'
     )
     // An older Studio sends no avatar: the Still pack, idle not held.
-    await renderPane({ buddy: buddy() })
+    await render(buddy())
     expect(preview.props).toMatchObject({ packId: 'still', pose: null })
   })
 
   it('relays a reaction chip and plays it in the preview; chips the pack lacks are off', async () => {
     const onReact = vi.fn()
-    await renderPane({ buddy: buddy(), onReact })
+    await render(buddy(), { onReact })
     expect(chips().map((chip) => [chip.textContent, chip.disabled])).toEqual([
       ['Laugh', false],
       ['Wave', true],
@@ -266,7 +278,7 @@ describe('CohostPane: the living Buddy header (plan 168 S-D3)', () => {
   })
 
   it('disables every chip without a relay', async () => {
-    await renderPane({ buddy: buddy() })
+    await render(buddy())
     expect(chips().every((chip) => chip.disabled)).toBe(true)
   })
 })

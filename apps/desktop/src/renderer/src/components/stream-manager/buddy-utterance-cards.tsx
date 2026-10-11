@@ -1,17 +1,39 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { BuddyIcon } from '@/components/icons'
+import { BuddyCard } from '@/components/stream-manager/buddy-card'
+import { useBuddyCardKeys } from '@/components/stream-manager/buddy-card-keys'
 import { removalKeyAnswer } from '@/components/stream-manager/removal-cards'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { StatusDot } from '@/components/status-dot'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import type { CohostUtterance } from '@/lib/backend'
+import type { CohostUtterance, StreamPlatform } from '@/lib/backend'
 import { BUDDY_UTTERANCE_TRIGGER_LABELS, buddyDisplayName } from '@/lib/buddy-auto-chat-view'
-import { cn } from '@/lib/utils'
+import { platformLabel } from '@/lib/platform-copy'
 
 /** Recent lines shown under the cards. */
 const RECENT_MAX = 4
+
+/** A chat destination a post can reach: the live snapshot's provider rows. */
+export interface UtteranceDestination {
+  id: string
+  platform: StreamPlatform
+}
+
+/**
+ * Where a proposed post goes (plan 174 F-13), as platform names: its own
+ * destinations, or every one when it names none (the backend's "every
+ * writable destination"). Empty when the window knows no destination yet.
+ */
+export function utteranceDestinationLabels(
+  utterance: Pick<CohostUtterance, 'destinationIds'>,
+  destinations: readonly UtteranceDestination[]
+): string[] {
+  const picked =
+    utterance.destinationIds.length > 0
+      ? destinations.filter((destination) => utterance.destinationIds.includes(destination.id))
+      : destinations
+  return [...new Set(picked.map((destination) => platformLabel(destination.platform)))]
+}
 
 /** The cards still waiting on the streamer: proposed and not yet expired. */
 export function openProposedUtterances(
@@ -29,11 +51,12 @@ export type UtteranceKeyAnswer = 'send' | 'dismiss'
 
 /**
  * What a window-level key means for the newest proposed card, or null to
- * leave it alone (plan 174 S0.2). ↵ sends and ⌫ dismisses, both on the terms
- * of a removal card's Enter (`removalKeyAnswer`): only while nothing has the
- * keyboard, so a focused chat row, menu or switch never posts as you; never
- * with a modifier, a held key or during IME composition; and never once
- * another handler took the key.
+ * leave it alone (plan 174 S0.2, S3.14c). ↵ sends; Esc dismisses, and ⌫ or
+ * Delete dismiss too, all on the terms of a removal card's keys
+ * (`removalKeyAnswer`): ↵ and ⌫ only while nothing has the keyboard, so a
+ * focused chat row, menu or switch never posts as you; Esc anywhere but a
+ * text field or an open menu; never with a modifier, a held key or during
+ * IME composition; and never once another handler took the key.
  */
 export function utteranceKeyAnswer(
   event: Parameters<typeof removalKeyAnswer>[0],
@@ -43,28 +66,39 @@ export function utteranceKeyAnswer(
   const answer =
     event.key === 'Enter'
       ? 'send'
-      : event.key === 'Backspace' || event.key === 'Delete'
+      : event.key === 'Backspace' || event.key === 'Delete' || event.key === 'Escape'
         ? 'dismiss'
         : null
   if (!answer) return null
+  // Picked field by field: a real event keeps these on its prototype, so a
+  // spread would drop them (and a taken key would look free).
   const { defaultPrevented, repeat, isComposing, metaKey, ctrlKey, altKey, shiftKey } = event
-  const asEnter = { key: 'Enter', defaultPrevented, repeat, isComposing, metaKey, ctrlKey, altKey }
-  return removalKeyAnswer({ ...asEnter, shiftKey }, activeElement, body) === 'confirm'
-    ? answer
-    : null
+  const asRemovalKey = {
+    key: event.key === 'Escape' ? 'Escape' : 'Enter',
+    defaultPrevented,
+    repeat,
+    isComposing,
+    metaKey,
+    ctrlKey,
+    altKey,
+    shiftKey
+  }
+  return removalKeyAnswer(asRemovalKey, activeElement, body) ? answer : null
 }
 
 /**
  * The Buddy's proposed cards (plan 164 S-D2, Suggest mode): what it wants to
- * post as you, with Send and Dismiss, then the last few lines it said. The
- * newest proposed card takes ↵ (send) and ⌫ (dismiss) while nothing else has
- * the keyboard and the pane is on screen; every card keeps its buttons.
+ * post as you and where, with Send and Dismiss, then the last few lines it
+ * said. The newest proposed card takes the window keys while nothing else has
+ * the keyboard and the pane is on screen (after a voice command card and a
+ * removal card, `buddy-card-keys.ts`); every card keeps its buttons.
  */
 export function BuddyUtteranceCards({
   utterances,
   pending = false,
   active = false,
   name = null,
+  destinations = NO_DESTINATIONS,
   onApprove,
   onDismiss
 }: {
@@ -72,6 +106,8 @@ export function BuddyUtteranceCards({
   pending?: boolean
   /** The streamer's name for Buddy: a card is the character asking. */
   name?: string | null
+  /** The chats a post can reach, so a card says where it goes (plan 174 F-13). */
+  destinations?: readonly UtteranceDestination[]
   /** The Buddy pane is on screen. The keys answer only then: a card behind
    * a tab never takes ↵ from whatever the streamer is doing. */
   active?: boolean
@@ -98,19 +134,19 @@ export function BuddyUtteranceCards({
     return () => clearInterval(timer)
   }, [proposed.length])
 
-  // Bubble phase, after the composer, a menu or a focused row had its say.
-  useEffect(() => {
-    if (!newest || pending || !active) return
-    const onKeyDown = (event: KeyboardEvent): void => {
+  const handleWindowKey = useCallback(
+    (event: KeyboardEvent): boolean => {
+      if (!newest) return false
       const answer = utteranceKeyAnswer(event, document.activeElement, document.body)
-      if (!answer) return
+      if (!answer) return false
       event.preventDefault()
       if (answer === 'send') onApproveRef.current(newest)
       else onDismissRef.current(newest)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [active, newest, pending])
+      return true
+    },
+    [newest]
+  )
+  useBuddyCardKeys('utterance', newest && !pending && active ? handleWindowKey : null)
 
   if (proposed.length === 0 && recent.length === 0) return null
 
@@ -119,52 +155,28 @@ export function BuddyUtteranceCards({
       {proposed.length > 0 ? (
         <div className="flex flex-col gap-2 p-2">
           {proposed.map((utterance) => (
-            <Alert
+            <BuddyCard
               key={utterance.id}
-              aria-label={`${buddyDisplayName(name)} wants to post`}
-              data-testid="buddy-utterance-card"
+              busy={pending}
               data-utterance-id={utterance.id}
-              role="group"
+              decline={{ label: 'Dismiss', testId: 'buddy-utterance-dismiss' }}
               icon={BuddyIcon}
-            >
-              <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
-                <span className="min-w-0 flex-1 truncate">
+              keys={utterance === newest}
+              label={`${buddyDisplayName(name)} wants to post`}
+              primary={{ label: 'Send', testId: 'buddy-utterance-send' }}
+              testId="buddy-utterance-card"
+              timer={utterance.expiresAt ? secondsLeft(utterance.expiresAt, nowMs) : null}
+              title={
+                <span data-slot="buddy-utterance-title">
                   {BUDDY_UTTERANCE_TRIGGER_LABELS[utterance.trigger.kind]} · posts as you
+                  {destinationsLine(utterance, destinations)}
                 </span>
-                {utterance.expiresAt ? (
-                  <span className="shrink-0 text-[11px] font-normal text-muted-foreground tabular-nums">
-                    {secondsLeft(utterance.expiresAt, nowMs)}
-                  </span>
-                ) : null}
-              </AlertTitle>
-              <AlertDescription className="text-xs" data-testid="buddy-utterance-text">
-                {utterance.text}
-              </AlertDescription>
-              <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
-                <Button
-                  data-testid="buddy-utterance-send"
-                  disabled={pending}
-                  size="xs"
-                  type="button"
-                  variant="secondary"
-                  onClick={() => onApprove(utterance)}
-                >
-                  Send
-                  {utterance === newest ? <ShortcutKeys accelerator="Enter" /> : null}
-                </Button>
-                <Button
-                  data-testid="buddy-utterance-dismiss"
-                  disabled={pending}
-                  size="xs"
-                  type="button"
-                  variant="ghost"
-                  onClick={() => onDismiss(utterance)}
-                >
-                  Dismiss
-                  {utterance === newest ? <ShortcutKeys accelerator="Backspace" /> : null}
-                </Button>
-              </div>
-            </Alert>
+              }
+              onDecline={() => onDismiss(utterance)}
+              onPrimary={() => onApprove(utterance)}
+            >
+              <span data-testid="buddy-utterance-text">{utterance.text}</span>
+            </BuddyCard>
           ))}
         </div>
       ) : null}
@@ -180,17 +192,16 @@ export function BuddyUtteranceCards({
               <Badge className="shrink-0" variant="outline">
                 {BUDDY_UTTERANCE_TRIGGER_LABELS[utterance.trigger.kind]}
               </Badge>
-              <span
-                className={cn(
-                  'min-w-0 flex-1 truncate',
-                  utterance.status === 'failed'
-                    ? 'text-subtle line-through'
-                    : 'text-muted-foreground'
-                )}
-              >
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">
                 {utterance.text}
               </span>
-              <span className="shrink-0 text-subtle">{statusLabel(utterance)}</span>
+              {/* Plan 174 F-13: a failed post reads as failed, in the dot's
+                  tone and a plain word, never as faded struck text. */}
+              <StatusDot
+                className="shrink-0 text-[11px]"
+                label={statusLabel(utterance)}
+                tone={utterance.status === 'failed' ? 'error' : 'neutral'}
+              />
             </li>
           ))}
         </ul>
@@ -199,12 +210,26 @@ export function BuddyUtteranceCards({
   )
 }
 
+const NO_DESTINATIONS: readonly UtteranceDestination[] = []
+
+/** " · to Twitch and YouTube", or nothing when the window knows no chat. */
+function destinationsLine(
+  utterance: CohostUtterance,
+  destinations: readonly UtteranceDestination[]
+): string {
+  const labels = utteranceDestinationLabels(utterance, destinations)
+  if (labels.length === 0) return ''
+  const list =
+    labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(', ')} and ${labels.at(-1)}`
+  return ` · to ${list}`
+}
+
 function statusLabel(utterance: CohostUtterance): string {
   switch (utterance.status) {
     case 'sent':
       return 'Posted'
     case 'failed':
-      return 'Not sent'
+      return 'Failed'
     case 'bubble-only':
       return 'On stream'
     default:

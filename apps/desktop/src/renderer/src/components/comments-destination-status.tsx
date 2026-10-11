@@ -8,8 +8,6 @@ import type {
   StreamPlatform
 } from '@/lib/backend'
 import type { ChatSendFailure } from '@/lib/chat-send'
-import type { CohostState } from '@/lib/backend'
-import { cohostChipView } from '@/lib/cohost-view'
 import { chatStateLabel } from '@/lib/state-labels'
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 
@@ -84,53 +82,35 @@ export function commentsDestinationNotes({
   return parts.join(' · ')
 }
 
-/** Co-host status, in the destination strip's own vocabulary. Monochrome by
- * rule — only `listening` earns the live accent, exactly like a connected
- * destination. */
-export function CohostStatusChip({ state }: { state: CohostState | null }): ReactElement | null {
-  const chip = cohostChipView(state)
-  if (!chip) return null
-  return (
-    <Badge data-testid="cohost-status-chip" variant={chip.tone === 'live' ? 'success' : 'neutral'}>
-      {chip.label}
-    </Badge>
-  )
-}
-
+// Buddy's own status lives in the Buddy pane's header (plan 174 S3.14a): the
+// strip names chat destinations only.
 export function CommentsDestinationStatus({
   providers,
   mode = 'providers',
   sendTargets = [],
-  failures = [],
-  cohostState = null
+  failures = []
 }: {
   providers: LiveChatProviderState[]
   mode?: 'providers' | 'composer'
   sendTargets?: StreamPlatform[]
   failures?: ChatSendFailure[]
-  /** Latest `cohost.state`; null hides the chip entirely. */
-  cohostState?: CohostState | null
 }): ReactElement | null {
-  if (providers.length === 0 && mode === 'providers' && !cohostState) {
+  if (providers.length === 0 && mode === 'providers') {
     return null
   }
 
   if (mode === 'composer') {
     const notes = commentsDestinationNotes({ providers, sendTargets })
-    const chip = cohostChipView(cohostState)
-    if (!notes && !chip && failures.length === 0) return null
+    if (!notes && failures.length === 0) return null
     return (
       <div className="flex min-w-0 flex-col gap-1.5" data-slot="comments-destination-status">
-        {notes || chip ? (
-          <div className="flex min-w-0 items-center gap-1.5">
-            <p
-              className="min-w-0 flex-1 truncate text-[11px] leading-tight text-muted-foreground"
-              title={notes}
-            >
-              {notes}
-            </p>
-            <CohostStatusChip state={cohostState} />
-          </div>
+        {notes ? (
+          <p
+            className="min-w-0 truncate text-[11px] leading-tight text-muted-foreground"
+            title={notes}
+          >
+            {notes}
+          </p>
         ) : null}
         {failures.length > 0 ? (
           <div className="flex flex-wrap gap-1">
@@ -175,7 +155,6 @@ export function CommentsDestinationStatus({
           {chatStateLabel(provider)}
         </Badge>
       ))}
-      <CohostStatusChip state={cohostState} />
     </div>
   )
 }

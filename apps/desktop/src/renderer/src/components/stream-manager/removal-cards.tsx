@@ -1,36 +1,32 @@
-import { useEffect, useRef, type KeyboardEvent, type ReactElement } from 'react'
+import { useCallback, useEffect, useRef, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { DeleteIcon } from '@/components/icons'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { BuddyCard } from '@/components/stream-manager/buddy-card'
+import { useBuddyCardKeys } from '@/components/stream-manager/buddy-card-keys'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import type {
   RemovalAnswer,
   RemovalCardView,
   RemovalPaneView,
   RemovalResultView
 } from '@/lib/chat-removal-view'
-import { shortcutLabel } from '@/lib/platform'
-import { cn } from '@/lib/utils'
 
-// Buddy's removal cards (plan 140, S6), at the top of the Stream Manager's
-// Buddy pane: what Buddy is about to remove because you asked, and how to stop
-// it. The backend owns the timing; a card only counts down to it, and leaves
-// a one-line result behind when the operation ends.
+// Buddy's removal cards (plan 140, S6), in the Stream Manager's Buddy pane:
+// what Buddy is about to remove because you asked, and how to stop it. The
+// backend owns the timing; a card only counts down to it, and leaves a
+// one-line result behind when the operation ends.
 //
-// Keyboard (Enter confirms, Esc cancels), scoped so it never steals a key:
-//
-// - A focused card answers its own keys. Enter on one of its buttons is that
-//   button's own click.
-// - Otherwise the topmost open card answers, but only when nothing else could
-//   want the key. Enter needs no focus at all (the page body): it never
-//   confirms from the chat composer, the search field, a chat row or a menu.
-//   Esc works anywhere except a text field or an open menu, dialog or list,
-//   which close themselves with it. Cancelling is the safe direction.
-// - Never with a modifier, a held key (repeat) or during IME composition, and
-//   never once another handler took the key (`defaultPrevented`).
+// Keyboard (plan 174 S3.14c): a focused card answers its own keys through the
+// one BuddyCard contract (↵ confirms, Esc or ⌫ cancels). Otherwise the
+// topmost open card answers through the shared window listener
+// (`buddy-card-keys.ts`, after a voice command card and before a proposed
+// post), but only when nothing else could want the key: Enter needs no focus
+// at all (the page body), so it never confirms from the chat composer, the
+// search field, a chat row or a menu; Esc works anywhere except a text field
+// or an open menu, dialog or list, which close themselves with it. Cancelling
+// is the safe direction. Never with a modifier, a held key (repeat) or during
+// IME composition, and never once another handler took the key.
 
 const EDITABLE = 'input, textarea, select, [contenteditable=""], [contenteditable="true"]'
 const SELF_CLOSING = '[role="menu"], [role="dialog"], [role="alertdialog"], [role="listbox"]'
@@ -93,17 +89,18 @@ export function RemovalCards({
   const topmost = view.cards.find((card) => !card.busy) ?? null
   const topmostId = topmost?.operationId ?? null
 
-  useEffect(() => {
-    if (!topmostId) return
-    const onKeyDown = (event: globalThis.KeyboardEvent): void => {
+  const handleWindowKey = useCallback(
+    (event: KeyboardEvent): boolean => {
+      if (!topmostId) return false
       const answer = removalKeyAnswer(event, document.activeElement, document.body)
-      if (!answer) return
+      if (!answer) return false
       event.preventDefault()
       onAnswerRef.current(topmostId, answer)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [topmostId])
+      return true
+    },
+    [topmostId]
+  )
+  useBuddyCardKeys('removal', topmostId ? handleWindowKey : null)
 
   if (!view.active) return null
   return (
@@ -127,6 +124,11 @@ export function RemovalCards({
   )
 }
 
+/**
+ * One removal card on the shared BuddyCard: Remove first, then Cancel, in
+ * that order whatever the mode; the mode only decides which one is
+ * emphasised (Remove when confirming, Cancel while counting down).
+ */
 function RemovalCard({
   card,
   topmost,
@@ -136,104 +138,50 @@ function RemovalCard({
   topmost: boolean
   onAnswer: (answer: RemovalAnswer) => void
 }): ReactElement {
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (card.busy || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
-    if (event.nativeEvent.isComposing || event.repeat) return
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      onAnswer('cancel')
-      return
-    }
-    // Enter on a button is that button's own click.
-    if (event.key !== 'Enter' || (event.target as Element).closest('button')) return
-    event.preventDefault()
-    onAnswer('confirm')
-  }
-  const keys = topmost && !card.busy
-  const confirm = (
-    <Button
-      key="confirm"
-      data-testid="removal-confirm"
-      disabled={card.busy}
-      size="xs"
-      title={`${card.confirmLabel} (${shortcutLabel('Enter')})`}
-      type="button"
-      variant={card.primary === 'confirm' ? 'destructive' : 'ghost'}
-      onClick={() => onAnswer('confirm')}
-    >
-      {card.confirmLabel}
-      {keys ? <ShortcutKeys accelerator="Enter" /> : null}
-    </Button>
-  )
-  const cancel = (
-    <Button
-      key="cancel"
-      data-testid="removal-cancel"
-      disabled={card.busy}
-      size="xs"
-      title={`Cancel (${shortcutLabel('Escape')})`}
-      type="button"
-      variant={card.primary === 'cancel' ? 'secondary' : 'ghost'}
-      onClick={() => onAnswer('cancel')}
-    >
-      Cancel
-      {keys ? <ShortcutKeys accelerator="Escape" /> : null}
-    </Button>
-  )
   return (
-    <Alert
-      aria-busy={card.busy || undefined}
-      aria-label={`Remove ${card.authorName}'s message from ${card.platformLabel}?`}
-      className="outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+    <BuddyCard
+      busy={card.busy}
       data-mode={card.mode}
       data-operation-id={card.operationId}
-      data-testid="removal-card"
       data-topmost={topmost || undefined}
-      role="group"
-      tabIndex={-1}
-      onKeyDown={onKeyDown}
+      decline={{
+        label: 'Cancel',
+        testId: 'removal-cancel',
+        variant: card.primary === 'cancel' ? 'secondary' : 'ghost'
+      }}
       icon={DeleteIcon}
+      keys={topmost && !card.busy}
+      label={`Remove ${card.authorName}'s message from ${card.platformLabel}?`}
+      primary={{
+        label: card.confirmLabel,
+        testId: 'removal-confirm',
+        variant: card.primary === 'confirm' ? 'destructive' : 'ghost'
+      }}
+      testId="removal-card"
+      timer={card.timer}
+      title={<span data-slot="removal-card-title">{card.title}</span>}
+      onDecline={() => onAnswer('cancel')}
+      onPrimary={() => onAnswer('confirm')}
     >
-      <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
-        <span className="min-w-0 flex-1 truncate" data-slot="removal-card-title">
-          {card.title}
-        </span>
-        {card.timer ? (
-          <span
-            className="shrink-0 text-[11px] font-normal text-muted-foreground tabular-nums"
-            data-slot="removal-card-timer"
-          >
-            {card.timer}
-          </span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        <ChatPlatformIcon platform={card.platform} />
+        <span className="min-w-0 truncate font-medium text-foreground">{card.authorName}</span>
+        {card.reason ? (
+          <Badge className="shrink-0" data-testid="removal-card-reason" variant="outline">
+            {card.reason}
+          </Badge>
         ) : null}
-      </AlertTitle>
-      <AlertDescription className="flex min-w-0 flex-col gap-1 text-xs">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <ChatPlatformIcon platform={card.platform} />
-          <span className="min-w-0 truncate font-medium text-foreground">{card.authorName}</span>
-          {card.reason ? (
-            <Badge className="shrink-0" data-testid="removal-card-reason" variant="outline">
-              {card.reason}
-            </Badge>
-          ) : null}
+      </span>
+      {card.excerpt ? (
+        <span
+          className="line-clamp-2 break-words text-foreground select-text"
+          data-slot="removal-card-excerpt"
+        >
+          “{card.excerpt}”
         </span>
-        {card.excerpt ? (
-          <span
-            className="line-clamp-2 break-words text-foreground select-text"
-            data-slot="removal-card-excerpt"
-          >
-            “{card.excerpt}”
-          </span>
-        ) : null}
-        {card.note ? <span data-slot="removal-card-note">{card.note}</span> : null}
-      </AlertDescription>
-      <div
-        className={cn('col-start-2 mt-1 flex flex-wrap gap-1', card.busy && 'opacity-60')}
-        data-slot="removal-card-actions"
-      >
-        {card.primary === 'confirm' ? [confirm, cancel] : [cancel, confirm]}
-      </div>
-    </Alert>
+      ) : null}
+      {card.note ? <span data-slot="removal-card-note">{card.note}</span> : null}
+    </BuddyCard>
   )
 }
 

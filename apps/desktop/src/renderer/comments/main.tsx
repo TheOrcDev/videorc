@@ -524,18 +524,14 @@ function CommentsWindowApp(): ReactElement {
       .finally(() => setCommandAnsweringId((current) => (current === commandId ? null : current)))
   }
 
-  // Buddy Live's one switch (plan 119), relayed: on means Buddy reads chat AND
-  // hears you (`listen: true`), off only stops it joining. The status
-  // popover's switch, the nudge and the listening card send it. The settings
-  // are main-renderer owned, and the relay reply carries the truth back so
-  // the switch reflects what happened, not what was clicked.
+  // The Buddy Live switch (plan 174 S3.14a, D7), relayed: `enabled` and
+  // nothing else. It never names listening: the microphone is the listening
+  // card's own choice below. The pane header's switch and the nudge send it.
+  // The settings are main-renderer owned, and the relay reply carries the
+  // truth back so the switch reflects what happened, not what was clicked.
   const setBuddyLive = (on: boolean): void => {
     void window.videorc
-      ?.sendCohostEnable?.({
-        requestId: crypto.randomUUID(),
-        enabled: on,
-        ...(on ? { listen: true } : {})
-      })
+      ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled: on })
       .then((state) => state && setCohost(state))
       .catch((error) =>
         toastUserError(
@@ -543,6 +539,33 @@ function CommentsWindowApp(): ReactElement {
           { action: on ? 'turn on' : 'turn off', object: 'Buddy Live' },
           { id: 'cohost-enable' }
         )
+      )
+  }
+
+  // The one-time listening card's Turn on (plan 068 D3): listening alone,
+  // with its explicit grant, so Studio saves it even though Buddy already
+  // runs. No other on-path ever names the microphone (plan 174 S3.14a).
+  const turnListeningOn = (): void => {
+    void window.videorc
+      ?.sendCohostEnable?.({
+        requestId: crypto.randomUUID(),
+        enabled: true,
+        listen: true,
+        grantListen: true
+      })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toastUserError(error, { action: 'turn on', object: 'listening' }, { id: 'cohost-enable' })
+      )
+  }
+
+  // The behaviour chips (plan 174 S3.14a, D7) link to their one home: main
+  // shows the main window and the shell opens Buddy → Chat.
+  const openBuddyChatSettings = (): void => {
+    void window.videorc
+      ?.openBuddyTabFromCommentsWindow?.({ requestId: crypto.randomUUID(), tab: 'chat' })
+      .catch((error) =>
+        toastUserError(error, { action: 'open', object: 'Buddy → Chat' }, { id: 'buddy-open-tab' })
       )
   }
 
@@ -562,21 +585,16 @@ function CommentsWindowApp(): ReactElement {
       )
   }
 
-  // Plan 164 S-D6: the pane's mode control and behaviour switches. The
-  // mode is the pane's enable: Suggest or Auto turns the Buddy on (with
-  // listening, the same as the switch, when it was off), Off turns it off;
-  // a behaviour switch keeps `enabled` as it is and never names listening
-  // (plan 174 S0.2), so Greetings cannot turn the microphone back on. The
-  // templates and cooldowns live in the Buddy tab and ride along untouched
-  // (Studio merges the block).
+  // Plan 164 S-D6, plan 174 S3.14a (D7): the pane's posting mode governs
+  // only what Buddy posts. It keeps `enabled` exactly as it is and never
+  // names listening, so the save is `{autoChat}` alone: neither Buddy nor its
+  // microphone ever turns on from here. The templates and cooldowns live in
+  // the Buddy tab and ride along untouched (Studio merges the block).
   const setBuddyAutoChat = (patch: CohostAutoChatRelayPatch): void => {
-    const enabled = patch.mode === undefined ? cohost.enabled : patch.mode !== 'off'
-    const turningOn = enabled && !cohost.enabled
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
-        enabled,
-        ...(turningOn ? { listen: true } : {}),
+        enabled: cohost.enabled,
         autoChat: patch
       })
       .then((state) => state && setCohost(state))
@@ -639,6 +657,7 @@ function CommentsWindowApp(): ReactElement {
           cohostListen={cohost.listen}
           cohostAutoChat={cohost.autoChat}
           onCohostAutoChatChange={setBuddyAutoChat}
+          onCohostOpenChatSettings={openBuddyChatSettings}
           onCohostUtteranceApprove={(utterance) =>
             void sendCohostAction('approve-utterance')(utterance.id)
           }
@@ -673,7 +692,7 @@ function CommentsWindowApp(): ReactElement {
           }
           onCohostEnable={(enabled) => setBuddyLive(enabled)}
           onCohostEnableConsent={() => setBuddyConsentAsked(true)}
-          onCohostListenOn={() => setBuddyLive(true)}
+          onCohostListenOn={turnListeningOn}
           onCohostNudgeDismiss={() => {
             setCohostNudgeDismissed(true)
             localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')

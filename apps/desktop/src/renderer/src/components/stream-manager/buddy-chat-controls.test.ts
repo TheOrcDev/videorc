@@ -3,10 +3,11 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { CohostAutoChat, CohostAutoChatRelayPatch } from '@/lib/backend'
+import type { CohostAutoChat, CohostAutoChatMode } from '@/lib/backend'
 import {
   BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY,
   BUDDY_AUTO_CONFIRM_SENTENCE,
+  BUDDY_MODE_HINTS,
   buddyPostingConsentSentence
 } from '@/lib/buddy-auto-chat-view'
 
@@ -16,7 +17,8 @@ import { BuddyChatControls } from './buddy-chat-controls'
 
 let root: Root
 let container: HTMLDivElement
-let onChange: ReturnType<typeof vi.fn<(patch: CohostAutoChatRelayPatch) => void>>
+let onModeChange: ReturnType<typeof vi.fn<(mode: CohostAutoChatMode) => void>>
+let onOpenChatSettings: ReturnType<typeof vi.fn<() => void>>
 
 function autoChat(overrides: Partial<CohostAutoChat> = {}): CohostAutoChat {
   return {
@@ -34,7 +36,8 @@ beforeEach(() => {
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
-  onChange = vi.fn()
+  onModeChange = vi.fn()
+  onOpenChatSettings = vi.fn()
 })
 
 afterEach(async () => {
@@ -43,23 +46,9 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-/** The disabled reason a switch's focusable wrapper describes, or null when it has none. */
-function reasonFor(id: string): string | null {
-  const wrapper = document.getElementById(id)?.closest<HTMLElement>('[data-slot="disabled-reason"]')
-  if (!wrapper) return null
-  expect(wrapper.tabIndex).toBe(0)
-  return (
-    document.getElementById(wrapper.getAttribute('aria-describedby') ?? '')?.textContent ?? null
-  )
-}
-
 async function render(
   current: CohostAutoChat,
-  {
-    allowed = true,
-    consented = true,
-    name
-  }: { allowed?: boolean; consented?: boolean; name?: string } = {}
+  { name, link = true }: { name?: string; link?: boolean } = {}
 ): Promise<void> {
   await act(async () =>
     root.render(
@@ -68,16 +57,9 @@ async function render(
         null,
         createElement(BuddyChatControls, {
           autoChat: current,
-          consented,
-          gate: allowed
-            ? { allowed: true }
-            : {
-                allowed: false,
-                featureId: 'live-cohost',
-                reason: 'Buddy requires Videorc Premium.'
-              },
           name,
-          onChange
+          onModeChange,
+          ...(link ? { onOpenChatSettings } : {})
         })
       )
     )
@@ -88,6 +70,10 @@ function modeButton(mode: string): HTMLButtonElement {
   const button = document.querySelector(`[data-buddy-mode="${mode}"]`) as HTMLButtonElement | null
   expect(button).toBeTruthy()
   return button!
+}
+
+function chips(): HTMLButtonElement[] {
+  return [...document.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-behaviour-chip"]')]
 }
 
 /** Radix toggles on mousedown with the primary button. */
@@ -108,15 +94,15 @@ function dialogButton(testId: string): HTMLButtonElement {
   return button!
 }
 
-describe('Buddy chat mode (plan 164 S-D6)', () => {
+describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
   it('asks for consent the first time, lands in Suggest, and remembers it', async () => {
     await render(autoChat())
     await press(modeButton('suggest'))
-    expect(onChange).not.toHaveBeenCalled()
+    expect(onModeChange).not.toHaveBeenCalled()
     expect(dialog()?.textContent).toContain('Let Buddy post as you?')
     expect(dialog()?.textContent).toContain(buddyPostingConsentSentence(null))
     await act(async () => dialogButton('buddy-chat-accept').click())
-    expect(onChange).toHaveBeenLastCalledWith({ mode: 'suggest' })
+    expect(onModeChange).toHaveBeenLastCalledWith('suggest')
     expect(dialog()).toBeNull()
     expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBe('1')
   })
@@ -127,62 +113,92 @@ describe('Buddy chat mode (plan 164 S-D6)', () => {
     expect(dialog()?.textContent).toContain(buddyPostingConsentSentence(null))
     await act(async () => dialogButton('buddy-chat-accept').click())
     // Consent lands in Suggest; Auto still waits for its own sentence.
-    expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenLastCalledWith({ mode: 'suggest' })
+    expect(onModeChange).toHaveBeenCalledTimes(1)
+    expect(onModeChange).toHaveBeenLastCalledWith('suggest')
     expect(dialog()?.textContent).toContain(BUDDY_AUTO_CONFIRM_SENTENCE)
     await act(async () => dialogButton('buddy-chat-confirm-auto').click())
-    expect(onChange).toHaveBeenLastCalledWith({ mode: 'auto' })
+    expect(onModeChange).toHaveBeenLastCalledWith('auto')
     expect(dialog()).toBeNull()
 
     // Consented already: Auto still asks, every time; Not now changes nothing.
-    onChange.mockClear()
+    onModeChange.mockClear()
     await render(autoChat({ mode: 'suggest' }))
     await press(modeButton('auto'))
-    expect(onChange).not.toHaveBeenCalled()
+    expect(onModeChange).not.toHaveBeenCalled()
     expect(dialog()?.textContent).toContain(BUDDY_AUTO_CONFIRM_SENTENCE)
     const notNow = [...document.querySelectorAll('button')].find(
       (candidate) => candidate.textContent?.trim() === 'Not now'
     )
     await act(async () => notNow?.click())
-    expect(onChange).not.toHaveBeenCalled()
+    expect(onModeChange).not.toHaveBeenCalled()
     expect(dialog()).toBeNull()
   })
 
   it("asks in the streamer's name for Buddy, and names the control Chat posting (plan 174 J2-20)", async () => {
     await render(autoChat(), { name: 'Grum' })
-    expect(
-      container.querySelector('[aria-label="Chat posting"]') ??
-        document.querySelector('[aria-label="Chat posting"]')
-    ).toBeTruthy()
+    const control = document.querySelector('[aria-labelledby="buddy-chat-posting-label"]')
+    expect(control).toBeTruthy()
+    expect(document.getElementById('buddy-chat-posting-label')?.textContent).toBe('Chat posting')
     await press(modeButton('suggest'))
     expect(dialog()?.textContent).toContain('Let Grum post as you?')
     expect(dialog()?.textContent).toContain(buddyPostingConsentSentence('Grum'))
     expect(dialog()?.textContent).not.toMatch(/the Buddy/i)
   })
 
-  it('turns Off without asking, and the switches write their one field', async () => {
+  it('turns Off without asking, and Off only stops posting (D7)', async () => {
     await render(autoChat({ mode: 'auto' }))
     await press(modeButton('off'))
     expect(dialog()).toBeNull()
-    expect(onChange).toHaveBeenLastCalledWith({ mode: 'off' })
-    const greetings = document.getElementById('buddy-greetings') as HTMLButtonElement
-    await act(async () => greetings.click())
-    expect(onChange).toHaveBeenLastCalledWith({ greetings: true })
+    expect(onModeChange).toHaveBeenLastCalledWith('off')
+    // The mode's meaning is a visible line, never a title (plan 174 F-12).
+    expect(document.querySelector('[data-slot="buddy-mode-hint"]')?.textContent).toBe(
+      BUDDY_MODE_HINTS.auto
+    )
+    expect(document.querySelector('[data-buddy-mode][title]')).toBeNull()
+    await render(autoChat({ mode: 'off' }))
+    expect(document.querySelector('[data-slot="buddy-mode-hint"]')?.textContent).toBe(
+      'Nothing is posted.'
+    )
   })
 
-  it('keeps Greetings free and locks Answers and Banter behind Premium and cloud AI', async () => {
-    await render(autoChat(), { allowed: false })
-    expect((document.getElementById('buddy-greetings') as HTMLButtonElement).disabled).toBe(false)
-    expect((document.getElementById('buddy-answers') as HTMLButtonElement).disabled).toBe(true)
-    expect((document.getElementById('buddy-banter') as HTMLButtonElement).disabled).toBe(true)
-    // Plan 174 F-12: the reason is a focusable, described wrapper, not a title.
-    expect(reasonFor('buddy-answers')).toBe('Buddy requires Videorc Premium.')
-    expect(reasonFor('buddy-greetings')).toBeNull()
-    await render(autoChat(), { consented: false })
-    expect((document.getElementById('buddy-answers') as HTMLButtonElement).disabled).toBe(true)
-    expect(reasonFor('buddy-banter')).toBe('Needs cloud AI.')
-    await render(autoChat())
-    expect((document.getElementById('buddy-answers') as HTMLButtonElement).disabled).toBe(false)
-    expect(reasonFor('buddy-answers')).toBeNull()
+  it('shows Greetings, Answers and Banter as read-only chips that open Buddy → Chat', async () => {
+    const line = {
+      id: 't-1',
+      kind: 'follow' as const,
+      text: 'Welcome, {name}!',
+      state: 'talk' as const,
+      enabled: true
+    }
+    await render(autoChat({ greetings: { enabled: true, templates: [line] } }))
+    // No switches: the behaviours have one home (plan 174 F-24, H-8).
+    expect(document.querySelector('[role="switch"]')).toBeNull()
+    expect(chips().map((chip) => chip.textContent)).toEqual([
+      'Greetings on',
+      'Answers off',
+      'Banter off'
+    ])
+    const [greetings, answers] = chips()
+    expect(greetings!.getAttribute('aria-label')).toBe('Greetings on. Change it in Buddy → Chat.')
+    expect(greetings!.hasAttribute('data-on')).toBe(true)
+    expect(answers!.hasAttribute('data-on')).toBe(false)
+    // The tone rides the chip's dot; the words stay monochrome.
+    expect(greetings!.getAttribute('data-variant')).toBe('success')
+    expect(answers!.getAttribute('data-variant')).toBe('neutral')
+    await act(async () => answers!.click())
+    expect(onOpenChatSettings).toHaveBeenCalledTimes(1)
+    expect(onModeChange).not.toHaveBeenCalled()
+  })
+
+  it('warns when Greetings is on with nothing to post (plan 174 F-11)', async () => {
+    await render(autoChat({ greetings: { enabled: true, templates: [] } }))
+    const [greetings] = chips()
+    expect(greetings!.textContent).toBe('Greetings on, no lines')
+    expect(greetings!.getAttribute('data-variant')).toBe('warning')
+    expect(greetings!.getAttribute('aria-label')).toContain('Nothing is posted until you add some')
+  })
+
+  it('keeps the chips inert without a way to Buddy → Chat', async () => {
+    await render(autoChat(), { link: false })
+    for (const chip of chips()) expect(chip.disabled).toBe(true)
   })
 })

@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  BUDDY_BEHAVIOUR_HOME,
   BUDDY_SAMPLE_FIELDS,
   BUDDY_STARTER_TEMPLATES,
   BUDDY_MODE_HINTS,
+  BUDDY_POSTING_LABEL,
   BUDDY_POSTS_PROMISE,
   BUDDY_TEMPLATE_FIELDS,
+  buddyBehaviourChips,
   buddyDisplayName,
   buddyModeChangeStep,
   buddyPostingConsentSentence,
@@ -34,7 +37,45 @@ describe('Buddy in copy (plan 174 J2-20, F-26)', () => {
     ]) {
       expect(line).not.toMatch(/\b[Tt]he Buddy\b/)
     }
-    expect(BUDDY_MODE_HINTS.off).toBe('Buddy Live is off. Nothing is posted.')
+  })
+})
+
+describe('Chat posting and the behaviour chips (plan 174 S3.14a, D7)', () => {
+  it('governs only what Buddy posts: Off never means Buddy Live off', () => {
+    expect(BUDDY_POSTING_LABEL).toBe('Chat posting')
+    expect(BUDDY_MODE_HINTS.off).toBe('Nothing is posted.')
+    for (const hint of Object.values(BUDDY_MODE_HINTS)) {
+      expect(hint).not.toContain('Buddy Live')
+    }
+  })
+
+  it('summarises each behaviour as a read-only chip that names its one home', () => {
+    const chips = buddyBehaviourChips({
+      greetings: {
+        enabled: true,
+        templates: [{ id: 't', kind: 'follow', text: 'Hi {name}', state: 'talk', enabled: true }]
+      },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    })
+    expect(chips.map((chip) => [chip.id, chip.text, chip.on])).toEqual([
+      ['greetings', 'Greetings on', true],
+      ['answers', 'Answers off', false],
+      ['banter', 'Banter off', false]
+    ])
+    expect(BUDDY_BEHAVIOUR_HOME).toBe('Buddy → Chat')
+    for (const chip of chips) {
+      expect(chip.empty).toBe(false)
+      expect(chip.name).toBe(`${chip.text}. Change it in Buddy → Chat.`)
+    }
+    // Plan 174 F-11: on with no line to post says so, never silently.
+    const [greetings] = buddyBehaviourChips({
+      greetings: { enabled: true, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    })
+    expect(greetings).toMatchObject({ on: true, empty: true, text: 'Greetings on, no lines' })
+    expect(greetings!.name).toContain('Nothing is posted until you add some in Buddy → Chat.')
   })
 })
 

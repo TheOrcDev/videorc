@@ -51,11 +51,13 @@ describe('Electron IPC contract', () => {
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
     // 130: plan 169 D10 retired buddy-assets:import-image (no per-state uploads).
+    // 133: plan 174 S3.14a adds comments-window:open-buddy-tab (the Buddy
+    // pane's behaviour chips open Buddy → Chat in the main window).
     // 132: plan 174 S3.1 adds app:exit (the renderer's answer to a quit or
     // close asked while on air).
     // 131: plan 174 S3.18 adds resource:reveal-support-bundle (Show in Finder).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(132)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(132)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(133)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(133)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

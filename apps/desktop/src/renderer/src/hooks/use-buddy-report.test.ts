@@ -184,7 +184,8 @@ describe('useBuddyReport (plan 119 S3)', () => {
     fake.core = { connection: null, wsStatus: 'connecting' }
     await render(null)
     expect(fake.clients).toHaveLength(0)
-    expect(state.loading).toBe(true)
+    // Plan 174 F-21: offline is its own state, never "Loading" forever.
+    expect(state).toMatchObject({ loading: false, offline: true, error: null })
 
     fake.core = { connection: CONNECTION, wsStatus: 'connected' }
     await render(null)

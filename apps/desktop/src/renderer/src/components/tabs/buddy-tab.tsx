@@ -14,12 +14,14 @@ import { BuddyPetCreator } from '@/components/buddy-pet-creator'
 import { BuddyPetSettings } from '@/components/buddy-pet-settings'
 import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
 import { BuddyEmblem } from '@/components/buddy-emblem'
+import { BuddyLiveSwitch } from '@/components/cohost-status'
 import { BuddyReportCard } from '@/components/buddy-report-card'
 import { BuddyVoiceCommands } from '@/components/buddy-voice-commands'
 import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
 import { PageTabs } from '@/components/page-tabs'
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -46,6 +48,7 @@ import {
   CLOUD_AI_KEEPS,
   CLOUD_AI_USES,
   BUDDY_CHAT_FREE_NOTE,
+  BUDDY_LIVE_LOADING_REASON,
   BUDDY_LIVE_POWERS,
   buddyLiveView,
   type BuddyLiveStatus
@@ -137,14 +140,14 @@ export function BuddyTab({
         onValueChange={selectTab}
       >
         <TabsContent className="flex flex-1 flex-col" value="live">
-          {/* Plan 164 S-A4: the creation screen leads; the old Live switch
-                and Cloud AI stay at the bottom until Stream Manager takes the
-                switch (S-D6). */}
+          {/* Profile (plan 174 D7, F-4): one status row leads, then My
+                Buddies and the creation screen, then Buddy Live's details. */}
           {creatorOpen ? <BuddyPetCreator onClose={closeBuddyPetCreator} /> : null}
           {/* Plan 170: My Buddies, the look panel and the onboarding share
                 one backend client and one look controller. */}
           <BuddyLookClientProvider>
             <PageStack className={creatorOpen ? 'hidden' : undefined}>
+              <BuddyProfileStatus />
               <BuddyLibrarySection />
               <BuddyPersonaSection />
               <BuddyPetSettings />
@@ -258,56 +261,92 @@ function BuddyVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
 }
 
 /**
- * The Live tab's left column (plan 150): Buddy's emblem beside its name and
- * Buddy Live's status, then why it is locked, the Stream Manager, and whether
- * Buddy hears you. The switch moved to Stream Manager (plan 164 S-D6): the
- * Buddy pane's Chat leaving Off is what turns Buddy Live on, so this column
- * points at it until plan 174 S3.14a gives Buddy Live its own switch.
+ * The Profile tab's one status row (plan 174 D7, F-4, G-2): Buddy's emblem
+ * and name, Buddy Live's status in the one vocabulary (F-20) with its reason,
+ * the Buddy Live switch (S3.14a), "Open Stream Manager" with its key, then
+ * the one unlock action when the account is locked, and how to put the Buddy
+ * on stream while it is not. The switch turns Buddy on and off and nothing
+ * else: without cloud-AI consent it asks first, and listening stays its own
+ * switch in the Buddy Live section below.
  */
-function BuddyLiveSection(): ReactElement {
-  const { cohostSettings, runtimeInfo } = useStudioCore()
+function BuddyProfileStatus(): ReactElement {
+  const { cohostSettings, overlayLayout, runtimeInfo, setBuddyLive } = useStudioCore()
   const { openCommentsWindow } = useStudioShell()
   const view = useBuddyLive()
   const buddyName = buddyDisplayName(cohostSettings?.persona.name)
+  const turnBuddyLive = (on: boolean): void => {
+    void setBuddyLive(on).catch((error: unknown) =>
+      toastUserError(error, { action: on ? 'turn on' : 'turn off', object: 'Buddy Live' })
+    )
+  }
 
+  return (
+    <div
+      className="flex flex-col gap-3 border-b border-border p-gutter"
+      data-slot="buddy-profile-status"
+    >
+      <div className="flex flex-wrap items-center gap-3" data-slot="buddy-live-status-block">
+        <BuddyEmblem size="lg" />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span
+            className="truncate text-sm font-medium text-foreground"
+            data-slot="buddy-profile-name"
+          >
+            {buddyName}
+          </span>
+          <BuddyLiveStatusLine status={view.status} />
+        </div>
+        <BuddyLiveSwitch
+          checked={view.checked}
+          disabledReason={
+            view.switchDisabled ? (view.unlock?.reason ?? BUDDY_LIVE_LOADING_REASON) : null
+          }
+          size="default"
+          onCheckedChange={turnBuddyLive}
+        />
+        {runtimeInfo?.commentsWindowEnabled !== false ? (
+          <Button
+            className="shrink-0"
+            type="button"
+            variant="outline"
+            onClick={() => void openCommentsWindow()}
+          >
+            <ChatIcon data-icon="inline-start" />
+            Open Stream Manager
+            <ShortcutKeys
+              accelerator={shortcutAccelerator('comments-window')}
+              className="ml-0.5"
+              platform={runtimeInfo?.platform}
+            />
+          </Button>
+        ) : null}
+      </div>
+      <BuddyUnlockAlert />
+      {!overlayLayout.buddy.showOnStream ? (
+        // Plan 174 G-2: nothing else says how a Buddy gets on stream.
+        <Alert data-testid="buddy-on-stream-note" variant="quiet">
+          <AlertTitle>
+            {buddyName} isn&apos;t on stream yet. In Stream Manager, turn on &ldquo;{buddyName} on
+            stream&rdquo; to show it.
+          </AlertTitle>
+        </Alert>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Buddy Live's details (plan 150): what it does and whether Buddy hears you.
+ * Its status and switch lead the tab (`BuddyProfileStatus`).
+ */
+function BuddyLiveSection(): ReactElement {
+  const view = useBuddyLive()
   return (
     <PanelSection
       action={<Badge variant="outline">Alpha</Badge>}
-      description={`Buddy reads your chat and hears you while you stream. ${BUDDY_POSTS_PROMISE}`}
+      description={`Buddy reads your chat while you stream. ${BUDDY_POSTS_PROMISE}`}
       title="Buddy Live"
     >
-      <div className="flex items-center gap-3" data-slot="buddy-live-status-block">
-        <BuddyEmblem size="lg" />
-        <Field className="min-w-0 flex-1" orientation="horizontal">
-          <FieldContent>
-            <FieldTitle>{buddyName}</FieldTitle>
-            <BuddyLiveStatusLine status={view.status} />
-            <FieldDescription data-testid="buddy-live-pointer">
-              Turn on Buddy Live in Stream Manager: in the Buddy pane, set Chat to Suggest or Auto.
-            </FieldDescription>
-          </FieldContent>
-        </Field>
-      </div>
-
-      <BuddyUnlockAlert />
-
-      {runtimeInfo?.commentsWindowEnabled !== false ? (
-        <Button
-          className="w-fit"
-          type="button"
-          variant="outline"
-          onClick={() => void openCommentsWindow()}
-        >
-          <ChatIcon data-icon="inline-start" />
-          Open Stream Manager
-          <ShortcutKeys
-            accelerator={shortcutAccelerator('comments-window')}
-            className="ml-0.5"
-            platform={runtimeInfo?.platform}
-          />
-        </Button>
-      ) : null}
-
       <CohostListenField locked={view.unlock !== null} />
     </PanelSection>
   )

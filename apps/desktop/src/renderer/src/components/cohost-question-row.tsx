@@ -46,7 +46,7 @@ export function CohostQuestionRow({
 
   return (
     <CommandItem
-      className="min-h-11"
+      className="h-row"
       data-cohost-row="question"
       data-cohost-row-key={key}
       data-cohost-selected={selected ? 'true' : 'false'}

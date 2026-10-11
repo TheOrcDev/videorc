@@ -15,37 +15,45 @@ import type {
 // of the eager renderer bundle.
 
 /**
- * Buddy Live's one switch (plan 119): on means Buddy reads chat AND hears you,
- * in one save; off only stops Buddy joining and leaves listening as it was.
- * The Buddy tab's consent dialog writes this one patch; a Stream Manager
- * command goes through `cohostEnableRelayPatch` instead.
+ * The Buddy Live switch's save (plan 174 S3.14a, D7): `enabled` and nothing
+ * else. Listening (the microphone) is its own choice with its own disclosure,
+ * asked by the "Buddy hears you" switch on the Buddy page and the Stream
+ * Manager's listening card, never by this one; the chat posting mode is its
+ * own control too. The Buddy page's consent dialog writes this patch after
+ * granting consent; a Stream Manager command goes through
+ * `cohostEnableRelayPatch` instead.
  */
 export function buddyLiveSettingsPatch(on: boolean): CohostSettingsPatch {
-  return on ? { enabled: true, listen: true } : { enabled: false }
+  return { enabled: on }
 }
 
 /**
- * The save one Stream Manager enable command makes (plan 174 S0.2). The
- * relay never adds listening on its own:
+ * The save one Stream Manager enable command makes (plan 174 S0.2, S3.14a).
+ * The relay never adds listening on its own:
  *
  * - `enabled` is written only when the command changes it, so a behaviour
- *   switch (Greetings, Answers, Banter) saves `{autoChat}` alone and never
+ *   command (the posting mode, a chip) saves `{autoChat}` alone and never
  *   turns Buddy, or its microphone, back on.
  * - `listen: true` is written only when the command names it and Buddy is on
- *   after the save: the one switch turning Buddy on (plan 119), the mode
- *   control's off to Suggest or Auto, or the listening card while Buddy
- *   already runs (plan 068 D3). Off leaves listening as it was.
+ *   after the save, and only in the command that turns Buddy on (off to on)
+ *   or one that carries `grantListen` (the listening card, plan 068 D3,
+ *   while Buddy already runs). A later `listen` without the grant is dropped,
+ *   so no on-path grants the microphone by accident. Off leaves listening as
+ *   it was.
  *
  * An empty patch means nothing to save: the caller answers with what it has.
  */
 export function cohostEnableRelayPatch(
   current: Pick<CohostSettings, 'enabled'> | null,
-  command: Pick<CohostEnableCommand, 'enabled' | 'listen'>,
+  command: Pick<CohostEnableCommand, 'enabled' | 'listen' | 'grantListen'>,
   autoChat: CohostAutoChat | null
 ): CohostSettingsPatch {
   const patch: CohostSettingsPatch = {}
   if (!current || current.enabled !== command.enabled) patch.enabled = command.enabled
-  if (command.enabled && command.listen === true) patch.listen = true
+  const turningOn = command.enabled && !current?.enabled
+  if (command.enabled && command.listen === true && (turningOn || command.grantListen === true)) {
+    patch.listen = true
+  }
   if (autoChat) patch.autoChat = autoChat
   return patch
 }

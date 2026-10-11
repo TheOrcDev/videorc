@@ -37,7 +37,7 @@ export function CohostFlagRow({
 
   return (
     <CommandItem
-      className="min-h-11"
+      className="h-row"
       data-cohost-row="flag"
       data-cohost-row-key={key}
       data-cohost-selected={selected ? 'true' : 'false'}

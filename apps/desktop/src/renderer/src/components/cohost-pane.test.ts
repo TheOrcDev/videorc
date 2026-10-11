@@ -260,7 +260,9 @@ describe('CohostPane', () => {
     expect(markup).toContain('>Dismiss<')
     expect(markup).toContain('data-slot="cohost-recap"')
     expect(markup).toContain('So far: unboxed the parts.')
-    expect(markup).toContain('Post to chat')
+    // Plan 174 F-23: the button says what the click does: it only pre-fills.
+    expect(markup).toContain('Edit in chat box')
+    expect(markup).not.toContain('Post to chat')
     // A live recap card replaces the draft button; nothing sends from here.
     expect(markup).not.toContain('Draft a recap')
     expect(markup).not.toContain('>Send<')
@@ -337,7 +339,6 @@ describe('CohostPane', () => {
   it('names the empty state instead of showing nothing', () => {
     const markup = renderPane({ state: state({ questions: [], flags: [] }) })
     expect(markup).toContain('Reading chat. Questions will appear here.')
-    expect(markup).toContain('reading chat')
   })
 
   it('replaces itself with a one-line upsell for a Basic account', () => {
@@ -350,9 +351,13 @@ describe('CohostPane', () => {
       },
       onUpgrade: () => undefined
     })
+    // Plan 174 F-14: a flush locked Alert with its one action, never a
+    // hand-rolled notice box.
     expect(markup).toContain('data-slot="cohost-notice"')
+    expect(markup).toMatch(/data-slot="alert"[^>]*data-variant="locked"/)
     expect(markup).toContain('Buddy requires Videorc Premium.')
     expect(markup).toContain('View Premium')
+    expect(markup).not.toContain('Premium Alpha')
     expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
@@ -414,9 +419,20 @@ describe('CohostPane', () => {
     for (const chip of chips) expect(chip).toContain('@max-[400px]/cohost-pane:hidden')
   })
 
-  it('keeps the chat mood in the status tooltip when the mood label folds', () => {
+  it('says the chat mood in plain words, never only in a tooltip (plan 174 S1.10)', () => {
     const markup = renderPane({ state: state({ mood: 'hype' }) })
-    expect(markup).toContain('Chat mood: Chat is hyped')
+    expect(markup).toContain('Chat is hyped')
+    expect(markup).not.toContain('Chat mood:')
+  })
+
+  it('shows viewer-reported problems as a warning Alert row (plan 174 F-7)', () => {
+    const markup = renderPane({
+      state: state({
+        alerts: [{ kind: 'audio', viewers: 3, active: true, lastSeenAt: new Date().toISOString() }]
+      })
+    })
+    expect(markup).toMatch(/data-variant="warning"[^>]*data-testid="cohost-alert"/)
+    expect(markup).toContain('Chat says: no audio · 3 viewers')
   })
 
   it('offers jump + dismiss when a flag is the only row', () => {
@@ -431,8 +447,20 @@ describe('CohostPane', () => {
 
   it('surfaces a partial tick and the chat mood without colouring them', () => {
     const markup = renderPane({ state: state({ mood: 'hype', partial: true }) })
-    expect(markup).toContain('Partial')
+    expect(markup).toContain('Partial pass')
     expect(markup).toContain('Chat is hyped')
+    expect(markup).not.toContain('text-warning')
+  })
+
+  it('is a flex column whose list takes the height: no duplicate header, no collapse (F-8)', () => {
+    const markup = renderPane({ state: state({ questions: [question()] }) })
+    expect(markup).toMatch(/data-testid="cohost-pane"/)
+    expect(markup).toMatch(/class="[^"]*min-h-0 flex-1 flex-col[^"]*" data-testid="cohost-pane"/)
+    expect(markup).not.toContain('data-slot="collapsible')
+    expect(markup).not.toContain('>Buddy<')
+    expect(markup).not.toContain('Alpha')
+    // The rows are 32 px (plan 174 F-8), never palette-scale.
+    expect(markup).toMatch(/class="[^"]*h-row[^"]*"[^>]*data-cohost-row="question"/)
   })
 
   it("names the failed tick in the server's words as the chip tooltip and a secondary line", () => {
@@ -448,9 +476,8 @@ describe('CohostPane', () => {
         }
       })
     })
-    expect(markup).toContain('data-slot="cohost-pane-status"')
-    expect(markup).toContain('>error<')
-    expect(markup).toContain('data-tone="destructive"')
+    // The status word and its dot live in the pane header (cohost-status);
+    // here the failed tick keeps its own line.
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
     expect(markup).toContain('once Buddy is reading chat again')
@@ -463,34 +490,14 @@ describe('CohostPane', () => {
     expect(healthy).not.toContain('data-slot="cohost-error-detail"')
     expect(healthy).toContain('Reading chat. Questions will appear here.')
   })
-  it('mirrors the working shimmer in the segment header while chat is queued', () => {
+  it('follows the real work in its empty state while chat is queued', () => {
     const reading = renderPane({ state: state({ pendingMessages: 4 }) })
-    expect(reading).toContain('data-slot="cohost-typing-dots"')
-    expect(reading).toContain('>reading 4 new…<')
     // The empty state stops claiming "Listening —" while there is real work.
     expect(reading).toContain('Reading 4 new messages…')
     expect(reading).not.toContain('Reading chat. Questions')
 
     const thinking = renderPane({ state: state({ tickInFlight: true, pendingMessages: 4 }) })
-    expect(thinking).toContain('typing-dot-fast')
-    expect(thinking).toContain('>thinking…<')
     expect(thinking).toContain('Thinking about the last batch…')
-  })
-
-  it('shows the presence dot for every state, live-green only while listening', () => {
-    expect(renderPane({ state: state() })).toContain('data-tone="live"')
-    expect(renderPane({ state: state({ status: 'off', sessionId: null }) })).toContain(
-      'data-tone="muted"'
-    )
-  })
-
-  it('flashes the grouped delta in place of the count', () => {
-    const markup = renderPane({
-      flash: 'grouped 2 questions',
-      state: state({ questions: [question()] })
-    })
-    expect(markup).toContain('grouped 2 questions')
-    expect(markup).not.toContain('>1 q<')
   })
 })
 

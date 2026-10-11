@@ -8558,9 +8558,10 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.chat.cohostState?.status).toBe('paused')
   }, 15_000)
 
-  // Plan 119 S2: Buddy Live is one switch. On asks for cloud-AI consent first
-  // (the Buddy tab's dialog), then writes chat AND listening in ONE save; off
-  // writes `enabled` alone. Cloud AI is its own choice and never rewrites them.
+  // Plan 174 S3.14a (D7): the Buddy Live switch writes `enabled` and nothing
+  // else. On asks for cloud-AI consent first (the Buddy page's dialog) and
+  // never grants the microphone in the same click: listening keeps its own
+  // switch. Cloud AI is its own choice and never rewrites them.
   async function mountBuddyLiveProvider(consent: '0' | '1'): Promise<{
     backend: StudioBackend
     latest: () => StudioObservation | undefined
@@ -8607,7 +8608,7 @@ describe('real StudioProvider lifecycle', () => {
     }
   }
 
-  it('turns Buddy Live on only through the consent dialog, then in one save with listening', async () => {
+  it('turns Buddy Live on only through the consent dialog, never the microphone with it', async () => {
     const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
     await act(async () => latest()!.core.setBuddyLive(true))
@@ -8621,13 +8622,16 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()!.core.buddyConsentRequested).toBe(false)
     expect(latest()!.core.aiConsent).toBe(true)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
-    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
+    // One click never grants consent and listening at once (the Phase 0 review).
+    expect(settingsWrites()).toEqual([{ enabled: true }])
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
 
     // Off is `enabled` alone: listening and consent stay as they were.
+    await act(async () => latest()!.core.patchCohostSettings({ listen: true }))
+    await waitForObservation(() => latest()?.core.cohostSettings?.listen === true)
     await act(async () => latest()!.core.setBuddyLive(false))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === false)
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }, { enabled: false }])
+    expect(settingsWrites()).toEqual([{ enabled: true }, { listen: true }, { enabled: false }])
     expect(latest()!.core.cohostSettings?.listen).toBe(true)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
     expect(toastSpies.error).not.toHaveBeenCalled()
@@ -8653,7 +8657,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
     expect(latest()!.core.buddyConsentRequested).toBe(false)
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(settingsWrites()).toEqual([{ enabled: true }])
   }, 15_000)
 
   it('revokes cloud AI without rewriting Buddy settings, and asks again on the next on', async () => {
@@ -8664,12 +8668,12 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => latest()!.core.setAiConsent(false))
     await waitForObservation(() => latest()?.core.aiConsent === false)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(settingsWrites()).toEqual([{ enabled: true }])
     expect(latest()!.core.cohostSettings?.enabled).toBe(true)
 
     await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
-    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(settingsWrites()).toEqual([{ enabled: true }])
   }, 15_000)
 
   // Plan 174 S0.2: a Comments-window command saves only what it names. The
@@ -8693,29 +8697,43 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(latest()!.core.buddyConsentRequested).toBe(false)
 
-    // The listening card, with Buddy already on: `listen` alone.
+    // A later `listen` with Buddy already on is dropped unless the listening
+    // card grants it (plan 174 S3.14a): nothing is saved, the state answers.
     await act(async () => {
       emitApi('onCohostEnableRequest', { requestId: 'enable-2', enabled: true, listen: true })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
+    expect(settingsWrites()).toEqual([{ enabled: true }])
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
+
+    // The listening card's own Turn on: `listen` alone.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', {
+        requestId: 'enable-2b',
+        enabled: true,
+        listen: true,
+        grantListen: true
+      })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
     expect(settingsWrites().at(-1)).toEqual({ listen: true })
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
 
-    // The status popover's switch, off: `enabled` alone; listening stays.
+    // The Buddy Live switch, off: `enabled` alone; listening stays.
     await act(async () => {
       emitApi('onCohostEnableRequest', { requestId: 'enable-3', enabled: false })
     })
-    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 4)
     expect(settingsWrites().at(-1)).toEqual({ enabled: false })
     expect(latest()!.core.cohostSettings?.listen).toBe(true)
 
-    // The one switch on again (the popover, the nudge): the window names
-    // listening, and the save is the Buddy tab's.
+    // The Buddy Live switch on again (the header, the nudge): `enabled`
+    // alone, the same save as the Buddy page's switch.
     await act(async () => {
-      emitApi('onCohostEnableRequest', { requestId: 'enable-4', enabled: true, listen: true })
+      emitApi('onCohostEnableRequest', { requestId: 'enable-4', enabled: true })
     })
-    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 4)
-    expect(settingsWrites().at(-1)).toEqual({ enabled: true, listen: true })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 5)
+    expect(settingsWrites().at(-1)).toEqual({ enabled: true })
     expect(latest()!.core.buddyConsentRequested).toBe(false)
   }, 15_000)
 

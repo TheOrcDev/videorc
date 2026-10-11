@@ -145,6 +145,9 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:clip-mark-result-push': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
   'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
+  // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):
+  // the Chat window asks, main shows the main window.
+  'comments-window:open-buddy-tab': MAIN_AND_COMMENTS,
   // Remove from chat and the removal card's answers (plan 140, S6): the Chat
   // window asks (its handler refuses any other sender), Studio replies.
   'comments-window:moderation': MAIN_AND_COMMENTS,

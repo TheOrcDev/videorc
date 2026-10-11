@@ -4409,6 +4409,10 @@ export interface VideorcApi {
    * (plan 140, S5): like Show who followed, main starts the reconnect with
    * every optional permission and opens the browser. Resolves once it opened. */
   reconnectScopesFromCommentsWindow: (command: ScopeReconnectCommand) => Promise<boolean>
+  /** The Stream Manager's read-only behaviour chips (plan 174 S3.14a) link to
+   * Buddy → Chat, their one home: main shows the main window and opens the
+   * Buddy page on that tab through `buddy:deep-link`. Resolves once sent. */
+  openBuddyTabFromCommentsWindow: (command: OpenBuddyTabCommand) => Promise<boolean>
   /** Chat removal relay (plan 140, S6): the Stream Manager's "Remove from
    * chat" and its removal-card answers. The MAIN renderer owns the backend
    * socket and makes the `liveChat.moderation.*` call; the reply is the
@@ -4591,7 +4595,9 @@ export interface VideorcApi {
    * window and synced the library; the shell opens the Buddy tab, and the
    * creator when `openCreator` (Make it Alive, after the avatar is worn).
    */
-  onBuddyDeepLink: (callback: (navigation: { openCreator: boolean }) => void) => () => void
+  onBuddyDeepLink: (
+    callback: (navigation: { openCreator: boolean; tab?: string }) => void
+  ) => () => void
   /**
    * Main was asked to quit (⌘Q, the Dock) or to close the main window (⌘W)
    * while on air (plan 174 S3.1, D2). The shell asks "End livestream and
@@ -6350,11 +6356,28 @@ export interface CohostEnableCommand {
   /** Also set `cohost.settings.listen` in the same save (plan 068 D3). */
   listen?: boolean
   /**
+   * The listening card's own Turn on (plan 174 S3.14a): the streamer read the
+   * microphone disclosure and asked for it, so `listen: true` is saved even
+   * while Buddy already runs. Without it the relay writes `listen` only in
+   * the command that turns Buddy on, never on a later one.
+   */
+  grantListen?: boolean
+  /**
    * Plan 164 S-D6: the Stream Manager's mode control and behaviour switches.
    * A partial block; the Studio renderer merges it into the stored
    * `autoChat` (templates and cooldowns stay) in the same save.
    */
   autoChat?: CohostAutoChatRelayPatch
+}
+
+/**
+ * "Open Buddy → Chat" from the Stream Manager (plan 174 S3.14a): the tab id
+ * as the Buddy page names it (`lib/buddy-tabs.ts`); the shell drops an id it
+ * does not know and opens the page on its first tab.
+ */
+export interface OpenBuddyTabCommand {
+  requestId: string
+  tab: string
 }
 
 /** The part of `autoChat` the Stream Manager may change (plan 164 S-D6). */

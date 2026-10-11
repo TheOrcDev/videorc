@@ -181,12 +181,16 @@ describe('Greetings editor (plan 164 S-D5)', () => {
 })
 
 describe('Greetings rhythm (plan 168 S-02)', () => {
-  it('puts the Greet activity row in a grouped card, as a field', async () => {
+  it('puts the Greetings row in a grouped card, as a field, under its one name (plan 174 F-24)', async () => {
     await render([])
     const card = document.querySelector('[data-slot="field-group"][data-variant="grouped"]')
     expect(card).toBeTruthy()
     expect(card!.children).toHaveLength(1)
     expect(card!.children[0]!.getAttribute('data-slot')).toBe('field')
     expect(card!.querySelector('#buddy-greetings-enabled')).toBeTruthy()
+    expect(card!.querySelector('label[for="buddy-greetings-enabled"]')?.textContent).toBe(
+      'Greetings'
+    )
+    expect(document.body.textContent).not.toContain('Greet activity')
   })
 })

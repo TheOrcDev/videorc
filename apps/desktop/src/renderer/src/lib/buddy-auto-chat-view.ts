@@ -1,5 +1,6 @@
 import type {
   CohostActivityTemplateKind,
+  CohostAutoChat,
   CohostAutoChatMode,
   CohostGreetingPlatform,
   CohostGreetingTemplate,
@@ -34,11 +35,67 @@ export const BUDDY_MODE_LABELS: Record<CohostAutoChatMode, string> = {
 }
 export const BUDDY_MODES: readonly CohostAutoChatMode[] = ['off', 'suggest', 'auto']
 
-/** Off is Buddy Live off until plan 174 S3.14a gives it its own switch. */
+/**
+ * The posting control's name (plan 174 S3.14a, D7): it governs only what
+ * Buddy posts as you. Whether Buddy runs at all is Buddy Live, its own switch.
+ */
+export const BUDDY_POSTING_LABEL = 'Chat posting'
+
+/** What the chosen mode means, as the line under the control (plan 174 F-12). */
 export const BUDDY_MODE_HINTS: Record<CohostAutoChatMode, string> = {
-  off: 'Buddy Live is off. Nothing is posted.',
+  off: 'Nothing is posted.',
   suggest: 'Each message is a card here; one click sends it.',
   auto: 'Messages go out by themselves, within the limits.'
+}
+
+export type BuddyBehaviourId = 'greetings' | 'answers' | 'banter'
+
+export const BUDDY_BEHAVIOUR_IDS: readonly BuddyBehaviourId[] = ['greetings', 'answers', 'banter']
+
+/** Each behaviour's one name, the same on the Buddy page and in the Stream Manager. */
+export const BUDDY_BEHAVIOUR_LABELS: Record<BuddyBehaviourId, string> = {
+  greetings: 'Greetings',
+  answers: 'Answers',
+  banter: 'Banter'
+}
+
+/** Where the behaviours are turned on and off: their one home (plan 174 D7). */
+export const BUDDY_BEHAVIOUR_HOME = 'Buddy → Chat'
+
+export interface BuddyBehaviourChip {
+  id: BuddyBehaviourId
+  label: string
+  on: boolean
+  /** On with nothing to post (plan 174 F-11): Greetings without a line. */
+  empty: boolean
+  /** "Greetings on", "Answers off", "Greetings on, no lines": the chip's text. */
+  text: string
+  /** The chip's accessible name: its state and the way to change it. */
+  name: string
+}
+
+/** Greetings is on but has no line to post (plan 174 F-11). */
+export const BUDDY_GREETINGS_EMPTY_NOTE =
+  'Greetings is on, but has no lines yet: nothing is posted until you add some.'
+
+/**
+ * The three behaviours as read-only summary chips (plan 174 S3.14a, D7): each
+ * says whether it is on and links to its one home, Buddy → Chat, so the
+ * Stream Manager never grows a second set of switches.
+ */
+export function buddyBehaviourChips(
+  autoChat: Pick<CohostAutoChat, 'greetings' | 'answers' | 'banter'>
+): BuddyBehaviourChip[] {
+  return BUDDY_BEHAVIOUR_IDS.map((id) => {
+    const label = BUDDY_BEHAVIOUR_LABELS[id]
+    const on = autoChat[id].enabled
+    const empty = id === 'greetings' && on && autoChat.greetings.templates.length === 0
+    const text = empty ? `${label} on, no lines` : `${label} ${on ? 'on' : 'off'}`
+    const name = empty
+      ? `${text}. Nothing is posted until you add some in ${BUDDY_BEHAVIOUR_HOME}.`
+      : `${text}. Change it in ${BUDDY_BEHAVIOUR_HOME}.`
+    return { id, label, on, empty, text, name }
+  })
 }
 
 /** The posting consent dialog's title (plan 164 S-D6): the character asks. */

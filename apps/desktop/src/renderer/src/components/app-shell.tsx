@@ -35,7 +35,12 @@ import {
 import { isCommandKey } from '@/lib/platform'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
-import { readLastBuddyTab, writeLastBuddyTab, type BuddyTabId } from '@/lib/buddy-tabs'
+import {
+  isBuddyTabId,
+  readLastBuddyTab,
+  writeLastBuddyTab,
+  type BuddyTabId
+} from '@/lib/buddy-tabs'
 import {
   readLastLivestreamView,
   writeLastLivestreamView,
@@ -414,10 +419,12 @@ export function AppShell(): ReactElement {
 
   // Plan 170 D18: `videorc://buddy` opens the Buddy tab (main focused the
   // window and synced the library); Make it Alive also opens the creator
-  // once main saw the avatar worn.
+  // once main saw the avatar worn. Plan 174 S3.14a: the Stream Manager's
+  // behaviour chips name a tab (Chat); an id this build does not know opens
+  // the first tab.
   useEffect(() => {
     const off = window.videorc?.onBuddyDeepLink?.((navigation) => {
-      openBuddy('live')
+      openBuddy(isBuddyTabId(navigation.tab) ? navigation.tab : 'live')
       if (navigation.openCreator) openBuddyPetCreator({ reference: 'persona-idle' })
     })
     return off

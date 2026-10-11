@@ -96,6 +96,7 @@ const api: VideorcApi = {
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),
+  openBuddyTabFromCommentsWindow: (command) => invoke('comments-window:open-buddy-tab', command),
   moderateFromCommentsWindow: (command) => invoke('comments-window:moderation', command),
   onModerationRequest: (callback) => subscribe('comments-window:moderation-request', callback),
   pushModerationResult: (resolution) =>

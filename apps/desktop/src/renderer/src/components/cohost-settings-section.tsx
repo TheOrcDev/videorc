@@ -417,7 +417,9 @@ export function BuddyModerationSection({
           />
         </Field>
         <Field>
-          <FieldLabel>Show on stream automatically</FieldLabel>
+          {/* Plan 174 F-18: "Show on stream" is the question's own action;
+              the Buddy overlay is "{name} on stream"; this is the automatic one. */}
+          <FieldLabel>Put comments on stream automatically</FieldLabel>
           <FieldDescription>
             Puts a chat comment on your stream by itself. You can always show one yourself with H.
           </FieldDescription>

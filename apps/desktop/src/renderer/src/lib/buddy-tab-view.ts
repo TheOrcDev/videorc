@@ -1,6 +1,7 @@
 import type { CohostSettings, CohostState, PlatformAccount } from './backend'
 import { removeMessagesReadiness } from '../../../shared/platform-scopes'
-import { COHOST_ERROR_TOAST_MESSAGES, cohostErrorDetail } from './cohost-state'
+import { cohostErrorDetail } from './cohost-state'
+import { cohostStatusLabel } from './cohost-presence'
 import {
   BUDDY_HEARS_YOU_USE,
   COHOST_CHAT_CONSENT_SENTENCE,
@@ -86,18 +87,26 @@ export const CLOUD_AI_KEEPS =
 
 export type BuddyLiveStatusKind = 'off' | 'on' | 'live' | 'attention'
 
+/**
+ * The status row's words (plan 174 F-20). On air, and when Buddy paused or
+ * stopped, the label is the one status vocabulary the Stream Manager and the
+ * Studio row say too (`cohostStatusLabel`); these are the rest.
+ */
 export const BUDDY_LIVE_STATUS_LABELS: Record<BuddyLiveStatusKind, string> = {
   off: 'Off',
-  on: 'On, joins your next stream',
-  live: 'Live now',
+  on: 'On',
+  live: 'Reading chat',
   attention: 'Needs attention'
 }
+
+/** What On means before a stream. */
+export const BUDDY_LIVE_ON_REASON = 'Joins your next stream'
 
 export interface BuddyLiveStatus {
   kind: BuddyLiveStatusKind
   label: string
-  /** A plain reason. Always set for `attention`; for `live`, only when Buddy
-   * reads chat but cannot hear you. */
+  /** A plain reason: why Buddy needs attention, why it is locked while off,
+   * what On means before a stream, or, on air, that it cannot hear you. */
   reason: string | null
   /** The server's own words for a failed pass, for the tooltip. */
   detail: string | null
@@ -151,12 +160,16 @@ export const BUDDY_CHAT_FREE_NOTE = 'Greetings are free.'
 export const BUDDY_CONSENT_OFF_REASON =
   "Cloud AI isn't allowed, so Buddy can't read chat or hear you. Allow it under Cloud AI."
 
+/** Why the Buddy Live switch waits before the backend has answered. */
+export const BUDDY_LIVE_LOADING_REASON = 'Loading your Buddy settings…'
+
 function status(
   kind: BuddyLiveStatusKind,
   reason: string | null = null,
-  detail: string | null = null
+  detail: string | null = null,
+  label: string = BUDDY_LIVE_STATUS_LABELS[kind]
 ): BuddyLiveStatus {
-  return { kind, label: BUDDY_LIVE_STATUS_LABELS[kind], reason, detail }
+  return { kind, label, reason, detail }
 }
 
 export function buddyLiveUnlock(
@@ -192,21 +205,20 @@ export function buddyLiveStatus({
   live: boolean
   state: CohostState | null
 }): BuddyLiveStatus {
-  if (!enabled) return status('off')
+  // Off beside its lock reason: a locked account sees why, next to the one
+  // unlock action, instead of a bare Off.
+  if (!enabled) return status('off', unlock?.reason ?? null)
   if (unlock) return status('attention', unlock.reason)
   if (!consented) return status('attention', BUDDY_CONSENT_OFF_REASON)
-  if (!live) return status('on')
+  if (!live) return status('on', BUDDY_LIVE_ON_REASON)
+  // On air: the engine's own state, in the words every surface says (F-20).
+  const label = cohostStatusLabel(state, { starting: !state || state.status === 'off' })
   if (state?.status === 'paused' || state?.status === 'error') {
-    const reason = state.reason
-      ? COHOST_ERROR_TOAST_MESSAGES[state.reason]
-      : state.status === 'paused'
-        ? 'Buddy paused.'
-        : 'Buddy hit an error.'
-    return status('attention', reason, cohostErrorDetailText(cohostErrorDetail(state)))
+    return status('attention', null, cohostErrorDetailText(cohostErrorDetail(state)), label)
   }
   // Reading chat, or starting to. Not hearing you is a line, not an alarm.
   const listening = cohostListeningView(state?.listening)
-  return status('live', listening?.state === 'blocked' ? listening.label : null)
+  return status('live', listening?.state === 'blocked' ? listening.label : null, null, label)
 }
 
 export function buddyLiveView(input: BuddyLiveViewInput): BuddyLiveView {
@@ -267,15 +279,36 @@ export const BUDDY_VOICE_COMMANDS: readonly {
     title: 'Answer',
     result: 'Confirms or stops a removal.',
     phrases: ['Yes', 'Do it', 'Remove it', 'No', 'Cancel', 'Never mind']
+  },
+  {
+    // Plan 174 F-16: the marker command (`marker_voice.rs`), with your title.
+    title: 'Marker',
+    result: 'Marks this moment in your recording, under the title you say.',
+    phrases: [
+      'Buddy, make a marker here for the Q&A',
+      'Buddy, add a marker called Q&A',
+      'Buddy, mark this as Q&A'
+    ]
   }
 ]
 
-/** One line of quoted phrases, as the row shows them. */
-export function buddyVoicePhrasesLabel(phrases: readonly string[], count = 1): string {
+/** One line of quoted phrases, as the row shows them: every one by default. */
+export function buddyVoicePhrasesLabel(phrases: readonly string[], count = phrases.length): string {
   return phrases
     .slice(0, count)
     .map((phrase) => `“${phrase}”`)
     .join(', ')
+}
+
+/**
+ * The words that start a command (plan 174 F-16): "Buddy" always, and the
+ * name the streamer gave it, the way the backend wakes on it
+ * (`cohost_command::wake_name_tokens`: a word of three letters or more).
+ */
+export function buddyWakeWordsLine(name: string | null | undefined): string {
+  const own = name?.trim() ?? ''
+  const wakes = own && own.toLowerCase() !== 'buddy' && /[\p{L}\p{N}]{3,}/u.test(own)
+  return wakes ? `Start with “Buddy” or your Buddy's own name, “${own}”.` : 'Start with “Buddy”.'
 }
 
 export const BUDDY_VOICE_COMMANDS_DESCRIPTION =
