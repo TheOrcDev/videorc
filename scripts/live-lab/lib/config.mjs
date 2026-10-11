@@ -68,13 +68,18 @@ export async function readConfig(dir) {
 // is created (or tightened) to 0700 first, so the secret never sits in a
 // readable file, even for a moment.
 export async function writeConfig(dir, config) {
+  await writeLabJson(dir, CONFIG_FILE, config)
+}
+
+// Any lab-dir JSON file (config, install record, ...) is written the same way.
+export async function writeLabJson(dir, fileName, value) {
   await mkdir(dir, { recursive: true, mode: DIR_MODE })
   await chmod(dir, DIR_MODE)
-  const target = configPath(dir)
-  const temp = join(dir, `.${CONFIG_FILE}.${randomBytes(6).toString('hex')}.tmp`)
+  const target = join(dir, fileName)
+  const temp = join(dir, `.${fileName}.${randomBytes(6).toString('hex')}.tmp`)
   const handle = await open(temp, 'wx', FILE_MODE)
   try {
-    await handle.writeFile(`${JSON.stringify(config, null, 2)}\n`, 'utf8')
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
     await handle.sync()
   } catch (error) {
     await handle.close()

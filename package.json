@@ -14,6 +14,7 @@
     "probe:youtube-efficiency": "node scripts/probe-youtube-efficiency.mjs",
     "live:hookup": "node scripts/live-lab/hookup.mjs",
     "live:doctor": "node scripts/live-lab/doctor.mjs",
+    "live:install": "node scripts/live-lab/install.mjs",
     "dev": "pnpm --filter @videorc/desktop dev",
     "dev:zerocopy": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_ZEROCOPY_SOURCES=1 -- pnpm --filter @videorc/desktop dev",
     "build": "pnpm --filter @videorc/desktop build",

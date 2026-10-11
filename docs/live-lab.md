@@ -96,3 +96,39 @@ rules) print SKIP with the slice that adds them.
 Tell Claude when it is OK to go live. Claude never starts a run on its own.
 
 Set `VIDEORC_LIVE_LAB_DIR` to use another config folder (the unit tests do).
+
+## 8. Build under test (plan 178 U5)
+
+`pnpm live:install` puts the build under test at `/Applications/Videorc.app`.
+It installs only an app signed with the Videorc Developer ID (team
+`C2PA37RB58`). Developer ID keeps the TCC grants from step 5 across builds;
+an ad-hoc signed app is refused, because macOS would drop them.
+
+```sh
+pnpm live:install --build release                 # the public macOS feed, as the app's updater reads it
+pnpm live:install --build candidate:<run-id|sha>  # a lab-candidate-macos.yml artifact
+pnpm live:install --rollback                      # swap back to the app it replaced
+```
+
+- **release**: reads `https://www.videorc.com/api/updates/latest-mac.yml`,
+  checks the zip against its sha512, then runs
+  `codesign --verify --deep --strict` and `spctl -a -vv` (notarized).
+- **candidate**: start a build of any branch, sha or same-repo PR head with
+  `gh workflow run lab-candidate-macos.yml -f ref=<ref>`. It is signed in CI,
+  not notarized, never uploaded anywhere but the Actions artifact
+  `lab-candidate-<sha7>` (kept 7 days), and versioned `<base>-lab.<sha7>`.
+  Fork PR heads are refused. The installer checks the run is green, the
+  sidecar `lab-candidate.json` (sha, ref, version, zip sha256), the Team ID,
+  and that the app has no quarantine flag.
+- The previous app stays at `Videorc.previous.app`. Install and rollback
+  refuse while Videorc runs from either path (checked with `lsof` on the
+  bundle executables). The lab user must be able to write to
+  `/Applications`.
+- The record lands in `install.json` in the lab folder (version, sha,
+  source, run, verifiedAt, and the app it replaced). `--app-path` installs
+  somewhere else; `--json` prints the record.
+- A candidate's version sorts below the release with the same base, so the
+  app's background updater would replace it on quit. Launch candidates with
+  `VIDEORC_DISABLE_AUTO_UPDATE=1`; the run harness (U6) has to set it.
+
+Exit codes: 0 installed, 2 refused (the reason code is printed), 1 failed.
