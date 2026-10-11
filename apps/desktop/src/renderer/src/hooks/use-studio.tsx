@@ -9606,6 +9606,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : { ...current, sources: { ...current.sources, cameraOff: sources.cameraOff } }
         )
       }
+      if (sourceKind === 'microphone') {
+        // Plan 0027: the same for a microphone set to None.
+        setCaptureConfig((current) =>
+          current.sources.microphoneOff === sources.microphoneOff
+            ? current
+            : { ...current, sources: { ...current.sources, microphoneOff: sources.microphoneOff } }
+        )
+      }
       try {
         await sourceSelectionController.select(
           sourceKind,

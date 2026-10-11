@@ -433,6 +433,23 @@ describe('live source selection authority', () => {
     ).toBeUndefined()
   })
 
+  it('keeps a live microphone None through confirmation (plan 0027)', () => {
+    const off = confirmedSourceSelection(
+      { cameraId: 'cam-a', microphoneOff: true },
+      snapshot({ confirmed: { cameraId: 'cam-a', microphoneId: undefined } }),
+      []
+    )
+    expect(off.microphoneOff).toBe(true)
+    expect(off.microphoneId).toBeUndefined()
+    const on = confirmedSourceSelection(
+      off,
+      snapshot({ confirmed: { cameraId: 'cam-a', microphoneId: 'mic-a' } }),
+      []
+    )
+    expect(on.microphoneId).toBe('mic-a')
+    expect(on.microphoneOff).toBeUndefined()
+  })
+
   it('keeps a live camera Off through confirmation and ends it once a camera is confirmed', () => {
     // Plan 080 S4: the backend confirms devices only; Off is renderer intent.
     const off = confirmedSourceSelection(

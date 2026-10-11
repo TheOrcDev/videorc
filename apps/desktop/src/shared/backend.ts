@@ -536,6 +536,12 @@ export interface SourceSelection {
   cameraOff?: boolean
   microphoneId?: string
   microphoneName?: string
+  /**
+   * The user chose no microphone (plan 0027), the microphone twin of
+   * `cameraOff`: without it None reads as "never chosen" and any scene click or
+   * device refresh turns the first microphone back on. Renderer intent only.
+   */
+  microphoneOff?: boolean
   testPattern?: boolean
 }
 

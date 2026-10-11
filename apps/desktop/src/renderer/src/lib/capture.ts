@@ -2589,13 +2589,16 @@ export function buildMicrophoneSources(
   microphoneId: string | undefined
 ): SourceSelection {
   const selected = microphones.find((device) => device.id === microphoneId)
-  return { ...current, microphoneId, microphoneName: selected?.name }
+  // Plan 0027: None is a choice too, the same way camera Off is (plan 080 S4).
+  return microphoneId
+    ? { ...current, microphoneId, microphoneName: selected?.name, microphoneOff: undefined }
+    : { ...current, microphoneId: undefined, microphoneName: undefined, microphoneOff: true }
 }
 
 const SOURCE_KIND_FIELDS = {
   capture: ['screenId', 'screenName', 'windowId', 'windowName', 'testPattern'],
   camera: ['cameraId', 'cameraName', 'cameraOff'],
-  microphone: ['microphoneId', 'microphoneName']
+  microphone: ['microphoneId', 'microphoneName', 'microphoneOff']
 } as const satisfies Record<string, readonly (keyof SourceSelection)[]>
 
 /**
@@ -2714,12 +2717,16 @@ export function reconcileSourceSelection(
     nativeMicrophoneAvailable && isAvFoundationMicrophoneId(nextSources.microphoneId)
       ? undefined
       : nextSources.microphoneId
-  const selectedMicrophone =
-    findRememberedSource(
-      rememberedMicrophoneId,
-      nativeMicrophoneNameFor(nextSources.microphoneName),
-      microphones
-    ) ?? microphones[0]
+  // Plan 0027: an explicit None stays None, like camera Off above.
+  const microphoneOff = nextSources.microphoneOff === true && !nextSources.microphoneId
+  const selectedMicrophone = microphoneOff
+    ? undefined
+    : (findRememberedSource(
+        rememberedMicrophoneId,
+        nativeMicrophoneNameFor(nextSources.microphoneName),
+        microphones
+      ) ?? microphones[0])
+  nextSources.microphoneOff = microphoneOff ? true : undefined
 
   const cameraIdentity = sourceIdentityFor(selectedCamera)
   nextSources.cameraId = cameraIdentity.id
