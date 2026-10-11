@@ -41,7 +41,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-1** · P0 ✔ · Space ends session from focused slider thumb (role=slider span), dialog body, mouse-opened menu; handler on window in StudioProvider (all pages), no confirm — fixed in #647 (S0.1 `084f3b9a`)
   - Evidence: use-studio.tsx:14834-14880,15933; App.tsx:39
   - Fix: gate: no modal, Studio active, widget roles excluded; tests; (owner: Space never ends a livestream)
-- **A-2** · P1 · ⌘1–9/⌘,/⌘K navigate from under page dialogs (unsaved schedule edits lost; OBS import lock bypassed); modal gate checks only onboarding+WhatsNew; theme D key behind modals
+- **A-2** · P1 · ⌘1–9/⌘,/⌘K navigate from under page dialogs (unsaved schedule edits lost; OBS import lock bypassed); modal gate checks only onboarding+WhatsNew; theme D key behind modals — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: app-shell.tsx:301-363; schedule-stream-dialog.tsx:268; obs-import-dialog.tsx:209; use-theme-toggle.ts:13
   - Fix: one isModalOpen() for all handlers
 - **A-3** · P1 · Space/⌘K "Start session"/global record start the LAST mode (streamEnabled persists) → open Go Live confirm that only renders on Studio → nothing happens off-Studio; global Go Live says "Streaming is not configured" after a recording — partly fixed in #647 (S0.6 `159c1155`, dialog hosted in AppShell); explicit modes in S3.1; fixed in #647 (S0.6 `159c1155`, S3.1 `a069d07f`)
@@ -56,25 +56,25 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-6** · P1 ✔ · capitalize in StatusBadge/StatusDot → Title Case chips ("Checked On First Use", "Backend Offline", "Needs Reconnect"); hides raw enum leaks; workaround in buddy-voice-commands — fixed in #647 (S1.3 `6bd8f9a2`)
   - Evidence: status-badge.tsx:58; status-dot.tsx:45; diagnostics-tab.tsx:197,226,231
   - Fix: drop capitalize; human labels; test rejects /^[a-z-]+$/
-- **A-7** · P1 · One root error boundary: a page crash/failed chunk takes down sidebar, status bar and Stop; panel shows raw error, no drag region, no support export
+- **A-7** · P1 · One root error boundary: a page crash/failed chunk takes down sidebar, status bar and Stop; panel shows raw error, no drag region, no support export — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: main.tsx:32; error-boundary.tsx:27; app-shell.tsx:466
   - Fix: page boundary keyed by active + better root panel
 - **A-8** · P1 ✔ · No application menu → Electron default (Reload ⌘R, Force Reload, DevTools) ships; no Settings…/windows/Help; Windows shows generic menu bar + duplicate brand — fixed in #647 (S0.6 `159c1155`; Theme, Check for Updates, Keyboard Shortcuts and Export Support Bundle menu items need main-to-renderer IPC, deferred)
   - Evidence: main: no setApplicationMenu; web-contents-security.ts:107; window-glass.ts:207; sidebar.tsx:199
   - Fix: real menu from workspace-nav + SHORTCUTS; hide on Windows
-- **A-9** · P1 · ⌘K gaps: no Preview/Notes, no Record vs Go Live, no mute/mark clip; "Go to" vs "Open" verbs; no synonyms (layout, diagnostics, recording, destinations, keyboard); theme not checked
+- **A-9** · P1 · ⌘K gaps: no Preview/Notes, no Record vs Go Live, no mute/mark clip; "Go to" vs "Open" verbs; no synonyms (layout, diagnostics, recording, destinations, keyboard); theme not checked — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: command-palette.tsx:83-259
   - Fix: Windows group; Session mirrors transport; keywords
-- **A-10** · P2 · Single-item sidebar groups LIBRARY→Library, SYSTEM→Settings; stale "under Studio" comments
+- **A-10** · P2 · Single-item sidebar groups LIBRARY→Library, SYSTEM→Settings; stale "under Studio" comments — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: sidebar.tsx:257-296
   - Fix: proposed IA (labels only for Setup; Settings bottom; Studio row live dot + clock; Buddy stays second under Studio, owner call D8)
 - **A-11** · P2 · Windows/actions have 3–5 names (Captions window: "Videorc Captions"/"Live captions"/"Open captions reader"/"Open reader"; Preview; "Chat closed for this recording"); Session actions (Record/Stream/Confirm Go Live/Resolve Blockers First/End livestream/Start session/Start-stop the session/Go live-end stream) — partly fixed in #647 (S2.2 `ae1e6788`, session actions); windows in S2.3a; fixed in #647 (S2.2 `ae1e6788`, S2.3a `490d7f6a`)
   - Evidence: captions.html:10; captions-reader.tsx:62; command-palette.tsx:200-233; shortcuts.ts:28-32; use-studio.tsx:10178
   - Fix: canonical names
-- **A-12** · P2 · ⌘J: main window toggles (closes) Stream Manager; inside SM focuses Buddy (documented as Focus Buddy); no ⇧⌘J inside SM; undocumented p, arrows, R; no ⌘/ reference
+- **A-12** · P2 · ⌘J: main window toggles (closes) Stream Manager; inside SM focuses Buddy (documented as Focus Buddy); no ⇧⌘J inside SM; undocumented p, arrows, R; no ⌘/ reference — partly fixed in #647 (S3.21 `5bee0e0d`, ⌘J shows Stream Manager, ⇧⌘J toggles, ⌘/ Shortcuts); focusing Buddy from the main window needs a new main→window push (deferred)
   - Evidence: app-shell.tsx:324; shortcuts.ts:31,37; stream-manager.tsx:672; use-studio.tsx:14846-14876
   - Fix: scope by window; ⌘/ → Shortcuts
-- **A-13** · P2 · ⌘K below palette scale (16px input, 20px icon, 12.5px headings), no footer/metadata/icons on some rows; group order; 4 names for palette
+- **A-13** · P2 · ⌘K below palette scale (16px input, 20px icon, 12.5px headings), no footer/metadata/icons on some rows; group order; 4 names for palette — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: ui/command.tsx:67-116; command-palette.tsx:72-261
   - Fix: retune + footer + order
 - **A-14** · P2 (= D-29) · Livestream strip scrolls away; shell hard-codes non-scrolling ids; strip hand-copied 5x; Livestream tab not remembered (sessionStorage + event) — fixed in #647 (S1.6b `1bd4865c`)
@@ -89,10 +89,10 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-17** · P2 · metaKey||ctrlKey on macOS steals ⌃K/⌃P text-editing keys — fixed in #647 (S1.2 `e257d3c4`)
   - Evidence: app-shell.tsx:303-335; main index.ts:2210
   - Fix: commandModifierKey(platform)
-- **A-18** · P2 · No focus management/announcement on page change; static document.title
+- **A-18** · P2 · No focus management/announcement on page change; static document.title — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: app-shell.tsx:200; pane.tsx:30; index.html:11
   - Fix: focus h1; document.title
-- **A-19** · P2 · What's New autofocuses "Full release notes" (Return opens browser); only newest entry
+- **A-19** · P2 · What's New autofocuses "Full release notes" (Return opens browser); only newest entry — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: whats-new-dialog.tsx:57; use-whats-new.ts:53 |
 - **A-20** · P2 · Toasts say "Details are in diagnostics." (no such place) — fixed in #647 (S2.3a `490d7f6a`)
   - Evidence: lib/toast.ts:10
@@ -108,7 +108,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-24** · P3 · Heading hierarchy h1 → h3 — fixed in #647 (S1.6a `b5e1c5b7`)
   - Evidence: panel-section.tsx:43; page.tsx:45
   - Fix: h2 default
-- **A-25** · P3 · Update chip "Restart to update" while live only navigates; green dot; aria-label mismatch
+- **A-25** · P3 · Update chip "Restart to update" while live only navigates; green dot; aria-label mismatch — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: update-ui.ts:43; sidebar.tsx:126 |
 - **A-26** · P3 · Copy: "Your {settings} is blocking…", "Loading workspace…", "Search for a command to run..." — partly fixed in #647 (S2.1 `e6379d71`, palette "..." and title); rest in S2.5
   - Evidence: system-access.ts:313; app-shell.tsx:103; ui/command.tsx:28 |
@@ -1058,7 +1058,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **V-8** · P3 · Stream Manager stats bar shows a run of placeholders ("– · – · –") that reads as broken — fixed in #647 (S3.16b `3919c3ea`)
   - Evidence: lib/stream-manager-stats.ts:228,504-560
   - Fix: hide unmeasured optional stats or show one "–" with reason (H-10)
-- **V-9** · P3 · ⌘K opens vertically centred over the content; Raycast/Spotlight convention is the upper third
+- **V-9** · P3 · ⌘K opens vertically centred over the content; Raycast/Spotlight convention is the upper third — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: components/ui/command.tsx (CommandDialog position)
   - Fix: top offset ~20% of window height
 - **V-10** · P3 · Scene page: "Save scene" renders as a heading-sized text button, 17 px further in than the section content — fixed in #647 (S3.9 `c3cf6b59`)
