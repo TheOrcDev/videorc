@@ -51,8 +51,9 @@ app. Two checks hold them (see [Guards](#guards)).
 
 ## Going live (D3)
 
-One verb pair on every surface. S2.2 applies it; until then the Studio
-button still reads "Stream".
+One verb pair on every surface (plan 174 S2.2). The strings live in
+`apps/desktop/src/renderer/src/lib/go-live-copy.ts`, and
+`pnpm smoke:start-labels` pins them.
 
 | Where                 | Copy                                                                            |
 | --------------------- | ------------------------------------------------------------------------------- |

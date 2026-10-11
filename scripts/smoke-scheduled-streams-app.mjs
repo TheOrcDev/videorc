@@ -456,12 +456,12 @@ try {
     await waitFor(
       () =>
         evaluate(
-          `return [...document.querySelectorAll('button')].some(button=>button.textContent==='Go Live…' && !button.disabled)`
+          `return [...document.querySelectorAll('button')].some(button=>button.textContent==='Use for Go Live…' && !button.disabled)`
         ),
       'recovered event selectable'
     )
     await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Go Live…' && !button.disabled);button.click();return true`
+      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Use for Go Live…' && !button.disabled);button.click();return true`
     )
     await waitFor(
       () =>
@@ -687,7 +687,11 @@ try {
     }
     assert.equal((await request(ws, timeoutMs, 'recording.status')).state, 'idle')
     const stoppedChat = await request(ws, timeoutMs, 'liveChat.stop', {})
-    assert.equal(stoppedChat.sessionId ?? null, null, 'viewer/chat owners stop before accounting snapshot')
+    assert.equal(
+      stoppedChat.sessionId ?? null,
+      null,
+      'viewer/chat owners stop before accounting snapshot'
+    )
     assert.ok(
       fixture.calls.every((call) => call.path.startsWith('/2/') || isDataApiPath(call.path)),
       'every fixture attempt uses a recognized provider API root'

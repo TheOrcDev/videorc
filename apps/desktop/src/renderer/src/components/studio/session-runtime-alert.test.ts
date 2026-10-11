@@ -81,9 +81,9 @@ describe('SessionRuntimeAlert', () => {
       })
     )
 
-    expect(failureMarkup).toContain('Live session stopped unexpectedly')
+    expect(failureMarkup).toContain('Livestream stopped unexpectedly')
     expect(failureMarkup).not.toContain('Recording stopped unexpectedly')
-    expect(microphoneMarkup).toContain('Microphone stopped: live session continues with silence')
+    expect(microphoneMarkup).toContain('Microphone stopped: livestream continues with silence')
     expect(microphoneMarkup).not.toContain('recording continues')
     expect(failureMarkup).not.toContain('Open Library')
   })
@@ -107,7 +107,7 @@ describe('SessionRuntimeAlert', () => {
       })
     )
 
-    expect(markup).toContain('Live session stopped unexpectedly')
+    expect(markup).toContain('Livestream stopped unexpectedly')
     expect(markup).not.toContain('Recording stopped unexpectedly')
     expect(markup).toContain('Open Library')
     expect(markup).toContain(revealInFileManagerLabel())

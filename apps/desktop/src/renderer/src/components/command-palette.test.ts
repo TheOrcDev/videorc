@@ -9,7 +9,8 @@ import { CommandPalette } from './command-palette'
 
 // Plan 174 S0.1 (B-1): the palette's session stop goes through the
 // provider's decision, never straight to stopSession: a livestream asks
-// first, a recording stops at once.
+// first, a recording stops at once. Plan 174 S2.2 (D3): it speaks the
+// transport's words, and offers both of its starts.
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -34,6 +35,8 @@ beforeEach(() => {
     savedScenes: [],
     applySavedScene: vi.fn(async () => true),
     startSession: vi.fn(async () => true),
+    startRecording: vi.fn(),
+    startLivestream: vi.fn(),
     stopSession: vi.fn(async () => true),
     requestStopSession: vi.fn(async () => false),
     commentsWindow: { open: false },
@@ -80,33 +83,54 @@ function item(label: string): HTMLElement {
   return found!
 }
 
-describe('CommandPalette session actions (plan 174 S0.1)', () => {
-  it('routes Stop session through requestStopSession while live, never stopSession', async () => {
+function labels(): string[] {
+  return [...document.querySelectorAll<HTMLElement>('[cmdk-item]')].map(
+    (entry) => entry.textContent?.trim() ?? ''
+  )
+}
+
+describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
+  it('ends a livestream through requestStopSession, never stopSession', async () => {
     mocked.recording = { state: 'recording', sessionId: 'live', streamUrl: 'rtmp://x/***' }
     await render()
-    await act(async () => item('Stop session').click())
+    expect(labels()).not.toContain('Stop recording')
+    await act(async () => item('End livestream').click())
     expect(mocked.core.requestStopSession).toHaveBeenCalledExactlyOnceWith('palette')
     expect(mocked.core.stopSession).not.toHaveBeenCalled()
   })
 
-  it('routes a plain recording the same way (the provider stops it at once)', async () => {
+  it('stops a plain recording the same way (the provider stops it at once)', async () => {
     mocked.recording = { state: 'recording', sessionId: 'rec' }
     await render()
-    await act(async () => item('Stop session').click())
+    expect(labels()).not.toContain('End livestream')
+    await act(async () => item('Stop recording').click())
     expect(mocked.core.requestStopSession).toHaveBeenCalledExactlyOnceWith('palette')
     expect(mocked.core.stopSession).not.toHaveBeenCalled()
   })
 
-  it('offers Start session when idle', async () => {
+  it('offers Start recording and Go live… when idle, each running its own start', async () => {
     mocked.recording = { state: 'idle' }
     await render()
-    expect(
-      [...document.querySelectorAll('[cmdk-item]')].some(
-        (entry) => entry.textContent?.trim() === 'Stop session'
-      )
-    ).toBe(false)
-    await act(async () => item('Start session').click())
-    expect(mocked.core.startSession).toHaveBeenCalledOnce()
+    expect(labels()).not.toContain('Stop recording')
+    expect(labels()).not.toContain('End livestream')
+    expect(labels().some((label) => /session/i.test(label))).toBe(false)
+
+    await act(async () => item('Start recording').click())
+    expect(mocked.core.startRecording).toHaveBeenCalledOnce()
+    expect(mocked.core.startLivestream).not.toHaveBeenCalled()
+
+    await render()
+    await act(async () => item('Go live…').click())
+    expect(mocked.core.startLivestream).toHaveBeenCalledOnce()
+    expect(mocked.core.startRecording).toHaveBeenCalledOnce()
+    expect(mocked.core.startSession).not.toHaveBeenCalled()
     expect(mocked.core.requestStopSession).not.toHaveBeenCalled()
+  })
+
+  it('disables both starts while a session is starting', async () => {
+    mocked.recording = { state: 'starting' }
+    await render()
+    expect(item('Start recording').getAttribute('aria-disabled')).toBe('true')
+    expect(item('Go live…').getAttribute('aria-disabled')).toBe('true')
   })
 })

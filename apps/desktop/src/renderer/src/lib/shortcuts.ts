@@ -6,6 +6,7 @@
 // accelerators, printed per platform by ShortcutKeys.
 
 import { parseAccelerator } from '../../../shared/accelerator-format'
+import { RECORD_SHORTCUT_LABEL } from './go-live-copy'
 
 export interface ShortcutEntry {
   id: string
@@ -16,7 +17,7 @@ export interface ShortcutEntry {
    */
   accelerators: readonly [string, ...string[]]
   label: string
-  group: 'Navigation' | 'Session' | 'Windows' | 'Chat' | 'Appearance'
+  group: 'Navigation' | 'Studio' | 'Windows' | 'Stream Manager' | 'Appearance'
 }
 
 const SHORTCUT_LIST = [
@@ -38,11 +39,13 @@ const SHORTCUT_LIST = [
     group: 'Navigation'
   },
 
+  // Space works on the Studio page only (plan 174 D1): Record, Stop
+  // recording, or the End livestream question while on air.
   {
     id: 'record-toggle',
     accelerators: ['Space'],
-    label: 'Start / stop the session',
-    group: 'Session'
+    label: RECORD_SHORTCUT_LABEL,
+    group: 'Studio'
   },
   {
     id: 'preview-window',
@@ -72,22 +75,27 @@ const SHORTCUT_LIST = [
   // Co-host pane (Comments window). Plain (cmd)J toggles the Comments window
   // from the main window; inside the window it focuses the co-host pane, and
   // the single-key actions apply to the selected row.
-  { id: 'cohost-focus', accelerators: ['CmdOrCtrl+J'], label: 'Focus Buddy', group: 'Chat' },
+  {
+    id: 'cohost-focus',
+    accelerators: ['CmdOrCtrl+J'],
+    label: 'Focus Buddy',
+    group: 'Stream Manager'
+  },
   {
     id: 'cohost-move',
     accelerators: ['Up', 'Down'],
     label: 'Move between questions',
-    group: 'Chat'
+    group: 'Stream Manager'
   },
-  { id: 'cohost-reply', accelerators: ['R'], label: 'Draft a reply', group: 'Chat' },
+  { id: 'cohost-reply', accelerators: ['R'], label: 'Draft a reply', group: 'Stream Manager' },
   {
     id: 'cohost-highlight',
     accelerators: ['H'],
     label: 'Show the question on stream',
-    group: 'Chat'
+    group: 'Stream Manager'
   },
-  { id: 'cohost-answered', accelerators: ['A'], label: 'Mark answered', group: 'Chat' },
-  { id: 'cohost-dismiss', accelerators: ['Backspace'], label: 'Dismiss', group: 'Chat' },
+  { id: 'cohost-answered', accelerators: ['A'], label: 'Mark answered', group: 'Stream Manager' },
+  { id: 'cohost-dismiss', accelerators: ['Backspace'], label: 'Dismiss', group: 'Stream Manager' },
 
   {
     id: 'theme-toggle',

@@ -15,6 +15,7 @@ import { KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutRegistration } from '@/lib/global-shortcuts'
+import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { shortcutsByGroup } from '@/lib/shortcuts'
@@ -30,8 +31,8 @@ const GLOBAL_ACTION_ROWS = [
 ] as const satisfies readonly GlobalShortcutAction[]
 
 const GLOBAL_ACTION_LABELS: Record<(typeof GLOBAL_ACTION_ROWS)[number], string> = {
-  'record-toggle': 'Start / stop recording',
-  'stream-toggle': 'Go live / end stream',
+  'record-toggle': RECORD_SHORTCUT_LABEL,
+  'stream-toggle': GO_LIVE_SHORTCUT_LABEL,
   'mic-toggle': 'Mute / unmute mic',
   'system-audio-toggle': 'Turn system audio on/off',
   'clip-mark': 'Mark a clip',

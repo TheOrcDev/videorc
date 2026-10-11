@@ -1401,6 +1401,14 @@ export type StudioContextValue = {
   disarmWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
   warmMicrophone: WarmMicrophoneStatus | null
   startSession: () => Promise<boolean>
+  /**
+   * The Studio transport's two starts, which ⌘K offers too (plan 174 S2.2,
+   * D3). Record starts a recording; Go Live… opens the Go Live dialog. Each
+   * sets the saved output mode, as the Studio buttons always have, and then
+   * starts.
+   */
+  startRecording: () => void
+  startLivestream: () => void
   stopSession: () => Promise<boolean>
   /**
    * Every stop path goes through here (plan 174 S0.1, D2). A recording stops
@@ -13800,6 +13808,39 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return runStartSession()
   }, [captureConfig.streamEnabled, openGoLiveConfirmation, runStartSession])
 
+  // The Studio transport's two starts, shared with ⌘K (plan 174 S2.2, D3).
+  // When a start changes the output mode (record vs go live), it sets the
+  // mode and starts on the next render, so startSession and its
+  // blocked-reason gate read the new streamEnabled instead of a stale
+  // closure value. When the mode already matches, it starts in the same
+  // task: the extra render and commit of the whole provider was a measurable
+  // slice of the Record click → recording path. Plan 174 S3.1 replaces the
+  // saved-mode write with explicit intents.
+  const [modeStartPending, setModeStartPending] = useState(false)
+  useEffect(() => {
+    if (!modeStartPending) {
+      return
+    }
+    setModeStartPending(false)
+    void startSession()
+  }, [modeStartPending, startSession])
+  const startRecording = useCallback(() => {
+    if (captureConfig.recordEnabled && !captureConfig.streamEnabled) {
+      void startSession()
+      return
+    }
+    setCaptureConfig((current) => ({ ...current, recordEnabled: true, streamEnabled: false }))
+    setModeStartPending(true)
+  }, [captureConfig.recordEnabled, captureConfig.streamEnabled, startSession])
+  const startLivestream = useCallback(() => {
+    if (captureConfig.streamEnabled) {
+      void startSession()
+      return
+    }
+    setCaptureConfig((current) => ({ ...current, streamEnabled: true }))
+    setModeStartPending(true)
+  }, [captureConfig.streamEnabled, startSession])
+
   const cancelGoLiveConfirmation = useCallback(() => {
     const decision = decideCancelGoLiveConfirmation({
       goLiveConfirmationPending,
@@ -15765,6 +15806,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       warmMicrophone,
       noteRecordClick,
       startSession,
+      startRecording,
+      startLivestream,
       stopSession,
       requestStopSession,
       remuxSession,
@@ -16000,6 +16043,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       warmMicrophone,
       noteRecordClick,
       startSession,
+      startRecording,
+      startLivestream,
       stopSession,
       requestStopSession,
       remuxSession,

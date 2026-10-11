@@ -4,6 +4,7 @@ import { toast } from '@/lib/toast'
 import { CopyIcon, DeleteIcon, EditIcon, ExternalLinkIcon, LinkIcon } from '@/components/icons'
 import { useScheduledStreams } from '@/hooks/use-scheduled-streams'
 import { useStudioCore } from '@/hooks/use-studio'
+import { GO_LIVE_LABEL, USE_FOR_GO_LIVE_LABEL } from '@/lib/go-live-copy'
 import { ScheduleStreamDialog } from '@/components/schedule-stream-dialog'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
@@ -287,12 +288,13 @@ export function ScheduledStreams(): ReactElement {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              Go live with this {scheduledProviderLabel(starting?.provider ?? 'youtube')}{' '}
-              {scheduledProviderNoun(starting?.provider ?? 'youtube')}
+              Use this {scheduledProviderLabel(starting?.provider ?? 'youtube')}{' '}
+              {scheduledProviderNoun(starting?.provider ?? 'youtube')} for Go Live
             </DialogTitle>
             <DialogDescription>
-              {starting?.requested.title} · {starting?.accountLabel}. Choose its destination, then
-              click Go Live in Studio to review every enabled destination and start manually.
+              {starting?.requested.title} · {starting?.accountLabel}. Choose its destination. When
+              you&apos;re ready, click {GO_LIVE_LABEL} in Studio to check every destination and
+              start.
             </DialogDescription>
           </DialogHeader>
           <Select value={targetId} onValueChange={setTargetId}>
@@ -555,7 +557,7 @@ function EventRow({
             variant="secondary"
             onClick={onGoLive}
           >
-            Go Live…
+            {USE_FOR_GO_LIVE_LABEL}
           </Button>
         ) : event.lifecycle === 'draft' ? (
           <Button

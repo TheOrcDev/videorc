@@ -152,6 +152,6 @@ export function performanceCheckTooHeavyToast(
   }
   return {
     title: `${outputLabel(chosen)} is too heavy for this computer`,
-    description: `Recordings will stutter. ${outputLabel(result.recommended)} held steady. Switch in Recording → Output.`
+    description: `Recordings will stutter. ${outputLabel(result.recommended)} held steady.`
   }
 }
