@@ -210,6 +210,26 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(lastPersona().avatar).toEqual({ kind: 'still' })
   })
 
+  it('lists the packs again once when the Buddy wears one the list does not have (an official download, a synced pack)', async () => {
+    // QA 2026-10-11: using Golmar downloaded official:orc and the Buddy wore
+    // it, but Packs still listed only Buddy (read when the tab opened), no
+    // row was checked and Remove stayed off until the tab was reopened.
+    const list = pets([{ ...PACK_B, packId: 'bundled:buddy', name: 'Buddy' }])
+    const worn = settings({ avatar: { kind: 'alive', packId: 'official:orc' } })
+    await render({ cohost: worn, list })
+    expect(list.refresh).toHaveBeenCalledTimes(1)
+    // The same missing pack is not listed again on every render.
+    await render({ cohost: worn, list })
+    expect(list.refresh).toHaveBeenCalledTimes(1)
+    // A pack the list has needs nothing.
+    const known = pets([PACK_A])
+    await render({
+      cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
+      list: known
+    })
+    expect(known.refresh).not.toHaveBeenCalled()
+  })
+
   it('shows the empty state with Create and Import when there is no pack to wear', async () => {
     await render({ list: pets([]) })
     await act(async () => kindButton('Alive').click())

@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { BuddyAvatarSection, type BuddyAvatarView } from '@/components/buddy-avatar-section'
 import { BuddyLookSection } from '@/components/buddy-look-section'
@@ -36,6 +36,20 @@ export function BuddyPetSettings({
   const [aliveDraft, setAliveDraft] = useState(false)
   const [motionDraft, setMotionDraft] = useState<BuddyMotionSettings | null>(null)
   const [previewInfo, setPreviewInfo] = useState<BuddyPetPreviewInfo | null>(null)
+  // The list is read when the tab opens, but the backend also installs packs
+  // by itself: an official Buddy's first use downloads its pack, a library
+  // Buddy brings its own, the creator saves one. When the Buddy wears a pack
+  // the list does not have, list again (once for that pack), so its row
+  // shows checked and Remove works without reopening the tab.
+  const wornNow = persona?.avatar.kind === 'alive' ? persona.avatar.packId : null
+  const unlistedPackId =
+    wornNow !== null && pets.packs !== null && !pets.packs.some((pack) => pack.packId === wornNow)
+      ? wornNow
+      : null
+  const relistPets = pets.refresh
+  useEffect(() => {
+    if (unlistedPackId) void relistPets()
+  }, [unlistedPackId, relistPets])
   if (!persona) return null
 
   const save = (next: CohostPersona): Promise<void> => patchCohostSettings({ persona: next })
