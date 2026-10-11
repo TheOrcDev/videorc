@@ -1,4 +1,4 @@
-import { ChevronDownIcon, MicrophoneIcon, BuddyIcon } from '@/components/icons'
+import { AlertIcon, ChevronDownIcon, MicrophoneIcon, BuddyIcon } from '@/components/icons'
 import {
   useEffect,
   useMemo,
@@ -127,6 +127,8 @@ export function CohostPane({
   onUpgrade,
   buddy = null,
   sayPending = false,
+  sayPostsToChat = false,
+  sayChatCap = null,
   onSay,
   onShowOnStreamChange,
   onReact
@@ -173,6 +175,10 @@ export function CohostPane({
   buddy?: CohostWindowBuddy | null
   /** A Say is on its way through the relay. */
   sayPending?: boolean
+  /** Auto, on air: a Say also posts to every chat as you (plan 174 F-6). */
+  sayPostsToChat?: boolean
+  /** The shortest chat cap among the destinations a Say reaches, when it posts. */
+  sayChatCap?: number | null
   /** Say something in the bubble (D7). Absent disables the box. */
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   /** `overlayLayout.buddy.showOnStream`. Absent disables the switch. */
@@ -185,7 +191,9 @@ export function CohostPane({
   const header = buddy ? (
     <BuddyHeader
       buddy={buddy}
+      sayChatCap={sayChatCap}
       sayPending={sayPending}
+      sayPostsToChat={sayPostsToChat}
       onReact={onReact}
       onSay={onSay}
       onShowOnStreamChange={onShowOnStreamChange}
@@ -447,7 +455,7 @@ export function CohostPane({
               ].join('\n') || undefined
             }
           >
-            {flash ?? presence.label.replace(/^Buddy\s*(·\s*)?/, '')}
+            {flash ?? presence.label}
           </span>
           {presence.dots ? <CohostTypingDots fast={presence.kind === 'thinking'} /> : null}
           <span className="flex-1" />
@@ -737,17 +745,25 @@ export function CohostPane({
 export function BuddyHeader({
   buddy,
   sayPending = false,
+  sayPostsToChat = false,
+  sayChatCap = null,
   onSay,
   onShowOnStreamChange,
   onReact
 }: {
   buddy: CohostWindowBuddy
   sayPending?: boolean
+  /** Auto, on air: the line also goes to every chat as you (plan 174 F-6). */
+  sayPostsToChat?: boolean
+  /** The shortest chat cap a posted Say meets (X takes 140); null when unknown. */
+  sayChatCap?: number | null
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   onShowOnStreamChange?: (showOnStream: boolean) => void
   onReact?: (reaction: string) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
+  const name = buddy.persona.name
+  const overCap = sayPostsToChat && sayChatCap !== null && draft.length > sayChatCap
   const previewRef = useRef<BuddyPetPreviewHandle>(null)
   // The loaded pack's reactions; null until it loads (or when it cannot).
   const [packReactions, setPackReactions] = useState<readonly string[] | null>(null)
@@ -808,28 +824,32 @@ export function BuddyHeader({
             “{buddy.bubble}”
           </span>
         ) : null}
+        {/* Plan 174 F-18: the overlay switch is named after the Buddy, so it
+            never reads like a question's "Show on stream". */}
         <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
           <Switch
-            aria-label="Show on stream"
+            aria-label={`${name} on stream`}
             checked={buddy.showOnStream}
             data-testid="buddy-show-on-stream"
             disabled={!onShowOnStreamChange}
             size="sm"
             onCheckedChange={(checked) => onShowOnStreamChange?.(checked)}
           />
-          <span className={PANE_NARROW_HIDDEN}>Show on stream</span>
+          <span className={HEADER_NARROW_HIDDEN}>{name} on stream</span>
         </label>
-        {/* Phase D's chat mode control (Off · Suggest · Auto) lands here. */}
         <span className="flex-1" />
       </div>
       <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2" data-slot="buddy-say">
         <div className="flex min-w-48 flex-1 items-center gap-1.5">
           <Input
-            aria-label={`Say something as ${buddy.persona.name}`}
+            aria-describedby={sayPostsToChat ? 'buddy-say-posts' : undefined}
+            aria-label={`Say something as ${name}`}
             className="h-7 text-xs"
             disabled={!onSay}
             maxLength={200}
-            placeholder="Say something on stream"
+            placeholder={
+              sayPostsToChat ? 'Say something on stream and in chat' : 'Say something on stream'
+            }
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
@@ -838,13 +858,32 @@ export function BuddyHeader({
               say(event.metaKey || event.ctrlKey ? 'laugh' : 'talk')
             }}
           />
-          <ShortcutKeys accelerator="Enter" className={PANE_NARROW_HIDDEN} title="Say it" />
+          <ShortcutKeys accelerator="Enter" className={HEADER_NARROW_HIDDEN} title="Say it" />
           <ShortcutKeys
             accelerator="CmdOrCtrl+Enter"
-            className={PANE_NARROW_HIDDEN}
+            className={HEADER_NARROW_HIDDEN}
             title="Say it laughing"
           />
         </div>
+        {sayPostsToChat ? (
+          // Plan 174 F-6: Auto posts the line to every chat as you, so the box
+          // says so and counts against the shortest chat cap (X takes 140).
+          <span
+            className={cn(
+              'flex shrink-0 items-center gap-1 text-[11px] tabular-nums',
+              overCap ? 'font-medium text-foreground' : 'text-muted-foreground'
+            )}
+            data-over-cap={overCap || undefined}
+            data-slot="buddy-say-posts"
+            id="buddy-say-posts"
+          >
+            {overCap ? (
+              <AlertIcon aria-hidden className="size-3 text-warning" weight="fill" />
+            ) : null}
+            Also posts to chat as you
+            {sayChatCap !== null ? ` · ${draft.length}/${sayChatCap}` : ''}
+          </span>
+        ) : null}
         <div
           aria-label="React on stream"
           className="flex shrink-0 items-center gap-1"
@@ -1136,8 +1175,8 @@ function CohostSayHiList({
 
 /**
  * A recap for viewers who asked what they missed, or one the streamer
- * drafted. Post to chat pre-fills the composer and nothing else: Buddy never
- * sends.
+ * drafted. "Edit in chat box" pre-fills the composer and nothing else (plan
+ * 174 F-23): Buddy never sends, and the button says what the click does.
  */
 function CohostRecapCard({
   recap,
@@ -1165,7 +1204,7 @@ function CohostRecapCard({
             variant="secondary"
             onClick={() => onPost?.(recap)}
           >
-            Post to chat
+            Edit in chat box
           </Button>
           <Button
             disabled={disabled || !onDismiss}
@@ -1219,6 +1258,9 @@ function CohostAction({
 const COHOST_RECENTLY_RESOLVED_TTL_MS = 60_000
 
 const PANE_NARROW_HIDDEN = '@max-[400px]/cohost-pane:hidden'
+// The Buddy header is its own container (plan 174 F-27): a class that names
+// the pane's container never applied there, so it names its own.
+const HEADER_NARROW_HIDDEN = '@max-[400px]/buddy-header:hidden'
 
 /** One-line explanation that REPLACES the pane (Premium, consent). Same shape
  * as the multistream upsell: state the reason, offer the one action. */

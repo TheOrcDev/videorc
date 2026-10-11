@@ -260,7 +260,9 @@ describe('CohostPane', () => {
     expect(markup).toContain('>Dismiss<')
     expect(markup).toContain('data-slot="cohost-recap"')
     expect(markup).toContain('So far: unboxed the parts.')
-    expect(markup).toContain('Post to chat')
+    // Plan 174 F-23: the button says what the click does: it only pre-fills.
+    expect(markup).toContain('Edit in chat box')
+    expect(markup).not.toContain('Post to chat')
     // A live recap card replaces the draft button; nothing sends from here.
     expect(markup).not.toContain('Draft a recap')
     expect(markup).not.toContain('>Send<')
@@ -337,7 +339,8 @@ describe('CohostPane', () => {
   it('names the empty state instead of showing nothing', () => {
     const markup = renderPane({ state: state({ questions: [], flags: [] }) })
     expect(markup).toContain('Reading chat. Questions will appear here.')
-    expect(markup).toContain('reading chat')
+    // Plan 174 F-20: the header says the one status word.
+    expect(markup).toContain('>Reading chat<')
   })
 
   it('replaces itself with a one-line upsell for a Basic account', () => {
@@ -449,7 +452,7 @@ describe('CohostPane', () => {
       })
     })
     expect(markup).toContain('data-slot="cohost-pane-status"')
-    expect(markup).toContain('>error<')
+    expect(markup).toContain('>Stopped: Videorc AI error<')
     expect(markup).toContain('data-tone="destructive"')
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
@@ -466,14 +469,14 @@ describe('CohostPane', () => {
   it('mirrors the working shimmer in the segment header while chat is queued', () => {
     const reading = renderPane({ state: state({ pendingMessages: 4 }) })
     expect(reading).toContain('data-slot="cohost-typing-dots"')
-    expect(reading).toContain('>reading 4 new…<')
+    expect(reading).toContain('>Reading 4 new…<')
     // The empty state stops claiming "Listening —" while there is real work.
     expect(reading).toContain('Reading 4 new messages…')
     expect(reading).not.toContain('Reading chat. Questions')
 
     const thinking = renderPane({ state: state({ tickInFlight: true, pendingMessages: 4 }) })
     expect(thinking).toContain('typing-dot-fast')
-    expect(thinking).toContain('>thinking…<')
+    expect(thinking).toContain('>Thinking…<')
     expect(thinking).toContain('Thinking about the last batch…')
   })
 

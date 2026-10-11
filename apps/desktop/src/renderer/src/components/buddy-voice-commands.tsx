@@ -30,6 +30,7 @@ import {
   BUDDY_VOICE_COMMANDS_OFF,
   BUDDY_VOICE_PREMIUM,
   buddyVoicePhrasesLabel,
+  buddyWakeWordsLine,
   removeMessagesRows,
   type RemoveMessagesRow
 } from '@/lib/buddy-tab-view'
@@ -137,27 +138,23 @@ export function BuddyVoiceCommands({
 
       <ConfigGrid className={CONFIG_GRID_PAIR}>
         <PanelSection
-          description={`${BUDDY_VOICE_COMMANDS_DESCRIPTION} ${COHOST_ACTS_ON_ASK_COPY}`}
+          description={`${buddyWakeWordsLine(cohostSettings?.persona.name)} ${BUDDY_VOICE_COMMANDS_DESCRIPTION} ${COHOST_ACTS_ON_ASK_COPY}`}
           title="Commands"
         >
           <GroupedList label="What you can say">
+            {/* Plan 174 F-28: a ListRow (the command and what it does), then
+                every phrase in plain secondary text, never in a tooltip. */}
             {BUDDY_VOICE_COMMANDS.map((command) => (
               <div
                 key={command.title}
-                className="flex min-w-0 flex-col gap-0.5 px-3 py-2"
+                className="flex min-w-0 flex-col pb-2"
                 data-command={command.title.toLowerCase()}
                 data-slot="buddy-voice-command"
               >
-                <p className="flex min-w-0 items-baseline gap-2 text-sm">
-                  <span className="shrink-0 font-medium text-foreground">{command.title}</span>
-                  <span
-                    className="truncate text-muted-foreground"
-                    title={command.phrases.map((phrase) => `“${phrase}”`).join('\n')}
-                  >
-                    {buddyVoicePhrasesLabel(command.phrases, command.title === 'Answer' ? 4 : 1)}
-                  </span>
+                <ListRow compact context={command.result} title={command.title} />
+                <p className="px-3 text-xs text-muted-foreground" data-slot="buddy-voice-phrases">
+                  {buddyVoicePhrasesLabel(command.phrases)}
                 </p>
-                <p className="text-xs text-muted-foreground">{command.result}</p>
               </div>
             ))}
           </GroupedList>

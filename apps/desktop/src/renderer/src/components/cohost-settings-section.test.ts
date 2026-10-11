@@ -125,7 +125,8 @@ describe('Show on stream automatically', () => {
 
   it('renders the choice with its helper lines and writes both flags', async () => {
     await render(settings())
-    expect(document.body.textContent).toContain('Show on stream automatically')
+    // Plan 174 F-18: not "Show on stream", which is the question's own action.
+    expect(document.body.textContent).toContain('Put comments on stream automatically')
     expect(document.body.textContent).toContain(
       'What I talk about needs Buddy to hear you (or live captions).'
     )

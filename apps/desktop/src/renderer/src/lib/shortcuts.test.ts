@@ -76,9 +76,19 @@ describe('SHORTCUTS registry', () => {
       'cohost-reply',
       'cohost-highlight',
       'cohost-answered',
-      'cohost-dismiss'
+      'cohost-dismiss',
+      'cohost-remove-flagged'
     ])
     expect(cohost.every((entry) => entry.group === 'Stream Manager')).toBe(true)
+    // Plan 174 F-27: the Suggest cards' and the Say box's keys are listed too.
+    const buddy = SHORTCUTS.filter((entry) => entry.id.startsWith('buddy-'))
+    expect(buddy.map((entry) => [entry.id, entry.accelerators[0]])).toEqual([
+      ['buddy-card-send', 'Enter'],
+      ['buddy-card-dismiss', 'Backspace'],
+      ['buddy-say', 'Enter'],
+      ['buddy-say-laugh', 'CmdOrCtrl+Enter']
+    ])
+    expect(buddy.every((entry) => entry.group === 'Stream Manager')).toBe(true)
     expect(cohost.find((entry) => entry.id === 'cohost-focus')?.accelerators).toEqual([
       'CmdOrCtrl+J'
     ])

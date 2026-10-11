@@ -291,9 +291,18 @@ describe('Buddy report card (plan 119 S3)', () => {
     expect(document.querySelector('[aria-label="Stream"]')).toBeNull()
   })
 
+  it('says Videorc is reconnecting while offline, never loading forever (plan 174 F-21)', async () => {
+    await render({ report: { payload: null, loading: false, offline: true, error: null } })
+    expect(card().getAttribute('data-state')).toBe('offline')
+    expect(card().querySelector('[data-testid="buddy-report-offline"]')).toBeTruthy()
+    expect(text()).toContain('Videorc is reconnecting')
+    expect(text()).not.toContain('Loading the report…')
+  })
+
   it('says it is loading, and offers Try again when the read fails', async () => {
     await render({ report: { payload: null, loading: true, error: null } })
     expect(card().getAttribute('aria-busy')).toBe('true')
+    expect(card().querySelector('[data-slot="spinner"]')).toBeTruthy()
     expect(text()).toContain('Loading the report…')
 
     await render({ report: { payload: null, loading: false, error: "Couldn't read this report." } })

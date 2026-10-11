@@ -8,6 +8,7 @@ import type { CohostUtterance } from '@/lib/backend'
 import {
   BuddyUtteranceCards,
   openProposedUtterances,
+  utteranceDestinationLabels,
   utteranceKeyAnswer
 } from './buddy-utterance-cards'
 
@@ -192,9 +193,45 @@ describe('BuddyUtteranceCards (plan 164 S-D2, plan 174 S0.2)', () => {
     expect(lines.map((line) => line.dataset.status)).toEqual(['bubble-only', 'failed', 'sent'])
     expect(lines.map((line) => line.textContent)).toEqual([
       'Greetinghi thereOn stream',
-      'GreetingoopsNot sent',
+      'GreetingoopsFailed',
       'GreetingggPosted'
     ])
+    // Plan 174 F-13: a failed post reads as failed, in the dot's tone, never
+    // as faded struck text.
+    const failed = lines[1]!
+    expect(failed.querySelector('[data-slot="status-dot"]')?.getAttribute('data-tone')).toBe(
+      'error'
+    )
+    expect(failed.innerHTML).not.toContain('line-through')
+    expect(failed.innerHTML).not.toContain('text-subtle')
+  })
+
+  it('says where a proposed post goes (plan 174 F-13)', async () => {
+    const destinations = [
+      { id: 'tw', platform: 'twitch' as const },
+      { id: 'yt', platform: 'youtube' as const }
+    ]
+    await act(async () =>
+      root.render(
+        createElement(BuddyUtteranceCards, {
+          utterances: [
+            utterance({ id: 'u-all' }),
+            utterance({ id: 'u-one', destinationIds: ['yt'] })
+          ],
+          destinations,
+          active: true,
+          onApprove: vi.fn(),
+          onDismiss: vi.fn()
+        })
+      )
+    )
+    const [all, one] = cards()
+    expect(all!.textContent).toContain('posts as you · to Twitch and YouTube')
+    expect(one!.textContent).toContain('posts as you · to YouTube')
+    expect(
+      utteranceDestinationLabels(utterance({ destinationIds: ['nope'] }), destinations)
+    ).toEqual([])
+    expect(utteranceDestinationLabels(utterance(), [])).toEqual([])
   })
 })
 

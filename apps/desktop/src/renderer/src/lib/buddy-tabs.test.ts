@@ -49,7 +49,7 @@ describe('BUDDY_TABS (plan 150)', () => {
       'clean-cut'
     ])
     expect(BUDDY_TABS.map((tab) => tab.label)).toEqual([
-      'Buddy',
+      'Profile',
       'Chat',
       'Voice',
       'Reports',

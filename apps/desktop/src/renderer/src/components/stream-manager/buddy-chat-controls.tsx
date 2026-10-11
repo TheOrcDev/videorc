@@ -125,7 +125,11 @@ export function BuddyChatControls({
             role="group"
           >
             {buddyBehaviourChips(autoChat).map((chip) => (
-              <Badge key={chip.id} asChild variant={chip.on ? 'success' : 'neutral'}>
+              <Badge
+                key={chip.id}
+                asChild
+                variant={chip.empty ? 'warning' : chip.on ? 'success' : 'neutral'}
+              >
                 <button
                   aria-label={chip.name}
                   data-behaviour={chip.id}

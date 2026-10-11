@@ -66,11 +66,17 @@ export interface BuddyBehaviourChip {
   id: BuddyBehaviourId
   label: string
   on: boolean
-  /** "Greetings on", "Answers off": the chip's text. */
+  /** On with nothing to post (plan 174 F-11): Greetings without a line. */
+  empty: boolean
+  /** "Greetings on", "Answers off", "Greetings on, no lines": the chip's text. */
   text: string
   /** The chip's accessible name: its state and the way to change it. */
   name: string
 }
+
+/** Greetings is on but has no line to post (plan 174 F-11). */
+export const BUDDY_GREETINGS_EMPTY_NOTE =
+  'Greetings is on, but has no lines yet: nothing is posted until you add some.'
 
 /**
  * The three behaviours as read-only summary chips (plan 174 S3.14a, D7): each
@@ -83,8 +89,12 @@ export function buddyBehaviourChips(
   return BUDDY_BEHAVIOUR_IDS.map((id) => {
     const label = BUDDY_BEHAVIOUR_LABELS[id]
     const on = autoChat[id].enabled
-    const text = `${label} ${on ? 'on' : 'off'}`
-    return { id, label, on, text, name: `${text}. Change it in ${BUDDY_BEHAVIOUR_HOME}.` }
+    const empty = id === 'greetings' && on && autoChat.greetings.templates.length === 0
+    const text = empty ? `${label} on, no lines` : `${label} ${on ? 'on' : 'off'}`
+    const name = empty
+      ? `${text}. Nothing is posted until you add some in ${BUDDY_BEHAVIOUR_HOME}.`
+      : `${text}. Change it in ${BUDDY_BEHAVIOUR_HOME}.`
+    return { id, label, on, empty, text, name }
   })
 }
 

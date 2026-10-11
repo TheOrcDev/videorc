@@ -113,7 +113,9 @@ describe('buddyPetCreatorGate (plan 168 S-F5)', () => {
 
   it('words its gates as one family, naming the tab that holds Cloud AI (plan 174 G-15)', () => {
     expect(BUDDY_PET_SIGNED_OUT).toBe('Sign in to create an Alive Buddy.')
-    expect(BUDDY_PET_CONSENT_OFF).toBe('Allow cloud AI on the Buddy tab to create an Alive Buddy.')
+    expect(BUDDY_PET_CONSENT_OFF).toBe(
+      'Allow cloud AI on the Profile tab to create an Alive Buddy.'
+    )
     expect(BUDDY_PET_NOT_AVAILABLE).toBe("Creating isn't available right now.")
   })
 })

@@ -13,6 +13,7 @@ import {
   BUDDY_VOICE_COMMANDS_OFF,
   BUDDY_VOICE_PREMIUM,
   buddyVoicePhrasesLabel,
+  buddyWakeWordsLine,
   removeMessagesRows,
   CLOUD_AI_CLEAN_CUT_USE,
   CLOUD_AI_KEEPS,
@@ -169,17 +170,22 @@ describe('buddyLiveView', () => {
       { signedIn: false }
     ]) {
       const view = buddyLiveView(input({ settings: { enabled: false }, ...overrides }))
-      expect(view.status).toMatchObject({ kind: 'off', label: 'Off', reason: null })
+      expect(view.status).toMatchObject({ kind: 'off', label: 'Off' })
       expect(view.checked).toBe(false)
     }
+    // Off beside its lock, so the reason sits next to the one unlock action.
+    expect(buddyLiveView(input({ settings: { enabled: false } })).status.reason).toBeNull()
+    expect(
+      buddyLiveView(input({ settings: { enabled: false }, signedIn: false })).status.reason
+    ).toBe(BUDDY_SIGNED_OUT_REASON)
   })
 
   it('joins the next stream once on, consented and unlocked', () => {
     const view = buddyLiveView(input())
     expect(view.status).toEqual({
       kind: 'on',
-      label: 'On, joins your next stream',
-      reason: null,
+      label: 'On',
+      reason: 'Joins your next stream',
       detail: null
     })
     expect(view.checked).toBe(true)
@@ -188,15 +194,16 @@ describe('buddyLiveView', () => {
     expect(view.streamManager).toBe(false)
   })
 
-  it('is live while on air and the engine reads chat, with the Stream Manager one click away', () => {
-    for (const state of [
-      null,
-      engine(),
-      engine({ status: 'off' }),
-      engine({ tickInFlight: true })
-    ]) {
+  it('is live while on air in the one status vocabulary (plan 174 F-20)', () => {
+    const cases: Array<[CohostState | null, string]> = [
+      [null, 'Starting…'],
+      [engine({ status: 'off' }), 'Starting…'],
+      [engine(), 'Reading chat'],
+      [engine({ tickInFlight: true }), 'Thinking…']
+    ]
+    for (const [state, label] of cases) {
       const view = buddyLiveView(input({ live: true, state }))
-      expect(view.status).toMatchObject({ kind: 'live', label: 'Live now', reason: null })
+      expect(view.status).toMatchObject({ kind: 'live', label, reason: null })
       expect(view.streamManager).toBe(true)
     }
   })
@@ -214,14 +221,14 @@ describe('buddyLiveView', () => {
     })
   })
 
-  it('needs attention when the engine paused or failed, in the plain words the toast uses', () => {
+  it('needs attention when the engine paused or failed, in the words every surface says', () => {
     const paused = buddyLiveView(
       input({ live: true, state: engine({ status: 'paused', reason: 'quota-exhausted' }) })
     )
     expect(paused.status).toMatchObject({
       kind: 'attention',
-      label: 'Needs attention',
-      reason: 'Buddy paused: daily AI quota is used up.'
+      label: 'Paused: daily AI allowance used up',
+      reason: null
     })
 
     const failed = buddyLiveView(
@@ -236,15 +243,15 @@ describe('buddyLiveView', () => {
     )
     expect(failed.status).toEqual({
       kind: 'attention',
-      label: 'Needs attention',
-      reason: 'Buddy stopped: Videorc AI returned an error.',
+      label: 'Stopped: Videorc AI error',
+      reason: null,
       detail: 'ai-gateway-error (HTTP 502): Every model failed.'
     })
 
     expect(
       buddyLiveView(input({ live: true, state: engine({ status: 'error', reason: null }) })).status
-        .reason
-    ).toBe('Buddy hit an error.')
+        .label
+    ).toBe('Stopped')
   })
 
   it('needs attention when cloud AI was revoked with Buddy still on', () => {
@@ -289,7 +296,8 @@ describe('Voice commands (plan 140, S6 part A)', () => {
       'Highlight',
       'Clear',
       'Remove',
-      'Answer'
+      'Answer',
+      'Marker'
     ])
     const phrases = BUDDY_VOICE_COMMANDS.flatMap((command) => command.phrases)
     for (const phrase of [
@@ -300,11 +308,22 @@ describe('Voice commands (plan 140, S6 part A)', () => {
       'This one is toxic. Remove it from our chat.',
       'Buddy, delete the comment from coders X',
       'Yes',
-      'Never mind'
+      'Never mind',
+      // Plan 174 F-16: the marker command, as marker_voice.rs parses it.
+      'Buddy, make a marker here for the Q&A'
     ]) {
       expect(phrases).toContain(phrase)
     }
     expect(buddyVoicePhrasesLabel(['Yes', 'Do it', 'No'], 2)).toBe('“Yes”, “Do it”')
+    expect(buddyVoicePhrasesLabel(['Yes', 'Do it'])).toBe('“Yes”, “Do it”')
+  })
+
+  it("says that Buddy's own name starts a command too (plan 174 F-16)", () => {
+    expect(buddyWakeWordsLine('Grum')).toBe("Start with “Buddy” or your Buddy's own name, “Grum”.")
+    // The backend wakes on a word of three letters or more; "Buddy" is itself.
+    for (const name of [null, '', 'Buddy', 'buddy', 'Io']) {
+      expect(buddyWakeWordsLine(name)).toBe('Start with “Buddy”.')
+    }
   })
 
   it('keeps the promises plain: posts only in your modes, 20 seconds, 10 a minute, free removal', () => {

@@ -162,7 +162,14 @@ describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
   })
 
   it('shows Greetings, Answers and Banter as read-only chips that open Buddy → Chat', async () => {
-    await render(autoChat({ greetings: { enabled: true, templates: [] } }))
+    const line = {
+      id: 't-1',
+      kind: 'follow' as const,
+      text: 'Welcome, {name}!',
+      state: 'talk' as const,
+      enabled: true
+    }
+    await render(autoChat({ greetings: { enabled: true, templates: [line] } }))
     // No switches: the behaviours have one home (plan 174 F-24, H-8).
     expect(document.querySelector('[role="switch"]')).toBeNull()
     expect(chips().map((chip) => chip.textContent)).toEqual([
@@ -180,6 +187,14 @@ describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
     await act(async () => answers!.click())
     expect(onOpenChatSettings).toHaveBeenCalledTimes(1)
     expect(onModeChange).not.toHaveBeenCalled()
+  })
+
+  it('warns when Greetings is on with nothing to post (plan 174 F-11)', async () => {
+    await render(autoChat({ greetings: { enabled: true, templates: [] } }))
+    const [greetings] = chips()
+    expect(greetings!.textContent).toBe('Greetings on, no lines')
+    expect(greetings!.getAttribute('data-variant')).toBe('warning')
+    expect(greetings!.getAttribute('aria-label')).toContain('Nothing is posted until you add some')
   })
 
   it('keeps the chips inert without a way to Buddy → Chat', async () => {

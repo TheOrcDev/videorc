@@ -371,7 +371,7 @@ function CohostSessionRow(): ReactElement {
       value={
         <span className="flex min-w-0 items-center gap-1.5">
           <CohostPresenceDot view={view} />
-          <span className="truncate">{view.label.replace(/^Buddy\s*(·\s*)?/, '')}</span>
+          <span className="truncate">{view.label}</span>
         </span>
       }
       onNavigate={() => void openCommentsWindow()}

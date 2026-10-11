@@ -53,7 +53,7 @@ describe('CohostStatus', () => {
     const markup = renderStatus({ state: offCohostState() })
     expect(markup).toContain('data-testid="cohost-status"')
     expect(markup).toContain('data-state-kind="off"')
-    expect(markup).toContain('Buddy off')
+    expect(markup).toContain('>Off<')
     expect(markup).toContain('data-tone="muted"')
     // Plan 174 S3.14a: no popover and no switch of its own; turning Buddy on
     // is the BuddyLiveSwitch beside it.
@@ -62,7 +62,7 @@ describe('CohostStatus', () => {
   })
 
   it('renders the same element for a null state — presence is unconditional', () => {
-    expect(renderStatus({ state: null })).toContain('Buddy off')
+    expect(renderStatus({ state: null })).toContain('>Off<')
   })
 
   it('is a button only when there is a pane to go to, else a status line', () => {
@@ -78,13 +78,13 @@ describe('CohostStatus', () => {
     expect(markup).toContain('data-tone="live"')
     expect(markup).toContain('tone-success')
     expect(markup).toContain('glass-dot')
-    expect(markup).toContain('Buddy · 1 q')
+    expect(markup).toContain('1 question')
     expect(markup).not.toContain('cohost-typing-dots')
   })
 
   it('shows the typing shimmer while reading queued chat', () => {
     const markup = renderStatus({ state: listening({ pendingMessages: 4 }) })
-    expect(markup).toContain('Buddy · reading 4 new…')
+    expect(markup).toContain('Reading 4 new…')
     expect(markup).toContain('data-slot="cohost-typing-dots"')
     expect(markup).toContain('typing-dot')
     expect(markup).not.toContain('typing-dot-fast')
@@ -92,7 +92,7 @@ describe('CohostStatus', () => {
 
   it('runs the shimmer faster and pulses the dot while a tick is in flight', () => {
     const markup = renderStatus({ state: listening({ tickInFlight: true, pendingMessages: 4 }) })
-    expect(markup).toContain('Buddy · thinking…')
+    expect(markup).toContain('Thinking…')
     expect(markup).toContain('typing-dot-fast')
     expect(markup).toContain('animate-pulse')
   })
@@ -107,7 +107,7 @@ describe('CohostStatus', () => {
     })
     expect(markup).toContain('data-state-kind="error"')
     expect(markup).toContain('data-tone="destructive"')
-    expect(markup).toContain('Buddy error')
+    expect(markup).toContain('Stopped: Videorc AI error')
     // The server's own words live in the tooltip, not in the label.
     expect(markup).toContain('ai-gateway-error (HTTP 502)')
   })
@@ -116,7 +116,7 @@ describe('CohostStatus', () => {
     const markup = renderStatus({
       state: listening({ status: 'paused', reason: 'quota-exhausted' })
     })
-    expect(markup).toContain('Buddy paused · quota')
+    expect(markup).toContain('Paused: daily AI allowance used up')
     expect(markup).toContain('data-tone="muted"')
     expect(markup).not.toContain('tone-destructive')
   })
@@ -127,7 +127,7 @@ describe('CohostStatus', () => {
       state: listening({ questions: [question()] })
     })
     expect(markup).toContain('grouped 2 questions')
-    expect(markup).not.toContain('>Buddy · 1 q<')
+    expect(markup).not.toContain('>1 question<')
   })
 
   it('carries the collapsed-pane unread count', () => {
@@ -154,9 +154,9 @@ describe('CohostStatus', () => {
     expect(markup).toMatch(
       /class="[^"]*@max-\[330px\]\/chat-header:sr-only[^"]*"[^>]*data-slot="cohost-status-label"/
     )
-    expect(markup).toContain('aria-label="Buddy paused · quota')
+    expect(markup).toContain('aria-label="Paused: daily AI allowance used up')
     // Hovering the lone dot still says what Buddy is doing.
-    expect(markup).toMatch(/title="Buddy paused · quota/)
+    expect(markup).toMatch(/title="Paused: daily AI allowance used up/)
   })
 
   it('keeps the trigger draggable-safe in the frameless window header', () => {

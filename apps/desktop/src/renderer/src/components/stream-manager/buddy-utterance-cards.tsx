@@ -2,16 +2,39 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { BuddyIcon } from '@/components/icons'
 import { removalKeyAnswer } from '@/components/stream-manager/removal-cards'
+import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import type { CohostUtterance } from '@/lib/backend'
+import type { CohostUtterance, StreamPlatform } from '@/lib/backend'
 import { BUDDY_UTTERANCE_TRIGGER_LABELS, buddyDisplayName } from '@/lib/buddy-auto-chat-view'
-import { cn } from '@/lib/utils'
+import { platformLabel } from '@/lib/platform-copy'
 
 /** Recent lines shown under the cards. */
 const RECENT_MAX = 4
+
+/** A chat destination a post can reach: the live snapshot's provider rows. */
+export interface UtteranceDestination {
+  id: string
+  platform: StreamPlatform
+}
+
+/**
+ * Where a proposed post goes (plan 174 F-13), as platform names: its own
+ * destinations, or every one when it names none (the backend's "every
+ * writable destination"). Empty when the window knows no destination yet.
+ */
+export function utteranceDestinationLabels(
+  utterance: Pick<CohostUtterance, 'destinationIds'>,
+  destinations: readonly UtteranceDestination[]
+): string[] {
+  const picked =
+    utterance.destinationIds.length > 0
+      ? destinations.filter((destination) => utterance.destinationIds.includes(destination.id))
+      : destinations
+  return [...new Set(picked.map((destination) => platformLabel(destination.platform)))]
+}
 
 /** The cards still waiting on the streamer: proposed and not yet expired. */
 export function openProposedUtterances(
@@ -65,6 +88,7 @@ export function BuddyUtteranceCards({
   pending = false,
   active = false,
   name = null,
+  destinations = NO_DESTINATIONS,
   onApprove,
   onDismiss
 }: {
@@ -72,6 +96,8 @@ export function BuddyUtteranceCards({
   pending?: boolean
   /** The streamer's name for Buddy: a card is the character asking. */
   name?: string | null
+  /** The chats a post can reach, so a card says where it goes (plan 174 F-13). */
+  destinations?: readonly UtteranceDestination[]
   /** The Buddy pane is on screen. The keys answer only then: a card behind
    * a tab never takes ↵ from whatever the streamer is doing. */
   active?: boolean
@@ -128,8 +154,9 @@ export function BuddyUtteranceCards({
               icon={BuddyIcon}
             >
               <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
-                <span className="min-w-0 flex-1 truncate">
+                <span className="min-w-0 flex-1 truncate" data-slot="buddy-utterance-title">
                   {BUDDY_UTTERANCE_TRIGGER_LABELS[utterance.trigger.kind]} · posts as you
+                  {destinationsLine(utterance, destinations)}
                 </span>
                 {utterance.expiresAt ? (
                   <span className="shrink-0 text-[11px] font-normal text-muted-foreground tabular-nums">
@@ -180,17 +207,16 @@ export function BuddyUtteranceCards({
               <Badge className="shrink-0" variant="outline">
                 {BUDDY_UTTERANCE_TRIGGER_LABELS[utterance.trigger.kind]}
               </Badge>
-              <span
-                className={cn(
-                  'min-w-0 flex-1 truncate',
-                  utterance.status === 'failed'
-                    ? 'text-subtle line-through'
-                    : 'text-muted-foreground'
-                )}
-              >
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">
                 {utterance.text}
               </span>
-              <span className="shrink-0 text-subtle">{statusLabel(utterance)}</span>
+              {/* Plan 174 F-13: a failed post reads as failed, in the dot's
+                  tone and a plain word, never as faded struck text. */}
+              <StatusDot
+                className="shrink-0 text-[11px]"
+                label={statusLabel(utterance)}
+                tone={utterance.status === 'failed' ? 'error' : 'neutral'}
+              />
             </li>
           ))}
         </ul>
@@ -199,12 +225,26 @@ export function BuddyUtteranceCards({
   )
 }
 
+const NO_DESTINATIONS: readonly UtteranceDestination[] = []
+
+/** " · to Twitch and YouTube", or nothing when the window knows no chat. */
+function destinationsLine(
+  utterance: CohostUtterance,
+  destinations: readonly UtteranceDestination[]
+): string {
+  const labels = utteranceDestinationLabels(utterance, destinations)
+  if (labels.length === 0) return ''
+  const list =
+    labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(', ')} and ${labels.at(-1)}`
+  return ` · to ${list}`
+}
+
 function statusLabel(utterance: CohostUtterance): string {
   switch (utterance.status) {
     case 'sent':
       return 'Posted'
     case 'failed':
-      return 'Not sent'
+      return 'Failed'
     case 'bubble-only':
       return 'On stream'
     default:

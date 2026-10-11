@@ -337,7 +337,7 @@ describe('StreamManager Buddy Live and chat posting (plan 174 S3.14a, D7)', () =
     expect(header).not.toContain('cohost-status-enable')
     expect(markup.match(/data-slot="buddy-live-switch"/g)).toHaveLength(1)
     // Off: the status says so, and the pane shows only its header and controls.
-    expect(header).toContain('Buddy off')
+    expect(header).toContain('data-state-kind="off"')
     expect(renderWith({ cohostEnabled: true })).toMatch(
       /data-slot="buddy-live-switch"[\s\S]*?aria-checked="true"/
     )

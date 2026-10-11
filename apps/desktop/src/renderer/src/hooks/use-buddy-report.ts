@@ -11,8 +11,10 @@ export interface BuddyReportState {
    * flashes the card empty; read the session from `payload.sessionId`.
    */
   payload: CohostReportPayload | null
-  /** No answer yet for the current ask. */
+  /** No answer yet for the current ask, while Videorc is connected. */
   loading: boolean
+  /** Videorc is not connected (plan 174 F-21): nothing loads until it is. */
+  offline: boolean
   /** Why the current ask failed; null once one succeeds. */
   error: string | null
   /** Ask again (the error row's Try again). */
@@ -104,9 +106,12 @@ export function useBuddyReport(sessionId: string | null): BuddyReportState {
   }, [connectFailed])
 
   const settled = answer?.ask === ask ? answer : null
+  const offline = online === null
   return {
     payload: answer?.payload ?? null,
-    loading: settled === null && !connectFailed,
+    // Offline is its own state (plan 174 F-21): never "Loading" forever.
+    loading: !offline && settled === null && !connectFailed,
+    offline,
     error: connectFailed ? BUDDY_REPORT_READ_ERROR : (settled?.error ?? null),
     reload
   }

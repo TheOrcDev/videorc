@@ -3,10 +3,13 @@ import { useMemo, useState, lazy, Suspense, type ReactElement, type ReactNode } 
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { GroupedList, ListRow } from '@/components/list-row'
+import { OfflineAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
+import { Spinner } from '@/components/ui/spinner'
 import {
   Select,
   SelectContent,
@@ -65,7 +68,7 @@ export function BuddyReportCard({
   const [markersOpen, setMarkersOpen] = useState(false)
   const newestId = useMemo(() => newestStreamedSessionId(sessions), [sessions])
   const ask = sessionId ?? newestId
-  const { payload, loading, error, reload } = useBuddyReport(ask)
+  const { payload, loading, offline = false, error, reload } = useBuddyReport(ask)
   const session = payload
     ? (sessions.find((entry) => entry.id === payload.sessionId) ?? null)
     : null
@@ -114,8 +117,13 @@ export function BuddyReportCard({
         aria-busy={loading || undefined}
         className="@container/buddy-report flex min-w-0 flex-col gap-4"
         data-slot="buddy-report"
-        data-state={loading ? 'loading' : view.kind === 'empty' ? 'empty' : view.kind}
+        data-state={
+          offline ? 'offline' : loading ? 'loading' : view.kind === 'empty' ? 'empty' : view.kind
+        }
       >
+        {/* Plan 174 F-21: offline is its own state, never a loading line
+            that waits forever. */}
+        {offline ? <OfflineAlert data-testid="buddy-report-offline" /> : null}
         {error ? (
           <Alert variant="warning">
             <AlertTitle>{error}</AlertTitle>
@@ -135,13 +143,18 @@ export function BuddyReportCard({
             ) : null}
             <ReportBody key={shown.sessionId} view={shown} />
           </>
-        ) : error ? null : loading ? (
-          <p className="text-xs text-muted-foreground">Loading the report…</p>
+        ) : error || offline ? null : loading ? (
+          <p className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Spinner aria-hidden className="size-3.5" />
+            Loading the report…
+          </p>
         ) : view.kind === 'empty' ? (
-          <div className="flex flex-col gap-1 py-6" data-slot="buddy-report-empty">
-            <p className="text-sm font-medium text-foreground">{BUDDY_REPORT_EMPTY_TITLE}</p>
-            <p className="text-xs text-muted-foreground">{view.message}</p>
-          </div>
+          <Empty data-slot="buddy-report-empty">
+            <EmptyHeader>
+              <EmptyTitle>{BUDDY_REPORT_EMPTY_TITLE}</EmptyTitle>
+              <EmptyDescription>{view.message}</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         ) : null}
       </div>
     </PanelSection>

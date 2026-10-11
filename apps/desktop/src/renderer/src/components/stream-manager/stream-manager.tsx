@@ -95,7 +95,7 @@ import {
   type StreamManagerPane,
   type StreamManagerRightPane
 } from '@/lib/stream-manager-layout'
-import { sendablePlatforms } from '@/lib/chat-send'
+import { chatDraftMaxChars, sendablePlatforms } from '@/lib/chat-send'
 import { shortcutLabel } from '@/lib/platform'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
@@ -814,6 +814,7 @@ export function StreamManager({
       {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
         <BuddyUtteranceCards
           active={buddyVisible}
+          destinations={snapshot.providers}
           name={buddyName}
           pending={cohostActionPending}
           utterances={shownCohostState?.utterances ?? []}
@@ -869,7 +870,9 @@ export function StreamManager({
             consented={cohostConsented}
             enabled={cohostEnabled}
             buddy={cohostBuddy ?? null}
+            sayChatCap={sendTargets.length > 0 ? chatDraftMaxChars(sendTargets) : null}
             sayPending={buddyPending}
+            sayPostsToChat={live && cohostAutoChat?.mode === 'auto'}
             onSay={onBuddySay}
             onShowOnStreamChange={onBuddyShowOnStream}
             onReact={onBuddyReact}

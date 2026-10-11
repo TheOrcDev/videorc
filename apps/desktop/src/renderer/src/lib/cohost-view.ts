@@ -131,15 +131,19 @@ export function cohostErrorDetailText(detail: CohostErrorDetail | null | undefin
   return message ? `${head}: ${message}` : head
 }
 
+/**
+ * Why Buddy paused or stopped, as the words after "Paused:" or "Stopped:" in
+ * the one status vocabulary (plan 174 F-20).
+ */
 const REASON_LABELS: Record<CohostReason, string> = {
-  'premium-required': 'Premium',
-  'consent-required': 'consent',
-  'session-expired': 'session expired',
+  'premium-required': 'Premium needed',
+  'consent-required': 'cloud AI is off',
+  'session-expired': 'sign-in expired',
   'signed-out': 'signed out',
-  'quota-exhausted': 'quota',
-  'server-unconfigured': 'unavailable',
-  network: 'offline',
-  'gateway-error': 'AI error'
+  'quota-exhausted': 'daily AI allowance used up',
+  'server-unconfigured': 'Videorc AI is unavailable',
+  network: 'no connection',
+  'gateway-error': 'Videorc AI error'
 }
 
 export function cohostReasonLabel(reason: CohostReason | null): string | null {

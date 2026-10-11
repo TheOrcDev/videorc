@@ -21,8 +21,10 @@ export const BUDDY_TAB_LABEL = 'Buddy'
  * The shell imports this module, so it sits in the eager chunk: keep it to
  * ids, labels and the storage helpers (no icons, no components).
  */
+// The first tab is Profile (plan 174 D7): the page is Buddy, so its first tab
+// is not Buddy too. Its `live` id stays (saved tabs, deep links, smokes).
 export const BUDDY_TABS = [
-  { id: 'live', label: BUDDY_TAB_LABEL },
+  { id: 'live', label: 'Profile' },
   { id: 'chat', label: 'Chat' },
   { id: 'voice', label: 'Voice' },
   { id: 'reports', label: 'Reports' },
