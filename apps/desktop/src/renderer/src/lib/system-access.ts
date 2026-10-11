@@ -264,7 +264,7 @@ export function systemAccessRows({
           ? ((audioMeter?.status === 'permission-required' ? undefined : audioMeter?.message) ??
             'Microphone permission is granted, but no usable input is currently available.')
           : microphone === 'first-use'
-            ? 'Checked when you run a mic check or start a session.'
+            ? 'Checked when you test the microphone or start recording.'
             : accessDetail(microphone, 'the microphone', os)
   })
 

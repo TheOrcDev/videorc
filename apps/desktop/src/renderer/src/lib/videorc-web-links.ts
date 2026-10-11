@@ -18,6 +18,9 @@ const VIDEORC_WEB_ORIGIN =
     : 'https://www.videorc.com'
 
 export const VIDEORC_WEB_LINKS = {
+  home: VIDEORC_WEB_ORIGIN,
+  // Every desktop build, for a build that cannot update itself (plan 174 I-20).
+  download: `${VIDEORC_WEB_ORIGIN}/download`,
   account: `${VIDEORC_WEB_ORIGIN}/account`,
   login: `${VIDEORC_WEB_ORIGIN}/login`,
   // Desktop sign-in entry point: explicit consent returns only a short-lived,
@@ -33,6 +36,10 @@ export const VIDEORC_WEB_LINKS = {
   changelogApi: `${VIDEORC_WEB_ORIGIN}/api/changelog`,
   changelog: `${VIDEORC_WEB_ORIGIN}/changelog`
 } as const
+
+// Videorc's source and its AGPL-3.0 license, with the third-party notices
+// beside it (plan 174 I-21): Settings → About links here.
+export const VIDEORC_SOURCE_CODE_URL = 'https://github.com/TheOrcDev/videorc'
 
 export function releaseNotesUrl(version: string): string {
   return `${VIDEORC_WEB_ORIGIN}/releases/${version}`

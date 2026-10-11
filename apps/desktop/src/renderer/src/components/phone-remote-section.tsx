@@ -2,7 +2,10 @@ import { CopyIcon, DeleteIcon, MobileIcon, WarningIcon } from '@/components/icon
 import { useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
+import { StatusDot } from '@/components/status-dot'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -11,6 +14,8 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
+import { DisabledReason } from '@/components/ui/disabled-reason'
+import { FieldGroup, SettingsRow } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -25,7 +30,6 @@ import {
   qrCodePath
 } from '@/lib/phone-remote-view'
 import { useCopyText } from '@/lib/copy-text'
-import { cn } from '@/lib/utils'
 
 // One shared 1 Hz clock for the countdown and "seen N min ago" labels. An
 // external store instead of an effect: nothing ticks unless a subscriber is
@@ -221,6 +225,10 @@ export function PhoneRemoteSection(): ReactElement {
   }
 
   const summary = status?.enabled ? phoneRemoteSummary(status) : null
+  // A network problem locks pairing (plan 174 I-8): the reason leads the
+  // section as an Alert and stays on the disabled button, not only as a
+  // change of text colour.
+  const blocked = summary?.tone === 'warning' ? summary.text : null
 
   return (
     <PanelSection
@@ -232,46 +240,50 @@ export function PhoneRemoteSection(): ReactElement {
           onCheckedChange={(checked) => void run(checked ? phone.enable : phone.disable)}
         />
       }
-      description="Read live comments, put one on stream with a tap, and switch scenes from a phone on the same Wi-Fi. Turning this on also turns on Remote control."
+      description="Read chat, put a message on stream with a tap and switch scenes from a phone on the same Wi-Fi."
       title="Phone remote"
     >
       {status?.enabled && summary ? (
-        <div className="flex flex-col gap-4">
-          <div className="flex items-center justify-between gap-3">
-            <p
-              className={cn(
-                'min-w-0 text-xs text-muted-foreground',
-                summary.tone === 'warning' && 'text-foreground'
-              )}
+        <>
+          {blocked ? (
+            <Alert variant="warning">
+              <AlertTitle>{blocked}</AlertTitle>
+            </Alert>
+          ) : null}
+          <FieldGroup variant="grouped">
+            <SettingsRow
+              description={
+                blocked ? 'Pairing works again once the problem above is fixed.' : summary.text
+              }
+              label="Phones"
             >
-              {summary.text}
-            </p>
-            <Button
-              disabled={pending || summary.tone === 'warning'}
-              size="sm"
-              variant="outline"
-              onClick={() => void beginPairing()}
-            >
-              Pair a phone
-            </Button>
-          </div>
+              <DisabledReason reason={blocked}>
+                <Button
+                  disabled={pending || blocked !== null}
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void beginPairing()}
+                >
+                  Pair a phone…
+                </Button>
+              </DisabledReason>
+            </SettingsRow>
+          </FieldGroup>
 
           {status.devices.length > 0 ? (
-            <ul className="flex flex-col">
+            <GroupedList label="Paired phones">
               {status.devices.map((device) => (
-                <li
+                <ListRow
                   key={device.id}
-                  className="flex h-11 items-center gap-3 rounded-row px-2 hover:bg-foreground/[0.06]"
+                  context={
+                    <StatusDot
+                      label={deviceActivityLabel(device, now)}
+                      tone={device.connected ? 'good' : 'neutral'}
+                    />
+                  }
+                  icon={<MobileIcon className="text-muted-foreground" />}
+                  title={device.name}
                 >
-                  <MobileIcon className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 truncate text-sm font-medium">{device.name}</span>
-                  <span className="flex-1" />
-                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    {device.connected ? (
-                      <span aria-hidden className="size-1.5 rounded-full glass-dot tone-success" />
-                    ) : null}
-                    {deviceActivityLabel(device, now)}
-                  </span>
                   <Button
                     aria-label={`Remove ${device.name}`}
                     disabled={pending}
@@ -281,16 +293,11 @@ export function PhoneRemoteSection(): ReactElement {
                   >
                     <DeleteIcon />
                   </Button>
-                </li>
+                </ListRow>
               ))}
-            </ul>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              No phones paired yet. Removing a phone later disconnects it immediately and leaves
-              your Stream Deck alone.
-            </p>
-          )}
-        </div>
+            </GroupedList>
+          ) : null}
+        </>
       ) : (
         <p className="text-xs text-muted-foreground">{PHONE_REMOTE_OFF_HINT}</p>
       )}

@@ -2,9 +2,13 @@ import { encode } from 'uqr'
 
 import type { RemoteLanDevice, RemoteLanStatus } from '@/lib/backend'
 
-/** Phone remote is off by default; an empty card body reads as a render bug. */
+/**
+ * Phone remote is off by default; an empty card body reads as a render bug.
+ * The line says what turning it on does, never "Off" beside the switch
+ * (plan 174 V-6).
+ */
 export const PHONE_REMOTE_OFF_HINT =
-  'Off. Turn on to watch comments and run your stream from a phone on the same Wi-Fi.'
+  'Turning this on also turns on Remote control, and pairs phones with a code you scan.'
 
 /** Nothing connected this long after a code is shown ⇒ explain why not. */
 export const PAIRING_TROUBLE_HINT_AFTER_MS = 30_000

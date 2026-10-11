@@ -168,22 +168,27 @@ function FieldDescription({ className, id, ...props }: React.ComponentProps<'p'>
  * One settings row (plan 174 S1.6a, I-7): the label and its 12 px description
  * on the left, the control on the right. A horizontal Field underneath, so
  * the label names the control and the description describes it. Rows sit in
- * a `FieldGroup variant="grouped"`.
+ * a `FieldGroup variant="grouped"`. `error` is the row's own refusal or
+ * failure (plan 174 S3.17): a FieldError under the description, announced
+ * when it appears.
  */
 function SettingsRow({
   label,
   description,
+  error,
   children,
   ...props
 }: Omit<React.ComponentProps<typeof Field>, 'orientation' | 'title'> & {
   label: React.ReactNode
   description?: React.ReactNode
+  error?: React.ReactNode
 }) {
   return (
     <Field data-settings-row="" orientation="horizontal" {...props}>
       <FieldContent>
         <FieldLabel>{label}</FieldLabel>
         {description ? <FieldDescription>{description}</FieldDescription> : null}
+        {error ? <FieldError>{error}</FieldError> : null}
       </FieldContent>
       {children}
     </Field>
