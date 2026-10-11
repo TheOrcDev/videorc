@@ -20,6 +20,7 @@ import {
   buddyPetNotesDraft,
   buddyPetNotesFromDraft,
   buddyPetRowMarked,
+  buddyPetSaveNote,
   buddyPetSheetPhase,
   type BuddyPetReviewMarks
 } from './buddy-pet-creator-view'
@@ -234,6 +235,37 @@ describe('sheets and review (D21)', () => {
     expect(buddyPetCreatorStep(reviewCreation({ step: 'build' }), true)).toBe('build')
     expect(buddyPetCreatorStep(reviewCreation(), false)).toBe('review')
     expect(buddyPetCreatorStep(reviewCreation(), true)).toBe('save')
+  })
+
+  it('says where a saved pack is kept: with a library Buddy in the account, else here (plan 172 D10)', () => {
+    // QA 2026-10-11: saving Ember QA's moves said "Kept on this computer."
+    // while the app sent them to the account library.
+    const aliveSync = {
+      cohost: { tick: 4, buddyLibrary: { alive: true } }
+    } as unknown as AiCapabilities
+    const linked = { name: 'Ember QA', libraryAvatarId: '0c211fd7-75db-4900-afbc-0fb0ef84eadc' }
+    expect(buddyPetSaveNote({ persona: linked, capabilities: aliveSync })).toBe(
+      'Saved with Ember QA in your Videorc library, so it moves on every computer you sign in to. Your Buddy wears it right away; switch back to Still any time.'
+    )
+    const here =
+      'Kept on this computer. Your Buddy wears it right away; switch back to Still any time.'
+    // Only on this computer, an official Buddy, or a web that keeps no packs.
+    expect(buddyPetSaveNote({ persona: { name: 'Rocky' }, capabilities: aliveSync })).toBe(here)
+    expect(
+      buddyPetSaveNote({
+        persona: { name: 'Golmar', libraryAvatarId: 'official:orc' },
+        capabilities: aliveSync
+      })
+    ).toBe(here)
+    expect(
+      buddyPetSaveNote({
+        persona: linked,
+        capabilities: {
+          cohost: { tick: 4, buddyLibrary: { alive: false } }
+        } as unknown as AiCapabilities
+      })
+    ).toBe(here)
+    expect(buddyPetSaveNote({ persona: linked, capabilities: null })).toBe(here)
   })
 
   it('names a pack, and knows which errors need a new creation', () => {
