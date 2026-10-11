@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -45,7 +47,8 @@ describe('background thumbnails (plan 174 C-40)', () => {
         write: (path, bytes) => writes.push(`${path}:${bytes.toString()}`)
       })
     ).toBe('abc.thumb.jpg')
-    expect(writes).toEqual(['/assets/abc.thumb.jpg:jpg'])
+    // The platform's own join: backslashes on Windows.
+    expect(writes).toEqual([`${join('/assets', 'abc.thumb.jpg')}:jpg`])
     expect(
       writeBackgroundThumbnail({
         id: 'abc',
