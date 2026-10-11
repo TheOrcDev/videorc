@@ -11187,7 +11187,25 @@ async function runSmokePreviewMotionCommand(
           highlightReasons: Object.fromEntries(rows.map((row) => [
             row.getAttribute('data-message-id'),
             row.querySelector('[data-slot="badge"][title]')?.getAttribute('title') ?? null
-          ]))
+          ])),
+          // Plan 177: each Activity row's tint, and whether its ⋯ sits whole
+          // inside the pane and on top (a long reward once pushed it out).
+          activityRows: (() => {
+            const pane = document.querySelector('[data-slot="activity-pane"]')?.getBoundingClientRect();
+            return Array.from(document.querySelectorAll('[data-slot="activity-row"]')).map((row) => {
+              const menu = row.querySelector('button[aria-label^="Actions for"]')?.getBoundingClientRect();
+              const top = menu ? document.elementFromPoint(menu.left + menu.width / 2, menu.top + menu.height / 2) : null;
+              return {
+                id: row.getAttribute('data-activity-id'),
+                kind: row.getAttribute('data-kind'),
+                rowTint: row.getAttribute('data-row-tint'),
+                menuInside: Boolean(pane && menu && menu.width > 0 && menu.left >= pane.left - 1 && menu.right <= pane.right + 1),
+                menuOnTop: Boolean(top?.closest('button[aria-label^="Actions for"]')),
+                menuRight: menu ? Math.round(menu.right) : null,
+                paneRight: pane ? Math.round(pane.right) : null
+              };
+            });
+          })()
         };
       })()`,
       true

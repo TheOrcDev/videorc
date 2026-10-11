@@ -217,6 +217,16 @@ export function activityRowActions(
   ]
 }
 
+/** A row's one background (plan 177, as chat's plan 154): a channel point
+ * reward paints the reward tint, unless it is on stream, where the on-stream
+ * fill wins. Hover still paints over it. */
+export function activityRowTint(
+  item: ActivityItem,
+  highlight: CommentHighlightPresentation
+): 'reward' | null {
+  return item.kind === 'redemption' && highlight.phase !== 'live' ? 'reward' : null
+}
+
 function ActivityRow({
   item,
   nowMs,
@@ -240,15 +250,18 @@ function ActivityRow({
     onShowFollowNames
   })
   const status = highlight.phase !== 'idle'
+  const tint = activityRowTint(item, highlight)
   return (
     <li
       className={cn(
         'flex items-start gap-2.5 px-3 py-2 hover:bg-accent',
-        highlight.phase === 'live' && 'bg-accent'
+        highlight.phase === 'live' && 'bg-accent',
+        tint === 'reward' && 'bg-reward/8'
       )}
       data-activity-id={item.id}
       data-highlight-phase={item.messageId ? highlight.phase : undefined}
       data-kind={item.kind}
+      data-row-tint={tint ?? undefined}
       data-slot="activity-row"
     >
       <span
@@ -447,7 +460,13 @@ export function ActivityPane({
           </Button>
         </div>
       ) : null}
-      <ScrollArea className="min-h-0 flex-1" type="scroll">
+      {/* Radix lays the viewport's content out as a table, which lets one long
+          reward widen every row and push each ⋯ out of the pane (plan 177);
+          a block keeps rows to the pane width, so the fact truncates. */}
+      <ScrollArea
+        className="min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
+        type="scroll"
+      >
         {shown.length ? (
           <ol aria-label="Activity" className="flex flex-col divide-y divide-border">
             {shown.map((item) => (

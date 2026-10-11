@@ -141,6 +141,9 @@ Colour
 - `--member`: a muted violet for paid membership (YouTube member, Twitch,
   Kick or X subscriber). It paints only the member row tint in chat
   (plan 154); never a chip tone, never text.
+- `--reward`: a muted teal for Twitch channel point rewards. It paints only
+  the reward row tint in Activity (`bg-reward/8`, plan 177); never a chip
+  tone, never text.
 - Use them through the tone utilities (`tone-success`, `tone-warning`,
   `tone-destructive`, `tone-live`, `tone-neutral`) and the chip utilities.
   Never as text colour on status copy.
@@ -271,7 +274,10 @@ made it chat first: one thin stats bar and fewer words.
   `components/stream-manager/activity-icons.tsx`). Either way the platform
   icon sits bottom-right. Then comes the name and a short fact on one line
   ("Resub · 14 months"), the viewer's words, and a ⋯ menu. Filter chips carry
-  their counts.
+  their counts. A channel point reward row paints `bg-reward/8` (plan 177);
+  on stream, `bg-accent` wins, and hover paints over it. The list's
+  ScrollArea lays rows out as a block, never Radix's table, so a long fact
+  truncates and every ⋯ stays in the pane.
 - **Proof.** `pnpm probe:comments-window` sweeps 320/480/640/800/1040/1280.
   It fails on any overflow, a stats bar taller than one row, main stats
   apart or clipped, a stat cut at the bar's edge, a hidden viewer count, a

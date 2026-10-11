@@ -31,6 +31,8 @@ const NEXT_LIVE_SESSION_ID = 'comments-window-probe-next-live'
 const LINK_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-link`
 // Plan 154: the member whose row must paint the member tint.
 const MEMBER_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:youtube:probe-member`
+// Plan 177: a long channel point reward, the row that once pushed its ⋯ out.
+const REWARD_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-reward`
 const HISTORY_SESSION_ID = 'comments-window-probe-history'
 const HISTORY_MODE = {
   kind: 'history',
@@ -718,6 +720,32 @@ async function probeLinksAndStreaks() {
     'member: a member row paints the member tint and a plain row paints none',
     JSON.stringify(tinted.last?.rowTints)
   )
+  // Plan 177: a reward row paints the reward tint, a streak row paints none,
+  // and every Activity row's ⋯ stays whole inside the pane, however long the
+  // reward, in both tiers that show Activity beside chat.
+  for (const width of [1280, 1040]) {
+    await layoutAt(width)
+    const activity = await waitFor(
+      () => smokeCommand('comments-window-reader-state'),
+      (s) => s.activityRows?.some((row) => row.id === REWARD_MESSAGE_ID),
+      5000
+    )
+    const rows = activity.last?.activityRows ?? []
+    const reward = rows.find((row) => row.id === REWARD_MESSAGE_ID)
+    const streak = rows.find((row) => row.kind === 'watch-streak')
+    assertProbe(
+      activity.ok && reward?.rowTint === 'reward' && streak && streak.rowTint === null,
+      `reward ${width}px: a reward row paints the reward tint and a streak row paints none`,
+      JSON.stringify(rows)
+    )
+    const cut = rows.filter((row) => !row.menuInside || !row.menuOnTop)
+    assertProbe(
+      activity.ok && rows.length > 0 && cut.length === 0,
+      `reward ${width}px: every Activity row's ⋯ sits whole inside the pane`,
+      JSON.stringify(cut.length ? cut : rows)
+    )
+  }
+  await layoutAt(1280)
   const menu = await smokeCommand('comments-window-context-click-link', {
     messageId: LINK_MESSAGE_ID
   })
@@ -1301,10 +1329,30 @@ function linksAndStreakSnapshot() {
           at: '2026-07-10T10:00:05Z'
         }),
         authorRoles: ['member']
+      },
+      {
+        ...messageFixture({
+          id: REWARD_MESSAGE_ID,
+          platform: 'twitch',
+          sessionId: NEXT_LIVE_SESSION_ID,
+          authorName: 'radiumcoders',
+          messageText: 'radiumcoders redeemed Hydrate the Orc before the raid',
+          at: '2026-07-10T10:00:06Z'
+        }),
+        eventType: 'redemption',
+        rawProviderType: 'channel.channel_points_custom_reward_redemption.add',
+        fragments: [],
+        details: {
+          kind: 'redemption',
+          reward: 'custom',
+          channelPoints: 1000,
+          title: 'Hydrate the Orc before the raid',
+          pointsName: 'Orc Gold'
+        }
       }
     ],
     unreadCount: 4,
-    updatedAt: '2026-07-10T10:00:06Z'
+    updatedAt: '2026-07-10T10:00:07Z'
   }
 }
 
