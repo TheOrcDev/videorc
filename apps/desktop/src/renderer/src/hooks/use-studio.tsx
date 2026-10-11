@@ -1595,8 +1595,10 @@ export type StudioCoreContextValue = Omit<
 
 export type StudioRecordingStateContextValue = {
   /** `streamUrl` tells a record+stream session (Go Live) from a recording:
-   * the backend reports both as `recording` (plan 095 S5). */
-  recording: Pick<RecordingStatus, 'state' | 'sessionId' | 'streamUrl'>
+   * the backend reports both as `recording` (plan 095 S5). `startedAt` feeds
+   * the shell's clocks (the status bar, the sidebar's Studio row; plan 174
+   * S1.3, D8) and changes only when a session starts. */
+  recording: Pick<RecordingStatus, 'state' | 'sessionId' | 'streamUrl' | 'startedAt'>
 }
 
 export type StudioRecordingContextValue = Pick<StudioContextValue, 'recording'>
@@ -16004,10 +16006,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recording: {
         state: recording.state,
         sessionId: recording.sessionId,
-        streamUrl: recording.streamUrl
+        streamUrl: recording.streamUrl,
+        startedAt: recording.startedAt
       }
     }),
-    [recording.sessionId, recording.state, recording.streamUrl]
+    [recording.sessionId, recording.startedAt, recording.state, recording.streamUrl]
   )
   const recordingValue = useMemo<StudioRecordingContextValue>(() => ({ recording }), [recording])
   const previewValue = useMemo<StudioPreviewContextValue>(

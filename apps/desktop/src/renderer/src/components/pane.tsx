@@ -33,7 +33,14 @@ export function Toolbar({
       )}
       data-slot="toolbar"
     >
-      {title ? <h1 className={WINDOW_TITLE_CLASS}>{title}</h1> : null}
+      {/* Focusable by script only (plan 174 S3.21, A-18): the shell moves the
+          focus here after keyboard navigation, so the new page is announced
+          and the next Tab starts at its top. */}
+      {title ? (
+        <h1 className={cn(WINDOW_TITLE_CLASS, 'outline-none')} tabIndex={-1}>
+          {title}
+        </h1>
+      ) : null}
     </header>
   )
 }

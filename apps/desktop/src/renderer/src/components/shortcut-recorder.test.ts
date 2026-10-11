@@ -75,9 +75,7 @@ describe('ShortcutRecorderField', () => {
       )
     )
     const alert = container.querySelector('[role="alert"]')
-    expect(alert?.textContent).toBe(
-      "⌘K is Videorc's shortcut for “Search & commands”. Pick another."
-    )
+    expect(alert?.textContent).toBe("⌘K is Videorc's shortcut for “Search”. Pick another.")
     expect(onChange).not.toHaveBeenCalled()
   })
 

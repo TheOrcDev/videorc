@@ -3,17 +3,19 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactEle
 const CommandPalette = lazy(async () => ({
   default: (await import('@/components/command-palette')).CommandPalette
 }))
+import { AppErrorBoundary } from '@/components/error-boundary'
 import { Pane, PaneBody, Toolbar } from '@/components/pane'
+import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarSessionState } from '@/components/status-bar-session'
 import { GoLiveDialogGate } from '@/components/go-live-dialog-gate'
 import {
-  WORKSPACE_SHORTCUTS,
   WorkspaceNavContext,
   isStudioPanel,
   readWorkspaceNavigation,
   workspaceTabLabel,
+  workspaceWindowTitle,
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
@@ -32,7 +34,8 @@ import {
   type CleanCutOpenRequest,
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
-import { isCommandKey } from '@/lib/platform'
+import { isModalOpen } from '@/lib/modal-open'
+import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
@@ -101,6 +104,12 @@ const PermissionsOnboardingDialog = lazy(async () => ({
 }))
 const WhatsNewDialog = lazy(async () => ({
   default: (await import('@/components/whats-new-dialog')).WhatsNewDialog
+}))
+// The root panel's export button (plan 174 A-7): loaded only when the shell
+// crashed, from here rather than from the panel's own chunk, which every
+// window shares and must not reach into use-studio.
+const SupportBundleButton = lazy(async () => ({
+  default: (await import('@/components/support-bundle-button')).SupportBundleButton
 }))
 // "End livestream?" (plan 174 S0.1): hosted here so every stop path asks
 // from every page; loaded only when a livestream is asked to end.
@@ -174,7 +183,26 @@ function PermissionsOnboardingGate({
   )
 }
 
+/**
+ * The main window. A crash in the shell itself shows the root panel with the
+ * support bundle still reachable (plan 174 A-7); a page's crash stays inside
+ * the page (PageErrorBoundary below).
+ */
 export function AppShell(): ReactElement {
+  return (
+    <AppErrorBoundary
+      supportBundle={
+        <Suspense fallback={null}>
+          <SupportBundleButton />
+        </Suspense>
+      }
+    >
+      <AppShellContent />
+    </AppErrorBoundary>
+  )
+}
+
+function AppShellContent(): ReactElement {
   const {
     wsStatus,
     recordingState,
@@ -196,6 +224,9 @@ export function AppShell(): ReactElement {
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
+  // Set by every way to a page except a click on its sidebar row: the page
+  // title takes the focus once the page is up (plan 174 A-18).
+  const titleFocusPendingRef = useRef(false)
   // Library's "Buddy report" opens the Buddy tab on one session's report (plan
   // 119 S3). Any other way to a page drops that ask, so the next visit to
   // Buddy shows the last stream again.
@@ -214,10 +245,11 @@ export function AppShell(): ReactElement {
     setBuddyTab(tab)
     writeLastBuddyTab(tab)
   }, [])
-  const setActive = useCallback((tab: WorkspaceTab) => {
+  const setActive = useCallback((tab: WorkspaceTab, options?: { focusTitle?: boolean }) => {
     setBuddyReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(null)
+    titleFocusPendingRef.current = options?.focusTitle ?? true
     setActiveTab(tab)
   }, [])
   const openBuddyReport = useCallback(
@@ -273,7 +305,7 @@ export function AppShell(): ReactElement {
     return () => window.clearTimeout(timer)
   }, [])
 
-  // Studio control pages are ordinary tabs grouped under "Studio" in the sidebar.
+  // The Setup pages are ordinary tabs, listed under "Setup" in the sidebar.
   const openStudioPanel = useCallback(
     (panel: StudioPanel) => {
       setActive(panel)
@@ -330,50 +362,41 @@ export function AppShell(): ReactElement {
     setOnboardingOpen(true)
   }, [])
 
+  // The shell's chords (plan 174 S3.21): ⌘ on macOS, Ctrl elsewhere (A-17),
+  // decided in shell-shortcuts.ts, and none of them from under a dialog or a
+  // menu (A-2). ⌘J shows Stream Manager, ⇧⌘J toggles it (A-12); Comments
+  // live ONLY in that window (owner call, 2026-08-19).
+  const commandOpenRef = useRef(commandOpen)
+  commandOpenRef.current = commandOpen
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      // ⌘ on macOS, Ctrl elsewhere, never both: ⌃K and ⌃P stay text editing
-      // on a Mac (plan 174 A-17).
-      const command = isCommandKey(event, runtimeInfo?.platform)
-      if (event.key.toLowerCase() === 'k' && command) {
-        event.preventDefault()
-        setCommandOpen((value) => !value)
-      }
-      if (event.key.toLowerCase() === 'p' && command) {
-        event.preventDefault()
-        void togglePreviewWindow()
-      }
-      if (
-        runtimeInfo?.notesWindowEnabled &&
-        event.key.toLowerCase() === 'n' &&
-        event.shiftKey &&
-        command
-      ) {
-        event.preventDefault()
-        if (notesWindowOpen) {
-          void closeNotesWindow()
-        } else {
-          void openNotesWindow()
-        }
-      }
-      // Comments live ONLY in the separate window now (owner call,
-      // 2026-08-19) — plain (cmd)J, which used to toggle the in-studio rail,
-      // keeps working by toggling the window, same as (cmd)shift-J.
-      if (runtimeInfo?.commentsWindowEnabled && event.key.toLowerCase() === 'j' && command) {
-        event.preventDefault()
-        void toggleCommentsWindow()
-      }
-      if (event.key.toLowerCase() === 'c' && event.shiftKey && command) {
-        event.preventDefault()
-        void toggleCaptionsWindow()
-      }
+      const action = shellShortcutAction(event, {
+        platform: runtimeInfo?.platform,
+        modalOpen: isModalOpen(document),
+        searchOpen: commandOpenRef.current,
+        notesWindowEnabled: Boolean(runtimeInfo?.notesWindowEnabled),
+        commentsWindowEnabled: Boolean(runtimeInfo?.commentsWindowEnabled)
+      })
+      if (!action) return
+      event.preventDefault()
+      if (action === 'toggle-search') setCommandOpen((value) => !value)
+      else if (action === 'close-search') setCommandOpen(false)
+      else if (action === 'toggle-preview') void togglePreviewWindow()
+      else if (action === 'toggle-notes')
+        void (notesWindowOpen ? closeNotesWindow() : openNotesWindow())
+      else if (action === 'show-stream-manager') void openCommentsWindow()
+      else if (action === 'toggle-stream-manager') void toggleCommentsWindow()
+      else if (action === 'toggle-captions') void toggleCaptionsWindow()
+      else openSettings('shortcuts')
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [
     closeNotesWindow,
     notesWindowOpen,
+    openCommentsWindow,
     openNotesWindow,
+    openSettings,
     runtimeInfo?.commentsWindowEnabled,
     runtimeInfo?.notesWindowEnabled,
     runtimeInfo?.platform,
@@ -384,23 +407,26 @@ export function AppShell(): ReactElement {
 
   // ⌘1–⌘9 / ⌘, arrive from the main process (Chromium swallows ⌘+digit before
   // the renderer keydown — see main's before-input-event handler). Map the raw
-  // key to a page here, where navigation state lives. FX6: the IPC path
-  // bypasses dialog focus entirely, so navigating behind an open modal has to
-  // be gated here explicitly (ref — the subscription outlives renders).
-  const modalOpenRef = useRef(false)
-  modalOpenRef.current = onboardingOpen || whatsNew.open
+  // key to a page here, where navigation state lives. The IPC path bypasses
+  // dialog focus entirely, so it asks the same `isModalOpen` as every other
+  // key (plan 174 A-2).
   useEffect(() => {
     const off = window.videorc?.onShortcutNavigate?.((key) => {
-      if (modalOpenRef.current) {
-        return
-      }
-      const shortcut = WORKSPACE_SHORTCUTS.find((entry) => entry.digit === key)
-      if (shortcut) {
-        setActive(shortcut.tab)
-      }
+      const tab = navigationShortcutTab(key, isModalOpen(document))
+      if (tab) setActive(tab)
     })
     return off
   }, [setActive])
+
+  // The window is named after its page, and after keyboard navigation the
+  // page title takes the focus, so the new page is announced and the next
+  // Tab starts at its top (plan 174 A-18).
+  useEffect(() => {
+    document.title = workspaceWindowTitle(active)
+    if (!titleFocusPendingRef.current) return
+    titleFocusPendingRef.current = false
+    document.querySelector<HTMLElement>('[data-slot="toolbar"] h1')?.focus()
+  }, [active])
 
   // Pages opened from outside React arrive through `openWorkspaceTab`
   // (plan 174, I-PAT-12); a page id that does not exist is dropped here.
@@ -470,12 +496,15 @@ export function AppShell(): ReactElement {
           active={active}
           activeStudioPanel={isStudioPanel(active) ? active : null}
           accountTier={entitlementTier}
-          onSelect={setActive}
-          onSelectStudioPanel={openStudioPanel}
+          // A click on a row keeps the focus on the row; every other way to
+          // a page moves it to the page title.
+          onSelect={(tab) => setActive(tab, { focusTitle: false })}
+          onSelectStudioPanel={(panel) => setActive(panel, { focusTitle: false })}
           onOpenSettings={openSettings}
           statusTone={statusTone}
           statusLabel={statusLabel}
           statusPulse={statusPulse}
+          sessionStartedAt={recording.startedAt}
           live={live}
           onOpenCommand={() => setCommandOpen(true)}
           platform={runtimeInfo?.platform}
@@ -488,43 +517,50 @@ export function AppShell(): ReactElement {
                   strips, Library's pinned header): PaneBody stops scrolling
                   for it. Every other page scrolls as one. */}
             <PaneBody>
-              <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
-                <Suspense fallback={<WorkspaceTabFallback />}>
-                  {active === 'studio' ? <StudioTab /> : null}
-                  {active === 'sources' ? <SourcesTab /> : null}
-                  {active === 'layouts' ? <LayoutTab /> : null}
-                  {active === 'assets' ? <AssetsTab /> : null}
-                  {active === 'live' ? (
-                    <StreamingTab view={livestreamView} onViewChange={selectLivestreamView} />
-                  ) : null}
-                  {active === 'captions' ? <CaptionsTab /> : null}
-                  {active === 'recording' ? <RecordingTab /> : null}
-                  {active === 'library' ? (
-                    <LibraryTab
-                      focusSessionId={libraryFocusSessionId}
-                      onOpenCleanCut={(sessionId) => openCleanCut({ sessionId, origin: 'library' })}
-                      onOpenBuddyReport={openBuddyReport}
-                    />
-                  ) : null}
-                  {active === 'ai' ? (
-                    <BuddyTab
-                      cleanCutRequest={cleanCutRequest}
-                      reportSessionId={buddyReportSessionId}
-                      tab={buddyTab}
-                      onOpenLibrarySession={openLibrarySession}
-                      onTabChange={selectBuddyTab}
-                    />
-                  ) : null}
-                  {active === 'diagnostics' ? <DiagnosticsTab /> : null}
-                  {active === 'settings' ? (
-                    <SettingsTab
-                      tab={settingsTab}
-                      onShowWhatsNew={whatsNew.showLatest}
-                      onTabChange={selectSettingsTab}
-                    />
-                  ) : null}
-                </Suspense>
-              </StudioMicVisualProvider>
+              {/* A page crash, or a page chunk that failed to load, stays
+                  inside the page (plan 174 A-7); keyed, so the next page
+                  starts clean. */}
+              <PageErrorBoundary key={active}>
+                <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
+                  <Suspense fallback={<WorkspaceTabFallback />}>
+                    {active === 'studio' ? <StudioTab /> : null}
+                    {active === 'sources' ? <SourcesTab /> : null}
+                    {active === 'layouts' ? <LayoutTab /> : null}
+                    {active === 'assets' ? <AssetsTab /> : null}
+                    {active === 'live' ? (
+                      <StreamingTab view={livestreamView} onViewChange={selectLivestreamView} />
+                    ) : null}
+                    {active === 'captions' ? <CaptionsTab /> : null}
+                    {active === 'recording' ? <RecordingTab /> : null}
+                    {active === 'library' ? (
+                      <LibraryTab
+                        focusSessionId={libraryFocusSessionId}
+                        onOpenCleanCut={(sessionId) =>
+                          openCleanCut({ sessionId, origin: 'library' })
+                        }
+                        onOpenBuddyReport={openBuddyReport}
+                      />
+                    ) : null}
+                    {active === 'ai' ? (
+                      <BuddyTab
+                        cleanCutRequest={cleanCutRequest}
+                        reportSessionId={buddyReportSessionId}
+                        tab={buddyTab}
+                        onOpenLibrarySession={openLibrarySession}
+                        onTabChange={selectBuddyTab}
+                      />
+                    ) : null}
+                    {active === 'diagnostics' ? <DiagnosticsTab /> : null}
+                    {active === 'settings' ? (
+                      <SettingsTab
+                        tab={settingsTab}
+                        onShowWhatsNew={whatsNew.showLatest}
+                        onTabChange={selectSettingsTab}
+                      />
+                    ) : null}
+                  </Suspense>
+                </StudioMicVisualProvider>
+              </PageErrorBoundary>
             </PaneBody>
           </Pane>
           {/* State on the left, the shell's real shortcuts on the right:
@@ -580,7 +616,12 @@ export function AppShell(): ReactElement {
             (first run initializes the last-seen version silently). */}
         <Suspense fallback={null}>
           {whatsNew.open && !onboardingOpen ? (
-            <WhatsNewDialog entry={whatsNew.entry} open onClose={whatsNew.dismiss} />
+            <WhatsNewDialog
+              entry={whatsNew.entry}
+              open
+              skippedVersions={whatsNew.skippedVersions}
+              onClose={whatsNew.dismiss}
+            />
           ) : null}
         </Suspense>
         <Suspense fallback={null}>

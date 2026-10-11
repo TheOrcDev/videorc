@@ -33,10 +33,13 @@ const SHORTCUT_LIST = [
   { id: 'nav-library', accelerators: ['CmdOrCtrl+8'], label: 'Library', group: 'Navigation' },
   { id: 'nav-ai', accelerators: ['CmdOrCtrl+9'], label: 'Buddy', group: 'Navigation' },
   { id: 'nav-settings', accelerators: ['CmdOrCtrl+,'], label: 'Settings', group: 'Navigation' },
+  // ⌘K is "Search" everywhere it is named (plan 174 A-13, docs/ui-copy.md).
+  { id: 'search', accelerators: ['CmdOrCtrl+K'], label: 'Search', group: 'Navigation' },
+  // The reference for every key on this list (plan 174 S3.21, A-12).
   {
-    id: 'search',
-    accelerators: ['CmdOrCtrl+K'],
-    label: 'Search & commands',
+    id: 'shortcuts-page',
+    accelerators: ['CmdOrCtrl+/'],
+    label: 'Settings → Shortcuts',
     group: 'Navigation'
   },
 
@@ -73,6 +76,14 @@ const SHORTCUT_LIST = [
     label: `Open ${WINDOW_NAMES.streamManager}`,
     group: 'Windows'
   },
+  // Plain ⌘J shows the window from the main window (plan 174 S3.21, A-12);
+  // inside it, the same key focuses Buddy (`cohost-focus`).
+  {
+    id: 'comments-window-show',
+    accelerators: ['CmdOrCtrl+J'],
+    label: `Show ${WINDOW_NAMES.streamManager}`,
+    group: 'Windows'
+  },
   {
     id: 'captions-window',
     accelerators: ['CmdOrCtrl+Shift+C'],
@@ -80,9 +91,9 @@ const SHORTCUT_LIST = [
     group: 'Windows'
   },
 
-  // Buddy pane (Stream Manager). Plain (cmd)J toggles Stream Manager from the
-  // main window; inside the window it focuses the Buddy pane, and
-  // the single-key actions apply to the selected row.
+  // Buddy pane (Stream Manager). Inside the window plain (cmd)J focuses the
+  // Buddy pane (from the main window it shows the window, above), and the
+  // single-key actions apply to the selected row.
   {
     id: 'cohost-focus',
     accelerators: ['CmdOrCtrl+J'],

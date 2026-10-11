@@ -1,82 +1,49 @@
 import { useCallback, useEffect, useState } from 'react'
-import { toast } from '@/lib/toast'
-import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
-
-/** No notes in the app, so the way out is the website (plan 174 S2.4). */
-function showReleaseNotesUnavailable(): void {
-  toast.info("Release notes aren't available in Videorc right now", {
-    id: 'whats-new-unavailable',
-    action: {
-      label: 'Open changelog',
-      onClick: () => openVideorcWebLink(VIDEORC_WEB_LINKS.changelog)
-    }
-  })
-}
-
-import {
-  changelogPlatformForRuntime,
-  fetchChangelogEntries,
-  resolveWhatsNewAction,
-  WHATS_NEW_STORAGE_KEY,
-  type ChangelogEntry
-} from '@/lib/whats-new'
+import type { ChangelogEntry, WhatsNewResult } from '@/lib/whats-new'
 
 // Post-update "What's new": when the app version changed since the last seen
-// one, fetch the changelog entries published in between and surface the newest
-// in a dialog. First run initializes silently; a failed fetch retries on the
-// next launch (last-seen is only advanced on a good answer or dismissal).
+// one, the newest changelog entry published in between opens in a dialog,
+// naming the releases skipped on the way (plan 174 A-19). The check itself,
+// the fetch and the parser live in lib/whats-new, loaded on demand after the
+// shell is up: none of it is in the eager bundle (plan 174 S3.21).
+const loadWhatsNew = (): Promise<typeof import('@/lib/whats-new')> => import('@/lib/whats-new')
+
 export function useWhatsNew(
   version: string | undefined,
   runtimePlatform: string | undefined
 ): {
   entry: ChangelogEntry | null
+  /** The releases between the last seen one and `entry`, newest first. */
+  skippedVersions: string[]
   open: boolean
   dismiss: () => void
   showLatest: () => void
 } {
-  const [entry, setEntry] = useState<ChangelogEntry | null>(null)
+  const [result, setResult] = useState<WhatsNewResult | null>(null)
   const [open, setOpen] = useState(false)
-  const platform = changelogPlatformForRuntime(runtimePlatform)
 
   useEffect(() => {
-    const action = resolveWhatsNewAction({
-      version,
-      lastSeen: localStorage.getItem(WHATS_NEW_STORAGE_KEY)
-    })
-    if (action === 'idle' || !version) {
+    if (!version) {
       return
     }
-    if (action === 'initialize') {
-      localStorage.setItem(WHATS_NEW_STORAGE_KEY, version)
-      return
-    }
-    if (!platform) {
-      return
-    }
-
     let cancelled = false
-    void fetchChangelogEntries({
-      platform,
-      since: localStorage.getItem(WHATS_NEW_STORAGE_KEY) ?? undefined
-    }).then((entries) => {
-      if (cancelled || entries === null) {
-        return
-      }
-      if (entries.length === 0) {
-        localStorage.setItem(WHATS_NEW_STORAGE_KEY, version)
-        return
-      }
-      setEntry(entries[0])
-      setOpen(true)
-    })
+    void loadWhatsNew()
+      .then((lib) => lib.checkWhatsNew({ version, runtimePlatform }))
+      .then((found) => {
+        if (cancelled || !found) {
+          return
+        }
+        setResult(found)
+        setOpen(true)
+      })
     return () => {
       cancelled = true
     }
-  }, [platform, version])
+  }, [runtimePlatform, version])
 
   const dismiss = useCallback(() => {
     if (version) {
-      localStorage.setItem(WHATS_NEW_STORAGE_KEY, version)
+      void loadWhatsNew().then((lib) => lib.markWhatsNewSeen(version))
     }
     setOpen(false)
   }, [version])
@@ -84,19 +51,22 @@ export function useWhatsNew(
   // Manual entry point (Settings → About & updates): always shows the latest
   // release, independent of the last-seen gate.
   const showLatest = useCallback(() => {
-    if (!platform) {
-      showReleaseNotesUnavailable()
-      return
-    }
-    void fetchChangelogEntries({ platform }).then((entries) => {
-      if (entries === null || entries.length === 0) {
-        showReleaseNotesUnavailable()
-        return
-      }
-      setEntry(entries[0])
-      setOpen(true)
-    })
-  }, [platform])
+    void loadWhatsNew()
+      .then((lib) => lib.latestWhatsNew(runtimePlatform))
+      .then((found) => {
+        if (!found) {
+          return
+        }
+        setResult(found)
+        setOpen(true)
+      })
+  }, [runtimePlatform])
 
-  return { entry, open, dismiss, showLatest }
+  return {
+    entry: result?.entry ?? null,
+    skippedVersions: result?.skippedVersions ?? [],
+    open,
+    dismiss,
+    showLatest
+  }
 }

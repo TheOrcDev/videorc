@@ -19,7 +19,7 @@ import { isLivestreamViewId } from '@/lib/livestream-tabs'
 import { migrateSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
 import type { WorkspaceNavigation } from '@/lib/workspace-navigation'
 
-// Studio control pages, grouped under "Studio" in the sidebar: one click away, but
+// The Setup pages, listed under the sidebar's "Setup" label: one click away, but
 // they are FULL pages — studio content renders only on the Studio tab (user decision
 // 2026-06-09, overriding the earlier push-rail idea). Sources is the single home for
 // every capture device — screen/window, camera, AND microphone — so changing what
@@ -29,8 +29,9 @@ export type StudioPanel = 'sources' | 'layouts' | 'assets' | 'live' | 'captions'
 // Full pages: they replace the workspace content area.
 export type WorkspaceTab = 'studio' | StudioPanel | 'library' | 'ai' | 'diagnostics' | 'settings'
 
-// Sidebar zones (ux-ia-refactor-plan): the stage row, then SETUP (the studio
-// panels), then LIBRARY, then SYSTEM. 'setup' rows come from STUDIO_PANELS.
+// Sidebar zones (plan 174 D8): the stage rows (Studio, Buddy), then Setup
+// (STUDIO_PANELS, the only labelled group), then Library; the 'system' rows
+// sit in a bottom block above the account row. Health has no row at all.
 export type WorkspaceTabGroup = 'stage' | 'library' | 'system'
 
 export type WorkspaceTabMeta = {
@@ -124,6 +125,15 @@ export function workspaceTabLabel(tab: WorkspaceTab): string {
     STUDIO_PANELS.find((entry) => entry.id === tab)?.label ??
     tab
   )
+}
+
+/**
+ * The main window's title for a page (plan 174 S3.21, A-18): "Studio –
+ * Videorc", read by Mission Control, the Windows taskbar and screen readers.
+ * An en dash: app copy never uses an em dash (docs/ui-copy.md).
+ */
+export function workspaceWindowTitle(tab: WorkspaceTab): string {
+  return `${workspaceTabLabel(tab)} – Videorc`
 }
 
 export function isStudioPanel(value: unknown): value is StudioPanel {

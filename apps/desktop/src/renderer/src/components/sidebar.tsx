@@ -1,19 +1,23 @@
 import { type AppIcon, SearchIcon, SyncIcon } from '@/components/icons'
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
-import logoUrl from '@/assets/videorc-logo.png'
 import { AccountMenu } from '@/components/account-menu'
-import { type StatusDotTone } from '@/components/status-dot'
+import { SectionLabel } from '@/components/section-label'
+import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTrafficLightGutter } from '@/components/window-frame'
 import { useModifierHeld } from '@/hooks/use-modifier-held'
 import { useReducedMotion } from '@/hooks/use-reduced-motion'
-import { shortcutAriaKeys, shortcutLabel } from '@/lib/platform'
+import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
+import { useUpdater } from '@/hooks/use-updater'
+import { shortcutAriaKeys } from '@/lib/platform'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { shortcutChipProps } from '@/lib/shortcut-overlay'
-import { useUpdater } from '@/hooks/use-updater'
+import { sessionClockLabel } from '@/lib/studio-session-view'
 import { updateChip } from '@/lib/update-ui'
 import {
   STUDIO_PANELS,
@@ -36,6 +40,7 @@ function NavRow({
   platform,
   shortcutVisible,
   shortcutIndex,
+  trailing,
   onClick
 }: {
   icon: AppIcon
@@ -46,8 +51,12 @@ function NavRow({
   platform?: string
   shortcutVisible: boolean
   shortcutIndex: number
+  /** What the row shows at its end while the shortcut chips are hidden. */
+  trailing?: ReactNode
   onClick: () => void
 }): ReactElement {
+  const chip = shortcutChipProps(shortcutVisible, shortcutIndex)
+  const trailingShown = Boolean(trailing) && !shortcutVisible
   return (
     <button
       type="button"
@@ -69,25 +78,46 @@ function NavRow({
         className={cn('size-4 shrink-0', isActive && 'text-primary')}
       />
       <span className="flex-1 truncate text-left">{label}</span>
+      {trailingShown ? trailing : null}
       {shortcutDigit ? (
         // Mounted whether or not it shows: reserving the width stops every
         // row from reflowing the instant ⌘ goes down. `aria-keyshortcuts` on
         // the button already tells assistive tech about the shortcut, so the
         // hidden chip is decoration and stays out of the accessibility tree.
+        // A row with a trailing clock lends the chip its slot while ⌘ is held.
         <ShortcutKeys
           accelerator={`CmdOrCtrl+${shortcutDigit}`}
           platform={platform}
-          {...shortcutChipProps(shortcutVisible, shortcutIndex)}
+          {...chip}
+          className={cn(chip.className, trailingShown && 'hidden')}
         />
       ) : null}
     </button>
   )
 }
 
-function GroupLabel({ children }: { children: string }): ReactElement {
+/**
+ * The Studio row's clock while a session runs (plan 174 D8): the live dot
+ * and the elapsed time, so the state shows from every page. It ticks here,
+ * so only this leaf re-renders each second. The status bar announces the
+ * state; this is a repeat for the eye, hidden from assistive tech.
+ */
+function SessionClock({
+  startedAt,
+  tone
+}: {
+  startedAt: string | undefined
+  tone: StatusDotTone
+}): ReactElement {
+  const elapsedMs = useSessionElapsedMs(startedAt)
   return (
-    <span className="px-2.5 pb-1 text-[11px] leading-none font-semibold text-subtle">
-      {children}
+    <span
+      aria-hidden
+      className="flex shrink-0 items-center gap-1.5 text-xs tabular-nums text-muted-foreground"
+      data-testid="sidebar-session-clock"
+    >
+      <StatusDot pulse tone={tone} />
+      {sessionClockLabel(elapsedMs)}
     </span>
   )
 }
@@ -96,7 +126,9 @@ function GroupLabel({ children }: { children: string }): ReactElement {
  * Update chip above the account row (post-0.9.4 fix batch F6): appears only
  * while an update is in flight or ready. Clicking installs when that is safe
  * (downloaded + no live capture); otherwise it jumps to Settings → About,
- * which owns the full update story.
+ * which owns the full update story. Its name is its visible words, with the
+ * version in the description and the tooltip (plan 174 A-25), and the dot is
+ * green only when a click installs.
  */
 function SidebarUpdateChip({
   captureActive,
@@ -126,19 +158,28 @@ function SidebarUpdateChip({
     >
       <div className="overflow-hidden">
         <div className="px-3 pb-1">
-          <button
-            aria-label={chip.detail}
-            className="flex h-row-compact w-full items-center gap-2.5 rounded-row px-2.5 text-left text-sm text-foreground hover:bg-accent"
-            title={chip.detail}
-            type="button"
-            onClick={() => (chip.action === 'install' ? install() : onOpenSettings())}
-          >
-            <span className="relative flex size-4 shrink-0 items-center justify-center">
-              <SyncIcon className="size-4 text-muted-foreground" />
-              <span className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full glass-dot tone-success" />
-            </span>
-            <span className="min-w-0 flex-1 truncate">{chip.label}</span>
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                aria-description={chip.detail}
+                className="flex h-row-compact w-full items-center gap-2.5 rounded-row px-2.5 text-left text-sm text-foreground hover:bg-accent"
+                type="button"
+                onClick={() => (chip.action === 'install' ? install() : onOpenSettings())}
+              >
+                <span className="relative flex size-4 shrink-0 items-center justify-center">
+                  <SyncIcon className="size-4 text-muted-foreground" />
+                  <span
+                    className={cn(
+                      'absolute -right-0.5 -top-0.5 size-1.5 rounded-full glass-dot',
+                      chip.tone === 'good' ? 'tone-success' : 'tone-neutral'
+                    )}
+                  />
+                </span>
+                <span className="min-w-0 flex-1 truncate">{chip.label}</span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{chip.detail}</TooltipContent>
+          </Tooltip>
         </div>
       </div>
     </div>
@@ -155,6 +196,7 @@ export function Sidebar({
   statusTone,
   statusLabel,
   statusPulse,
+  sessionStartedAt,
   live,
   onOpenCommand,
   platform
@@ -170,6 +212,8 @@ export function Sidebar({
   statusLabel: string
   /** Only while recording or on air (plan 174 S1.3). */
   statusPulse: boolean
+  /** When the running session started; the Studio row's clock counts from it. */
+  sessionStartedAt?: string | null
   live: boolean
   onOpenCommand: () => void
   platform?: string
@@ -184,6 +228,25 @@ export function Sidebar({
   const reducedMotion = useReducedMotion()
   const trafficLightGutter = useTrafficLightGutter()
 
+  const row = (
+    tab: { id: WorkspaceTab; label: string; icon: AppIcon },
+    trailing?: ReactNode
+  ): ReactElement => (
+    <NavRow
+      key={tab.id}
+      icon={tab.icon}
+      label={tab.label}
+      isActive={active === tab.id}
+      triggerId={tab.id}
+      shortcutDigit={shortcutDigitFor(tab.id)}
+      shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
+      platform={platform}
+      shortcutVisible={shortcutVisible}
+      trailing={trailing}
+      onClick={() => onSelect(tab.id)}
+    />
+  )
+
   return (
     // The sidebar coat (plan 091, D3/D4): the delta that takes the body's
     // cover up to the sidebar's, so the sidebar is the heavier, more covered
@@ -191,59 +254,56 @@ export function Sidebar({
     // the window coat; this is never a white tint (plan 050 found one dropped
     // secondary text under 4.5:1 over a bright desktop).
     <aside className="flex w-52 shrink-0 flex-col border-r bg-glass-sidebar text-sidebar-foreground">
-      {/* The top row shares the window's 40 px header band with the toolbar.
-          macOS: traffic lights, then search; the brand lives in About and the
-          Dock. Windows has no traffic lights, and its title bars lead with the
-          app icon and name, so the row does too (the win32 variant, from the
-          first paint). */}
+      {/* The top row shares the window's 40 px header band with the toolbar:
+          the traffic lights, then Search. The brand lives in About and the
+          Dock; on Windows the native title bar already carries it, so the row
+          repeats nothing (plan 174 D18). */}
       <div
         className={cn(
           'flex h-toolbar shrink-0 items-center justify-end pr-2 [-webkit-app-region:drag]',
           trafficLightGutter
         )}
       >
-        <span className="mr-auto hidden items-center gap-2 text-xs win32:flex">
-          <img alt="" className="size-4" src={logoUrl} />
-          Videorc
-        </span>
-        <Button
-          aria-keyshortcuts={shortcutAriaKeys(shortcutAccelerator('search'), platform)}
-          aria-label="Search"
-          className="text-muted-foreground [-webkit-app-region:no-drag]"
-          size="icon-sm"
-          title={`Search (${shortcutLabel(shortcutAccelerator('search'), platform)})`}
-          type="button"
-          variant="ghost"
-          onClick={onOpenCommand}
+        <ShortcutTooltip
+          accelerator={shortcutAccelerator('search')}
+          label="Search"
+          platform={platform}
         >
-          <SearchIcon className="size-4" />
-        </Button>
+          <Button
+            aria-keyshortcuts={shortcutAriaKeys(shortcutAccelerator('search'), platform)}
+            aria-label="Search"
+            className="text-muted-foreground [-webkit-app-region:no-drag]"
+            size="icon-sm"
+            type="button"
+            variant="ghost"
+            onClick={onOpenCommand}
+          >
+            <SearchIcon className="size-4" />
+          </Button>
+        </ShortcutTooltip>
       </div>
 
-      {/* Four zones (ux-ia-refactor-plan): stage row, SETUP, LIBRARY, SYSTEM. */}
+      {/* Three zones (plan 174 D8): the stage rows, Setup (the one labelled
+          group) and Library; Settings sits in a bottom block above the
+          account row. Buddy stays second, directly under Studio, on ⌘9
+          (owner call): it sells Premium. */}
       <nav
         aria-label="Primary"
         className="flex flex-1 flex-col gap-4 overflow-y-auto px-3 pt-1 pb-2"
       >
         <div className="flex flex-col gap-0.5">
-          {tabsIn('stage').map((tab) => (
-            <NavRow
-              key={tab.id}
-              icon={tab.icon}
-              label={tab.label}
-              isActive={active === tab.id}
-              triggerId={tab.id}
-              shortcutDigit={shortcutDigitFor(tab.id)}
-              shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
-              platform={platform}
-              shortcutVisible={shortcutVisible}
-              onClick={() => onSelect(tab.id)}
-            />
-          ))}
+          {tabsIn('stage').map((tab) =>
+            row(
+              tab,
+              tab.id === 'studio' && statusPulse ? (
+                <SessionClock startedAt={sessionStartedAt ?? undefined} tone={statusTone} />
+              ) : undefined
+            )
+          )}
         </div>
 
         <div className="flex flex-col gap-0.5">
-          <GroupLabel>Setup</GroupLabel>
+          <SectionLabel className="px-2.5 pb-1 leading-none">Setup</SectionLabel>
           {STUDIO_PANELS.map((panel) => (
             <NavRow
               key={panel.id}
@@ -260,45 +320,15 @@ export function Sidebar({
           ))}
         </div>
 
-        <div className="flex flex-col gap-0.5">
-          <GroupLabel>Library</GroupLabel>
-          {tabsIn('library').map((tab) => (
-            <NavRow
-              key={tab.id}
-              icon={tab.icon}
-              label={tab.label}
-              isActive={active === tab.id}
-              triggerId={tab.id}
-              shortcutDigit={shortcutDigitFor(tab.id)}
-              shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
-              platform={platform}
-              shortcutVisible={shortcutVisible}
-              onClick={() => onSelect(tab.id)}
-            />
-          ))}
-        </div>
+        <div className="flex flex-col gap-0.5">{tabsIn('library').map((tab) => row(tab))}</div>
 
-        <div className="flex flex-col gap-0.5">
-          <GroupLabel>System</GroupLabel>
-          {/* Health (Diagnostics) is dev/forensic — kept out of the sidebar
-              entirely. It stays reachable via ⌘K and the account menu; the
-              support-bundle export lives in Settings → About. */}
+        {/* Health (Diagnostics) is dev/forensic — kept out of the sidebar
+            entirely. It stays reachable via ⌘K, the status bar and the account
+            menu; the support-bundle export lives there. */}
+        <div className="mt-auto flex flex-col gap-0.5" data-testid="sidebar-bottom">
           {tabsIn('system')
             .filter((tab) => tab.id !== 'diagnostics')
-            .map((tab) => (
-              <NavRow
-                key={tab.id}
-                icon={tab.icon}
-                label={tab.label}
-                isActive={active === tab.id}
-                triggerId={tab.id}
-                shortcutDigit={shortcutDigitFor(tab.id)}
-                shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
-                platform={platform}
-                shortcutVisible={shortcutVisible}
-                onClick={() => onSelect(tab.id)}
-              />
-            ))}
+            .map((tab) => row(tab))}
         </div>
       </nav>
 
