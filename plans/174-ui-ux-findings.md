@@ -110,7 +110,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: h2 default
 - **A-25** · P3 · Update chip "Restart to update" while live only navigates; green dot; aria-label mismatch — fixed in #647 (S3.21 `5bee0e0d`)
   - Evidence: update-ui.ts:43; sidebar.tsx:126 |
-- **A-26** · P3 · Copy: "Your {settings} is blocking…", "Loading workspace…", "Search for a command to run..." — partly fixed in #647 (S2.1 `e6379d71`, palette "..." and title); rest in S2.5
+- **A-26** · P3 · Copy: "Your {settings} is blocking…", "Loading workspace…", "Search for a command to run..." — partly fixed in #647 (S2.1 `e6379d71`, palette "..." and title); rest in S2.5; fixed in #647 (S2.1, S2.5 `34f4e6aa`, "Opening Videorc…")
   - Evidence: system-access.ts:313; app-shell.tsx:103; ui/command.tsx:28 |
 - **A-27** · P3 · Skill/docs stale (fullscreen gutter; Comments window; Chat hints) — fixed in #647 (S4.2 `9f2f2fc8`)
   - Evidence: SKILL.md:60; docs/buddy.md:412; App.tsx:41 |
@@ -201,7 +201,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: session-panel.tsx etc. |
 - **B-29** · P3 · Hand-rolled skeletons and links; Cancel outline vs ghost; 32px segmented in 20px slot; On/Off button pair for boolean — fixed in #647 (S1.7 `466ff1e5`)
   - Evidence: studio-tab.tsx:249; session-panel.tsx:253; scenes-gallery.tsx:93,231; vertical-leg-monitor.tsx:112-137 |
-- **B-30** · P3 · Regex-trimmed lowercase labels ("off", "2 q", "ready"); "Could not start." period; Open Library vs Open in Library; missing "…"; hyphen separator
+- **B-30** · P3 · Regex-trimmed lowercase labels ("off", "2 q", "ready"); "Could not start." period; Open Library vs Open in Library; missing "…"; hyphen separator — fixed in #647 (S2.5 `34f4e6aa`)
   - Evidence: session-panel.tsx:273,342; go-live-dialog.tsx:365,506 |
 - **B-31** · P3 · Dead startButtonLabel helpers pinned by smoke:start-labels (asserts Title Case labels no UI renders) — fixed in #647 (S2.2 `ae1e6788`)
   - Evidence: capture.ts:2771; scripts/smoke-start-labels.mjs |
@@ -684,7 +684,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: displayKeyGlyph + Tooltip
 - **G-24** · P3 · Library edit dialog closes before save accepted — fixed in #647 (S3.15a `2addd9c7`)
   - Evidence: buddy-library-section.tsx:358 |
-- **G-25** · P3 · Copy nits (See Premium vs View Premium x9; New Buddy no ellipsis; "Not available yet"; manifest.json; back button "Buddy") — partly fixed in #647 (S2.3b `21073ea6`); casing and ellipses in S2.5
+- **G-25** · P3 · Copy nits (See Premium vs View Premium x9; New Buddy no ellipsis; "Not available yet"; manifest.json; back button "Buddy") — partly fixed in #647 (S2.3b `21073ea6`); casing and ellipses in S2.5; fixed in #647 (S2.3b, S2.5 `34f4e6aa`)
   - Evidence: |
 - **G-26** · P3 · A11y nits: every Alert role=alert (assertive for info lines); FieldLabel htmlFor on ToggleGroup div; smooth scroll ignores reduced motion — partly fixed in #647 (S1.5 `905ea8fe`, Alert role); rest in S3.15b; fixed in #647 (S1.5 `905ea8fe`)
   - Evidence: ui/alert.tsx:33
@@ -874,7 +874,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **I-31** · P3 · Copy-to-clipboard 3 behaviours; silent copies — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: remote-settings.tsx:66; phone-remote-section.tsx:153; scheduled-streams.tsx:483
   - Fix: copyText + "Copied"
-- **I-32** · P3 · Missing ellipses ("Pair a phone", "Set up permissions", "What's new", "Browse"); shortcut labels "Open … window" for toggles; "Chat" group — partly fixed in #647 (S2.2 `ae1e6788`, session shortcut labels; S3.17 its files); ellipses in S2.5
+- **I-32** · P3 · Missing ellipses ("Pair a phone", "Set up permissions", "What's new", "Browse"); shortcut labels "Open … window" for toggles; "Chat" group — partly fixed in #647 (S2.2 `ae1e6788`, session shortcut labels; S3.17 its files); ellipses in S2.5; fixed in #647 (S2.2, S3.17, S2.5 `34f4e6aa`)
   - Evidence: phone-remote-section.tsx:252; shortcuts.ts:28-42 |
 - **I-33** · P3 · SECTION_PAIR duplicates CONFIG_GRID_PAIR; 3 sub-group label styles — partly fixed in #647 (S1.6a `b5e1c5b7`, tokens); rest in S3.17; fixed in #647 (S3.17 `b88c8794`)
   - Evidence: settings-tab.tsx:22; shortcuts-settings.tsx:105,139 |
@@ -1009,7 +1009,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: "Couldn't {verb} {object}" + reason + one action
 - **J2-15** · P2 (= A-6) · capitalize in StatusBadge/StatusDot ("Needs Reconnect", "Higher Delay", "Device Disconnected") — fixed in #647 (S1.3 `6bd8f9a2`)
   - Evidence: status-badge.tsx:58; status-dot.tsx:45 |
-- **J2-16** · P2 · Plurals ("1 viewers", "credits", "sheets/redos", "sessions loaded"; "(s)" hacks; 3 private plural()); durations (4 formats; Library "1 hour and 5 minutes"); unknown placeholders (-, --:--, –); relative time 3 styles; resolution formats; forced en-US numbers
+- **J2-16** · P2 · Plurals ("1 viewers", "credits", "sheets/redos", "sessions loaded"; "(s)" hacks; 3 private plural()); durations (4 formats; Library "1 hour and 5 minutes"); unknown placeholders (-, --:--, –); relative time 3 styles; resolution formats; forced en-US numbers — fixed in #647 (S1.4, S2.5 `34f4e6aa`)
   - Evidence: stream-manager-stats.ts:124,213,253; captions-controls.tsx:265; buddy-pet-creator.tsx:1119; library-tab.tsx:432,620; format.ts:36-63; seventv-status.ts:17
   - Fix: lib/format.ts helpers; locale
 - **J2-17** · P2 (= I-9, C-28) · Windows copy: "Reveal in Finder", "this Mac", "~/Movies/…", "system Trash", "Show in folder" — fixed in #647 (S1.4 `215e6585`, S2.3a `490d7f6a`)
@@ -1024,7 +1024,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-20** · P2 · Buddy naming in copy: persona name vs fixed "Buddy" in toasts; switch has 4 names ("Buddy Live", "Joins my streams", "chat mode"); "pet pack", "sheets" — fixed in #647 (S2.3b `21073ea6`)
   - Evidence: buddy-tab.tsx:377,380,545; cohost-view.ts:565; cohost-state.ts:109; buddy-tab-view.ts:250; buddy-avatar-section.tsx:216
   - Fix: "Buddy" for feature; persona name when character acts; one switch name
-- **J2-21** · P3 · Conventions: casing deviations; "..." x2; missing "…" on commands opening steps (Stream, Import, Upload, Rename, Browse, Choose thumbnail, Edit) and pending labels; British/American tie (cancelled/canceled, colours/color, behavior); contractions; toast title periods; placeholder styles; Select vs Choose — partly fixed in #647 (S2.1 `e6379d71`, rules in docs/ui-copy.md); sweep in S2.5
+- **J2-21** · P3 · Conventions: casing deviations; "..." x2; missing "…" on commands opening steps (Stream, Import, Upload, Rename, Browse, Choose thumbnail, Edit) and pending labels; British/American tie (cancelled/canceled, colours/color, behavior); contractions; toast title periods; placeholder styles; Select vs Choose — partly fixed in #647 (S2.1 `e6379d71`, rules in docs/ui-copy.md); sweep in S2.5; fixed in #647 (S2.1 `e6379d71`, S2.5 `34f4e6aa`)
   - Evidence: (see report)
   - Fix: sentence case; "…" rules; American English; contractions; no period in toast titles
 
