@@ -99,7 +99,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: "Details were saved for support" + Export action
 - **A-21** · P2 · Account trigger aria-label "Open account menu" over visible "Sign in" (WCAG 2.5.3); promised status dot missing; Sign out disabled w/o reason; 7px initials — partly fixed in #647 (S0.5 `e0140afc`, trigger name); status dot, Sign out reason and initials size open
   - Evidence: account-menu.tsx:32,86,95,152 |
-- **A-22** · P2 · Shortcut conflict toast lists ids ("record-toggle, layout:camera-only")
+- **A-22** · P2 · Shortcut conflict toast lists ids ("record-toggle, layout:camera-only") — fixed in #647 (S2.4 `4929496f`)
   - Evidence: global-shortcuts.ts:158
   - Fix: labels
 - **A-23** · P2 · Settings → Recording competes with Output page (both id 'recording')
@@ -172,7 +172,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **B-17** · P2 · Session pill: recording/streaming/failed/offline same red chip; green "Ready" when blocked; not a live region — partly fixed in #647 (S1.3 `6bd8f9a2`, status pill); rest in S3.2
   - Evidence: studio-session-view.ts:165-199; status-badge.tsx:33-48
   - Fix: icons per state; "Not ready"; role=status
-- **B-18** · P2 · Toasts repeating Go Live dialog content ("Some destinations failed setup", "Resolve Go Live issues", output notice)
+- **B-18** · P2 · Toasts repeating Go Live dialog content ("Some destinations failed setup", "Resolve Go Live issues", output notice) — partly fixed in #647 (S2.4 `4929496f`); blocked toast kept as a warning because the server verdict can differ; rest in S3.4
   - Evidence: use-studio.tsx:13036,13840,13859
   - Fix: remove
 - **B-19** · P2 · Readiness computed twice (page "2 of 2 ready" vs dialog "Blocked"); Broadcast info fields twice with different validation
@@ -307,7 +307,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: scene-stage.tsx:785-858 |
 - **C-35** · P3 ✔ (visual) · Source name repeated under its own title in inspector — fixed in #647 (S3.9 `c3cf6b59`)
   - Evidence: layout-tab.tsx:494,996 |
-- **C-36** · P3 · Rename toast (routine); "Deleted Screen."
+- **C-36** · P3 · Rename toast (routine); "Deleted Screen." — fixed in #647 (S2.4 `4929496f`)
   - Evidence: use-studio.tsx:11412,11435 |
 - **C-37** · P3 · Jargon: "Vertical leg", "Its width is the rect", "Snap (horizontal)"; one-shot snaps as ToggleGroup; "Alt / ⌥" — partly fixed in #647 (S1.7 `466ff1e5`, snaps as buttons); keys in S1.2, copy in S2.3a
   - Evidence: layout-tab.tsx:435,1139,1180-1196; scene-stage.tsx:1034 |
@@ -500,7 +500,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-21** · P2 · "MP4" painted as green success chip
   - Evidence: library-tab.tsx:639
   - Fix: outline tag
-- **E-22** · P2 · Library toast discipline (queued toast duplicates row; import no feedback; rename error toast while dialog open)
+- **E-22** · P2 · Library toast discipline (queued toast duplicates row; import no feedback; rename error toast while dialog open) — fixed in #647 (S2.4 `4929496f`)
   - Evidence: library-tab.tsx:906,759,205,167
   - Fix: focus new row; FieldError
 - **E-23** · P2 · title= tooltips for failure reasons / disabled reasons / shortcuts
@@ -705,7 +705,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **H-3** · P1 (= F-2) · Three "turn on" paths bypass the mode; mode reads Off while Buddy listens; Off hint "never posts" but stops Buddy entirely
   - Evidence: cohost-status.tsx:145; cohost-nudge.tsx:29; cohost-pane.tsx:314; comments/main.tsx:481-506,606
   - Fix: route on through mode; Off hint rewrite
-- **H-4** · P1 · Buddy action/Clear/transport failures shown as "Custom: …" composer badges with RTMP icon (invisible when Chat pane hidden); other Buddy failures toast
+- **H-4** · P1 · Buddy action/Clear/transport failures shown as "Custom: …" composer badges with RTMP icon (invisible when Chat pane hidden); other Buddy failures toast — fixed in #647 (S2.4 `4929496f`)
   - Evidence: comments/main.tsx:408-415,633-643,794-800; comments-destination-status.tsx:182
   - Fix: toast/inline Alert in pane
 - **H-5** · P1 · Suggest cards get no badge/reveal when Buddy pane hidden; expire unseen after 45 s — fixed in #647 (S0.2 `da6fa229`)
@@ -784,7 +784,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **H-31** · P3 · Skill/docs out of date vs code by owner calls (activity mark far right; SM status bar 32px; Mark clip/Clear labelled)
   - Evidence: SKILL.md:170,225,268; docs/buddy.md:413
   - Fix: amend skill
-- **H-32** · P3 · Success toasts for "do this in your browser"; Mark clip toast w/o Undo vs /marker inline Undo
+- **H-32** · P3 · Success toasts for "do this in your browser"; Mark clip toast w/o Undo vs /marker inline Undo — partly fixed in #647 (S2.4 `4929496f`, browser steps as info); Mark clip Undo needs an RPC the plan doesn't name (deferred)
   - Evidence: comments/main.tsx:656,680,697 |
 - **H-33** · P3 · "Questions" chip shown when Buddy off; Buddy jump wipes filters silently
   - Evidence: chat-pane.tsx:309,404 |
@@ -845,7 +845,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **I-18** · P2 (= A-5) · Shortcut rendering: chord-in-one-keycap vs keycap-per-key; Windows "␣"/"⌫" glyphs, "ShiftCtrlN"; ⌘F/⌘N literals; "Cmd+P" — fixed in #647 (S1.2 `e257d3c4`)
   - Evidence: sidebar.tsx:74; command-palette.tsx:108; shortcuts-settings.tsx:146; platform.ts:42-97
   - Fix: KbdChord / ShortcutKeys
-- **I-19** · P2 (= A-22) · Global shortcut failure toast prints ids
+- **I-19** · P2 (= A-22) · Global shortcut failure toast prints ids — fixed in #647 (S2.4 `4929496f`)
   - Evidence: global-shortcuts.ts:158 |
 - **I-20** · P2 · About update states: raw electron-updater error in warning text; unsupported states w/o links; "Finish your recording first" (also streams); OS "ready" notification during capture; auto-install on quit not stated; hand-rolled progress — fixed in #647 (S3.17 `b88c8794`)
   - Evidence: about-settings.tsx:113-195; updater.ts:255,275 |
@@ -980,10 +980,10 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-5** · P1 (= B-3) · Start controls depend on hidden mode; "Streaming: Disabled" after a Record; Go Live shortcut refused — fixed in #647 (S2.2 `ae1e6788`)
   - Evidence: studio-tab.tsx:128,140; session-panel.tsx:115; use-studio.tsx:13744,14834; global-shortcuts.ts:36-49; command-palette.tsx:195
   - Fix: "Record ␣" / "Go Live…"; explicit modes
-- **J2-6** · P1 · Engineering internals in copy: "Backend socket is not connected." x13 toasts + raw ws enum; RPC method names + ms timeouts; "Layout committed at revision n…"; "livestream providers"; "compositor"; "OAuth callback"; server codes "(ai-gateway-error: …)"; action ids; VIDEORC\_\* env vars; "unavailable outside Electron" x10; "entitlement"; "Metadata draft"; "quality gate"; "pet pack"; managed file path — partly fixed in #647 (S2.1 `e6379d71`, copy guard with ratchet); toast strings in S2.4
+- **J2-6** · P1 · Engineering internals in copy: "Backend socket is not connected." x13 toasts + raw ws enum; RPC method names + ms timeouts; "Layout committed at revision n…"; "livestream providers"; "compositor"; "OAuth callback"; server codes "(ai-gateway-error: …)"; action ids; VIDEORC\_\* env vars; "unavailable outside Electron" x10; "entitlement"; "Metadata draft"; "quality gate"; "pet pack"; managed file path — partly fixed in #647 (S2.1 `e6379d71`, copy guard with ratchet); toast strings in S2.4; fixed in #647 (S2.1 `e6379d71` guard, S2.4 `4929496f` toast strings)
   - Evidence: use-studio.tsx (many); backendClient.ts:313,382,414,510; backend-transport.ts:34; session-runtime-recovery.ts:242-330; cohost-state.ts:125
   - Fix: banned-word guard; "Videorc is reconnecting. Try again in a moment."; dev strings → console
-- **J2-7** · P1 · 97 raw error.message passthroughs; ipcErrorMessage in 3 places; Stream Manager toasts show "Error invoking remote method 'comments-window:…'"; generic "Import failed." etc.
+- **J2-7** · P1 · 97 raw error.message passthroughs; ipcErrorMessage in 3 places; Stream Manager toasts show "Error invoking remote method 'comments-window:…'"; generic "Import failed." etc. — fixed in #647 (S2.4 `4929496f`)
   - Evidence: use-studio.tsx (31); comments/main.tsx (12); library-tab.tsx (8); preload/index.ts:17
   - Fix: userErrorMessage(error,{action,object}); strip IPC prefix in guardToastText
 - **J2-8** · P1 · Library/Takeovers claim "No sessions yet"/"No takeovers yet" before data loads or while offline (sessions starts [])
@@ -995,16 +995,16 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-10** · P1 · Terminology map: going live; stream vs livestream; on-air state; recording vs session; Output; scene/layout/preset; source/input/device; destination/account/channel/stream key (never target/provider); Stream Manager vs chat/comments; Health vs diagnostics; takeover vs Screen; Import vs Upload; Stream details vs Broadcast info/metadata; Premium phrasing x6 ("{Feature} is part of Videorc Premium." + View Premium); remove/delete/discard/clear; microphone vs mic — fixed in #647 (S2.1 `e6379d71`, glossary in CONTEXT.md)
   - Evidence: (see report)
   - Fix: adopt canonical terms; record in CONTEXT.md; copy guard
-- **J2-11** · P2 · 15 success toasts for routine visible actions (channel set, imported x2, HW accel retry scheduled, renamed, saved stream metadata, key saved/removed/restored, duplicated, noise cleanup queued, saved event selected, OAuth callback received)
+- **J2-11** · P2 · 15 success toasts for routine visible actions (channel set, imported x2, HW accel retry scheduled, renamed, saved stream metadata, key saved/removed/restored, duplicated, noise cleanup queued, saved event selected, OAuth callback received) — fixed in #647 (S2.4 `4929496f`)
   - Evidence: use-studio.tsx:5917,10331,10419,11412,12015,14623-14661; library-tab.tsx:759,906; assets-tab.tsx:152; scheduled-streams.tsx:345; session-runtime-recovery.ts:315
   - Fix: remove; focus new rows
-- **J2-12** · P2 · Toast types/durations by meaning: refusals as error/warning/info; self-healing retries as error; "approve in browser" as success; failed destination 4 s; long descriptions 4 s; long-lived conditions toasted once (overloaded, falling behind)
+- **J2-12** · P2 · Toast types/durations by meaning: refusals as error/warning/info; self-healing retries as error; "approve in browser" as success; failed destination 4 s; long descriptions 4 s; long-lived conditions toasted once (overloaded, falling behind) — partly fixed in #647 (S2.4 `4929496f`, types and durations); mirroring into Session/Health in S3.18
   - Evidence: use-studio.tsx:3784,6068,8869,9403,11402,11624,11785,11915,14356; session-runtime-recovery.ts:57,460; studio-health.ts:68
   - Fix: type rules; ≥8 s with description; persist until replaced; mirror into Session/Health
-- **J2-13** · P2 · 9 duplicate-wording groups ("not connected" x11; MP4 ready vs Exported MP4 share id (action lost); Buddy stopped x2 ids; approve-in-browser x4; sign-in retry x4; quality check; broadcast failure; restart instruction; Open Library vs Open in Library)
+- **J2-13** · P2 · 9 duplicate-wording groups ("not connected" x11; MP4 ready vs Exported MP4 share id (action lost); Buddy stopped x2 ids; approve-in-browser x4; sign-in retry x4; quality check; broadcast failure; restart instruction; Open Library vs Open in Library) — fixed in #647 (S2.4 `4929496f`)
   - Evidence: (see report)
   - Fix: one wording each
-- **J2-14** · P2 · ~62 error toasts without next step; title-as-noun toasts ("Microphone check", "Mark clip")
+- **J2-14** · P2 · ~62 error toasts without next step; title-as-noun toasts ("Microphone check", "Mark clip") — fixed in #647 (S2.4 `4929496f`)
   - Evidence: library-tab.tsx:172; use-studio.tsx:3860,10430,11634,13840,14279; use-whats-new.ts:76; global-shortcuts.ts:173
   - Fix: "Couldn't {verb} {object}" + reason + one action
 - **J2-15** · P2 (= A-6) · capitalize in StatusBadge/StatusDot ("Needs Reconnect", "Higher Delay", "Device Disconnected") — fixed in #647 (S1.3 `6bd8f9a2`)
