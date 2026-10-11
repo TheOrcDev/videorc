@@ -235,7 +235,8 @@ function unnamedControls(path: string, source: string): string[] {
         report(node, `<${tag}> has no name`)
       }
       if (tag === 'Switch' && inButton) report(node, 'a Switch inside a button')
-      inField ||= tag === 'Field'
+      // A SettingsRow is a Field whose `label` prop is its FieldLabel (S3.17).
+      inField ||= tag === 'Field' || tag === 'SettingsRow'
       inLabel ||= LABEL_TAGS.has(tag)
       inButton ||= tag === 'button' || tag === 'Button' || attributes.get('role') === 'button'
     }
@@ -561,6 +562,7 @@ describe('renderer accessible names (plan 174 S0.5)', () => {
       '  <Field><FieldLabel htmlFor="title">Title</FieldLabel><Input id="title" /></Field>',
       '  <Field><FieldLabel>Motion</FieldLabel><Slider max={1} /></Field>',
       '  <Field><FieldLabel>Fit</FieldLabel><SegmentedControl options={fits} /></Field>',
+      '  <SettingsRow label="Theme"><SegmentedControl options={themes} /></SettingsRow>',
       '  <SegmentedControl aria-label="Network" options={networks} />',
       '  <SelectTrigger aria-label="Filter" />',
       '  <SelectTrigger id="schedule-privacy" />',

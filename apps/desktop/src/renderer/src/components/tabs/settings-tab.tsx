@@ -22,12 +22,10 @@ import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
 export function SettingsTab({
   tab,
   onTabChange,
-  onOpenPermissionsSetup,
   onShowWhatsNew
 }: {
   tab: SettingsTabId
   onTabChange: (tab: SettingsTabId) => void
-  onOpenPermissionsSetup: () => void
   onShowWhatsNew: () => void
 }): ReactElement {
   const { refreshBackend } = useStudioCore()
@@ -60,7 +58,7 @@ export function SettingsTab({
       </TabsContent>
       <TabsContent className="flex flex-col" value="permissions">
         <PageStack>
-          <PermissionsSettings onOpenPermissionsSetup={onOpenPermissionsSetup} />
+          <PermissionsSettings />
         </PageStack>
       </TabsContent>
       <TabsContent className="flex flex-col" value="shortcuts">

@@ -117,7 +117,7 @@ describe('Settings layout', () => {
     expect(
       Object.fromEntries(tabPanels().map((panel) => [panel.value, sectionTitles(panel.jsx)]))
     ).toEqual({
-      general: ['Appearance & behavior', 'Import'],
+      general: ['Appearance', 'Stream Manager', 'Import', 'Elsewhere'],
       recording: ['Recording & storage'],
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
@@ -173,7 +173,7 @@ describe('Settings layout', () => {
     expect(panelSources.ShortcutsSettings).not.toContain('Global ·')
   })
 
-  it('pairs two-section tabs side by side and stacks single-section tabs', () => {
+  it('pairs multi-section tabs side by side and stacks single-section tabs', () => {
     // At `lg` the pair fills the visible height with one stretched row, so the
     // column hairline runs the full height; stacked, rows keep content height.
     // One pair class for every two-section tab (plan 174 S1.6a, I-33).
@@ -184,7 +184,7 @@ describe('Settings layout', () => {
     )
     for (const panel of tabPanels()) {
       const wrapper =
-        sectionTitles(panel.jsx).length === 2
+        sectionTitles(panel.jsx).length >= 2
           ? '<ConfigGrid className={CONFIG_GRID_PAIR}>'
           : '<PageStack>'
       expect(panel.jsx.trim().startsWith(wrapper), `${panel.value} opens with ${wrapper}`).toBe(
@@ -220,10 +220,39 @@ describe('Settings layout', () => {
     }
   })
 
+  it('splits General into two columns of two sections: the pair holds exactly two children', () => {
+    // Plan 174 S3.17 (I-27): Appearance over Stream Manager, Import over
+    // Elsewhere. Each column is one PageStack, so the pair keeps its two
+    // stretched cells and the column rule runs the full height.
+    const general = exportedBody(panelSources.GeneralSettings as string, 'GeneralSettings')
+    expect(general.match(/<PageStack\b/g)).toHaveLength(2)
+    const [first, second] = general.split(/<PageStack\b/).slice(1)
+    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Stream Manager'])
+    expect(sectionTitles(second as string)).toEqual(['Import', 'Elsewhere'])
+  })
+
+  it('points to the pages that own the rest, with the typed navigation', () => {
+    const general = panelSources.GeneralSettings as string
+    for (const tab of ['ai', 'recording', 'live', 'diagnostics']) {
+      expect(general).toContain(`openWorkspaceTab('${tab}')`)
+    }
+    expect(general).toContain('label="Account and Premium"')
+    expect(general).not.toMatch(/new CustomEvent/)
+  })
+
+  it('has one home for the permission rows: no second "set up" step', () => {
+    expect(shellSource).not.toContain('onOpenPermissionsSetup')
+    expect(panelSources.PermissionsSettings).toContain('<SystemAccessList')
+    expect(panelSources.PermissionsSettings).not.toContain('Set up permissions')
+    expect(read('../permissions-onboarding-dialog.tsx')).toContain('<SystemAccessList')
+  })
+
   it('gives Remote control a one-line body when it is off, so it is never header-only', () => {
+    // Plan 174 V-6: the line says what turning it on does, never "Off" again.
     expect(REMOTE_CONTROL_OFF_HINT).toBe(
-      'Off. Turn on to pair a Stream Deck or the Videorc remote.'
+      'Turning this on makes a pairing token for your remotes. The Stream Deck plugin pairs on its own.'
     )
+    expect(REMOTE_CONTROL_OFF_HINT).not.toMatch(/^Off\b/)
 
     const remoteSource = panelSources.RemoteSettings as string
     const remoteCard = remoteSource.slice(remoteSource.indexOf('title="Remote control"'))

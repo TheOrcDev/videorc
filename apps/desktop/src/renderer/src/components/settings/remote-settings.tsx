@@ -4,18 +4,33 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PhoneRemoteSection } from '@/components/phone-remote-section'
 import { Button } from '@/components/ui/button'
-import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { FieldGroup, SettingsRow } from '@/components/ui/field'
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput
+} from '@/components/ui/input-group'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
 import { platformCopy } from '@/lib/platform-copy'
 import type { RemoteControlStatus } from '@/lib/backend'
 import { useCopyText } from '@/lib/copy-text'
+import { NO_VALUE } from '@/lib/format'
 
 /**
  * Remote control is off by default, and an empty body made the card render as a
- * bare header. One muted line says what the switch is for instead.
+ * bare header. One muted line says what turning it on does, never "Off" again
+ * beside the switch that already says so (plan 174 V-6).
  */
-export const REMOTE_CONTROL_OFF_HINT = 'Off. Turn on to pair a Stream Deck or the Videorc remote.'
+export const REMOTE_CONTROL_OFF_HINT =
+  'Turning this on makes a pairing token for your remotes. The Stream Deck plugin pairs on its own.'
+
+/** "1 client connected." / "No clients connected." */
+export function connectedClientsLine(count: number): string {
+  if (count === 0) return 'No clients connected.'
+  return count === 1 ? '1 client connected.' : `${count} clients connected.`
+}
 
 /** "1 paired phone is" / "3 paired phones are". */
 export function pairedPhonesClause(count: number): string {
@@ -84,51 +99,55 @@ export function RemoteSettings(): ReactElement {
             }}
           />
         }
-        description={`Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this ${deviceNoun} only.`}
+        description={`Start recordings, switch scenes and mute your microphone from a Stream Deck or another remote on this ${deviceNoun}.`}
         title="Remote control"
       >
         {remoteStatus?.enabled ? (
           <FieldGroup variant="grouped">
-            <Field>
-              <FieldLabel htmlFor="remote-token">Pairing token</FieldLabel>
-              <div className="flex gap-2">
-                <div
+            <SettingsRow
+              description={connectedClientsLine(remoteStatus.connectedClients)}
+              label="Pairing token"
+            >
+              {/* A read-only value, not a styled box (plan 174 I-22): the label
+                  names it and it can be selected and copied. */}
+              <InputGroup className="w-48 shrink-0">
+                <InputGroupInput
+                  readOnly
+                  className="font-mono text-xs"
                   id="remote-token"
-                  className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-inset px-2.5 font-mono text-xs text-muted-foreground"
-                >
-                  {remoteStatus.token
-                    ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`
-                    : '-'}
-                </div>
-                <Button
-                  disabled={!remoteStatus.token}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    if (remoteStatus.token) {
-                      void copyToken(remoteStatus.token, "Couldn't copy the pairing token.")
-                    }
-                  }}
-                >
-                  {tokenCopied ? 'Copied' : 'Copy'}
-                </Button>
-                <Button
-                  disabled={remotePending}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setConfirmingRegenerate(true)}
-                >
-                  Regenerate
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {remoteStatus.connectedClients > 0
-                  ? `${remoteStatus.connectedClients} client${remoteStatus.connectedClients === 1 ? '' : 's'} connected.`
-                  : 'No clients connected.'}{' '}
-                Regenerating disconnects every paired client. The Stream Deck plugin pairs
-                automatically on this {deviceNoun}.
-              </p>
-            </Field>
+                  value={
+                    remoteStatus.token
+                      ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`
+                      : NO_VALUE
+                  }
+                />
+                <InputGroupAddon align="inline-end">
+                  <InputGroupButton
+                    disabled={!remoteStatus.token}
+                    onClick={() => {
+                      if (remoteStatus.token) {
+                        void copyToken(remoteStatus.token, "Couldn't copy the pairing token.")
+                      }
+                    }}
+                  >
+                    {tokenCopied ? 'Copied' : 'Copy'}
+                  </InputGroupButton>
+                </InputGroupAddon>
+              </InputGroup>
+            </SettingsRow>
+            <SettingsRow
+              description={`Disconnects every paired client. The Stream Deck plugin pairs again on its own on this ${deviceNoun}.`}
+              label="New token"
+            >
+              <Button
+                disabled={remotePending}
+                size="sm"
+                variant="outline"
+                onClick={() => setConfirmingRegenerate(true)}
+              >
+                Regenerate
+              </Button>
+            </SettingsRow>
           </FieldGroup>
         ) : (
           <p className="text-xs text-muted-foreground">{REMOTE_CONTROL_OFF_HINT}</p>
