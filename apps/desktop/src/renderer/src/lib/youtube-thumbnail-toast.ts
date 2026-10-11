@@ -1,4 +1,5 @@
 import { toast } from '@/lib/toast'
+import { userErrorMessage } from '@/lib/user-error'
 
 import type { BackendClient } from '@/backendClient'
 import type { YouTubeThumbnailResult } from '@/lib/backend'
@@ -62,10 +63,9 @@ export function showYouTubeThumbnailFailure(
                 else toast.success('Thumbnail set on YouTube', { id })
               })
               .catch((error: unknown) => {
-                toast.warning('Thumbnail not set on YouTube', {
-                  id,
-                  description: error instanceof Error ? error.message : String(error)
-                })
+                const copy = userErrorMessage(error)
+                console.warn('[youtube] thumbnail retry failed:', copy.raw)
+                toast.warning('Thumbnail not set on YouTube', { id, description: copy.description })
               })
           }
         }

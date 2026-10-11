@@ -165,7 +165,7 @@ describe('Import from OBS', () => {
     expect(stored.activeSlotId).toBe('bg-10')
     // The toast closes the loop without pointing back at the closed report.
     expect(mocked.toast.success).toHaveBeenCalledWith('OBS setup imported', {
-      description: 'Check Sources and the Scene stage for anything that was approximated.'
+      description: 'Check Sources and Scene.'
     })
   })
 

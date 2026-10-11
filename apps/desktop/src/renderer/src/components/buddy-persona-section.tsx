@@ -27,7 +27,7 @@ import {
   freshBuddyPersona,
   buddyNameToSave
 } from '@/lib/buddy-persona-view'
-import { toast } from '@/lib/toast'
+import { toastUserError } from '@/lib/user-error'
 import { BuddyBubbleSample } from '@/components/buddy-bubble-sample'
 
 /**
@@ -73,9 +73,7 @@ export function BuddyPersonaSection(): ReactElement | null {
       await window.videorc.removeBuddyPersona(persona.id)
       await save(freshBuddyPersona(crypto.randomUUID()))
     } catch (failure: unknown) {
-      toast.error('Could not start over', {
-        description: failure instanceof Error ? failure.message : undefined
-      })
+      toastUserError(failure, { action: 'start', object: 'over' }, { id: 'buddy-start-over' })
     }
   }
 

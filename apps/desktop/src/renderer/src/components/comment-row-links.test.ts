@@ -167,7 +167,11 @@ describe('Open link and Copy link (plan 151, D10)', () => {
   it('says so when main refuses or fails', async () => {
     openChatLink.mockResolvedValue(false)
     item('Open link').onSelect()
-    await vi.waitFor(() => expect(toastError).toHaveBeenCalledWith("Couldn't open that link."))
+    await vi.waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("Couldn't open that link", {
+        description: 'Copy it and open it in your browser.'
+      })
+    )
     toastError.mockReset()
     openChatLink.mockRejectedValue(new Error('denied'))
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)

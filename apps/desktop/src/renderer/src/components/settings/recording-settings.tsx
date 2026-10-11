@@ -7,7 +7,6 @@ import {
   WarningIcon
 } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
-import { toast } from 'sonner'
 
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow } from '@/components/navigable-row'
@@ -20,6 +19,7 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
+import { toastUserError } from '@/lib/user-error'
 import { microphoneIndicatorCopy, platformCopy } from '@/lib/platform-copy'
 import type { DirectoryFacts } from '@/lib/backend'
 import { formatVideoQuality } from '@/lib/format-video'
@@ -181,9 +181,11 @@ export function RecordingSettings(): ReactElement {
           state={encoderPreference}
           onChange={(preference) => {
             void setEncoderPreference(preference).catch((error: unknown) => {
-              toast.error('Could not change the fallback video encoder.', {
-                description: error instanceof Error ? error.message : String(error)
-              })
+              toastUserError(
+                error,
+                { action: 'change', object: 'the backup encoder' },
+                { id: 'encoder-preference' }
+              )
             })
           }}
         />

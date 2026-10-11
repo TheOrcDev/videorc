@@ -60,6 +60,8 @@ import {
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import { copyText } from '@/lib/copy-text'
+import { platformLabel } from '@/lib/platform-copy'
+import { currentPlatform, osSettingsName } from '@/lib/platform'
 import { toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -199,6 +201,32 @@ import {
   type RecordLatencySample
 } from '@/lib/record-latency'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
+import { showMp4ExportFailed, showMp4Finalizing, showMp4Ready } from '@/lib/finalization-toast'
+import {
+  COHOST_STATUS_TOAST_ID,
+  cohostStatusDetail,
+  cohostStatusToast,
+  showBrowserApproval,
+  showStreamTargetNotice,
+  showTakeoverEditRefused,
+  showXBroadcastProblem,
+  X_MEDIA_STUDIO_URL,
+  sourceSwitchFailedDescription,
+  sourceSwitchFailedTitle
+} from '@/lib/studio-toasts'
+import {
+  beginVideorcSignIn,
+  openVideorcWebLink,
+  VIDEORC_PREMIUM_URL
+} from '@/lib/videorc-web-links'
+import {
+  OFFLINE_TOAST_ID,
+  offlineError,
+  toastOffline,
+  toastUserError,
+  UserFacingError,
+  type UserErrorContext
+} from '@/lib/user-error'
 import {
   INITIAL_ACCOUNT_READY_REFRESH_STATE,
   reduceAccountReadyRefresh,
@@ -433,9 +461,7 @@ import {
 import {
   applyCohostState,
   cohostEnableRelayPatch,
-  cohostErrorToast,
   cohostHighlightMessageId,
-  cohostStoppedToast,
   mergeAutoChatRelayPatch,
   buddyLiveSettingsPatch
 } from '@/lib/cohost-state'
@@ -474,7 +500,7 @@ import {
   reconcileSessionStartResponse,
   reduceSessionStartFailure,
   SESSION_START_FAILED_TOAST_ID,
-  SESSION_START_FAILED_TOAST_TITLE,
+  sessionStartFailedTitle,
   sessionStartFailureMessage,
   sessionStartFailureToastOptions,
   type SessionStartFailure
@@ -483,7 +509,7 @@ import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
 import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
-import { findDevice, isActiveRecordingState, mergeStreamHealth } from '@/lib/format'
+import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
 import {
   confirmedSystemAudioMix,
   systemAudioIssueFromHealthEvent,
@@ -542,6 +568,9 @@ type PlatformLifecycleSettlement = {
   promise: Promise<PlatformBroadcastCleanupResult>
 }
 
+/** Why a new Go Live waits: the last one is still being ended on its platforms. */
+const LIVESTREAM_STILL_SETTLING =
+  'Videorc is still ending your last livestream on its platforms. Try again in a moment.'
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX = 'prepared-platform:'
 const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
@@ -1177,7 +1206,7 @@ export type StudioContextValue = {
   /** Shows a failed action the way every Studio action does: the error toast
    * (or the Premium prompt) and the diagnostics record. For promises a page
    * starts itself, so no failure is swallowed (plan 174, C-6). */
-  reportError: (error: unknown) => void
+  reportError: (error: unknown, context?: UserErrorContext) => void
   /** The Buddy on stream (plan 164 Phase C): which state shows and the bubble
    * that is up (`cohost.buddy.state`); null until the backend reported. */
   buddyOverlay: BuddyOverlaySnapshot | null
@@ -1430,8 +1459,10 @@ export type StudioContextValue = {
   ensureSessionPoster: (sessionId: string) => Promise<boolean>
   renameSession: (sessionId: string, title: string) => Promise<void>
   deleteSessions: (targets: SessionSummary[]) => Promise<void>
-  duplicateSession: (sessionId: string) => Promise<void>
-  importRecording: () => Promise<void>
+  /** Resolves with the copy's id, so Library can focus its row. */
+  duplicateSession: (sessionId: string) => Promise<string | null>
+  /** Resolves with the imported recording's id, or null when nothing was picked. */
+  importRecording: () => Promise<string | null>
   startNoiseCleanup: (sessionId: string) => Promise<NoiseCleanupJob>
   cancelNoiseCleanup: (jobId: string) => Promise<NoiseCleanupJob>
   sessionStorageTotals: SessionStorageTotals | null
@@ -2196,43 +2227,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // Restore progress after relaunch; settle a notice whose terminal event
     // was missed while disconnected using the authoritative database row.
     for (const session of sessions) {
-      const id = `finalization-${session.id}`
       if (session.finalizationState === 'finalizing') {
         activeFinalizationNoticesRef.current.add(session.id)
-        toast.loading(finalizingBadgeLabel(session), {
-          id,
-          duration: Infinity,
-          description:
-            'Your recording is safe. Long recordings can take several minutes to save as MP4.'
-        })
+        showMp4Finalizing(session.id, finalizingBadgeLabel(session))
       } else if (activeFinalizationNoticesRef.current.delete(session.id)) {
         if (
           session.finalizationState === 'finalized' &&
           !announcedFinalizationsRef.current.has(session.id)
         ) {
           announcedFinalizationsRef.current.add(session.id)
-          toast.success('MP4 ready', {
-            id,
-            duration: 15000,
-            action: {
-              label: 'Show in folder',
-              onClick: () => {
-                void window.videorc?.revealSession(session.id)
-              }
-            }
-          })
+          showMp4Ready(session.id)
         } else if (session.finalizationState === 'failed') {
-          toast.error('MP4 export failed', {
-            duration: Infinity,
-            id,
-            description: session.finalizationError ?? 'The original MKV recording was kept.',
-            action: {
-              label: 'Retry export',
-              onClick: () => {
-                void remuxSessionRef.current?.(session.id)
-              }
-            }
-          })
+          showMp4ExportFailed(
+            session.id,
+            () => void remuxSessionRef.current?.(session.id),
+            session.finalizationError
+          )
         }
       }
     }
@@ -2542,7 +2552,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // toast — a missing client and a non-live status used to revert the switch
       // silently.
       if (!client) {
-        throw new Error('Backend is not connected. Try again in a moment.')
+        throw offlineError()
       }
       setCaptionLines([])
       let status: CaptionsStatus
@@ -2679,7 +2689,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, commitOverlayLayout, wsStatus])
   const setOverlayLayout = useCallback(
     async (layout: OverlayLayout): Promise<void> => {
-      if (!client) throw new Error('Backend socket is not connected.')
+      if (!client) throw offlineError()
       const saved = await client.requestTyped('overlays.layout.set', layout)
       commitOverlayLayout(saved)
     },
@@ -2763,7 +2773,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     const offClear = window.videorc?.onCommentsClearRequest?.((command: CommentsClearCommand) => {
       void (async () => {
-        if (!client) throw new Error('Backend socket is not connected.')
+        if (!client) throw offlineError()
         if (liveChatSnapshotRef.current.sessionId !== command.sessionId) {
           throw new Error('That chat view is no longer the active livestream.')
         }
@@ -2799,11 +2809,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
     })
     const offMarkerRefused = client?.on('session.marker.voice.refused', ({ message }) =>
-      toast.error(message)
+      toast.error("Couldn't add the marker", { id: 'voice-marker-refused', description: message })
     )
     const offMarker = window.videorc?.onMarkerRequest?.((command) => {
       void (async () => {
-        if (!client) throw new Error('Backend socket is not connected.')
+        if (!client) throw offlineError()
         switch (command.action) {
           case 'create':
             return client.requestTyped('session.marker.create', command.params)
@@ -2828,7 +2838,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // as clear, resolved with where the mark landed.
     const offClipMark = window.videorc?.onClipMarkRequest?.((command: ClipMarkCommand) => {
       void (async () => {
-        if (!client) throw new Error('Backend socket is not connected.')
+        if (!client) throw offlineError()
         if (!isActiveRecordingState(recordingRef.current.state)) {
           throw new Error('No session is running, so there is nothing to mark.')
         }
@@ -2918,7 +2928,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // remote 'show' restarts its lifetime.
       options?: { alwaysSet?: boolean }
     ): Promise<CommentHighlightState | null> => {
-      if (!client) throw new Error('Backend socket is not connected.')
+      if (!client) throw offlineError()
       const sessionId = expectedSessionId ?? liveChatSnapshot.sessionId
       if (!sessionId || message.sessionId !== sessionId) {
         throw new Error('That message does not belong to the active livestream.')
@@ -3139,7 +3149,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     const off = window.videorc?.onChatSendRequest?.((command: CommentsSendCommand) => {
       void (async () => {
-        if (!client) throw new Error('Backend socket is not connected.')
+        if (!client) throw offlineError()
         return client.request<CommentsSendOperation>('liveChat.send', {
           operationId: command.operationId,
           sessionId: command.sessionId,
@@ -3275,10 +3285,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const setCommentsWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     await window.videorc?.setCommentsWindowAlwaysOnTop?.(alwaysOnTop)
   }, [])
+  const openSessionCommentsWindowRef = useRef<
+    ((sessionId: string, title: string, startedAt: string) => Promise<void>) | null
+  >(null)
   const openSessionCommentsWindow = useCallback(
-    async (sessionId: string, title: string, startedAt: string) => {
+    async (sessionId: string, title: string, startedAt: string): Promise<void> => {
+      const context = { action: 'open', object: "this stream's chat" }
       if (!client) {
-        toast.error('Backend socket is not connected.')
+        toastOffline(context)
         return
       }
       try {
@@ -3316,12 +3330,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         await window.videorc?.openCommentsWindow?.()
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Could not open saved comments.'
-        toast.error(message)
+        toastUserError(error, context, {
+          id: `session-chat:${sessionId}`,
+          action: {
+            label: 'Retry',
+            onClick: () => void openSessionCommentsWindowRef.current?.(sessionId, title, startedAt)
+          }
+        })
       }
     },
     [client, publishLiveCommentsSnapshot]
   )
+  openSessionCommentsWindowRef.current = openSessionCommentsWindow
   const [streamMetadataDraft, setStreamMetadataDraft] = useState<StreamMetadataDraft | null>(null)
   const [streamMetadataValidation, setStreamMetadataValidation] =
     useState<StreamMetadataValidation | null>(null)
@@ -3820,7 +3840,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     for (const notice of streamTargetNotices(streamTargetStatesRef.current, streamTargets)) {
-      notifyOnce(notice.key, notice.kind, notice.title, { description: notice.description })
+      showStreamTargetNotice(notice)
     }
     streamTargetStatesRef.current = new Map(
       streamTargets.map((target) => [target.targetId, target.state])
@@ -3896,8 +3916,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         )
       } catch {
-        toast.error('The working scene could not be saved for the next launch.', {
-          id: 'working-scene-storage'
+        toast.error("Couldn't remember this scene for next time", {
+          id: 'working-scene-storage',
+          description: "Your stream and recording aren't affected."
         })
       }
     },
@@ -3915,16 +3936,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () =>
       new LazyLiveSourceSelectionController({
         get: async (sessionId) => {
-          if (!clientRef.current) throw new Error('Backend socket is not connected.')
+          if (!clientRef.current) throw offlineError()
           return clientRef.current.requestTyped('session.sources.get', { sessionId })
         },
         switch: async (request) => {
           if (request.kind === 'microphone') closeVisualMicrophoneStreams()
-          if (!clientRef.current) throw new Error('Backend socket is not connected.')
+          if (!clientRef.current) throw offlineError()
           return clientRef.current.requestTyped('session.source.switch', request)
         },
         changed: setSourceSelectionState,
-        failed: (requestId, message) => toast.error(message, { id: `source-switch-${requestId}` }),
+        failed: (requestId, message, source) =>
+          toast.error(sourceSwitchFailedTitle(source, deviceListRef.current.devices), {
+            id: `source-switch-${requestId}`,
+            description: sourceSwitchFailedDescription(message)
+          }),
         requestId: () => crypto.randomUUID(),
         confirmed: (snapshot) => {
           const current = captureConfigRef.current
@@ -3987,7 +4012,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [sourceSelectionController]
   )
 
-  const reportError = useCallback((error: unknown) => {
+  // Plan 174 S2.4: the toast says what failed and what to do
+  // (`userErrorMessage`); the raw text stays in the diagnostic record.
+  const reportError = useCallback((error: unknown, context?: UserErrorContext) => {
     const message = ipcErrorMessage(error)
     // Always keep the diagnostic record, even for suppressed transients.
     setLastError(message)
@@ -3996,7 +4023,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     const status = wsStatusRef.current
-    void loadSessionRuntimeRecovery().then((runtime) => runtime.showBackendError(message, status))
+    void loadSessionRuntimeRecovery().then((runtime) =>
+      runtime.showBackendError(error, status, context)
+    )
   }, [])
 
   const retryCaptureRecovery = useCallback(async (): Promise<void> => {
@@ -4029,7 +4058,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         clientRef.current === activeClient &&
         captureRecoveryConnectionGenerationRef.current === connectionGeneration
       ) {
-        reportError(error)
+        reportError(error, { action: 'restart', object: 'capture' })
       }
     } finally {
       if (captureRecoveryRetryInFlightRef.current?.token === token) {
@@ -4086,7 +4115,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     toast.dismiss(SESSION_START_FAILED_TOAST_ID)
   }, [clearSessionRuntimeState])
   const reportSessionStartFailure = useCallback(
-    (error: unknown, retry: () => void) => {
+    (error: unknown, retry: () => void, goLive: boolean) => {
       const message = sessionStartFailureMessage(error)
       setLastError(message)
       sessionStartRetryRef.current = retry
@@ -4100,7 +4129,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       toast.error(
-        SESSION_START_FAILED_TOAST_TITLE,
+        sessionStartFailedTitle(goLive),
         sessionStartFailureToastOptions(message, retrySessionStart, () => {
           // The user closed the toast: the Session-panel line goes with it.
           sessionStartRetryRef.current = null
@@ -4212,16 +4241,33 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // Toast discipline: the pane and the destination chip already show every
     // co-host state. Only a NEW failure (reason + server error code) is news;
     // backoff retries of the same failure stay silent.
-    const errorToast = cohostErrorToast(previous, merged)
-    if (errorToast) {
-      toast.error(errorToast.message, { id: 'cohost-error' })
-    }
     // Plan 140 S1: the backend ends a running session when Premium lapses
     // mid-stream (or the account signs out). The chip only turns "off", so
     // one plain, untinted line says why; a streamer's own Stop stays silent.
-    const stoppedToast = cohostStoppedToast(previous, merged)
-    if (stoppedToast) {
-      toast(stoppedToast, { id: 'cohost-stopped' })
+    // Plan 174 S2.4: failures and stops share one id and carry their fix.
+    const statusToast = cohostStatusToast(previous, merged)
+    if (statusToast) {
+      const detail = cohostStatusDetail(merged)
+      if (detail) console.warn('[buddy] stopped:', detail)
+      const show =
+        statusToast.kind === 'message'
+          ? toast
+          : statusToast.kind === 'warning'
+            ? toast.warning
+            : toast.error
+      show(statusToast.title, {
+        id: COHOST_STATUS_TOAST_ID,
+        ...(statusToast.action === 'sign-in'
+          ? { action: { label: 'Sign in', onClick: beginVideorcSignIn } }
+          : statusToast.action === 'view-premium'
+            ? {
+                action: {
+                  label: 'View Premium',
+                  onClick: () => openVideorcWebLink(VIDEORC_PREMIUM_URL)
+                }
+              }
+            : {})
+      })
     }
   }, [])
 
@@ -4395,7 +4441,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const patchCohostSettings = useCallback(
     async (patch: CohostSettingsPatch): Promise<void> => {
-      if (!client) throw new Error('Backend socket is not connected.')
+      if (!client) throw offlineError()
       const next = await client.request<CohostSettings>('cohost.settings.set', patch)
       setCohostSettings(next)
     },
@@ -4470,7 +4516,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         | CohostUtteranceParams
         | CohostSayParams
     ): Promise<CohostState> => {
-      if (!client) throw new Error('Backend socket is not connected.')
+      if (!client) throw offlineError()
       setCohostActionPending(true)
       try {
         const state = await client.request<CohostState>(method, params)
@@ -4711,7 +4757,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const off = window.videorc?.onCohostEnableRequest?.((command: CohostEnableCommand) => {
       void (async () => {
         if (command.grantConsent === true) setAiConsent(true)
-        if (!client) throw new Error('Backend socket is not connected.')
+        if (!client) throw offlineError()
         // The mode control and behaviour switches ride the same save, merged
         // into the stored block so the templates and cooldowns stay.
         const autoChat = command.autoChat
@@ -4753,7 +4799,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     const off = window.videorc?.onCohostActionRequest?.((command: CohostActionCommand) => {
       void (async () => {
-        if (!client) throw new Error('Backend socket is not connected.')
+        if (!client) throw offlineError()
         // The Buddy's own actions (plan 164 S-C4): the Say box and the output
         // switch. The Say box is one utterance (D7): it posts per the chat
         // mode when the window named its live session, and bubbles at once
@@ -5900,7 +5946,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (options.background && isYouTubeChannelAuthFailure(error)) {
           return
         }
-        reportError(error)
+        reportError(error, { action: 'load', object: 'your YouTube channels' })
       } finally {
         setYoutubeChannelsLoading(false)
       }
@@ -5917,7 +5963,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected.')
+        toastOffline()
         return
       }
 
@@ -5957,9 +6003,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         })
         await refreshYouTubeChannels(selected.accountId)
-        toast.success(`YouTube channel set to ${selected.accountLabel}.`)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'change', object: 'the YouTube channel' })
       }
     },
     [
@@ -6008,7 +6053,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setTwitchCategories(result.categories)
       } catch (error) {
         setTwitchCategories([])
-        reportError(error)
+        reportError(error, { action: 'search', object: 'Twitch categories' })
       } finally {
         setTwitchCategorySearchPending(false)
       }
@@ -6049,7 +6094,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setKickCategoryResults(result.categories)
       } catch (error) {
         setKickCategoryResults([])
-        reportError(error)
+        reportError(error, { action: 'search', object: 'Kick categories' })
       } finally {
         setKickCategorySearchPending(false)
       }
@@ -6093,11 +6138,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const authorizeXLive = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
-      toast.error('Backend socket is not connected.')
+      toastOffline()
       return
     }
     if (!window.videorc?.openOAuthUrl) {
-      toast.error('OAuth browser launch is unavailable outside Electron.')
+      console.warn('[oauth] no browser launcher in this renderer')
       return
     }
 
@@ -6108,9 +6153,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         {}
       )
       await window.videorc.openOAuthUrl(result.authUrl)
-      toast.success('Approve Videorc on x.com to enable X Live.')
+      showBrowserApproval('Approve X Live in your browser', result.authUrl)
     } catch (error) {
-      reportError(error)
+      reportError(error, { action: 'start', object: 'X Live approval' })
     }
   }, [client, reportError, wsStatus])
 
@@ -6179,7 +6224,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       duration: 20000,
       action: {
         label: 'Open Media Studio',
-        onClick: () => void window.videorc?.openOAuthUrl?.('https://studio.x.com')
+        onClick: () => void window.videorc?.openOAuthUrl?.(X_MEDIA_STUDIO_URL)
       }
     })
   }, [recording.state, recordingLive])
@@ -6268,7 +6313,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
       if (isActiveRecordingState(sessionState)) {
         void loadSessionRuntimeRecovery().then((runtime) =>
-          runtime.showSourceFallbackActiveSession(session)
+          runtime.showSourceFallbackActiveSession(session, fallbackEvents[0])
         )
       }
     },
@@ -6734,17 +6779,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (event.state === 'finalizing') {
           activeFinalizationNoticesRef.current.add(event.sessionId)
           announcedFinalizationsRef.current.delete(event.sessionId)
-          toast.loading(
+          showMp4Finalizing(
+            event.sessionId,
             finalizingBadgeLabel({
               status: 'completed',
               finalizationProgressPercent: event.progressPercent
-            }),
-            {
-              id: `finalization-${event.sessionId}`,
-              duration: Infinity,
-              description:
-                'Your recording is safe. Long recordings can take several minutes to save as MP4.'
-            }
+            })
           )
         }
         if (finalizationEventNeedsRefresh(sessionsRef.current, event)) {
@@ -6755,28 +6795,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           !announcedFinalizationsRef.current.has(event.sessionId)
         ) {
           announcedFinalizationsRef.current.add(event.sessionId)
-          toast.success('MP4 ready', {
-            id: `finalization-${event.sessionId}`,
-            duration: 15000,
-            action: {
-              label: 'Show in folder',
-              onClick: () => {
-                void window.videorc?.revealSession(event.sessionId)
-              }
-            }
-          })
+          showMp4Ready(event.sessionId)
           autoRunCleanCutRef.current?.(event)
         }
         if (event.state === 'failed') {
-          toast.error('MP4 export failed', {
-            duration: Infinity,
-            id: `finalization-${event.sessionId}`,
-            description: event.error ?? 'The original MKV recording was kept.',
-            action: {
-              label: 'Retry export',
-              onClick: () => void remuxSessionRef.current?.(event.sessionId)
-            }
-          })
+          showMp4ExportFailed(
+            event.sessionId,
+            () => void remuxSessionRef.current?.(event.sessionId),
+            event.error
+          )
         }
       }),
       // A clean cut that finished out of view (plan 119 S15): its copy joins
@@ -7320,7 +7347,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
           id: 'clip-marked',
-          description: copy.description
+          description: copy.description,
+          ...(copy.kind === 'warning'
+            ? { action: { label: 'Open Output', onClick: () => openWorkspaceTab('recording') } }
+            : {})
         })
       }),
       nextClient.on('comments.highlight.status', (payload) => {
@@ -7451,10 +7481,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('log', (payload) => appendLog(payload as BackendLogEvent)),
       nextClient.on('error', (payload) => {
         const error = payload as { message?: string }
-        const message = error.message ?? 'Backend error.'
+        const message = error.message ?? 'Unknown engine error.'
         setLastError(message)
-        // A backend `error` event can repeat every reconnect: one toast per text.
-        notifyOnce(`backend-error:${message}`, 'error', message)
+        // Plan 174 S2.4: the raw text is for the console and the support
+        // bundle; the streamer gets what to do. A backend `error` event can
+        // repeat every reconnect: one toast per text.
+        console.warn('[backend-error] event:', message)
+        notifyOnce(`backend-error:${message}`, 'error', 'Videorc hit a problem', {
+          description: 'Export a support bundle from Health if it repeats.'
+        })
       }),
       nextClient.on('connection.closed', () => setWsStatus('closed'))
     ]
@@ -8390,7 +8425,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           patchLayout({ cameraTransformMode: 'preset', cameraTransform: null })
         }
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'change', object: 'the scene' })
       }
     },
     [
@@ -8419,7 +8454,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyCommittedScene(status)
         syncSourceTransformsToLayout(status.scene, sourceId)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'change', object: 'the scene' })
       }
     },
     [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
@@ -8479,14 +8514,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (params: SceneEditorDraftParams): Promise<SceneEditorDraftAck> =>
       client
         ? client.request<SceneEditorDraftAck>('scene.editor.draft.set', params)
-        : Promise.reject(new Error('Backend socket is not connected.')),
+        : Promise.reject(offlineError()),
     [client]
   )
   const clearSceneEditorDraft = useCallback(
     (): Promise<SceneEditorDraftAck> =>
       client
         ? client.request<SceneEditorDraftAck>('scene.editor.draft.clear')
-        : Promise.reject(new Error('Backend socket is not connected.')),
+        : Promise.reject(offlineError()),
     [client]
   )
 
@@ -8552,7 +8587,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sceneVisibilityRequestIdRef.current === requestId &&
           layoutIntentIdRef.current === intentId
         )
-          reportError(error)
+          reportError(error, { action: 'change', object: 'the scene' })
       } finally {
         if (sceneVisibilityRequestIdRef.current === requestId) setSceneVisibilityPending(false)
       }
@@ -8585,7 +8620,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         applyCommittedScene(status)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'change', object: 'the scene' })
       }
     },
     [applyCommittedScene, client, reportError, scene]
@@ -8605,7 +8640,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyCommittedScene(status)
         syncSourceTransformsToLayout(status.scene)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'move', object: 'the camera' })
       }
     },
     [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
@@ -8934,13 +8969,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         layoutPresetOrientation(layout.layoutPreset) !==
           layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
       ) {
-        toast.error('Stop the recording or stream before switching orientation.', {
+        toast.warning('Stop the recording or stream before switching orientation.', {
           id: 'scene-orientation-lock'
         })
         return Promise.resolve(false)
       }
       if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected. Layout unchanged.')
+        toast.warning('Videorc is reconnecting', {
+          id: OFFLINE_TOAST_ID,
+          description: "The scene didn't change. Try again in a moment."
+        })
         return Promise.resolve(false)
       }
 
@@ -9124,21 +9162,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               console.warn(
                 `Layout committed at revision ${status.sceneRevision}; native preview presentation proof was not observed. ${detail}`
               )
-              notifyOnce(
-                'layout-preview-proof-lag',
-                'warning',
-                'Preview verification lagged behind the layout change',
-                {
-                  description:
-                    'The layout was applied and the output is unaffected. If the preview looks stale, close and reopen it.'
-                }
-              )
+              notifyOnce('layout-preview-proof-lag', 'info', 'The preview may be behind', {
+                description:
+                  'Your stream and recording have the new scene. Reopen the preview if it looks stale.'
+              })
               return
             }
+            console.warn(
+              `Layout committed at revision ${status.sceneRevision}, but preview proof was not observed. The controls were reconciled to the backend commit. ${detail}`
+            )
             reportError(
-              new Error(
-                `Layout committed at revision ${status.sceneRevision}, but preview proof was not observed. The controls were reconciled to the backend commit. ${detail}`
-              )
+              new UserFacingError("Check the preview, and choose the scene again if it's wrong."),
+              { action: 'confirm', object: 'the scene change' }
             )
             return
           }
@@ -9147,7 +9182,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // routine scene changes). Only lag/failure states surface above.
         } catch (error) {
           if (!sceneRequestDispatched) {
-            if (layoutIntentIdRef.current === intentId) reportError(error)
+            if (layoutIntentIdRef.current === intentId)
+              reportError(error, { action: 'switch', object: 'the scene' })
             settleCommitReceipt(false)
             return
           }
@@ -9198,11 +9234,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               applyLayoutTransactionState(reconciliation.snapshot)
               settleCommitReceipt(failureDisposition === 'requested-scene-applied')
               if (failureDisposition !== 'requested-scene-applied') {
-                reportError(error)
+                reportError(error, { action: 'switch', object: 'the scene' })
               }
               return
             } else if (layoutIntentIdRef.current === intentId) {
-              reportError(error)
+              reportError(error, { action: 'switch', object: 'the scene' })
             }
           }
           settleCommitReceipt(false)
@@ -9219,7 +9255,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       })().catch((error) => {
         settleCommitReceipt(false)
-        reportError(error)
+        reportError(error, { action: 'switch', object: 'the scene' })
       })
       return commitReceipt
     },
@@ -9326,7 +9362,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           deviceListRef.current.devices
         )
         if (issues.length) {
-          toast.error(issues.join(' '), { id: 'layout-source-unavailable' })
+          toast.warning(issues.join(' '), { id: 'layout-source-unavailable' })
           return Promise.resolve(false)
         }
       }
@@ -9526,7 +9562,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     async (sourceKind: LiveSourceDeviceSwitchPending, sources: SourceSelection) => {
       const blocked = sourceSwitchReason(sourceKind)
       if (blocked) {
-        toast.error(blocked)
+        // A refusal is "can't now", never an error (plan 174 S2.4).
+        toast.warning(blocked, {
+          id: 'source-switch-blocked',
+          description: 'Try again in a second.'
+        })
         return
       }
       if (!isActiveRecordingState(recordingRef.current.state)) {
@@ -9573,7 +9613,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : (sources.screenName ?? sources.windowName)
         )
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'switch', object: 'the source' })
       }
     },
     [sourceSelectionController, sourceSwitchReason, loadScene, reportError, sceneEditMode]
@@ -10285,8 +10325,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeNotesWindow?.().then(() => {
+      console.warn('[notes] closed for the recording: VIDEORC_NOTES_RECORDING_OVERLAY=0')
       notifyOnce('notes-closed-for-recording', 'warning', 'Notes closed for this recording', {
-        description: 'Notes recording overlay is disabled by VIDEORC_NOTES_RECORDING_OVERLAY=0.'
+        description: 'Videorc closed them so they stay out of the recording.'
       })
     })
   }, [notesWindow.open, recording.state, runtimeInfo?.notesWindowRecordingOverlayAllowed])
@@ -10301,10 +10342,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeCommentsWindow?.().then(() => {
-      notifyOnce('chat-closed-for-recording', 'warning', 'Chat closed for this recording', {
-        description:
-          'Chat window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
-      })
+      console.warn(
+        '[stream-manager] closed for the recording: no capture protection and VIDEORC_COMMENTS_RECORDING_OVERLAY=0'
+      )
+      notifyOnce(
+        'chat-closed-for-recording',
+        'warning',
+        'Stream Manager closed for this recording',
+        {
+          description: 'Videorc closed it so your chat stays out of the recording.'
+        }
+      )
     })
   }, [
     commentsWindow.open,
@@ -10430,11 +10478,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const importScreenImage = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
-      toast.error('Backend socket is not connected.')
+      toastOffline()
       return
     }
     if (!window.videorc?.pickScreenImage) {
-      toast.error('Screen image picker is unavailable outside Electron.')
+      console.warn('[takeovers] no image picker in this renderer')
       return
     }
 
@@ -10454,9 +10502,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return [...withoutExisting, screen].sort((a, b) => a.sortOrder - b.sortOrder)
       })
       await refreshScreensForClient(client)
-      toast.success(`Imported ${screen.name}.`)
     } catch (error) {
-      reportError(error)
+      reportError(error, { action: 'import', object: 'the image' })
     } finally {
       setScreenImportPending(false)
     }
@@ -10465,14 +10512,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const openSystemPermissionSettings = useCallback(
     async (pane: SystemPermissionPane) => {
       if (!window.videorc?.openSystemPermissions) {
-        toast.error('Permission shortcut is unavailable outside Electron.')
+        console.warn('[permissions] no settings shortcut in this renderer')
         return
       }
 
       try {
         await window.videorc.openSystemPermissions(pane)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'open', object: osSettingsName(currentPlatform()) })
       }
     },
     [reportError]
@@ -10480,14 +10527,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const revealPermissionTarget = useCallback(async () => {
     if (!window.videorc?.revealPermissionTarget) {
-      toast.error('Permission target shortcut is unavailable outside Electron.')
+      console.warn('[permissions] no reveal shortcut in this renderer')
       return
     }
 
     try {
       await window.videorc.revealPermissionTarget()
     } catch (error) {
-      reportError(error)
+      reportError(error, { action: 'show', object: 'Videorc in the file manager' })
     }
   }, [reportError])
 
@@ -10531,13 +10578,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // handler for this file, which the renderer cannot ask for yet).
       toast.success('Support bundle exported', {
         description: basename(result.path),
+        duration: 15_000,
         action: {
           label: 'Copy path',
           onClick: () => void copyText(result.path, "Couldn't copy the path.")
         }
       })
     } catch (error) {
-      reportError(error)
+      reportError(error, { action: 'export', object: 'a support bundle' })
     } finally {
       setSupportBundleExportPending(false)
     }
@@ -10545,27 +10593,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const scheduleHardwareAccelerationRetry = useCallback(async () => {
     if (!window.videorc?.retryHardwareAcceleration) {
-      toast.error('Graphics recovery is unavailable outside Electron.')
+      console.warn('[graphics] no hardware acceleration retry in this renderer')
       return
     }
 
     try {
       const nextRuntimeInfo = await window.videorc.retryHardwareAcceleration()
       setRuntimeInfo(nextRuntimeInfo)
-      toast.success('Hardware acceleration retry scheduled.', {
-        description: 'Quit and reopen Videorc when you are ready. This launch stays unchanged.'
-      })
     } catch (error) {
-      reportError(error)
+      reportError(error, { action: 'turn on', object: 'hardware acceleration' })
     }
   }, [reportError])
 
   const sampleAudioMeter = useCallback(async () => {
     if (!client) {
       // F-011: this used to be a silent no-op — the button appeared dead.
-      toast.error('Microphone check', {
-        description: 'Backend is not connected. Try again in a moment.'
-      })
+      toastOffline({ action: 'check', object: 'the microphone' })
       return false
     }
 
@@ -10592,7 +10635,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         audioMeterSampleGenerationRef.current === sampleGeneration &&
         clientRef.current === client
       ) {
-        reportError(error)
+        reportError(error, { action: 'check', object: 'the microphone' })
       }
       return false
     } finally {
@@ -10732,7 +10775,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       options: { force?: boolean } = {}
     ): Promise<StreamOutputTopologyProbeResult> => {
       if (!client || wsStatus !== 'connected') {
-        return Promise.reject(new Error('Backend socket is not connected.'))
+        return Promise.reject(offlineError())
       }
 
       const requestKey = streamOutputTopologyProbeRequestKey(params)
@@ -10856,7 +10899,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sessionResults: streamOutputTopologySessionResultsRef.current,
         request: (params) => {
           if (!client || wsStatus !== 'connected') {
-            return Promise.reject(new Error('Backend socket is not connected.'))
+            return Promise.reject(offlineError())
           }
           return client.requestTyped('stream.output.topology.probe', params)
         }
@@ -11244,7 +11287,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
       ) {
         setSuppressCaptionsForSession(true)
-        toast.error('Live captions cannot start in this session', {
+        toast.warning("Live captions can't start in this session", {
           id: 'captions-output-unsupported',
           description:
             captionOutputReadiness.description ??
@@ -11254,12 +11297,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       captionsStartAttemptedRef.current = true
       captionsStopAttemptedRef.current = false
-      void startCaptions(captureConfig.captions.language).catch((error: unknown) => {
-        toast.error('Live captions could not start', {
-          description:
-            error instanceof Error ? error.message : 'The caption service is unavailable.'
+      const language = captureConfig.captions.language
+      const start = (): void => {
+        void startCaptions(language).catch((error: unknown) => {
+          toastUserError(
+            error,
+            { action: 'start', object: 'live captions' },
+            { id: 'captions-start', action: { label: 'Retry', onClick: start } }
+          )
         })
-      })
+      }
+      start()
     } else if (action === 'stop') {
       captionsStartAttemptedRef.current = false
       captionsStopAttemptedRef.current = true
@@ -11533,11 +11581,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const renameScreen = useCallback(
     async (screenId: string, name: string) => {
       if (!client || isSessionActive) {
-        toast.error(
-          isSessionActive
-            ? 'Screen management is locked while live.'
-            : 'Backend socket is not connected.'
-        )
+        showTakeoverEditRefused(isSessionActive)
         return
       }
 
@@ -11545,9 +11589,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setLastError(null)
         const screen = await client.request<StreamScreen>('screens.rename', { screenId, name })
         setScreens((current) => current.map((item) => (item.id === screen.id ? screen : item)))
-        toast.success(`Renamed ${screen.name}.`)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'rename', object: 'the takeover' })
       }
     },
     [client, isSessionActive, reportError]
@@ -11556,11 +11599,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const deleteScreen = useCallback(
     async (screenId: string) => {
       if (!client || isSessionActive) {
-        toast.error(
-          isSessionActive
-            ? 'Screen management is locked while live.'
-            : 'Backend socket is not connected.'
-        )
+        showTakeoverEditRefused(isSessionActive)
         return
       }
 
@@ -11572,7 +11611,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // A confirmed delete may say so, and names what went (plan 174 C-1).
         toast.success(`Deleted “${name}”`)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'delete', object: 'the takeover' })
       }
     },
     [client, isSessionActive, reportError, screens]
@@ -11581,11 +11620,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const reorderScreen = useCallback(
     async (screenId: string, targetIndex: number) => {
       if (!client || isSessionActive) {
-        toast.error(
-          isSessionActive
-            ? 'Screen management is locked while live.'
-            : 'Backend socket is not connected.'
-        )
+        showTakeoverEditRefused(isSessionActive)
         return
       }
 
@@ -11607,7 +11642,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const nextScreens = await client.request<StreamScreen[]>('screens.reorder', { screenIds })
         setScreens(nextScreens)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'move', object: 'the takeover' })
       }
     },
     [client, isSessionActive, reportError, screens]
@@ -11616,7 +11651,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const activateScreen = useCallback(
     async (screenId: string): Promise<boolean> => {
       if (!client) {
-        toast.error('Backend socket is not connected.')
+        toastOffline()
         return false
       }
 
@@ -11628,7 +11663,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       } catch (error) {
         const failurePolicy = await loadCommandFailurePolicy()
         if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') {
-          reportError(error)
+          reportError(error, { action: 'show', object: 'the takeover' })
           return false
         }
         const authoritative = await client
@@ -11640,7 +11675,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (failurePolicy.screenActivateFailureCanReconcile(error, screenId, authoritative)) {
           return true
         }
-        reportError(error)
+        reportError(error, { action: 'show', object: 'the takeover' })
         return false
       }
     },
@@ -11649,7 +11684,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const clearActiveScreen = useCallback(async (): Promise<boolean> => {
     if (!client) {
-      toast.error('Backend socket is not connected.')
+      toastOffline()
       return false
     }
 
@@ -11661,7 +11696,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } catch (error) {
       const failurePolicy = await loadCommandFailurePolicy()
       if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') {
-        reportError(error)
+        reportError(error, { action: 'take off', object: 'the takeover' })
         return false
       }
       const authoritative = await client
@@ -11673,7 +11708,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (failurePolicy.screenClearFailureCanReconcile(error, authoritative)) {
         return true
       }
-      reportError(error)
+      reportError(error, { action: 'take off', object: 'the takeover' })
       return false
     }
   }, [client, commitActiveScreen, reportError])
@@ -11681,7 +11716,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const disconnectPlatformAccount = useCallback(
     async (platform: PlatformAccount['platform']) => {
       if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected.')
+        toastOffline()
         return
       }
 
@@ -11707,9 +11742,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             streaming: { ...current.streaming, targets }
           })
         })
-        toast.success('Disconnected account.')
+        toast.success(`Disconnected ${platformLabel(platform)}`)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'disconnect', object: platformLabel(platform) })
       }
     },
     [client, refreshPlatformAccountsForClient, reportError, wsStatus]
@@ -11724,11 +11759,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected.')
+        toastOffline()
         return
       }
       if (!window.videorc?.openOAuthUrl) {
-        toast.error('OAuth browser launch is unavailable outside Electron.')
+        console.warn('[oauth] no browser launcher in this renderer')
         return
       }
 
@@ -11759,22 +11794,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Callback-URL registration hints live in docs/distribution.md — they
         // are developer-portal instructions, not something an end user can act
         // on, so the toast stays quiet.
-        toast.success('Approve the connection in your browser', {
-          id: 'oauth-authorization-link',
-          description: 'Signed in on a different browser? Copy the link and open it there instead.',
-          duration: Number.POSITIVE_INFINITY,
-          action: {
-            label: 'Copy link',
-            // The toast closes on the click, so success still says so here.
-            onClick: () => {
-              void copyText(result.authUrl, "Couldn't copy the link.").then(
-                (copied) => copied && toast.success('Authorization link copied.')
-              )
-            }
-          }
-        })
+        showBrowserApproval('Approve the connection in your browser', result.authUrl)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'connect', object: platformLabel(platform) })
       }
     },
     [client, reportError, wsStatus]
@@ -11802,7 +11824,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ])
       }
     } catch (error) {
-      reportError(error)
+      reportError(error, { action: 'sign out' })
     } finally {
       coordinator.finishMutation(mutation)
     }
@@ -11899,11 +11921,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ownedCallbackIds.delete(envelope.id)
       inFlightCallbacks.delete(envelope.id)
       exhaustedCallbackIds.add(envelope.id)
-      notifyOnce(
-        'account-callback-retry',
-        'error',
-        'Account sign-in is still unavailable. Videorc kept the callback without acknowledging it.'
-      )
+      console.warn('[account] sign-in callback retries exhausted; kept unacknowledged')
+      notifyOnce('account-callback-retry', 'error', "Couldn't finish signing in", {
+        description: 'Sign in again from the account menu.',
+        action: { label: 'Sign in', onClick: beginVideorcSignIn }
+      })
     }
     const scheduleRetry = (envelope: AccountCallbackEnvelope): void => {
       if (disposed) return
@@ -11920,11 +11942,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       retryAttempts.set(envelope.id, attempt + 1)
       if (attempt === 0) {
-        notifyOnce(
-          'account-callback-retry',
-          'error',
-          'Account sign-in is temporarily unavailable. Videorc will retry.'
-        )
+        notifyOnce('account-callback-retry', 'info', 'Finishing sign-in…')
       }
       const timer = window.setTimeout(() => {
         retryTimers.delete(timer)
@@ -12050,11 +12068,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       retryAttempts.set(envelope.id, attempt + 1)
       if (attempt === 0) {
-        notifyOnce(
-          'oauth-callback-retry',
-          'error',
-          'OAuth completion is temporarily unavailable. Videorc will retry.'
-        )
+        notifyOnce('oauth-callback-retry', 'info', 'Finishing the connection…')
       }
       const timer = window.setTimeout(() => {
         retryTimers.delete(timer)
@@ -12128,11 +12142,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const saveStreamMetadataDraft = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
-      toast.error('Backend socket is not connected.')
+      toastOffline()
       return
     }
     if (!streamMetadataDraft) {
-      toast.error('Metadata draft is not loaded yet.')
+      toast.warning('Stream details are still loading', { description: 'Try again in a moment.' })
       return
     }
 
@@ -12149,13 +12163,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         streamMetadataDraft
       )
       setStreamMetadataDraft(saved)
-      if (validation.valid) {
-        toast.success('Saved stream metadata.')
-      } else {
-        toast.warning('Saved stream metadata with warnings.')
+      // The form is the confirmation of a save; only what still needs work is news.
+      if (!validation.valid) {
+        const count = validation.issues.length
+        toast.warning(
+          count > 0
+            ? `Saved. ${plural(count, 'detail needs', 'details need')} attention before you go live`
+            : 'Saved. Some details need attention before you go live',
+          { id: 'stream-details-saved' }
+        )
       }
     } catch (error) {
-      reportError(error)
+      reportError(error, { action: 'save', object: 'the stream details' })
     } finally {
       setStreamMetadataSavePending(false)
     }
@@ -12535,10 +12554,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               }
               await client.request<LiveChatSnapshot>('liveChat.x.start', params)
             } catch (chatError) {
-              const chatMessage = chatError instanceof Error ? chatError.message : String(chatError)
-              toast.warning(`X chat needs review for ${target.label}.`, {
-                description: chatMessage
-              })
+              showXBroadcastProblem('chat', target, chatError)
             }
           }
         } catch (error) {
@@ -12563,9 +12579,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          toast.warning(`Could not publish ${target.label} on X.`, {
-            description: message
-          })
+          showXBroadcastProblem('start', target, error)
         }
       }
       return nextStreaming
@@ -12580,7 +12594,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionId?: string
     ): Promise<XEndResult> => {
       if (!client) {
-        return Promise.reject(new Error('Backend socket is not connected.'))
+        return Promise.reject(offlineError())
       }
       const endKey = JSON.stringify([target.accountId ?? '', broadcastId])
       const completed = xEndedBroadcastResultsRef.current.get(endKey)
@@ -12721,9 +12735,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          toast.warning(`Could not end ${target.label} on X.`, {
-            description: message
-          })
+          showXBroadcastProblem('end', target, error)
         }
       }
       return nextStreaming
@@ -12737,7 +12749,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       broadcastId: string
     ): Promise<YouTubeBroadcastTransitionResult> => {
       if (!client) {
-        return Promise.reject(new Error('Backend socket is not connected.'))
+        return Promise.reject(offlineError())
       }
       const completionKey = JSON.stringify([target.accountId ?? '', broadcastId])
       const completed = youtubeCompletedBroadcastResultsRef.current.get(completionKey)
@@ -12959,7 +12971,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return pending.promise
       }
       if (pending) {
-        return Promise.reject(new Error('Another livestream provider lifecycle is still settling.'))
+        return Promise.reject(new UserFacingError(LIVESTREAM_STILL_SETTLING))
       }
 
       let resolvedOwner = owner
@@ -13024,9 +13036,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         const result = await settleClaimedPlatformLifecycleOwner(retainedOwner)
         if (!result.complete) {
-          reportError(
-            new Error('Finish cleaning up the prepared livestream providers before starting again.')
-          )
+          reportError(new UserFacingError(LIVESTREAM_STILL_SETTLING), { action: 'go live' })
           return false
         }
       } catch (error) {
@@ -13077,9 +13087,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (result.complete) {
         return true
       }
-      reportError(
-        new Error('Finish cleaning up the previous livestream providers before starting again.')
-      )
+      reportError(new UserFacingError(LIVESTREAM_STILL_SETTLING), { action: 'go live' })
       return false
     } catch (error) {
       reportError(error)
@@ -13214,14 +13222,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               const validation = validations.find((item) => item.platform === target.platform)
               if (!validation || !['valid', 'refreshed'].includes(validation.state)) {
                 unhealthy = target
-                unhealthyMessage = `Reconnect ${target.label} before starting an OAuth livestream.`
+                unhealthyMessage = `Reconnect ${target.label} in Livestream → Setup, then go live.`
                 break
               }
             }
             if (unhealthy) {
               throw new Error(
                 unhealthyMessage ??
-                  `Reconnect ${unhealthy.label} before starting an OAuth livestream.`
+                  `Reconnect ${unhealthy.label} in Livestream → Setup, then go live.`
               )
             }
           }
@@ -13431,9 +13439,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Every start rejection — the compositor startup barrier, topology
           // probe, platform activation, the RPC itself — is unmissable: keyed
           // persistent toast + Session-panel line, Retry re-runs this exact start.
-          reportSessionStartFailure(error, () => {
-            void runStartSessionRef.current?.(streamingOverride, preparedOutput)
-          })
+          reportSessionStartFailure(
+            error,
+            () => {
+              void runStartSessionRef.current?.(streamingOverride, preparedOutput)
+            },
+            Boolean(streamingOverride)
+          )
           if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
             applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
           }
@@ -13491,10 +13503,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionOutput?: Pick<GoLiveOutput.GoLiveSessionOutput, 'video' | 'streaming'>
     ): Promise<GoLivePartialSetup> => {
       if (!client) {
-        throw new Error('Backend socket is not connected.')
+        throw offlineError()
       }
       if (!(await settlePreviousPlatformLifecycle())) {
-        throw new Error('The previous livestream providers still need cleanup before Go Live.')
+        throw new UserFacingError(LIVESTREAM_STILL_SETTLING)
       }
 
       const outputVideo = sessionOutput?.video ?? captureConfig.video
@@ -14005,10 +14017,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const premiumIssue = premiumRequiredIssueMessage(preflight)
           if (premiumIssue) {
             void loadSessionRuntimeRecovery().then((runtime) =>
-              runtime.showPremiumUpgrade('Premium required for this Go Live setup.', premiumIssue)
+              runtime.showPremiumUpgrade(
+                'This Go Live setup is part of Videorc Premium',
+                premiumIssue
+              )
             )
           } else {
-            toast.error('Resolve Go Live issues before starting.')
+            // The server's verdict can differ from what the dialog showed
+            // before the click; the dialog now marks what blocks it.
+            toast.warning('Fix the items marked in red, then go live', { id: 'go-live-blocked' })
           }
           return
         }
@@ -14026,10 +14043,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           throw new Error('No livestream destinations are ready after platform setup.')
         }
         if (setupDecision.kind === 'partial') {
+          // The dialog shows the failures with Continue or Cancel (B-18).
           setGoLivePartialSetup(setupDecision.setup)
-          toast.warning('Some destinations failed setup.', {
-            description: 'Continue with the ready destinations or cancel this Go Live.'
-          })
           return
         }
         setGoLiveConfirmationOpen(false)
@@ -14038,9 +14053,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
         // setup) is just as silent as a refused start: same persistent surface.
         // The dialog stays open, so Retry re-runs the confirmation.
-        reportSessionStartFailure(error, () => {
-          void confirmGoLiveRef.current?.()
-        })
+        reportSessionStartFailure(
+          error,
+          () => {
+            void confirmGoLiveRef.current?.()
+          },
+          true
+        )
       } finally {
         setGoLiveConfirmationPending(false)
       }
@@ -14364,7 +14383,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const renameSession = useCallback(
     async (sessionId: string, title: string): Promise<void> => {
       if (!client) {
-        throw new Error('Backend is not connected.')
+        throw offlineError()
       }
       await client.request('sessions.rename', { sessionId, title })
       await refreshSessions(client)
@@ -14381,7 +14400,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const deleteSessions = useCallback(
     async (targets: SessionSummary[]): Promise<void> => {
       if (!client) {
-        throw new Error('Backend is not connected.')
+        throw offlineError()
       }
       const operations: SessionDeletionOperation[] = await client.requestTyped('sessions.delete', {
         sessionIds: targets.map((session) => session.id)
@@ -14402,45 +14421,49 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const duplicateSession = useCallback(
-    async (sessionId: string): Promise<void> => {
+    async (sessionId: string): Promise<string | null> => {
       if (!client) {
-        throw new Error('Backend is not connected.')
+        throw offlineError()
       }
-      await client.request('sessions.duplicate', { sessionId })
+      const result = await client.request<{ sessionId?: string } | null>('sessions.duplicate', {
+        sessionId
+      })
       await refreshSessions(client)
+      return result?.sessionId ?? null
     },
     [client, refreshSessions]
   )
 
-  const importRecording = useCallback(async (): Promise<void> => {
+  const importRecording = useCallback(async (): Promise<string | null> => {
     if (!client) {
-      throw new Error('Backend is not connected.')
+      throw offlineError()
     }
     const source = await window.videorc?.pickFile?.()
     if (!source) {
-      return
+      return null
     }
     const outputDirectory = settings.outputDirectoryHandle
       ? await window.videorc?.authorizeOutputDirectory?.(settings.outputDirectoryHandle)
       : null
     if (settings.outputDirectoryHandle && !outputDirectory) {
-      throw new Error(
+      throw new UserFacingError(
         'The selected output folder is unavailable. Choose it again in Settings → Recording.'
       )
     }
     // Blank means the platform default — the backend resolves and creates it,
     // exactly like recording does (Settings: "Blank uses the default").
-    await client.request('sessions.import', {
+    const result = await client.request<{ sessionId?: string } | null>('sessions.import', {
       sourceCapability: source.capabilityId,
       outputDirectoryCapability: outputDirectory?.capabilityId
     })
     await refreshSessions(client)
+    return result?.sessionId ?? null
   }, [client, refreshSessions, settings.outputDirectoryHandle])
 
   const startNoiseCleanup = useCallback(
     async (sessionId: string): Promise<NoiseCleanupJob> => {
       if (!client) {
-        throw new Error('Backend is not connected.')
+        throw offlineError()
       }
       const job = await client.requestTyped('noiseCleanup.start', { sessionId })
       setNoiseCleanupJobs((current) => upsertNoiseCleanupJob(current, job))
@@ -14452,7 +14475,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const cancelNoiseCleanup = useCallback(
     async (jobId: string): Promise<NoiseCleanupJob> => {
       if (!client) {
-        throw new Error('Backend is not connected.')
+        throw offlineError()
       }
       const job = await client.requestTyped('noiseCleanup.cancel', { jobId })
       setNoiseCleanupJobs((current) => upsertNoiseCleanupJob(current, job))
@@ -14490,9 +14513,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sessionId
         })
         await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
-        toast.success('Exported MP4.', { id: `finalization-${sessionId}` })
+        showMp4Ready(sessionId)
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'export', object: 'the MP4' })
       }
     },
     [client, refreshNoiseCleanupJobs, refreshSessions, reportError]
@@ -14501,7 +14524,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const markClip = useCallback(async (): Promise<ClipMarkedEvent | null> => {
     if (!client) {
-      toast.error('Mark clip', { description: 'Backend is not connected. Try again in a moment.' })
+      toastOffline({ action: 'mark', object: 'the clip' })
       return null
     }
     if (!isActiveRecordingState(recordingRef.current.state)) {
@@ -14514,7 +14537,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     try {
       return await client.request<ClipMarkedEvent>('clip.mark')
     } catch (error) {
-      reportError(error)
+      reportError(error, { action: 'mark', object: 'the clip' })
       return null
     }
   }, [client, reportError])
@@ -14522,7 +14545,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const assessRecording = useCallback(
     async (sessionId: string): Promise<FileAssessment> => {
       if (!client) {
-        throw new Error('Backend is not connected.')
+        throw offlineError()
       }
       return client.requestTyped('repair.assess_file', { sessionId })
     },
@@ -14532,7 +14555,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const repairRecording = useCallback(
     async (sessionId: string): Promise<GateStatus> => {
       if (!client) {
-        throw new Error('Backend is not connected.')
+        throw offlineError()
       }
       const result = await client.requestTyped('repair.repair_file', { sessionId })
       await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
@@ -14544,7 +14567,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const restoreRecording = useCallback(
     async (sessionId: string): Promise<boolean> => {
       if (!client) {
-        throw new Error('Backend is not connected.')
+        throw offlineError()
       }
       const result = await client.requestTyped('repair.restore_file', { sessionId })
       if (result.restored) {
@@ -14581,10 +14604,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // ceiling, so only a real Premium gate offers Premium (plan 174 D-13).
         if (gate.upgradeUrl) {
           void loadSessionRuntimeRecovery().then((runtime) =>
-            runtime.showPremiumUpgrade('Premium required for this media profile.', gate.reason)
+            runtime.showPremiumUpgrade('This quality is part of Videorc Premium', gate.reason)
           )
         } else {
-          toast.error("This quality isn't available", { description: gate.reason })
+          toast.warning("This quality isn't available", { description: gate.reason })
         }
         return
       }
@@ -14597,6 +14620,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [entitlements]
   )
+  const applyVideoPresetRef = useRef(applyVideoPreset)
+  applyVideoPresetRef.current = applyVideoPreset
 
   // Performance check. The backend owns the measurement; this only decides
   // when to ask for one and whether its verdict may move the output.
@@ -14672,7 +14697,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const chosen = captureConfigRef.current.video
         const tooHeavy = next.result && performanceCheckTooHeavyToast(chosen, next.result)
         if (tooHeavy) {
-          toast.warning(tooHeavy.title, { description: tooHeavy.description })
+          toast.warning(tooHeavy.title, {
+            id: 'output-too-heavy',
+            description: tooHeavy.description,
+            action: {
+              label: tooHeavy.actionLabel,
+              onClick: () => applyVideoPresetRef.current?.(tooHeavy.preset)
+            }
+          })
         }
       })
     ]
@@ -14821,9 +14853,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           setLastError(`Could not migrate saved ${label} stream key: ${message}`)
-          toast.warning(`Could not migrate ${label} stream key.`, {
+          toast.warning(`Save your ${label} stream key again`, {
+            id: `stream-key-migration:${candidate.targetId}`,
             description:
-              'The key will stay available for this session. Save it again from Streaming settings to remove the legacy local copy.'
+              'Paste it in Livestream → Setup so Videorc can store it securely. It works for now.'
           })
         }
       }
@@ -14833,7 +14866,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const saveManualStreamKey = useCallback(
     async (targetId: string, streamKey: string) => {
       if (!client) {
-        toast.error('Backend socket is not connected.')
+        toastOffline()
         return false
       }
 
@@ -14846,24 +14879,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             streamKey
           }
         )
+        // The destination row shows the saved key's hint, or Restore when it
+        // was removed: the row is the confirmation (plan 174 S2.4, J2-11).
         patchManualStreamKeyResult(targetId, result)
-        const label =
-          captureConfigRef.current.streaming.targets.find((item) => item.id === targetId)?.label ??
-          targetId
-        if (result.streamKeyPresent) {
-          toast.success(
-            `${label} stream key saved${result.streamKeyHint ? ` (ends ${result.streamKeyHint})` : ''}.`
-          )
-        } else {
-          toast.success(
-            result.previousStreamKeyPresent
-              ? `${label} stream key removed. The previous key is kept for restore.`
-              : `${label} stream key removed.`
-          )
-        }
         return true
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'save', object: 'the stream key' })
         return false
       }
     },
@@ -14875,7 +14896,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const restorePreviousStreamKey = useCallback(
     async (targetId: string) => {
       if (!client) {
-        toast.error('Backend socket is not connected.')
+        toastOffline()
         return
       }
 
@@ -14886,14 +14907,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           { targetId }
         )
         patchManualStreamKeyResult(targetId, result)
-        const label =
-          captureConfigRef.current.streaming.targets.find((item) => item.id === targetId)?.label ??
-          targetId
-        toast.success(
-          `${label} stream key restored${result.streamKeyHint ? ` (ends ${result.streamKeyHint})` : ''}.`
-        )
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'restore', object: 'the previous stream key' })
       }
     },
     [client, patchManualStreamKeyResult, reportError]
@@ -15364,7 +15379,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           address ? { address } : {}
         )
       } catch (error) {
-        reportError(error)
+        reportError(error, { action: 'start', object: 'phone pairing' })
         return null
       }
     },
@@ -15411,7 +15426,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         registrar.sync(settingsRef.current.globalShortcuts ?? {})
       })
       .catch((error: unknown) => {
-        if (!disposed) reportError(error)
+        if (!disposed) reportError(error, { action: 'start', object: 'phone pairing' })
       })
     return () => {
       disposed = true
@@ -15450,7 +15465,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             eligible.map(({ id }) => id)
           )
         if (!target) {
-          toast.info('No other available layout.', { id: 'layout-shortcut-empty' })
+          toast.info('No other scene to switch to', { id: 'layout-shortcut-empty' })
           return
         }
         if (

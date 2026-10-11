@@ -177,7 +177,7 @@ describe('recordingStartupHealthToast', () => {
   const REFUSED_MESSAGE =
     'Recording startup blocked before encoding: waiting for compositor frame (recent gaps none ms; 0 fresh frame(s) in 2500ms); cadence budget 200ms.'
 
-  it('maps the unsteady-start WARN to a keyed warning toast carrying the backend copy', () => {
+  it('maps the unsteady-start WARN to a keyed warning toast in plain words', () => {
     const result = recordingStartupHealthToast({
       code: RECORDING_STARTUP_CADENCE_UNSTEADY_CODE,
       level: 'warn',
@@ -186,8 +186,8 @@ describe('recordingStartupHealthToast', () => {
     expect(result).toEqual({
       variant: 'warning',
       id: RECORDING_STARTUP_UNSTEADY_TOAST_ID,
-      title: 'Recording started on an unsteady compositor',
-      description: UNSTEADY_MESSAGE,
+      title: 'The first seconds may stutter',
+      description: 'Videorc took a moment to settle when the recording started. Check its start.',
       duration: 15000
     })
     expect(result?.id).toBe('recording-startup-cadence-unsteady')
@@ -210,7 +210,7 @@ describe('recordingStartupHealthToast', () => {
       duration: Infinity
     })
     expect(result).toMatchObject({
-      title: 'Could not start',
+      title: "Couldn't start",
       description: sessionStartFailureToastOptions(
         REFUSED_MESSAGE,
         () => {},

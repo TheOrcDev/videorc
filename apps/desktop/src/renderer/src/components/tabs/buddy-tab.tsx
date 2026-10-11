@@ -55,7 +55,7 @@ import {
   type BuddyLiveStatus
 } from '@/lib/buddy-tab-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
-import { toast } from '@/lib/toast'
+import { toastUserError } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
@@ -483,9 +483,14 @@ function BuddyTabConsentDialog(): ReactElement {
   const { buddyConsentRequested, answerBuddyConsent } = useStudioCore()
   const answer = (accepted: boolean): void => {
     void answerBuddyConsent(accepted).catch((error: unknown) =>
-      toast.error('Could not turn on Buddy Live', {
-        description: error instanceof Error ? error.message : undefined
-      })
+      toastUserError(
+        error,
+        { action: 'turn on', object: 'Buddy Live' },
+        {
+          id: 'buddy-live-consent',
+          ...(accepted ? { action: { label: 'Retry', onClick: () => answer(true) } } : {})
+        }
+      )
     )
   }
   return <BuddyConsentDialog open={buddyConsentRequested} onAnswer={answer} />

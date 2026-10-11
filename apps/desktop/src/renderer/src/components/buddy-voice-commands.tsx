@@ -34,7 +34,7 @@ import {
   type RemoveMessagesRow
 } from '@/lib/buddy-tab-view'
 import { buddyTabLabel } from '@/lib/buddy-tabs'
-import { toast } from '@/lib/toast'
+import { toastUserError } from '@/lib/user-error'
 import { permissionReconnectOptions } from '../../../shared/platform-scopes'
 
 const REMOVE_CONFIRM_MODES: readonly RemoveConfirmMode[] = ['confirm', 'countdown']
@@ -81,9 +81,11 @@ export function BuddyVoiceCommands({
   const removeConfirm = cohostSettings?.removeConfirm ?? 'confirm'
   const save = (patch: CohostSettingsPatch): void => {
     void patchCohostSettings?.(patch).catch((error: unknown) =>
-      toast.error('Could not save the voice command setting', {
-        description: error instanceof Error ? error.message : undefined
-      })
+      toastUserError(
+        error,
+        { action: 'save', object: 'the voice command setting' },
+        { id: 'buddy-voice-setting' }
+      )
     )
   }
 
@@ -96,9 +98,11 @@ export function BuddyVoiceCommands({
     setPending(row.platform)
     void run
       .catch((error: unknown) =>
-        toast.error(`Could not reconnect ${row.label}`, {
-          description: error instanceof Error ? error.message : undefined
-        })
+        toastUserError(
+          error,
+          { action: 'open', object: `the ${row.label} page` },
+          { id: `buddy-reconnect:${row.platform}` }
+        )
       )
       .finally(() => setPending(null))
   }

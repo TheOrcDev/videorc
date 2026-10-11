@@ -141,7 +141,7 @@ export function outputLabel(video: Pick<VideoSettings, 'width' | 'height' | 'fps
 export function performanceCheckTooHeavyToast(
   chosen: VideoSettings,
   result: PerformanceCheckResult
-): { title: string; description: string } | undefined {
+): { title: string; description: string; actionLabel: string; preset: VideoPreset } | undefined {
   // The floor is recommended even when it failed. Do not claim it held.
   if (
     result.belowFloor ||
@@ -152,6 +152,8 @@ export function performanceCheckTooHeavyToast(
   }
   return {
     title: `${outputLabel(chosen)} is too heavy for this computer`,
-    description: `Recordings will stutter. ${outputLabel(result.recommended)} held steady.`
+    description: `Recordings will stutter. ${outputLabel(result.recommended)} held steady.`,
+    actionLabel: `Use ${outputLabel(result.recommended)}`,
+    preset: result.recommended.preset
   }
 }

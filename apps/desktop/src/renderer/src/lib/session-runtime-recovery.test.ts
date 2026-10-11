@@ -22,7 +22,8 @@ import {
   showSessionFinished,
   showSessionHealthEvent,
   showSourceFallbackActiveSession,
-  showXPlaybackEvent
+  showXPlaybackEvent,
+  sourceFallbackTitle
 } from '@/lib/session-runtime-recovery'
 
 function failedSession(mode: string): SessionSummary {
@@ -81,7 +82,7 @@ describe('session runtime recovery', () => {
     expect(toastSpies.error).toHaveBeenCalledWith(
       'Livestream stopped unexpectedly',
       expect.objectContaining({
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ onClick: expect.any(Function) })
       })
     )
@@ -164,12 +165,13 @@ describe('session runtime recovery', () => {
     })
 
     // No platform on the result: the generic words and the shared fallback id.
-    expect(toastSpies.success).toHaveBeenCalledWith('Account connected.', {
+    expect(toastSpies.success).toHaveBeenCalledWith('Account connected', {
       id: 'oauth-callback:provider'
     })
     expect(toastSpies.error).toHaveBeenCalledWith("Couldn't finish connecting the account.", {
       id: 'oauth-callback:provider',
-      description: 'Authorization was declined.'
+      description: 'Authorization was declined.',
+      duration: 8_000
     })
   })
 
@@ -510,16 +512,39 @@ describe('record+stream notices (plan 174 B-6)', () => {
     expect(toastSpies.success).not.toHaveBeenCalled()
   })
 
-  it('says a source changed while streaming during Go Live', () => {
-    showSourceFallbackActiveSession(goLive)
+  it('says a source changed while streaming during Go Live, naming the device', () => {
+    showSourceFallbackActiveSession(goLive, {
+      kind: 'automatic-source-fallback',
+      sourceKind: 'camera',
+      reason: 'unavailable-selected',
+      previousName: 'Studio Cam',
+      nextId: 'cam-2',
+      nextName: 'FaceTime HD Camera'
+    })
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Source changed while streaming. Check the output before continuing.',
-      expect.objectContaining({ id: 'source-reconciliation:active-session' })
+      'Camera switched to FaceTime HD Camera',
+      expect.objectContaining({
+        id: 'source-reconciliation:active-session',
+        description: 'Your stream uses it now. Check the output before you continue.'
+      })
     )
     showSourceFallbackActiveSession({ state: 'recording' })
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Source changed while recording. Check the output before continuing.',
-      expect.anything()
+      'A source changed',
+      expect.objectContaining({
+        description: 'Your recording uses it now. Check the output before you continue.'
+      })
     )
+  })
+
+  it('names the source a fallback turned off (plan 174 S2.4)', () => {
+    expect(
+      sourceFallbackTitle({
+        kind: 'automatic-source-fallback',
+        sourceKind: 'microphone',
+        reason: 'unavailable-cleared',
+        previousName: 'USB Mic'
+      })
+    ).toBe('Microphone turned off')
   })
 })

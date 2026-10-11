@@ -35,6 +35,7 @@ import {
   CONDENSED_DEFAULT_TARGET_MINUTES,
   CONDENSED_TARGET_MINUTES,
   cleanCutAutoStatus,
+  cleanCutFailureCopy,
   cleanCutMinutesLeftLabel,
   cleanCutStatusView,
   cleanCutUnlock,
@@ -52,6 +53,7 @@ import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { dayLabel, isActiveRecordingState } from '@/lib/format'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { toast } from '@/lib/toast'
+import { userErrorMessage } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
@@ -79,8 +81,24 @@ const CONDENSED_LENGTH_OPTIONS: SegmentedControlOption[] = CONDENSED_TARGET_MINU
 
 const UNTITLED = 'Untitled recording'
 
-function errorMessage(error: unknown): string | undefined {
-  return error instanceof Error ? error.message : undefined
+const UNKNOWN_CLEAN_CUT_FAILURE = cleanCutFailureCopy(undefined, undefined)
+
+/**
+ * Plan 174 S2.4: a failed call in plain words. Clean cut's own codes keep
+ * their sentence; anything else gets the generic next step, never raw text.
+ */
+function cleanCutErrorReason(error: unknown): string {
+  const code =
+    typeof error === 'object' &&
+    error !== null &&
+    typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : undefined
+  const known = code ? cleanCutFailureCopy(code, undefined) : UNKNOWN_CLEAN_CUT_FAILURE
+  if (known !== UNKNOWN_CLEAN_CUT_FAILURE) return known
+  const copy = userErrorMessage(error)
+  console.warn('[clean-cut] request failed:', copy.raw)
+  return copy.description
 }
 
 /**
@@ -180,7 +198,11 @@ export function CleanCutCard({
           request.mode === 'condensed'
             ? "Couldn't start the condensed cut"
             : "Couldn't start the clean cut",
-          { description: errorMessage(error) }
+          {
+            id: 'clean-cut-start',
+            description: cleanCutErrorReason(error),
+            action: { label: 'Retry', onClick: () => startCut(request) }
+          }
         )
       )
       .finally(() => setPending(false))
@@ -226,17 +248,23 @@ export function CleanCutCard({
     void client
       .render(failed.id)
       .catch((error: unknown) =>
-        toast.error("Couldn't cut it again", { description: errorMessage(error) })
+        toast.error("Couldn't redo the clean cut", {
+          id: 'clean-cut-start',
+          description: cleanCutErrorReason(error),
+          action: { label: 'Retry', onClick: () => retry(failed) }
+        })
       )
       .finally(() => setPending(false))
   }
 
   const cancel = (active: CleanCutJob): void => {
-    void client
-      .cancel(active.id)
-      .catch((error: unknown) =>
-        toast.error("Couldn't cancel the clean cut", { description: errorMessage(error) })
-      )
+    void client.cancel(active.id).catch((error: unknown) =>
+      toast.error("Couldn't cancel the clean cut", {
+        id: 'clean-cut-cancel',
+        description: cleanCutErrorReason(error),
+        action: { label: 'Retry', onClick: () => cancel(active) }
+      })
+    )
   }
 
   const review = (target: CleanCutJob): void =>

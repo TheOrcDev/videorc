@@ -15,6 +15,7 @@ import {
   type RemovalToastView
 } from '@/lib/chat-removal-view'
 import { toast } from '@/lib/toast'
+import { userErrorMessage, type UserError } from '@/lib/user-error'
 import {
   COMMENTS_MODERATION_TIMING_CONTRACT,
   mergeModerationOperations,
@@ -54,7 +55,8 @@ export interface RemovalToastSurface {
   show: (id: string, view: RemovalToastView, onAnswer: (answer: RemovalAnswer) => void) => void
   dismiss: (id: string) => void
   outcome: (id: string, outcome: RemovalOutcomeToast) => void
-  error: (id: string, message: string) => void
+  /** A failed answer, already in copy (plan 174 S2.4): never the raw text. */
+  error: (id: string, copy: Pick<UserError, 'title' | 'description' | 'tone'>) => void
 }
 
 export interface ChatModerationRelayOptions {
@@ -124,8 +126,9 @@ function sonnerSurface(): RemovalToastSurface {
       const show = outcome.kind === 'message' ? toast : toast[outcome.kind]
       show(outcome.text, { id })
     },
-    error: (id, message) => {
-      toast.error(message, { id })
+    error: (id, copy) => {
+      const show = copy.tone === 'warning' ? toast.warning : toast.error
+      show(copy.title, { id, description: copy.description })
     }
   }
 }
@@ -230,12 +233,16 @@ export function startChatModerationRelay(options: ChatModerationRelayOptions): C
     answered.add(operationId)
     void answerRequest(operationId, answer)
       .then((operation) => accept([operation]))
-      .catch((error: unknown) =>
-        surface.error(
-          removalToastId(operationId, 'outcome'),
-          errorMessage(error, 'Could not answer the removal.')
+      .catch((error: unknown) => {
+        const copy = userErrorMessage(
+          error,
+          answer === 'confirm'
+            ? { action: 'remove', object: 'the message' }
+            : { action: 'keep', object: 'the message' }
         )
-      )
+        console.warn('[chat-removal] answer failed:', copy.raw)
+        surface.error(removalToastId(operationId, 'outcome'), copy)
+      })
   }
 
   const syncSession = (sessionId: string | null | undefined): void => {
