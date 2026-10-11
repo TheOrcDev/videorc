@@ -61,9 +61,10 @@ import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import { copyText } from '@/lib/copy-text'
 import { platformLabel } from '@/lib/platform-copy'
-import { currentPlatform, osSettingsName } from '@/lib/platform'
-import { toast } from '@/lib/toast'
+import { currentPlatform, osSettingsName, revealInFileManagerLabel } from '@/lib/platform'
+import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { openHealthToastAction } from '@/lib/health-door'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
 import {
@@ -7488,7 +7489,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // repeat every reconnect: one toast per text.
         console.warn('[backend-error] event:', message)
         notifyOnce(`backend-error:${message}`, 'error', 'Videorc hit a problem', {
-          description: 'Export a support bundle from Health if it repeats.'
+          description: 'Export a support bundle from Health if it repeats.',
+          // The door to Health (plan 174 D9), on the toast's timed life.
+          action: openHealthToastAction(),
+          duration: TOAST_WITH_DESCRIPTION_MS
         })
       }),
       nextClient.on('connection.closed', () => setWsStatus('closed'))
@@ -10573,16 +10577,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         'diagnostics.supportBundle.export',
         params
       )
-      // The bundle lands in the app's own data folder, which Finder hides;
-      // Copy path gets the streamer to it (a reveal needs a main-process
-      // handler for this file, which the renderer cannot ask for yet).
+      // The bundle lands in the app's own data folder, which Finder hides,
+      // so the toast shows it there (plan 174 S3.18, I-1). Main reveals only
+      // a bundle inside that folder. Outside Electron, Copy path stands in.
+      const revealSupportBundle = window.videorc?.revealSupportBundle
       toast.success('Support bundle exported', {
         description: basename(result.path),
         duration: 15_000,
-        action: {
-          label: 'Copy path',
-          onClick: () => void copyText(result.path, "Couldn't copy the path.")
-        }
+        action: revealSupportBundle
+          ? {
+              label: revealInFileManagerLabel(freshRuntimeInfo?.platform),
+              onClick: () =>
+                void revealSupportBundle(result.path).catch((error: unknown) =>
+                  reportError(error, { action: 'show', object: 'the support bundle' })
+                )
+            }
+          : {
+              label: 'Copy path',
+              onClick: () => void copyText(result.path, "Couldn't copy the path.")
+            }
       })
     } catch (error) {
       reportError(error, { action: 'export', object: 'a support bundle' })
@@ -16195,8 +16208,9 @@ function isEditableTargetSafe(target: EventTarget | null): boolean {
     : false
 }
 
+/** The file name in a macOS or a Windows path. */
 function basename(path: string): string {
-  return path.split('/').at(-1) ?? path
+  return path.split(/[\\/]/).at(-1) ?? path
 }
 
 function delay(ms: number): Promise<void> {

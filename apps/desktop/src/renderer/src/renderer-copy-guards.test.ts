@@ -106,7 +106,6 @@ const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/components/settings/encoder-preference-field.tsx': 1,
   'src/components/streaming/go-live-panel.tsx': 1,
   'src/components/studio/session-panel.tsx': 3,
-  'src/components/tabs/diagnostics-tab.tsx': 13,
   'src/components/tabs/studio-tab.tsx': 2,
   'src/hooks/use-scheduled-streams.ts': 3,
   'src/hooks/use-studio.tsx': 15,
@@ -118,7 +117,6 @@ const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/lib/native-preview-surface-lifecycle.ts': 1,
   'src/lib/obs-import-map.ts': 3,
   'src/lib/record-latency.ts': 1,
-  'src/lib/studio-health.ts': 1,
   'src/lib/toast.ts': 1
 }
 

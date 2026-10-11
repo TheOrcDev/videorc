@@ -134,3 +134,17 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
     expect(item('Go live…').getAttribute('aria-disabled')).toBe('true')
   })
 })
+
+describe('CommandPalette Health door (plan 174 D9)', () => {
+  it('finds Health by what people look for there', async () => {
+    await render()
+    const input = document.querySelector<HTMLInputElement>('[cmdk-input]')!
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => {
+      setValue.call(input, 'support bundle')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(labels()).toContain('Health')
+    expect(labels()).not.toContain('Library')
+  })
+})

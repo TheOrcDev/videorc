@@ -16,6 +16,7 @@ import {
   sessionModeActivity,
   sessionRuntimeContinuationIsCurrent,
   sessionRuntimeRecoveryPlan,
+  showBackendError,
   showOAuthCallbackExhausted,
   showOAuthCallbackResult,
   showRecordingFailure,
@@ -546,5 +547,38 @@ describe('record+stream notices (plan 174 B-6)', () => {
         previousName: 'USB Mic'
       })
     ).toBe('Microphone turned off')
+  })
+})
+
+// Plan 174 S3.18 (D9): a failure Videorc can't explain says "export a support
+// bundle from Health", so its toast opens Health; a known cause doesn't.
+describe('backend error toasts', () => {
+  beforeEach(() => vi.clearAllMocks())
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('gives an unexplained failure an Open Health door on a timed toast', () => {
+    const dispatchEvent = vi.fn()
+    vi.stubGlobal('window', { dispatchEvent })
+    showBackendError(new Error('engine said no'), 'connected', {
+      action: 'save',
+      object: 'the scene'
+    })
+    expect(toastSpies.error).toHaveBeenCalledOnce()
+    const [title, options] = toastSpies.error.mock.calls[0]
+    expect(title).toBe("Couldn't save the scene")
+    expect(options).toMatchObject({
+      description: 'Try again. If it keeps happening, export a support bundle from Health.',
+      duration: 8_000,
+      action: { label: 'Open Health' }
+    })
+    options.action.onClick()
+    expect(dispatchEvent.mock.calls[0][0].detail).toEqual({ tab: 'diagnostics' })
+  })
+
+  it('keeps a known cause without the door', () => {
+    const error = Object.assign(new Error('busy'), { code: 'command-lane-full' })
+    showBackendError(error, 'connected', { action: 'save', object: 'the scene' })
+    const [, options] = toastSpies.warning.mock.calls[0]
+    expect(options.action).toBeUndefined()
   })
 })

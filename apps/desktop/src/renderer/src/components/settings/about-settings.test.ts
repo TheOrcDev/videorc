@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { UpdateStatus } from '@/lib/backend'
+import { WORKSPACE_NAVIGATE_EVENT, type WorkspaceNavigation } from '@/lib/workspace-navigation'
 
 import { AboutSettings } from './about-settings'
 
@@ -80,6 +81,24 @@ describe('AboutSettings', () => {
       'Finish your recording or stream first. Installing restarts Videorc.'
     )
     expect(container.textContent).toContain('installs the next time you quit Videorc')
+  })
+
+  // Plan 174 S3.18 (I-1, D9): the support bundle lives on Health; About
+  // links to it instead of keeping a second export button.
+  it('sends the support bundle to its one home on Health', async () => {
+    const opened: WorkspaceNavigation[] = []
+    const listener = (event: Event): void => {
+      opened.push((event as CustomEvent<WorkspaceNavigation>).detail)
+    }
+    window.addEventListener(WORKSPACE_NAVIGATE_EVENT, listener)
+    try {
+      await render()
+      expect(container.querySelector('[data-testid="support-bundle-button"]')).toBeNull()
+      await act(async () => button('Open Health')!.click())
+      expect(opened).toEqual([{ tab: 'diagnostics' }])
+    } finally {
+      window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, listener)
+    }
   })
 
   it('links the website, the policies and the source', async () => {

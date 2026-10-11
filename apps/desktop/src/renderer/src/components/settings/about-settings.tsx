@@ -4,7 +4,6 @@ import type { ReactElement } from 'react'
 import logoUrl from '@/assets/videorc-logo.png'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
-import { SupportBundleButton } from '@/components/support-bundle-button'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -16,6 +15,7 @@ import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { useUpdater } from '@/hooks/use-updater'
 import { updateRowView, type UpdateRowControl } from '@/lib/about-update-view'
 import { isActiveRecordingState, NO_VALUE } from '@/lib/format'
+import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import { releaseTrackLabel } from '@/lib/release-track'
 import {
   openVideorcWebLink,
@@ -25,7 +25,7 @@ import {
 
 /**
  * Where Videorc lives on the web (plan 174 I-21). "Contact support" waits for
- * a support address the app does not have yet.
+ * a support address the app does not have yet (an owner call, S3.18).
  */
 const ABOUT_LINKS: ReadonlyArray<{ title: string; context: string; url: string }> = [
   { title: 'Website', context: 'videorc.com', url: VIDEORC_WEB_LINKS.home },
@@ -42,11 +42,15 @@ export function AboutSettings({ onShowWhatsNew }: { onShowWhatsNew: () => void }
 
       <PanelSection description="Get help or report a problem." title="Support">
         <FieldGroup variant="grouped">
+          {/* The support bundle's one home is Health (plan 174 S3.18, I-1, D9);
+              About sends the streamer there. */}
           <SettingsRow
-            description="Redacted logs and Health's checks in one file, to send with a problem report."
+            description="Export it from Health: redacted logs and Health's checks in one file, to send with a problem report."
             label="Support bundle"
           >
-            <SupportBundleButton />
+            <Button size="sm" type="button" variant="outline" onClick={openHealth}>
+              {OPEN_HEALTH_LABEL}
+            </Button>
           </SettingsRow>
         </FieldGroup>
         <GroupedList label="Links">
