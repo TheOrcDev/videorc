@@ -541,7 +541,15 @@ release|candidate:<id>] [--privacy unlisted]` from any dev machine:
 on-demand run started from the owner's Mac publishes a report with no
 secrets (redaction test run on the published files).
 
-### U11 — Schedule
+### U11 — Schedule — BUILT
+
+Built on branch `plan-178/u11`: `live:schedule tick | status |
+install-agent | uninstall-agent`, `config/live-lab/schedule.json` (D9 table,
+report window 6 h), `lib/schedule-{time,table,plan,state,actions,tick,status,agent}.mjs`
++ tests (DST, grace, missed, lock deferral, policy off, state, plist), plist
+`ExitTimeOut` 90, runbook section 8. Owed on the lab machine:
+`install-agent` as `videorc-lab`, the admin's `pmset repeat`, and one
+untouched D9 day (needs U6 `run.mjs`, U9 scenarios, U10 `publish.mjs`).
 
 **Files:** `config/live-lab/com.videorc.live-lab.plist` (template),
 `scripts/live-lab/schedule.mjs` + tests, `package.json` script

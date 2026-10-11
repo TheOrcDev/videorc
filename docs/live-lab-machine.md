@@ -180,16 +180,84 @@ policy (FAIL), unplug the dummy (FAIL), then put everything back and get all
 PASS. The remaining SKIPs (quota counter, build under test, fault rules) are
 filled by U8, U6 and U13.
 
-## 8. Schedule (after U11 lands)
+## 8. Schedule
 
-As `videorc-lab`:
+The schedule is one launchd agent in the lab user's GUI session
+(`config/live-lab/com.videorc.live-lab.plist`). It runs
+`scripts/live-lab/schedule.mjs tick` every 300 s and once at login. Each tick
+reads the policy (`enabled` and `schedule.enabled` must both be true, slots are
+read in `schedule.timezone`) and the table in `config/live-lab/schedule.json`
+(D9):
+
+| Local time | Slot           | What runs                                                |
+| ---------- | -------------- | -------------------------------------------------------- |
+| 04:00      | `update-check` | `live:install --build release` under the run lock        |
+| 04:30      | `churn`        | `live:run --scenario churn --trigger schedule`           |
+| 06:00      | `marathon`     | `live:run --scenario marathon` (`marathonHours` 4)       |
+| 11:00      | `idle`         | `live:run --scenario idle`                               |
+| 13:30      | `report`       | `live:publish --since <last good report>` (6 h window)   |
+
+A slot runs once a day, inside its window (slot time plus 15 minutes unless
+the table says otherwise). A slot whose window closes unrun (machine off,
+asleep, or still busy with the run before it) is recorded as `missed` and
+skipped; it never runs late. When the run lock is held (an on-demand run), the
+slot is `deferred-lock` and retried on the next tick while its window lasts.
+The tick runs each slot to completion; launchd never starts a second instance
+of the agent while one runs (a `StartInterval` firing during a run is
+skipped), and the tick holds `~/videorc-live-lab/schedule-tick.lock` against a
+hand-typed `tick`. Scenario parameters reach `live:run` as JSON in
+`VIDEORC_LIVE_LAB_SCENARIO_PARAMS`.
+
+The report slot has a 6 h window so a long marathon cannot starve it. When the
+marathon moves to 8 h (D9, after two weeks) it runs past 11:00 and the idle
+slot is recorded as missed on those days; move idle in the table then.
+
+Install it as `videorc-lab` (the command refuses any other user):
 
 ```sh
-cp ~/videorc/config/live-lab/com.videorc.live-lab.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.videorc.live-lab.plist
+cd ~/videorc
+pnpm live:schedule install-agent
 ```
 
-As admin, the weekly reboot: `sudo pmset repeat restart Sun 03:30:00`.
+It renders the template with this checkout's paths into
+`~/Library/LaunchAgents/com.videorc.live-lab.plist`, creates
+`~/videorc-live-lab/logs` (launchd does not create the folder of its log
+file), lints the plist and runs `launchctl bootstrap gui/$(id -u)`. It refuses
+while a run holds the run lock, because replacing the agent would kill the
+run (`--force` overrides). `pnpm live:schedule uninstall-agent` boots it out
+and removes the file.
+
+Check it:
+
+```sh
+pnpm live:schedule status          # add --json for agents, --no-control offline
+```
+
+`status` prints today's and tomorrow's slots with their outcomes, the last 7
+run folders with their verdicts, today's lab quota, the run lock, the STOP
+file, `control.json`, the last tick and the last boot doctor. Files:
+
+- `~/videorc-live-lab/schedule-state.json`: what ran on which day (14 days);
+- `~/videorc-live-lab/logs/schedule.log`: the tick's own lines (launchd);
+- `~/videorc-live-lab/logs/schedule-<date>.log`: each slot's full output
+  (30 days kept);
+- `~/videorc-live-lab/doctor/boot-<time>.txt`: the doctor run after each boot.
+
+Weekly reboot, as the **admin** account (once):
+
+```sh
+sudo pmset repeat restart U 03:30:00
+pmset -g sched                     # shows the repeating restart
+```
+
+`U` is Sunday. Auto-login brings the lab user's session back, the agent's
+login tick runs `live:doctor` once for the new boot and keeps the output for
+the next report, and the 04:00 slot follows as usual.
+
+To pause the schedule without touching anything else, the owner sets
+`schedule.enabled: false` in the policy; the tick then records
+`schedule-disabled` and does nothing. The STOP file and `control.json` stop
+scheduled runs the same way they stop any run.
 
 ## Stopping everything
 
