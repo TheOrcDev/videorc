@@ -47,3 +47,14 @@ export const USE_FOR_GO_LIVE_LABEL = 'Use for Go Live…'
 /** Settings → Shortcuts: the record key and the global Go Live hotkey. */
 export const RECORD_SHORTCUT_LABEL = 'Record / stop recording'
 export const GO_LIVE_SHORTCUT_LABEL = 'Go Live / end livestream'
+
+/**
+ * Go Live asked with no destination ready (plan 174 S3.1): the hotkey, ⌘K
+ * and a remote get this refusal with its one fix, never "Streaming is not
+ * configured". The Studio button is disabled with the same fact instead.
+ */
+export const GO_LIVE_NO_DESTINATION_TITLE = 'Set up a destination to go live'
+export const OPEN_LIVESTREAM_LABEL = 'Open Livestream'
+
+/** The Go Live button while its first checks run, from the first click (B-7). */
+export const GO_LIVE_CHECKING_LABEL = 'Checking…'

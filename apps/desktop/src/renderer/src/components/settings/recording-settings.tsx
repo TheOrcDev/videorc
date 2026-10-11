@@ -201,7 +201,7 @@ export function RecordingSettings(): ReactElement {
         <NavigableRow
           icon={LivestreamIcon}
           label="Stream destinations"
-          value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
+          value={streamingSummary(captureConfig.streaming.targets)}
           onNavigate={() => openStudioPanel('live')}
         />
       </GroupedList>

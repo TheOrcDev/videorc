@@ -19,8 +19,8 @@ describe('global layout shortcuts', () => {
   it('dispatches every layout action exactly once without microphone fallback', () => {
     const context = {
       sessionActive: false,
-      streamEnabled: false,
-      startSession: vi.fn(),
+      startRecording: vi.fn(async () => true),
+      startLivestream: vi.fn(async () => false),
       stopSession: vi.fn(),
       toggleMicrophoneMute: vi.fn(),
       markClip: vi.fn(),
@@ -36,6 +36,40 @@ describe('global layout shortcuts', () => {
     executeGlobalShortcut('invalid' as GlobalShortcutAction, context)
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
     expect(context.switchLayout).toHaveBeenCalledTimes(12)
+    expect(context.startRecording).not.toHaveBeenCalled()
+    expect(context.startLivestream).not.toHaveBeenCalled()
+  })
+
+  // Plan 174 S3.1 (B-3, A-3): the record key records and the Go Live key goes
+  // live, whatever mode was saved last; while a session runs both stop it.
+  // The hotkey never refuses on its own: a Go Live with no destination is the
+  // provider's refusal ("Set up a destination to go live"), not the key's.
+  it('starts the explicit intents idle and stops the session while active', () => {
+    const idle = {
+      sessionActive: false,
+      startRecording: vi.fn(async () => true),
+      startLivestream: vi.fn(async () => false),
+      stopSession: vi.fn(async () => true),
+      toggleMicrophoneMute: vi.fn()
+    }
+    executeGlobalShortcut('record-toggle', idle)
+    expect(idle.startRecording).toHaveBeenCalledOnce()
+    expect(idle.startLivestream).not.toHaveBeenCalled()
+    executeGlobalShortcut('stream-toggle', idle)
+    expect(idle.startLivestream).toHaveBeenCalledOnce()
+    expect(idle.startRecording).toHaveBeenCalledOnce()
+    expect(idle.stopSession).not.toHaveBeenCalled()
+    expect(toast.warning).not.toHaveBeenCalledWith(
+      'Set up a destination to go live',
+      expect.anything()
+    )
+
+    const active = { ...idle, sessionActive: true, stopSession: vi.fn(async () => true) }
+    executeGlobalShortcut('record-toggle', active)
+    executeGlobalShortcut('stream-toggle', active)
+    expect(active.stopSession).toHaveBeenCalledTimes(2)
+    expect(active.startRecording).toHaveBeenCalledOnce()
+    expect(active.startLivestream).toHaveBeenCalledOnce()
   })
   it('keeps stable IDs, unassigned defaults and validates unknown actions', () => {
     expect(globalShortcutEntries({})).toHaveLength(17)
@@ -62,8 +96,8 @@ describe('global layout shortcuts', () => {
 describe('system audio shortcut', () => {
   const base = () => ({
     sessionActive: false,
-    streamEnabled: false,
-    startSession: vi.fn(),
+    startRecording: vi.fn(),
+    startLivestream: vi.fn(),
     stopSession: vi.fn(),
     toggleMicrophoneMute: vi.fn(),
     setSystemAudioEnabled: vi.fn()
@@ -78,7 +112,8 @@ describe('system audio shortcut', () => {
     expect(on.setSystemAudioEnabled).toHaveBeenCalledExactlyOnceWith(false)
     expect(off.toggleMicrophoneMute).not.toHaveBeenCalled()
     expect(on.toggleMicrophoneMute).not.toHaveBeenCalled()
-    expect(off.startSession).not.toHaveBeenCalled()
+    expect(off.startRecording).not.toHaveBeenCalled()
+    expect(off.startLivestream).not.toHaveBeenCalled()
   })
 
   it('is a no-op that says why when the device cannot run', () => {

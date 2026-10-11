@@ -107,7 +107,6 @@ const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/components/streaming/go-live-panel.tsx': 1,
   'src/components/studio/session-panel.tsx': 3,
   'src/components/tabs/diagnostics-tab.tsx': 13,
-  'src/components/tabs/studio-tab.tsx': 2,
   'src/hooks/use-scheduled-streams.ts': 3,
   'src/hooks/use-studio.tsx': 15,
   'src/lib/backend-transport.ts': 3,

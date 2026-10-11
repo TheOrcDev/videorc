@@ -11,10 +11,12 @@ import {
   END_LIVESTREAM_ARMED_TOAST,
   END_LIVESTREAM_ARMED_TOAST_ID,
   END_LIVESTREAM_ARM_WINDOW_MS,
+  exitForStopOrigin,
   stopDecision,
   type SessionStopConfirmation,
   type SessionStopOrigin
 } from '@/lib/session-stop'
+import type { AppExitKind } from '@/lib/backend'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -173,11 +175,21 @@ import {
   decideCancelGoLiveConfirmation,
   decideContinueGoLiveWithReadyDestinations,
   decideGoLivePreflight,
-  decideGoLiveStart,
   decidePreparedGoLiveSetup,
+  shouldIgnoreGoLiveAction,
   type GoLivePartialSetup,
   type GoLiveSetupFailure
 } from '@/lib/go-live-flow'
+import {
+  RECORD_INTENT,
+  captureConfigForIntent,
+  livestreamIntent,
+  sameSessionStartIntent,
+  savedModeIntent,
+  type SessionStartIntent
+} from '@/lib/session-start-intent'
+import { GO_LIVE_NO_DESTINATION_TITLE, OPEN_LIVESTREAM_LABEL } from '@/lib/go-live-copy'
+import { RECORDING_STOP_FINALIZE_OVERRUN_CODE } from '@/lib/studio-session-view'
 import {
   isYouTubeChannelAuthFailure,
   shouldAutoRefreshYouTubeChannels
@@ -1239,6 +1251,14 @@ export type StudioContextValue = {
   goLivePartialSetup: GoLivePartialSetup | null
   goLiveCaptionsReadiness: GoLiveCaptionsReadiness
   continueGoLiveWithoutCaptions: () => void
+  /**
+   * What the starting or running session was asked to do (plan 174 S3.1):
+   * the explicit Record or Go Live intent, or null when this renderer did
+   * not start it. Clears when the session ends.
+   */
+  sessionStartIntent: SessionStartIntent | null
+  /** The stop overran its finalize window: the warning under Force stop (B-16). */
+  sessionStopOverrun: boolean
   // preview + audio
   previewUrl: string | null
   previewLoading: boolean
@@ -1436,15 +1456,18 @@ export type StudioContextValue = {
   armWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
   disarmWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
   warmMicrophone: WarmMicrophoneStatus | null
+  /** A start in the saved output mode: the smoke harness's hook, nothing in the app. */
   startSession: () => Promise<boolean>
   /**
-   * The Studio transport's two starts, which ⌘K offers too (plan 174 S2.2,
-   * D3). Record starts a recording; Go Live… opens the Go Live dialog. Each
-   * sets the saved output mode, as the Studio buttons always have, and then
-   * starts.
+   * The Studio transport's two starts, which ⌘K, the hotkeys and the remotes
+   * share (plan 174 S2.2 D3, S3.1 B-3). Record starts a local take; Go Live…
+   * opens the Go Live dialog, and records too only when the Output page's
+   * "Save local recording" is on. Neither writes the saved output mode. A
+   * start that cannot run says why and resolves false; one that only opened
+   * the dialog resolves false too.
    */
-  startRecording: () => void
-  startLivestream: () => void
+  startRecording: () => Promise<boolean>
+  startLivestream: () => Promise<boolean>
   stopSession: () => Promise<boolean>
   /**
    * Every stop path goes through here (plan 174 S0.1, D2). A recording stops
@@ -1484,6 +1507,14 @@ export type StudioContextValue = {
   startBlockedReason: string | null
   canStart: boolean
   canStop: boolean
+  /**
+   * Why each transport button is off right now (plan 174 S3.1, B-9): the
+   * one function behind both, asked for the record intent and the Go Live
+   * intent. Null when that start can run.
+   */
+  recordBlockedReason: string | null
+  liveStreamBlockedReason: string | null
+  /** The reason the Session section shows while nothing runs: Record's first, else Go Live's. */
   visibleStartBlockedReason: string | null
   selectedCaptureDevice?: Device
   selectedCamera?: Device
@@ -3384,31 +3415,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsForSession, setSuppressCaptionsForSession] = useState(false)
-  const captionOutputReadiness = useMemo(() => {
-    const streamVideos = streamOutputVideosForTargets(
-      captureConfig.video,
-      captureConfig.streamEnabled ? captureConfig.streaming : undefined,
-      providerStreamOutputPlanOptions(captureConfig)
-    ).map(({ video }) => video)
-    return captionSessionOutputReadiness({
-      burnTarget: captureConfig.captions.burnTarget,
-      recordEnabled: captureConfig.recordEnabled,
-      streamEnabled: captureConfig.streamEnabled,
-      recordingVideo: captureConfig.video,
-      streamVideos
-    })
-  }, [captureConfig])
+  // Plan 174 S3.1: the intent behind the starting or running session, so
+  // the captions runtime reads what the session does rather than the saved
+  // mode; null once it ends or when another client started it.
+  const [activeStartIntent, setActiveStartIntent] = useState<SessionStartIntent | null>(null)
+  // B-16: the backend said the stop overran its finalize window; cleared by
+  // the next status that is not `stopping`.
+  const [stopOverrun, setStopOverrun] = useState(false)
+  // B-7: one Go Live preflight at a time, from the first click.
+  const openGoLiveConfirmationInFlightRef = useRef<Promise<void> | null>(null)
+  const captionReadinessForIntent = useCallback(
+    (intent: SessionStartIntent) => {
+      const config = captureConfigForIntent(captureConfig, intent)
+      const streamVideos = streamOutputVideosForTargets(
+        config.video,
+        config.streamEnabled ? config.streaming : undefined,
+        providerStreamOutputPlanOptions(config)
+      ).map(({ video }) => video)
+      return captionSessionOutputReadiness({
+        burnTarget: config.captions.burnTarget,
+        recordEnabled: config.recordEnabled,
+        streamEnabled: config.streamEnabled,
+        recordingVideo: config.video,
+        streamVideos
+      })
+    },
+    [captureConfig]
+  )
+  const captionOutputReadiness = useMemo(
+    () => captionReadinessForIntent(activeStartIntent ?? savedModeIntent(captureConfig)),
+    [activeStartIntent, captionReadinessForIntent, captureConfig]
+  )
+  // The Go Live dialog asks about a Go Live, whatever the saved mode is.
+  const goLiveCaptionOutputReadiness = useMemo(
+    () => captionReadinessForIntent(livestreamIntent(captureConfig.recordEnabled)),
+    [captionReadinessForIntent, captureConfig.recordEnabled]
+  )
   const goLiveCaptionsReadiness = useMemo(
     () =>
       decideGoLiveCaptionsReadiness({
         persistedEnabled: captureConfig.captions.enabled,
         suppressForSession: suppressCaptionsForSession,
         capabilities: aiCapabilities,
-        outputReadiness: captionOutputReadiness
+        outputReadiness: goLiveCaptionOutputReadiness
       }),
     [
       aiCapabilities,
-      captionOutputReadiness,
+      goLiveCaptionOutputReadiness,
       captureConfig.captions.enabled,
       suppressCaptionsForSession
     ]
@@ -3745,6 +3798,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     settings: SettingsState
     streamingOverride?: StreamingSettings
     suppressCaptionsForSession: boolean
+    intent: SessionStartIntent
     promise: Promise<boolean>
   } | null>(null)
   const confirmGoLiveInFlightPromiseRef = useRef<Promise<void> | null>(null)
@@ -5144,6 +5198,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recordingRef.current = status
       if (!['recording', 'streaming'].includes(status.state)) {
         toast.dismiss('recording-degraded')
+      }
+      if (!isActiveRecordingState(status.state)) {
+        // Plan 174 S3.1: whatever ended the session, an armed hotkey press
+        // means nothing now, and the next start brings its own intent.
+        endLivestreamArmedAtRef.current = null
+        toast.dismiss(END_LIVESTREAM_ARMED_TOAST_ID)
+        setActiveStartIntent(null)
+      }
+      if (status.state !== 'stopping') {
+        setStopOverrun(false)
       }
       sourceStatusUnknownRef.current = false
       setSourceStatusKnown(true)
@@ -6973,6 +7037,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bootstrapGuard.mark('sessions')
         const event = payload as HealthEvent
         setHealthEvents((current) => [event, ...current].slice(0, 40))
+        if (event.code === RECORDING_STOP_FINALIZE_OVERRUN_CODE) {
+          // B-16: the Studio explains Force stop while the stop drags on.
+          setStopOverrun(true)
+        }
         const systemAudioIssue = systemAudioIssueFromHealthEvent(event)
         const systemAudioIssueSessionId = event.sessionId ?? recordingRef.current.sessionId
         if (systemAudioIssue && systemAudioIssueSessionId) {
@@ -10682,23 +10750,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
 
   const outputEnabled = captureConfig.recordEnabled || captureConfig.streamEnabled
-  const profileCompatibility = videoProfileCompatibility(captureConfig)
   const streamReady =
     !captureConfig.streamEnabled || areEnabledStreamTargetsStartReady(captureConfig.streaming)
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
-  const goLiveEntitlement = captureConfig.streamEnabled
-    ? goLiveEntitlementGate({ entitlements, streaming: captureConfig.streaming })
-    : { allowed: true as const }
-  const recordingProfileEntitlement = captureConfig.recordEnabled
-    ? videoProfileEntitlementGate({
-        entitlements,
-        kind: 'recording',
-        video: captureConfig.video
-      })
-    : { allowed: true as const }
-  const streamingProfileEntitlement = captureConfig.streamEnabled
-    ? resolvedStreamingProfileEntitlementGate(captureConfig, entitlements)
-    : { allowed: true as const }
   const isSessionActive =
     isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
   const mixingSessionActive =
@@ -10743,7 +10797,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const currentStreamOutputTopology =
     useMemo((): GoLiveOutput.StreamOutputTopologyRequest | null => {
-      if (!captureConfig.streamEnabled) {
+      // Go Live is an explicit start (plan 174 S3.1): the output check runs
+      // whenever a destination is ready, not only in a saved streaming mode.
+      if (!areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
         return null
       }
       if (rejectedStreamOutputSplitKeys.size > 0 && goLiveOutputChunk) {
@@ -12210,60 +12266,93 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus
   ])
 
-  const startBlockedReason = (() => {
-    if (wsStatus !== 'connected') {
-      return `Backend socket is ${wsStatus}.`
-    }
-    if (isSessionActive) {
-      return 'A capture session is already active.'
-    }
-    if (!outputEnabled) {
-      return 'Enable Record MKV, Stream RTMP, or both before starting.'
-    }
-    if (!recordingProfileEntitlement.allowed) {
-      return recordingProfileEntitlement.reason
-    }
-    if (!streamingProfileEntitlement.allowed) {
-      return streamingProfileEntitlement.reason
-    }
-    if (profileCompatibility.blockingReason) {
-      return profileCompatibility.blockingReason
-    }
-    if (captureConfig.streamEnabled && livestreamingEntitlementReason) {
-      return livestreamingEntitlementReason
-    }
-    if (captureConfig.streamEnabled && !goLiveEntitlement.allowed) {
-      return goLiveEntitlement.reason
-    }
-    if (captureConfig.streamEnabled && !streamReady) {
-      return captureConfig.streaming.targets.some((target) => target.enabled)
-        ? 'Finish manual livestream destination setup before streaming.'
-        : 'Enable at least one livestream destination before streaming.'
-    }
-    if (!health) {
-      return 'Checking FFmpeg before starting.'
-    }
-    if (!health.ffmpeg.available) {
-      return health.ffmpeg.message ?? 'FFmpeg is not available.'
-    }
-    // Only a finished verdict blocks here. A check that is still running or
-    // failed is settled when Go Live is pressed: the start waits for it.
-    if (
-      captureConfig.streamEnabled &&
-      currentStreamOutputTopologyRequestKey &&
-      streamOutputTopologyPreflight.state === 'ready'
-    ) {
-      const topologyReason = streamOutputTopologyBlockReason(
-        streamOutputTopologyPreflight,
-        currentStreamOutputTopologyRequestKey
-      )
-      if (topologyReason) {
-        return topologyReason
+  // Why a start cannot run, for the intent asked (plan 174 S3.1, B-3 and
+  // B-9): one function behind the Record button, the Go Live button, the
+  // hotkeys, ⌘K and the remotes, read with that start's own flags rather
+  // than the saved mode.
+  const startBlockedReasonFor = useCallback(
+    (intent: SessionStartIntent): string | null => {
+      if (wsStatus !== 'connected') {
+        return `Backend socket is ${wsStatus}.`
       }
-    }
+      if (isSessionActive) {
+        return 'A capture session is already active.'
+      }
+      if (!intent.record && !intent.stream) {
+        return 'Enable Record MKV, Stream RTMP, or both before starting.'
+      }
+      const config = captureConfigForIntent(captureConfig, intent)
+      const recordingProfileGate = intent.record
+        ? videoProfileEntitlementGate({ entitlements, kind: 'recording', video: config.video })
+        : { allowed: true as const }
+      if (!recordingProfileGate.allowed) {
+        return recordingProfileGate.reason
+      }
+      const streamingProfileGate = intent.stream
+        ? resolvedStreamingProfileEntitlementGate(config, entitlements)
+        : { allowed: true as const }
+      if (!streamingProfileGate.allowed) {
+        return streamingProfileGate.reason
+      }
+      const compatibility = videoProfileCompatibility(config)
+      if (compatibility.blockingReason) {
+        return compatibility.blockingReason
+      }
+      if (intent.stream && livestreamingEntitlementReason) {
+        return livestreamingEntitlementReason
+      }
+      if (intent.stream) {
+        const goLiveGate = goLiveEntitlementGate({ entitlements, streaming: config.streaming })
+        if (!goLiveGate.allowed) {
+          return goLiveGate.reason
+        }
+        if (!areEnabledStreamTargetsStartReady(config.streaming)) {
+          return config.streaming.targets.some((target) => target.enabled)
+            ? 'Finish manual livestream destination setup before streaming.'
+            : 'Enable at least one livestream destination before streaming.'
+        }
+      }
+      if (!health) {
+        return 'Checking FFmpeg before starting.'
+      }
+      if (!health.ffmpeg.available) {
+        return health.ffmpeg.message ?? 'FFmpeg is not available.'
+      }
+      // Only a finished verdict blocks here. A check that is still running or
+      // failed is settled when Go Live is pressed: the start waits for it.
+      if (
+        intent.stream &&
+        currentStreamOutputTopologyRequestKey &&
+        streamOutputTopologyPreflight.state === 'ready'
+      ) {
+        const topologyReason = streamOutputTopologyBlockReason(
+          streamOutputTopologyPreflight,
+          currentStreamOutputTopologyRequestKey
+        )
+        if (topologyReason) {
+          return topologyReason
+        }
+      }
 
-    return null
-  })()
+      return null
+    },
+    [
+      captureConfig,
+      currentStreamOutputTopologyRequestKey,
+      entitlements,
+      health,
+      isSessionActive,
+      livestreamingEntitlementReason,
+      streamOutputTopologyPreflight,
+      wsStatus
+    ]
+  )
+  /** The saved output mode's reason: `canStart` and the smokes' `streamingState()`. */
+  const startBlockedReason = startBlockedReasonFor(savedModeIntent(captureConfig))
+  const recordBlockedReason = startBlockedReasonFor(RECORD_INTENT)
+  const liveStreamBlockedReason = startBlockedReasonFor(
+    livestreamIntent(captureConfig.recordEnabled)
+  )
 
   const activatePreparedYouTubeBroadcasts = useCallback(
     async (streamingForStart: StreamingSettings, runId: number, sessionId?: string) => {
@@ -13104,14 +13193,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const runStartSessionRef = useRef<
     | ((
         streamingOverride?: StreamingSettings,
-        preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null
+        preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
+        intent?: SessionStartIntent
       ) => Promise<boolean>)
     | null
   >(null)
   const runStartSession = useCallback(
     (
       streamingOverride?: StreamingSettings,
-      preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null
+      preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
+      // Plan 174 S3.1: what this start asks for; the saved mode only for the
+      // smokes' hook, never for a transport button.
+      intent: SessionStartIntent = savedModeIntent(captureConfig)
     ) => {
       recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
@@ -13120,7 +13213,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sceneEditMode,
         settings,
         streamingOverride,
-        suppressCaptionsForSession
+        suppressCaptionsForSession,
+        intent
       }
       const pendingStart = sessionStartInFlightRef.current
       if (pendingStart) {
@@ -13130,7 +13224,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           pendingStart.sceneEditMode === requestSnapshot.sceneEditMode &&
           pendingStart.settings === requestSnapshot.settings &&
           pendingStart.streamingOverride === requestSnapshot.streamingOverride &&
-          pendingStart.suppressCaptionsForSession === requestSnapshot.suppressCaptionsForSession
+          pendingStart.suppressCaptionsForSession === requestSnapshot.suppressCaptionsForSession &&
+          sameSessionStartIntent(pendingStart.intent, requestSnapshot.intent)
         if (sameRequest) {
           return pendingStart.promise
         }
@@ -13150,9 +13245,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
           return false
         }
-        if (startBlockedReason) {
-          if (startBlockedReason && !isSessionActive) {
-            reportError(new Error(startBlockedReason))
+        const blockedReason = startBlockedReasonFor(intent)
+        if (blockedReason) {
+          if (!isSessionActive) {
+            reportError(new Error(blockedReason))
           }
           return false
         }
@@ -13162,8 +13258,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         try {
           setLastError(null)
           noteSessionStartAttempt()
+          setActiveStartIntent(intent)
           streamingForStart = streamingOverride ?? null
-          let sessionCaptureConfig = captureConfig
+          // The session is built from the intent, never from the saved mode.
+          let sessionCaptureConfig = captureConfigForIntent(captureConfig, intent)
           if (streamingForStart) {
             const output = preparedOutput
               ? { ...preparedOutput, streaming: streamingForStart }
@@ -13173,7 +13271,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
             streamingForStart = output.streaming
             sessionCaptureConfig = {
-              ...captureConfig,
+              ...sessionCaptureConfig,
               video: output.video,
               streaming: output.streaming
             }
@@ -13442,12 +13540,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           reportSessionStartFailure(
             error,
             () => {
-              void runStartSessionRef.current?.(streamingOverride, preparedOutput)
+              void runStartSessionRef.current?.(streamingOverride, preparedOutput, intent)
             },
             Boolean(streamingOverride)
           )
           if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
             applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
+          }
+          if (!isActiveRecordingState(recordingRef.current.state)) {
+            setActiveStartIntent(null)
           }
           return false
         } finally {
@@ -13488,7 +13589,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       settlePreparedPlatformLifecycle,
       settlePreviousPlatformLifecycle,
       settleStreamOutputTopology,
-      startBlockedReason,
+      startBlockedReasonFor,
       suppressCaptionsForSession,
       validatePlatformAccountsForClient
     ]
@@ -13814,123 +13915,187 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ]
   )
 
-  const openGoLiveConfirmation = useCallback(async () => {
-    if (!client) {
+  // A start asked from ⌘K, a hotkey or a remote while it cannot run (plan 174
+  // S3.1): a refusal with its one fix, never an error, and never a mode of
+  // the caller's own. The Studio buttons are disabled with the same reason.
+  const refuseStart = useCallback((reason: string, intent: SessionStartIntent) => {
+    if (intent.stream && !areEnabledStreamTargetsStartReady(captureConfigRef.current.streaming)) {
+      toast.warning(GO_LIVE_NO_DESTINATION_TITLE, {
+        id: 'go-live-no-destination',
+        action: { label: OPEN_LIVESTREAM_LABEL, onClick: () => openWorkspaceTab('live') }
+      })
       return
     }
-    if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
-      return
-    }
-    if (startBlockedReason) {
-      if (startBlockedReason && !isSessionActive) {
-        reportError(new Error(startBlockedReason))
-      }
-      return
-    }
+    toast.warning(reason, { id: 'session-start-blocked' })
+  }, [])
 
-    try {
-      setLastError(null)
-      setGoLivePartialSetup(null)
-      setSuppressCaptionsForSession(false)
-      setGoLiveConfirmationPending(true)
-      // Settle the output check before anything is prepared on a platform.
-      const topology = await settleStreamOutputTopology(captureConfig.streaming)
-      if (topology.reason) {
-        throw new Error(topology.reason)
+  const openGoLiveConfirmationRef = useRef<((intent: SessionStartIntent) => Promise<void>) | null>(
+    null
+  )
+  const openGoLiveConfirmation = useCallback(
+    (intent: SessionStartIntent): Promise<void> => {
+      // One preflight at a time (B-7): a second click joins the first.
+      const pending = openGoLiveConfirmationInFlightRef.current
+      if (pending) {
+        return pending
       }
-      if (streamMetadataDraft) {
-        const saved = await client.request<StreamMetadataDraft>(
-          'streamTargets.metadata.update',
-          streamMetadataDraft
-        )
-        setStreamMetadataDraft(saved)
-        const validation = await client.request<StreamMetadataValidation>(
-          'streamTargets.metadata.validate',
-          saved
-        )
-        setStreamMetadataValidation(validation)
+      if (!client) {
+        return Promise.resolve()
       }
-      const [preflight] = await Promise.all([
-        client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
-          scheduledEventIds: Object.fromEntries(
-            captureConfig.streaming.targets
-              .filter((t) => t.enabled && t.scheduledEventId)
-              .map((t) => [t.id, t.scheduledEventId])
-          ),
-          streaming: captureConfig.streaming
-        }),
-        captureConfig.captions.enabled
-          ? client
-              .request<AiCapabilities>('ai.capabilities.get')
-              .then((capabilities) => {
-                setAiCapabilities(capabilities)
-                setAiReadinessError(null)
-              })
-              .catch((error: unknown) => {
-                setAiCapabilities(null)
-                setAiReadinessError(error instanceof Error ? error.message : String(error))
-              })
-          : Promise.resolve()
-      ])
-      setGoLivePreflight(preflight)
-      setGoLiveConfirmationOpen(true)
-    } catch (error) {
-      reportError(error)
-    } finally {
-      setGoLiveConfirmationPending(false)
-    }
-  }, [
-    captureConfig.captions.enabled,
-    captureConfig.streaming,
-    client,
-    isSessionActive,
-    reportError,
-    settlePreviousPlatformLifecycle,
-    settleStreamOutputTopology,
-    startBlockedReason,
-    streamMetadataDraft
-  ])
+      const preflightRun = (async (): Promise<void> => {
+        try {
+          // "Checking…" from the first click (B-7), before the first await.
+          setGoLiveConfirmationPending(true)
+          if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
+            return
+          }
+          const blockedReason = startBlockedReasonFor(intent)
+          if (blockedReason) {
+            if (!isSessionActive) {
+              refuseStart(blockedReason, intent)
+            }
+            return
+          }
+          setLastError(null)
+          setGoLivePartialSetup(null)
+          setSuppressCaptionsForSession(false)
+          // Settle the output check before anything is prepared on a platform.
+          const topology = await settleStreamOutputTopology(captureConfig.streaming)
+          if (topology.reason) {
+            throw new Error(topology.reason)
+          }
+          if (streamMetadataDraft) {
+            const saved = await client.request<StreamMetadataDraft>(
+              'streamTargets.metadata.update',
+              streamMetadataDraft
+            )
+            setStreamMetadataDraft(saved)
+            const validation = await client.request<StreamMetadataValidation>(
+              'streamTargets.metadata.validate',
+              saved
+            )
+            setStreamMetadataValidation(validation)
+          }
+          const [preflight] = await Promise.all([
+            client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
+              scheduledEventIds: Object.fromEntries(
+                captureConfig.streaming.targets
+                  .filter((t) => t.enabled && t.scheduledEventId)
+                  .map((t) => [t.id, t.scheduledEventId])
+              ),
+              streaming: captureConfig.streaming
+            }),
+            captureConfig.captions.enabled
+              ? client
+                  .request<AiCapabilities>('ai.capabilities.get')
+                  .then((capabilities) => {
+                    setAiCapabilities(capabilities)
+                    setAiReadinessError(null)
+                  })
+                  .catch((error: unknown) => {
+                    setAiCapabilities(null)
+                    setAiReadinessError(error instanceof Error ? error.message : String(error))
+                  })
+              : Promise.resolve()
+          ])
+          setGoLivePreflight(preflight)
+          setGoLiveConfirmationOpen(true)
+        } catch (error) {
+          // A preflight that fails is a refused Go Live (B-7): the same
+          // persistent surface as a refused start, and Retry runs the
+          // checks again.
+          reportSessionStartFailure(
+            error,
+            () => {
+              void openGoLiveConfirmationRef.current?.(intent)
+            },
+            true
+          )
+        } finally {
+          setGoLiveConfirmationPending(false)
+        }
+      })()
+      openGoLiveConfirmationInFlightRef.current = preflightRun
+      const clearPreflightRun = () => {
+        if (openGoLiveConfirmationInFlightRef.current === preflightRun) {
+          openGoLiveConfirmationInFlightRef.current = null
+        }
+      }
+      void preflightRun.then(clearPreflightRun, clearPreflightRun)
+      return preflightRun
+    },
+    [
+      captureConfig.captions.enabled,
+      captureConfig.streaming,
+      client,
+      isSessionActive,
+      refuseStart,
+      reportSessionStartFailure,
+      settlePreviousPlatformLifecycle,
+      settleStreamOutputTopology,
+      startBlockedReasonFor,
+      streamMetadataDraft
+    ]
+  )
+  openGoLiveConfirmationRef.current = openGoLiveConfirmation
 
-  const startSession = useCallback(async () => {
-    if (decideGoLiveStart(captureConfig.streamEnabled) === 'open-confirmation') {
-      await openGoLiveConfirmation()
-      return false
-    }
-    return runStartSession()
-  }, [captureConfig.streamEnabled, openGoLiveConfirmation, runStartSession])
-
-  // The Studio transport's two starts, shared with ⌘K (plan 174 S2.2, D3).
-  // When a start changes the output mode (record vs go live), it sets the
-  // mode and starts on the next render, so startSession and its
-  // blocked-reason gate read the new streamEnabled instead of a stale
-  // closure value. When the mode already matches, it starts in the same
-  // task: the extra render and commit of the whole provider was a measurable
-  // slice of the Record click → recording path. Plan 174 S3.1 replaces the
-  // saved-mode write with explicit intents.
-  const [modeStartPending, setModeStartPending] = useState(false)
-  useEffect(() => {
-    if (!modeStartPending) {
-      return
-    }
-    setModeStartPending(false)
-    void startSession()
-  }, [modeStartPending, startSession])
-  const startRecording = useCallback(() => {
-    if (captureConfig.recordEnabled && !captureConfig.streamEnabled) {
-      void startSession()
-      return
-    }
-    setCaptureConfig((current) => ({ ...current, recordEnabled: true, streamEnabled: false }))
-    setModeStartPending(true)
-  }, [captureConfig.recordEnabled, captureConfig.streamEnabled, startSession])
-  const startLivestream = useCallback(() => {
-    if (captureConfig.streamEnabled) {
-      void startSession()
-      return
-    }
-    setCaptureConfig((current) => ({ ...current, streamEnabled: true }))
-    setModeStartPending(true)
-  }, [captureConfig.streamEnabled, startSession])
+  // Every start is an explicit intent (plan 174 S3.1, B-3): what it records
+  // and whether it streams travel with the start, and the saved output mode
+  // is never written. A Go Live in flight owns the transport: while its
+  // preflight runs, its dialog is open, or a start is running, Record, Space,
+  // the hotkeys, ⌘K and the remotes do nothing (B-14, the Phase 0 review).
+  const startWithIntent = useCallback(
+    async (intent: SessionStartIntent): Promise<boolean> => {
+      if (
+        goLiveConfirmationOpen ||
+        shouldIgnoreGoLiveAction({
+          goLiveConfirmationPending:
+            goLiveConfirmationPending ||
+            openGoLiveConfirmationInFlightRef.current !== null ||
+            confirmGoLiveInFlightPromiseRef.current !== null,
+          startRequestPending: startRequestPending || sessionStartInFlightRef.current !== null
+        })
+      ) {
+        return false
+      }
+      if (intent.stream) {
+        await openGoLiveConfirmation(intent)
+        return false
+      }
+      const blockedReason = startBlockedReasonFor(intent)
+      if (blockedReason) {
+        refuseStart(blockedReason, intent)
+        return false
+      }
+      return runStartSession(undefined, undefined, intent)
+    },
+    [
+      goLiveConfirmationOpen,
+      goLiveConfirmationPending,
+      openGoLiveConfirmation,
+      refuseStart,
+      runStartSession,
+      startBlockedReasonFor,
+      startRequestPending
+    ]
+  )
+  // The saved output mode, for the smoke harness's hook only.
+  const startSession = useCallback(
+    () =>
+      startWithIntent(
+        savedModeIntent({
+          recordEnabled: captureConfig.recordEnabled,
+          streamEnabled: captureConfig.streamEnabled
+        })
+      ),
+    [captureConfig.recordEnabled, captureConfig.streamEnabled, startWithIntent]
+  )
+  const startRecording = useCallback(() => startWithIntent(RECORD_INTENT), [startWithIntent])
+  // Go Live records too only when the Output page says so (D19).
+  const startLivestream = useCallback(
+    () => startWithIntent(livestreamIntent(captureConfig.recordEnabled)),
+    [captureConfig.recordEnabled, startWithIntent]
+  )
 
   const cancelGoLiveConfirmation = useCallback(() => {
     const decision = decideCancelGoLiveConfirmation({
@@ -14048,7 +14213,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
         setGoLiveConfirmationOpen(false)
-        await runStartSession(setupDecision.streaming, sessionOutput)
+        await runStartSession(
+          setupDecision.streaming,
+          sessionOutput,
+          livestreamIntent(captureConfigRef.current.recordEnabled)
+        )
       } catch (error) {
         // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
         // setup) is just as silent as a refused start: same persistent surface.
@@ -14108,7 +14277,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setGoLiveConfirmationPending(true)
       setGoLivePartialSetup(null)
       setGoLiveConfirmationOpen(false)
-      await runStartSession(decision.streaming, preparedGoLiveOutputRef.current)
+      await runStartSession(
+        decision.streaming,
+        preparedGoLiveOutputRef.current,
+        livestreamIntent(captureConfigRef.current.recordEnabled)
+      )
     } catch (error) {
       reportError(error)
     } finally {
@@ -14282,12 +14455,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [stopSession]
   )
   const confirmStopSession = useCallback(() => {
+    const exit = stopConfirmation ? exitForStopOrigin(stopConfirmation.origin) : null
     setStopConfirmation(null)
     // The confirm click is the user's stop: arm the latency clock here, not
     // at the click that only opened the question.
     noteRecordClick('stop')
-    void stopSession()
-  }, [noteRecordClick, stopSession])
+    const stopped = stopSession()
+    if (exit) {
+      // Plan 174 S3.1 (D2): the app was leaving. Now that the livestream is
+      // ending, let it: main held the quit or the close for this answer.
+      const leave = (): void => {
+        void window.videorc?.exitApp?.(exit)
+      }
+      void stopped.then(leave, leave)
+    }
+  }, [noteRecordClick, stopConfirmation, stopSession])
+  // Main asks before a quit or a main-window close ends a livestream (plan
+  // 174 S3.1, D2). Not live: nothing to protect, so the exit goes through at
+  // once. Live: the End livestream question, with "Keep streaming" focused.
+  const handleExitRequest = useEffectEvent((kind: AppExitKind) => {
+    if (!sessionIsLive(recordingRef.current)) {
+      void window.videorc?.exitApp?.(kind)
+      return
+    }
+    void requestStopSession(kind === 'quit' ? 'quit' : 'close-window')
+  })
+  useEffect(() => window.videorc?.onExitRequest?.((kind) => handleExitRequest(kind)), [])
   const cancelStopSession = useCallback(() => {
     setStopConfirmation(null)
   }, [])
@@ -14954,13 +15147,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus === 'connected' &&
     ['recording', 'streaming', 'starting', 'stopping'].includes(recording.state) &&
     !stopRequestPending
+  // Plan 174 S3.1 (B-9): the reason behind a disabled transport button, the
+  // record one first. It shows whether or not an error is on screen: the
+  // last error never hides why a start cannot run.
   const visibleStartBlockedReason =
-    startBlockedReason &&
-    !lastError &&
-    !isActiveRecordingState(recording.state) &&
-    !startRequestPending &&
-    !stopRequestPending
-      ? startBlockedReason
+    !isActiveRecordingState(recording.state) && !startRequestPending && !stopRequestPending
+      ? (recordBlockedReason ?? liveStreamBlockedReason)
       : null
   const visibleDeviceList = useMemo(
     () => deviceListWithoutProtectedOverlayWindows(deviceList, notesWindow),
@@ -15214,9 +15406,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const context: RemoteIntentContext = {
       client,
       sessionActive: isActiveRecordingState(recordingRef.current.state),
-      streamEnabled: captureConfigRef.current.streamEnabled,
-      startSession,
-      stopSession,
+      recordBlockedReason,
+      liveStreamBlockedReason,
+      startRecording,
+      startLivestream,
+      // A remote intent is a deliberate device action (plan 174 S0.1, D2):
+      // it stops at once, through the one door every stop takes.
+      stopSession: () => requestStopSession('remote-control'),
       setMicrophoneMuted: requestRemoteMicrophoneMute,
       systemAudio: [systemAudioStatus, systemAudioShown],
       setSystemAudioEnabled,
@@ -15485,8 +15681,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }, 70)
       },
       sessionActive: isActiveRecordingState(recordingRef.current.state),
-      streamEnabled: captureConfigRef.current.streamEnabled,
-      startSession,
+      startRecording,
+      startLivestream,
       // A global hotkey may fire with Videorc in the background: while live it
       // arms, and a second press within the window ends the livestream (D2).
       stopSession: () => requestStopSession('global-hotkey'),
@@ -15926,7 +16122,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startBlockedReason,
       canStart,
       canStop,
+      recordBlockedReason,
+      liveStreamBlockedReason,
       visibleStartBlockedReason,
+      sessionStartIntent: activeStartIntent,
+      sessionStopOverrun: stopOverrun,
       selectedCaptureDevice,
       selectedCamera,
       selectedMicrophone,
@@ -16164,7 +16364,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startBlockedReason,
       canStart,
       canStop,
+      recordBlockedReason,
+      liveStreamBlockedReason,
       visibleStartBlockedReason,
+      activeStartIntent,
+      stopOverrun,
       selectedCaptureDevice,
       selectedCamera,
       selectedMicrophone,

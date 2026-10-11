@@ -81,8 +81,18 @@ interface RemoteSurfaceClient {
 export interface RemoteIntentContext {
   client: RemoteSurfaceClient
   sessionActive: boolean
-  streamEnabled: boolean
-  startSession: () => Promise<boolean>
+  /**
+   * The Studio's two explicit starts (plan 174 S3.1): `recordStart` records
+   * and `streamStart` goes live, whatever mode was saved last. The start
+   * itself refuses (and says so in the Studio); the reason it cannot run
+   * right now rides on the failed ack, so a deck key can say why.
+   */
+  recordBlockedReason: string | null
+  liveStreamBlockedReason: string | null
+  startRecording: () => Promise<boolean>
+  startLivestream: () => Promise<boolean>
+  /** Every stop goes through the provider's stop decision (S0.1): a remote
+   * intent is a deliberate device action, so it stops at once. */
   stopSession: () => Promise<boolean>
   setMicrophoneMuted: (mode: 'mute' | 'unmute' | 'toggle') => Promise<boolean>
   /** Plan 069 S6: the system-audio device status and the state the remotes
@@ -243,9 +253,13 @@ export async function executeRemoteIntent(
     switch (intent.kind) {
       case 'recordStart':
         if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
-        return void ((await context.startSession())
+        return void ((await context.startRecording())
           ? await ack(true)
-          : await ack(false, 'The capture session did not start. Check Studio for details.'))
+          : await ack(
+              false,
+              context.recordBlockedReason ??
+                'The capture session did not start. Check Studio for details.'
+            ))
       case 'recordStop':
       case 'streamStop':
         if (!context.sessionActive) return void (await ack(false, 'No active session.'))
@@ -253,23 +267,24 @@ export async function executeRemoteIntent(
           ? await ack(true)
           : await ack(false, 'The active session did not stop. Check Studio for details.'))
       case 'recordToggle': {
-        const committed = context.sessionActive
-          ? await context.stopSession()
-          : await context.startSession()
+        const stopping = context.sessionActive
+        const committed = stopping ? await context.stopSession() : await context.startRecording()
         return void (committed
-          ? await ack(true)
-          : await ack(false, 'The session toggle was not committed. Check Studio for details.'))
-      }
-      case 'streamStart':
-        if (!context.streamEnabled) {
-          return void (await ack(false, 'Enable streaming in the Studio first.'))
-        }
-        if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
-        return void ((await context.startSession())
           ? await ack(true)
           : await ack(
               false,
-              'The stream did not start. Complete any required confirmation in Studio.'
+              (!stopping && context.recordBlockedReason) ||
+                'The session toggle was not committed. Check Studio for details.'
+            ))
+      }
+      case 'streamStart':
+        if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
+        return void ((await context.startLivestream())
+          ? await ack(true)
+          : await ack(
+              false,
+              context.liveStreamBlockedReason ??
+                'The stream did not start. Complete any required confirmation in Studio.'
             ))
       case 'micMute':
       case 'micUnmute':

@@ -96,6 +96,7 @@ export const electronInvokeApiMethods = {
   'app:get-runtime-info': 'getRuntimeInfo',
   'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
+  'app:exit': 'exitApp',
   'screens:pick-image': 'pickScreenImage',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
@@ -284,6 +285,8 @@ export interface ElectronIpcEventMap {
   'preview-surface:pump-mode': boolean
   'preview-surface:resync-scene': undefined
   'app:update-status': UpdateStatus
+  /** Plan 174 S3.1 (D2): a quit or a main-window close while on air asks the renderer first. */
+  'app:exit-request': 'quit' | 'close'
 }
 
 export type ElectronEventChannel = keyof ElectronIpcEventMap
@@ -328,7 +331,8 @@ export const electronEventChannels = [
   'shortcut-recorder:disarmed',
   'preview-surface:pump-mode',
   'preview-surface:resync-scene',
-  'app:update-status'
+  'app:update-status',
+  'app:exit-request'
 ] as const satisfies readonly ElectronEventChannel[]
 
 type MissingElectronEventChannel = Exclude<
@@ -1450,7 +1454,10 @@ const specificRuntimeInvokeContracts = {
     tupleSchema([booleanSchema]),
     objectSchema({ armed: booleanSchema })
   ),
-  'updates:install': invokeContract(noArgs, undefinedSchema)
+  'updates:install': invokeContract(noArgs, undefinedSchema),
+  // Plan 174 S3.1 (D2): the renderer's answer after the livestream ended,
+  // one of two words, nothing else.
+  'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema)
 } satisfies Partial<Record<ElectronInvokeChannel, IpcRuntimeContract>>
 
 /** Channels deliberately using structural bounds instead of a semantic schema.
@@ -1600,6 +1607,8 @@ const specificRuntimeEventSchemas = {
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
+  // Plan 174 S3.1 (D2): which exit is waiting on the End livestream question.
+  'app:exit-request': enumSchema(['quit', 'close']),
   // Plan 170 D18: `videorc://buddy` opens the Buddy tab; `openCreator` also
   // opens the creator once the "Make it Alive" avatar is worn.
   'buddy:deep-link': objectSchema({ openCreator: booleanSchema }, { allowUnknown: false }),

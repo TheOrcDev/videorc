@@ -327,6 +327,7 @@ import {
 } from '../shared/chat-gif'
 import { installContextMenu } from './context-menu'
 import { installAppMenu } from './app-menu'
+import { LiveExitGuard, type AppExitKind } from './exit-guard'
 import {
   appMenuReleaseNotesUrl,
   type AppMenuPageKey,
@@ -819,6 +820,9 @@ let backendAdminConnection: BackendConnection | null = null
 let backendAuthorityReady: Promise<void> = Promise.resolve()
 const mainResourceCapabilities = new MainResourceCapabilityRegistry()
 let mainCaptureState: MainCaptureState = 'unknown'
+// Plan 174 S3.1 (D2): a quit or a main-window close while on air waits for
+// the renderer's End livestream question (exit-guard.ts).
+const liveExitGuard = new LiveExitGuard()
 let deferredPermissionRestartState: DeferredPermissionRestartState =
   idleDeferredPermissionRestartState
 let smokePreviewMotionServer: HttpServer | null = null
@@ -1955,6 +1959,9 @@ function installMainWindowRecovery(window: BrowserWindow, loadMainDocument: () =
       .then(({ response }) => {
         asking = false
         if (response === 1) {
+          // A native Quit chosen over a renderer that keeps failing: that
+          // renderer cannot ask the End livestream question, so do not wait.
+          liveExitGuard.allow('quit')
           app.quit()
           return
         }
@@ -2225,6 +2232,18 @@ function createWindow(): void {
         sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', input.key)
       }
     }
+  })
+
+  // Closing the main window while on air (⌘W, the red button) asks first
+  // (plan 174 S3.1, D2): the renderer puts up "End livestream and close?"
+  // and answers through app:exit. A quit closes the window on its own way
+  // out, after its own question.
+  mainWindow.on('close', (event) => {
+    if (appIsQuitting || !liveExitGuard.shouldAsk('close', mainRendererCanAnswer())) {
+      return
+    }
+    event.preventDefault()
+    askRendererBeforeExit('close')
   })
 
   // Focus leaving the window means the modifier can be released without any
@@ -9195,6 +9214,7 @@ function disconnectBackendEventSocket(): void {
   backendEventSocket = null
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
+  liveExitGuard.transportLost()
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -9229,6 +9249,7 @@ function retireBackendEventSocket(
   backendEventSocket = null
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
+  liveExitGuard.transportLost()
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -10032,6 +10053,8 @@ async function runSmokePreviewMotionCommand(
   params: Record<string, unknown>
 ): Promise<unknown> {
   if (command === 'app-quit') {
+    // A harness's quit is never the person's: it must not wait on a question.
+    liveExitGuard.allow('quit')
     setImmediate(() => app.quit())
     return { quitting: true }
   }
@@ -13172,6 +13195,7 @@ async function runPermissionBackendRestart(reason: string): Promise<MediaAccessR
 function updateMainCaptureState(payload: unknown): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
+  liveExitGuard.observeRecordingStatus(payload)
   const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
   deferredPermissionRestartState = decision.state
   if (decision.runReason) {
@@ -14333,6 +14357,42 @@ function showMainWindowPage(key: AppMenuPageKey): void {
   sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', key)
 }
 
+// Plan 174 S3.1 (D2): the app leaving while on air. Main holds the quit or
+// the close and asks the renderer to put up the End livestream question; the
+// renderer ends the livestream on a yes and answers through app:exit. Only a
+// renderer that can show the question is asked (exit-guard.ts).
+function mainRendererCanAnswer(): boolean {
+  return Boolean(
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    !mainWindow.webContents.isDestroyed() &&
+    !mainWindow.webContents.isCrashed()
+  )
+}
+
+function askRendererBeforeExit(kind: AppExitKind): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+  mainWindow.show()
+  mainWindow.focus()
+  sendElectronEvent(mainWindow.webContents, 'app:exit-request', kind)
+}
+
+function exitAfterLivestreamEnded(kind: AppExitKind): void {
+  liveExitGuard.allow(kind)
+  if (kind === 'quit') {
+    app.quit()
+    return
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close()
+  }
+}
+
 function toggleAppMenuWindow(id: AppMenuWindowId): void {
   if (!appMenuMainWindowOpen()) {
     return
@@ -14471,6 +14531,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('app:get-runtime-info', () => runtimeInfo())
   secureIpcHandle('app:retry-hardware-acceleration', () => retryHardwareAcceleration())
+  secureIpcHandle('app:exit', (_event, kind: AppExitKind) => {
+    exitAfterLivestreamEnded(kind)
+  })
   secureIpcHandle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
   )
@@ -15312,6 +15375,8 @@ app.on('window-all-closed', () => {
 // restoring Node's default immediate process termination while export runs.
 installPersistentBackendShutdownSignalHandlers(process, (signal) => {
   logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
+  // A signal is never the person's quit: it must not wait on a question.
+  liveExitGuard.allow('quit')
   app.quit()
 })
 
@@ -15320,6 +15385,15 @@ previewLifecycleEvidence.bindBeforeQuit(app, {
     safeConsole.warn('Ignored app quit while the preview lifecycle probe owns the app.')
   },
   onAllowed: (event) => {
+    // Plan 174 S3.1 (D2): quitting while on air asks first. The renderer
+    // ends the livestream on a yes and quits again through app:exit; a no
+    // leaves the app running as it was. A recording quits as before: the
+    // backend shutdown below drains its finalization.
+    if (!appIsQuitting && liveExitGuard.shouldAsk('quit', mainRendererCanAnswer())) {
+      event.preventDefault()
+      askRendererBeforeExit('quit')
+      return
+    }
     appIsQuitting = true
     accountSignInTransactions?.dispose()
     providerOAuthCallbacks?.dispose()

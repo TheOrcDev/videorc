@@ -238,3 +238,70 @@ describe('SessionStatusPill (plan 174 S1.3)', () => {
     expect(iconCount()).toBe(1)
   })
 })
+
+// Plan 174 S3.1: Go Live reads "Checking…" from the first click (B-7), and a
+// stop that overran its finalize window explains Force stop (B-16).
+describe('SessionTransport in flight (plan 174 S3.1)', () => {
+  it('reads Checking… while the Go Live preflight runs and holds both starts', () => {
+    act(() =>
+      root.render(
+        createElement(SessionTransport, {
+          active: false,
+          canStop: false,
+          stopLabel: 'Stop recording',
+          startRequestPending: false,
+          goLivePending: true,
+          recordBlockedReason: null,
+          liveStreamBlockedReason: null,
+          status: null,
+          onRecord: noop,
+          onLiveStream: noop,
+          onStop: noop
+        })
+      )
+    )
+    const buttons = [...container.querySelectorAll('button')]
+    expect(buttons.map((button) => button.disabled)).toEqual([true, true])
+    expect(buttons[1]?.textContent?.trim()).toBe('Checking…')
+    expect(container.querySelector('[data-slot="disabled-reason"]')).toBeNull()
+  })
+
+  it('explains Force stop once the stop overran, as a polite warning', () => {
+    const stopping = { state: 'stopping', sessionId: 's', startedAt: STARTED_AT } as const
+    act(() =>
+      root.render(
+        createElement(
+          StudioContextProviders,
+          {
+            core: unused,
+            recordingState: { recording: stopping },
+            recording: { recording: stopping },
+            preview: unused,
+            diagnostics: unused,
+            chat: unused,
+            audio: unused
+          },
+          createElement(SessionTransport, {
+            active: true,
+            canStop: true,
+            stopLabel: 'Force stop',
+            stopOverrun: true,
+            startRequestPending: false,
+            recordBlockedReason: null,
+            liveStreamBlockedReason: null,
+            status: null,
+            onRecord: noop,
+            onLiveStream: noop,
+            onStop: noop
+          })
+        )
+      )
+    )
+    const alert = container.querySelector('[data-testid="session-stop-overrun"]')
+    expect(alert?.getAttribute('role')).toBe('status')
+    expect(alert?.getAttribute('data-variant')).toBe('warning')
+    expect(alert?.textContent).toContain('Stopping is taking longer than expected')
+    expect(alert?.textContent).toContain('Force stop ends it now; the last seconds may be lost.')
+    expect(text('button')).toContain('Force stop')
+  })
+})

@@ -4299,6 +4299,9 @@ export type SessionMediaGrantResult =
   | { url: string; expiresAt: number }
   | { error: SessionMediaGrantRefusal }
 
+/** How the app is leaving: the whole app, or only its main window (plan 174 S3.1). */
+export type AppExitKind = 'quit' | 'close'
+
 export interface VideorcApi {
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
@@ -4312,6 +4315,11 @@ export interface VideorcApi {
   getBackendLogs: () => Promise<BackendLogEvent[]>
   getRuntimeInfo: () => Promise<RuntimeInfo>
   retryHardwareAcceleration: () => Promise<RuntimeInfo>
+  /**
+   * The renderer's answer to `onExitRequest` once the livestream ended (plan
+   * 174 S3.1, D2): main lets this one quit or window close through.
+   */
+  exitApp: (kind: AppExitKind) => Promise<void>
   pickScreenImage: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
@@ -4581,6 +4589,13 @@ export interface VideorcApi {
    * creator when `openCreator` (Make it Alive, after the avatar is worn).
    */
   onBuddyDeepLink: (callback: (navigation: { openCreator: boolean }) => void) => () => void
+  /**
+   * Main was asked to quit (⌘Q, the Dock) or to close the main window (⌘W)
+   * while on air (plan 174 S3.1, D2). The shell asks "End livestream and
+   * quit?" with "Keep streaming" focused, ends the livestream on a yes and
+   * answers with `exitApp`; a no leaves everything as it was.
+   */
+  onExitRequest: (callback: (kind: AppExitKind) => void) => () => void
   /** Whether the command modifier is physically down; see main's before-input-event. */
   onShortcutModifier: (callback: (held: boolean) => void) => () => void
   /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */

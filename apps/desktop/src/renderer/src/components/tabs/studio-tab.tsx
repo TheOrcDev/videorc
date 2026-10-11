@@ -20,9 +20,9 @@ import {
   useStudioPreview,
   useStudioRecordingState
 } from '@/hooks/use-studio'
-import { videoProfileCompatibility } from '@/lib/capture'
+import { areEnabledStreamTargetsStartReady } from '@/lib/capture'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
-import { entitlementDisabledReason } from '@/lib/entitlements'
+import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
 import {
@@ -48,15 +48,18 @@ export function StudioTab(): ReactElement {
     canStop,
     startRequestPending,
     stopRequestPending,
+    goLiveConfirmationPending,
     visibleStartBlockedReason,
+    recordBlockedReason,
+    liveStreamBlockedReason,
+    sessionStartIntent,
+    sessionStopOverrun,
     startRecording,
     startLivestream,
     requestStopSession,
     noteRecordClick,
     captureConfig,
-    entitlements,
     wsStatus,
-    health,
     sessionStartFailure,
     dismissSessionStartFailure,
     sessionRuntimeNotice,
@@ -66,48 +69,28 @@ export function StudioTab(): ReactElement {
 
   const active = isSessionTransportActive(recording.state)
   const banner = studioBlocker(studio)
-  const liveStreamCompatibility = videoProfileCompatibility({
-    ...captureConfig,
-    streamEnabled: true
-  })
-  const liveStreamEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
-  const goLiveEntitlement = goLiveEntitlementGate({
-    entitlements,
-    streaming: captureConfig.streaming
-  })
-  const goLiveEntitlementBlocker = goLiveEntitlement.allowed ? null : goLiveEntitlement
-  const liveStreamBlockedReason =
-    liveStreamEntitlementReason ??
-    goLiveEntitlementBlocker?.reason ??
-    liveStreamCompatibility.blockingReason
-  const recordCompatibility = videoProfileCompatibility({
-    ...captureConfig,
-    recordEnabled: true,
-    streamEnabled: false
-  })
-  const recordBlockedReason =
-    wsStatus !== 'connected'
-      ? `Backend socket is ${wsStatus}.`
-      : recordCompatibility.blockingReason
-        ? recordCompatibility.blockingReason
-        : !health
-          ? 'Checking FFmpeg before starting.'
-          : !health.ffmpeg.available
-            ? (health.ffmpeg.message ?? 'FFmpeg is not available.')
-            : null
+  // A Go Live in flight owns the transport (plan 174 S3.1, the Phase 0
+  // review): while its preflight runs or a start is in flight, Record,
+  // Space and a second Go Live click do nothing.
+  const startsBusy = shouldIgnoreGoLiveAction({ goLiveConfirmationPending, startRequestPending })
 
   // Two-button start (plan 174 D3): Record and Go Live…, the same two starts
-  // ⌘K offers, so the provider owns them. The latency clock arms on the click.
+  // ⌘K offers, so the provider owns them, and the reasons each is off come
+  // from the provider's one function (S3.1). The latency clock arms on the
+  // click.
   const handleRecord = (): void => {
-    noteRecordClick('start')
-    startRecording()
-  }
-  const handleLiveStream = (): void => {
-    if (liveStreamBlockedReason) {
+    if (startsBusy || recordBlockedReason) {
       return
     }
     noteRecordClick('start')
-    startLivestream()
+    void startRecording()
+  }
+  const handleLiveStream = (): void => {
+    if (startsBusy || liveStreamBlockedReason) {
+      return
+    }
+    noteRecordClick('start')
+    void startLivestream()
   }
   // Every stop goes through the provider's decision (plan 174 S0.1, D2): a
   // recording stops at once, a livestream asks first. The latency clock arms
@@ -128,7 +111,7 @@ export function StudioTab(): ReactElement {
       if (canStop) handleStop('space')
       return
     }
-    if (!recordBlockedReason && !startRequestPending) handleRecord()
+    handleRecord()
   })
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -141,7 +124,13 @@ export function StudioTab(): ReactElement {
   // Go Live is record+stream, which the backend reports as `recording`: the
   // stream URL is what makes it on air (plan 095 S5). While it starts, the
   // control cancels the livestream rather than "stopping a recording" (B-16).
-  const stopControl = sessionStopControl(recording, stopRequestPending, captureConfig.streamEnabled)
+  // The start's own intent says which it is (S3.1); a session this renderer
+  // did not start falls back to the saved mode.
+  const stopControl = sessionStopControl(
+    recording,
+    stopRequestPending,
+    sessionStartIntent?.stream ?? captureConfig.streamEnabled
+  )
 
   // The status pill rides the inspector's transport block, so it exists in
   // every preview mode, docked included, and the mic sliver shares its one
@@ -187,12 +176,14 @@ export function StudioTab(): ReactElement {
           <SessionTransport
             active={active}
             canStop={canStop}
+            goLivePending={goLiveConfirmationPending}
             liveStreamBlockedReason={liveStreamBlockedReason}
             recordBlockedReason={recordBlockedReason}
             startRequestPending={startRequestPending}
             status={sessionStatus}
             stopLabel={stopControl.label}
             stopNote={stopControl.note}
+            stopOverrun={sessionStopOverrun}
             onLiveStream={handleLiveStream}
             onRecord={handleRecord}
             onStop={() => handleStop('button')}
@@ -350,41 +341,34 @@ function StudioPreviewPanel(): ReactElement {
   )
 }
 
+/**
+ * Where the shown blocked reason is fixed (plan 174 S3.1): the reason line
+ * follows the record intent first, then Go Live, so the jump does too. A
+ * Record that cannot start points at what records; a Go Live that cannot
+ * start points at Livestream.
+ */
 function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
-  title: string
   jumpTo?: WorkspaceTab | StudioPanel
   /** With `jumpTo: 'settings'`, the Settings tab that owns the fix. */
   settingsTab?: SettingsTabId
   jumpLabel?: string
 } | null {
-  const { wsStatus, outputEnabled, captureConfig, streamReady, health, entitlements } = studio
-  const goLiveEntitlement = captureConfig.streamEnabled
-    ? goLiveEntitlementGate({ entitlements, streaming: captureConfig.streaming })
-    : { allowed: true as const }
-
+  const { wsStatus, recordBlockedReason, captureConfig, health, entitlements } = studio
   if (wsStatus !== 'connected') {
-    return { title: 'Backend not connected' }
+    return null
   }
-  if (!outputEnabled) {
-    return { title: 'No output enabled', jumpTo: 'recording', jumpLabel: 'Open Output' }
-  }
-  if (captureConfig.streamEnabled && !goLiveEntitlement.allowed) {
-    return {
-      title: goLiveEntitlement.upgradeUrl ? 'Premium required' : 'Streaming limit reached',
-      jumpTo: 'live',
-      jumpLabel: 'Open Livestream'
+  if (recordBlockedReason) {
+    if (health && !health.ffmpeg.available) {
+      return { jumpTo: 'settings', settingsTab: 'recording', jumpLabel: 'Open Settings' }
     }
+    return null
   }
-  if (captureConfig.streamEnabled && !streamReady) {
-    return { title: 'Stream target incomplete', jumpTo: 'live', jumpLabel: 'Open Livestream' }
+  const goLiveEntitlement = goLiveEntitlementGate({
+    entitlements,
+    streaming: captureConfig.streaming
+  })
+  if (!goLiveEntitlement.allowed || !areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
+    return { jumpTo: 'live', jumpLabel: 'Open Livestream' }
   }
-  if (health && !health.ffmpeg.available) {
-    return {
-      title: 'FFmpeg unavailable',
-      jumpTo: 'settings',
-      settingsTab: 'recording',
-      jumpLabel: 'Open Settings'
-    }
-  }
-  return { title: 'Finish setup to start' }
+  return null
 }

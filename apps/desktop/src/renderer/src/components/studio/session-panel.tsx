@@ -32,12 +32,13 @@ import {
 } from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
 import { formatVideoQuality } from '@/lib/format-video'
-import { GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
+import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import {
+  STOP_FINALIZE_OVERRUN_ALERT,
   sessionAlsoRecords,
   sessionClockLabel,
   sessionStatusGlyph,
@@ -61,7 +62,9 @@ export function SessionTransport({
   canStop,
   stopLabel,
   stopNote,
+  stopOverrun = false,
   startRequestPending,
+  goLivePending = false,
   recordBlockedReason,
   liveStreamBlockedReason,
   status,
@@ -74,7 +77,11 @@ export function SessionTransport({
   stopLabel: string
   /** What Stop does beyond its label, said visibly ("Your recording stops too."). */
   stopNote?: string
+  /** The stop overran its finalize window (plan 174 S3.1, B-16): explain Force stop. */
+  stopOverrun?: boolean
   startRequestPending: boolean
+  /** Go Live's first checks are running (B-7): the button reads "Checking…" from the click. */
+  goLivePending?: boolean
   recordBlockedReason: string | null
   liveStreamBlockedReason: string | null
   /** The session status chip (and the mic sliver that rides with it). */
@@ -83,6 +90,7 @@ export function SessionTransport({
   onLiveStream: () => void
   onStop: () => void
 }): ReactElement {
+  const startsBusy = startRequestPending || goLivePending
   return (
     <section
       aria-label="Session controls"
@@ -112,7 +120,7 @@ export function SessionTransport({
             <DisabledReason className="flex-1" reason={recordBlockedReason}>
               <Button
                 className="flex-1"
-                disabled={Boolean(recordBlockedReason) || startRequestPending}
+                disabled={Boolean(recordBlockedReason) || startsBusy}
                 size="lg"
                 variant="destructive"
                 onClick={onRecord}
@@ -125,16 +133,20 @@ export function SessionTransport({
                 />
               </Button>
             </DisabledReason>
-            <DisabledReason className="flex-1" reason={liveStreamBlockedReason}>
+            <DisabledReason
+              className="flex-1"
+              reason={goLivePending ? null : liveStreamBlockedReason}
+            >
               <Button
                 className="flex-1"
-                disabled={Boolean(liveStreamBlockedReason) || startRequestPending}
+                data-slot="go-live-button"
+                disabled={Boolean(liveStreamBlockedReason) || startsBusy}
                 size="lg"
                 variant="outline"
                 onClick={onLiveStream}
               >
                 <LivestreamIcon data-icon="inline-start" weight="fill" />
-                {GO_LIVE_LABEL}
+                {goLivePending ? GO_LIVE_CHECKING_LABEL : GO_LIVE_LABEL}
               </Button>
             </DisabledReason>
           </>
@@ -146,6 +158,14 @@ export function SessionTransport({
         <p className="text-xs text-muted-foreground" data-slot="session-stop-note">
           {stopNote}
         </p>
+      ) : null}
+      {/* B-16: a stop that drags on says what is happening and what Force
+          stop does, instead of a bare "Stopping…" that strands the streamer. */}
+      {active && stopOverrun ? (
+        <Alert data-testid="session-stop-overrun" variant="warning">
+          <AlertTitle>{STOP_FINALIZE_OVERRUN_ALERT.title}</AlertTitle>
+          <AlertDescription>{STOP_FINALIZE_OVERRUN_ALERT.description}</AlertDescription>
+        </Alert>
       ) : null}
     </section>
   )
@@ -263,7 +283,7 @@ export function SessionPanel({
         <NavigableRow
           icon={LivestreamIcon}
           label="Livestream"
-          value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
+          value={streamingSummary(captureConfig.streaming.targets)}
           onNavigate={() => openStudioPanel('live')}
         />
         <NavigableRow

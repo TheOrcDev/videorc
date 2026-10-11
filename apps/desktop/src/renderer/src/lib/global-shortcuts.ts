@@ -6,7 +6,6 @@ import {
 export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 import { toast } from '@/lib/toast'
 import { layoutPresetLabel } from '@/lib/layout-labels'
-import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 import type { DeviceStatus, GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
 import { openSettingsTab } from '@/lib/settings-tabs'
@@ -16,8 +15,14 @@ type RegisterFn = (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsR
 
 export interface GlobalShortcutContext {
   sessionActive: boolean
-  streamEnabled: boolean
-  startSession: () => Promise<unknown>
+  /**
+   * The Studio's two explicit starts (plan 174 S3.1, B-3): the record key
+   * records, the Go Live key goes live, whatever mode was saved last. Each
+   * refuses with its own reason when it cannot start, so the hotkey never
+   * needs a mode of its own.
+   */
+  startRecording: () => Promise<unknown>
+  startLivestream: () => Promise<unknown>
   stopSession: () => Promise<unknown>
   toggleMicrophoneMute: () => void
   /** Plan 068 D6: mark a clip at the current moment. */
@@ -40,21 +45,13 @@ export function executeGlobalShortcut(
     return
   }
   if (action === 'record-toggle') {
-    void (context.sessionActive ? context.stopSession() : context.startSession())
+    void (context.sessionActive ? context.stopSession() : context.startRecording())
     return
   }
   if (action === 'stream-toggle') {
-    if (context.sessionActive) {
-      void context.stopSession()
-    } else if (context.streamEnabled) {
-      void context.startSession()
-    } else {
-      // A refusal with its one fix, so a warning (plan 174 S2.4).
-      toast.warning('Set up a destination to go live', {
-        id: 'global-shortcut-stream',
-        action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
-      })
-    }
+    // Always a Go Live (plan 174 S3.1): with no destination ready the
+    // provider refuses with "Set up a destination to go live" and its fix.
+    void (context.sessionActive ? context.stopSession() : context.startLivestream())
     return
   }
   if (action === 'mic-toggle') context.toggleMicrophoneMute()

@@ -17,8 +17,10 @@ function remoteIntentContext(overrides: Partial<RemoteIntentContext> = {}) {
       }
     },
     sessionActive: false,
-    streamEnabled: true,
-    startSession: vi.fn(async () => true),
+    recordBlockedReason: null,
+    liveStreamBlockedReason: null,
+    startRecording: vi.fn(async () => true),
+    startLivestream: vi.fn(async () => false),
     stopSession: vi.fn(async () => true),
     setMicrophoneMuted: vi.fn(async () => true),
     systemAudio: ['available', false],
@@ -121,10 +123,66 @@ describe('executeRemoteIntent', () => {
 
     await executeRemoteIntent({ intentId: 'intent-1', intent: { kind: 'recordStart' } }, context)
 
-    expect(context.startSession).toHaveBeenCalledOnce()
+    expect(context.startRecording).toHaveBeenCalledOnce()
+    expect(context.startLivestream).not.toHaveBeenCalled()
     expect(requests).toEqual([
       { method: 'remote.intent.ack', params: { intentId: 'intent-1', ok: true } }
     ])
+  })
+
+  // Plan 174 S3.1 (B-3): recordStart records and streamStart goes live,
+  // whatever mode the Studio saved last. The start itself refuses (so the
+  // Studio shows why); its reason rides on the failed ack for the deck key.
+  it('calls the explicit intents and relays why a start is blocked', async () => {
+    const live = remoteIntentContext()
+    await executeRemoteIntent(
+      { intentId: 'go-live', intent: { kind: 'streamStart' } },
+      live.context
+    )
+    expect(live.context.startLivestream).toHaveBeenCalledOnce()
+    expect(live.context.startRecording).not.toHaveBeenCalled()
+    // Opening the Go Live dialog is not a started stream.
+    expect(live.requests.at(-1)).toEqual({
+      method: 'remote.intent.ack',
+      params: {
+        intentId: 'go-live',
+        ok: false,
+        message: 'The stream did not start. Complete any required confirmation in Studio.'
+      }
+    })
+
+    const blocked = remoteIntentContext({
+      recordBlockedReason: 'Pick a screen or a camera first.',
+      liveStreamBlockedReason: 'Set up a destination to go live.',
+      startRecording: vi.fn(async () => false),
+      startLivestream: vi.fn(async () => false)
+    })
+    for (const kind of ['recordStart', 'recordToggle', 'streamStart']) {
+      await executeRemoteIntent({ intentId: `blocked-${kind}`, intent: { kind } }, blocked.context)
+    }
+    // One door: the Studio's own starts refuse, and show why there too.
+    expect(blocked.context.startRecording).toHaveBeenCalledTimes(2)
+    expect(blocked.context.startLivestream).toHaveBeenCalledOnce()
+    expect(blocked.requests.map(({ params }) => params)).toEqual([
+      { intentId: 'blocked-recordStart', ok: false, message: 'Pick a screen or a camera first.' },
+      { intentId: 'blocked-recordToggle', ok: false, message: 'Pick a screen or a camera first.' },
+      { intentId: 'blocked-streamStart', ok: false, message: 'Set up a destination to go live.' }
+    ])
+
+    // While a session runs the blocked reasons are moot: recordToggle stops it.
+    const active = remoteIntentContext({
+      sessionActive: true,
+      recordBlockedReason: 'A capture session is already active.'
+    })
+    await executeRemoteIntent(
+      { intentId: 'toggle-stop', intent: { kind: 'recordToggle' } },
+      active.context
+    )
+    expect(active.context.stopSession).toHaveBeenCalledOnce()
+    expect(active.requests.at(-1)).toEqual({
+      method: 'remote.intent.ack',
+      params: { intentId: 'toggle-stop', ok: true }
+    })
   })
 
   it('rejects invalid scene presets without applying them', async () => {
@@ -190,7 +248,7 @@ describe('executeRemoteIntent', () => {
 
   it('rejects a start that returns without an authoritative session commit', async () => {
     const { context, requests } = remoteIntentContext({
-      startSession: vi.fn(async () => false)
+      startRecording: vi.fn(async () => false)
     })
 
     await executeRemoteIntent(
@@ -315,7 +373,7 @@ describe('executeRemoteIntent', () => {
 
   it('forwards microphone toggles and action failures', async () => {
     const { context, requests } = remoteIntentContext({
-      startSession: vi.fn(async () => {
+      startRecording: vi.fn(async () => {
         throw new Error('start rejected')
       })
     })

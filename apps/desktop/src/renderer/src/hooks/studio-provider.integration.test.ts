@@ -4494,6 +4494,234 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.message).toHaveBeenCalledTimes(2)
   })
 
+  // Plan 174 S3.1 (the Phase 0 review): a remote's stop goes through the one
+  // stop door, where a Stream Deck intent is a deliberate device action that
+  // stops at once; whatever ends the session clears an armed hotkey press;
+  // and recordStart records, whatever mode the Studio saved last (B-3).
+  it('routes remote intents through the stop door and the explicit starts', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(now))
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          enabledTargetIds: ['twitch'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) =>
+            target.id === 'twitch' ? { ...target, enabled: true, authMode: 'manual-rtmp' } : target
+          )
+        }
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const pushEvent = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        await Promise.resolve()
+      })
+    }
+    const goLive = (sessionId: string): RecordingStatus => ({
+      state: 'recording',
+      sessionId,
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    })
+    const acks = (): Array<{ intentId?: string; ok?: boolean; message?: string }> =>
+      backend.sentCommands
+        .filter((command) => command.method === 'remote.intent.ack')
+        .map((command) => command.params as { intentId?: string; ok?: boolean; message?: string })
+    const stopsSent = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'session.stop').length
+
+    // A global hotkey arms; the remote's stop then stops at once and clears it.
+    await pushEvent('recording.status', goLive('go-live-1'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-1')
+    await act(async () => {
+      expect(await latest().core.requestStopSession('global-hotkey')).toBe(false)
+    })
+    expect(toastSpies.message).toHaveBeenCalledTimes(1)
+    await pushEvent('remote.intent', { intentId: 'stop-1', intent: { kind: 'recordStop' } })
+    await waitForObservation(() => acks().some((ack) => ack.intentId === 'stop-1'))
+    expect(acks().find((ack) => ack.intentId === 'stop-1')).toEqual({
+      intentId: 'stop-1',
+      ok: true
+    })
+    expect(stopsSent()).toBe(1)
+    expect(toastSpies.dismiss).toHaveBeenCalledWith('end-livestream-armed')
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // The backend ending the session clears the arm too: the next press on a
+    // later livestream arms again instead of ending it.
+    await pushEvent('recording.status', goLive('go-live-2'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-2')
+    vi.clearAllMocks()
+    await act(async () => {
+      expect(await latest().core.requestStopSession('global-hotkey')).toBe(false)
+    })
+    expect(toastSpies.message).toHaveBeenCalledTimes(1)
+    await pushEvent('recording.status', {
+      state: 'idle',
+      sessionId: 'go-live-2',
+      message: 'Ended.'
+    })
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+    expect(toastSpies.dismiss).toHaveBeenCalledWith('end-livestream-armed')
+    await pushEvent('recording.status', goLive('go-live-3'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-3')
+    vi.clearAllMocks()
+    await act(async () => {
+      expect(await latest().core.requestStopSession('global-hotkey')).toBe(false)
+    })
+    expect(stopsSent()).toBe(1)
+    expect(toastSpies.message).toHaveBeenCalledTimes(1)
+    await pushEvent('recording.status', {
+      state: 'idle',
+      sessionId: 'go-live-3',
+      message: 'Ended.'
+    })
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // recordStart records, even though the saved mode is Go Live (B-3): the
+    // dialog never opens, the file is written, the saved mode is untouched.
+    await pushEvent('remote.intent', { intentId: 'rec-1', intent: { kind: 'recordStart' } })
+    await waitForObservation(() => acks().some((ack) => ack.intentId === 'rec-1'))
+    expect(acks().find((ack) => ack.intentId === 'rec-1')).toEqual({ intentId: 'rec-1', ok: true })
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(start?.params).toMatchObject({ output: { recordEnabled: true, streamEnabled: false } })
+    expect(latest().core.goLiveConfirmationOpen).toBe(false)
+    expect(latest().core.captureConfig.streamEnabled).toBe(true)
+    await waitForObservation(() => latest().recording.recording.state === 'recording')
+    await act(async () => {
+      await latest().core.stopSession()
+    })
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+  })
+
+  // Plan 174 S3.1 (D2): main holds a quit or a main-window close while on air
+  // and asks the renderer. Not live, the exit goes through at once; live, the
+  // End livestream question names the exit, "Keep streaming" leaves the app as
+  // it was, and the yes ends the livestream and then lets the app go.
+  it('asks before a quit or a window close ends a livestream, then lets the app go', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
+    })
+    const exitApp = vi.fn(async (_kind: 'quit' | 'close') => undefined)
+    ;(api as unknown as { exitApp: typeof exitApp }).exitApp = exitApp
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          enabledTargetIds: ['twitch'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) =>
+            target.id === 'twitch' ? { ...target, enabled: true, authMode: 'manual-rtmp' } : target
+          )
+        }
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    const pushStatus = async (status: RecordingStatus): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'recording.status', payload: status })
+        })
+        await Promise.resolve()
+      })
+    }
+    const stopsSent = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'session.stop').length
+
+    // Not live: nothing to protect, main may go.
+    await act(async () => emit('onExitRequest', 'quit'))
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('quit')
+    expect(shell?.stopConfirmation).toBeNull()
+
+    // Live: the question, titled for the exit. Keep streaming changes nothing.
+    await pushStatus({
+      state: 'recording',
+      sessionId: 'go-live-1',
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    })
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-1')
+    exitApp.mockClear()
+    await act(async () => emit('onExitRequest', 'quit'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'quit')
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(stopsSent()).toBe(0)
+    await act(async () => shell!.cancelStopSession())
+    await waitForObservation(() => shell?.stopConfirmation === null)
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(latest().recording.recording.sessionId).toBe('go-live-1')
+
+    // A window close asks the same way; yes ends the livestream, then the window goes.
+    await act(async () => emit('onExitRequest', 'close'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'close-window')
+    expect(exitApp).not.toHaveBeenCalled()
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() => stopsSent() === 1)
+    await waitForObservation(() => exitApp.mock.calls.length === 1)
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('close')
+    await waitForObservation(() => latest().recording.recording.state === 'idle')
+  })
+
   it('returns a fully cloneable development scene-preset state with evaluated source diagnostics', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
@@ -10606,9 +10834,11 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
   })
 
-  // Plan 174 S2.2 (D3): the Studio transport and ⌘K share the provider's two
-  // starts. Go Live… turns streaming on and opens the Go Live dialog, and
-  // starts nothing on its own; Record turns streaming off and starts at once.
+  // Plan 174 S2.2 (D3) and S3.1 (B-3): the Studio transport and ⌘K share the
+  // provider's two starts, and each is an explicit intent. Go Live… opens the
+  // Go Live dialog and starts nothing on its own; Record starts a local take
+  // at once. Neither writes the saved output mode: the Output page's "Save
+  // local recording" and the Livestream page's destinations stay as they are.
   it('starts Go Live… and Record through the shared provider starts', async () => {
     const backend = new StudioBackend()
     enableYouTubeOauthForTest(backend)
@@ -10641,12 +10871,22 @@ describe('real StudioProvider lifecycle', () => {
       })
     })
     await waitForObservation(() => latest()?.core.startBlockedReason === null)
+    // Both reasons come from one function (S3.1): with a ready destination
+    // and a saved record-only mode, both starts can run.
+    expect(latest()!.core.recordBlockedReason).toBeNull()
+    expect(latest()!.core.liveStreamBlockedReason).toBeNull()
 
+    let goLive!: Promise<boolean>
     await act(async () => {
-      latest()!.core.startLivestream()
+      goLive = latest()!.core.startLivestream()
     })
     await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
-    expect(latest()!.core.captureConfig.streamEnabled).toBe(true)
+    // Opening the dialog is not a started stream, and the saved mode is untouched.
+    expect(await goLive).toBe(false)
+    expect(latest()!.core.captureConfig).toMatchObject({
+      recordEnabled: true,
+      streamEnabled: false
+    })
     expect(backend.commands.some((command) => command.method === 'session.start')).toBe(false)
 
     await act(async () => {
@@ -10654,17 +10894,104 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === false)
 
+    // Record while "Save local recording" is OFF still records: Record is a
+    // take, and the Output switch only decides whether a Go Live records too.
     await act(async () => {
-      latest()!.core.startRecording()
+      latest()!.core.setCaptureConfig({
+        ...latest()!.core.captureConfig,
+        recordEnabled: false
+      })
+    })
+    await waitForObservation(() => latest()?.core.captureConfig.recordEnabled === false)
+    let recorded!: Promise<boolean>
+    await act(async () => {
+      recorded = latest()!.core.startRecording()
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(await recorded).toBe(true)
+    expect(latest()!.core.sessionStartIntent).toEqual({ record: true, stream: false })
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(start?.params).toMatchObject({ output: { recordEnabled: true, streamEnabled: false } })
     expect(latest()!.core.captureConfig).toMatchObject({
-      recordEnabled: true,
+      recordEnabled: false,
       streamEnabled: false
     })
     expect(latest()?.core.goLiveConfirmationOpen).toBe(false)
     await act(async () => {
       await latest()!.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    expect(latest()!.core.sessionStartIntent).toBeNull()
+  })
+
+  // Plan 174 S3.1 (the Phase 0 review): a Go Live preflight that is still
+  // pending owns the transport, so Record (the button, Space, a hotkey, ⌘K,
+  // a remote) cannot start a record-only take underneath it.
+  it('ignores Record while the Go Live preflight is pending', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      latest()!.core.setCaptureConfig(youtubeOauthStreamCaptureConfig())
+    })
+    await waitForObservation(() => latest()?.core.liveStreamBlockedReason === null)
+
+    const releasePreflight = backend.deferResponse('streamTargets.confirmation.validate', {
+      valid: true,
+      destinations: [],
+      issues: []
+    })
+    let goLive!: Promise<boolean>
+    await act(async () => {
+      goLive = latest()!.core.startLivestream()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationPending === true)
+    // "Checking…" is on, the dialog is not yet in the DOM, and Record is held.
+    expect(latest()!.core.goLiveConfirmationOpen).toBe(false)
+    let recorded: boolean | undefined
+    await act(async () => {
+      recorded = await latest()!.core.startRecording()
+    })
+    expect(recorded).toBe(false)
+    expect(backend.commands.some((command) => command.method === 'session.start')).toBe(false)
+    // A second Go Live click joins the first instead of running a second preflight.
+    let secondGoLive!: Promise<boolean>
+    await act(async () => {
+      secondGoLive = latest()!.core.startLivestream()
+    })
+    await act(async () => {
+      releasePreflight()
+      await Promise.all([goLive, secondGoLive])
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(
+      backend.sentCommands.filter(
+        (command) => command.method === 'streamTargets.confirmation.validate'
+      )
+    ).toHaveLength(1)
+    expect(backend.commands.some((command) => command.method === 'session.start')).toBe(false)
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
     })
   })
 
