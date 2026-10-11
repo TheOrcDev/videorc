@@ -1,4 +1,3 @@
-import { ExternalLinkIcon, PinIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useEffectEvent, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -12,7 +11,7 @@ import {
   TakeoverSection
 } from '@/components/studio/session-panel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
   useStudioCore,
@@ -25,6 +24,13 @@ import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
+import {
+  STUDIO_CONTAINER,
+  STUDIO_GRID,
+  STUDIO_INSPECTOR,
+  STUDIO_PREVIEW_COLUMN,
+  studioTransportRowClass
+} from '@/lib/studio-layout'
 import {
   isSessionTransportActive,
   sessionIsLive,
@@ -161,17 +167,26 @@ export function StudioTab(): ReactElement {
     </span>
   )
 
+  // The docked preview is a native surface glued over its slot: a pinned
+  // transport row would scroll under it (lib/studio-layout.ts).
+  const previewDocked =
+    studio.nativePreviewSurfaceEnabled &&
+    studio.previewWindow.open &&
+    studio.previewWindow.mode === 'docked'
+
   // The Go Live confirmation is the shell's (GoLiveDialogGate), so it opens
   // over every page, not only this one (plan 174 S0.6, B-5).
   return (
-    <>
+    <div className={STUDIO_CONTAINER}>
       {/* The Studio bench: the preview pane leads, and the inspector (the
-          transport, session facts, microphone, inputs, takeover) sits beside
-          it, split by a hairline. Hard
+          transport, session facts, microphone, sources, takeover) sits beside
+          it, split by a hairline, from 720 px of content (a container query,
+          so the smallest window keeps Stop in view; plan 174 S3.3, B-10).
+          Narrower, the transport row leads the page above the preview. Hard
           blocks surface inside the Session section, never as a yellow top
           banner (post-0.9.4 fix batch F8). */}
-      <div className="grid min-h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
-        <div className="min-w-0 lg:border-r">
+      <div className={STUDIO_GRID}>
+        <div className={STUDIO_PREVIEW_COLUMN}>
           <StudioPreviewPanel />
           {/* Scenes and the vertical leg: deferred so the launch surface
               paints its preview and transport first. */}
@@ -180,7 +195,7 @@ export function StudioTab(): ReactElement {
           </Suspense>
         </div>
 
-        <aside aria-label="Session inspector" className="min-w-0 border-t lg:border-t-0">
+        <div className={studioTransportRowClass(previewDocked)}>
           {/* Record, Go Live…, and the clock sit at the top of the
               inspector, right above Session (owner call, 2026-09-23); Space
               still records. */}
@@ -197,6 +212,9 @@ export function StudioTab(): ReactElement {
             onRecord={handleRecord}
             onStop={() => handleStop('button')}
           />
+        </div>
+
+        <aside aria-label="Session inspector" className={STUDIO_INSPECTOR}>
           <SessionPanel
             active={active}
             blockedJump={
@@ -217,14 +235,14 @@ export function StudioTab(): ReactElement {
           <Suspense fallback={<MicrophoneSectionFallback />}>
             <MicrophoneSection />
           </Suspense>
-          {/* Inputs: compact mirrors of Screen / Camera / System audio / Output
-              / Captions, each editing the same captureConfig and deep-linking
-              to its page. */}
+          {/* Sources (Screen, Camera, System audio) and Captions: compact
+              mirrors editing the same captureConfig, each with a way to its
+              page. Output is the Session row above (plan 174 S3.3, B-15). */}
           <QuickSettings />
           <TakeoverSection />
         </aside>
       </div>
-    </>
+    </div>
   )
 }
 
@@ -232,7 +250,7 @@ function StudioDashboardBottomRowFallback(): ReactElement {
   return (
     <div className="flex flex-col" aria-label="Loading Studio controls">
       <PanelSection title="Scenes">
-        <div className="h-24 rounded-row bg-foreground/[0.04]" />
+        <Skeleton className="h-24" />
       </PanelSection>
     </div>
   )
@@ -242,8 +260,8 @@ function StudioDashboardBottomRowFallback(): ReactElement {
 function MicrophoneSectionFallback(): ReactElement {
   return (
     <PanelSection title="Microphone">
-      <div className="h-control rounded-chip bg-foreground/[0.04]" />
-      <div className="h-4 rounded-chip bg-foreground/[0.04]" />
+      <Skeleton className="h-control rounded-chip" />
+      <Skeleton className="h-4 rounded-chip" />
     </PanelSection>
   )
 }
@@ -252,11 +270,9 @@ function StudioPreviewPanel(): ReactElement {
   const {
     nativePreviewSurfaceEnabled,
     handleSystemPermission,
-    openPreviewWindow,
     previewWindow,
     refreshPreview,
-    runtimeInfo,
-    setPreviewWindowMode
+    runtimeInfo
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const { previewLiveStatus } = useStudioPreview()
@@ -305,45 +321,10 @@ function StudioPreviewPanel(): ReactElement {
     )
   }
 
+  // The stage itself offers Open, Stick, Pop out and Close: no header icons
+  // repeating them in other words (plan 174 S3.3, B-23).
   return (
-    <PanelSection
-      title="Preview"
-      action={
-        <div className="flex items-center gap-1.5">
-          {previewWindow.open && previewWindow.mode === 'floating' ? (
-            <Button
-              aria-label="Stick preview into the app"
-              size="icon"
-              title="Stick the preview into this panel"
-              variant="ghost"
-              onClick={() => void setPreviewWindowMode('docked')}
-            >
-              <PinIcon className="size-4" />
-            </Button>
-          ) : previewWindow.open ? (
-            <Button
-              aria-label="Pop preview out into its own window"
-              size="icon"
-              title="Pop the preview out into its own window"
-              variant="ghost"
-              onClick={() => void setPreviewWindowMode('floating')}
-            >
-              <ExternalLinkIcon className="size-4" />
-            </Button>
-          ) : (
-            <Button
-              aria-label="Open preview window"
-              size="icon"
-              title="Open preview in its own window"
-              variant="ghost"
-              onClick={() => void openPreviewWindow()}
-            >
-              <ExternalLinkIcon className="size-4" />
-            </Button>
-          )}
-        </div>
-      }
-    >
+    <PanelSection title="Preview">
       {previewStage}
       {healthErrorRow}
     </PanelSection>

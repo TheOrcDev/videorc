@@ -453,6 +453,17 @@ function DetachedPreviewCard({
             <span className="text-xs text-muted-foreground">{disabledCopy.detail}</span>
           </div>
           <div className="flex flex-wrap justify-center gap-2">
+            {/* The panel header no longer repeats the stage's actions (plan
+                174 S3.3, B-23), so the window opens from here too. */}
+            {!previewWindowOpen ? (
+              <Button size="sm" variant="outline" onClick={onOpen}>
+                Open preview
+                <ShortcutKeys
+                  accelerator={shortcutAccelerator('preview-window')}
+                  className="ml-1"
+                />
+              </Button>
+            ) : null}
             {onRetry && disabledCopy.retryable ? (
               <Button size="sm" variant="outline" onClick={onRetry}>
                 Retry preview

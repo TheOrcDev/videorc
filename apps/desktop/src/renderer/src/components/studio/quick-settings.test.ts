@@ -34,7 +34,7 @@ function render(input: Partial<SystemAudioSwitchInput>): string {
   )
 }
 
-describe('Studio inputs System audio row (plan 069)', () => {
+describe('Studio Sources System audio row (plan 069)', () => {
   it('shows Off and On beside a labelled switch', () => {
     expect(render({})).toContain('>Off<')
     expect(render({})).toContain('aria-label="System audio"')
@@ -76,7 +76,7 @@ describe('Studio inputs System audio row (plan 069)', () => {
   })
 })
 
-describe('Studio Inputs rows (plan 080 S4)', () => {
+describe('Studio Sources rows (plan 080 S4)', () => {
   const display: Device = { id: 'screen:2', name: 'Display 2', kind: 'screen', status: 'available' }
   const camera: Device = {
     id: 'camera:1',
@@ -98,7 +98,6 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       selectedCaptureDevice: devices.find((device) => device.id === sources.screenId),
       selectedCamera: devices.find((device) => device.id === sources.cameraId),
       selectedMicrophone: undefined,
-      patchVideo: vi.fn(),
       isSessionActive: false,
       entitlements: null,
       captionsStatus: { state: 'idle' },
@@ -127,13 +126,25 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       camera,
       systemAudio
     ])
-    // The microphone has one home, the Microphone section above (plan 092).
-    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio', 'Output', 'Captions'])
+    // The microphone has one home, the Microphone section above (plan 092);
+    // Output is the Session row (plan 174 S3.3, B-15).
+    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio', 'Captions'])
     expect(markup).not.toContain('Mute microphone')
     expect(markup).toContain('title="Display 2"')
     expect(markup).toContain('title="MacBook Pro Camera"')
     // The old joined trigger ("Display 2 · MacBook Pro Camera") is gone.
     expect(markup).not.toContain('Display 2 · MacBook Pro Camera')
+  })
+
+  it('calls them Sources, with a way home, and keeps Captions out of them (B-15, B-25)', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
+    expect(markup).not.toContain('Inputs')
+    const [sources, captions] = markup.split('data-slot="panel-section"').slice(1)
+    expect(sources).toContain('>Sources</h2>')
+    expect(sources).toContain('>Open Sources</button>')
+    expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
+    expect(captions).not.toContain('<h2')
+    expect(rowLabels(captions ?? '')).toEqual(['Captions'])
   })
 
   it('opens Screen and Camera with one click: the row control is the dropdown', () => {

@@ -1,7 +1,8 @@
-import { CheckIcon, MobileIcon } from '@/components/icons'
+import { MobileIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
+import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
 import {
   LayoutThumb,
   ScreenFramingControl,
@@ -16,8 +17,7 @@ import {
   simulcastArmed,
   simulcastLegPreset
 } from '@/lib/capture'
-import { MediaCard } from '@/components/media-card'
-import { cn } from '@/lib/utils'
+import { sceneGalleryReason, type SceneSourceGap } from '@/lib/scene-presets'
 
 /**
  * The vertical leg of a dual-orientation stream: pick its scene, choose how
@@ -43,6 +43,17 @@ export function VerticalLegMonitor(): ReactElement | null {
   const followed =
     captureConfig.simulcastFollowsProgram && streamingPreset !== captureConfig.lastVerticalPreset
   const framing = captureConfig.simulcastScreenFraming
+  // What each vertical scene needs that isn't chosen, said once under the
+  // gallery (plan 174 S3.3, B-20), as the Scenes gallery does.
+  const cards = VERTICAL_SCENES.map((scene) => {
+    const gaps: SceneSourceGap[] = []
+    if (layoutPresetNeedsCamera(scene.id) && !hasCamera)
+      gaps.push({ source: 'camera', state: 'off' })
+    if (layoutPresetNeedsScreen(scene.id) && !hasScreen)
+      gaps.push({ source: 'screen', state: 'off' })
+    return { scene, gaps }
+  })
+  const reason = sceneGalleryReason(cards.map(({ scene, gaps }) => ({ label: scene.label, gaps })))
 
   return (
     <PanelSection
@@ -65,38 +76,25 @@ export function VerticalLegMonitor(): ReactElement | null {
         className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(84px,1fr))]"
         data-slot="vertical-leg-scenes"
       >
-        {VERTICAL_SCENES.map((scene) => {
-          const disabled =
-            (layoutPresetNeedsCamera(scene.id) && !hasCamera) ||
-            (layoutPresetNeedsScreen(scene.id) && !hasScreen)
-          const selected = captureConfig.lastVerticalPreset === scene.id
+        {cards.map(({ scene, gaps }) => {
           const streaming = streamingPreset === scene.id
           return (
-            <MediaCard
+            <SceneCard
               key={scene.id}
-              asChild
-              className={cn('gap-1.5 p-2 text-left', disabled && 'cursor-not-allowed opacity-50')}
-              interactive={!streaming}
+              data-scene-preset={scene.id}
+              disabled={gaps.length > 0}
+              label={scene.label}
+              // The scene picked here, even while Follow streams its twin.
+              pressed={captureConfig.lastVerticalPreset === scene.id}
               selected={streaming}
-            >
-              <button
-                aria-pressed={selected}
-                disabled={disabled}
-                type="button"
-                onClick={() => applySimulcastLeg({ lastVerticalPreset: scene.id })}
-              >
-                <LayoutThumb framing={framing} preset={scene.id} />
-                <span className="flex items-center justify-between gap-1">
-                  <span className="truncate text-xs font-medium">{scene.label}</span>
-                  {streaming ? (
-                    <CheckIcon className="size-3.5 shrink-0 text-primary" weight="bold" />
-                  ) : null}
-                </span>
-              </button>
-            </MediaCard>
+              size="sm"
+              thumb={<LayoutThumb framing={framing} preset={scene.id} />}
+              onSelect={() => applySimulcastLeg({ lastVerticalPreset: scene.id })}
+            />
           )
         })}
       </div>
+      <SceneGalleryReason reason={reason} />
 
       <ScreenFramingControl
         value={framing}
