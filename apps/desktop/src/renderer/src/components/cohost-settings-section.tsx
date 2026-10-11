@@ -91,7 +91,7 @@ function useCohostSettingsSave(lockedByTab = false): {
   const save = (patch: CohostSettingsPatch): void => {
     setError(null)
     void patchCohostSettings(patch).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : 'Could not save Buddy settings.')
+      setError(failure instanceof Error ? failure.message : "Couldn't save Buddy settings.")
     )
   }
   return {
@@ -186,7 +186,7 @@ export function BuddyRepliesSection({
         />
         <CohostCooldownField
           cooldown={autoChat.banter.cooldownSeconds}
-          description="A short remark when you have been quiet for a while, never within a minute of a greeting or an answer."
+          description="A short remark when you've been quiet for a while, never within a minute of a greeting or an answer."
           enabled={autoChat.banter.enabled}
           id="cohost-banter"
           label="Banter"

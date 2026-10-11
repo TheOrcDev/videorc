@@ -135,7 +135,7 @@ describe('system audio shortcut', () => {
       id: 'global-shortcut-system-audio'
     })
     expect(vi.mocked(toast.warning).mock.calls[1][0]).toBe(
-      'System audio is not available on this computer'
+      "System audio isn't available on this computer"
     )
   })
 })

@@ -156,7 +156,7 @@ describe('eligibility (decision 11)', () => {
     }
     expect(reason({ status: 'running' })).toContain('once the recording has finished')
     expect(reason({ finalizationState: 'finalizing' })).toContain('once the recording has finished')
-    expect(reason({ mode: 'imported' })).toBe('Imported videos are not supported yet.')
+    expect(reason({ mode: 'imported' })).toBe("Imported videos aren't supported yet.")
     expect(reason({ derivedFromSessionId: 'rec-0' })).toContain("can't be cut again")
     expect(reason({ cleanCutOfSessionId: 'rec-0' })).toContain("can't be cut again")
     expect(reason({ processingKind: 'noise-cleanup' })).toContain("can't be cut again")
@@ -375,7 +375,7 @@ describe('failure copy', () => {
       "Videorc couldn't be reached. Retry when you're online."
     )
     expect(cleanCutFailureCopy('insufficient-space', undefined)).toBe(
-      'There is not enough free disk space for the cut copy.'
+      "There isn't enough free disk space for the cut copy."
     )
     expect(cleanCutFailureCopy('some-new-code', 'The server said why.')).toBe(
       'The server said why.'

@@ -239,7 +239,7 @@ describe('mapping table rows', () => {
       DEVICES
     )
     expect(result.stream).toMatchObject({ kind: 'rtmp-platform', platform: 'kick', hasKey: true })
-    expect(reportNotes(result, 'imported').join('\n')).toContain('Kick Manual RTMP')
+    expect(reportNotes(result, 'imported').join('\n')).toContain('into Kick, set to Stream key')
   })
 
   it('an IVS live-video.net host alone never reads as Kick', () => {

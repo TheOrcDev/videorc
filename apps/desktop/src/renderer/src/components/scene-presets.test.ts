@@ -82,14 +82,14 @@ describe('scene library controls', () => {
     mocked.core.savedSceneModified = false
     await act(async () => root.render(createElement(ScenePresetControls, { toolbar: true })))
     const labels = () => [...container.querySelectorAll('button')].map((b) => b.textContent)
-    expect(labels()).toEqual(['Save scene'])
+    expect(labels()).toEqual(['Save scene…'])
     // The name and its state belong to the section's description now.
     expect(container.textContent).not.toContain('Modified')
 
     mocked.core = { ...mocked.core, savedSceneModified: true }
     await act(async () => root.render(createElement(ScenePresetControls, { toolbar: true })))
-    expect(labels()).toEqual(['Update “Presentation”', 'Save scene'])
-    await click('Update “Presentation”')
+    expect(labels()).toEqual(['Update “Presentation”…', 'Save scene…'])
+    await click('Update “Presentation”…')
     expect(document.body.textContent).toContain('Update saved scene')
     await click('Save')
     expect(mocked.core.saveScene).toHaveBeenCalledExactlyOnceWith('Presentation', 'scene-a')
@@ -97,7 +97,7 @@ describe('scene library controls', () => {
 
   it('validates names inline and saves only explicitly', async () => {
     await render()
-    await click('Save scene')
+    await click('Save scene…')
     await click('Save')
     expect(document.body.textContent).toContain('between 1 and 80')
     expect(mocked.core.saveScene).not.toHaveBeenCalled()

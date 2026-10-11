@@ -1,14 +1,6 @@
-import type {
-  AudioMeterResult,
-  BackendHealth,
-  Device,
-  RecordingStatus,
-  StreamHealth
-} from '../../../shared/backend'
+import type { Device, RecordingStatus, StreamHealth } from '../../../shared/backend'
 import { isActiveRecordingState as isSharedActiveRecordingState } from '../../../shared/capture-state'
 import { formatTimecode } from '../../../shared/timecode'
-import { formatVideoQuality } from './format-video'
-import type { CaptureConfig, SetupStep, SetupTone, WsStatus } from './capture'
 
 export function compactTime(timestamp: string): string {
   try {
@@ -92,96 +84,6 @@ export function findDevice(devices: Device[], id?: string): Device | undefined {
   return id ? devices.find((device) => device.id === id) : undefined
 }
 
-export function setupChecklist({
-  audioMeter,
-  captureConfig,
-  health,
-  selectedCamera,
-  selectedCaptureDevice,
-  selectedMicrophone,
-  streamReady,
-  wsStatus
-}: {
-  audioMeter: AudioMeterResult | null
-  captureConfig: CaptureConfig
-  health: BackendHealth | null
-  selectedCamera?: Device
-  selectedCaptureDevice?: Device
-  selectedMicrophone?: Device
-  streamReady: boolean
-  wsStatus: WsStatus
-}): SetupStep[] {
-  const microphoneTone: SetupTone =
-    audioMeter?.status === 'ready'
-      ? 'good'
-      : audioMeter?.status === 'silent' ||
-          audioMeter?.status === 'no-frames' ||
-          audioMeter?.status === 'permission-required' ||
-          !selectedMicrophone
-        ? 'warn'
-        : 'neutral'
-
-  return [
-    {
-      label: 'Backend',
-      detail:
-        wsStatus === 'connected'
-          ? 'Local backend is connected.'
-          : wsStatus === 'waiting' || wsStatus === 'connecting'
-            ? 'Connecting to the local backend…'
-            : 'Backend not connected. It restarts automatically; give it a moment.',
-      tone: wsStatus === 'connected' ? 'good' : 'warn'
-    },
-    {
-      label: 'FFmpeg',
-      detail: health?.ffmpeg.available
-        ? (health.ffmpeg.version ?? 'FFmpeg is available.')
-        : (health?.ffmpeg.message ?? 'Waiting for FFmpeg.'),
-      tone: health?.ffmpeg.available ? 'good' : 'warn'
-    },
-    {
-      label: 'Capture',
-      detail: selectedCaptureDevice
-        ? selectedCaptureDevice.name
-        : 'No screen or window source selected.',
-      tone: selectedCaptureDevice?.status === 'available' ? 'good' : 'warn'
-    },
-    {
-      label: 'Camera',
-      detail: selectedCamera ? selectedCamera.name : 'Camera overlay is off.',
-      tone: selectedCamera?.status === 'available' || !selectedCamera ? 'good' : 'warn'
-    },
-    {
-      label: 'Microphone',
-      detail:
-        audioMeter?.message ??
-        (selectedMicrophone ? selectedMicrophone.name : 'No microphone selected.'),
-      tone: microphoneTone
-    },
-    {
-      label: 'Output',
-      detail: captureConfig.recordEnabled
-        ? captureConfig.streamEnabled
-          ? `${formatVideoQuality(captureConfig.video, { size: 'full' })}, record and stream.`
-          : `${formatVideoQuality(captureConfig.video, { size: 'full' })}, recording.`
-        : captureConfig.streamEnabled
-          ? `${formatVideoQuality(captureConfig.video, { size: 'full' })}, streaming.`
-          : 'No output is enabled.',
-      tone: captureConfig.recordEnabled || captureConfig.streamEnabled ? 'good' : 'warn'
-    },
-    {
-      label: 'Stream',
-      detail: captureConfig.streamEnabled
-        ? streamReady
-          ? 'RTMP target is set.'
-          : 'Manual RTMP credentials are required.'
-        : 'Streaming is off.',
-      tone: streamReady ? 'good' : 'warn'
-    }
-  ]
-}
-
-/** "742 MB" / "1.2 GB" — the Library's size column and storage footer. */
 export function formatBytes(bytes?: number | null): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
     return '-'

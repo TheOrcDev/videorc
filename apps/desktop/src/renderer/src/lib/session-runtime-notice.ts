@@ -59,7 +59,7 @@ export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string 
         ? 'Microphone and system audio lost'
         : sources.has('system')
           ? 'System audio lost'
-          : 'Microphone audio could not be recorded'
+          : "Microphone audio couldn't be recorded"
     return notice.phase === 'ended' ? `${subject}: saved session has missing audio` : subject
   }
 

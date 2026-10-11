@@ -83,8 +83,8 @@ describe('BackendClient request lifetime', () => {
 
     client.close()
 
-    await expect(connecting).rejects.toThrow('Backend client is closed.')
-    await expect(client.connect()).rejects.toThrow('Backend client is closed.')
+    await expect(connecting).rejects.toThrow("Videorc's engine is shut down.")
+    await expect(client.connect()).rejects.toThrow("Videorc's engine is shut down.")
     expect(FakeWebSocket.instances).toHaveLength(0)
   })
 
@@ -95,7 +95,7 @@ describe('BackendClient request lifetime', () => {
 
     client.close()
 
-    await expect(connecting).rejects.toThrow('Backend client is closed.')
+    await expect(connecting).rejects.toThrow("Videorc's engine is shut down.")
     expect(client.connected).toBe(false)
   })
 
@@ -108,13 +108,13 @@ describe('BackendClient request lifetime', () => {
     const socket = FakeWebSocket.instances[0]!
 
     client.close()
-    await expect(connecting).rejects.toThrow('Backend client is closed.')
+    await expect(connecting).rejects.toThrow("Videorc's engine is shut down.")
     socket.open()
     socket.respond({ event: 'recording.status', payload: { state: 'recording', durationMs: 10 } })
 
     expect(client.connected).toBe(false)
     expect(statuses).toEqual([])
-    await expect(client.connect()).rejects.toThrow('Backend client is closed.')
+    await expect(client.connect()).rejects.toThrow("Videorc's engine is shut down.")
     expect(FakeWebSocket.instances).toHaveLength(1)
   })
 
@@ -124,7 +124,7 @@ describe('BackendClient request lifetime', () => {
 
     const connecting = client.connect()
 
-    await expect(connecting).rejects.toThrow('Backend client is closed.')
+    await expect(connecting).rejects.toThrow("Videorc's engine is shut down.")
     expect(FakeWebSocket.instances).toHaveLength(1)
     expect(FakeWebSocket.instances[0]!.readyState).toBe(FakeWebSocket.CLOSED)
     expect(client.connected).toBe(false)
@@ -137,7 +137,7 @@ describe('BackendClient request lifetime', () => {
     const socket = FakeWebSocket.instances[0]!
 
     socket.onerror?.()
-    await expect(connecting).rejects.toThrow('Could not connect to the Rust backend.')
+    await expect(connecting).rejects.toThrow("Couldn't connect to Videorc's engine.")
     socket.open()
 
     expect(client.connected).toBe(false)
@@ -150,7 +150,7 @@ describe('BackendClient request lifetime', () => {
 
     FakeWebSocket.instances[0]!.close()
 
-    await expect(connecting).rejects.toThrow('Backend connection closed.')
+    await expect(connecting).rejects.toThrow("Videorc's engine connection closed.")
     expect(client.connected).toBe(false)
   })
 
@@ -190,7 +190,7 @@ describe('BackendClient request lifetime', () => {
     expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
     expect(client.connected).toBe(false)
     expect(closures).toEqual([null])
-    await expect(client.connect()).rejects.toThrow('Backend client is closed.')
+    await expect(client.connect()).rejects.toThrow("Videorc's engine is shut down.")
   })
 
   it('times out a missing response and removes the pending entry', async () => {
@@ -254,7 +254,7 @@ describe('BackendClient request lifetime', () => {
     socket.sendFailure = new Error('socket buffer rejected the write')
 
     await expect(client.request('scene.get')).rejects.toThrow(
-      'Could not send backend request "scene.get"'
+      'Couldn\'t send the "scene.get" request'
     )
     expect(client.pendingRequestCount).toBe(0)
   })
@@ -419,8 +419,8 @@ describe('BackendClient request lifetime', () => {
     socket.onmessage?.({ data: JSON.stringify({ event: 42, payload: {} }) })
 
     expect(errors).toEqual([
-      { message: 'Backend sent an invalid websocket message.' },
-      { message: 'Backend sent an invalid websocket message.' }
+      { message: "Videorc's engine sent an unreadable message." },
+      { message: "Videorc's engine sent an unreadable message." }
     ])
   })
 
@@ -435,7 +435,9 @@ describe('BackendClient request lifetime', () => {
     socket.respond({ event: 'recording.status', payload: { state: 'recording', durationMs: 10 } })
 
     expect(statuses).toEqual([{ state: 'recording', durationMs: 10 }])
-    expect(errors).toEqual([{ message: 'Backend event "recording.status" failed validation.' }])
+    expect(errors).toEqual([
+      { message: 'Videorc\'s engine sent an unreadable "recording.status" event.' }
+    ])
   })
 })
 

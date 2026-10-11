@@ -124,7 +124,7 @@ function WorkspaceTabFallback(): ReactElement {
       className="flex min-h-40 items-center justify-center text-xs text-muted-foreground"
       role="status"
     >
-      Loading workspace…
+      Opening Videorc…
     </div>
   )
 }

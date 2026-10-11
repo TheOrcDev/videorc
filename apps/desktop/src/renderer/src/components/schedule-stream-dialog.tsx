@@ -546,7 +546,7 @@ export function ScheduleStreamDialog({
                       <FieldDescription>
                         {event?.providerEventId
                           ? 'Change audience in YouTube Studio, then refresh.'
-                          : 'YouTube asks every stream to say whether it is made for kids.'}
+                          : "YouTube asks every stream to say whether it's made for kids."}
                       </FieldDescription>
                     </Field>
                   )}

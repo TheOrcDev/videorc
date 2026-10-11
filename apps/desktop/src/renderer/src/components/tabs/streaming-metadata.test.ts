@@ -246,7 +246,7 @@ describe('Stream details (plan 174 S3.5b)', () => {
 
   it('keeps the thumbnail picker off, with its reason, when only a stream key reaches YouTube', () => {
     const markup = render(draft(), [target('youtube', 'Orc TV')])
-    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Choose thumbnail</)
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Choose thumbnail…</)
     expect(markup).toContain('Stream key destinations can&#x27;t receive a thumbnail.')
   })
 

@@ -71,7 +71,7 @@ describe('device picker trigger', () => {
     expect(devicePickerTriggerView({ ...off, devices: [] }).label).toBe('No cameras found')
     expect(devicePickerTriggerView(off)).toEqual({ label: 'Off', status: null, placeholder: false })
     expect(devicePickerTriggerView({ ...off, noneLabel: undefined })).toEqual({
-      label: 'Select a camera',
+      label: 'Choose a camera',
       status: null,
       placeholder: true
     })

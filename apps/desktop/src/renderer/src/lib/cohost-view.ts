@@ -21,6 +21,7 @@ import { chatDraftMaxChars } from './chat-send'
 import { shortcutLabel } from './platform'
 import { shortcutAccelerator } from './shortcuts'
 import { formatRelativeTime } from './format-time'
+import { plural } from './format'
 import { buddyDisplayName } from './buddy-auto-chat-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 
@@ -582,7 +583,7 @@ const COHOST_PROMISE_TOAST_TEXT_CAP = 80
 export function cohostPromiseTriggerLabel(trigger: CohostPromiseTrigger): string | null {
   if (typeof trigger.value !== 'number' || !Number.isFinite(trigger.value)) return null
   const value = Math.max(0, Math.round(trigger.value))
-  if (trigger.kind === 'viewers') return `at ${value.toLocaleString()} viewers`
+  if (trigger.kind === 'viewers') return `at ${plural(value, 'viewer')}`
   if (trigger.kind === 'minutes') return `in ${value} min`
   return null
 }

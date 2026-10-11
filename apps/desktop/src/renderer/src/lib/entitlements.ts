@@ -93,7 +93,7 @@ export function entitlementCapability(
   return {
     featureId,
     state: 'disabled',
-    reason: 'This Videorc feature is not enabled.'
+    reason: "This Videorc feature isn't enabled."
   }
 }
 
@@ -113,5 +113,5 @@ export function entitlementDisabledReason(
     return null
   }
 
-  return capability.reason ?? 'This Videorc feature is not enabled.'
+  return capability.reason ?? "This Videorc feature isn't enabled."
 }

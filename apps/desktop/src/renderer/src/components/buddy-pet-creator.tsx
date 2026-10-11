@@ -88,6 +88,7 @@ import {
   readBuddyPetReviewMarks,
   writeBuddyPetReviewMarks
 } from '@/lib/buddy-pet-review-marks'
+import { plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
   BUDDY_PET_ATLAS_SHEETS,
@@ -784,7 +785,7 @@ function ReferenceStep({
     const base64 = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader()
       reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*,/, ''))
-      reader.onerror = () => reject(reader.error ?? new Error('The picture could not be read.'))
+      reader.onerror = () => reject(reader.error ?? new Error("The picture couldn't be read."))
       reader.readAsDataURL(file)
     })
     if (upload) URL.revokeObjectURL(upload.url)
@@ -874,7 +875,7 @@ function ReferenceStep({
                   if (file) {
                     void pick(file).catch((error: unknown) =>
                       setUploadError(
-                        error instanceof Error ? error.message : 'The picture could not be read.'
+                        error instanceof Error ? error.message : "The picture couldn't be read."
                       )
                     )
                   }
@@ -916,7 +917,7 @@ function NotesEditor({
         />
       </Field>
       <Field>
-        <FieldLabel htmlFor="buddy-pet-materials">It is made of</FieldLabel>
+        <FieldLabel htmlFor="buddy-pet-materials">It's made of</FieldLabel>
         <Input
           disabled={disabled}
           id="buddy-pet-materials"
@@ -1115,7 +1116,7 @@ function PilotStep({
         ) : null}
       </PanelSection>
       <PanelSection
-        description="New first poses use these words. They are fixed once the poses look right."
+        description="New first poses use these words. They're fixed once the poses look right."
         title="What Videorc sees"
       >
         <NotesEditor disabled={disabled} draft={draft} error={notesError} onChange={onDraft} />
@@ -1146,7 +1147,7 @@ function BuildStep({
   return (
     <>
       <PanelSection
-        description={`Eight sets of poses, one at a time; each takes up to two minutes. ${creation.sheetsRemaining} sets and ${creation.redosRemaining} redos left in this creation.`}
+        description={`Eight sets of poses, one at a time; each takes up to two minutes. ${plural(creation.sheetsRemaining, 'set')} and ${plural(creation.redosRemaining, 'redo')} left in this creation.`}
         title="Poses"
       >
         <GroupedList>
@@ -1305,7 +1306,7 @@ function ReviewStep({
     (creation.running?.job === 'sheet' ? (creation.running.sheet as BuddyPetSheetKey) : null)
   return (
     <PanelSection
-      description="Check every row: each pose looks where its arrow points, and every pose looks like the same Buddy. Redo a row that is wrong; it counts against this creation's redos."
+      description="Check every row: each pose looks where its arrow points, and every pose looks like the same Buddy. Redo a row that's wrong; it counts against this creation's redos."
       title="Check"
     >
       <div className="flex flex-wrap items-start gap-6">

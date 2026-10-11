@@ -76,13 +76,13 @@ describe('youtube quota copy (plan 094)', () => {
   it('names the destination only when its label is not the platform name', () => {
     const quota = 'YouTube ends the broadcast on its own about a minute after you stop.'
     expect(youtubeBroadcastToast('end', { label: 'YouTube', platform: 'youtube' }, quota)).toEqual({
-      title: "Couldn't end the YouTube broadcast.",
+      title: "Couldn't end the YouTube broadcast",
       description: quota
     })
     expect(
       youtubeBroadcastToast('start', { label: 'YouTube (vertical)', platform: 'youtube' }, quota)
     ).toEqual({
-      title: "Couldn't start the YouTube broadcast.",
+      title: "Couldn't start the YouTube broadcast",
       description: `YouTube (vertical): ${quota}`
     })
     expect(
@@ -142,10 +142,10 @@ describe('youtube quota copy (plan 094)', () => {
   it('words the budget steps as what is paused and what still works', () => {
     expect(youtubeBudgetNotice('normal')).toBeNull()
     expect(youtubeBudgetNotice('shed-extras')?.title).toBe(
-      "YouTube subscriber count paused to save Videorc's daily YouTube limit."
+      "YouTube subscriber count paused to save Videorc's daily YouTube limit"
     )
     expect(youtubeBudgetNotice('shed-viewers')?.title).toBe(
-      "YouTube viewer count paused to save Videorc's daily YouTube limit."
+      "YouTube viewer count paused to save Videorc's daily YouTube limit"
     )
     const essentials = youtubeBudgetNotice('essentials-only')
     expect(essentials?.title).toContain('paused for today')
@@ -153,7 +153,7 @@ describe('youtube quota copy (plan 094)', () => {
     for (const step of ['shed-extras', 'shed-viewers', 'essentials-only'] as const) {
       const notice = youtubeBudgetNotice(step)
       expect(notice?.description).not.toMatch(/<|{"error"/)
-      expect(notice?.description).toMatch(/not affected|still work/)
+      expect(notice?.description).toMatch(/n't affected|still work/)
     }
   })
 })

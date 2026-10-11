@@ -481,13 +481,6 @@ export type AudioSyncRecommendationParseResult =
   | { ok: false; error: string }
 
 export type WsStatus = 'waiting' | 'connecting' | 'connected' | 'failed' | 'closed'
-export type SetupTone = 'good' | 'warn' | 'neutral'
-export type SetupStep = {
-  label: string
-  detail: string
-  tone: SetupTone
-}
-
 export const STORAGE_KEYS = {
   settings: 'videorc.settings',
   captureConfig: 'videorc.captureConfig',
@@ -586,10 +579,10 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
 
 export function oauthUnavailableReason(platform: StreamPlatform): string | null {
   if (platform === 'custom') {
-    return 'Custom RTMP does not support OAuth.'
+    return "Custom RTMP uses a stream key. There's no account to sign in to."
   }
   if (platform === 'tiktok' || platform === 'instagram') {
-    return `${platformLabel(platform)} livestreams use a manual stream key. There is no OAuth to connect.`
+    return `${platformLabel(platform)} livestreams use a stream key. There's no account to sign in to.`
   }
   return null
 }

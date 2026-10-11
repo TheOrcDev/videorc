@@ -236,7 +236,7 @@ export function removalCardView(
 export const REMOVAL_RESULT_VISIBLE_MS = 6_000
 
 const REMOVAL_RESULT_FALLBACK: Partial<Record<ModerationPhase, string>> = {
-  cancelled: 'Cancelled. Nothing was removed.',
+  cancelled: 'Canceled. Nothing was removed.',
   expired: 'No answer. Nothing was removed.',
   removed: 'Removed.',
   'hidden-locally': 'Hidden in Videorc. Viewers may still see it.',

@@ -27,7 +27,7 @@ export async function commitSceneTransform({
   try {
     const status = await request({ sourceId, transform: patch, snap: 'none' })
     if (!isCurrent(status)) return { ok: false }
-    if (!status.applied) throw new Error(status.message ?? 'Scene transform was not applied.')
+    if (!status.applied) throw new Error(status.message ?? "Scene transform wasn't applied.")
     if (!status.scene.sources.some((source) => source.id === sourceId))
       throw new Error('The edited source is no longer available.')
     apply(status)

@@ -1198,7 +1198,7 @@ function OAuthAccountPanel({
                       ? 'Loading channels…'
                       : youtubeChannelOptions.length === 0
                         ? 'Refresh to load your channels'
-                        : 'Select channel'
+                        : 'Choose a channel'
                   }
                 />
               </SelectTrigger>
@@ -1256,7 +1256,7 @@ function OAuthAccountPanel({
               onClick={() => void onRefreshXNativeCapability(account.accountId)}
             >
               <SyncIcon data-icon="inline-start" weight="bold" />
-              {xNativeCapabilityLoading ? 'Checking' : 'Check again'}
+              {xNativeCapabilityLoading ? 'Checking…' : 'Check again'}
             </Button>
           </div>
           {xNativeCapability?.message && !xNativeCapability.nativeAvailable ? (

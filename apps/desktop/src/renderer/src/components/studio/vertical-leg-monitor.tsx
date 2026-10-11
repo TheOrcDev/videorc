@@ -66,7 +66,7 @@ export function VerticalLegMonitor(): ReactElement | null {
       }
       description={
         isSessionActive
-          ? 'Changes here go live on the vertical stream only. Your horizontal stream is not touched.'
+          ? "Changes here go live on the vertical stream only. Your horizontal stream isn't touched."
           : 'Goes live beside your horizontal stream when you start.'
       }
       icon={MobileIcon}
@@ -108,7 +108,7 @@ export function VerticalLegMonitor(): ReactElement | null {
           </label>
           <span className="text-xs text-muted-foreground">
             {followed
-              ? 'Following now: your horizontal scene has a vertical twin, so that is what streams.'
+              ? "Following now: your horizontal scene has a vertical twin, so that's what streams."
               : 'Camera only and Screen only switch the vertical stream to the matching scene.'}
           </span>
         </div>

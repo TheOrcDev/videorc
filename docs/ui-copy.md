@@ -180,10 +180,13 @@ source change: the stage is the confirmation.
   JSX text and every string that reads as prose in the renderer (a toast, an
   error message, a label, a placeholder) and fails on:
   - an icon component's name (`DeleteIcon`), with no exceptions;
-  - the words in [No internals](#no-internals) and "...", against a ratchet:
-    `COPY_RULE_RATCHET` lists today's offenders as a count per file. Fixing
-    one means lowering that file's count (the test says to what); a count
-    may never rise, and a file not listed may have none.
+  - the words in [No internals](#no-internals) and "...", with no
+    exceptions (plan 174 S2.5 brought the last offenders to zero, so there
+    is no allowlist);
+  - a Title Case command label: the text of a `Button`, a menu item, a tab
+    or a dialog action may capitalize a word after its first only when it
+    is a name from [Casing](#casing) (`CAPITALIZED_NAMES` in the test).
+    "Import From OBS" fails; "Open Stream Manager" passes.
 - `pnpm lint` runs `scripts/check-em-dashes.mjs` (no em dash in app copy).
 - `renderer-buddy-name-guard.test.ts` keeps the companion's retired names
   out of copy.

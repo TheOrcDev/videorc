@@ -458,7 +458,7 @@ function PresetTile({
                   label={`Actions for ${name}`}
                   reveal={active ? 'always' : 'hover'}
                   items={[
-                    { id: 'rename', label: 'Rename', icon: EditIcon, onSelect: onStartRename },
+                    { id: 'rename', label: 'Rename…', icon: EditIcon, onSelect: onStartRename },
                     {
                       id: 'replace',
                       label: 'Replace image…',

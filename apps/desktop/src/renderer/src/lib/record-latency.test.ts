@@ -121,7 +121,7 @@ describe('record latency helpers', () => {
     }
     expect(slowestTimelinePhase(snapshot)).toEqual({ phase: 'running', deltaMs: 820 })
     expect(slowestTimelinePhase({ kind: 'stop', totalMs: 0, outcome: 'idle' })).toBeNull()
-    expect(formatTimelineSummary(snapshot)).toBe('1200 ms · running · cold · 18 ms click→backend')
+    expect(formatTimelineSummary(snapshot)).toBe('1200 ms · running · cold · 18 ms click→engine')
     // The one placeholder (plan 174 S3.18, I-25).
     expect(formatTimelineSummary(null)).toBe('–')
   })

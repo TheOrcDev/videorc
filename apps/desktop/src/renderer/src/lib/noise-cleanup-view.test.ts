@@ -304,8 +304,8 @@ describe('Noise Cleanup Library view', () => {
 
   it('only confirms cancellation after the backend returns cancelled', () => {
     expect(noiseCleanupCancellationNotice(job({ status: 'cancelled' }))).toEqual({
-      title: 'Noise cleanup cancelled',
-      description: 'The original recording was not changed.'
+      title: 'Noise cleanup canceled',
+      description: "The original recording wasn't changed."
     })
     for (const status of ['queued', 'processing', 'validating'] as const) {
       expect(noiseCleanupCancellationNotice(job({ status }))).toEqual({

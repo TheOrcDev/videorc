@@ -1021,9 +1021,9 @@ async function waitForLiveLayoutProof(
   const errorDetail =
     lastError instanceof Error && lastError.message ? ` Last error: ${lastError.message}` : ''
   throw new Error(
-    `Live layout switch did not reach the active recording/streaming output within ${Math.round(
+    `The scene change didn't reach the recording or livestream within ${Math.round(
       LIVE_LAYOUT_PROOF_WAIT_TIMEOUT_MS / 1000
-    )}s (target revision ${status.sceneRevision}, rendered revision ${renderedRevision}, active revision ${activeRevision}).${errorDetail}`
+    )}s (scene version wanted ${status.sceneRevision}, drawn ${renderedRevision}, live ${activeRevision}).${errorDetail}`
   )
 }
 
@@ -1142,9 +1142,7 @@ async function waitForPreviewLayoutProof(
   if (compositorStatusCanDriveProofScene(renderedStatus, status.sceneRevision, { linuxCpuProof })) {
     return renderedStatus
   }
-  throw new Error(
-    `Preview layout switch did not present committed revision ${status.sceneRevision} within the proof window.`
-  )
+  throw new Error(`The preview didn't show scene version ${status.sceneRevision} in time.`)
 }
 
 export type StudioContextValue = {
@@ -1920,7 +1918,7 @@ const idlePreviewSurfaceStatus = (): PreviewSurfaceStatus => ({
   sourcePixelsPresent: false,
   pendingHostCommandCount: 0,
   updatedAt: new Date().toISOString(),
-  message: 'Native preview surface is not running.'
+  message: "Native preview surface isn't running."
 })
 
 const isPreviewSurfaceTransport = (transport: PreviewLiveStatus['transport']): boolean =>
@@ -1934,7 +1932,7 @@ const idlePreviewCameraStatus = (): PreviewCameraStatus => ({
   framesCaptured: 0,
   droppedFrames: 0,
   updatedAt: new Date().toISOString(),
-  message: 'Native camera preview is not running.'
+  message: "Native camera preview isn't running."
 })
 
 const idlePreviewScreenStatus = (): PreviewScreenStatus => ({
@@ -1945,7 +1943,7 @@ const idlePreviewScreenStatus = (): PreviewScreenStatus => ({
   includeCursor: true,
   excludeCurrentProcessWindows: true,
   updatedAt: new Date().toISOString(),
-  message: 'Native screen preview is not running.'
+  message: "Native screen preview isn't running."
 })
 
 function selectedPreviewScreenDevice(
@@ -2012,7 +2010,7 @@ function selectedPreviewScreenBlockedStatus(
     return {
       ...base,
       state: 'source-missing',
-      message: selectedDevice.detail ?? 'Selected screen source is not available.'
+      message: selectedDevice.detail ?? "The screen source you chose isn't available."
     }
   }
 
@@ -2020,7 +2018,7 @@ function selectedPreviewScreenBlockedStatus(
     return {
       ...base,
       state: 'source-missing',
-      message: 'Selected screen source is no longer available.'
+      message: "The screen source you chose isn't available anymore."
     }
   }
 
@@ -2034,7 +2032,7 @@ const idleNotesWindowState = (): NotesWindowState => ({
   alwaysOnTop: false,
   protected: false,
   enabled: false,
-  message: 'Notes window is disabled by VIDEORC_NOTES_WINDOW=0.'
+  message: 'Notes is turned off for this run.'
 })
 
 const idleCommentsWindowState = (): CommentsWindowState => ({
@@ -2046,7 +2044,7 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   autoShowActivity: false,
   protected: false,
   enabled: false,
-  message: 'Chat window is disabled by VIDEORC_COMMENTS_WINDOW=0.'
+  message: 'Stream Manager is turned off for this run.'
 })
 
 const idleCaptionsWindowState = (): CaptionsWindowState => ({
@@ -2055,7 +2053,7 @@ const idleCaptionsWindowState = (): CaptionsWindowState => ({
   bounds: null,
   alwaysOnTop: false,
   enabled: false,
-  message: 'Captions window is disabled by VIDEORC_CAPTIONS_WINDOW=0.'
+  message: 'Captions reader is turned off for this run.'
 })
 
 const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
@@ -2597,7 +2595,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         continue
       }
       chatSetupWarnedRef.current.warned.add(warning.id)
-      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat is not connected`, {
+      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat isn't connected`, {
         description: warning.message,
         action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
       })
@@ -2674,7 +2672,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       commitCaptionsStatus(status)
       if (!captionsStatusIsActive(status) && status.state !== 'ready') {
-        throw new Error(status.message ?? `Live captions did not start (status: ${status.state}).`)
+        throw new Error(status.message ?? `Live captions didn't start (status: ${status.state}).`)
       }
     },
     [client, commitCaptionsStatus, runCaptionsCommand]
@@ -2885,7 +2883,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCommentsClearResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not clear the chat view.'
+            error: error instanceof Error ? error.message : "Couldn't clear the chat view."
           })
         })
     })
@@ -2925,7 +2923,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           window.videorc?.pushMarkerResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not save marker.'
+            error: error instanceof Error ? error.message : "Couldn't save marker."
           })
         )
     })
@@ -2935,7 +2933,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void (async () => {
         if (!client) throw offlineError()
         if (!isActiveRecordingState(recordingRef.current.state)) {
-          throw new Error('No session is running, so there is nothing to mark.')
+          throw new Error("No session is running, so there's nothing to mark.")
         }
         return client.request<ClipMarkedEvent>('clip.mark')
       })()
@@ -2950,7 +2948,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushClipMarkResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not mark the clip.'
+            error: error instanceof Error ? error.message : "Couldn't mark the clip."
           })
         })
     })
@@ -3026,7 +3024,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!client) throw offlineError()
       const sessionId = expectedSessionId ?? liveChatSnapshot.sessionId
       if (!sessionId || message.sessionId !== sessionId) {
-        throw new Error('That message does not belong to the active livestream.')
+        throw new Error("That message doesn't belong to the active livestream.")
       }
       setCommentHighlightApplyingId(message.id)
       try {
@@ -3078,7 +3076,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           { ...streamVideo, rect },
           canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
         )
-        if (!cards) throw new Error('Could not render this message for the stream.')
+        if (!cards) throw new Error("Couldn't render this message for the stream.")
         if (commentHighlightIntentRef.current !== intent) return null
         let state: CommentHighlightState
         try {
@@ -3546,7 +3544,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     source: 'unavailable',
     transport: 'unavailable',
     backing: 'none',
-    message: 'Live preview is not running.'
+    message: "Live preview isn't running."
   })
   const [previewSurfaceStatus, setPreviewSurfaceStatus] =
     useState<PreviewSurfaceStatus>(idlePreviewSurfaceStatus)
@@ -4448,7 +4446,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             listening: {
               state: 'blocked',
               reasonCode: 'configuration_failed',
-              message: error instanceof Error ? error.message : 'Could not enable voice markers.'
+              message: error instanceof Error ? error.message : "Couldn't enable voice markers."
             }
           })
       })
@@ -4918,7 +4916,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostEnableResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not change the Buddy setting.'
+            error: error instanceof Error ? error.message : "Couldn't change the Buddy setting."
           })
         })
     })
@@ -6356,9 +6354,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     xProducerReminderShownRef.current = true
-    toast.info('X feed is connected. Now start the Broadcast on X.', {
+    toast.info('X feed is connected: start the broadcast on X', {
       description:
-        'X does not go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, ' +
+        "X doesn't go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, " +
         'create a broadcast from your source, and press Broadcast.',
       duration: 20000,
       action: {
@@ -8748,7 +8746,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           visibilityIdentity(status.scene) !== identity ||
           status.scene.sources.find((source) => source.id === sourceId)?.visible !== visible
         ) {
-          throw new Error('Source visibility was not acknowledged.')
+          throw new Error("Source visibility wasn't acknowledged.")
         }
         applyCommittedScene(status)
         const current = captureConfigRef.current
@@ -8900,7 +8898,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : null
         if (!surfaceStatus) {
           throw new NativePreviewPresentationProofError(
-            `Native preview could not verify committed scene revision ${status.sceneRevision}.`
+            `The preview couldn't confirm it shows scene version ${status.sceneRevision}.`
           )
         }
         applyPreviewSurfaceStatus(surfaceStatus)
@@ -8913,7 +8911,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
         ) {
           throw new NativePreviewPresentationProofError(
-            `Native preview did not present committed scene revision ${status.sceneRevision}.`
+            `The preview didn't show scene version ${status.sceneRevision}.`
           )
         }
       }
@@ -9153,7 +9151,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         layoutPresetOrientation(layout.layoutPreset) !==
           layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
       ) {
-        toast.warning('Stop the recording or stream before switching orientation.', {
+        toast.warning('Stop the recording or stream before switching orientation', {
           id: 'scene-orientation-lock'
         })
         return Promise.resolve(false)
@@ -9495,7 +9493,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // The canvas is fixed mid-session; the transaction's own refusal would
       // say so, but the entry must stay for after the session.
       restoreLayoutUndo(entry)
-      toast.error('Stop the recording or stream before switching orientation.', {
+      toast.error('Stop the recording or stream before switching orientation', {
         id: 'scene-orientation-lock'
       })
       return false
@@ -10988,9 +10986,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         .then(async (result) => {
           if (!streamOutputTopologyResultMatchesRequest(result, params)) {
-            throw new Error(
-              'Backend returned a livestream output verdict for a different output configuration.'
-            )
+            throw new Error('The livestream check came back for different settings. Check again.')
           }
           const splitRejected = streamOutputTopologySplitRejected(result)
           if (splitRejected) {
@@ -11029,7 +11025,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               message:
                 error instanceof Error
                   ? error.message
-                  : 'The livestream output path could not be verified.'
+                  : "The livestream output path couldn't be verified."
             })
           }
           throw error
@@ -11246,7 +11242,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const validResult = result?.sessionId === requested.sessionId ? result : undefined
           const protocolError =
             result && !validResult
-              ? new Error('Backend returned live microphone state for a different session.')
+              ? new Error('The microphone update came back for a different recording.')
               : undefined
           if (validResult?.applied) {
             latest.lastApplied = {
@@ -11475,7 +11471,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           id: 'captions-output-unsupported',
           description:
             captionOutputReadiness.description ??
-            'The active output configuration cannot carry caption pixels.'
+            "The active output configuration can't carry caption pixels."
         })
         return
       }
@@ -12066,7 +12062,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         !verifier ||
         state !== envelope.state
       ) {
-        throw new Error('Desktop account callback did not match its sign-in transaction.')
+        throw new Error("The sign-in link didn't match. Sign in again.")
       }
       const coordinator = accountSnapshotCoordinatorRef.current
       const mutation = coordinator.beginMutation()
@@ -12220,12 +12216,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         parsed.port ||
         parsed.hash
       ) {
-        throw new Error('Provider OAuth callback had an invalid redirect URI.')
+        throw new Error("The connect link wasn't valid. Connect again.")
       }
 
       const state = parsed.searchParams.get('state')?.trim()
       if (!state || state !== envelope.state) {
-        throw new Error('Provider OAuth callback state did not match its durable envelope.')
+        throw new Error("The connect link didn't match. Connect again.")
       }
 
       const params: OAuthCompleteParams = {
@@ -12582,7 +12578,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
 
           if (!target.scheduledEventId && !lastStatus?.active) {
-            throw new Error(lastStatus?.message ?? 'YouTube ingest did not become active yet.')
+            throw new Error(lastStatus?.message ?? "YouTube ingest didn't become active yet.")
           }
           if (platformLifecycleRun.current !== runId) {
             return
@@ -14305,7 +14301,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return Promise.resolve()
     }
     if (goLiveCaptionsReadiness.blocksStart) {
-      toast.warning('Live captions are not ready.', {
+      toast.warning("Live captions aren't ready", {
         description: goLiveCaptionsReadiness.description
       })
       return Promise.resolve()
@@ -14352,9 +14348,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         )
         if (changedScheduledEvent) {
           setGoLivePreflight(preflight)
-          toast.warning(
-            'The scheduled event changed. Review its updated visibility and details, then confirm again.'
-          )
+          toast.warning('The scheduled event changed', {
+            description: 'Review its updated visibility and details, then confirm again.'
+          })
           return
         }
         setGoLivePreflight(preflight)
@@ -14443,7 +14439,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const continueGoLiveWithReadyDestinations = useCallback(async () => {
     if (goLiveCaptionsReadiness.blocksStart) {
-      toast.warning('Live captions are not ready.', {
+      toast.warning("Live captions aren't ready", {
         description: goLiveCaptionsReadiness.description
       })
       return
@@ -14906,7 +14902,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     }
     if (!isActiveRecordingState(recordingRef.current.state)) {
-      toast.info('Nothing to mark yet.', {
+      toast.info('Nothing to mark yet', {
         id: 'clip-marked',
         description: 'Start recording or go live, then mark the moments you want clipped.'
       })
@@ -15256,7 +15252,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           patchManualStreamKeyResult(candidate.targetId, result)
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          setLastError(`Could not migrate saved ${label} stream key: ${message}`)
+          setLastError(`Couldn't migrate saved ${label} stream key: ${message}`)
           toast.warning(`Save your ${label} stream key again`, {
             id: `stream-key-migration:${candidate.targetId}`,
             description:
@@ -15654,7 +15650,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           publishCommentHighlightState(state)
           return state.phase === 'live'
             ? { ok: true }
-            : { ok: false, message: state.reason ?? 'The comment did not reach the stream.' }
+            : { ok: false, message: state.reason ?? "The comment didn't reach the stream." }
         } catch (error) {
           // The backend's eligibility reason ("not live", ...) verbatim.
           return {
@@ -15672,7 +15668,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } catch (error) {
           return {
             ok: false,
-            message: error instanceof Error ? error.message : 'Could not clear the comment.'
+            message: error instanceof Error ? error.message : "Couldn't clear the comment."
           }
         }
       },
@@ -15683,7 +15679,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } catch (error) {
           return {
             ok: false,
-            message: error instanceof Error ? error.message : 'Could not mark the clip.'
+            message: error instanceof Error ? error.message : "Couldn't mark the clip."
           }
         }
       }

@@ -229,7 +229,7 @@ export function hydrateSceneLibrary(raw: unknown): {
     readOnly: false,
     error:
       scenes.length !== (Array.isArray(data.scenes) ? data.scenes.length : 0)
-        ? 'Some invalid saved scenes could not be loaded.'
+        ? "Some invalid saved scenes couldn't be loaded."
         : null
   }
 }

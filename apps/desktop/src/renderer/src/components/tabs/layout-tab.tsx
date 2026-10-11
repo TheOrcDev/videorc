@@ -959,11 +959,11 @@ function CameraInspector({
   const placementDescription = isFreeform
     ? 'Drag and resize the camera on the stage, or set exact numbers below.'
     : isCameraOnly
-      ? 'Camera only fills the frame as a rectangle. Corner, size and shape do not apply; frame yourself under Lens.'
+      ? "Camera only fills the frame as a rectangle. Corner, size and shape don't apply; frame yourself under Lens."
       : isVerticalCameraOnly
-        ? 'The camera fills the whole 9:16 canvas and crops to fit. Corner, size and shape do not apply; frame yourself under Lens.'
+        ? "The camera fills the whole 9:16 canvas and crops to fit. Corner, size and shape don't apply; frame yourself under Lens."
         : isVerticalStack
-          ? 'The stacked vertical scenes give the camera and the screen fixed bands of the 9:16 canvas. Corner, size and shape do not apply; frame yourself under Lens.'
+          ? "The stacked vertical scenes give the camera and the screen fixed bands of the 9:16 canvas. Corner, size and shape don't apply; frame yourself under Lens."
           : undefined
   // Vertical bands and the full-canvas vertical camera ALWAYS fill and crop:
   // a "Fit frame" option would letterbox the short-form frame (2026-07-13

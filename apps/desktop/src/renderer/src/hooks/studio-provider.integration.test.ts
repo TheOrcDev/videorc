@@ -9170,7 +9170,7 @@ describe('real StudioProvider lifecycle', () => {
 
     expect(requestMediaAccess).not.toHaveBeenCalled()
     expect(openSystemPermissions).not.toHaveBeenCalled()
-    expect(toastSpies.error).toHaveBeenCalledWith('Could not check Camera permission.', {
+    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't check Camera permission", {
       description: 'Try again before changing access.',
       duration: 8_000
     })

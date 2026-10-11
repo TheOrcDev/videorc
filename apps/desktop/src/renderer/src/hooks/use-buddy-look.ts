@@ -199,7 +199,7 @@ export function createBuddyLookController(client: BuddyLookClient): BuddyLookCon
       // ends with the draft event, unless its draft was discarded meanwhile.
       if (running?.kind === 'create' && event.state === 'idle' && event.phase === 'failed') {
         ended({
-          problem: event.error ?? { code: 'failed', message: 'The look could not be made.' }
+          problem: event.error ?? { code: 'failed', message: "The look couldn't be made." }
         })
       } else if (running?.kind === 'redo' && event.error?.code === 'cohost-avatar-cancelled') {
         ended({})

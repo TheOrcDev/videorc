@@ -179,6 +179,6 @@ export function formatTimelineSummary(
   if (!snapshot) return NO_VALUE
   const cold = snapshot.cold === true ? ' · cold' : snapshot.cold === false ? ' · warm' : ''
   const origin =
-    snapshot.clickToOriginMs !== undefined ? ` · ${snapshot.clickToOriginMs} ms click→backend` : ''
+    snapshot.clickToOriginMs !== undefined ? ` · ${snapshot.clickToOriginMs} ms click→engine` : ''
   return `${formatLatencyMs(snapshot.totalMs)} · ${snapshot.outcome}${cold}${origin}`
 }

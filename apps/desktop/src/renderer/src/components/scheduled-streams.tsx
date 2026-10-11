@@ -519,7 +519,7 @@ function EventRow({
     menu.push(
       {
         id: 'edit',
-        label: 'Edit',
+        label: 'Edit…',
         icon: EditIcon,
         disabled: pending,
         onSelect: () =>

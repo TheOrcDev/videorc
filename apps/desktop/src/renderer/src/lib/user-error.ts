@@ -39,11 +39,10 @@ export function offlineError(): VideorcOfflineError {
 // strings, so the copy guard reads them as code.
 const OFFLINE_RAW = [
   /^Videorc is reconnecting\. Try again in a moment\.$/,
-  /^Backend (?:socket|WebSocket|client|connection) (?:is not connected|is closed|closed)\.$/,
-  /^Backend is not connected\.(?: Try again in a moment\.)?$/,
-  /^Could not connect to the Rust backend\.$/,
-  /^Backend request "[^"]+" timed out before it was sent\.$/,
-  /^Could not send backend request/
+  /^Videorc's engine (?:isn't connected|connection closed|is shut down)\.$/,
+  /^Couldn't connect to Videorc's engine\.$/,
+  /^The "[^"]+" request timed out before it was sent\.$/,
+  /^Couldn't send the "[^"]+" request/
 ]
 const UNKNOWN_OUTCOME = /its outcome is unknown\.$/
 

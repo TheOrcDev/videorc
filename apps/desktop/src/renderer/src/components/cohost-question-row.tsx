@@ -81,7 +81,7 @@ export function CohostQuestionRow({
               On topic
             </Badge>
           </TooltipTrigger>
-          <TooltipContent>About what you are talking about right now</TooltipContent>
+          <TooltipContent>About what you're talking about right now</TooltipContent>
         </Tooltip>
       ) : null}
       {question.fromNotes ? (
@@ -112,7 +112,7 @@ export function CohostQuestionRow({
               <span className="@max-[400px]/cohost-pane:hidden">Talking about this</span>
             </Badge>
           </TooltipTrigger>
-          <TooltipContent>You are talking about this question</TooltipContent>
+          <TooltipContent>You're talking about this question</TooltipContent>
         </Tooltip>
       ) : null}
       {onStream ? <Badge variant="success">On stream</Badge> : null}

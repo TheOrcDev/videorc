@@ -604,7 +604,7 @@ export function SyncCalibrationView({
               onClick={() => fileInputRef.current?.click()}
             >
               <UploadIcon data-icon="inline-start" />
-              Import JSON
+              Import JSON…
             </Button>
             <Button
               disabled={!canApply}

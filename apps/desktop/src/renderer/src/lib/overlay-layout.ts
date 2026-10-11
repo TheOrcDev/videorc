@@ -49,7 +49,7 @@ export const OVERLAY_SNAP_LABELS: Record<OverlaySnap, string> = {
   'top-right': 'Top right',
   'bottom-left': 'Bottom left',
   'bottom-right': 'Bottom right',
-  'bottom-center': 'Bottom centre'
+  'bottom-center': 'Bottom center'
 }
 
 function round6(value: number): number {

@@ -576,7 +576,7 @@ export function ChatPane({
           <InputGroupInput
             ref={searchRef}
             aria-label="Search chat"
-            placeholder="Search"
+            placeholder="Search chat…"
             value={filter.search}
             onChange={(event) =>
               setFilter((current) => ({ ...current, search: event.target.value }))
@@ -859,7 +859,7 @@ export function Composer({
         })
         .catch((error) =>
           setNotice(
-            error instanceof Error ? error.message : 'Could not save marker. Retry this command.'
+            error instanceof Error ? error.message : "Couldn't save marker. Retry this command."
           )
         )
         .finally(() => {
@@ -1082,7 +1082,7 @@ export function Composer({
                       setNotice('Marker removed.')
                     })
                     .catch((error) =>
-                      setNotice(error instanceof Error ? error.message : 'Could not remove marker.')
+                      setNotice(error instanceof Error ? error.message : "Couldn't remove marker.")
                     )
                     .finally(() => {
                       localPendingRef.current = false

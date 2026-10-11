@@ -43,7 +43,7 @@ export function streamKeyPlatformMismatch(
   }
   const detectedLabel = platformLabel(detected)
   const fieldLabel = platformLabel(fieldPlatform)
-  return `This looks like a ${detectedLabel} stream key, but you are saving it to ${fieldLabel}.`
+  return `This looks like a ${detectedLabel} stream key, but you're saving it to ${fieldLabel}.`
 }
 
 /** Client-side masked tail, mirroring the backend's hint format. */

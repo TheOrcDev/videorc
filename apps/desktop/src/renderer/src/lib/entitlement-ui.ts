@@ -171,7 +171,7 @@ function featureGate(
 
   return lockedGate(
     featureId,
-    entitlementDisabledReason(entitlements, featureId) ?? 'This Videorc feature is not enabled.'
+    entitlementDisabledReason(entitlements, featureId) ?? "This Videorc feature isn't enabled."
   )
 }
 

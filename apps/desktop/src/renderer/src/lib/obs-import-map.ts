@@ -487,14 +487,14 @@ export function mapObsSetup(
           verdict: 'imported',
           subject: label,
           note: setup.service.hasKey
-            ? `Imports the server and the stream key to ${platformName} Manual RTMP.`
-            : `Imports the server to ${platformName} Manual RTMP. OBS had no stream key.`
+            ? `Imports the server and the stream key into ${platformName}, set to Stream key.`
+            : `Imports the server into ${platformName}, set to Stream key. OBS had no stream key.`
         })
       } else if (platform === 'youtube' || platform === 'kick') {
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: `OBS had no server URL. Set up ${platformName} Manual RTMP in Livestream.`
+          note: `OBS had no server URL. Set up ${platformName} with a stream key in Livestream.`
         })
       } else {
         result.stream = {

@@ -1,6 +1,7 @@
 import { encode } from 'uqr'
 
 import type { RemoteLanDevice, RemoteLanStatus } from '@/lib/backend'
+import { plural } from '@/lib/format'
 
 /**
  * Phone remote is off by default; an empty card body reads as a render bug.
@@ -78,7 +79,7 @@ export function phoneRemoteSummary(status: RemoteLanStatus): {
     tone: 'ok',
     text:
       connected > 0
-        ? `${connected} phone${connected === 1 ? '' : 's'} connected · ${where}`
+        ? `${plural(connected, 'phone')} connected · ${where}`
         : `Listening on ${where} · same Wi-Fi only`
   }
 }

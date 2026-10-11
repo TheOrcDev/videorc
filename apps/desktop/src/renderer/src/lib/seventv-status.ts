@@ -1,4 +1,5 @@
 import type { SevenTvStatus } from '@/lib/backend'
+import { plural } from '@/lib/format'
 
 /**
  * The muted line under Settings → General → "Show 7TV emotes in chat"
@@ -14,7 +15,7 @@ export function sevenTvStatusLine(status: SevenTvStatus): string | null {
       return 'Loading your 7TV emotes…'
     case 'linked': {
       const count = status.emoteCount ?? 0
-      const emotes = `${count.toLocaleString('en-US')} ${count === 1 ? 'emote' : 'emotes'}`
+      const emotes = plural(count, 'emote')
       return status.setName ? `“${status.setName}” · ${emotes}` : emotes
     }
     case 'notLinked':

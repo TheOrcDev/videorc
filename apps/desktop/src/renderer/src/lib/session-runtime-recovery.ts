@@ -128,8 +128,8 @@ export function recordingFailurePresentation({
   const message =
     status.message ??
     (activityIsLive(activity)
-      ? 'Videorc could not finish this livestream.'
-      : 'Videorc could not finish this recording.')
+      ? "Videorc couldn't finish this livestream."
+      : "Videorc couldn't finish this recording.")
   return {
     dedupeKey,
     notice: {
@@ -291,7 +291,7 @@ export function showBackendError(
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
   // One toast per playback state: the backend re-checks on a timer.
   if (event.status === 'verified') {
-    notifyOnce('x-playback', 'success', 'Viewers can watch your X broadcast.', {
+    notifyOnce('x-playback', 'success', 'Viewers can watch your X broadcast', {
       description: event.shareUrl
     })
   } else if (event.status === 'pending') {
@@ -337,8 +337,8 @@ export function showOAuthCallbackResult(result: OAuthCallbackResult): void {
     const description =
       result.reason === 'youtube-quota' && result.retryAt
         ? youtubeConnectPausedMessage(result.retryAt)
-        : (result.message ?? result.status ?? 'Connection could not be completed.')
-    toast.error(`Couldn't finish connecting ${platformName}.`, { id, description })
+        : (result.message ?? result.status ?? "Connection couldn't be completed.")
+    toast.error(`Couldn't finish connecting ${platformName}`, { id, description })
   }
 }
 
@@ -346,7 +346,7 @@ export function showOAuthCallbackResult(result: OAuthCallbackResult): void {
 export function showOAuthCallbackExhausted(): void {
   const platformName = platformLabelOrAccount(lastOAuthCallbackPlatform)
   console.warn('[oauth] callback retries exhausted; kept unacknowledged')
-  toast.error(`Couldn't finish connecting ${platformName}.`, {
+  toast.error(`Couldn't finish connecting ${platformName}`, {
     id: oauthCallbackToastId(lastOAuthCallbackPlatform),
     description: `Connect ${platformName} again from Livestream → Setup.`,
     action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
@@ -516,7 +516,7 @@ function showSessionAudioNews(event: HealthEvent): void {
 export function showNoiseCleanupCompleted(jobId: string, outputSessionId: string): void {
   toast.success('Noise cleanup complete', {
     id: `noise-cleanup-completed-${jobId}`,
-    description: 'A separate cleaned copy is ready. The original was not changed.',
+    description: "A separate cleaned copy is ready. The original wasn't changed.",
     duration: 15_000,
     action: {
       label: 'Play',

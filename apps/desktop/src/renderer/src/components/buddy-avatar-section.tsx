@@ -159,7 +159,7 @@ export function BuddyAvatarSection({
     if (pack.packId === wornPackId) return
     setActionError(null)
     onWear(pack.packId).catch((failure: unknown) =>
-      setActionError(failure instanceof Error ? failure.message : `Could not wear ${pack.name}.`)
+      setActionError(failure instanceof Error ? failure.message : `Couldn't wear ${pack.name}.`)
     )
   }
 
@@ -171,7 +171,7 @@ export function BuddyAvatarSection({
       await pets.remove(pack.packId)
     } catch (failure: unknown) {
       setActionError(
-        `Could not remove ${pack.name}: ${failure instanceof Error ? failure.message : String(failure)}`
+        `Couldn't remove ${pack.name}: ${failure instanceof Error ? failure.message : String(failure)}`
       )
     }
   }

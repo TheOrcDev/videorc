@@ -42,7 +42,7 @@ export function broadcastInfoIssues(
           : null
   const description =
     broadcastTextLength(value.description) > BROADCAST_DESCRIPTION_MAX
-      ? `Keep the description to ${BROADCAST_DESCRIPTION_MAX.toLocaleString('en-US')} characters.`
+      ? `Keep the description to ${BROADCAST_DESCRIPTION_MAX.toLocaleString()} characters.`
       : angle.test(value.description)
         ? "Descriptions can't contain < or >."
         : null

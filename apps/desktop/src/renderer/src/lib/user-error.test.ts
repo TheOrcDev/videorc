@@ -42,11 +42,11 @@ describe('userErrorMessage', () => {
   it("strips Electron's IPC wrapper from the raw text", () => {
     const copy = userErrorMessage(
       new Error(
-        "Error invoking remote method 'comments-window:moderate': Error: Backend socket is not connected."
+        "Error invoking remote method 'comments-window:moderate': Error: Videorc's engine isn't connected."
       ),
       { action: 'remove', object: 'the message' }
     )
-    expect(copy.raw).toBe('Backend socket is not connected.')
+    expect(copy.raw).toBe("Videorc's engine isn't connected.")
     expect(copy.kind).toBe('offline')
     expect(copy.text).not.toContain('invoking remote method')
   })
@@ -54,12 +54,13 @@ describe('userErrorMessage', () => {
   it('says Videorc is reconnecting for every offline shape, as a warning', () => {
     for (const error of [
       offlineError(),
-      new Error('Backend socket is not connected.'),
-      new Error('Backend WebSocket is not connected.'),
-      new Error('Backend connection closed.'),
-      new Error('Backend is not connected. Try again in a moment.'),
-      new Error('Could not connect to the Rust backend.'),
-      new Error('Backend request "clip.mark" timed out before it was sent.')
+      new Error(OFFLINE_REASON),
+      new Error("Videorc's engine isn't connected."),
+      new Error("Videorc's engine connection closed."),
+      new Error("Videorc's engine is shut down."),
+      new Error("Couldn't connect to Videorc's engine."),
+      new Error('The "clip.mark" request timed out before it was sent.'),
+      new Error('Couldn\'t send the "clip.mark" request: InvalidStateError')
     ]) {
       const copy = userErrorMessage(error, { action: 'mark', object: 'the clip' })
       expect(copy).toMatchObject({
@@ -94,13 +95,12 @@ describe('userErrorMessage', () => {
       userErrorMessage(
         backendError(
           'request-outcome-unknown',
-          'Backend request "screens.activate" timed out; its outcome is unknown.'
+          'The "screens.activate" request timed out; its outcome is unknown.'
         )
       ).description
     ).toContain("didn't hear back")
     expect(
-      userErrorMessage(new Error('Backend request "x" lost the socket; its outcome is unknown.'))
-        .kind
+      userErrorMessage(new Error('The "x" request lost the socket; its outcome is unknown.')).kind
     ).toBe('known')
   })
 

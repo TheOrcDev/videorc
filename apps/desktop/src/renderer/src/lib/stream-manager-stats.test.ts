@@ -267,7 +267,7 @@ describe('stats bar items (plan 057)', () => {
     expect(viewers?.value).toBe('12')
     expect(viewers?.details).toEqual([
       { label: 'Twitch', value: '12', platform: 'twitch' },
-      { label: 'Kick', value: 'waiting', platform: 'kick' },
+      { label: 'Kick', value: 'Waiting', platform: 'kick' },
       { label: 'Peak', value: '12' }
     ])
   })

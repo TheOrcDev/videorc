@@ -70,7 +70,7 @@ export function BuddyGreetingsSection(): ReactElement | null {
   const save = (next: CohostAutoChat): void => {
     setError(null)
     void patchCohostSettings({ autoChat: next }).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : 'Could not save the greetings.')
+      setError(failure instanceof Error ? failure.message : "Couldn't save the greetings.")
     )
   }
   const saveTemplates = (next: CohostGreetingTemplate[]): void =>

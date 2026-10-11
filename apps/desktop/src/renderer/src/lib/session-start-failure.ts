@@ -73,7 +73,7 @@ export function reconcileSessionStartResponse(
 
 export function sessionStartFailureMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  return message.trim() || 'The session could not start.'
+  return message.trim() || "The session couldn't start."
 }
 
 export function reduceSessionStartFailure(

@@ -281,9 +281,9 @@ export function rejectedLiveAudioProcessingUpdate(input: {
     rollback: backendConfirmedRollback ?? input.lastApplied,
     disableForSession: liveAudioControlsUnavailable,
     message: liveAudioControlStateUnknown
-      ? 'The live microphone change could not be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute.'
+      ? "The live microphone change couldn't be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute."
       : liveAudioControlsUnavailable
         ? 'Live microphone controls are unavailable for this capture. The previous gain and mute settings were restored.'
-        : 'The live microphone change was not applied. The previous gain and mute settings were restored.'
+        : "The live microphone change wasn't applied. The previous gain and mute settings were restored."
   }
 }

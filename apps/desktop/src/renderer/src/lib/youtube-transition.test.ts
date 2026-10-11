@@ -10,7 +10,7 @@ describe('YouTube transition confirmation', () => {
 
   it('rejects a non-live lifecycle before the UI can show on air', () => {
     expect(() => assertYouTubeTransitionConfirmed(transitionResult('testing'), 'live')).toThrow(
-      /did not confirm live.*testing/
+      /didn't confirm live.*testing/
     )
   })
 

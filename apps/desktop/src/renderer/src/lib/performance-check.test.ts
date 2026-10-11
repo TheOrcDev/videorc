@@ -136,7 +136,7 @@ describe('shouldRunPerformanceCheck', () => {
       })
     ).toMatchObject({
       checkLabel: 'Check this computer',
-      text: 'This computer has not been measured yet.'
+      text: "This computer hasn't been measured yet."
     })
     const trustedV2 = { ...poison, capabilityKey: 'performance-check-v2:abc' }
     expect(isUntrustedPerformanceCheckResult(trustedV2)).toBe(false)
@@ -199,7 +199,7 @@ describe('performanceCheckLine', () => {
       line({ running: false, stale: false, result: strong }, 'stream-safe-1080p60')
     ).toMatchObject({
       tone: 'muted',
-      text: '1080p · 60 fps has not been measured. 4K · 30 fps held steady.',
+      text: "1080p · 60 fps hasn't been measured. 4K · 30 fps held steady.",
       applyPreset: 'record-4k30'
     })
     const nothing = result([['tutorial-720p30', 'failed']], 'tutorial-720p30', true)

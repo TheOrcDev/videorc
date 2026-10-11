@@ -75,7 +75,7 @@ function toggleSystemAudio(context: GlobalShortcutContext): void {
       action: { label: 'Open Permissions', onClick: () => openSettingsTab('permissions') }
     })
   } else {
-    toast.warning('System audio is not available on this computer', {
+    toast.warning("System audio isn't available on this computer", {
       id: 'global-shortcut-system-audio'
     })
   }
