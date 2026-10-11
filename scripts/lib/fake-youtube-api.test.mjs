@@ -173,3 +173,27 @@ test('a chat message delete answers 204, costs 50 units and takes scripted failu
     await api.close()
   }
 })
+
+test('extra tokens are accepted and author their chat inserts; others still 401', async () => {
+  const fake = await startFakeYouTubeApi({
+    extraTokens: { 'viewer-token': { authorName: 'lab_viewer' } }
+  })
+  try {
+    const post = (token) =>
+      fetch(`${fake.origin}/youtube/v3/liveChat/messages?part=snippet`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ snippet: { textMessageDetails: { messageText: 'hi' } } })
+      })
+    const viewer = await post('viewer-token')
+    assert.equal(viewer.status, 200)
+    assert.equal((await viewer.json()).authorDetails.displayName, 'lab_viewer')
+    assert.equal(fake.chat.sent.length, 0)
+    const streamer = await post(FAKE_YOUTUBE_ACCESS_TOKEN)
+    assert.equal((await streamer.json()).authorDetails.displayName, 'videorc_streamer')
+    assert.equal(fake.chat.sent.length, 1)
+    assert.equal((await post('stranger')).status, 401)
+  } finally {
+    await fake.close()
+  }
+})

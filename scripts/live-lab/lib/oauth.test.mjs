@@ -4,8 +4,10 @@ import { request } from 'node:http'
 import test from 'node:test'
 
 import {
+  ACCESS_TOKEN_REUSE_MS,
   YOUTUBE_SCOPE,
   buildAuthUrl,
+  createAccessTokenSource,
   createPkcePair,
   exchangeCode,
   fetchMyChannel,
@@ -193,5 +195,53 @@ test('fetchMyChannel reads id, title and handle, and fails on no channel', async
       fetchImpl: async () => jsonResponse(403, { error: { message: 'quotaExceeded' } })
     }),
     /quotaExceeded/
+  )
+})
+
+test('access token source refreshes per role on the lab client, caches, and forces on demand', async () => {
+  const calls = []
+  let clock = 1_000
+  const fetchImpl = async (url, init) => {
+    const body = Object.fromEntries(new URLSearchParams(init.body))
+    calls.push({ url: String(url), body })
+    return jsonResponse(200, { access_token: `access-for-${body.refresh_token}-${calls.length}` })
+  }
+  const config = {
+    client: { id: CLIENT_ID, secret: 'lab-client-secret-value' },
+    roles: {
+      broadcaster: { refreshToken: 'refresh-broadcaster-token' },
+      viewer: { refreshToken: 'refresh-viewer-token-abc' }
+    }
+  }
+  const getAccessToken = createAccessTokenSource({
+    config,
+    fetchImpl,
+    tokenEndpoint: 'http://127.0.0.1:9/token',
+    now: () => clock
+  })
+  assert.equal(await getAccessToken('broadcaster'), 'access-for-refresh-broadcaster-token-1')
+  assert.equal(await getAccessToken('broadcaster'), 'access-for-refresh-broadcaster-token-1')
+  assert.equal(await getAccessToken('viewer'), 'access-for-refresh-viewer-token-abc-2')
+  assert.equal(calls[0].url, 'http://127.0.0.1:9/token')
+  assert.deepEqual(calls[0].body, {
+    client_id: CLIENT_ID,
+    client_secret: 'lab-client-secret-value',
+    refresh_token: 'refresh-broadcaster-token',
+    grant_type: 'refresh_token'
+  })
+  assert.equal(
+    await getAccessToken('broadcaster', { force: true }),
+    'access-for-refresh-broadcaster-token-3'
+  )
+  clock += ACCESS_TOKEN_REUSE_MS
+  assert.equal(await getAccessToken('viewer'), 'access-for-refresh-viewer-token-abc-4')
+
+  await assert.rejects(
+    createAccessTokenSource({ config: { ...config, roles: {} }, fetchImpl })('viewer'),
+    /viewer role is not authorized/
+  )
+  await assert.rejects(
+    createAccessTokenSource({ config: { ...config, client: null }, fetchImpl })('viewer'),
+    /No lab OAuth client/
   )
 })

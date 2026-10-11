@@ -107,8 +107,8 @@ export async function startLoopback({ state, timeoutMs = 5 * 60 * 1000 }) {
   }
 }
 
-async function postToken(body, fetchImpl) {
-  const response = await fetchImpl(TOKEN_ENDPOINT, {
+async function postToken(body, fetchImpl, tokenEndpoint = TOKEN_ENDPOINT) {
+  const response = await fetchImpl(tokenEndpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(body).toString()
@@ -162,7 +162,8 @@ export async function refreshAccessToken({
   clientId,
   clientSecret,
   refreshToken,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  tokenEndpoint = TOKEN_ENDPOINT
 }) {
   const payload = await postToken(
     {
@@ -171,9 +172,51 @@ export async function refreshAccessToken({
       refresh_token: refreshToken,
       grant_type: 'refresh_token'
     },
-    fetchImpl
+    fetchImpl,
+    tokenEndpoint
   )
   return payload.access_token
+}
+
+// Plan 178 U8. Access tokens for the observer (broadcaster) and the viewer
+// bot (viewer), refreshed from the stored refresh tokens on the lab client and
+// cached in memory only (never written to disk or logs). Google access tokens
+// live 3600 s; a cached one is reused for 45 min. `force` drops the cache
+// after a 401.
+export const ACCESS_TOKEN_REUSE_MS = 45 * 60 * 1000
+
+export function createAccessTokenSource({
+  config,
+  fetchImpl = fetch,
+  tokenEndpoint = TOKEN_ENDPOINT,
+  now = () => Date.now()
+}) {
+  const cache = new Map()
+  return async function getAccessToken(role, { force = false } = {}) {
+    const entry = config?.roles?.[role]
+    if (!entry?.refreshToken) {
+      throw new Error(`The ${role} role is not authorized. Run pnpm live:hookup --role ${role}.`)
+    }
+    if (!config.client?.id || !config.client?.secret) {
+      throw new Error('No lab OAuth client stored. Run pnpm live:hookup --client-json <path>.')
+    }
+    const cached = cache.get(role)
+    if (!force && cached && now() - cached.at < ACCESS_TOKEN_REUSE_MS) {
+      return cached.token
+    }
+    const token = await refreshAccessToken({
+      clientId: config.client.id,
+      clientSecret: config.client.secret,
+      refreshToken: entry.refreshToken,
+      fetchImpl,
+      tokenEndpoint
+    })
+    if (typeof token !== 'string' || token.length === 0) {
+      throw new Error(`Google returned no access token for the ${role} role.`)
+    }
+    cache.set(role, { token, at: now() })
+    return token
+  }
 }
 
 // channels.list mine=true, part=snippet: 1 quota unit.
