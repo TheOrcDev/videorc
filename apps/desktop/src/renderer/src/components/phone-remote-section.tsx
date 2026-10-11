@@ -117,7 +117,7 @@ function PairingDialog({
           {expired ? (
             <div className="flex size-56 flex-col items-center justify-center gap-3 rounded-row border border-border text-center text-[13px] text-muted-foreground">
               This code expired.
-              <Button size="sm" variant="outline" onClick={() => onAddress(pairing.address)}>
+              <Button variant="outline" onClick={() => onAddress(pairing.address)}>
                 New code
               </Button>
             </div>
@@ -162,7 +162,6 @@ function PairingDialog({
 
           {revealed && !expired ? (
             <Button
-              size="sm"
               variant="ghost"
               onClick={() => void copyLink(pairing.url, "Couldn't copy the pairing link.")}
             >
@@ -323,7 +322,6 @@ export function PhoneRemoteSection(): ReactElement {
               <DisabledReason reason={blocked}>
                 <Button
                   disabled={pending || blocked !== null}
-                  size="sm"
                   variant="outline"
                   onClick={() => void beginPairing()}
                 >

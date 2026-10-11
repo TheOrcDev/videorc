@@ -48,7 +48,7 @@ export function AboutSettings({ onShowWhatsNew }: { onShowWhatsNew: () => void }
             description="Export it from Health: redacted logs and Health's checks in one file, to send with a problem report."
             label="Support bundle"
           >
-            <Button size="sm" type="button" variant="outline" onClick={openHealth}>
+            <Button type="button" variant="outline" onClick={openHealth}>
               {OPEN_HEALTH_LABEL}
             </Button>
           </SettingsRow>
@@ -96,7 +96,7 @@ function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): Re
             ) : null}
           </span>
         </div>
-        <Button size="sm" variant="outline" onClick={onShowWhatsNew}>
+        <Button variant="outline" onClick={onShowWhatsNew}>
           What&apos;s new…
         </Button>
       </div>
@@ -138,14 +138,14 @@ function UpdateControl({
   switch (control.kind) {
     case 'check':
       return (
-        <Button size="sm" variant="outline" onClick={onCheck}>
+        <Button variant="outline" onClick={onCheck}>
           <RefreshIcon data-icon="inline-start" />
           {control.label}
         </Button>
       )
     case 'checking':
       return (
-        <Button disabled size="sm" variant="outline">
+        <Button disabled variant="outline">
           <Spinner aria-hidden data-icon="inline-start" />
           Checking…
         </Button>
@@ -161,7 +161,7 @@ function UpdateControl({
     case 'install':
       return (
         <DisabledReason reason={control.disabledReason}>
-          <Button disabled={control.disabledReason !== null} size="sm" onClick={onInstall}>
+          <Button disabled={control.disabledReason !== null} onClick={onInstall}>
             <RefreshIcon data-icon="inline-start" />
             {control.label}
           </Button>
@@ -170,7 +170,6 @@ function UpdateControl({
     case 'link':
       return (
         <Button
-          size="sm"
           variant="outline"
           onClick={() => openVideorcWebLink(VIDEORC_WEB_LINKS[control.link])}
         >

@@ -154,7 +154,7 @@ export function BuddyPersonaSection(): ReactElement | null {
                   <Button
                     aria-label="Zoom in on the bubble"
                     data-testid="buddy-bubble-zoom"
-                    size="icon-sm"
+                    size="icon"
                     type="button"
                     variant="ghost"
                     onClick={() => setBubbleZoomOpen(true)}

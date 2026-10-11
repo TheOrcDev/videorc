@@ -197,7 +197,6 @@ export function ScheduledStreams(): ReactElement {
               </span>
             ) : null}
             <Button
-              size="sm"
               variant="ghost"
               disabled={state.busy || refreshing}
               onClick={() => {
@@ -448,7 +447,6 @@ function ProviderSection({
         {history ? null : (
           <Button
             className="ml-auto"
-            size="sm"
             variant="outline"
             onClick={(event) => onSchedule(event.currentTarget)}
           >
@@ -614,12 +612,12 @@ function EventRow({
       </div>
       <div className="flex shrink-0 items-center gap-1" ref={menuAnchor}>
         {event.thumbnailState === 'error' ? (
-          <Button disabled={pending} size="sm" variant="ghost" onClick={onSchedule}>
+          <Button disabled={pending} variant="ghost" onClick={onSchedule}>
             Retry thumbnail
           </Button>
         ) : null}
         {needsRecovery ? (
-          <Button disabled={pending} size="sm" variant="outline" onClick={onRecover}>
+          <Button disabled={pending} variant="outline" onClick={onRecover}>
             Recover
           </Button>
         ) : event.lifecycle === 'scheduled' ? (
@@ -627,7 +625,6 @@ function EventRow({
           <DisabledReason reason={sessionActive ? SESSION_LOCK_REASON : null}>
             <Button
               disabled={sessionActive || pending || Boolean(event.preparation)}
-              size="sm"
               variant="secondary"
               onClick={onGoLive}
             >
@@ -638,7 +635,6 @@ function EventRow({
           <Button
             aria-label={`Schedule this draft on ${label}`}
             disabled={!providerAvailable || pending}
-            size="sm"
             variant="outline"
             onClick={onSchedule}
           >

@@ -265,7 +265,6 @@ function StreamingSetup(): ReactElement {
                     {destinationLabel(target.label)}: {target.scheduledEventTitle}
                   </span>
                   <Button
-                    size="sm"
                     variant="ghost"
                     disabled={
                       isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
@@ -455,10 +454,10 @@ export function StreamFailureBanner({
           </span>
         ) : null}
         <span className="flex gap-2 pt-1.5">
-          <Button size="sm" variant="destructive" onClick={onEndLivestream}>
+          <Button variant="destructive" onClick={onEndLivestream}>
             End livestream
           </Button>
-          <Button size="sm" variant="outline" onClick={onDismiss}>
+          <Button variant="outline" onClick={onDismiss}>
             Continue streaming
           </Button>
         </span>
@@ -544,7 +543,6 @@ export function MetadataEditor({
           ) : null}
           <Button
             disabled={disabled || !draft || pending}
-            size="sm"
             variant="secondary"
             onClick={() => {
               setTitleChecked(true)

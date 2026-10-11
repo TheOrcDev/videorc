@@ -313,13 +313,12 @@ function RecordingsFolderSection(): ReactElement {
           label="Recordings folder"
         >
           <div className="flex shrink-0 flex-wrap justify-end gap-2">
-            <Button size="sm" variant="outline" onClick={() => void chooseFolder()}>
+            <Button variant="outline" onClick={() => void chooseFolder()}>
               <FolderIcon data-icon="inline-start" />
               Choose…
             </Button>
             {folder.canReveal ? (
               <Button
-                size="sm"
                 variant="outline"
                 onClick={() => {
                   if (handle) void window.videorc?.revealSelectedResource?.(handle)
@@ -330,7 +329,6 @@ function RecordingsFolderSection(): ReactElement {
             ) : null}
             {folder.custom ? (
               <Button
-                size="sm"
                 variant="ghost"
                 onClick={() =>
                   setSettings((current) => ({

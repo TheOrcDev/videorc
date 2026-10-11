@@ -29,7 +29,7 @@ const Toaster = ({ closeButton = true, toastOptions, ...props }: ToasterProps) =
           // Toasts are floating surfaces (plan 072): the float glass and the
           // typed tints live in styles.css (the sonner block), because sonner
           // injects unlayered CSS that a layered utility cannot beat.
-          toast: ['cn-toast', toastOptions?.classNames?.toast].filter(Boolean).join(' ')
+          toast: toastOptions?.classNames?.toast
         }
       }}
       {...props}

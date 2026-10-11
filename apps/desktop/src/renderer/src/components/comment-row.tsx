@@ -193,7 +193,7 @@ export function HighlightStatus({
 }): ReactElement | null {
   switch (status.phase) {
     case 'applying':
-      return <Badge variant="secondary">Applying…</Badge>
+      return <Badge>Applying…</Badge>
     case 'live':
       return (
         <span className="flex items-center gap-1">
@@ -227,7 +227,7 @@ export function RemovalStatus({
   if (!status) return null
   if (status.kind === 'removing') {
     return (
-      <Badge data-removal={status.kind} data-testid="removal-status" variant="secondary">
+      <Badge data-removal={status.kind} data-testid="removal-status">
         <Spinner aria-hidden data-icon="inline-start" weight="bold" />
         {status.label}
       </Badge>
@@ -356,7 +356,7 @@ function AffiliationBadge({
     <ChipHint hint={label}>
       <img
         alt={label}
-        className="size-4 shrink-0 rounded-sm object-cover"
+        className="size-4 shrink-0 rounded-chip object-cover"
         data-slot="comment-affiliation"
         draggable={false}
         src={localUrl}
@@ -681,13 +681,13 @@ function EventStatus({ message }: { message: LiveChatMessage }): ReactElement | 
     return <Badge variant="warning">{message.amountText}</Badge>
   }
   if (message.eventType === 'membership') {
-    return <Badge variant="secondary">Member</Badge>
+    return <Badge>Member</Badge>
   }
   if (message.eventType === 'moderation') {
-    return <Badge variant="secondary">Moderation</Badge>
+    return <Badge>Moderation</Badge>
   }
   if (message.eventType === 'system') {
-    return <Badge variant="secondary">System</Badge>
+    return <Badge>System</Badge>
   }
   return null
 }
@@ -753,7 +753,7 @@ function CommentContent({
           ) : null}
           {mentioned ? (
             <ChipHint hint="Mentions you">
-              <Badge className="shrink-0" data-testid="comment-mention" variant="secondary">
+              <Badge className="shrink-0" data-testid="comment-mention">
                 @you
               </Badge>
             </ChipHint>

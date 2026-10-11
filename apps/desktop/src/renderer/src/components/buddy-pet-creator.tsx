@@ -309,7 +309,7 @@ export function BuddyPetCreator({
     >
       <div className="flex shrink-0 flex-col gap-2 border-b border-border px-gutter py-3">
         <div className="flex items-center gap-3">
-          <Button size="sm" type="button" variant="ghost" onClick={onClose}>
+          <Button type="button" variant="ghost" onClick={onClose}>
             <ArrowLeftIcon data-icon="inline-start" />
             Back
           </Button>
@@ -436,7 +436,6 @@ export function BuddyPetCreator({
           <Button
             data-testid="buddy-pet-cancel"
             disabled={!controller || state.pending === 'cancel' || state.pending === 'save'}
-            size="sm"
             type="button"
             variant="ghost"
             onClick={() => setCancelOpen(true)}
@@ -852,7 +851,6 @@ function ReferenceStep({
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 disabled={disabled}
-                size="sm"
                 type="button"
                 variant="outline"
                 onClick={() => fileInput.current?.click()}
@@ -982,7 +980,7 @@ function NotesEditor({
               <Button
                 aria-label={`Remove feature ${index + 1}`}
                 disabled={disabled}
-                size="icon-sm"
+                size="icon"
                 type="button"
                 variant="ghost"
                 onClick={() =>

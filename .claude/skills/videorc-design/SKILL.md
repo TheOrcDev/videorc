@@ -295,9 +295,26 @@ Everything except ⌘K uses the desktop scale.
   - `rounded-row`: 8 px. Rows and cards.
   - `rounded-chip`: 6 px. Controls and key chips.
   - `rounded-tag`: 7 px. Tags. Status chips are round.
+  - Floating surfaces add the popup tier (`rounded-lg`, 10 px; see
+    Floating surfaces). Nothing else: no `rounded-sm`/`md`/`xl` or
+    `rounded-[Npx]` in chrome (a guard checks).
   - Window corners belong to the OS.
-- **Controls.** The default height is 28 px for Button, Select trigger, and
-  Input. Retune it once in `components/ui`, never per screen.
+- **Controls.** The default height is 28 px for Button, Toggle, Select
+  trigger, and Input. Retune it once in `components/ui`, never per screen: no
+  `h-*` or `size-*` on a control at its call site (a guard checks).
+  - **One compact size** (plan 174 S4.1, J1-11): `xs`, 24 px. Button `xs`
+    and `icon-xs`, Toggle and ToggleGroup `xs`, SelectTrigger `xs`
+    (SegmentedControl `sm` is the same 24 px). Use it only where the control
+    sits inside something denser than a page: an Alert's action; a row's
+    trailing or hover actions (`ListRow`, `SourceItem`, chat, activity,
+    transcript and marker rows); a card's actions (`MediaCard`, the Buddy and
+    Stream Manager cards); the Stream Manager's panes and status bar; a
+    small inline action under a field (Reset, Calibrate).
+  - A page's or a dialog's own actions stay 28 px, and so does a control
+    beside a 28 px control in the same row.
+  - There is no `sm` or `icon-sm`: both were 28 px under another name.
+    Badge has one size (20 px). Switch's `sm` is a 16 px track, not a
+    control height.
 - **One control per kind of choice** (plan 174 S1.7, D13). Each wears one
   look:
   - Choosing one of 2–4 exclusive values: `SegmentedControl`

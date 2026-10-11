@@ -667,13 +667,7 @@ export function CleanCutReview({
       onKeyDown={handleKeyDown}
     >
       <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-gutter py-1.5">
-        <Button
-          data-testid="clean-cut-review-back"
-          size="sm"
-          type="button"
-          variant="ghost"
-          onClick={close}
-        >
+        <Button data-testid="clean-cut-review-back" type="button" variant="ghost" onClick={close}>
           <ArrowLeftIcon data-icon="inline-start" />
           {backLabel}
         </Button>
@@ -909,7 +903,6 @@ export function CleanCutReview({
           <Button
             data-testid="clean-cut-review-retry"
             disabled={retrying || !connected}
-            size="sm"
             type="button"
             variant="outline"
             onClick={() => void retryRender(job)}
@@ -924,7 +917,6 @@ export function CleanCutReview({
         ) : null}
         {status.kind === 'ready' && changes === 0 && data?.job.outputSessionId ? (
           <Button
-            size="sm"
             type="button"
             variant="ghost"
             onClick={() =>
@@ -937,7 +929,6 @@ export function CleanCutReview({
         {changes > 0 ? (
           <Button
             disabled={saving}
-            size="sm"
             type="button"
             variant="ghost"
             onClick={() => edit(EMPTY_CLEAN_CUT_DRAFT)}
@@ -950,7 +941,6 @@ export function CleanCutReview({
         >
           <Button
             disabled={changes === 0 || saving || !editable}
-            size="sm"
             type="button"
             onClick={() => void save()}
           >
@@ -1038,7 +1028,7 @@ function ReviewPlaceholder({
       </EmptyHeader>
       {load.kind === 'waiting' && !load.job ? (
         <EmptyContent>
-          <Button size="sm" type="button" variant="outline" onClick={onBackToList}>
+          <Button type="button" variant="outline" onClick={onBackToList}>
             Open Clean cut
           </Button>
         </EmptyContent>
@@ -1061,7 +1051,7 @@ function KindChips({
       aria-label="Kinds of cuts"
       className="flex-wrap"
       data-testid="clean-cut-chips"
-      size="sm"
+      size="xs"
       spacing={1}
       type="multiple"
       value={pressed}
@@ -1075,7 +1065,7 @@ function KindChips({
       {chips.map((chip) => {
         const item = (
           <ToggleGroupItem
-            className="h-6 gap-1.5 px-1.5 text-xs"
+            className="gap-1.5"
             data-chip={chip.group.id}
             data-state-kind={chip.state}
             disabled={chip.state === 'empty'}

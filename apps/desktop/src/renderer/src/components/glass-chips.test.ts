@@ -15,7 +15,6 @@ const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
 
 type BadgeVariant =
   | 'default'
-  | 'secondary'
   | 'outline'
   | 'success'
   | 'warning'
@@ -31,13 +30,11 @@ const classOf = (markup: string): string[] => /class="([^"]*)"/.exec(markup)?.[1
 const TONE_TEXT = /(^|\s)(text-success|text-warning|text-destructive|text-live)(\s|$)/
 
 describe('Badge glass chips', () => {
-  it('maps default and secondary to neutral glass with primary text', () => {
-    for (const variant of ['default', 'secondary'] as const) {
-      const classes = classOf(badge(variant))
-      expect(classes).toContain('glass-chip')
-      expect(classes).toContain('text-foreground')
-      expect(classes).not.toContain('bg-primary')
-    }
+  it('maps default to neutral glass with primary text', () => {
+    const classes = classOf(badge('default'))
+    expect(classes).toContain('glass-chip')
+    expect(classes).toContain('text-foreground')
+    expect(classes).not.toContain('bg-primary')
   })
 
   it('maps outline to a tag: the same glass, secondary text, 20 px, 7 px radius', () => {

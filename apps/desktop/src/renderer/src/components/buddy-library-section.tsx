@@ -482,7 +482,7 @@ function BuddyCard({
               type="button"
               variant="ghost"
             >
-              <MoreIcon className="size-4" />
+              <MoreIcon weight="bold" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-44">

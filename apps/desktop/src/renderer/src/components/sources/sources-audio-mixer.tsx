@@ -580,7 +580,7 @@ export function SyncCalibrationView({
                 ? 'warning'
                 : status === 'unavailable'
                   ? 'outline'
-                  : 'secondary'
+                  : 'default'
             }
           >
             {measuredLagLabel}

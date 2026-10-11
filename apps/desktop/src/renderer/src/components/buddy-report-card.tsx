@@ -99,7 +99,6 @@ export function BuddyReportCard({
             {showMarkers ? (
               <Button
                 data-testid="buddy-report-markers"
-                size="sm"
                 type="button"
                 variant="ghost"
                 onClick={() => setMarkersOpen(true)}
@@ -182,7 +181,7 @@ function ReportSwitcher({
   const selected = options.find((option) => option.id === selectedId)
   return (
     <Select value={selectedId} onValueChange={onSelect}>
-      <SelectTrigger aria-label="Stream" className="max-w-56" size="sm">
+      <SelectTrigger aria-label="Stream" className="max-w-56" size="xs">
         <SelectValue>
           <span className="truncate">{selected?.date || selected?.title || 'Stream'}</span>
         </SelectValue>

@@ -66,8 +66,8 @@ type BadgeVariant = NonNullable<ComponentProps<typeof Badge>['variant']>
 
 const STATUS_BADGE: Record<BackgroundAssetSlotStatus, { label: string; variant: BadgeVariant }> = {
   empty: { label: 'Empty', variant: 'outline' },
-  ready: { label: 'Ready', variant: 'secondary' },
-  active: { label: 'In use', variant: 'secondary' },
+  ready: { label: 'Ready', variant: 'default' },
+  active: { label: 'In use', variant: 'default' },
   'missing-file': { label: 'File missing', variant: 'warning' },
   unsupported: { label: 'Unsupported', variant: 'destructive' }
 }
@@ -198,7 +198,7 @@ export function AssetsTab(): ReactElement {
         icon={ImageIcon}
         description={`${plural(registry.slots.length, 'background')} · PNG, JPEG or WebP.`}
         action={
-          <Button disabled={importing} size="sm" variant="outline" onClick={() => importInto(null)}>
+          <Button disabled={importing} variant="outline" onClick={() => importInto(null)}>
             <ImageIcon data-icon="inline-start" />
             {importing ? 'Importing…' : 'Import image…'}
           </Button>
@@ -222,7 +222,7 @@ export function AssetsTab(): ReactElement {
               }}
               onStyle={(_id, patch) => applyWorkingBackgroundStyle(patch)}
             />
-            <Button variant="ghost" size="sm" onClick={() => applyBackgroundSlot(null)}>
+            <Button variant="ghost" onClick={() => applyBackgroundSlot(null)}>
               Use no background
             </Button>
           </div>
@@ -411,10 +411,10 @@ function PresetTile({
 
       {!asset ? (
         <div className="absolute top-1 right-1 z-10 flex gap-1">
-          <Button size="sm" variant="ghost" onClick={onReplace}>
+          <Button variant="ghost" onClick={onReplace}>
             Add image…
           </Button>
-          <Button size="sm" variant="ghost" onClick={onRestore}>
+          <Button variant="ghost" onClick={onRestore}>
             Restore default
           </Button>
         </div>
@@ -518,7 +518,7 @@ function BackgroundStylePopover({
       <Tooltip>
         <TooltipTrigger asChild>
           <PopoverTrigger asChild>
-            <Button aria-label={`Adjust style for ${name}`} size="icon-sm" variant="ghost">
+            <Button aria-label={`Adjust style for ${name}`} size="icon" variant="ghost">
               <AdjustIcon />
             </Button>
           </PopoverTrigger>

@@ -441,7 +441,6 @@ export function ActivityPane({
           <ToggleGroup
             aria-label="Filter activity"
             className="flex-wrap justify-start"
-            size="sm"
             type="single"
             value={filter}
             onValueChange={(value) => setFilter((value || 'all') as ActivityFilter | 'all')}
@@ -475,8 +474,7 @@ export function ActivityPane({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label="Activity filters"
-              className={cn('h-7 shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
-              size="sm"
+              className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
               type="button"
               variant="ghost"
             >
@@ -591,7 +589,6 @@ export function ActivityPane({
                 <Button
                   className="mt-2"
                   data-testid="activity-follow-names"
-                  size="sm"
                   variant="outline"
                   onClick={onShowFollowNames}
                 >

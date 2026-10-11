@@ -488,7 +488,6 @@ export function ChatPane({
           />
           <ToggleGroup
             aria-label="Chat filters"
-            size="sm"
             type="multiple"
             value={[
               ...(filter.questions ? ['questions'] : []),
@@ -521,8 +520,7 @@ export function ChatPane({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label="Chat filters"
-              className={cn('h-7 shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
-              size="sm"
+              className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
               type="button"
               variant="ghost"
             >
@@ -672,7 +670,7 @@ export function ChatPane({
         {!pinned && (unread > 0 || incomplete) ? (
           // A glass chip, not an ad-hoc pill (plan 174 H-17): the Badge is
           // the button.
-          <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto" variant="secondary">
+          <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto">
             <button
               aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
               data-testid="chat-paused"
@@ -1070,7 +1068,6 @@ export function Composer({
             {savedMarker && onUndoMarker ? (
               <Button
                 variant="ghost"
-                size="sm"
                 disabled={localPending}
                 onClick={() => {
                   if (localPendingRef.current) return
@@ -1145,9 +1142,7 @@ function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): Re
     <div aria-label="Latest message delivery" className="mt-1.5 flex">
       <Tooltip>
         <TooltipTrigger asChild>
-          <Badge className="max-w-full truncate" variant="secondary">
-            Sending…
-          </Badge>
+          <Badge className="max-w-full truncate">Sending…</Badge>
         </TooltipTrigger>
         <TooltipContent>{operation.text}</TooltipContent>
       </Tooltip>

@@ -237,7 +237,7 @@ function DevicePickerList({
             <CommandGroup className="p-1" heading={group.heading} key={group.heading ?? index}>
               {group.items.map((item) => (
                 <CommandItem
-                  className="min-h-7 gap-2 rounded-md py-1 pr-2 pl-2"
+                  className="min-h-7 gap-2 rounded-row py-1 pr-2 pl-2"
                   data-checked={item.selected}
                   disabled={item.disabled}
                   key={item.value}

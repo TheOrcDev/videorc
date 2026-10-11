@@ -75,7 +75,7 @@ export function QuickSettings(): ReactElement {
     <>
       <PanelSection
         action={
-          <Button size="sm" variant="ghost" onClick={() => openWorkspaceTab('sources')}>
+          <Button variant="ghost" onClick={() => openWorkspaceTab('sources')}>
             Open Sources
           </Button>
         }

@@ -538,11 +538,11 @@ export function LibraryTab({
             onChange={(event) => changeView({ query: event.target.value })}
           />
         </div>
-        <Button disabled={importing} size="sm" variant="outline" onClick={() => void runImport()}>
+        <Button disabled={importing} variant="outline" onClick={() => void runImport()}>
           <UploadIcon data-icon="inline-start" />
           {importing ? 'Importing…' : 'Import…'}
         </Button>
-        <Button size="sm" variant="outline" onClick={() => openWorkspaceTab('studio')}>
+        <Button variant="outline" onClick={() => openWorkspaceTab('studio')}>
           <CameraIcon data-icon="inline-start" weight="fill" />
           Open Studio
         </Button>
@@ -554,18 +554,13 @@ export function LibraryTab({
           <span className="text-muted-foreground">{selected.length} selected</span>
           <Button
             disabled={bulkHoldReason !== null}
-            size="sm"
             variant="destructive"
             onClick={() => setDeleting(selectedSessions)}
           >
             <DeleteIcon data-icon="inline-start" />
             Delete
           </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setSelection({ selected: [], anchor: null })}
-          >
+          <Button variant="ghost" onClick={() => setSelection({ selected: [], anchor: null })}>
             Clear selection
           </Button>
           {bulkHoldReason ? (
@@ -619,11 +614,7 @@ export function LibraryTab({
             <Empty className="py-10">
               <EmptyTitle>No recordings match</EmptyTitle>
               <EmptyContent>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => changeView({ filter: 'all', query: '' })}
-                >
+                <Button variant="outline" onClick={() => changeView({ filter: 'all', query: '' })}>
                   {libraryClearLabel(filter, query)}
                 </Button>
               </EmptyContent>
@@ -1145,7 +1136,7 @@ function RowActions({
           <Button
             aria-label="Play recording"
             disabled
-            size="icon-sm"
+            size="icon"
             tabIndex={tabIndex}
             variant="ghost"
           >
@@ -1157,7 +1148,7 @@ function RowActions({
           <TooltipTrigger asChild>
             <Button
               aria-label="Play recording"
-              size="icon-sm"
+              size="icon"
               tabIndex={tabIndex}
               variant="ghost"
               onClick={() => void actions.play()}
@@ -1630,7 +1621,7 @@ export function NoiseCleanupDirectAction({
       aria-label={ariaLabel}
       className="min-[1280px]:w-auto min-[1280px]:px-2"
       disabled={!view.directAction}
-      size="icon-sm"
+      size="icon"
       tabIndex={tabIndex}
       variant="ghost"
       onClick={() => view.directAction && onAction(view.directAction)}

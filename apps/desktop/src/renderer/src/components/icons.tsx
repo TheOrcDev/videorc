@@ -19,7 +19,10 @@ import type { ComponentType, SVGProps } from 'react'
 
 import type * as PhosphorIcons from '@phosphor-icons/react'
 
-import buddyEmblemUrl from '../assets/buddy/buddy-emblem-64.webp'
+// A file, never a data URI (plan 174 S4.1): under Vite's 4 KB inline limit
+// this 2.6 KB picture became 2.7 KB of base64 in the eager bundle. Every
+// importer must use the same query, or the bundle carries both copies.
+import buddyEmblemUrl from '../assets/buddy/buddy-emblem-64.webp?no-inline'
 import {
   YOUTUBE_ARTBOARD,
   YOUTUBE_ICON_URL,

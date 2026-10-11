@@ -357,7 +357,7 @@ describe('ActivityPane on stream', () => {
   it('shows Applying… and Failed (with the reason on hover) on the matching row', () => {
     const applying = render({ highlightApplyingId: 'm-sub' })
     expect(rowOf(applying, 'sub')).toContain('data-highlight-phase="applying"')
-    expect(rowOf(applying, 'sub')).toMatch(/data-variant="secondary"[^>]*>Applying…</)
+    expect(rowOf(applying, 'sub')).toMatch(/data-variant="default"[^>]*>Applying…</)
     expect(rowOf(applying, 'follow')).not.toContain('Applying')
 
     const failed = render({

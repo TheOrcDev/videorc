@@ -862,7 +862,6 @@ function DescribeStep({
               <Button
                 data-testid="buddy-onboarding-picture-choose"
                 disabled={disabled || preparing}
-                size="sm"
                 type="button"
                 variant="outline"
                 onClick={() => fileInput.current?.click()}

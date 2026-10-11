@@ -32,7 +32,7 @@ export function CopyDetailsButton({ details }: { details: string }): ReactElemen
     timerRef.current = window.setTimeout(() => setState('idle'), 1500)
   }
   return (
-    <Button size="sm" type="button" variant="ghost" onClick={() => void copy()}>
+    <Button type="button" variant="ghost" onClick={() => void copy()}>
       {state === 'copied' ? 'Copied' : state === 'failed' ? "Couldn't copy" : 'Copy details'}
     </Button>
   )
@@ -62,10 +62,10 @@ export function RootErrorPanel({
               : 'Try again, or reload Videorc. If it keeps happening, export a support bundle from Health after the reload.'}
           </p>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" type="button" onClick={onReset}>
+            <Button type="button" onClick={onReset}>
               Try again
             </Button>
-            <Button size="sm" type="button" variant="outline" onClick={() => location.reload()}>
+            <Button type="button" variant="outline" onClick={() => location.reload()}>
               Reload Videorc
             </Button>
             <CopyDetailsButton details={errorDetails(error, componentStack)} />

@@ -31,9 +31,11 @@ import { VIDEORC_WEB_LINKS, openVideorcWebLink } from '@/lib/videorc-web-links'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
 // The Videorc product-account control that replaces the bottom-left "connected"
-// status dot. Signed-out shows "Sign in" and links out to the web; backend
-// status stays as secondary metadata (a small dot on the trigger + the Health
-// row). No platform accounts appear here, and no username is fabricated.
+// status dot. Signed-out shows "Sign in" and links out to the web. Backend
+// status lives in the status bar's state button, Health's door (D9), and in
+// the menu's Health row; the trigger carries no dot, so its name stays the
+// words it shows (A-21). No platform accounts appear here, and no username is
+// fabricated.
 export function AccountMenu({
   tier,
   statusTone,
@@ -55,6 +57,7 @@ export function AccountMenu({
   const signedIn = isSignedIn(account)
   const displayName = accountDisplayName(account)
   const tierLabel = entitlementTierLabel(tier)
+  const signOutLocked = isSignOutDisabled(account, live)
   const [open, setOpen] = useState(false)
 
   // FX5: workspace navigation arrives via main-process IPC (⌘1–9) or the
@@ -89,17 +92,14 @@ export function AccountMenu({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="flex min-w-0 items-center gap-1.5 rounded-row px-1.5 py-1 text-sm transition-colors hover:bg-sidebar-accent/60"
+          className="flex h-7 min-w-0 items-center gap-1.5 rounded-row px-1.5 text-sm transition-colors hover:bg-sidebar-accent/60"
         >
           {/* The web account's avatar (uploaded on videorc.com or the Google
               photo) through main's allowlisted cache; a signed-in account
-              without one gets initials — a face beats a generic glyph. */}
+              without one gets initials — a face beats a generic glyph. 20 px,
+              so the initials keep the 11 px floor (A-21). */}
           {account.status === 'signed-in' ? (
-            <AvatarCircle
-              avatarUrl={account.avatarUrl}
-              className="size-4 text-[7px]"
-              name={displayName}
-            />
+            <AvatarCircle avatarUrl={account.avatarUrl} className="size-5" name={displayName} />
           ) : (
             <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
           )}
@@ -154,14 +154,17 @@ export function AccountMenu({
         {signedIn ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              disabled={isSignOutDisabled(account, live)}
-              variant="destructive"
-              onSelect={signOut}
-            >
+            <DropdownMenuItem disabled={signOutLocked} variant="destructive" onSelect={signOut}>
               <SignOutIcon />
               Sign out
             </DropdownMenuItem>
+            {/* Locked means disabled, with one reason (A-21): a menu skips a
+                disabled item, so the reason is text under it, not a tooltip. */}
+            {signOutLocked ? (
+              <DropdownMenuLabel>
+                Sign out is locked while you're recording or live.
+              </DropdownMenuLabel>
+            ) : null}
           </>
         ) : null}
       </DropdownMenuContent>

@@ -29,7 +29,7 @@ export function PageErrorPanel({
       </EmptyHeader>
       <EmptyContent>
         <div className="flex gap-2">
-          <Button size="sm" type="button" onClick={onReset}>
+          <Button type="button" onClick={onReset}>
             Reload page
           </Button>
           <CopyDetailsButton details={errorDetails(error, componentStack)} />

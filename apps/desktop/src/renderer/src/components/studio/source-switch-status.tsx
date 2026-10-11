@@ -46,7 +46,7 @@ export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): React
     <span className="flex flex-col items-start gap-1" role="status">
       <span>{message}</span>
       {(state.checking || state.outputPending) && state.error ? (
-        <Button size="sm" variant="outline" onClick={() => void retrySourceStatus()}>
+        <Button variant="outline" onClick={() => void retrySourceStatus()}>
           Check again
         </Button>
       ) : null}

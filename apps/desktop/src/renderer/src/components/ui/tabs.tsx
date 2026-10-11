@@ -51,8 +51,6 @@ function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPr
         // data-state="active" (#392: a data-active variant never matches), so
         // the choice reads at a glance without leaning on the focus ring.
         'data-[state=active]:text-foreground group-data-[variant=default]/tabs-list:data-[state=active]:glass-chip',
-        // The line variant underlines the selection instead.
-        'after:absolute after:bg-foreground after:opacity-0 group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-[state=active]:after:opacity-100',
         className
       )}
       {...props}
@@ -64,7 +62,11 @@ function TabsContent({ className, ...props }: React.ComponentProps<typeof TabsPr
   return (
     <TabsPrimitive.Content
       data-slot="tabs-content"
-      className={cn('flex-1 text-sm outline-none', className)}
+      className={cn(
+        // Radix makes a panel a tab stop: it shows when it has focus (J1-9).
+        'flex-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset',
+        className
+      )}
       {...props}
     />
   )

@@ -803,7 +803,6 @@ export function LayoutTab(): ReactElement {
                 action={
                   <Button
                     disabled={isSessionActive || stageDragging}
-                    size="sm"
                     variant="outline"
                     onClick={() => void resetSceneSource(selectedSource.id)}
                   >
@@ -1373,13 +1372,7 @@ export function OverlayItemInspector({
         {/* One-shot moves, so plain Buttons: nothing stays selected (plan 174 C-37). */}
         <div aria-label="Snap overlay" className="flex w-full flex-wrap gap-2" role="group">
           {OVERLAY_SNAPS.map((snap) => (
-            <Button
-              key={snap}
-              disabled={blocked}
-              size="sm"
-              variant="outline"
-              onClick={() => onSnap(snap)}
-            >
+            <Button key={snap} disabled={blocked} variant="outline" onClick={() => onSnap(snap)}>
               {OVERLAY_SNAP_LABELS[snap]}
             </Button>
           ))}

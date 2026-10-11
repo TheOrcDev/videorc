@@ -76,7 +76,6 @@ export function SystemAccessList({
               <Button
                 aria-label={`${row.label}: ${actionLabel}`}
                 disabled={pending !== null}
-                size="sm"
                 variant="outline"
                 onClick={() => void run(row.id)}
               >

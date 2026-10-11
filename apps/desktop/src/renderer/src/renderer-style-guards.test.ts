@@ -428,12 +428,8 @@ describe('status colour discipline (plan 174 S1.8)', () => {
 
   it('sets no text below 11 px in the chrome (F-14, H-17)', () => {
     // Not words: the caption preview draws the burned-in caption at the
-    // stage's scale (content), and the sidebar account avatar's initials
-    // stand in for a 16 px picture.
-    const CONTENT = new Set([
-      'src/components/captions/captions-controls.tsx',
-      'src/components/account-menu.tsx'
-    ])
+    // stage's scale (content).
+    const CONTENT = new Set(['src/components/captions/captions-controls.tsx'])
     expect(
       offenders(
         /\btext-\[(?:[0-9]|10)(?:\.\d+)?px\]/,
@@ -572,5 +568,191 @@ describe('renderer accessible names (plan 174 S0.5)', () => {
       '</>'
     ].join('\n')
     expect(unnamedControls('named.tsx', named)).toEqual([])
+  })
+})
+
+// Plan 174 S4.1 (J1-11, J1-12, J1-24): the guardrails earlier slices relied
+// on, consolidated. Each allowlist names files, with the reason, and stays
+// short: a list that grows past about 20 means the rule is wrong.
+
+const NATIVE_TITLE_TAGS = new Set(['Button', 'button', 'ToggleGroupItem', 'Badge'])
+
+/**
+ * A control's job, said through `title=`, as `path:line: <Tag title>` (S1.10):
+ * a native title never shows on a disabled control, never on keyboard focus,
+ * and repeats the name to a screen reader. A Tooltip says it.
+ */
+function nativeTitles(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: string[] = []
+  const visit = (node: ts.Node): void => {
+    const parts = jsxParts(file, node)
+    if (parts && NATIVE_TITLE_TAGS.has(parts.tag) && parts.attributes.has('title')) {
+      const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+      found.push(`${path}:${line + 1}: <${parts.tag} title>`)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+/**
+ * Every `aria-pressed` set inside a `.map()` callback, as `path:line:
+ * <Tag aria-pressed>`: a list of pressed buttons is a choice built by hand.
+ * One of 2–4 is a SegmentedControl, filters are a ToggleGroup (S1.7, D13).
+ */
+function pressedButtonGroups(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: string[] = []
+  const visit = (node: ts.Node, inMap: boolean): void => {
+    const parts = jsxParts(file, node)
+    if (parts && inMap && parts.attributes.has('aria-pressed')) {
+      const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+      found.push(`${path}:${line + 1}: <${parts.tag} aria-pressed>`)
+    }
+    const mapCall =
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.getText(file) === 'map'
+    ts.forEachChild(node, (child) => visit(child, inMap || mapCall))
+  }
+  visit(file, false)
+  return found
+}
+
+const COMPACT_SIZED_TAGS = new Set([
+  'Button',
+  'Toggle',
+  'ToggleGroup',
+  'ToggleGroupItem',
+  'SelectTrigger',
+  'Badge'
+])
+
+/**
+ * A control's height set at the call site, as `path:line: <Tag className>`:
+ * 28 px is the default and `xs` (24 px) the one compact size (J1-11).
+ */
+function handSizedControls(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: string[] = []
+  const visit = (node: ts.Node): void => {
+    const parts = jsxParts(file, node)
+    if (parts && COMPACT_SIZED_TAGS.has(parts.tag)) {
+      const className = parts.attributes.get('className') ?? ''
+      if (/(?:^|[\s'"`])(?:min-)?(?:h|size)-(?:\d|\[|control)/.test(className)) {
+        const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+        found.push(`${path}:${line + 1}: <${parts.tag} className=${className}>`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+/** Radii off the tiers: Tailwind's size scale and arbitrary values. */
+const OFF_TIER_RADIUS =
+  /\brounded(?:-[trblse]{1,2})?-(?:xs|sm|md|xl|2xl|3xl|4xl|\[(?!inherit\])[^\]]+\])(?![\w-])/
+/** The popup tier (10 px, `rounded-lg`): menus, selects, popovers, chart tooltips. */
+const POPUP_RADIUS = /\brounded(?:-[trblse]{1,2})?-lg(?![\w-])/
+
+const POPUP_TIER_FILES = new Set([
+  'src/components/ui/dropdown-menu.tsx',
+  'src/components/ui/context-menu.tsx',
+  'src/components/ui/select.tsx',
+  'src/components/ui/popover.tsx',
+  'src/components/ui/hover-card.tsx',
+  'src/components/ui/chart.tsx',
+  // audiocn (plan 092): its channel chips and slider well keep the kit's look.
+  'src/components/ui/channel-toggle.tsx',
+  'src/components/ui/parameter-slider.tsx'
+])
+
+const OFF_TIER_RADIUS_ALLOWLIST = new Set([
+  // Content, not chrome: the caption preview draws the burned-in caption's
+  // box at the stage's scale, and the scene thumbnails draw each layout's
+  // sources in miniature.
+  'src/components/captions/captions-controls.tsx',
+  'src/components/studio/scenes-gallery.tsx',
+  // Word marks hug the transcript's text, smaller than any control.
+  'src/components/clean-cut/clean-cut-transcript.tsx',
+  // shadcn: the chart legend's 2 px swatches and the 16 px checkbox's corner.
+  'src/components/ui/chart.tsx',
+  'src/components/ui/checkbox.tsx',
+  // audiocn (plan 092): the mixer's dashed empty well.
+  'src/components/ui/mixer.tsx'
+])
+
+describe('guardrails consolidated (plan 174 S4.1)', () => {
+  const tsx = files.filter(({ path }) => path.endsWith('.tsx'))
+  const parsed = (check: (path: string, source: string) => string[]): string[] =>
+    tsx.flatMap(({ path }) => check(path, readFileSync(join(RENDERER_ROOT, path), 'utf8')))
+
+  it('never puts a native title on a Button, button, ToggleGroupItem or Badge (S1.10)', () => {
+    expect(parsed(nativeTitles)).toEqual([])
+  })
+
+  it('never hand-rolls a choice from pressed buttons in a list (S1.7)', () => {
+    // The Studio's takeovers: any number of them, one on at a time, each a
+    // button with its own disabled reason. A ToggleGroup would need the
+    // reasons rebuilt; a follow-up, not a mechanical swap.
+    const allowed = 'src/components/studio/session-panel.tsx'
+    const found = parsed(pressedButtonGroups)
+    expect(found.filter((line) => !line.startsWith(`${allowed}:`))).toEqual([])
+    // The exception stays real, so it cannot outlive its reason.
+    expect(found.some((line) => line.startsWith(`${allowed}:`))).toBe(true)
+  })
+
+  it('sizes controls in components/ui, never per call site (J1-11)', () => {
+    // A borderless text link that wraps: its height is the text's.
+    const ALLOWED = new Set(['src/components/streaming/go-live-panel.tsx'])
+    expect(parsed(handSizedControls).filter((line) => !ALLOWED.has(line.split(':')[0]))).toEqual([])
+  })
+
+  it('keeps radii on the tiers: panel, row, chip, tag, full, and popup for floating surfaces', () => {
+    const tiers = (path: string): boolean => /\.(tsx|ts)$/.test(path)
+    expect(
+      offenders(OFF_TIER_RADIUS, (path) => tiers(path) && !OFF_TIER_RADIUS_ALLOWLIST.has(path))
+    ).toEqual([])
+    expect(offenders(POPUP_RADIUS, (path) => tiers(path) && !POPUP_TIER_FILES.has(path))).toEqual(
+      []
+    )
+    for (const path of [...OFF_TIER_RADIUS_ALLOWLIST, ...POPUP_TIER_FILES]) {
+      expect(
+        files.some((file) => file.path === path),
+        path
+      ).toBe(true)
+    }
+  })
+
+  it('never sets cursor-not-allowed: a disabled control takes no pointer events (J1-24)', () => {
+    expect(offenders(/\bcursor-not-allowed\b/)).toEqual([])
+  })
+
+  it('catches each rule however the props wrap, and leaves the allowed forms alone', () => {
+    expect(
+      nativeTitles('theme.tsx', '<Button\n  size="icon"\n  title="Switch theme (D)"\n/>')
+    ).toEqual(['theme.tsx:1: <Button title>'])
+    expect(nativeTitles('row.tsx', '<ListRow title="Follow" />')).toEqual([])
+    const fits = [
+      '<div role="group">',
+      '  {FITS.map((fit) => (',
+      '    <Button aria-pressed={value === fit} key={fit} />',
+      '  ))}',
+      '</div>'
+    ].join('\n')
+    expect(pressedButtonGroups('fit.tsx', fits)).toEqual(['fit.tsx:3: <Button aria-pressed>'])
+    expect(pressedButtonGroups('pin.tsx', '<Button aria-pressed={pinned} />')).toEqual([])
+    expect(
+      handSizedControls('chat.tsx', "<Button className={cn('h-7 shrink-0 px-2', NARROW)} />")
+    ).toEqual(["chat.tsx:1: <Button className=cn('h-7 shrink-0 px-2', NARROW)>"])
+    expect(handSizedControls('ok.tsx', '<Button className="w-full" size="xs" />')).toEqual([])
+    expect(OFF_TIER_RADIUS.test("'rounded-md border px-2'")).toBe(true)
+    expect(OFF_TIER_RADIUS.test("'rounded-[5px]'")).toBe(true)
+    expect(OFF_TIER_RADIUS.test("'rounded-t-xl'")).toBe(true)
+    expect(OFF_TIER_RADIUS.test("'rounded-row rounded-[inherit] rounded-full'")).toBe(false)
+    expect(POPUP_RADIUS.test("'rounded-lg border glass-float'")).toBe(true)
   })
 })

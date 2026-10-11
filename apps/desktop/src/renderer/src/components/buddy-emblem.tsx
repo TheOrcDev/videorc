@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react'
 
-import emblem64Url from '@/assets/buddy/buddy-emblem-64.webp'
+// `?no-inline`: a file, never a data URI in the eager bundle (see icons.tsx).
+import emblem64Url from '@/assets/buddy/buddy-emblem-64.webp?no-inline'
 import emblem112Url from '@/assets/buddy/buddy-emblem-112.webp'
 import { cn } from '@/lib/utils'
 

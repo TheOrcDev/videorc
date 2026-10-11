@@ -324,16 +324,11 @@ export function SessionMarkersDialog({
                       value={draft}
                       onChange={(event) => setDraft(event.target.value)}
                     />
-                    <Button disabled={pending} size="sm" type="submit">
+                    <Button disabled={pending} type="submit">
                       Save
                       <ShortcutKeys accelerator="Enter" />
                     </Button>
-                    <Button
-                      size="sm"
-                      type="button"
-                      variant="ghost"
-                      onClick={() => setEditing(null)}
-                    >
+                    <Button type="button" variant="ghost" onClick={() => setEditing(null)}>
                       Cancel
                     </Button>
                   </form>
@@ -410,7 +405,6 @@ export function SessionMarkersDialog({
             <Button
               className="self-start"
               disabled={loading}
-              size="sm"
               variant="ghost"
               onClick={() => void load(client, cursor)}
             >
