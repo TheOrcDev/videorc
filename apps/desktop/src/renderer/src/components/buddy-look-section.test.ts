@@ -214,13 +214,25 @@ describe('BuddyLookSection (plan 169 D13, plan 170 D14)', () => {
     expect(document.body.textContent).not.toContain('Upload')
   })
 
-  it('follows a look being made elsewhere on the same client (the onboarding)', async () => {
+  it('follows a look being made elsewhere on the same client (the onboarding), and can cancel it', async () => {
     const backend = fakeBackend({ running: { requestId: NEXT, kind: 'create' } })
     await render({ client: backend.client })
     expect(byTestId('buddy-look')?.dataset.view).toBe('working')
     expect(document.querySelectorAll('[data-testid="buddy-look-skeleton"]')).toHaveLength(4)
-    expect(tiles()[0]!.textContent).toContain('Drawing the character')
-    expect(tiles()[1]!.textContent).toContain('Next, from idle')
+    // One copy for a draft wherever it shows (plan 174 G-11): the line is the onboarding's.
+    expect(byTestId('buddy-look-working')?.textContent).toBe(
+      'Drawing the pictures. This takes one to three minutes.'
+    )
+    // Plan 174 G-14: the clock runs, and Cancel discards the running id.
+    expect(byTestId('buddy-look-elapsed')?.textContent).toMatch(/^\d:\d\d$/)
+    await click(byTestId('buddy-look-cancel'))
+    expect(backend.requestTyped).toHaveBeenCalledWith(
+      'cohost.avatar.discard',
+      { requestId: NEXT },
+      { timeoutMs: 15_000 }
+    )
+    expect(byTestId('buddy-look')?.dataset.view).toBe('current')
+    expect(byTestId('buddy-look-error')).toBeNull()
   })
 
   it('shows a draft: Redo only on talk, laugh and think, and the preview plays it', async () => {
@@ -231,18 +243,27 @@ describe('BuddyLookSection (plan 169 D13, plan 170 D14)', () => {
       .filter((tile) => tile.querySelector('[data-testid="buddy-look-redo"]'))
       .map((tile) => tile.dataset.state)
     expect(withRedo).toEqual(['talk', 'laugh', 'think'])
-    // The failed pose says why; the made ones show their draft picture.
-    expect(tiles()[3]!.textContent).toContain('The model could not draw think.')
+    // The failed pose says so in the shared words; the made ones show their draft picture.
+    expect(tiles()[3]!.textContent).toContain('This pose did not come out. Redo it.')
+    expect(tiles().map((tile) => tile.querySelector('span')?.textContent)).toEqual([
+      'Idle',
+      'Talk',
+      'Laugh',
+      'Think'
+    ])
+    expect(byTestId('buddy-look-keep')?.textContent).toContain('Use as my Buddy')
     expect(tiles()[1]!.querySelector('img')?.getAttribute('src')).toBe(
       `videorc-asset://buddy/default/drafts/${ID}/talk.png`
     )
     expect(mocked.previews.at(-1)).toEqual({ packId: 'still', stillImages: draft().images })
 
-    // R on a focused tile redoes it.
+    // The tile is no tab stop (plan 174 G-18); R on its focused Redo redoes it.
     const laugh = tiles()[2]!
+    expect(laugh.hasAttribute('tabindex')).toBe(false)
+    const redo = laugh.querySelector<HTMLButtonElement>('[data-testid="buddy-look-redo"]')!
     await act(async () => {
-      laugh.focus()
-      laugh.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', bubbles: true }))
+      redo.focus()
+      redo.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', bubbles: true }))
     })
     await settle()
     expect(backend.requestTyped).toHaveBeenCalledWith(
@@ -300,12 +321,24 @@ describe('BuddyLookSection (plan 169 D13, plan 170 D14)', () => {
     expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
   })
 
-  it('keeps Redo off without cloud AI consent', async () => {
+  it('keeps Redo off without cloud AI consent, and says why (plan 174 G-5)', async () => {
     await render({ client: fakeBackend({ draft: draft() }).client, consented: false })
     const redos = [
       ...document.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-look-redo"]')
     ]
     expect(redos).toHaveLength(3)
     expect(redos.every((button) => button.disabled)).toBe(true)
+    expect(document.querySelector('[data-slot="disabled-reason-text"]')?.textContent).toBe(
+      'Allow cloud AI to create a Buddy.'
+    )
+  })
+
+  it('prices Redo at one image and counts the images left (plan 174 G-14)', async () => {
+    await render({ client: fakeBackend({ draft: draft() }, 7).client })
+    expect(document.querySelector('[data-testid="buddy-look-redo"]')?.textContent).toContain(
+      'Redo · 1 image'
+    )
+    expect(byTestId('buddy-look-images-left')?.textContent).toBe('7 images left today')
+    expect(document.querySelector('[data-slot="disabled-reason-text"]')).toBeNull()
   })
 })

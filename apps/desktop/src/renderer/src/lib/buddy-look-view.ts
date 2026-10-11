@@ -1,20 +1,13 @@
 import type {
-  AiCapabilities,
   CohostAvatarDraft,
   CohostAvatarRedoState,
   CohostAvatarState,
   CohostPersona
 } from './backend'
-import type { EntitlementUiGate } from './entitlement-ui'
-import {
-  BUDDY_GENERATE_CONSENT_OFF,
-  BUDDY_GENERATE_NOT_AVAILABLE,
-  BUDDY_GENERATE_QUOTA,
-  BUDDY_GENERATE_SIGNED_OUT
-} from './buddy-persona-view'
 
 // "Your Buddy's look" (plan 169 D13): pure derivations the panel and its
-// tests share.
+// tests share. Whether a look can be made is the one gate model
+// (`buddy-create-gate.ts`, plan 174 G-5).
 
 /** A new look is four pictures off the daily image cap (D6); a redo is one. */
 export const BUDDY_LOOK_CREATE_IMAGES = 4
@@ -22,62 +15,6 @@ export const BUDDY_LOOK_REDO_STATES: readonly CohostAvatarRedoState[] = ['talk',
 
 export function isBuddyLookRedoState(state: CohostAvatarState): state is CohostAvatarRedoState {
   return (BUDDY_LOOK_REDO_STATES as readonly string[]).includes(state)
-}
-
-export interface BuddyLookAvailability {
-  /** Create my Buddy (and Try again) work. */
-  allowed: boolean
-  /** Redo works (one image left is enough). */
-  redoAllowed: boolean
-  /** The one tertiary line when Create does not work; null when it does. */
-  reason: string | null
-  /** Today's remaining images, when the web reported them. */
-  remaining: number | null
-}
-
-/**
- * Whether the look can be made for this account (plan 169 D13; the plan 164
- * hints): signed in, Premium, cloud AI allowed, a web that offers the route,
- * and enough of today's images (a set uses 4, a redo 1). The checks run in
- * the order a streamer can fix them.
- */
-export function buddyLookAvailability({
-  signedIn,
-  gate,
-  consented,
-  capabilities
-}: {
-  signedIn: boolean
-  gate: EntitlementUiGate
-  consented: boolean
-  capabilities: Pick<AiCapabilities, 'cohost'> | null
-}): BuddyLookAvailability {
-  const avatar = capabilities?.cohost?.avatar
-  const remaining = avatar?.enabled ? avatar.remainingToday : null
-  const off = (reason: string): BuddyLookAvailability => ({
-    allowed: false,
-    redoAllowed: false,
-    reason,
-    remaining
-  })
-  if (!signedIn) return off(BUDDY_GENERATE_SIGNED_OUT)
-  if (!gate.allowed) return off(gate.reason)
-  if (!consented) return off(BUDDY_GENERATE_CONSENT_OFF)
-  if (!avatar?.enabled) return off(BUDDY_GENERATE_NOT_AVAILABLE)
-  if (avatar.remainingToday <= 0) return off(BUDDY_GENERATE_QUOTA)
-  if (avatar.remainingToday < BUDDY_LOOK_CREATE_IMAGES) {
-    return {
-      allowed: false,
-      redoAllowed: true,
-      reason: `A new look uses ${BUDDY_LOOK_CREATE_IMAGES} images; ${buddyImagesCount(avatar.remainingToday)} left today.`,
-      remaining
-    }
-  }
-  return { allowed: true, redoAllowed: true, reason: null, remaining }
-}
-
-function buddyImagesCount(count: number): string {
-  return `${count} ${count === 1 ? 'image' : 'images'}`
 }
 
 /**

@@ -1,11 +1,9 @@
 import type { AiCapabilities, BuddyPetSummary, BuddyTrigger } from '@/lib/backend'
-import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import {
   BUDDY_SLEEP_AFTER_MAX_SECONDS,
   BUDDY_TRIGGER_DEFAULT_REACTIONS,
   type BuddyReactionTable
 } from '../../../shared/buddy-pet'
-import { BUDDY_GENERATE_NOT_AVAILABLE } from '@/lib/buddy-persona-view'
 
 // The Buddy tab's Avatar, Reactions and Motion sections and the Stream
 // Manager's reaction chips (plan 168 Phase D): pure copy and derivations the
@@ -189,49 +187,18 @@ export function buddyPetCapability(
   }
 }
 
-// One gate family for creating (plan 174 G-15): "Sign in to…", "Allow cloud AI
-// … to…", "Creating isn't available right now.", then the allowance.
-export const BUDDY_CREATE_SIGNED_OUT = 'Sign in to create an Alive Buddy.'
-export const BUDDY_CREATE_CONSENT_OFF = 'Allow cloud AI below to create an Alive Buddy.'
-export const BUDDY_CREATE_USED_UP = "This month's creations are used up."
-
-export interface BuddyPetCreateAvailability {
-  allowed: boolean
-  /** The one tertiary line under the actions when Create is off. */
-  reason: string | null
-  /** "2 of 3 left this month", when the web reports the numbers. */
-  allowance: string | null
-}
-
 /**
- * Whether Create opens the creator (D20): signed in, Premium, cloud AI
- * allowed, and a web that offers pet creation with creations left. The
- * checks run in the order a streamer can fix them.
+ * "2 of 3 left this month", when the web reports the numbers; null otherwise.
+ * Why Create is off is the one gate model's (`buddy-create-gate.ts`,
+ * plan 174 G-5).
  */
-export function buddyPetCreateAvailability({
-  signedIn,
-  gate,
-  consented,
-  capabilities
-}: {
-  signedIn: boolean
-  gate: EntitlementUiGate
-  consented: boolean
-  capabilities: Pick<AiCapabilities, 'cohost'> | null
-}): BuddyPetCreateAvailability {
+export function buddyPetAllowanceLine(
+  capabilities: Pick<AiCapabilities, 'cohost'> | null | undefined
+): string | null {
   const pet = buddyPetCapability(capabilities)
-  const allowance =
-    pet?.enabled && pet.remaining !== null && pet.limit !== null
-      ? `${pet.remaining} of ${pet.limit} left this month`
-      : null
-  if (!signedIn) return { allowed: false, reason: BUDDY_CREATE_SIGNED_OUT, allowance }
-  if (!gate.allowed) return { allowed: false, reason: gate.reason, allowance }
-  if (!consented) return { allowed: false, reason: BUDDY_CREATE_CONSENT_OFF, allowance }
-  if (!pet?.enabled) return { allowed: false, reason: BUDDY_GENERATE_NOT_AVAILABLE, allowance }
-  if (pet.remaining !== null && pet.remaining <= 0) {
-    return { allowed: false, reason: BUDDY_CREATE_USED_UP, allowance }
-  }
-  return { allowed: true, reason: null, allowance }
+  return pet?.enabled && pet.remaining !== null && pet.limit !== null
+    ? `${pet.remaining} of ${pet.limit} left this month`
+    : null
 }
 
 // --- Stream Manager (S-D3) ----------------------------------------------------

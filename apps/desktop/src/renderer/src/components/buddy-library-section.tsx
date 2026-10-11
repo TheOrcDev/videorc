@@ -11,9 +11,10 @@ import {
 } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
+import { BuddyPictureCard } from '@/components/buddy-picture-card'
+import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
@@ -41,6 +42,7 @@ import { useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look
 import { useStudioCore } from '@/hooks/use-studio'
 import type { BuddyLookPicture } from '@/lib/buddy-look-view'
 import {
+  buddyAliveTagDistinguishes,
   buddyInvitationVisible,
   buddyLibraryBusyLine,
   buddyLibrarySaveOffer,
@@ -53,6 +55,7 @@ import {
   type BuddyOnboardingStep
 } from '@/lib/buddy-library-view'
 import { BUDDY_OFFICIAL_ART } from '@/lib/buddy-official-art'
+import { useBuddyOnboardingRequest } from '@/lib/buddy-onboarding-store'
 import {
   BUDDY_LIBRARY_COPY,
   BUDDY_ONBOARDING_GATES,
@@ -63,8 +66,6 @@ import {
   buddyOnboardingCounter
 } from '@/lib/buddy-onboarding-copy'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
-import { MediaCard } from '@/components/media-card'
-import { cn } from '@/lib/utils'
 import {
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
   BUDDY_LIBRARY_NAME_MAX_CHARS,
@@ -136,6 +137,14 @@ export function BuddyLibrarySection({
   } | null>(null)
   const openOnboarding = (step: BuddyOnboardingStep): void =>
     setOnboarding((current) => ({ open: true, nonce: (current?.nonce ?? 0) + 1, step }))
+  // Another surface asked for the onboarding (the Alive creator's New Buddy…,
+  // plan 174 G-4): this section hosts the sheet, so it opens it.
+  const request = useBuddyOnboardingRequest()
+  const [appliedRequest, setAppliedRequest] = useState<number | null>(null)
+  if (request && request.nonce !== appliedRequest) {
+    setAppliedRequest(request.nonce)
+    openOnboarding(request.step)
+  }
 
   const [edit, setEdit] = useState<EditTarget | null>(null)
   const [editOpen, setEditOpen] = useState(false)
@@ -281,10 +290,11 @@ export function BuddyLibrarySection({
         ) : null}
 
         <LibraryGroup label={BUDDY_LIBRARY_COPY.official} testId="buddy-library-official">
-          <CardGrid>
+          <Gallery>
             {view.official.map((card) => (
               <BuddyCard
                 key={card.id}
+                aliveTag={buddyAliveTagDistinguishes(view.official)}
                 card={card}
                 disabled={working}
                 onAlive={() => void makeAlive(card)}
@@ -292,7 +302,7 @@ export function BuddyLibrarySection({
                 onUse={() => void controller?.use(card.id)}
               />
             ))}
-          </CardGrid>
+          </Gallery>
         </LibraryGroup>
 
         <LibraryGroup label={BUDDY_LIBRARY_COPY.mine} testId="buddy-library-mine">
@@ -309,10 +319,10 @@ export function BuddyLibrarySection({
             </div>
           ) : view.mine === null ? (
             view.syncing ? (
-              <CardGrid>
+              <Gallery>
                 <Skeleton className="aspect-[3/4] rounded-row" />
                 <Skeleton className="aspect-[3/4] rounded-row" />
-              </CardGrid>
+              </Gallery>
             ) : (
               <p className="text-xs text-subtle">{BUDDY_LIBRARY_COPY.emptyMine}</p>
             )
@@ -321,10 +331,11 @@ export function BuddyLibrarySection({
               {BUDDY_LIBRARY_COPY.emptyMine}
             </p>
           ) : (
-            <CardGrid>
+            <Gallery>
               {view.mine.map((card) => (
                 <BuddyCard
                   key={card.id}
+                  aliveTag={buddyAliveTagDistinguishes(view.mine ?? [])}
                   card={card}
                   disabled={working}
                   onAlive={() => void makeAlive(card)}
@@ -332,26 +343,33 @@ export function BuddyLibrarySection({
                   onUse={() => void controller?.use(card.id)}
                 />
               ))}
-            </CardGrid>
+            </Gallery>
           )}
         </LibraryGroup>
 
+        {/* A failed sync or action is the section's (plan 174 G-7). */}
         {(problem ?? view.error) ? (
-          <FieldError data-testid="buddy-library-error">{problem ?? view.error}</FieldError>
+          <Alert data-testid="buddy-library-error" variant="destructive">
+            <AlertTitle>{problem ?? view.error}</AlertTitle>
+          </Alert>
         ) : null}
       </div>
 
       <EditDialog
         open={editOpen}
         target={edit}
+        problem={state.problem?.message ?? null}
         onClose={() => setEditOpen(false)}
         onDelete={async (card) => {
-          setEditOpen(false)
-          await controller?.remove(card.id)
+          // Plan 174 G-24: the dialog closes only once the backend accepted.
+          const accepted = (await controller?.remove(card.id)) ?? false
+          if (accepted) setEditOpen(false)
+          return accepted
         }}
         onUpdate={async (params) => {
-          setEditOpen(false)
-          await controller?.update(params)
+          const accepted = (await controller?.update(params)) ?? false
+          if (accepted) setEditOpen(false)
+          return accepted
         }}
         context={library?.mine?.find((entry) => entry.id === edit?.card.id)?.context ?? ''}
         personality={library?.mine?.find((entry) => entry.id === edit?.card.id)?.personality ?? ''}
@@ -394,165 +412,138 @@ function LibraryGroup({
   )
 }
 
-function CardGrid({ children }: { children: ReactElement | ReactElement[] }): ReactElement {
-  return (
-    <div className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(8.25rem,1fr))]">
-      {children}
-    </div>
-  )
-}
-
 /**
- * One Buddy: its idle pose, name and a short line, then Use (or the
- * Active badge) and a menu with the rest. A card, because it is an object
- * with a picture (the design skill's rule).
+ * One Buddy: the one picture card (plan 174 G-17), its idle pose, name and
+ * what it is like, then Use and a menu with the rest. The active one is
+ * marked by the card itself; "Alive" shows only where it tells cards apart
+ * (V-1).
  */
 function BuddyCard({
   card,
+  aliveTag,
   disabled,
   onUse,
   onAlive,
   onEdit
 }: {
   card: BuddyLibraryCard
+  /** The group holds both kinds, so the tag says something. */
+  aliveTag: boolean
   disabled: boolean
   onUse: () => void
   onAlive: () => void
   onEdit: (target: EditTarget) => void
 }): ReactElement {
   const picture = card.slug ? BUDDY_OFFICIAL_ART[card.slug].idle : card.idleUrl
+  const menu = card.kind === 'mine' || card.canMakeAlive
   return (
-    <MediaCard
-      className={cn('gap-1.5 p-1.5', card.busy && 'opacity-70')}
-      data-active={card.active || undefined}
-      data-busy={card.busy || undefined}
+    <BuddyPictureCard
+      active={card.active}
+      alive={aliveTag && card.alive}
+      busy={card.busy}
       data-id={card.id}
       data-kind={card.kind}
       data-testid="buddy-library-card"
-      selected={card.active}
-      title={card.hint || undefined}
+      detail={card.hint}
+      name={card.name}
+      picture={picture}
+      subtitle={card.subtitle}
     >
-      <div className="relative aspect-square overflow-hidden rounded-chip bg-foreground/[0.04]">
-        {picture ? (
-          <img
-            alt={card.name}
-            className="size-full object-contain p-1.5"
-            decoding="async"
-            draggable={false}
-            src={picture}
-          />
-        ) : (
-          <Skeleton className="size-full rounded-none" />
-        )}
-        {card.alive ? (
-          <Badge
-            className="absolute top-1.5 left-1.5"
-            data-testid="buddy-library-alive-tag"
-            variant="outline"
-          >
-            {BUDDY_LIBRARY_COPY.alive}
-          </Badge>
-        ) : null}
-        {card.busy ? (
-          <Spinner
-            aria-hidden
-            className="absolute top-1.5 right-1.5 size-3.5 text-muted-foreground"
-          />
-        ) : null}
-      </div>
-      <div className="flex min-w-0 flex-col px-0.5">
-        <span className="truncate text-sm font-medium text-foreground">{card.name}</span>
-        <span className="line-clamp-2 min-h-8 text-xs text-muted-foreground">{card.subtitle}</span>
-      </div>
-      <div className="flex items-center gap-1">
-        {card.active ? (
-          <div className="flex h-6 flex-1 items-center px-0.5">
-            <Badge data-testid="buddy-library-active" variant="success">
-              {BUDDY_LIBRARY_COPY.active}
-            </Badge>
-          </div>
-        ) : (
-          <Button
-            className="flex-1"
-            data-testid="buddy-library-use"
-            disabled={disabled}
-            size="xs"
-            type="button"
-            variant="outline"
-            onClick={onUse}
-          >
-            {BUDDY_LIBRARY_COPY.use}
-          </Button>
-        )}
-        {card.kind === 'mine' || card.canMakeAlive ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                aria-label={`More for ${card.name}`}
-                data-testid="buddy-library-more"
-                disabled={disabled}
-                size="icon-xs"
-                type="button"
-                variant="ghost"
-              >
-                <MoreIcon className="size-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-44">
-              {card.kind === 'mine' ? (
-                <>
-                  <DropdownMenuItem
-                    data-testid="buddy-library-rename"
-                    onSelect={() => onEdit({ kind: 'rename', card })}
-                  >
-                    <EditIcon />
-                    {BUDDY_LIBRARY_COPY.rename}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    data-testid="buddy-library-edit-personality"
-                    onSelect={() => onEdit({ kind: 'personality', card })}
-                  >
-                    <NoteIcon />
-                    {BUDDY_LIBRARY_COPY.editPersonality}
-                  </DropdownMenuItem>
-                </>
-              ) : null}
-              {card.canMakeAlive ? (
-                <DropdownMenuItem data-testid="buddy-library-alive" onSelect={onAlive}>
-                  <SparkleIcon />
-                  {BUDDY_LIBRARY_COPY.makeAlive}
+      {card.active ? (
+        menu ? (
+          <span className="flex-1" />
+        ) : null
+      ) : (
+        <Button
+          className="flex-1"
+          data-testid="buddy-library-use"
+          disabled={disabled}
+          size="xs"
+          type="button"
+          variant="outline"
+          onClick={onUse}
+        >
+          {BUDDY_LIBRARY_COPY.use}
+        </Button>
+      )}
+      {menu ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label={`More for ${card.name}`}
+              data-testid="buddy-library-more"
+              disabled={disabled}
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
+              <MoreIcon className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-44">
+            {card.kind === 'mine' ? (
+              <>
+                <DropdownMenuItem
+                  data-testid="buddy-library-rename"
+                  onSelect={() => onEdit({ kind: 'rename', card })}
+                >
+                  <EditIcon />
+                  {BUDDY_LIBRARY_COPY.rename}
                 </DropdownMenuItem>
-              ) : null}
-              {card.kind === 'mine' ? (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    data-testid="buddy-library-delete"
-                    variant="destructive"
-                    onSelect={() => onEdit({ kind: 'delete', card })}
-                  >
-                    <DeleteIcon />
-                    {BUDDY_LIBRARY_COPY.delete}
-                  </DropdownMenuItem>
-                </>
-              ) : null}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null}
-      </div>
-    </MediaCard>
+                <DropdownMenuItem
+                  data-testid="buddy-library-edit-personality"
+                  onSelect={() => onEdit({ kind: 'personality', card })}
+                >
+                  <NoteIcon />
+                  {BUDDY_LIBRARY_COPY.editPersonality}
+                </DropdownMenuItem>
+              </>
+            ) : null}
+            {card.canMakeAlive ? (
+              <DropdownMenuItem data-testid="buddy-library-alive" onSelect={onAlive}>
+                <SparkleIcon />
+                {BUDDY_LIBRARY_COPY.makeAlive}
+              </DropdownMenuItem>
+            ) : null}
+            {card.kind === 'mine' ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  data-testid="buddy-library-delete"
+                  variant="destructive"
+                  onSelect={() => onEdit({ kind: 'delete', card })}
+                >
+                  <DeleteIcon />
+                  {BUDDY_LIBRARY_COPY.delete}
+                </DropdownMenuItem>
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
+    </BuddyPictureCard>
   )
+}
+
+type EditParams = {
+  avatarId: string
+  name?: string
+  personality?: string
+  context?: string
 }
 
 /**
  * Rename, Edit personality (with About you) and the Delete confirm for one
- * of your own Buddies. The target stays set while the dialog fades out.
+ * of your own Buddies. The target stays set while the dialog fades out. A
+ * dialog closes only when the backend accepted (plan 174 G-24); a refusal
+ * shows inside it, with the fields still filled.
  */
 function EditDialog({
   open,
   target,
   personality,
   context,
+  problem,
   onClose,
   onUpdate,
   onDelete
@@ -561,30 +552,37 @@ function EditDialog({
   target: EditTarget | null
   personality: string
   context: string
+  /** The library's last refusal, in the backend's words. */
+  problem: string | null
   onClose: () => void
-  onUpdate: (params: {
-    avatarId: string
-    name?: string
-    personality?: string
-    context?: string
-  }) => Promise<void>
-  onDelete: (card: BuddyLibraryCard) => Promise<void>
+  /** True when the backend accepted the change. */
+  onUpdate: (params: EditParams) => Promise<boolean>
+  onDelete: (card: BuddyLibraryCard) => Promise<boolean>
 }): ReactElement {
   const deleting = target?.kind === 'delete' ? target : null
+  const [deletePending, setDeletePending] = useState(false)
   return (
     <>
       <ConfirmDialog
+        cancelDisabled={deletePending}
         cancelLabel={BUDDY_LIBRARY_COPY.cancel}
-        confirmLabel={BUDDY_LIBRARY_COPY.delete}
+        confirmDisabled={deletePending}
+        confirmLabel={deletePending ? 'Deleting…' : BUDDY_LIBRARY_COPY.delete}
         description={BUDDY_LIBRARY_COPY.deleteBody}
         open={open && deleting !== null}
         testId="buddy-library-delete"
         title={deleting ? buddyLibraryDeleteTitle(deleting.card.name) : ''}
         onCancel={onClose}
         onConfirm={() => {
-          if (deleting) void onDelete(deleting.card)
+          if (!deleting || deletePending) return
+          setDeletePending(true)
+          void onDelete(deleting.card).finally(() => setDeletePending(false))
         }}
-      />
+      >
+        {deleting && problem && !deletePending ? (
+          <FieldError data-testid="buddy-library-delete-error">{problem}</FieldError>
+        ) : null}
+      </ConfirmDialog>
       <Dialog
         open={open && deleting === null}
         onOpenChange={(next) => {
@@ -597,6 +595,7 @@ function EditDialog({
             key={`${target.kind}:${target.card.id}:${String(open)}`}
             context={context}
             personality={personality}
+            problem={problem}
             target={target}
             onClose={onClose}
             onUpdate={onUpdate}
@@ -611,23 +610,23 @@ function EditForm({
   target,
   personality: savedPersonality,
   context: savedContext,
+  problem,
   onClose,
   onUpdate
 }: {
   target: EditTarget
   personality: string
   context: string
+  problem: string | null
   onClose: () => void
-  onUpdate: (params: {
-    avatarId: string
-    name?: string
-    personality?: string
-    context?: string
-  }) => Promise<void>
+  onUpdate: (params: EditParams) => Promise<boolean>
 }): ReactElement {
   const [name, setName] = useState(target.card.name)
   const [personality, setPersonality] = useState(savedPersonality)
   const [context, setContext] = useState(savedContext)
+  const [saving, setSaving] = useState(false)
+  // The refusal shows only for a save asked from this form, never a stale one.
+  const [refused, setRefused] = useState(false)
   const rename = target.kind === 'rename'
   const nameToSave = buddyOnboardingName(name)
   const changed = rename
@@ -638,7 +637,9 @@ function EditForm({
     : buddyTextLength(personality) <= BUDDY_LIBRARY_PERSONALITY_MAX_CHARS &&
       buddyTextLength(context) <= BUDDY_LIBRARY_CONTEXT_MAX_CHARS
   const save = (): void => {
-    if (!changed || !valid) return
+    if (!changed || !valid || saving) return
+    setSaving(true)
+    setRefused(false)
     void onUpdate(
       rename
         ? { avatarId: target.card.id, name: nameToSave ?? undefined }
@@ -647,7 +648,10 @@ function EditForm({
             ...(personality !== savedPersonality ? { personality: personality.trim() } : {}),
             ...(context !== savedContext ? { context: context.trim() } : {})
           }
-    )
+    ).then((accepted) => {
+      setSaving(false)
+      if (!accepted) setRefused(true)
+    })
   }
   return (
     <DialogContent
@@ -724,12 +728,19 @@ function EditForm({
             </Field>
           </FieldGroup>
         )}
+        {refused && problem ? (
+          <FieldError data-testid="buddy-library-edit-error">{problem}</FieldError>
+        ) : null}
         <DialogFooter>
-          <Button type="button" variant="ghost" onClick={onClose}>
+          <Button disabled={saving} type="button" variant="ghost" onClick={onClose}>
             {BUDDY_LIBRARY_COPY.cancel}
           </Button>
-          <Button data-testid="buddy-library-save" disabled={!changed || !valid} type="submit">
-            Save
+          <Button
+            data-testid="buddy-library-save"
+            disabled={!changed || !valid || saving}
+            type="submit"
+          >
+            {saving ? 'Saving…' : 'Save'}
           </Button>
         </DialogFooter>
       </form>

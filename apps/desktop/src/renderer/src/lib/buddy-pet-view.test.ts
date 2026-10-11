@@ -10,14 +10,11 @@ import {
   useBuddyPetCreatorOpen
 } from '@/lib/buddy-pet-creator-nav'
 import {
-  BUDDY_CREATE_CONSENT_OFF,
-  BUDDY_CREATE_SIGNED_OUT,
-  BUDDY_CREATE_USED_UP,
   BUDDY_REACTION_DEFAULT_VALUE,
   buddyChoosableReactions,
   buddyReactionDisabledReason,
+  buddyPetAllowanceLine,
   buddyPetCapability,
-  buddyPetCreateAvailability,
   buddyPetPosesLabel,
   buddyPetSourceLabel,
   isBuddyShippedPack,
@@ -27,7 +24,6 @@ import {
   buddyTriggerOutcome,
   withBuddyTriggerReaction
 } from '@/lib/buddy-pet-view'
-import { BUDDY_GENERATE_NOT_AVAILABLE } from '@/lib/buddy-persona-view'
 
 const STILL = ['talk', 'laugh', 'think']
 const PAGE_PET = ['laugh', 'surprised', 'wink', 'kiss', 'blink', 'sleep', 'proud', 'excited']
@@ -119,14 +115,9 @@ describe('Motion and pack copy', () => {
 })
 
 describe('Create availability (D20)', () => {
-  const on = {
-    signedIn: true,
-    gate: { allowed: true } as const,
-    consented: true,
-    capabilities: {
-      cohost: { pet: { enabled: true, creationsRemainingThisMonth: 2, monthlyLimit: 3 } }
-    } as unknown as AiCapabilities
-  }
+  const petOn = {
+    cohost: { pet: { enabled: true, creationsRemainingThisMonth: 2, monthlyLimit: 3 } }
+  } as unknown as AiCapabilities
 
   it('reads the web block leniently: absent, partial or odd numbers', () => {
     expect(buddyPetCapability(null)).toBeNull()
@@ -141,42 +132,17 @@ describe('Create availability (D20)', () => {
     ).toEqual({ enabled: false, remaining: null, limit: 3 })
   })
 
-  it('names the one reason Create is off, in the order a streamer fixes them', () => {
-    expect(buddyPetCreateAvailability(on)).toEqual({
-      allowed: true,
-      reason: null,
-      allowance: '2 of 3 left this month'
-    })
-    expect(buddyPetCreateAvailability({ ...on, signedIn: false }).reason).toBe(
-      BUDDY_CREATE_SIGNED_OUT
-    )
+  it("counts this month's creations when the web reports them (why Create is off is the one gate model)", () => {
+    expect(buddyPetAllowanceLine(petOn)).toBe('2 of 3 left this month')
+    expect(buddyPetAllowanceLine(null)).toBeNull()
     expect(
-      buddyPetCreateAvailability({
-        ...on,
-        gate: {
-          allowed: false,
-          featureId: 'live-cohost',
-          reason: 'Buddy requires Videorc Premium.',
-          upgradeUrl: 'https://www.videorc.com/premium'
-        }
-      }).reason
-    ).toBe('Buddy requires Videorc Premium.')
-    expect(buddyPetCreateAvailability({ ...on, consented: false }).reason).toBe(
-      BUDDY_CREATE_CONSENT_OFF
-    )
-    expect(buddyPetCreateAvailability({ ...on, capabilities: null })).toEqual({
-      allowed: false,
-      reason: BUDDY_GENERATE_NOT_AVAILABLE,
-      allowance: null
-    })
+      buddyPetAllowanceLine({ cohost: { pet: { enabled: true } } } as unknown as AiCapabilities)
+    ).toBeNull()
     expect(
-      buddyPetCreateAvailability({
-        ...on,
-        capabilities: {
-          cohost: { pet: { enabled: true, creationsRemainingThisMonth: 0, monthlyLimit: 3 } }
-        } as unknown as AiCapabilities
-      })
-    ).toEqual({ allowed: false, reason: BUDDY_CREATE_USED_UP, allowance: '0 of 3 left this month' })
+      buddyPetAllowanceLine({
+        cohost: { pet: { enabled: true, creationsRemainingThisMonth: 0, monthlyLimit: 3 } }
+      } as unknown as AiCapabilities)
+    ).toBe('0 of 3 left this month')
   })
 })
 

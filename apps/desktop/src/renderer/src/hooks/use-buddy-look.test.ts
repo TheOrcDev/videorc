@@ -193,6 +193,47 @@ describe('createBuddyLookController (plan 169 D9)', () => {
     controller.dispose()
   })
 
+  it('cancels a create through a discard of its id, and ignores the late pictures (plan 174 G-14)', async () => {
+    const fake = fakeClient({ draft: draft() })
+    const controller = createBuddyLookController(fake.client)
+    await controller.refresh()
+    expect(controller.getState().startedAt).toBeNull()
+    await controller.create({ description: 'a goblin' })
+    const started = controller.getState().startedAt
+    expect(started).not.toBeNull()
+    expect(controller.getState().running).toEqual({ requestId: NEXT, kind: 'create' })
+    await controller.cancel()
+    expect(fake.requestTyped).toHaveBeenCalledWith(
+      'cohost.avatar.discard',
+      { requestId: NEXT },
+      { timeoutMs: 15_000 }
+    )
+    const state = controller.getState()
+    expect(state.running).toBeNull()
+    expect(state.pending).toBeNull()
+    expect(state.startedAt).toBeNull()
+    expect(state.phases).toEqual({})
+    // The late end of the cancelled run is not this window's problem.
+    fake.emit('cohost.avatar.progress', {
+      requestId: NEXT,
+      state: 'idle',
+      phase: 'failed',
+      error: { code: 'cohost-avatar-cancelled', message: 'The look was canceled.' }
+    })
+    expect(controller.getState().problem).toBeNull()
+    // Nothing to cancel while a redo runs or nothing runs.
+    fake.requestTyped.mockClear()
+    await controller.cancel()
+    await controller.redo('laugh')
+    await controller.cancel()
+    expect(fake.requestTyped).not.toHaveBeenCalledWith(
+      'cohost.avatar.discard',
+      expect.anything(),
+      expect.anything()
+    )
+    controller.dispose()
+  })
+
   it('shows a refusal and frees the panel', async () => {
     const fake = fakeClient({ draft: draft() })
     fake.requestTyped.mockImplementationOnce(async () => ({ draft: draft() }))

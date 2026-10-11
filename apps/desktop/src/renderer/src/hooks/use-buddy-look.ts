@@ -31,7 +31,7 @@ export interface BuddyLookProblem {
   message: string
 }
 
-export type BuddyLookPending = 'create' | 'redo' | 'keep' | 'discard'
+export type BuddyLookPending = 'create' | 'redo' | 'keep' | 'discard' | 'cancel'
 
 export interface BuddyLookState {
   /** The first status has not arrived yet. */
@@ -40,6 +40,8 @@ export interface BuddyLookState {
   draft: CohostAvatarDraft | null
   /** The job running in the backend (this window's, or one picked up). */
   running: CohostAvatarRunning | null
+  /** When this window first saw the job (its elapsed clock, plan 174 G-14); null when none runs. */
+  startedAt: number | null
   /** Each state's step in the running job, from `cohost.avatar.progress`. */
   phases: Partial<Record<CohostAvatarState, CohostAvatarPhase>>
   /** Why the last attempt at a state failed (a failed redo keeps its picture). */
@@ -58,6 +60,7 @@ const INITIAL: BuddyLookState = {
   loading: true,
   draft: null,
   running: null,
+  startedAt: null,
   phases: {},
   stateErrors: {},
   pending: null,
@@ -95,6 +98,11 @@ export interface BuddyLookController {
   /** The draft becomes the look; the saved settings, or null when refused. */
   keep: () => Promise<CohostSettings | null>
   discard: () => Promise<void>
+  /**
+   * Stop waiting for a look being made (plan 174 G-14): the backend drops
+   * what the web still delivers. Images the cloud already drew are spent.
+   */
+  cancel: () => Promise<void>
   dispose: () => void
 }
 
@@ -139,23 +147,23 @@ export function createBuddyLookController(client: BuddyLookClient): BuddyLookCon
         { timeoutMs: ACCEPT_TIMEOUT_MS }
       )
       const running = status.running ?? null
-      const wasRunning = state.running !== null
+      const sameRun = state.running !== null && state.running.requestId === running?.requestId
       set({
         loading: false,
         draft: status.draft ?? null,
         running,
         ...(running
           ? {
-              phases:
-                wasRunning && state.running?.requestId === running.requestId
-                  ? state.phases
-                  : running.kind === 'create'
-                    ? { idle: 'working' as const }
-                    : running.state
-                      ? { [running.state]: 'working' as const }
-                      : {}
+              startedAt: sameRun ? state.startedAt : (state.startedAt ?? Date.now()),
+              phases: sameRun
+                ? state.phases
+                : running.kind === 'create'
+                  ? { idle: 'working' as const }
+                  : running.state
+                    ? { [running.state]: 'working' as const }
+                    : {}
             }
-          : { phases: {} })
+          : { phases: {}, startedAt: null })
       })
       if (running) armWatchdog()
       else clearWatchdog()
@@ -167,7 +175,7 @@ export function createBuddyLookController(client: BuddyLookClient): BuddyLookCon
   /** A job ended: the slot is free, and today's images changed. */
   const ended = (patch: Partial<BuddyLookState>): void => {
     clearWatchdog()
-    set({ running: null, pending: null, phases: {}, ...patch })
+    set({ running: null, pending: null, phases: {}, startedAt: null, ...patch })
     void refreshCapabilities()
   }
 
@@ -176,7 +184,10 @@ export function createBuddyLookController(client: BuddyLookClient): BuddyLookCon
       // One job runs at a time per process: a progress while this window
       // waits on its create's accept is that create's.
       if (!state.running && state.pending === 'create' && event.state === 'idle') {
-        set({ running: { requestId: event.requestId, kind: 'create' } })
+        set({
+          running: { requestId: event.requestId, kind: 'create' },
+          startedAt: state.startedAt ?? Date.now()
+        })
       }
       if (event.requestId !== state.running?.requestId) return
       const stateErrors = { ...state.stateErrors }
@@ -225,7 +236,13 @@ export function createBuddyLookController(client: BuddyLookClient): BuddyLookCon
     },
     create: async ({ description, inspirationBase64, name, personality, context }) => {
       if (state.pending || state.running) return
-      set({ pending: 'create', problem: null, stateErrors: {}, phases: { idle: 'working' } })
+      set({
+        pending: 'create',
+        problem: null,
+        stateErrors: {},
+        phases: { idle: 'working' },
+        startedAt: Date.now()
+      })
       try {
         const accepted = await client.requestTyped(
           'cohost.avatar.create',
@@ -245,7 +262,7 @@ export function createBuddyLookController(client: BuddyLookClient): BuddyLookCon
           armWatchdog()
         }
       } catch (error) {
-        set({ pending: null, phases: {}, problem: problemOf(error) })
+        set({ pending: null, phases: {}, startedAt: null, problem: problemOf(error) })
       }
     },
     redo: async (avatarState) => {
@@ -258,6 +275,7 @@ export function createBuddyLookController(client: BuddyLookClient): BuddyLookCon
         problem: null,
         stateErrors,
         running: { requestId: draft.requestId, kind: 'redo', state: avatarState },
+        startedAt: Date.now(),
         phases: { [avatarState]: 'working' }
       })
       try {
@@ -269,7 +287,41 @@ export function createBuddyLookController(client: BuddyLookClient): BuddyLookCon
         if (state.pending === 'redo') set({ pending: null })
         if (state.running) armWatchdog()
       } catch (error) {
-        set({ pending: null, running: null, phases: {}, problem: problemOf(error) })
+        set({
+          pending: null,
+          running: null,
+          phases: {},
+          startedAt: null,
+          problem: problemOf(error)
+        })
+      }
+    },
+    cancel: async () => {
+      // Only a create is cancelled (a draft's redo is given up by deleting
+      // the draft). A discard of the running id frees the backend's slot at
+      // once; the late pictures end as a cancelled idle for an id this
+      // window no longer follows.
+      const running = state.running
+      if (!running || running.kind !== 'create' || state.pending) return
+      set({ pending: 'cancel', problem: null })
+      try {
+        const status = await client.requestTyped(
+          'cohost.avatar.discard',
+          { requestId: running.requestId },
+          { timeoutMs: ACCEPT_TIMEOUT_MS }
+        )
+        clearWatchdog()
+        set({
+          pending: null,
+          running: null,
+          phases: {},
+          stateErrors: {},
+          startedAt: null,
+          draft: status.draft ?? null
+        })
+        void refreshCapabilities()
+      } catch (error) {
+        set({ pending: null, problem: problemOf(error) })
       }
     },
     keep: async () => {

@@ -440,7 +440,6 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
       'Buddy Live is part of Videorc Premium. Greetings are free.'
     )
-    expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
     // Greetings are free (plan 164 D6): editable under the same lock.
     expect((document.getElementById('buddy-greetings-enabled') as HTMLButtonElement).disabled).toBe(
       false
@@ -461,7 +460,7 @@ describe('Locked means disabled, with one reason, on every tab (plan 150, D7)', 
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
       'Sign in to use Buddy Live'
     )
-    expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
+    expect((document.getElementById('cohost-answers') as HTMLButtonElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'voice' })
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
 import type { BuddyPets } from '@/hooks/use-buddy-pets'
 import type { AiCapabilities, CohostSettings, BuddyPetSummary } from '@/lib/backend'
+import { writeBuddyWornPack } from '@/lib/buddy-worn-pack'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 import { BuddyPetSettings } from './buddy-pet-settings'
@@ -13,7 +14,7 @@ import { BuddyPetSettings } from './buddy-pet-settings'
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
   react: vi.fn((_reaction: string) => true),
-  previews: [] as { packId: string; size: number }[],
+  previews: [] as { packId: string; size: number; paused?: boolean }[],
   openCreator: vi.fn()
 }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
@@ -22,7 +23,11 @@ vi.mock('@/lib/buddy-pet-creator-nav', () => ({ openBuddyPetCreator: mocked.open
 vi.mock('@/components/buddy-pet-preview-lazy', () => ({
   LazyBuddyPetPreview: (props: BuddyPetPreviewProps) => {
     useImperativeHandle(props.ref, () => ({ react: mocked.react }))
-    mocked.previews.push({ packId: props.packId, size: props.size })
+    mocked.previews.push({
+      packId: props.packId,
+      size: props.size,
+      ...(props.paused === undefined ? {} : { paused: props.paused })
+    })
     return createElement('div', { 'data-testid': 'buddy-pet-preview', 'data-pack': props.packId })
   }
 }))
@@ -30,6 +35,7 @@ vi.mock('@/components/buddy-pet-preview-lazy', () => ({
 let root: Root
 let container: HTMLDivElement
 const patchCohostSettings = vi.fn(async () => undefined)
+const setAiConsent = vi.fn()
 
 const PACK_A: BuddyPetSummary = {
   packId: '0b9c6c34-5d7e-4b4f-9a7e-3c2d1e0f9a8b',
@@ -103,9 +109,11 @@ const petOn = {
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   patchCohostSettings.mockClear()
+  setAiConsent.mockClear()
   mocked.react.mockClear()
   mocked.openCreator.mockClear()
   mocked.previews.length = 0
+  localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -138,7 +146,8 @@ async function render({
     cohostGate: premium,
     cohostSettings: cohost,
     patchCohostSettings,
-    runtimeInfo: { platform: 'darwin' }
+    runtimeInfo: { platform: 'darwin' },
+    setAiConsent
   }
   await act(async () => root.render(createElement(BuddyPetSettings, { pets: list, importFolder })))
 }
@@ -165,37 +174,61 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await render()
     expect(kindButton('Still').getAttribute('data-state')).toBe('on')
     expect(document.querySelectorAll('[data-testid="buddy-look-tile"]')).toHaveLength(4)
-    expect(mocked.previews.at(-1)).toEqual({ packId: 'still', size: 160 })
+    expect(mocked.previews.at(-1)).toEqual({ packId: 'still', size: 160, paused: false })
   })
 
-  it('zooms the living preview into a dialog at 420 px, with the same pack', async () => {
+  it('folds Zoom into Test and pauses the living preview (plan 174 G-22, G-20)', async () => {
     await render({
       cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
       list: pets([PACK_A])
     })
-    const zoom = button('buddy-preview-zoom')
-    expect(zoom.getAttribute('aria-label')).toBe('Zoom in on Grum')
+    expect(document.querySelector('[data-testid="buddy-preview-zoom"]')).toBeNull()
     expect(document.querySelector('[data-testid="buddy-preview-zoom-dialog"]')).toBeNull()
-    mocked.previews.length = 0
-    await act(async () => zoom.click())
-    const dialog = document.querySelector('[data-testid="buddy-preview-zoom-dialog"]')!
-    expect(dialog.getAttribute('role')).toBe('dialog')
-    expect(
-      dialog.querySelector('[data-testid="buddy-pet-preview"]')?.getAttribute('data-pack')
-    ).toBe(PACK_A.packId)
-    expect(mocked.previews).toContainEqual({ packId: PACK_A.packId, size: 420 })
-    // The tab's own preview stays under it, at its own size.
-    expect(mocked.previews).toContainEqual({ packId: PACK_A.packId, size: 160 })
-    await act(async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(button('buddy-test-open')).toBeTruthy()
+    const pause = button('buddy-preview-pause')
+    expect(pause.getAttribute('aria-pressed')).toBe('false')
+    expect(mocked.previews.at(-1)).toEqual({ packId: PACK_A.packId, size: 160, paused: false })
+    await act(async () => pause.click())
+    expect(pause.getAttribute('aria-pressed')).toBe('true')
+    expect(mocked.previews.at(-1)).toEqual({ packId: PACK_A.packId, size: 160, paused: true })
+  })
+
+  it('moves through the moves with arrow keys and wears one with Enter (plan 174 G-18)', async () => {
+    await render({
+      cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
+      list: pets([PACK_A, PACK_B])
     })
-    expect(document.querySelector('[data-testid="buddy-preview-zoom-dialog"]')).toBeNull()
+    const rows = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-pack-row"]')]
+    expect(rows.map((row) => row.getAttribute('role'))).toEqual(['radio', 'radio'])
+    // One tab stop: the worn row.
+    expect(rows.map((row) => row.tabIndex)).toEqual([0, -1])
+    rows[0]!.focus()
+    await act(async () =>
+      rows[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    )
+    expect(document.activeElement).toBe(rows[1])
+    // Browsing wears nothing; Enter does.
+    expect(patchCohostSettings).not.toHaveBeenCalled()
+    await act(async () => rows[1]!.click())
+    expect(lastPersona().avatar).toEqual({ kind: 'alive', packId: PACK_B.packId })
+  })
+
+  it('wears the pack worn last when Alive comes back (plan 174 G-10)', async () => {
+    writeBuddyWornPack('p-1', PACK_B.packId)
+    await render({ list: pets([PACK_A, PACK_B]) })
+    await act(async () => kindButton('Alive').click())
+    expect(lastPersona().avatar).toEqual({ kind: 'alive', packId: PACK_B.packId })
+    // Arrow keys browse without switching what viewers see: Enter does.
+    expect(document.querySelector('[data-testid="buddy-avatar-kind"]')?.getAttribute('role')).toBe(
+      'radiogroup'
+    )
   })
 
   it('persists Alive with the first own pack, and Still again', async () => {
     await render({ list: pets([PACK_A, { ...PACK_B, packId: 'bundled:buddy' }]) })
     await act(async () => kindButton('Alive').click())
     expect(lastPersona().avatar).toEqual({ kind: 'alive', packId: PACK_A.packId })
+    expect(localStorage.getItem('videorc.buddyWornPack:p-1')).toBe(PACK_A.packId)
 
     await render({
       cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
@@ -224,16 +257,27 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(mocked.openCreator).toHaveBeenCalledTimes(1)
   })
 
-  it('disables Create with its one reason when the web offers no creator or consent is off', async () => {
+  it('locks Create with one Alert and its one action when the web offers no creator or consent is off (plan 174 G-5)', async () => {
     await render({ list: pets([]), capabilities: { cohost: { tick: 4 } } as AiCapabilities })
     await act(async () => kindButton('Alive').click())
     expect(button('buddy-pack-create').disabled).toBe(true)
-    expect(button('buddy-create-hint').textContent).toBe("Creating isn't available right now.")
+    const gate = (): HTMLElement =>
+      document.querySelector('[data-testid="buddy-create-gate"]') as HTMLElement
+    expect(gate().textContent).toBe("Creating isn't available right now.")
+    expect(gate().dataset.gate).toBe('unavailable')
+    expect(document.querySelector('[data-testid="buddy-create-hint"]')).toBeNull()
     await render({ list: pets([]), consented: false })
     expect(button('buddy-pack-create').disabled).toBe(true)
-    expect(button('buddy-create-hint').textContent).toBe(
-      'Allow cloud AI below to create an Alive Buddy.'
+    expect(gate().textContent).toContain('Allow cloud AI to create an Alive Buddy.')
+    // The one action opens the one consent dialog; accepting grants consent.
+    await act(async () => gate().querySelector('button')!.click())
+    const consent = document.querySelector('[data-testid="buddy-avatar-consent"]')!
+    await act(async () =>
+      [...consent.querySelectorAll('button')]
+        .find((candidate) => candidate.textContent === 'Allow cloud AI')!
+        .click()
     )
+    expect(setAiConsent).toHaveBeenCalledWith(true)
   })
 
   it('imports a pack and wears it', async () => {

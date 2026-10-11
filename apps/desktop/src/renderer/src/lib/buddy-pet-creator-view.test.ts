@@ -78,26 +78,38 @@ function reviewCreation(overrides: Partial<BuddyPetCreation> = {}): BuddyPetCrea
   }
 }
 
-describe('buddyPetCreatorGate (plan 168 S-F5)', () => {
+describe('buddyPetCreatorGate (plan 168 S-F5; the one gate model of plan 174 G-5)', () => {
   const on = { signedIn: true, gate: premium, consented: true, capabilities: petOn(2) }
 
   it('names the one reason the creator is off, in the order a streamer fixes them', () => {
     expect(buddyPetCreatorGate(on)).toEqual({
-      allowed: true,
-      reason: null,
+      gate: null,
       canStart: true,
       allowance: { left: 2, limit: 3 }
     })
-    expect(buddyPetCreatorGate({ ...on, signedIn: false }).reason).toBe(BUDDY_PET_SIGNED_OUT)
-    expect(buddyPetCreatorGate({ ...on, gate: basic }).reason).toBe(basic.reason)
-    expect(buddyPetCreatorGate({ ...on, consented: false }).reason).toBe(BUDDY_PET_CONSENT_OFF)
-    expect(buddyPetCreatorGate({ ...on, capabilities: null }).reason).toBe(BUDDY_PET_NOT_AVAILABLE)
+    expect(buddyPetCreatorGate({ ...on, signedIn: false }).gate).toEqual({
+      kind: 'signed-out',
+      reason: BUDDY_PET_SIGNED_OUT,
+      action: { kind: 'sign-in' }
+    })
+    expect(buddyPetCreatorGate({ ...on, gate: basic }).gate).toEqual({
+      kind: 'premium',
+      reason: 'Creating an Alive Buddy is part of Videorc Premium.',
+      action: { kind: 'view-premium', url: basic.upgradeUrl }
+    })
+    expect(buddyPetCreatorGate({ ...on, consented: false }).gate).toEqual({
+      kind: 'cloud-ai',
+      reason: BUDDY_PET_CONSENT_OFF,
+      action: { kind: 'allow-cloud-ai' }
+    })
+    expect(buddyPetCreatorGate({ ...on, capabilities: null }).gate?.reason).toBe(
+      BUDDY_PET_NOT_AVAILABLE
+    )
     const basicBlock = {
       cohost: { pet: { enabled: false, creationsRemainingThisMonth: 0, monthlyLimit: 0 } }
     } as unknown as AiCapabilities
     expect(buddyPetCreatorGate({ ...on, capabilities: basicBlock })).toEqual({
-      allowed: false,
-      reason: BUDDY_PET_NOT_AVAILABLE,
+      gate: { kind: 'unavailable', reason: BUDDY_PET_NOT_AVAILABLE, action: null },
       canStart: false,
       allowance: null
     })
@@ -105,15 +117,15 @@ describe('buddyPetCreatorGate (plan 168 S-F5)', () => {
 
   it('keeps an open creation going when the month is used up, but starts no new one', () => {
     const used = buddyPetCreatorGate({ ...on, capabilities: petOn(0) })
-    expect(used.allowed).toBe(true)
+    expect(used.gate).toBeNull()
     expect(used.canStart).toBe(false)
     expect(buddyPetAllowanceCopy(used.allowance!)).toBe('0 of 3 left this month')
     expect(buddyPetAllowanceCopy({ left: 2, limit: 3 })).toBe('2 of 3 left this month')
   })
 
-  it('words its gates as one family, naming the tab that holds Cloud AI (plan 174 G-15)', () => {
+  it('words its gates as one family; the Alert carries the action, so no line points at a tab (plan 174 G-15)', () => {
     expect(BUDDY_PET_SIGNED_OUT).toBe('Sign in to create an Alive Buddy.')
-    expect(BUDDY_PET_CONSENT_OFF).toBe('Allow cloud AI on the Buddy tab to create an Alive Buddy.')
+    expect(BUDDY_PET_CONSENT_OFF).toBe('Allow cloud AI to create an Alive Buddy.')
     expect(BUDDY_PET_NOT_AVAILABLE).toBe("Creating isn't available right now.")
   })
 })

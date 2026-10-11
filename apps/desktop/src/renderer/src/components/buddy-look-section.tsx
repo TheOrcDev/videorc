@@ -5,20 +5,23 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import {
+  BUDDY_LOOK_TILES_COPY,
+  BuddyLookWorkingLine,
   BuddyPoseTile,
-  BuddyPoseTiles,
-  type BuddyPoseTilesCopy
+  BuddyPoseTiles
 } from '@/components/buddy-look-tiles'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
 import { useStudioCore } from '@/hooks/use-studio'
 import { COHOST_AVATAR_STATES } from '@/lib/backend'
+import { buddyImagesLeftLine, buddyLookRedoGate } from '@/lib/buddy-create-gate'
 import { BUDDY_DEFAULT_PACK, buddyStateImageUrl } from '@/lib/buddy-default-pack'
-import { buddyLookAvailability, buddyLookDraftImages } from '@/lib/buddy-look-view'
-import { BUDDY_STATE_LABELS } from '@/lib/buddy-persona-view'
+import { buddyLookDraftImages } from '@/lib/buddy-look-view'
+import { BUDDY_ONBOARDING_STEP4 } from '@/lib/buddy-onboarding-copy'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
 
@@ -27,24 +30,15 @@ const DRAFT_PREVIEW_PX = 112
 
 type LookView = 'working' | 'draft' | 'current'
 
-/** Plan 169's words for the tiles in this panel. */
-const LOOK_PANEL_TILES_COPY: BuddyPoseTilesCopy = {
-  labels: BUDDY_STATE_LABELS,
-  redo: 'Redo',
-  working: (state, phase) =>
-    phase === 'done' ? 'Done' : state === 'idle' ? 'Drawing the character…' : 'Next, from idle',
-  redrawing: 'Redrawing…',
-  failed: (reason) => reason
-}
-
 /**
  * "Your Buddy's look" (plan 169 D10 to D13), the Avatar section's Still
  * panel. Since plan 170 a new look is made in the four-step onboarding
  * (New Buddy, under My Buddies); this panel shows the active look and, while
  * a look is being made or waits as a draft (the onboarding closed before
- * deciding), the same four tiles: Redo (R on a focused tile), Keep this
- * look (⌘↵) and Discard. Make it Alive opens the Alive creator with the
- * current look. Nothing toasts: the tiles are the confirmation.
+ * deciding), the same four tiles: Cancel while it is drawn (plan 174 G-14),
+ * Redo for one image (R on a focused tile), Keep this look (⌘↵) and Delete.
+ * Make it Alive opens the Alive creator with the current look. Nothing
+ * toasts: the tiles are the confirmation.
  */
 export interface BuddyLookSectionProps {
   /** Tests inject the backend; the app shares the Buddy tab's client. */
@@ -67,11 +61,12 @@ export function BuddyLookSection({
   const client = injectedClient !== undefined ? injectedClient : connected
   const { state, controller } = useBuddyLook(client)
   const persona = cohostSettings?.persona ?? null
-  const availability = buddyLookAvailability({
+  const capabilities = state.capabilities ?? aiCapabilities ?? null
+  const redoGate = buddyLookRedoGate({
     signedIn: account?.status === 'signed-in',
     gate: cohostGate,
     consented: aiConsent,
-    capabilities: state.capabilities ?? aiCapabilities ?? null
+    capabilities
   })
   const platform = runtimeInfo?.platform
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -117,9 +112,9 @@ export function BuddyLookSection({
           </FieldLabel>
           <FieldDescription>
             {view === 'working'
-              ? 'Idle first, then talking, laughing and thinking from it. About a minute.'
+              ? 'Idle first, then talk, laugh and think from it.'
               : view === 'draft'
-                ? `Keep it to give ${persona.name} this look. Redo remakes one pose from this idle.`
+                ? `Use it to give ${persona.name} this look. Redo remakes one pose from this idle.`
                 : persona.source === 'default'
                   ? 'The default Buddy until you create your own.'
                   : `What ${persona.name} wears on stream.`}
@@ -134,7 +129,7 @@ export function BuddyLookSection({
                   <BuddyPoseTile
                     key={avatarState}
                     badge={bundled ? 'Default' : fallsBack ? 'Uses idle' : undefined}
-                    label={BUDDY_STATE_LABELS[avatarState]}
+                    label={BUDDY_LOOK_TILES_COPY.labels[avatarState]}
                     state={avatarState}
                     url={url}
                   />
@@ -145,12 +140,23 @@ export function BuddyLookSection({
             <BuddyPoseTiles
               busy={busy}
               controller={controller}
-              copy={LOOK_PANEL_TILES_COPY}
-              redoAllowed={availability.redoAllowed}
+              copy={BUDDY_LOOK_TILES_COPY}
+              imagesLeft={buddyImagesLeftLine(capabilities)}
+              redoAllowed={redoGate === null}
+              redoReason={redoGate?.reason ?? null}
               state={state}
               view={view}
             />
           )}
+          {view === 'working' ? (
+            <BuddyLookWorkingLine
+              cancelling={state.pending === 'cancel'}
+              line={BUDDY_ONBOARDING_STEP4.working}
+              startedAt={state.startedAt}
+              testId="buddy-look-working"
+              onCancel={controller ? () => void controller.cancel() : undefined}
+            />
+          ) : null}
           {view === 'draft' && state.draft ? (
             <div
               className="flex flex-wrap items-center gap-4"
@@ -177,7 +183,7 @@ export function BuddyLookSection({
                     type="button"
                     onClick={() => void keep()}
                   >
-                    Keep this look
+                    {BUDDY_ONBOARDING_STEP4.use}
                     <ShortcutKeys
                       accelerator="CmdOrCtrl+Enter"
                       className="ml-0.5"
@@ -230,7 +236,11 @@ export function BuddyLookSection({
               </span>
             </div>
           ) : null}
-          {problem ? <FieldError data-testid="buddy-look-error">{problem}</FieldError> : null}
+          {problem ? (
+            <Alert data-testid="buddy-look-error" variant="destructive">
+              <AlertTitle>{problem}</AlertTitle>
+            </Alert>
+          ) : null}
         </Field>
       </FieldGroup>
     </div>

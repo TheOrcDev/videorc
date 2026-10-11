@@ -1,7 +1,9 @@
 import { ResetIcon, ZoomInIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
+import { BuddyExampleChips } from '@/components/buddy-example-chips'
 import { PanelSection } from '@/components/panel-section'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
@@ -27,16 +29,23 @@ import {
   freshBuddyPersona,
   buddyNameToSave
 } from '@/lib/buddy-persona-view'
+import { BUDDY_ONBOARDING_STEP3 } from '@/lib/buddy-onboarding-copy'
 import { toastUserError } from '@/lib/user-error'
 import { BuddyBubbleSample } from '@/components/buddy-bubble-sample'
+import { BUDDY_LIBRARY_CONTEXT_MAX_CHARS } from '../../../shared/buddy-library'
 
 /**
- * The Buddy creation screen (plan 164 S-A4): name it, give it a personality
- * and pick its bubble. Everything here is free (D6) and persists through
- * `patchCohostSettings` on blur or change, with no success toasts (the
- * design skill): the screen is the confirmation. Its looks moved to the
- * Avatar section (plan 168 S-D2), where "Your Buddy's look" is the Still
- * panel (`BuddyLookSection`, plan 169) beside the living preview.
+ * The Buddy creation screen (plan 164 S-A4): name it, give it a personality,
+ * tell it about you and pick its bubble. Everything here is free (D6) and
+ * persists through `patchCohostSettings` on blur or change, with no success
+ * toasts (the design skill): the screen is the confirmation. Its looks moved
+ * to the Avatar section (plan 168 S-D2), where "Your Buddy's look" is the
+ * Still panel (`BuddyLookSection`, plan 169) beside the living preview.
+ *
+ * "About you" (plan 174 G-9) is the one home of the facts Buddy answers
+ * from: the same words as the onboarding's step 3 and the library's edit
+ * dialog, saved as the Buddy's notes, which the backend keeps in step with
+ * the library Buddy's "About you".
  *
  * Stream Manager operates the Buddy (plan 164, owner pick); this screen only
  * creates it.
@@ -44,6 +53,7 @@ import { BuddyBubbleSample } from '@/components/buddy-bubble-sample'
 export function BuddyPersonaSection(): ReactElement | null {
   const { cohostSettings, patchCohostSettings } = useStudioCore()
   const persona = cohostSettings?.persona ?? null
+  const notes = cohostSettings?.notes ?? ''
   const [error, setError] = useState<string | null>(null)
   const save = async (next: CohostPersona): Promise<void> => {
     setError(null)
@@ -57,6 +67,12 @@ export function BuddyPersonaSection(): ReactElement | null {
   }
   const saveQuietly = (next: CohostPersona): void => {
     void save(next).catch(() => undefined)
+  }
+  const saveNotes = (next: string): void => {
+    setError(null)
+    void patchCohostSettings({ notes: next }).catch((failure: unknown) =>
+      setError(failure instanceof Error ? failure.message : "Couldn't save the changes.")
+    )
   }
 
   const [startOverOpen, setStartOverOpen] = useState(false)
@@ -79,7 +95,7 @@ export function BuddyPersonaSection(): ReactElement | null {
 
   return (
     <PanelSection
-      description="Name it, give it a personality and its looks. It answers to its name in chat and in voice; Stream Manager runs it while you're live."
+      description="Name it, give it a personality and tell it about you. It answers to its name in chat and in voice; Stream Manager runs it while you're live."
       title="Name and personality"
     >
       <div className="flex flex-wrap items-start gap-2" data-slot="buddy-header">
@@ -94,15 +110,17 @@ export function BuddyPersonaSection(): ReactElement | null {
           <ResetIcon data-icon="inline-start" />
           Start over
         </Button>
-        {error ? (
-          <FieldError className="mt-1" data-testid="buddy-save-error">
-            {error}
-          </FieldError>
-        ) : null}
       </div>
+      {/* A save that failed is the section's (plan 174 G-7). */}
+      {error ? (
+        <Alert data-testid="buddy-save-error" variant="destructive">
+          <AlertTitle>{error}</AlertTitle>
+        </Alert>
+      ) : null}
 
       <FieldGroup variant="grouped">
         <BuddyPersonalityField persona={persona} onSave={saveQuietly} />
+        <BuddyAboutField notes={notes} onSave={saveNotes} />
 
         <Field>
           <FieldLabel>Bubble</FieldLabel>
@@ -300,22 +318,69 @@ function BuddyPersonalityField({
         onChange={(event) => setDraft(event.target.value)}
       />
       <div className="flex flex-wrap items-center gap-2">
-        {BUDDY_PERSONALITY_EXAMPLES.map((example) => (
-          <Button
-            key={example}
-            size="xs"
-            type="button"
-            variant="outline"
-            onClick={() => {
-              setDraft(example)
-              commit(example)
-            }}
-          >
-            {example}
-          </Button>
-        ))}
+        {/* A chip fills an empty field at once and asks over typed text (plan 174 G-3). */}
+        <BuddyExampleChips
+          examples={BUDDY_PERSONALITY_EXAMPLES}
+          value={draft}
+          what="personality"
+          onFill={(example) => {
+            setDraft(example)
+            commit(example)
+          }}
+        />
         <span className="ml-auto text-xs tabular-nums text-muted-foreground">
           {[...draft].length}/{BUDDY_PERSONALITY_MAX_CHARS}
+        </span>
+        {dirty ? (
+          <span className="text-xs text-muted-foreground">Unsaved. Click away to save.</span>
+        ) : null}
+      </div>
+    </Field>
+  )
+}
+
+/**
+ * "About you" (plan 174 G-9): the facts Buddy answers viewers from, saved
+ * on blur as the Buddy's notes. One name and one home, the same words the
+ * onboarding and the library's edit dialog use.
+ */
+function BuddyAboutField({
+  notes,
+  onSave
+}: {
+  notes: string
+  onSave: (notes: string) => void
+}): ReactElement {
+  const [draft, setDraft] = useState(notes)
+  const savedRef = useRef(notes)
+  useEffect(() => {
+    if (savedRef.current === notes) return
+    savedRef.current = notes
+    setDraft(notes)
+  }, [notes])
+  const dirty = draft !== notes
+  const overLimit = [...draft].length > BUDDY_LIBRARY_CONTEXT_MAX_CHARS
+  const commit = (): void => {
+    if (!dirty || overLimit) return
+    savedRef.current = draft
+    onSave(draft)
+  }
+  return (
+    <Field>
+      <FieldLabel htmlFor="cohost-notes">About you</FieldLabel>
+      <FieldDescription>{BUDDY_ONBOARDING_STEP3.aboutHelp}</FieldDescription>
+      <Textarea
+        className="min-h-24"
+        id="cohost-notes"
+        maxLength={BUDDY_LIBRARY_CONTEXT_MAX_CHARS}
+        placeholder={BUDDY_ONBOARDING_STEP3.aboutPlaceholder}
+        value={draft}
+        onBlur={commit}
+        onChange={(event) => setDraft(event.target.value)}
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+          {[...draft].length}/{BUDDY_LIBRARY_CONTEXT_MAX_CHARS}
         </span>
         {dirty ? (
           <span className="text-xs text-muted-foreground">Unsaved. Click away to save.</span>

@@ -149,7 +149,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('Answered from your Buddy notes')
+    expect(markup).toContain('Answered from About you')
     expect(markup).toContain('On stream')
   })
 })

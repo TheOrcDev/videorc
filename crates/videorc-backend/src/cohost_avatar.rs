@@ -941,7 +941,10 @@ async fn create_in(
         shared: env.shared.clone(),
     };
     tokio::spawn(async move {
-        job.run_create(route).await;
+        // Plan 174 G-14: a discard of the running id cancels the create; the
+        // task then drops whatever the web still delivers.
+        let cancelled = guard.cancelled.clone();
+        job.run_create(route, cancelled).await;
         drop(guard);
     });
     Ok(CohostAvatarAccepted { request_id })
@@ -1003,7 +1006,7 @@ impl SetJob {
         );
     }
 
-    async fn run_create(&self, route: CreateRoute) {
+    async fn run_create(&self, route: CreateRoute, cancelled: Arc<AtomicBool>) {
         let idle = CohostAvatarState::Idle;
         self.progress(idle, CohostAvatarPhase::Working, None, None);
         let fail = |error: CohostAvatarErrorDetail| {
@@ -1056,13 +1059,24 @@ impl SetJob {
                     &response,
                     &shared,
                     meta.as_ref(),
+                    &cancelled,
                 )
             })
             .await
         };
         let draft = match stored {
             Ok(draft) => draft,
-            Err(error) => return fail(error),
+            Err(error) => {
+                // Plan 174 G-14: a look cancelled while the web drew it is
+                // dropped, and one the library route already saved to the
+                // account leaves it again, like a discarded draft.
+                if error.code == COHOST_AVATAR_CANCELLED
+                    && let Some((_, avatar)) = &library
+                {
+                    crate::cohost_library::delete_after_discard(&self.state, &avatar.id);
+                }
+                return fail(error);
+            }
         };
         for avatar_state in ALL_STATES {
             let path = image_of(&draft.images, avatar_state);
@@ -1183,6 +1197,7 @@ fn store_set(
     response: &CohostAvatarSetResponse,
     shared: &AvatarShared,
     library: Option<&DraftLibrary>,
+    cancelled: &AtomicBool,
 ) -> Result<CohostAvatarDraft, CohostAvatarErrorDetail> {
     let mut pictures = BTreeMap::new();
     let mut failed = BTreeMap::new();
@@ -1226,6 +1241,16 @@ fn store_set(
         return Err(error);
     }
     let _lock = shared.commit.lock().unwrap_or_else(|e| e.into_inner());
+    // Plan 174 G-14: cancelled while the web drew it (a discard of the
+    // running id): nothing lands, checked under the same lock the discard took.
+    if cancelled.load(Ordering::Acquire) {
+        let _ = std::fs::remove_dir_all(&staging);
+        remove_drafts_dir_if_empty(root, persona_id);
+        return Err(CohostAvatarErrorDetail::new(
+            COHOST_AVATAR_CANCELLED,
+            "The look was canceled, so its pictures were dropped.",
+        ));
+    }
     let destination = drafts.join(request_id);
     if let Err(error) = std::fs::rename(&staging, &destination) {
         let _ = std::fs::remove_dir_all(&staging);

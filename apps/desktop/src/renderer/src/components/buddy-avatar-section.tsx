@@ -1,7 +1,8 @@
-import { DeleteIcon, FolderIcon, PlayIcon, SparkleIcon, ZoomInIcon } from '@/components/icons'
+import { DeleteIcon, FolderIcon, PauseIcon, PlayIcon, SparkleIcon } from '@/components/icons'
 import {
   lazy,
   Suspense,
+  useRef,
   useState,
   type KeyboardEvent,
   type ReactElement,
@@ -9,49 +10,48 @@ import {
   type Ref
 } from 'react'
 
+import { BuddyCreateGateAlert } from '@/components/buddy-create-gate-alert'
 import type { BuddyPetPreviewHandle, BuddyPetPreviewInfo } from '@/components/buddy-pet-preview'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
+import { CloudAiConsentDialog } from '@/components/cloud-ai-consent-dialog'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
 import { Empty, EmptyContent, EmptyDescription } from '@/components/ui/empty'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
 import { FieldError } from '@/components/ui/field'
-import { SegmentedControl } from '@/components/ui/segmented-control'
+import {
+  SegmentedControl,
+  segmentedTabStop,
+  segmentedTargetIndex
+} from '@/components/ui/segmented-control'
 import type { BuddyPets } from '@/hooks/use-buddy-pets'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyPetImportResult, BuddyPetSummary } from '@/lib/backend'
 import { buddyDisplayName } from '@/lib/buddy-auto-chat-view'
+import { buddyAliveCreateGate, type BuddyCreateGate } from '@/lib/buddy-create-gate'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
   BUDDY_AVATAR_KIND_LABELS,
   BUDDY_TAB_PREVIEW_PX,
-  buddyPetCreateAvailability,
+  buddyPetAllowanceLine,
   buddyPetPosesLabel,
   buddyPetSourceLabel,
-  isBuddyShippedPack,
-  type BuddyPetCreateAvailability
+  isBuddyShippedPack
 } from '@/lib/buddy-pet-view'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import type { BuddyMotionSettings } from '../../../shared/buddy-pet'
 
 export type BuddyAvatarView = 'still' | 'alive'
 
+/** A look under Still that Alive would hide (plan 174 G-10): being drawn, or waiting. */
+export type BuddyLookPending = 'working' | 'draft'
+
 // Test your Buddy (plan 169 D14) is its own chunk, loaded on first open.
 const BuddyTestDialog = lazy(() => import('@/components/buddy-test-dialog'))
-
-/** The preview in its zoom dialog: big enough to check the Buddy out. */
-const ZOOM_PREVIEW_PX = 420
 
 export interface BuddyAvatarSectionProps {
   persona: CohostPersona
@@ -68,6 +68,8 @@ export interface BuddyAvatarSectionProps {
   onPreviewLoad?: (info: BuddyPetPreviewInfo) => void
   /** The Still panel: the four state images (`BuddyStillLooks`). */
   stillPanel: ReactNode
+  /** A new look under Still while Alive shows (plan 174 G-10); null when none. */
+  lookPending?: BuddyLookPending | null
   /** Wear a pack (persists `persona.avatar`). */
   onWear: (packId: string) => Promise<void>
   /** The worn pack is being removed: the Buddy goes back to Still, the view stays Alive. */
@@ -88,13 +90,15 @@ function isTextEntry(target: EventTarget | null): boolean {
 
 /**
  * Avatar (plan 168 S-D2, D2): Still or Alive, with the living preview
- * beside it, its zoom and Test (plan 169 D14, T while the section has
- * focus). Still is the four state images (the plan 164 tiles); Alive is
- * a pet pack, chosen from the persona's packs, imported from a page-pet
- * folder (free, `Kbd` I) or made with the creator (Premium, Phase F).
- * Everything persists through `patchCohostSettings` with no success toast:
- * the preview is the confirmation. Refusals show inline in the backend's
- * words.
+ * beside it, its pause (plan 174 G-20) and Test (plan 169 D14, T while the
+ * section has focus; it is the one place to see the Buddy big, G-22). Still
+ * is the four state images (the plan 164 tiles); Alive is a pet pack,
+ * chosen from the persona's packs, imported from a page-pet folder (free,
+ * `Kbd` I) or made with the creator (Premium, Phase F). Everything persists
+ * through `patchCohostSettings` with no success toast: the preview is the
+ * confirmation. Refusals show inline in the backend's words, as the
+ * section's Alert (G-7). Why Create is off is the one gate model's Alert
+ * (G-5), and a new look hidden under Still says so above (G-10).
  */
 export function BuddyAvatarSection({
   persona,
@@ -106,26 +110,28 @@ export function BuddyAvatarSection({
   motion,
   onPreviewLoad,
   stillPanel,
+  lookPending = null,
   onWear,
   onUnwear,
   importFolder
 }: BuddyAvatarSectionProps): ReactElement {
-  const { account, aiCapabilities, aiConsent, cohostGate } = useStudioCore()
-  const create = buddyPetCreateAvailability({
+  const { account, aiCapabilities, aiConsent, cohostGate, setAiConsent } = useStudioCore()
+  const createGate = buddyAliveCreateGate({
     signedIn: account?.status === 'signed-in',
     gate: cohostGate,
     consented: aiConsent,
     capabilities: aiCapabilities ?? null
   })
+  const allowance = buddyPetAllowanceLine(aiCapabilities)
+  const [consentOpen, setConsentOpen] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [paused, setPaused] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   // The pack the confirm names; it stays set while the dialog fades out.
   const [removeTarget, setRemoveTarget] = useState<BuddyPetSummary | null>(null)
   const [removeOpen, setRemoveOpen] = useState(false)
-  const [zoomOpen, setZoomOpen] = useState(false)
-  const [zoomError, setZoomError] = useState<string | null>(null)
   const [testOpen, setTestOpen] = useState(false)
   // Each open starts a fresh test (Idle, the bubble on); 0 = never opened.
   const [testSession, setTestSession] = useState(0)
@@ -170,6 +176,13 @@ export function BuddyAvatarSection({
     }
   }
 
+  const changeView = (next: BuddyAvatarView): void => {
+    setActionError(null)
+    onViewChange(next).catch((failure: unknown) =>
+      setActionError(failure instanceof Error ? failure.message : "Couldn't switch the avatar.")
+    )
+  }
+
   const openTest = (): void => {
     setTestSession((session) => session + 1)
     setTestOpen(true)
@@ -192,7 +205,10 @@ export function BuddyAvatarSection({
   return (
     <PanelSection
       action={
+        // Manual activation: this choice changes what viewers see, so arrow
+        // keys browse and Space or Enter switches (plan 174 G-10).
         <SegmentedControl
+          activationMode="manual"
           aria-label="Avatar"
           data-testid="buddy-avatar-kind"
           options={(['still', 'alive'] as const).map((kind) => ({
@@ -201,19 +217,26 @@ export function BuddyAvatarSection({
           }))}
           size="sm"
           value={view}
-          onValueChange={(next) => {
-            setActionError(null)
-            onViewChange(next).catch((failure: unknown) =>
-              setActionError(
-                failure instanceof Error ? failure.message : "Couldn't switch the avatar."
-              )
-            )
-          }}
+          onValueChange={changeView}
         />
       }
       description={`How ${buddyDisplayName(persona.name)} looks on stream and here. Still is your four pictures. Alive moves: it looks around and reacts. Importing moves is free; creating them is part of Videorc Premium.`}
       title="Avatar"
     >
+      {view === 'alive' && lookPending ? (
+        <Alert data-testid="buddy-avatar-look-pending" icon={SparkleIcon}>
+          <AlertTitle>
+            {lookPending === 'working'
+              ? `A new look for ${persona.name} is being drawn under Still.`
+              : `A new look for ${persona.name} is waiting under Still.`}
+          </AlertTitle>
+          <AlertAction>
+            <Button size="xs" type="button" variant="outline" onClick={() => changeView('still')}>
+              Switch to Still
+            </Button>
+          </AlertAction>
+        </Alert>
+      ) : null}
       <div
         className="group/avatar flex flex-col gap-4 sm:flex-row sm:items-start"
         data-testid="buddy-avatar"
@@ -228,6 +251,7 @@ export function BuddyAvatarSection({
               label={persona.name}
               motion={motion}
               packId={previewPackId}
+              paused={paused}
               personaId={persona.id}
               placeholder={<Skeleton className="size-full rounded-row" />}
               size={BUDDY_TAB_PREVIEW_PX}
@@ -246,26 +270,23 @@ export function BuddyAvatarSection({
               <>
                 <div className="flex items-center gap-1">
                   <p className="text-[11px] text-subtle">Click it to react</p>
+                  {/* Moving content pauses (plan 174 G-20, WCAG 2.2.2). */}
                   <Button
-                    aria-label={`Zoom in on ${persona.name}`}
-                    data-testid="buddy-preview-zoom"
+                    aria-label={paused ? `Play ${persona.name}` : `Pause ${persona.name}`}
+                    aria-pressed={paused}
+                    data-testid="buddy-preview-pause"
                     size="icon-xs"
-                    title="Zoom in"
                     type="button"
                     variant="ghost"
-                    onClick={() => {
-                      setZoomError(null)
-                      setZoomOpen(true)
-                    }}
+                    onClick={() => setPaused((current) => !current)}
                   >
-                    <ZoomInIcon />
+                    {paused ? <PlayIcon /> : <PauseIcon />}
                   </Button>
                 </div>
                 <Button
                   aria-keyshortcuts="T"
                   data-testid="buddy-test-open"
                   size="xs"
-                  title="Test each state"
                   type="button"
                   variant="ghost"
                   onClick={openTest}
@@ -284,12 +305,14 @@ export function BuddyAvatarSection({
             stillPanel
           ) : (
             <AlivePanel
-              create={create}
+              allowance={allowance}
+              gate={createGate}
               importError={importError}
               importing={importing}
               pets={pets}
               wornPack={wornPack}
               wornPackId={wornPackId}
+              onAllowCloudAi={() => setConsentOpen(true)}
               onImport={() => void importPack()}
               onRemove={(pack) => {
                 setRemoveTarget(pack)
@@ -298,45 +321,14 @@ export function BuddyAvatarSection({
               onWear={wear}
             />
           )}
+          {/* A refused wear, remove or switch is the section's (plan 174 G-7). */}
           {actionError ? (
-            <FieldError data-testid="buddy-avatar-error">{actionError}</FieldError>
+            <Alert data-testid="buddy-avatar-error" variant="destructive">
+              <AlertTitle>{actionError}</AlertTitle>
+            </Alert>
           ) : null}
         </div>
       </div>
-
-      {/* The living preview, large: it follows the pointer and reacts to a
-          click like the small one, with the same pack, motion and images. */}
-      {previewPackId ? (
-        <Dialog open={zoomOpen} onOpenChange={setZoomOpen}>
-          <DialogContent data-testid="buddy-preview-zoom-dialog" size="lg">
-            <DialogHeader>
-              <DialogTitle>{persona.name}</DialogTitle>
-              <DialogDescription>
-                It follows your pointer and reacts when you click it.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex justify-center">
-              <LazyBuddyPetPreview
-                className="rounded-row border border-border bg-inset"
-                label={persona.name}
-                motion={motion}
-                packId={previewPackId}
-                personaId={persona.id}
-                placeholder={<Skeleton className="size-full rounded-row" />}
-                size={ZOOM_PREVIEW_PX}
-                stillImages={persona.images}
-                onError={setZoomError}
-                onLoad={() => setZoomError(null)}
-              />
-            </div>
-            {zoomError ? (
-              <FieldError className="text-center" data-testid="buddy-preview-zoom-error">
-                {zoomError}
-              </FieldError>
-            ) : null}
-          </DialogContent>
-        </Dialog>
-      ) : null}
 
       {previewPackId && testSession > 0 ? (
         <Suspense fallback={null}>
@@ -350,6 +342,15 @@ export function BuddyAvatarSection({
           />
         </Suspense>
       ) : null}
+
+      <CloudAiConsentDialog
+        open={consentOpen}
+        testId="buddy-avatar-consent"
+        onAnswer={(accepted) => {
+          setConsentOpen(false)
+          if (accepted) setAiConsent(true)
+        }}
+      />
 
       <ConfirmDialog
         cancelLabel="Keep it"
@@ -379,9 +380,11 @@ function AlivePanel({
   pets,
   wornPack,
   wornPackId,
-  create,
+  gate,
+  allowance,
   importing,
   importError,
+  onAllowCloudAi,
   onWear,
   onImport,
   onRemove
@@ -389,18 +392,38 @@ function AlivePanel({
   pets: BuddyPets
   wornPack: BuddyPetSummary | null
   wornPackId: string | null
-  create: BuddyPetCreateAvailability
+  /** Why Create is off (plan 174 G-5); null when it works. */
+  gate: BuddyCreateGate | null
+  /** "2 of 3 left this month", when the web reports the numbers. */
+  allowance: string | null
   importing: boolean
   importError: string | null
+  onAllowCloudAi: () => void
   onWear: (pack: BuddyPetSummary) => void
   onImport: () => void
   onRemove: (pack: BuddyPetSummary) => void
 }): ReactElement {
   const packs = pets.packs
+  // The moves are radios with roving focus (plan 174 G-18): arrow keys
+  // browse, one tab stop (the worn row), Enter or Space wears. Browsing never
+  // wears: wearing changes what viewers see.
+  const rows = useRef<Array<HTMLButtonElement | null>>([])
+  const enabled = (packs ?? []).map(() => true)
+  const checkedIndex = (packs ?? []).findIndex((pack) => pack.packId === wornPackId)
+  const tabStop = segmentedTabStop(enabled, checkedIndex)
+  const onRowsKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return
+    const current = rows.current.findIndex((row) => row === event.target)
+    if (current < 0) return
+    const target = segmentedTargetIndex(enabled, current, event.key)
+    if (target === null) return
+    event.preventDefault()
+    rows.current[target]?.focus()
+  }
   const createButton = (
     <Button
       data-testid="buddy-pack-create"
-      disabled={!create.allowed}
+      disabled={gate !== null}
       type="button"
       variant="outline"
       onClick={openBuddyPetCreator}
@@ -422,9 +445,15 @@ function AlivePanel({
       <Kbd className="ml-0.5">I</Kbd>
     </Button>
   )
-  const createHint = create.reason ?? create.allowance
   return (
     <>
+      {gate ? (
+        <BuddyCreateGateAlert
+          data-testid="buddy-create-gate"
+          gate={gate}
+          onAllowCloudAi={onAllowCloudAi}
+        />
+      ) : null}
       {pets.error ? (
         <Alert data-testid="buddy-packs-error" variant="destructive">
           <AlertTitle>Couldn&apos;t list your moves</AlertTitle>
@@ -446,29 +475,26 @@ function AlivePanel({
         </Empty>
       ) : (
         <>
-          <div aria-label="Your moves" role="radiogroup">
+          <div aria-label="Your moves" role="radiogroup" onKeyDown={onRowsKeyDown}>
             <GroupedList label="Moves">
-              {packs.map((pack) => {
+              {packs.map((pack, index) => {
                 const worn = pack.packId === wornPackId
                 return (
                   <ListRow
                     key={pack.packId}
-                    interactive
+                    ref={(element) => {
+                      rows.current[index] = element
+                    }}
+                    as="button"
                     aria-checked={worn}
                     context={`${buddyPetPosesLabel(pack)} · ${buddyPetSourceLabel(pack)}`}
                     data-testid="buddy-pack-row"
                     meta={worn ? 'Wearing' : undefined}
                     role="radio"
                     selected={worn}
-                    tabIndex={0}
+                    tabIndex={index === tabStop ? 0 : -1}
                     title={pack.name}
                     onClick={() => onWear(pack)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault()
-                        onWear(pack)
-                      }
-                    }}
                   />
                 )
               })}
@@ -493,9 +519,9 @@ function AlivePanel({
           </div>
         </>
       )}
-      {createHint ? (
+      {allowance ? (
         <p className="text-xs tabular-nums text-muted-foreground" data-testid="buddy-create-hint">
-          {createHint}
+          {allowance}
         </p>
       ) : null}
       {importError ? (

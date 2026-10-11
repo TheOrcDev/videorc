@@ -23,6 +23,11 @@ import {
   BUDDY_ONBOARDING_STEP4,
   BUDDY_ONBOARDING_STEP_TITLES
 } from '@/lib/buddy-onboarding-copy'
+import {
+  clearBuddyOnboardingDraft,
+  clearBuddyOnboardingRequest,
+  readBuddyOnboardingDraft
+} from '@/lib/buddy-onboarding-store'
 import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from '../../../shared/buddy-library'
 
 import { BuddyOnboarding } from './buddy-onboarding'
@@ -35,9 +40,9 @@ const mocked = vi.hoisted(() => ({
 }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
 vi.mock('@/lib/buddy-pet-creator-nav', () => ({ openBuddyPetCreator: mocked.openCreator }))
-vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => ({ signIn: mocked.signIn }) }))
 vi.mock('@/lib/videorc-web-links', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/videorc-web-links')>()),
+  beginVideorcSignIn: mocked.signIn,
   openVideorcWebLink: mocked.openLink
 }))
 vi.mock('@/components/buddy-pet-preview-lazy', async () => {
@@ -175,6 +180,8 @@ beforeEach(() => {
   onOpenChange.mockClear()
   mocked.signIn.mockClear()
   mocked.openLink.mockClear()
+  clearBuddyOnboardingDraft()
+  clearBuddyOnboardingRequest()
   Object.assign(URL, { createObjectURL: () => 'blob:picked', revokeObjectURL: () => undefined })
   container = document.createElement('div')
   document.body.append(container)
@@ -300,7 +307,9 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(byTestId('buddy-onboarding-progress')?.textContent).toBe('Step 1 of 4')
     expect(sheet().textContent).toContain(BUDDY_ONBOARDING_STEP_TITLES[0])
     expect(sheet().textContent).toContain(BUDDY_ONBOARDING_STEP1.lead)
-    expect(sheet().textContent).toContain(BUDDY_ONBOARDING_STEP1.premiumNote)
+    // A Premium account meets no gate and no note about Premium (plan 174 G-5).
+    expect(byTestId('buddy-onboarding-gate')).toBeNull()
+    expect(sheet().textContent).not.toContain(BUDDY_ONBOARDING_STEP1.premiumNote)
     expect(byTestId('buddy-stream-demo')).not.toBeNull()
     expect(byTestId('buddy-onboarding-what')?.querySelectorAll('li')).toHaveLength(5)
     const cards = [
@@ -313,10 +322,28 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
       'official:pirate',
       'official:robot'
     ])
-    // The active one is badged, the others offer "Use this one".
+    // The active one is marked by the one picture card, the others offer "Use this one".
     expect(cards[0]!.dataset.active).toBe('true')
+    expect(cards[0]!.getAttribute('aria-current')).toBe('true')
     expect(cards[0]!.querySelector('[data-testid="buddy-onboarding-use-official"]')).toBeNull()
     expect(cards[1]!.textContent).toContain(BUDDY_ONBOARDING_STEP1.cardAction)
+    expect(cards[1]!.querySelector('[data-testid="buddy-picture-card-detail"]')?.textContent).toBe(
+      BUDDY_OFFICIAL_CATALOG[1]!.personality
+    )
+    // The step is announced, and the demo's lines are in its name, with a pause (plan 174 G-20, G-21).
+    expect(byTestId('buddy-onboarding-announce')?.textContent).toBe(
+      'Step 1 of 4: Meet your sidekick'
+    )
+    expect(byTestId('buddy-stream-demo')?.getAttribute('aria-label')).toContain(
+      BUDDY_ONBOARDING_STEP1.demoBubbles[0]
+    )
+    const pause = byTestId<HTMLButtonElement>('buddy-stream-demo-pause')!
+    expect(pause.getAttribute('aria-pressed')).toBe('false')
+    await click(pause)
+    expect(byTestId('buddy-stream-demo')?.dataset.paused).toBe('true')
+    expect(pause.getAttribute('aria-pressed')).toBe('true')
+    await click(byTestId('buddy-onboarding-create-own'))
+    expect(byTestId('buddy-onboarding-announce')?.textContent).toBe('Step 2 of 4: Describe it')
   })
 
   it('shows one still frame with reduced motion: the greeting and the chip', async () => {
@@ -328,6 +355,8 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     await render({ client: fakeBackend().client })
     const demo = byTestId('buddy-stream-demo')!
     expect(demo.dataset.pose).toBe('talk')
+    // Nothing moves, so there is nothing to pause.
+    expect(byTestId('buddy-stream-demo-pause')).toBeNull()
     expect(byTestId('buddy-stream-demo-bubble')?.textContent).toBe(
       BUDDY_ONBOARDING_STEP1.demoBubbles[0]
     )
@@ -354,16 +383,29 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(byTestId('buddy-onboarding-hint')?.textContent).toBe(BUDDY_ONBOARDING_STEP2.nextHint)
     await type('buddy-onboarding-description', '   ')
     expect(next().disabled).toBe(true)
-    // An example chip fills it in.
-    await click(
-      [...sheet().querySelectorAll('button')].find(
-        (button) => button.textContent === BUDDY_ONBOARDING_STEP2.examples[1]
-      )
-    )
+    // An example chip fills an empty field in at once (plan 174 G-3).
+    const chip = (text: string): HTMLButtonElement | undefined =>
+      [...sheet().querySelectorAll('button')].find((button) => button.textContent === text)
+    await click(chip(BUDDY_ONBOARDING_STEP2.examples[1]))
     expect(
       (document.getElementById('buddy-onboarding-description') as HTMLTextAreaElement).value
     ).toBe('A knight made of pizza')
     expect(sheet().textContent).toContain('22/600')
+    // Over something written, it asks first; Keep mine changes nothing.
+    await type('buddy-onboarding-description', 'My own goblin')
+    await click(chip(BUDDY_ONBOARDING_STEP2.examples[0]))
+    expect(byTestId('buddy-example-replace-dialog')?.textContent).toContain(
+      'Replace your description?'
+    )
+    await click(byTestId('buddy-example-replace-cancel'))
+    expect(
+      (document.getElementById('buddy-onboarding-description') as HTMLTextAreaElement).value
+    ).toBe('My own goblin')
+    await click(chip(BUDDY_ONBOARDING_STEP2.examples[0]))
+    await click(byTestId('buddy-example-replace-confirm'))
+    expect(
+      (document.getElementById('buddy-onboarding-description') as HTMLTextAreaElement).value
+    ).toBe(BUDDY_ONBOARDING_STEP2.examples[0])
     expect(next().disabled).toBe(false)
     expect(byTestId('buddy-onboarding-hint')).toBeNull()
     await type('buddy-onboarding-description', 'x'.repeat(601))
@@ -427,6 +469,33 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     ).toBe('A goblin')
   })
 
+  it('keeps what was typed across a remount and reopens where it left off (plan 174 G-12)', async () => {
+    await render({ client: fakeBackend().client })
+    await click(byTestId('buddy-onboarding-create-own'))
+    await type('buddy-onboarding-description', 'A small cheeky goblin')
+    await click(next())
+    await type('buddy-onboarding-name', 'Nibbles')
+    expect(readBuddyOnboardingDraft()).toMatchObject({
+      step: 3,
+      input: { description: 'A small cheeky goblin', name: 'Nibbles' }
+    })
+    // The sub-tab switches: the sheet unmounts and comes back.
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await render({ client: fakeBackend().client })
+    expect(step()).toBe('3')
+    expect((document.getElementById('buddy-onboarding-name') as HTMLInputElement).value).toBe(
+      'Nibbles'
+    )
+    // An incomplete earlier step is where it reopens: Back to step 2, clear it, remount.
+    await click(byTestId('buddy-onboarding-back'))
+    await type('buddy-onboarding-description', '')
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await render({ client: fakeBackend().client })
+    expect(step()).toBe('2')
+  })
+
   it('creates with every field: the look, the picture, the name, personality and About you', async () => {
     const backend = fakeBackend()
     await render({ client: backend.client })
@@ -449,10 +518,23 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
       },
       { timeoutMs: 15_000 }
     )
-    // Working: the four slots fill in, idle first; Back is gone.
+    // Working: the four slots fill in, idle first; Back is gone; the clock
+    // runs and Cancel is offered (plan 174 G-14).
     expect(byTestId('buddy-onboarding-working')?.textContent).toBe(BUDDY_ONBOARDING_STEP4.working)
     expect(document.querySelectorAll('[data-testid="buddy-look-skeleton"]')).toHaveLength(4)
     expect(byTestId('buddy-onboarding-back')).toBeNull()
+    expect(byTestId('buddy-look-elapsed')?.textContent).toMatch(/^\d:\d\d$/)
+    await click(byTestId('buddy-look-cancel'))
+    expect(backend.requestTyped).toHaveBeenCalledWith(
+      'cohost.avatar.discard',
+      { requestId: NEXT },
+      { timeoutMs: 15_000 }
+    )
+    // Back to the summary and Create, with what was typed still there.
+    expect(byTestId('buddy-onboarding-working')).toBeNull()
+    expect(byTestId('buddy-onboarding-failed')).toBeNull()
+    expect(byTestId<HTMLButtonElement>('buddy-onboarding-create')?.disabled).toBe(false)
+    expect(byTestId('buddy-onboarding-summary-name')?.textContent).toContain('Nibbles')
   })
 
   it('Skip for now creates without the personality and About you', async () => {
@@ -469,47 +551,50 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     )
   })
 
-  it('gates Create by account, Premium, Cloud AI, room and images, each with its line and action', async () => {
+  it('gates Create by account, Premium, Cloud AI, room and images: one Alert, one action, from step 1', async () => {
     const gateOf = (): { kind?: string; text?: string | null; actions: string[] } => {
       const row = byTestId('buddy-onboarding-gate')
       return {
         kind: row?.dataset.gate,
         text: row?.textContent,
-        actions: [
-          ...document.querySelectorAll<HTMLElement>('[data-testid="buddy-onboarding-gate-action"]')
-        ].map((button) => button.textContent ?? '')
+        actions: [...(row?.querySelectorAll('button') ?? [])].map(
+          (button) => button.textContent ?? ''
+        )
       }
     }
+    const action = (): HTMLButtonElement | null =>
+      byTestId('buddy-onboarding-gate')?.querySelector('button') ?? null
     const create = (): HTMLButtonElement => byTestId<HTMLButtonElement>('buddy-onboarding-create')!
 
     await render({ client: fakeBackend().client, signedIn: false })
+    // Said at step 1 already (the G owner item), before any typing; the
+    // official five stay free and Create my own still shows the steps.
+    expect(gateOf()).toMatchObject({ kind: 'signed-out', actions: ['Sign in'] })
+    expect(byTestId<HTMLButtonElement>('buddy-onboarding-create-own')?.disabled).toBe(false)
     await walkToCreate()
     expect(gateOf()).toMatchObject({ kind: 'signed-out', actions: ['Sign in'] })
     expect(gateOf().text).toContain(BUDDY_ONBOARDING_GATES.signedOut)
     expect(create().disabled).toBe(true)
-    await click(document.querySelector('[data-action="sign-in"]') as HTMLElement)
+    await click(action())
     expect(mocked.signIn).toHaveBeenCalledOnce()
 
     await act(async () => root.unmount())
     root = createRoot(container)
+    clearBuddyOnboardingDraft()
     await render({ client: fakeBackend().client, gate: free })
     await walkToCreate()
-    expect(gateOf()).toMatchObject({
-      kind: 'premium',
-      actions: ['View Premium', 'Start from one of ours']
-    })
-    await click(document.querySelector('[data-action="see-premium"]') as HTMLElement)
+    expect(gateOf()).toMatchObject({ kind: 'premium', actions: ['View Premium'] })
+    await click(action())
     expect(mocked.openLink).toHaveBeenCalledWith('https://example.test/premium')
-    await click(document.querySelector('[data-action="start-from-ours"]') as HTMLElement)
-    expect(step()).toBe('1')
 
     await act(async () => root.unmount())
     root = createRoot(container)
+    clearBuddyOnboardingDraft()
     await render({ client: fakeBackend().client, consented: false })
     await walkToCreate()
     expect(gateOf()).toMatchObject({ kind: 'cloud-ai', actions: ['Allow cloud AI'] })
     expect(gateOf().text).toContain(BUDDY_ONBOARDING_GATES.cloudAiOff)
-    await click(document.querySelector('[data-action="allow-cloud-ai"]') as HTMLElement)
+    await click(action())
     const consent = byTestId('buddy-onboarding-consent')!
     await click(
       [...consent.querySelectorAll('button')].find(
@@ -520,6 +605,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
 
     await act(async () => root.unmount())
     root = createRoot(container)
+    clearBuddyOnboardingDraft()
     const full = capabilities(20, 30)
     await render({ client: fakeBackend({}, full).client, caps: full })
     await walkToCreate()
@@ -529,6 +615,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
 
     await act(async () => root.unmount())
     root = createRoot(container)
+    clearBuddyOnboardingDraft()
     const spent = capabilities(3)
     await render({ client: fakeBackend({}, spent).client, caps: spent })
     await walkToCreate()
@@ -556,6 +643,11 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
         .map((tile) => tile.dataset.state)
     ).toEqual(['talk', 'laugh', 'think'])
     expect(tiles[3]!.textContent).toContain(BUDDY_ONBOARDING_STEP4.poseFailed)
+    // Redo says what it costs, and the tiles say what is left (plan 174 G-14).
+    expect(tiles[1]!.querySelector('[data-testid="buddy-look-redo"]')?.textContent).toContain(
+      'Redo · 1 image'
+    )
+    expect(byTestId('buddy-look-images-left')?.textContent).toBe('20 images left today')
     expect(byTestId('buddy-onboarding-saved')?.textContent).toBe(BUDDY_ONBOARDING_STEP4.done)
     expect(byTestId('buddy-pet-preview')?.dataset.pack).toBe('still')
 
@@ -580,12 +672,12 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
         '[data-testid="buddy-onboarding-use"], [data-testid="buddy-onboarding-make-alive"]'
       )
     ]
-    // Secondary, right after "Use as my Buddy".
+    // Secondary first; the primary "Use as my Buddy" sits rightmost (the G owner item).
     expect(footer.map((button) => button.dataset.testid)).toEqual([
-      'buddy-onboarding-use',
-      'buddy-onboarding-make-alive'
+      'buddy-onboarding-make-alive',
+      'buddy-onboarding-use'
     ])
-    expect(footer[1]!.textContent).toBe(BUDDY_ONBOARDING_STEP4.makeAlive)
+    expect(footer[0]!.textContent).toBe(BUDDY_ONBOARDING_STEP4.makeAlive)
     expect(mocked.openCreator).not.toHaveBeenCalled()
     await click(byTestId('buddy-onboarding-make-alive'))
     expect(backend.requestTyped).toHaveBeenCalledWith(
@@ -625,6 +717,28 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     )
     expect(byTestId('buddy-onboarding-use')).toBeNull()
     expect(byTestId('buddy-onboarding-create')).not.toBeNull()
+  })
+
+  it('Start a new one leaves the waiting draft in the library and begins again (plan 174 G-13)', async () => {
+    const backend = fakeBackend({ draft: draft(LIBRARY_AVATAR) })
+    await render({ client: backend.client, libraryController: fakeLibraryController() })
+    expect(step()).toBe('4')
+    await click(byTestId('buddy-onboarding-start-new'))
+    expect(backend.requestTyped).not.toHaveBeenCalledWith(
+      'cohost.avatar.discard',
+      expect.anything(),
+      expect.anything()
+    )
+    expect(step()).toBe('2')
+    await type('buddy-onboarding-description', 'A tiny dragon')
+    await click(next())
+    await type('buddy-onboarding-name', 'Ember')
+    await click(next())
+    expect(step()).toBe('4')
+    // The left-behind draft is no longer this sheet's: Create is offered.
+    expect(byTestId('buddy-onboarding-use')).toBeNull()
+    expect(byTestId<HTMLButtonElement>('buddy-onboarding-create')?.disabled).toBe(false)
+    expect(readBuddyOnboardingDraft().leftBehindDraftId).toBe(DRAFT)
   })
 
   it('names the draft it would delete after the name typed on step 3', async () => {
