@@ -64,6 +64,7 @@ beforeEach(() => {
     deleteSessions: vi.fn(),
     renameSession: vi.fn(),
     noiseCleanupJobs: [],
+    cleanCutJobs: [],
     connection: null,
     ensureSessionPoster: vi.fn(async () => false),
     assessRecording: vi.fn(),
@@ -139,7 +140,7 @@ describe('Library → Buddy report (plan 119 S3)', () => {
   it('says where files live', async () => {
     await render()
     expect(document.querySelector('[data-slot="page-header"]')?.textContent).toContain(
-      'Every recording and stream becomes a local session. Files stay on disk.'
+      'Every recording and livestream you make. Files stay on disk.'
     )
   })
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { scheduleUndoableAction } from './undoable-action'
+import { holdUndoableAction, scheduleUndoableAction } from './undoable-action'
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -59,5 +59,28 @@ describe('scheduleUndoableAction (plan 174 S0.3, E-8)', () => {
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 3000)
     action.undo()
     expect(clearTimeoutSpy).toHaveBeenCalledWith('handle')
+  })
+})
+
+describe('holdUndoableAction (plan 174 S3.12)', () => {
+  it('waits for its owner however long it takes, then runs once', () => {
+    const run = vi.fn()
+    const action = holdUndoableAction(run)
+    vi.advanceTimersByTime(60_000)
+    expect(run).not.toHaveBeenCalled()
+    expect(action.state).toBe('pending')
+    action.flush()
+    action.flush()
+    expect(run).toHaveBeenCalledOnce()
+    expect(action.state).toBe('done')
+  })
+
+  it('never runs once undone', () => {
+    const run = vi.fn()
+    const action = holdUndoableAction(run)
+    action.undo()
+    action.flush()
+    expect(run).not.toHaveBeenCalled()
+    expect(action.state).toBe('undone')
   })
 })
