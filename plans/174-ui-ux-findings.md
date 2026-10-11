@@ -112,7 +112,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: update-ui.ts:43; sidebar.tsx:126 |
 - **A-26** · P3 · Copy: "Your {settings} is blocking…", "Loading workspace…", "Search for a command to run..." — partly fixed in #647 (S2.1 `e6379d71`, palette "..." and title); rest in S2.5
   - Evidence: system-access.ts:313; app-shell.tsx:103; ui/command.tsx:28 |
-- **A-27** · P3 · Skill/docs stale (fullscreen gutter; Comments window; Chat hints)
+- **A-27** · P3 · Skill/docs stale (fullscreen gutter; Comments window; Chat hints) — fixed in #647 (S4.2 `9f2f2fc8`)
   - Evidence: SKILL.md:60; docs/buddy.md:412; App.tsx:41 |
 
 **Owner decisions raised by this review:** Space never ends a livestream (Studio-only; stop recording instantly; livestream needs confirm/hold/⌘.); ⌘9 Buddy out of order (**owner 2026-10-10: Buddy stays directly under Studio on ⌘9**, it sells Premium; D8); Windows sidebar duplicate brand; ⌘J toggles SM → ⌘J show+focus Buddy, ⇧⌘J toggle; first Buddy tab → "Profile"
@@ -197,7 +197,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: studio-tab.tsx:292; studio-health.ts:183 |
 - **B-27** · P2 · Missing space renders "later.The instant-stream…" in Go Live dialog — fixed in #647 (S0.4a `d0dca074`)
   - Evidence: go-live-dialog.tsx:180-184 |
-- **B-28** · P3 · ~25 title= on Studio, no Tooltip
+- **B-28** · P3 · ~25 title= on Studio, no Tooltip — fixed in #647 (S1.10 `63181a3e`)
   - Evidence: session-panel.tsx etc. |
 - **B-29** · P3 · Hand-rolled skeletons and links; Cancel outline vs ghost; 32px segmented in 20px slot; On/Off button pair for boolean — fixed in #647 (S1.7 `466ff1e5`)
   - Evidence: studio-tab.tsx:249; session-panel.tsx:253; scenes-gallery.tsx:93,231; vertical-leg-monitor.tsx:112-137 |
@@ -239,7 +239,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **C-9** · P1 · Three device picker implementations (filled Select 28px "None" / outline Button+Command 40px rows / inline Select "Off") side by side — fixed in #647 (S1.9 `819509ef`)
   - Evidence: source-select.tsx:96-133; source-select-searchable.tsx:67-180; quick-settings.tsx:387-470
   - Fix: one DevicePicker
-- **C-10** · P1 · Fix-it reasons only in title= (source chip hints "No fresh frames…", locked preset reason on pointer-events-none item, truncated stage hint) — fixed in #647 (S3.8 `1fd8befe`)
+- **C-10** · P1 · Fix-it reasons only in title= (source chip hints "No fresh frames…", locked preset reason on pointer-events-none item, truncated stage hint) — fixed in #647 (S3.8 `1fd8befe`); fixed in #647 (S3.8 `1fd8befe`, S1.10 `63181a3e`)
   - Evidence: sources-tab.tsx:38-67; video-preset-select-items.tsx:96; scene-stage.tsx:1028
   - Fix: visible role=status line
 - **C-11** · P1 · No visible keyboard focus on background tiles (outline clipped by overflow-hidden parent) — fixed in #647 (S3.10 `31c121b0`)
@@ -386,7 +386,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **D-22** · P2 · Video quality: 8+ spellings; "Output quality" vs Output page; "choose a stream-safe preset" w/o such option; "independent of recording" false on shared encode — fixed in #647 (S1.4 `215e6585`)
   - Evidence: output-quality.ts:5; capture.ts:749; go-live-panel.tsx:271,524,742; performance-check.ts:134; studio-session-view.ts:48; entitlement-ui.ts:186
   - Fix: formatVideoQuality()
-- **D-23** · P2 · Essential reasons in title= (stream check failure, per-destination qualities, provider validation)
+- **D-23** · P2 · Essential reasons in title= (stream check failure, per-destination qualities, provider validation) — fixed in #647 (S1.10 `63181a3e`; the raw preflight message is a focusable explanation)
   - Evidence: go-live-panel.tsx:312,274; destination-card.tsx:1014 |
 - **D-24** · P2 · Checklist links don't move focus; ~20px targets; FFmpeg row no action — fixed in #647 (S3.5a `88d5c501`)
   - Evidence: streaming-tab.tsx:185; go-live-panel.tsx:249,290 |
@@ -503,7 +503,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **E-22** · P2 · Library toast discipline (queued toast duplicates row; import no feedback; rename error toast while dialog open) — fixed in #647 (S2.4 `4929496f`)
   - Evidence: library-tab.tsx:906,759,205,167
   - Fix: focus new row; FieldError
-- **E-23** · P2 · title= tooltips for failure reasons / disabled reasons / shortcuts
+- **E-23** · P2 · title= tooltips for failure reasons / disabled reasons / shortcuts — fixed in #647 (S1.10 `63181a3e`)
   - Evidence: library-tab.tsx:635,303,922; clean-cut-\*
   - Fix: Tooltip+Kbd; visible failure line
 - **E-24** · P2 · Review footer shows only "Failed" — fixed in #647 (S3.13 `e0c3763a`)
@@ -566,7 +566,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: stream-manager.tsx:453,821 |
 - **F-11** · P2 · Greetings on with zero templates posts nothing, says nothing — fixed in #647 (S3.14b `bc1edee8`)
   - Evidence: buddy-chat-controls.tsx:121 |
-- **F-12** · P2 · Mode meanings + disabled reasons only in title=; reaction chips disabled w/o reason for Still Buddy — partly fixed in #647 (S1.1 `add86ec0`, disabled reasons); mode meanings in S1.10; fixed in #647 (S3.14a `00dfb9dd`)
+- **F-12** · P2 · Mode meanings + disabled reasons only in title=; reaction chips disabled w/o reason for Still Buddy — partly fixed in #647 (S1.1 `add86ec0`, disabled reasons); mode meanings in S1.10; fixed in #647 (S3.14a `00dfb9dd`); fixed in #647 (S1.1, S3.14a `00dfb9dd`)
   - Evidence: buddy-chat-controls.tsx:112,131-142,209; cohost-pane.tsx:841 |
 - **F-13** · P2 · Proposed post doesn't show destinations; failed rows read as faded text — fixed in #647 (S3.14b `bc1edee8`)
   - Evidence: buddy-utterance-cards.tsx:83,134 |
@@ -679,7 +679,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **G-22** · P2 · Avatar Zoom vs Test vs bubble Zoom: three "see it big" dialogs — fixed in #647 (S3.15b `85364e5b`)
   - Evidence: buddy-avatar-section.tsx:254-362
   - Fix: fold Zoom into Test
-- **G-23** · P2 · Hard-coded ⌘N + title= tooltips in Buddy surfaces — partly fixed in #647 (S1.2 `e257d3c4`, keys); tooltips in S1.10
+- **G-23** · P2 · Hard-coded ⌘N + title= tooltips in Buddy surfaces — partly fixed in #647 (S1.2 `e257d3c4`, keys); tooltips in S1.10; fixed in #647 (S1.2, S1.10 `4e2a38e2`)
   - Evidence: buddy-greetings-section.tsx:388,397 + 7 title=
   - Fix: displayKeyGlyph + Tooltip
 - **G-24** · P3 · Library edit dialog closes before save accepted — fixed in #647 (S3.15a `2addd9c7`)
@@ -739,7 +739,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: activity-pane.tsx:204,442,487; stream-manager-status-bar.tsx:101; comments/main.tsx:680 |
 - **H-15** · P2 · Stats hover cards not focusable; customisation right-click only; provider details title-only; <640 failed provider = red dot only; Buddy tab state colour-only — fixed in #647 (S3.16b `3919c3ea`)
   - Evidence: stats-bar.tsx:146-204,319; stream-manager-status-bar.tsx:158-179; stream-manager.tsx:963 |
-- **H-16** · P2 · 73 title= in window, zero Tooltip; removal outcome/highlight failure (cleared after 5 s)/flag reason only in title
+- **H-16** · P2 · 73 title= in window, zero Tooltip; removal outcome/highlight failure (cleared after 5 s)/flag reason only in title — fixed in #647 (S1.10 `4e2a38e2`)
   - Evidence: comment-row.tsx:129,168,199; activity-pane.tsx:280; comments/main.tsx:129
   - Fix: Tooltip/HoverCard; inline failures
 - **H-17** · P2 · Badges h-4 text-[10px]; ad-hoc rounded-full pill; 10px text (row time, flag action, alpha); rounded-[4px], rounded-md; ToggleGroup h-6 overrides vs h-7 — partly fixed in #647 (S1.8 `df1a6513`, 10 px text); rest in S3.16b; fixed in #647 (S3.16b `3919c3ea`)
@@ -781,7 +781,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: LivestreamIcon for on-stream
 - **H-30** · P3 · History: two date formats; live-only controls visible; "Back to live" when not live; rows lose ⋯ (Copy/links) — fixed in #647 (S3.16a `aeddb652`)
   - Evidence: stream-manager.tsx:923-935,762,1073; comment-row.tsx:778 |
-- **H-31** · P3 · Skill/docs out of date vs code by owner calls (activity mark far right; SM status bar 32px; Mark clip/Clear labelled)
+- **H-31** · P3 · Skill/docs out of date vs code by owner calls (activity mark far right; SM status bar 32px; Mark clip/Clear labelled) — fixed in #647 (S4.2 `9f2f2fc8`)
   - Evidence: SKILL.md:170,225,268; docs/buddy.md:413
   - Fix: amend skill
 - **H-32** · P3 · Success toasts for "do this in your browser"; Mark clip toast w/o Undo vs /marker inline Undo — partly fixed in #647 (S2.4 `4929496f`, browser steps as info); Mark clip Undo needs an RPC the plan doesn't name (deferred); deferred: Mark clip Undo needs an RPC the plan doesn't name (S2.4, S3.16b)
@@ -804,7 +804,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **I-2** · P1 · Notes never says it's hidden from capture; protection failure only logged to console (notes may appear on stream) — fixed in #647 (S0.6 `159c1155`)
   - Evidence: notes-window.tsx:91,219; main index.ts:2809
   - Fix: footer "Hidden from recordings and streams"; destructive Alert on failure
-- **I-3** · P1 (= A-20) · Copy points to places that don't exist: "Details are in diagnostics"; "Recording → Output"; phone "Settings → Phone remote" (tab is Remote); doc paths — fixed in #647 (S2.3a `490d7f6a`; doc paths in S4.2)
+- **I-3** · P1 (= A-20) · Copy points to places that don't exist: "Details are in diagnostics"; "Recording → Output"; phone "Settings → Phone remote" (tab is Remote); doc paths — fixed in #647 (S2.3a `490d7f6a`; doc paths in S4.2); fixed in #647 (S2.3a `490d7f6a`, S4.2 `9f2f2fc8`)
   - Evidence: toast.ts:10; performance-check.ts:155; go-live-dialog.tsx:445; remote_web/index.html:32; app.js:511 |
 - **I-4** · P1 · Health "Verdicts" = 14–16 equal chips, raw enums ("Permission-needed"), jargon (OBS-native, Surface proof, Tick spike), amber for transitional; no overall answer; actionable warnings buried — fixed in #647 (S3.18 `6e3546dd`)
   - Evidence: diagnostics-tab.tsx:169-248,695,1022,1242,1467
@@ -904,7 +904,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J1-5** · P1 · Status copy coloured (28 text-destructive, 23 text-warning, 9 text-success ≈45 text); light amber 2.18:1; ~20 text-xs text-destructive paragraphs vs FieldError used once; go-live alert clones — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: recording-settings.tsx:112,117; sources-audio-mixer.tsx:680-698; go-live-dialog.tsx:281-495
   - Fix: Alert / StatusDot+icon / restyled FieldError; guard on text-(warning|success|destructive)
-- **J1-6** · P1 ✔ · ~160 native title= vs 4 Tooltip roots; TooltipProvider only in main window → Tooltip would crash Stream Manager/Notes/Captions; shortcuts hidden in titles; explanations on non-focusable badges — partly fixed in #647 (S1.1 `add86ec0`, providers in every window); `title=` migration in S1.10
+- **J1-6** · P1 ✔ · ~160 native title= vs 4 Tooltip roots; TooltipProvider only in main window → Tooltip would crash Stream Manager/Notes/Captions; shortcuts hidden in titles; explanations on non-focusable badges — partly fixed in #647 (S1.1 `add86ec0`, providers in every window); `title=` migration in S1.10; fixed in #647 (S1.1 `add86ec0`; S1.10 `63181a3e`, `4e2a38e2`)
   - Evidence: App.tsx:37; comments/main.tsx; notes/main.tsx; captions/main.tsx
   - Fix: WindowProviders (TooltipProvider+Toaster) for all 4 entries; promote ShortcutTooltip; migrate; title only for truncation
 - **J1-7** · P1 · Segmented choice built 6 ways (Tabs track; borderless ToggleGroup; outline ToggleGroup; joined spacing=0; hand-rolled buttons (eager budget); aria-pressed tiles); owner rule "segmented choices use Tabs" (plan 080) — fixed in #647 (S1.7 `466ff1e5`)
@@ -954,7 +954,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: MarkerIcon; remove dead slots
 - **J1-23** · P3 · Float motion zoom-in-95 + slide vs skill 0.98; smooth scroll ignores reduced motion; transition-all; duration-200 — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: ui/select.tsx:70 etc. |
-- **J1-24** · P3 · Dead variants/tokens/classes; cursor-not-allowed x12 (never shows); palette scale; tracking-widest; skill drift (gutter)
+- **J1-24** · P3 · Dead variants/tokens/classes; cursor-not-allowed x12 (never shows); palette scale; tracking-widest; skill drift (gutter) — partly fixed in #647 (S4.2 `9f2f2fc8`, skill drift); compact-size rule in S4.1
   - Evidence: |
 
 **Owner decisions raised by this review:** Radix-free SegmentedControl respecting eager budget; raise --subtle + rule "essential info never tertiary"; delete borderless Input ghost variant (fails 2.4.7)
