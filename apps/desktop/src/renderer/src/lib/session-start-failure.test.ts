@@ -5,6 +5,7 @@ import {
   reduceSessionStartFailure,
   SESSION_START_FAILED_TOAST_ID,
   SESSION_START_FAILED_TOAST_TITLE,
+  sessionStartFailedTitle,
   sessionStartFailureMessage,
   sessionStartFailureToastOptions
 } from './session-start-failure'
@@ -133,7 +134,9 @@ describe('sessionStartFailureToastOptions', () => {
 
     expect(options.id).toBe(SESSION_START_FAILED_TOAST_ID)
     expect(options.id).toBe('session-start-failed')
-    expect(SESSION_START_FAILED_TOAST_TITLE).toBe('Could not start')
+    expect(SESSION_START_FAILED_TOAST_TITLE).toBe("Couldn't start")
+    expect(sessionStartFailedTitle(false)).toBe("Couldn't start recording")
+    expect(sessionStartFailedTitle(true)).toBe("Couldn't go live")
     expect(options.description).toBe(BARRIER_MESSAGE)
     expect(options.duration).toBe(Infinity)
     expect(options.action.label).toBe('Retry')

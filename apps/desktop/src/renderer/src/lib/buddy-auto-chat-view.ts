@@ -14,9 +14,18 @@ import { platformLabel } from '@/lib/platform-copy'
 // resolves the real greetings (`cohost_greetings.rs`); this mirror only
 // previews and warns, so the editor never disagrees with what goes out.
 
+/**
+ * The name copy uses when the character speaks or acts (plan 174 J2-20):
+ * the streamer's own name for it ("Grum"), else "Buddy". The feature itself
+ * is always "Buddy", with no article.
+ */
+export function buddyDisplayName(name: string | null | undefined): string {
+  return name?.trim() || 'Buddy'
+}
+
 /** The product promise (plan 164 D4), everywhere the old one was. */
 export const BUDDY_POSTS_PROMISE =
-  'The Buddy posts only in the modes you turn on. Everything is off by default.'
+  'Buddy posts only in the modes you turn on. Everything is off by default.'
 
 export const BUDDY_MODE_LABELS: Record<CohostAutoChatMode, string> = {
   off: 'Off',
@@ -25,15 +34,23 @@ export const BUDDY_MODE_LABELS: Record<CohostAutoChatMode, string> = {
 }
 export const BUDDY_MODES: readonly CohostAutoChatMode[] = ['off', 'suggest', 'auto']
 
+/** Off is Buddy Live off until plan 174 S3.14a gives it its own switch. */
 export const BUDDY_MODE_HINTS: Record<CohostAutoChatMode, string> = {
-  off: 'The Buddy never posts.',
+  off: 'Buddy Live is off. Nothing is posted.',
   suggest: 'Each message is a card here; one click sends it.',
   auto: 'Messages go out by themselves, within the limits.'
 }
 
-/** The consent dialog (plan 164 S-D6), word for word. */
-export const BUDDY_CONSENT_SENTENCE =
-  'The Buddy posts to your chats as you, on the platforms you stream to, only in the modes you turn on. You can watch every message in Reports.'
+/** The posting consent dialog's title (plan 164 S-D6): the character asks. */
+export function buddyPostingConsentTitle(name: string | null | undefined): string {
+  return `Let ${buddyDisplayName(name)} post as you?`
+}
+
+/** The posting consent dialog (plan 164 S-D6), word for word. */
+export function buddyPostingConsentSentence(name: string | null | undefined): string {
+  return `${buddyDisplayName(name)} posts to your chats as you, on the platforms you stream to, only in the modes you turn on. You can read every message later in Buddy → Reports.`
+}
+
 export const BUDDY_AUTO_CONFIRM_SENTENCE = 'Automatic messages are sent without asking you first.'
 
 /** Where the window remembers the one-time consent (like the nudge). */

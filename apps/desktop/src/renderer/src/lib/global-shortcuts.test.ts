@@ -2,7 +2,11 @@ import { nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { describe, expect, it, vi } from 'vitest'
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn(), warning: vi.fn() } }))
 import { toast } from 'sonner'
-import { executeGlobalShortcut, GlobalShortcutsRegistrar } from './global-shortcuts'
+import {
+  executeGlobalShortcut,
+  globalShortcutLabel,
+  GlobalShortcutsRegistrar
+} from './global-shortcuts'
 import { withGlobalShortcut } from '../../../shared/global-shortcut-bindings'
 import {
   GLOBAL_SHORTCUT_ACTIONS,
@@ -132,6 +136,15 @@ describe('withGlobalShortcut', () => {
   })
 })
 
+describe('globalShortcutLabel (plan 174 A-22)', () => {
+  it('names what a shortcut does, never its id', () => {
+    expect(globalShortcutLabel('stream-toggle')).toBe('Go Live / end livestream')
+    expect(globalShortcutLabel('layout-next')).toBe('Next scene')
+    expect(globalShortcutLabel('layout:camera-only')).not.toContain('camera-only')
+    expect(globalShortcutLabel('unknown-action')).toBe('unknown-action')
+  })
+})
+
 describe('GlobalShortcutsRegistrar conflicts', () => {
   it('names the Shortcuts tab and offers a button that opens it (plan 064)', async () => {
     const target = new EventTarget()
@@ -147,9 +160,9 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
       await vi.waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1))
 
       const [title, options] = vi.mocked(toast.error).mock.calls[0] ?? []
-      expect(title).toBe('Some global shortcuts could not be registered')
+      expect(title).toBe("A global shortcut didn't register")
       expect(options?.description).toBe(
-        'record-toggle: invalid, duplicate or already used by another app. Pick different bindings in Settings → Shortcuts.'
+        'Record / stop recording: another app uses it, or the keys are taken twice. Choose different keys in Settings → Shortcuts.'
       )
       const action = options?.action as { label: string; onClick: () => void }
       expect(action.label).toBe('Open Shortcuts')

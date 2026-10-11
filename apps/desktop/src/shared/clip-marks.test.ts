@@ -55,7 +55,7 @@ describe('clip marked toast', () => {
     expect(toast).toEqual({
       kind: 'warning',
       title: "Recording is off, so this clip can't be saved.",
-      description: 'Turn on Record in the Studio to keep clips from a stream.'
+      description: 'Turn on Save local recording on the Output page.'
     })
   })
 })

@@ -5,6 +5,7 @@ import { LockAlert } from '@/components/lock-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   Dialog,
   DialogBody,
@@ -36,12 +37,16 @@ import type {
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
 import { unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
+import { GO_LIVE_DIALOG_TITLE, goLiveConfirmLabel, goLiveOnReadyLabel } from '@/lib/go-live-copy'
 import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
 import { OVERLAY_ITEM_LABELS, overlayStartNotices } from '@/lib/overlay-layout'
 import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
 import { destinationLabel, platformLabel } from '@/lib/platform-copy'
 import { YOUTUBE_STREAM_KEY_LINK_LABEL, YOUTUBE_STREAM_KEY_URL } from '@/lib/youtube-quota-copy'
+
+/** Why the primary waits: the dialog lists what blocks it above the button. */
+const GO_LIVE_BLOCKED_REASON = 'Fix the items above, then go live.'
 
 // The Go Live confirmation flow: review destinations + metadata, resolve any
 // error-severity blockers, then start the livestream. Extracted from StudioTab
@@ -127,8 +132,8 @@ export function GoLiveConfirmationDialog({
   const captionsIssueCount = captionsReadiness.blocksStart ? 1 : 0
   const issueCount = errorCount + entitlementIssueCount + captionsIssueCount
   // "Resolve before going live" means exactly that: error-severity issues keep
-  // the confirm button locked until resolved (disable the destination, switch
-  // it to Manual RTMP, or fix it in the Streaming tab).
+  // the confirm button locked until resolved (go live without the
+  // destination, use its stream key, or fix it on the Livestream page).
   const hasInstantTargets = captureConfig.streaming.targets.some(
     (target) => target.enabled && !target.scheduledEventId
   )
@@ -141,9 +146,9 @@ export function GoLiveConfirmationDialog({
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
       <DialogContent className="gap-4" size="xl">
         <DialogHeader>
-          <DialogTitle>Confirm Go Live</DialogTitle>
+          <DialogTitle>{GO_LIVE_DIALOG_TITLE}</DialogTitle>
           <DialogDescription>
-            Review destinations and metadata before Videorc starts the livestream.
+            Check your destinations and stream details before Videorc starts the livestream.
           </DialogDescription>
         </DialogHeader>
 
@@ -397,13 +402,17 @@ export function GoLiveConfirmationDialog({
               onClick={onContinuePartial}
             >
               <LivestreamIcon data-icon="inline-start" weight="fill" />
-              {pending ? 'Starting…' : 'Continue With Ready'}
+              {pending ? 'Starting…' : goLiveOnReadyLabel(partialSetup.readyLabels)}
             </Button>
           ) : (
-            <Button disabled={pending || !preflight || blocked} onClick={onConfirm}>
-              <LivestreamIcon data-icon="inline-start" weight="fill" />
-              {pending ? 'Checking…' : blocked ? 'Resolve Blockers First' : 'Confirm Go Live'}
-            </Button>
+            // The primary always says what it does (D3); while something above
+            // blocks it, the reason rides on hover and focus, never as its label.
+            <DisabledReason reason={!pending && blocked ? GO_LIVE_BLOCKED_REASON : null}>
+              <Button disabled={pending || !preflight || blocked} onClick={onConfirm}>
+                <LivestreamIcon data-icon="inline-start" weight="fill" />
+                {pending ? 'Checking…' : goLiveConfirmLabel(preflight?.destinations.length ?? 0)}
+              </Button>
+            </DisabledReason>
           )}
         </DialogFooter>
       </DialogContent>
@@ -517,7 +526,7 @@ function openExternalUrl(url: string): void {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-function GoLiveDestinationRow({
+export function GoLiveDestinationRow({
   destination,
   pending,
   onResolveBlocker
@@ -539,8 +548,8 @@ function GoLiveDestinationRow({
             )}
             {destination.ready ? 'Ready' : 'Blocked'}
           </Badge>
+          {/* How it connects, in the Livestream page's words: Sign in or Stream key. */}
           <Badge variant="outline">
-            {/* The destination card's words (plan 174 D4). */}
             {destination.authMode === 'oauth' ? 'Sign in' : 'Stream key'}
           </Badge>
         </div>
@@ -564,7 +573,7 @@ function GoLiveDestinationRow({
                 variant="outline"
                 onClick={() => onResolveBlocker(destination.targetId, 'manual-rtmp')}
               >
-                Use a stream key instead
+                Use stream key
               </Button>
             ) : null}
             <Button

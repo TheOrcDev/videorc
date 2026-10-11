@@ -217,7 +217,9 @@ describe('performanceCheckTooHeavyToast', () => {
   it('warns once when a chosen output is heavier than what held', () => {
     expect(performanceCheckTooHeavyToast(videoPresets['record-4k30'], weak)).toEqual({
       title: '4K · 30 fps is too heavy for this computer',
-      description: 'Recordings will stutter. 720p · 30 fps held steady. Switch in Output.'
+      description: 'Recordings will stutter. 720p · 30 fps held steady.',
+      actionLabel: 'Use 720p · 30 fps',
+      preset: 'tutorial-720p30'
     })
   })
 

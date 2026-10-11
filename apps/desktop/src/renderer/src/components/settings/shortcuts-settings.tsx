@@ -7,6 +7,7 @@ import {
 } from '../../../../shared/global-shortcuts'
 import { useSyncExternalStore, type ReactElement } from 'react'
 
+import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { SectionLabel } from '@/components/section-label'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
@@ -15,6 +16,7 @@ import { KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutRegistration } from '@/lib/global-shortcuts'
+import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { shortcutsByGroup } from '@/lib/shortcuts'
@@ -30,8 +32,8 @@ const GLOBAL_ACTION_ROWS = [
 ] as const satisfies readonly GlobalShortcutAction[]
 
 const GLOBAL_ACTION_LABELS: Record<(typeof GLOBAL_ACTION_ROWS)[number], string> = {
-  'record-toggle': 'Start / stop recording',
-  'stream-toggle': 'Go live / end stream',
+  'record-toggle': RECORD_SHORTCUT_LABEL,
+  'stream-toggle': GO_LIVE_SHORTCUT_LABEL,
   'mic-toggle': 'Mute / unmute mic',
   'system-audio-toggle': 'Turn system audio on/off',
   'clip-mark': 'Mark a clip',
@@ -137,30 +139,25 @@ export function ShortcutsSettings(): ReactElement {
       </PanelSection>
 
       <PanelSection description="Keys that work while Videorc is in front." title="App shortcuts">
-        <div className="flex flex-col gap-3">
-          {[...shortcutsByGroup().entries()].map(([group, entries]) => (
-            <div key={group} className="flex flex-col gap-1">
-              <SectionLabel>{group}</SectionLabel>
-              {entries.map((entry) => (
-                <div
-                  key={entry.id}
-                  className="flex items-center gap-3 rounded-row px-2.5 py-1.5 text-sm"
-                >
-                  <span className="flex-1 truncate text-muted-foreground">{entry.label}</span>
-                  <KbdGroup>
-                    {entry.accelerators.map((accelerator) => (
-                      <ShortcutKeys
-                        key={accelerator}
-                        accelerator={accelerator}
-                        platform={runtimeInfo?.platform}
-                      />
-                    ))}
-                  </KbdGroup>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
+        {/* One grouped list per group, labelled like the layout groups above
+            (plan 174 S3.17, I-33): the rows used to be loose text. */}
+        {[...shortcutsByGroup().entries()].map(([group, entries]) => (
+          <GroupedList key={group} label={group}>
+            {entries.map((entry) => (
+              <ListRow key={entry.id} compact title={entry.label}>
+                <KbdGroup>
+                  {entry.accelerators.map((accelerator) => (
+                    <ShortcutKeys
+                      key={accelerator}
+                      accelerator={accelerator}
+                      platform={runtimeInfo?.platform}
+                    />
+                  ))}
+                </KbdGroup>
+              </ListRow>
+            ))}
+          </GroupedList>
+        ))}
       </PanelSection>
     </>
   )

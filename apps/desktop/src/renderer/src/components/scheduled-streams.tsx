@@ -1,9 +1,10 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { copyText } from '@/lib/copy-text'
-import { toast } from '@/lib/toast'
+import { toastUserError } from '@/lib/user-error'
 import { CopyIcon, DeleteIcon, EditIcon, ExternalLinkIcon, LinkIcon } from '@/components/icons'
 import { useScheduledStreams } from '@/hooks/use-scheduled-streams'
 import { useStudioCore } from '@/hooks/use-studio'
+import { GO_LIVE_LABEL, USE_FOR_GO_LIVE_LABEL } from '@/lib/go-live-copy'
 import { ScheduleStreamDialog } from '@/components/schedule-stream-dialog'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
@@ -96,7 +97,7 @@ export function ScheduledStreams(): ReactElement {
       setRecovering(event)
       setCandidateId('')
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error))
+      toastUserError(error, { action: 'recover', object: 'the event' })
     }
   }
   const sections = scheduledProviderSections(state.events, state.capabilities, history)
@@ -287,12 +288,13 @@ export function ScheduledStreams(): ReactElement {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              Go live with this {scheduledProviderLabel(starting?.provider ?? 'youtube')}{' '}
-              {scheduledProviderNoun(starting?.provider ?? 'youtube')}
+              Use this {scheduledProviderLabel(starting?.provider ?? 'youtube')}{' '}
+              {scheduledProviderNoun(starting?.provider ?? 'youtube')} for Go Live
             </DialogTitle>
             <DialogDescription>
-              {starting?.requested.title} · {starting?.accountLabel}. Choose its destination, then
-              click Go Live in Studio to review every enabled destination and start manually.
+              {starting?.requested.title} · {starting?.accountLabel}. Choose its destination. When
+              you&apos;re ready, click {GO_LIVE_LABEL} in Studio to check every destination and
+              start.
             </DialogDescription>
           </DialogHeader>
           <Select value={targetId} onValueChange={setTargetId}>
@@ -329,8 +331,8 @@ export function ScheduledStreams(): ReactElement {
                   setCaptureConfig((current) =>
                     selectScheduledStreamForTarget(current, targetId, starting)
                   )
+                  // The Livestream alert shows the chosen event (plan 174 J2-11).
                   setStarting(null)
-                  toast.success('Saved event selected. Click Go Live in Studio when ready.')
                 }
               }}
             >
@@ -555,7 +557,7 @@ function EventRow({
             variant="secondary"
             onClick={onGoLive}
           >
-            Go Live…
+            {USE_FOR_GO_LIVE_LABEL}
           </Button>
         ) : event.lifecycle === 'draft' ? (
           <Button

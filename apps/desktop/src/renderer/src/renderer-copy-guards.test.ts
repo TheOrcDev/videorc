@@ -100,28 +100,20 @@ const COPY_RULES: ReadonlyArray<{ id: string; pattern: RegExp }> = [
  */
 const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/backendClient.ts': 20,
-  'src/components/settings/about-settings.tsx': 1,
   'src/components/settings/encoder-preference-field.tsx': 1,
-  'src/components/settings/general-settings.tsx': 1,
   'src/components/streaming/go-live-panel.tsx': 1,
-  'src/components/tabs/assets-tab.tsx': 1,
   'src/components/tabs/diagnostics-tab.tsx': 13,
-  'src/hooks/use-chat-emote-settings.ts': 1,
   'src/hooks/use-scheduled-streams.ts': 3,
-  'src/hooks/use-studio.tsx': 79,
+  'src/hooks/use-studio.tsx': 14,
   'src/lib/backend-transport.ts': 3,
-  'src/lib/buddy-tab-view.ts': 1,
-  'src/lib/capture.ts': 4,
-  'src/lib/clean-cut-view.ts': 1,
+  'src/lib/capture.ts': 2,
   'src/lib/format.ts': 5,
   'src/lib/go-live-output.ts': 1,
   'src/lib/live-source-selection.ts': 1,
   'src/lib/native-preview-surface-lifecycle.ts': 1,
   'src/lib/obs-import-map.ts': 3,
   'src/lib/record-latency.ts': 1,
-  'src/lib/session-runtime-recovery.ts': 5,
-  'src/lib/studio-health.ts': 2,
-  'src/lib/system-permission-orchestration.ts': 1
+  'src/lib/studio-health.ts': 1
 }
 
 /** JSX attributes a reader sees or hears; any other attribute's string is code. */

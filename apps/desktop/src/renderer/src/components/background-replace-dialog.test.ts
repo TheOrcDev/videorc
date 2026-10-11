@@ -160,7 +160,8 @@ describe('Assets Import on a fresh profile', () => {
     const podcast = stored.slots.find((slot: { id: string }) => slot.id === 'bg-06')
     expect(podcast.assetId).toBe('imported-2')
     expect(stored.assets['imported-2'].name).toBe('Neon sign')
-    expect(mocked.toast.success).toHaveBeenCalledWith('Imported Neon sign.')
+    // The replaced tile is the confirmation: no routine success toast (J2-11).
+    expect(mocked.toast.success).not.toHaveBeenCalled()
   })
 
   it('leaves every background as it was when the picker is cancelled', async () => {

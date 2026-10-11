@@ -29,6 +29,7 @@ import {
   type ReactElement
 } from 'react'
 import { toast } from '@/lib/toast'
+import { toastUserError, userErrorMessage } from '@/lib/user-error'
 
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { PageHeader } from '@/components/page'
@@ -48,6 +49,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
+import { FieldError } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -148,6 +150,9 @@ export function LibraryTab({
   const [markerSession, setMarkerSession] = useState<SessionSummary | null>(null)
   const [renaming, setRenaming] = useState<SessionSummary | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
+  // A rename failure belongs under the field it is about, not in a toast
+  // behind the open dialog (plan 174 S2.4, E-22).
+  const [renameError, setRenameError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<SessionSummary[]>([])
   const [deletePending, setDeletePending] = useState(false)
   const [recentlyCreatedSessionId, setRecentlyCreatedSessionId] = useState<string | null>(null)
@@ -168,9 +173,11 @@ export function LibraryTab({
   const runImport = async (): Promise<void> => {
     setImporting(true)
     try {
-      await importRecording()
+      // The new row is the confirmation: Library shows and focuses it.
+      const imported = await importRecording()
+      if (imported) focusLibrarySession(imported)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Import failed.')
+      toastUserError(error, { action: 'import', object: 'the recording' }, { id: 'library-import' })
     } finally {
       setImporting(false)
     }
@@ -188,7 +195,10 @@ export function LibraryTab({
       setSelected((current) => current.filter((id) => !deleting.some((s) => s.id === id)))
       setDeleting([])
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Delete failed.')
+      toastUserError(error, {
+        action: 'move',
+        object: `${deleting.length === 1 ? 'the recording' : 'the recordings'} to the ${trashName()}`
+      })
       setDeleting([])
     } finally {
       setDeletePending(false)
@@ -200,10 +210,13 @@ export function LibraryTab({
     const title = renameDraft.trim()
     if (!title) return
     try {
+      setRenameError(null)
       await renameSession(renaming.id, title)
       setRenaming(null)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Rename failed.')
+      const copy = userErrorMessage(error, { action: 'rename', object: 'the recording' })
+      console.warn('[library] rename failed:', copy.raw)
+      setRenameError(copy.kind === 'known' ? copy.description : copy.text)
     }
   }
 
@@ -411,6 +424,7 @@ export function LibraryTab({
                   onRename={() => {
                     setRenaming(session)
                     setRenameDraft(session.title)
+                    setRenameError(null)
                   }}
                   onToggleSelected={() =>
                     setSelected((current) => toggleLibrarySelection(current, session.id))
@@ -467,10 +481,20 @@ export function LibraryTab({
             <Input
               autoFocus
               aria-label="Recording name"
+              aria-invalid={renameError ? true : undefined}
+              aria-describedby={renameError ? 'library-rename-error' : undefined}
               maxLength={120}
               value={renameDraft}
-              onChange={(event) => setRenameDraft(event.target.value)}
+              onChange={(event) => {
+                setRenameDraft(event.target.value)
+                setRenameError(null)
+              }}
             />
+            {renameError ? (
+              <FieldError id="library-rename-error" className="mt-2">
+                {renameError}
+              </FieldError>
+            ) : null}
             <DialogFooter className="mt-4">
               <Button type="button" variant="ghost" onClick={() => setRenaming(null)}>
                 Cancel
@@ -742,10 +766,11 @@ function RowActions({
   const runDuplicate = async (): Promise<void> => {
     setDuplicating(true)
     try {
-      await duplicateSession(session.id)
-      toast.success('Recording duplicated.')
+      // The copy's row is the confirmation (plan 174 S2.4, J2-11).
+      const copy = await duplicateSession(session.id)
+      if (copy) onRevealSession(copy)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Duplicate failed.')
+      toastUserError(error, { action: 'duplicate', object: 'the recording' })
     } finally {
       setDuplicating(false)
     }
@@ -789,7 +814,8 @@ function RowActions({
     }
     const problem = await window.videorc.openSession(session.id)
     if (problem) {
-      toast.error(problem)
+      const runtime = await import('@/lib/session-runtime-recovery')
+      runtime.showPlaybackProblem(session.id, problem)
     }
   }
 
@@ -804,7 +830,7 @@ function RowActions({
       // FX4: the kebab menu closes on click, so without a toast the check
       // completed invisibly (repair already reports this way).
       if (next.issues.length === 0) {
-        toast.success('Passes every quality gate.')
+        toast.success('No problems found', { id: `quality-check:${session.id}` })
       } else {
         const first = next.reasons[0] ?? next.issues[0]?.kind
         toast.warning(
@@ -817,7 +843,14 @@ function RowActions({
         )
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Quality check failed.')
+      toastUserError(
+        error,
+        { action: 'check', object: 'the recording' },
+        {
+          id: `quality-check:${session.id}`,
+          action: { label: 'Retry', onClick: () => void runCheck() }
+        }
+      )
       setPhase('idle')
     }
   }
@@ -834,14 +867,20 @@ function RowActions({
           next.interpolated ? 'Repaired with interpolated frames.' : 'Recording repaired.'
         )
       } else if (next.status === 'ready') {
-        toast.success('Recording already passes every quality gate.')
+        toast.success('No problems found', { id: `quality-check:${session.id}` })
       } else if (next.status === 'not-hundred-percent') {
-        toast.warning('Kept the original. It could not reach 100%.')
+        toast.warning("Couldn't fully repair the recording", {
+          description: 'The original is unchanged.'
+        })
       } else {
-        toast.error('The quality check could not run.')
+        toast.error("Couldn't check the recording", {
+          id: `quality-check:${session.id}`,
+          description: 'Try again. If it keeps happening, export a support bundle from Health.',
+          action: { label: 'Retry', onClick: () => void runCheck() }
+        })
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Repair failed.')
+      toastUserError(error, { action: 'repair', object: 'the recording' })
       setPhase('assessed')
     }
   }
@@ -859,7 +898,7 @@ function RowActions({
         toast.info('No backup was found for this recording.')
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Restore failed.')
+      toastUserError(error, { action: 'restore', object: 'the original' })
     }
   }
 
@@ -889,14 +928,17 @@ function RowActions({
         toast.info(notice.title, { description: notice.description })
         return
       }
+      // The row shows the job's progress: that is the confirmation (J2-11).
       await startNoiseCleanup(session.id)
-      toast.success('Noise cleanup queued.', {
-        description: 'Videorc will create a separate cleaned copy on this device.'
-      })
     } catch (error) {
-      toast.error(action === 'cancel' ? 'Could not cancel cleanup.' : 'Noise cleanup failed.', {
-        description: error instanceof Error ? error.message : String(error)
-      })
+      toastUserError(
+        error,
+        { action: action === 'cancel' ? 'cancel' : 'start', object: 'noise cleanup' },
+        {
+          id: `noise-cleanup:${session.id}`,
+          action: { label: 'Retry', onClick: () => void runNoiseCleanupAction(action) }
+        }
+      )
     }
   }
 

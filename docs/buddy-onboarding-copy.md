@@ -67,7 +67,7 @@ Progress label: `Step {n} of 4`. Buttons: `Back`, `Next`, `Skip for now`
   "Calm and wise"; counter `{count}/1200`
 - About you label: "About you (optional)"; placeholder "I stream indie
   games on Tuesdays and Fridays at 8 pm. My shop is at example.com/shop.";
-  help "Your Buddy answers viewers' questions from this."; counter
+  help "Buddy answers viewers' questions from this."; counter
   `{count}/4000`
 
 ## Step 4: Create your Buddy
@@ -76,7 +76,7 @@ Progress label: `Step {n} of 4`. Buttons: `Back`, `Next`, `Skip for now`
   row reads "Not set".
 - Allowance: "Uses 4 of your {remaining} images left today."
 - Primary: "Create my Buddy"
-- Working: "Drawing your Buddy. This takes one to three minutes."
+- Working: "Drawing the pictures. This takes one to three minutes."
 - Pose labels: "Idle", "Talk", "Laugh", "Think"
 - Done: "Saved to your library."
 - Actions: "Use as my Buddy", "Redo" (talk, laugh and think only), web only
@@ -87,14 +87,14 @@ Progress label: `Step {n} of 4`. Buttons: `Back`, `Next`, `Skip for now`
 
 Gates and errors (step 4 and the library):
 
-- Signed out (web): "Sign in to create your Buddy." Action "Sign in"
+- Signed out (web): "Sign in to create a Buddy." Action "Sign in"
 - Free account: "Creating your own Buddy is part of Videorc Premium."
-  Actions "See Premium" and "Start from one of ours"
+  Actions "View Premium" and "Start from one of ours"
 - Allowance used up: "You've used today's images. You get more tomorrow."
 - Library full: "Your library is full ({limit} Buddies). Delete one to make
   room."
-- Failed: "Your Buddy could not be drawn. Nothing was used from your
-  allowance. Try again."
+- Failed: "Couldn't draw the pictures. Nothing was used from your allowance.
+  Try again."
 - App, Cloud AI off: "Allow cloud AI to create a Buddy." Action "Allow cloud
   AI" (the app's existing consent label)
 
@@ -104,7 +104,7 @@ Gates and errors (step 4 and the library):
 - Groups: "Official", "Made by you"
 - Active badge: "Active"
 - Actions: "Use", "Rename", "Edit personality", "Delete", "Make it Alive",
-  "New Buddy"
+  "New Buddy…" (it opens the onboarding)
 - Empty "Made by you": "Buddies you create show up here, on videorc.com and in
   the app."
 - Rename and Edit personality dialogs: action "Save"

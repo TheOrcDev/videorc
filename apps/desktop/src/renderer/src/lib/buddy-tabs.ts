@@ -33,6 +33,14 @@ export type BuddyTabId = (typeof BUDDY_TABS)[number]['id']
 
 export const DEFAULT_BUDDY_TAB: BuddyTabId = 'live'
 
+/**
+ * A tab's label as the strip shows it, for copy that points at a tab (plan
+ * 174 F-5): a pointer never names a tab that is not there.
+ */
+export function buddyTabLabel(id: BuddyTabId): string {
+  return BUDDY_TABS.find((tab) => tab.id === id)?.label ?? id
+}
+
 export function isBuddyTabId(value: unknown): value is BuddyTabId {
   return BUDDY_TABS.some((tab) => tab.id === value)
 }

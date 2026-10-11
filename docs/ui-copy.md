@@ -51,8 +51,9 @@ app. Two checks hold them (see [Guards](#guards)).
 
 ## Going live (D3)
 
-One verb pair on every surface. S2.2 applies it; until then the Studio
-button still reads "Stream".
+One verb pair on every surface (plan 174 S2.2). The strings live in
+`apps/desktop/src/renderer/src/lib/go-live-copy.ts`, and
+`pnpm smoke:start-labels` pins them.
 
 | Where                 | Copy                                                                            |
 | --------------------- | ------------------------------------------------------------------------------- |
@@ -184,5 +185,5 @@ source change: the stage is the confirmation.
     one means lowering that file's count (the test says to what); a count
     may never rise, and a file not listed may have none.
 - `pnpm lint` runs `scripts/check-em-dashes.mjs` (no em dash in app copy).
-- `renderer-buddy-name-guard.test.ts` keeps "Orcle" and "Golem" out of
-  copy.
+- `renderer-buddy-name-guard.test.ts` keeps the companion's retired names
+  out of copy.

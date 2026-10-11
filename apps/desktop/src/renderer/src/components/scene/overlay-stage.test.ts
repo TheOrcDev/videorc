@@ -27,6 +27,9 @@ describe('overlay stage helpers', () => {
     expect(overlayItemFromStageId(null)).toBeNull()
     const layout: OverlayLayout = {
       ...DEFAULT_OVERLAY_LAYOUT,
+      highlight: { ...DEFAULT_OVERLAY_LAYOUT.highlight, showOnStream: true, showInRecording: true },
+      // Switched off on both outputs: drawn dimmed with an "off" chip (plan 174, C-13).
+      captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, showOnStream: false, showInRecording: false },
       buddy: { ...DEFAULT_OVERLAY_LAYOUT.buddy, showOnStream: true, showInRecording: false }
     }
     const items = overlayStageItems(layout, 'vertical')
@@ -35,6 +38,7 @@ describe('overlay stage helpers', () => {
       stageId: 'overlay:buddy',
       label: 'Buddy',
       badge: 'stream only',
+      off: false,
       rect: {
         x: layout.buddy.vertical.x,
         y: layout.buddy.vertical.y,
@@ -42,7 +46,8 @@ describe('overlay stage helpers', () => {
         height: layout.buddy.vertical.h
       }
     })
-    expect(items[0]!.badge).toBeNull()
+    expect(items[0]).toMatchObject({ badge: null, off: false })
+    expect(items[1]).toMatchObject({ label: 'Captions', badge: 'off', off: true })
   })
 
   it('clamps a released stage rect before it reaches the wire', () => {

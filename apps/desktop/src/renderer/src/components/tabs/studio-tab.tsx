@@ -1,5 +1,5 @@
 import { ExternalLinkIcon, PinIcon } from '@/components/icons'
-import { lazy, Suspense, useEffect, useEffectEvent, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useEffectEvent, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
@@ -51,11 +51,11 @@ export function StudioTab(): ReactElement {
     startRequestPending,
     stopRequestPending,
     visibleStartBlockedReason,
-    startSession,
+    startRecording,
+    startLivestream,
     requestStopSession,
     noteRecordClick,
     captureConfig,
-    setCaptureConfig,
     entitlements,
     wsStatus,
     health,
@@ -97,41 +97,18 @@ export function StudioTab(): ReactElement {
         ? START_BLOCKED_COPY.recorderMissing
         : null)
 
-  // Two-button start: when the click changes the output mode (record vs go-live),
-  // set it and start on the next render so startSession and its blocked-reason
-  // gate see the updated streamEnabled instead of a stale closure value. When the
-  // config already matches the button, start in the same task — the extra
-  // render+commit of the whole Studio provider was a measurable slice of the
-  // Record click → recording path.
-  const [pendingStart, setPendingStart] = useState(false)
-  useEffect(() => {
-    if (!pendingStart) {
-      return
-    }
-    setPendingStart(false)
-    void startSession()
-  }, [pendingStart, startSession])
-
+  // Two-button start (plan 174 D3): Record and Go Live…, the same two starts
+  // ⌘K offers, so the provider owns them. The latency clock arms on the click.
   const handleRecord = (): void => {
     noteRecordClick('start')
-    if (captureConfig.recordEnabled && !captureConfig.streamEnabled) {
-      void startSession()
-      return
-    }
-    setCaptureConfig((current) => ({ ...current, recordEnabled: true, streamEnabled: false }))
-    setPendingStart(true)
+    startRecording()
   }
   const handleLiveStream = (): void => {
     if (liveStreamBlockedReason) {
       return
     }
     noteRecordClick('start')
-    if (captureConfig.streamEnabled) {
-      void startSession()
-      return
-    }
-    setCaptureConfig((current) => ({ ...current, streamEnabled: true }))
-    setPendingStart(true)
+    startLivestream()
   }
   // Every stop goes through the provider's decision (plan 174 S0.1, D2): a
   // recording stops at once, a livestream asks first. The latency clock arms
@@ -205,9 +182,9 @@ export function StudioTab(): ReactElement {
         </div>
 
         <aside aria-label="Session inspector" className="min-w-0 border-t lg:border-t-0">
-          {/* Record, Stream, and the clock sit at the top of the inspector,
-              right above Session (owner call, 2026-09-23); Space still
-              records. */}
+          {/* Record, Go Live…, and the clock sit at the top of the
+              inspector, right above Session (owner call, 2026-09-23); Space
+              still records. */}
           <SessionTransport
             active={active}
             canStop={canStop}

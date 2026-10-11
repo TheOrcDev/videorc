@@ -313,8 +313,8 @@ export function AppShell(): ReactElement {
     setOnboardingOpen(false)
   }, [])
 
-  // Settings' "Set up permissions": force-open regardless of grants or the
-  // dismissal flag — no flag clearing, closing just re-dismisses.
+  // The first-run gate opens the dialog when a grant is missing; closing it
+  // re-dismisses. Settings → Permissions shows the same rows (plan 174 S3.17).
   const openPermissionsSetup = useCallback(() => {
     setOnboardingOpen(true)
   }, [])
@@ -506,7 +506,6 @@ export function AppShell(): ReactElement {
                   {active === 'settings' ? (
                     <SettingsTab
                       tab={settingsTab}
-                      onOpenPermissionsSetup={openPermissionsSetup}
                       onShowWhatsNew={whatsNew.showLatest}
                       onTabChange={selectSettingsTab}
                     />

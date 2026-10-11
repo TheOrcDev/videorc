@@ -3305,7 +3305,7 @@ describe('real StudioProvider lifecycle', () => {
         id: 'recording-stopped-unexpectedly',
         description: failedStatus.message,
         duration: Infinity,
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -3547,7 +3547,7 @@ describe('real StudioProvider lifecycle', () => {
         id: 'recording-stopped-unexpectedly',
         description: failureEvent.message,
         duration: Infinity,
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -3636,10 +3636,10 @@ describe('real StudioProvider lifecycle', () => {
       message: failedSnapshotEvent.message
     })
     expect(toastSpies.error).toHaveBeenCalledWith(
-      'Live session stopped unexpectedly',
+      'Livestream stopped unexpectedly',
       expect.objectContaining({
         description: failedSnapshotEvent.message,
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
@@ -4074,7 +4074,7 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped: live session continues with silence',
+      'Microphone stopped: livestream continues with silence',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
@@ -4101,7 +4101,7 @@ describe('real StudioProvider lifecycle', () => {
 
     expect(toastSpies.success).not.toHaveBeenCalled()
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Microphone stopped during the live session',
+      'Microphone stopped during the livestream',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
@@ -4161,7 +4161,7 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped during the live session',
+      'Microphone stopped during the livestream',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
@@ -4313,7 +4313,7 @@ describe('real StudioProvider lifecycle', () => {
     )
 
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped: live session continues with silence',
+      'Microphone stopped: livestream continues with silence',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(toastSpies.warning).not.toHaveBeenCalledWith(
@@ -4340,7 +4340,7 @@ describe('real StudioProvider lifecycle', () => {
       expect.objectContaining({ duration: 12000 })
     )
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Microphone stopped during the live session',
+      'Microphone stopped during the livestream',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
   })
@@ -5553,7 +5553,7 @@ describe('real StudioProvider lifecycle', () => {
         // validates discovery before admitting its layout to the backend.
         expect(button(unavailable).disabled).toBe(false)
         await act(async () => button(unavailable).click())
-        await waitForObservation(() => toastSpies.error.mock.calls.length > 0)
+        await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
       }
       expect(
         backend.sentCommands.filter((command) => command.method === 'scene.layout.apply_live')
@@ -5784,14 +5784,16 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(await latest().applySavedScene(saved.id)).toBe(true)
     })
-    await waitForObservation(
-      () => latest().canSaveScene && toastSpies.warning.mock.calls.length > 0
-    )
+    // Plan 174 S2.4: a lagging preview is neutral news, so info.
+    await waitForObservation(() => latest().canSaveScene && toastSpies.info.mock.calls.length > 0)
     expect(latest().activeSavedSceneId).toBe(saved.id)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
     expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(saved.id)
-    expect(toastSpies.warning).toHaveBeenCalled()
+    expect(toastSpies.info).toHaveBeenCalledWith(
+      'The preview may be behind',
+      expect.objectContaining({ id: expect.stringContaining('layout-preview-proof-lag') })
+    )
     showPreview = false
     api.getNativePreviewSurfaceStatus = async () => nativePreviewStatus()
     await act(async () => {
@@ -6094,8 +6096,10 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(latest()?.core.captureConfig.sources.screenId).toBe(sources.screenId)
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
-    expect(toastSpies.error).toHaveBeenCalledWith('The selected display is unavailable.', {
-      id: expect.stringContaining('source-switch-')
+    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't switch the screen", {
+      id: expect.stringContaining('source-switch-'),
+      description: 'The selected display is unavailable. Choose it again in Sources.',
+      duration: 8_000
     })
     expect(toastSpies.success).not.toHaveBeenCalled()
   }, 10_000)
@@ -8836,7 +8840,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(requestMediaAccess).not.toHaveBeenCalled()
     expect(openSystemPermissions).not.toHaveBeenCalled()
     expect(toastSpies.error).toHaveBeenCalledWith('Could not check Camera permission.', {
-      description: 'Try again before changing access.'
+      description: 'Try again before changing access.',
+      duration: 8_000
     })
   })
 
@@ -10599,6 +10604,68 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(2)
     expect(backend.youtubePrepareCount).toBe(1)
     expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
+  })
+
+  // Plan 174 S2.2 (D3): the Studio transport and ⌘K share the provider's two
+  // starts. Go Live… turns streaming on and opens the Go Live dialog, and
+  // starts nothing on its own; Record turns streaming off and starts at once.
+  it('starts Go Live… and Record through the shared provider starts', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...youtubeOauthStreamCaptureConfig(),
+        recordEnabled: true,
+        streamEnabled: false
+      })
+    })
+    await waitForObservation(() => latest()?.core.startBlockedReason === null)
+
+    await act(async () => {
+      latest()!.core.startLivestream()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(latest()!.core.captureConfig.streamEnabled).toBe(true)
+    expect(backend.commands.some((command) => command.method === 'session.start')).toBe(false)
+
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === false)
+
+    await act(async () => {
+      latest()!.core.startRecording()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(latest()!.core.captureConfig).toMatchObject({
+      recordEnabled: true,
+      streamEnabled: false
+    })
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(false)
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
   })
 
   // Plan 094 (bug 1): the owner's failed `complete` on quota was retained and

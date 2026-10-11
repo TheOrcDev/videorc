@@ -91,7 +91,7 @@ const MARGIN_RATIO = 0.25
 const BREATH_FRAME_MS = 66
 
 function errorReason(error: unknown): string {
-  return error instanceof Error ? error.message : 'The Buddy pack could not be loaded.'
+  return error instanceof Error ? error.message : "Couldn't load the preview."
 }
 
 /**

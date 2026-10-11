@@ -102,6 +102,8 @@ describe('accountFromSnapshot', () => {
 describe('videorc web links', () => {
   it('points the account links at the Videorc web origin', () => {
     expect(VIDEORC_WEB_LINKS).toEqual({
+      home: 'https://www.videorc.com',
+      download: 'https://www.videorc.com/download',
       account: 'https://www.videorc.com/account',
       login: 'https://www.videorc.com/login',
       desktopAuthorize: 'https://www.videorc.com/desktop/authorize/v2',

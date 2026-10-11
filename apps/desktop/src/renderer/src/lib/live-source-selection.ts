@@ -15,6 +15,9 @@ export interface LiveSourceSelectionState {
   outputPending?: boolean
 }
 
+/** The source a failed switch was for. */
+export type SourceSwitchTarget = Pick<SourceSwitchParams, 'kind' | 'deviceId'>
+
 /** One synchronous admission fence shared by every source picker. */
 export class LiveSourceSelectionController {
   private proofTimer: ReturnType<typeof setTimeout> | null = null
@@ -46,14 +49,15 @@ export class LiveSourceSelectionController {
       changed: (state: LiveSourceSelectionState) => void
       confirmed: (snapshot: SessionSources) => void
       requestId: () => string
-      failed?: (requestId: string, message: string) => void
+      /** `source` names what the streamer asked for, so the toast can too (plan 174 S2.4). */
+      failed?: (requestId: string, message: string, source: SourceSwitchTarget) => void
     }
   ) {}
 
-  private reportFailure(requestId: string, message: string): void {
+  private reportFailure(requestId: string, message: string, source: SourceSwitchTarget): void {
     if (this.lastFailureRequest === requestId) return
     this.lastFailureRequest = requestId
-    this.options.failed?.(requestId, message)
+    this.options.failed?.(requestId, message, source)
   }
 
   dispose(): void {
@@ -128,7 +132,8 @@ export class LiveSourceSelectionController {
     if (completed && operation.stage === 'failed') {
       this.reportFailure(
         operation.requestId,
-        operation.reason ?? 'The source could not be changed.'
+        operation.reason ?? 'The source could not be changed.',
+        { kind: operation.kind, deviceId: operation.deviceId }
       )
     }
     if (completed) {
@@ -287,7 +292,8 @@ export class LiveSourceSelectionController {
         if (code !== 'source-switch-stopping' && code !== 'source-switch-inactive-session') {
           this.reportFailure(
             request.requestId,
-            error instanceof Error ? error.message : 'The source change was rejected.'
+            error instanceof Error ? error.message : 'The source change was rejected.',
+            { kind: request.kind, deviceId: request.deviceId }
           )
         }
         await this.refresh()

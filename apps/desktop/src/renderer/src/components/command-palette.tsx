@@ -1,11 +1,12 @@
 import {
-  CameraIcon,
   CaptionsIcon,
   ChatIcon,
   DarkModeIcon,
   DesktopIcon,
   LightModeIcon,
+  LivestreamIcon,
   BuddyIcon,
+  RecordIcon,
   SettingsIcon,
   StopIcon
 } from '@/components/icons'
@@ -24,9 +25,11 @@ import {
 } from '@/components/ui/command'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { BUDDY_TABS } from '@/lib/buddy-tabs'
+import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import { SETTINGS_TABS } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
+import { sessionStopControl } from '@/lib/studio-session-view'
 import {
   STUDIO_PANELS,
   WORKSPACE_TABS,
@@ -50,7 +53,8 @@ export function CommandPalette({
     runtimeInfo,
     savedScenes,
     applySavedScene,
-    startSession,
+    startRecording,
+    startLivestream,
     requestStopSession,
     commentsWindow,
     toggleCommentsWindow,
@@ -68,6 +72,9 @@ export function CommandPalette({
 
   const live = recording.state === 'recording' || recording.state === 'streaming'
   const busy = recording.state === 'starting' || recording.state === 'stopping'
+  // The transport's own stop words (plan 174 D3): "End livestream" on air,
+  // "Stop recording" for a recording.
+  const stopLabel = sessionStopControl(recording, false).label
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
@@ -178,26 +185,42 @@ export function CommandPalette({
 
         <CommandSeparator />
 
+        {/* The transport's two starts and its stop, in its words (plan 174
+            D3): "Start recording" and "Go live…", then "Stop recording" or
+            "End livestream". */}
         <CommandGroup heading="Session">
           {live ? (
             <CommandItem
-              value="Stop session"
+              value={stopLabel}
+              keywords={['stop', 'end', 'recording', 'livestream']}
               disabled={busy}
               // A livestream asks first (plan 174 S0.1); a recording stops.
               onSelect={() => run(() => void requestStopSession('palette'))}
             >
               <StopIcon className="size-4" />
-              Stop session
+              {stopLabel}
             </CommandItem>
           ) : (
-            <CommandItem
-              value="Start session recording"
-              disabled={busy}
-              onSelect={() => run(() => void startSession())}
-            >
-              <CameraIcon className="size-4" />
-              Start session
-            </CommandItem>
+            <>
+              <CommandItem
+                value={START_RECORDING_COMMAND}
+                keywords={['record']}
+                disabled={busy}
+                onSelect={() => run(startRecording)}
+              >
+                <RecordIcon className="size-4" />
+                {START_RECORDING_COMMAND}
+              </CommandItem>
+              <CommandItem
+                value={GO_LIVE_COMMAND}
+                keywords={['stream', 'livestream', 'broadcast']}
+                disabled={busy}
+                onSelect={() => run(startLivestream)}
+              >
+                <LivestreamIcon className="size-4" />
+                {GO_LIVE_COMMAND}
+              </CommandItem>
+            </>
           )}
           {runtimeInfo?.commentsWindowEnabled ? (
             <CommandItem

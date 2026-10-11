@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from '@/lib/toast'
+import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
+
+/** No notes in the app, so the way out is the website (plan 174 S2.4). */
+function showReleaseNotesUnavailable(): void {
+  toast.info("Release notes aren't available in Videorc right now", {
+    id: 'whats-new-unavailable',
+    action: {
+      label: 'Open changelog',
+      onClick: () => openVideorcWebLink(VIDEORC_WEB_LINKS.changelog)
+    }
+  })
+}
 
 import {
   changelogPlatformForRuntime,
@@ -73,12 +85,12 @@ export function useWhatsNew(
   // release, independent of the last-seen gate.
   const showLatest = useCallback(() => {
     if (!platform) {
-      toast.info('Release notes are not available right now.')
+      showReleaseNotesUnavailable()
       return
     }
     void fetchChangelogEntries({ platform }).then((entries) => {
       if (entries === null || entries.length === 0) {
-        toast.info('Release notes are not available right now.')
+        showReleaseNotesUnavailable()
         return
       }
       setEntry(entries[0])

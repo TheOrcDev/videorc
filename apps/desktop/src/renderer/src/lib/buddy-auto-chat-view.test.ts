@@ -3,11 +3,40 @@ import { describe, expect, it } from 'vitest'
 import {
   BUDDY_SAMPLE_FIELDS,
   BUDDY_STARTER_TEMPLATES,
+  BUDDY_MODE_HINTS,
+  BUDDY_POSTS_PROMISE,
   BUDDY_TEMPLATE_FIELDS,
+  buddyDisplayName,
   buddyModeChangeStep,
+  buddyPostingConsentSentence,
+  buddyPostingConsentTitle,
   greetingTemplateWarnings,
   resolveGreetingPreview
 } from './buddy-auto-chat-view'
+
+describe('Buddy in copy (plan 174 J2-20, F-26)', () => {
+  it("uses the streamer's name when the character acts, else Buddy", () => {
+    expect(buddyDisplayName('Grum')).toBe('Grum')
+    expect(buddyDisplayName('  Nib  ')).toBe('Nib')
+    expect(buddyDisplayName('')).toBe('Buddy')
+    expect(buddyDisplayName(null)).toBe('Buddy')
+    expect(buddyPostingConsentTitle('Grum')).toBe('Let Grum post as you?')
+    expect(buddyPostingConsentSentence('Grum')).toBe(
+      'Grum posts to your chats as you, on the platforms you stream to, only in the modes you turn on. You can read every message later in Buddy → Reports.'
+    )
+  })
+
+  it('never writes "the Buddy": the feature is Buddy, with no article', () => {
+    for (const line of [
+      BUDDY_POSTS_PROMISE,
+      ...Object.values(BUDDY_MODE_HINTS),
+      buddyPostingConsentSentence(null)
+    ]) {
+      expect(line).not.toMatch(/\b[Tt]he Buddy\b/)
+    }
+    expect(BUDDY_MODE_HINTS.off).toBe('Buddy Live is off. Nothing is posted.')
+  })
+})
 
 describe('greeting preview (plan 164 S-D5)', () => {
   it('fills known fields from the sample and collapses the gaps', () => {

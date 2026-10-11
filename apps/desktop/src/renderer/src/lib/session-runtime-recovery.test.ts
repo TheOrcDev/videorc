@@ -22,7 +22,8 @@ import {
   showSessionFinished,
   showSessionHealthEvent,
   showSourceFallbackActiveSession,
-  showXPlaybackEvent
+  showXPlaybackEvent,
+  sourceFallbackTitle
 } from '@/lib/session-runtime-recovery'
 
 function failedSession(mode: string): SessionSummary {
@@ -60,7 +61,7 @@ describe('session runtime recovery', () => {
       events: [],
       priorSessionState: 'recording'
     })
-    // Plan 174 B-6: on air, so the notice says "live session"; it saved a
+    // Plan 174 B-6: on air, so the notice says "livestream"; it saved a
     // file, so it keeps Open Library and the reveal.
     expect(recovery).toMatchObject({ kind: 'recording-failed', activity: 'record+stream' })
     if (recovery?.kind !== 'recording-failed') throw new Error('Missing recovered failure')
@@ -69,8 +70,8 @@ describe('session runtime recovery', () => {
       activity: recovery.activity,
       currentDedupeKey: null
     })!
-    expect(presentation.notice.message).toBe('Videorc could not finish this live session.')
-    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe('Live session stopped unexpectedly')
+    expect(presentation.notice.message).toBe('Videorc could not finish this livestream.')
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe('Livestream stopped unexpectedly')
 
     vi.stubGlobal('window', { videorc: { revealSession: vi.fn() } })
     try {
@@ -79,9 +80,9 @@ describe('session runtime recovery', () => {
       vi.unstubAllGlobals()
     }
     expect(toastSpies.error).toHaveBeenCalledWith(
-      'Live session stopped unexpectedly',
+      'Livestream stopped unexpectedly',
       expect.objectContaining({
-        action: expect.objectContaining({ label: 'Open Library' }),
+        action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ onClick: expect.any(Function) })
       })
     )
@@ -164,12 +165,13 @@ describe('session runtime recovery', () => {
     })
 
     // No platform on the result: the generic words and the shared fallback id.
-    expect(toastSpies.success).toHaveBeenCalledWith('Account connected.', {
+    expect(toastSpies.success).toHaveBeenCalledWith('Account connected', {
       id: 'oauth-callback:provider'
     })
     expect(toastSpies.error).toHaveBeenCalledWith("Couldn't finish connecting the account.", {
       id: 'oauth-callback:provider',
-      description: 'Authorization was declined.'
+      description: 'Authorization was declined.',
+      duration: 8_000
     })
   })
 
@@ -416,7 +418,7 @@ describe('session audio news (plan 076)', () => {
 
 // Plan 174 B-6: Go Live leaves recording on, and the backend reports that
 // record+stream session as `recording` with a stream URL. Its notices speak of
-// the live session (the audience lost something) and keep the saved file's
+// the livestream (the audience lost something) and keep the saved file's
 // actions (it recorded too).
 describe('record+stream notices (plan 174 B-6)', () => {
   const goLive = {
@@ -435,7 +437,7 @@ describe('record+stream notices (plan 174 B-6)', () => {
 
   beforeEach(() => vi.clearAllMocks())
 
-  it('says a microphone dropout during Go Live leaves the live session silent', () => {
+  it('says a microphone dropout during Go Live leaves the livestream silent', () => {
     const presentation = microphoneLossPresentation({
       event: microphoneLost,
       recording: goLive,
@@ -444,7 +446,7 @@ describe('record+stream notices (plan 174 B-6)', () => {
     })!
     expect(presentation.activity).toBe('record+stream')
     expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe(
-      'Microphone stopped: live session continues with silence'
+      'Microphone stopped: livestream continues with silence'
     )
 
     const recordingOnly = microphoneLossPresentation({
@@ -510,16 +512,39 @@ describe('record+stream notices (plan 174 B-6)', () => {
     expect(toastSpies.success).not.toHaveBeenCalled()
   })
 
-  it('says a source changed while streaming during Go Live', () => {
-    showSourceFallbackActiveSession(goLive)
+  it('says a source changed while streaming during Go Live, naming the device', () => {
+    showSourceFallbackActiveSession(goLive, {
+      kind: 'automatic-source-fallback',
+      sourceKind: 'camera',
+      reason: 'unavailable-selected',
+      previousName: 'Studio Cam',
+      nextId: 'cam-2',
+      nextName: 'FaceTime HD Camera'
+    })
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Source changed while streaming. Check the output before continuing.',
-      expect.objectContaining({ id: 'source-reconciliation:active-session' })
+      'Camera switched to FaceTime HD Camera',
+      expect.objectContaining({
+        id: 'source-reconciliation:active-session',
+        description: 'Your stream uses it now. Check the output before you continue.'
+      })
     )
     showSourceFallbackActiveSession({ state: 'recording' })
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Source changed while recording. Check the output before continuing.',
-      expect.anything()
+      'A source changed',
+      expect.objectContaining({
+        description: 'Your recording uses it now. Check the output before you continue.'
+      })
     )
+  })
+
+  it('names the source a fallback turned off (plan 174 S2.4)', () => {
+    expect(
+      sourceFallbackTitle({
+        kind: 'automatic-source-fallback',
+        sourceKind: 'microphone',
+        reason: 'unavailable-cleared',
+        previousName: 'USB Mic'
+      })
+    ).toBe('Microphone turned off')
   })
 })

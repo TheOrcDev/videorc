@@ -153,7 +153,7 @@ describe('SessionTransport start reasons (plan 174 S1.1, B-9)', () => {
     )
     const buttons = [...container.querySelectorAll('button')]
     const record = buttons.find((button) => button.textContent?.includes('Record'))
-    const stream = buttons.find((button) => button.textContent?.includes('Stream'))
+    const stream = buttons.find((button) => button.textContent?.includes('Go Live…'))
     expect(record?.disabled).toBe(true)
     expect(record?.getAttribute('title')).toBeNull()
     const wrapper = record?.closest<HTMLElement>('[data-slot="disabled-reason"]')
@@ -161,9 +161,46 @@ describe('SessionTransport start reasons (plan 174 S1.1, B-9)', () => {
     expect(
       document.getElementById(wrapper?.getAttribute('aria-describedby') ?? '')?.textContent
     ).toBe('Pick a screen or a camera first.')
-    // Nothing blocks Stream: no wrapper, no extra tab stop.
+    // Nothing blocks Go Live: no wrapper, no extra tab stop.
     expect(stream?.disabled).toBe(false)
     expect(stream?.closest('[data-slot="disabled-reason"]')).toBeNull()
+  })
+})
+
+// Plan 174 S2.2 (D3): one verb pair. Record shows its Space key; Go Live…
+// opens the Go Live dialog; each button runs its own start.
+describe('SessionTransport start labels (plan 174 S2.2)', () => {
+  it('reads Record with its Space key and Go Live…, never Stream', () => {
+    const onRecord = vi.fn()
+    const onLiveStream = vi.fn()
+    act(() =>
+      root.render(
+        createElement(SessionTransport, {
+          active: false,
+          canStop: false,
+          stopLabel: 'Stop recording',
+          startRequestPending: false,
+          recordBlockedReason: null,
+          liveStreamBlockedReason: null,
+          status: null,
+          onRecord,
+          onLiveStream,
+          onStop: noop
+        })
+      )
+    )
+    const buttons = [...container.querySelectorAll('button')]
+    expect(buttons).toHaveLength(2)
+    const key = buttons[0]?.querySelector('[data-slot=kbd]')
+    expect(key?.getAttribute('data-accelerator')).toBe('Space')
+    expect(buttons[0]?.textContent?.replace(key?.textContent ?? '', '').trim()).toBe('Record')
+    expect(buttons[1]?.textContent?.trim()).toBe('Go Live…')
+    expect(container.textContent).not.toMatch(/\bStream\b/)
+
+    act(() => buttons[0]?.click())
+    act(() => buttons[1]?.click())
+    expect(onRecord).toHaveBeenCalledOnce()
+    expect(onLiveStream).toHaveBeenCalledOnce()
   })
 })
 

@@ -1,4 +1,5 @@
 import type {
+  AutomaticSourceFallbackEvent,
   BackendLifecycleEvent,
   HealthEvent,
   OAuthCallbackResult,
@@ -18,7 +19,9 @@ import { revealInFileManagerLabel } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { recordingStartupHealthToast } from '@/lib/studio-health'
 import { requestSystemAudioResume, SYSTEM_AUDIO_ECHO_TOAST_ID } from '@/lib/system-audio'
-import { isTransientBackendError, shouldToastBackendError } from '@/lib/backend-transport'
+import { shouldToastBackendError } from '@/lib/backend-transport'
+import { ipcErrorMessage } from '@/lib/ipc-error-message'
+import { OFFLINE_TOAST_ID, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifyOnce } from '@/lib/notify-once'
@@ -124,7 +127,7 @@ export function recordingFailurePresentation({
   const message =
     status.message ??
     (activityIsLive(activity)
-      ? 'Videorc could not finish this live session.'
+      ? 'Videorc could not finish this livestream.'
       : 'Videorc could not finish this recording.')
   return {
     dedupeKey,
@@ -150,7 +153,7 @@ export function showRecordingFailure({ notice }: RecordingFailurePresentation): 
     ...(activitySavesRecording(notice.activity)
       ? {
           action: {
-            label: 'Open Library',
+            label: 'Open in Library',
             onClick: () => openLibrary(sessionId)
           }
         }
@@ -234,34 +237,47 @@ export function showMicrophoneLoss({ notice }: MicrophoneLossPresentation): void
 
 export function showBackendLifecycle(event: BackendLifecycleEvent): void {
   if (event.state === 'restarting') {
-    toast.warning('Backend crashed', {
+    toast.warning('Videorc is recovering', {
       id: 'backend-lifecycle',
       description: `Restarting automatically (attempt ${event.attempt ?? 1})…`
     })
   } else if (event.state === 'failed') {
-    toast.error('Backend crashed repeatedly', {
+    toast.error("Videorc can't recover on its own", {
       id: 'backend-lifecycle',
-      description: 'Automatic restarts stopped. Restart Videorc to recover.',
+      description: 'Quit and reopen Videorc.',
       duration: Infinity
     })
   } else if (event.state === 'lost') {
-    toast.error('Backend shutdown could not be confirmed', {
+    toast.error('Videorc needs a restart', {
       id: 'backend-lifecycle',
-      description: 'A replacement was not started. Quit and reopen Videorc to recover safely.',
+      description: 'Quit and reopen Videorc.',
       duration: Infinity
     })
   }
 }
 
-export function showBackendError(message: string, status: WsStatus): void {
+export function showBackendError(
+  error: unknown,
+  status: WsStatus,
+  context?: UserErrorContext
+): void {
+  const message = ipcErrorMessage(error)
   // Permission grants intentionally restart the backend. During that brief
   // reconnect window the Session badge already explains the state, so avoid a
   // wall of duplicate transport errors. A connected-state blip stays visible.
   if (!shouldToastBackendError(message, status)) return
-  if (isTransientBackendError(message)) {
-    toast.error(message, { id: 'backend-transport' })
+  // Plan 174 S2.4: what failed and what to do, never the raw text; that goes
+  // to the console and the support bundle.
+  const copy = userErrorMessage(error, context)
+  if (copy.kind === 'canceled') return
+  console.warn(`[backend-error] ${copy.title}:`, message)
+  if (copy.kind === 'offline') {
+    const show = copy.tone === 'warning' ? toast.warning : toast.error
+    show(copy.title, { id: OFFLINE_TOAST_ID, description: copy.description })
   } else {
-    notifyOnce(`backend-error:${message}`, 'error', message)
+    notifyOnce(`backend-error:${copy.title}:${message}`, copy.tone, copy.title, {
+      description: copy.description
+    })
   }
 }
 
@@ -272,12 +288,12 @@ export function showXPlaybackEvent(event: XPlaybackEvent): void {
       description: event.shareUrl
     })
   } else if (event.status === 'pending') {
-    notifyOnce('x-playback', 'warning', 'X is still provisioning playback.', {
+    notifyOnce('x-playback', 'warning', 'X is still preparing your stream', {
       description:
         'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
     })
   } else {
-    notifyOnce('x-playback', 'error', 'X never produced playback for this broadcast.', {
+    notifyOnce('x-playback', 'error', 'X never showed your stream', {
       description:
         'Viewers saw a loading spinner. Your local recording is unaffected; the next Go Live uses a replacement source if this repeats.'
     })
@@ -303,11 +319,13 @@ export function showOAuthCallbackResult(result: OAuthCallbackResult): void {
   const id = oauthCallbackToastId(result.platform)
   const platformName = result.platform ? CHAT_PLATFORM_LABELS[result.platform] : 'the account'
   if (result.status === 'success' && result.accountConnected) {
-    toast.success('Account connected.', { id })
+    toast.success(result.platform ? `Connected ${platformName}` : 'Account connected', { id })
   } else if (result.status === 'success' && result.platform === 'x' && result.tokenStored) {
-    toast.success(result.message ?? 'X live authorization complete.', { id })
+    toast.success('X Live is on', { id })
   } else if (result.status === 'success') {
-    toast.success('OAuth callback received.', { id })
+    // Plan 174 S2.4 (J2-11): a step on the way, not news. The approve toast
+    // goes; the connected one follows.
+    toast.dismiss(id)
   } else {
     const description =
       result.reason === 'youtube-quota' && result.retryAt
@@ -319,10 +337,12 @@ export function showOAuthCallbackResult(result: OAuthCallbackResult): void {
 
 /** The renderer gave up retrying a provider callback (same id as the results). */
 export function showOAuthCallbackExhausted(): void {
-  toast.error(`Couldn't finish connecting ${platformLabelOrAccount(lastOAuthCallbackPlatform)}.`, {
+  const platformName = platformLabelOrAccount(lastOAuthCallbackPlatform)
+  console.warn('[oauth] callback retries exhausted; kept unacknowledged')
+  toast.error(`Couldn't finish connecting ${platformName}.`, {
     id: oauthCallbackToastId(lastOAuthCallbackPlatform),
-    description:
-      'OAuth completion is still unavailable. Videorc kept the callback without acknowledging it.'
+    description: `Connect ${platformName} again from Livestream → Setup.`,
+    action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
   })
 }
 
@@ -391,10 +411,10 @@ export function showSessionHealthEvent(
     if (event.code !== 'recording-quality-not-100' || event.level !== 'warn') return null
     const dedupeKey = event.sessionId ?? event.message
     if (qualityToastAlreadyShown) return null
-    toast.warning('Recording is not 100%', {
+    toast.warning('This recording has dropped frames', {
       description: event.message,
       duration: 15_000,
-      action: { label: 'Open Library', onClick: () => openLibrary(event.sessionId ?? undefined) }
+      action: { label: 'Open in Library', onClick: () => openLibrary(event.sessionId ?? undefined) }
     })
     return dedupeKey
   }
@@ -497,7 +517,7 @@ export function showNoiseCleanupCompleted(jobId: string, outputSessionId: string
         const openSession = window.videorc?.openSession
         if (!openSession) return
         void openSession(outputSessionId).then((problem) => {
-          if (problem) toast.error(problem)
+          if (problem) showPlaybackProblem(outputSessionId, problem)
         })
       }
     },
@@ -517,22 +537,57 @@ export function showPremiumUpgrade(title: string, description?: string): void {
     }
     window.open(VIDEORC_PREMIUM_URL, '_blank', 'noopener,noreferrer')
   }
-  toast.error(title, {
+  // Plan 174 S2.4: a plan limit is news about Premium, not a failure.
+  toast.info(title, {
     description,
     duration: 15_000,
     action: { label: 'View Premium', onClick: openPremiumUpgradePage }
   })
 }
 
+/** "Couldn't play this recording": the reason, and where the file is. */
+export function showPlaybackProblem(sessionId: string, problem: string): void {
+  const revealSession = window.videorc?.revealSession
+  toast.error("Couldn't play this recording", {
+    id: `playback-problem:${sessionId}`,
+    description: problem,
+    ...(revealSession
+      ? {
+          action: {
+            label: revealInFileManagerLabel(),
+            onClick: () => void revealSession(sessionId)
+          }
+        }
+      : {})
+  })
+}
+
+const SOURCE_FALLBACK_NOUNS: Record<AutomaticSourceFallbackEvent['sourceKind'], string> = {
+  capture: 'Screen',
+  camera: 'Camera',
+  microphone: 'Microphone'
+}
+
+/** Pure. "Camera switched to FaceTime HD Camera", or "Camera turned off". */
+export function sourceFallbackTitle(event: AutomaticSourceFallbackEvent | undefined): string {
+  if (!event) return 'A source changed'
+  const noun = SOURCE_FALLBACK_NOUNS[event.sourceKind] ?? 'A source'
+  const name = event.nextName?.trim()
+  if (name) return `${noun} switched to ${name}`
+  return event.nextId ? `${noun} switched` : `${noun} turned off`
+}
+
 export function showSourceFallbackActiveSession(
-  session: Pick<RecordingStatus, 'state' | 'streamUrl'>
+  session: Pick<RecordingStatus, 'state' | 'streamUrl'>,
+  event?: AutomaticSourceFallbackEvent
 ): void {
-  toast.warning(
-    sessionIsLive(session)
-      ? 'Source changed while streaming. Check the output before continuing.'
-      : 'Source changed while recording. Check the output before continuing.',
-    { duration: 10_000, id: 'source-reconciliation:active-session' }
-  )
+  toast.warning(sourceFallbackTitle(event), {
+    description: sessionIsLive(session)
+      ? 'Your stream uses it now. Check the output before you continue.'
+      : 'Your recording uses it now. Check the output before you continue.',
+    duration: 10_000,
+    id: 'source-reconciliation:active-session'
+  })
 }
 
 function latestMatchingEvent(

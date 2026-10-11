@@ -39,7 +39,9 @@ import {
   type EditorDraftSample
 } from '@/lib/editor-draft-channel'
 import { cn } from '@/lib/utils'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { overlayStageId, type OverlayDraft, type OverlayStageItem } from './overlay-stage'
+import { stageNudgeForKey } from './stage-nudge'
 import {
   StageEdits,
   StageGesture,
@@ -120,6 +122,9 @@ const OVERLAY_ICONS: Record<OverlayItem, ElementType> = {
 }
 type StageGhost = GhostResult & { sourceId: string }
 
+/** What the stage is doing: a pointer gesture, a released commit still landing, or nothing. */
+export type StagePhase = 'idle' | 'dragging' | 'pending'
+
 /** A schematic editor: pointer samples never start capture; the only IPC a
  * gesture crosses is the live draft below, and only over the live canvas.
  *
@@ -156,12 +161,14 @@ export function SceneStage({
   outputAspect = 16 / 9,
   aspectLocked = true,
   externalPending = false,
-  onBusyChange,
+  onPhaseChange,
   onSelectSource,
   onTogglePreview,
   onCommitTransform,
   onSnapCorner,
   onRequestFreeform,
+  onNudge,
+  onUndo,
   overlays
 }: {
   scene: Scene | null
@@ -198,12 +205,18 @@ export function SceneStage({
   outputAspect?: number
   aspectLocked?: boolean
   externalPending?: boolean
-  onBusyChange?: (busy: boolean) => void
+  /** The stage's phase, so the owner can tell a pointer gesture from a commit
+   * still landing (plan 174 S3.9, C-5: the inspector goes inert only for the gesture). */
+  onPhaseChange?: (phase: StagePhase) => void
   onSelectSource: (sourceId: string) => void
   onTogglePreview: () => void
   onCommitTransform?: StageCommit
   onSnapCorner?: (corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right') => void
   onRequestFreeform?: () => void
+  /** Arrow keys on the focused canvas nudge the selected source (plan 174 S3.9, C-31). */
+  onNudge?: (sourceId: string, directionX: number, directionY: number, large: boolean) => void
+  /** Present while there is a layout change to take back: the footer offers Undo (D15). */
+  onUndo?: () => void
 }): ReactElement {
   const sources = scene?.sources ?? []
   const stageH =
@@ -272,14 +285,14 @@ export function SceneStage({
   useLayoutEffect(() => {
     channel.enabled = draftEnabled
   }, [channel, draftEnabled])
-  const phase = ghost
+  const phase: StagePhase = ghost
     ? 'dragging'
     : edits.draft || overlays?.draft || externalPending
       ? 'pending'
       : 'idle'
   useLayoutEffect(() => {
-    onBusyChange?.(phase !== 'idle')
-  }, [onBusyChange, phase])
+    onPhaseChange?.(phase)
+  }, [onPhaseChange, phase])
   // Same scene revision updates are normal acknowledgements; replacement of its
   // source identities/shape or disabling editing invalidates pointer ownership.
   const sourceIdentity = sources
@@ -343,13 +356,13 @@ export function SceneStage({
       cancelGesture()
       edits.invalidate()
       observer.disconnect()
-      onBusyChange?.(false)
+      onPhaseChange?.('idle')
       window.removeEventListener('keydown', key, true)
       window.removeEventListener('blur', cancelGesture)
       window.removeEventListener('resize', measure)
       window.removeEventListener('scroll', cancelGesture, true)
     }
-  }, [cancelGesture, edits, onBusyChange])
+  }, [cancelGesture, edits, onPhaseChange])
 
   const editable = (source: SceneSource): boolean =>
     !source.locked && (freeform || source.transform.width < 1 || source.transform.height < 1)
@@ -643,6 +656,22 @@ export function SceneStage({
   }
   const gutter = 28 / pixelScale
   const canvasRadius = Math.min(CANVAS_RADIUS_PX / pixelScale, stageH / 2)
+  // The label chips on the schematic (sources and overlay items): 11 px type
+  // and 4 px padding on screen, whatever the canvas scale.
+  const labelPx = 11 / pixelScale
+  const padPx = 4 / pixelScale
+  const chipH = 16 / pixelScale
+  /** Arrow keys on the focused canvas: a nudge of the selected, editable
+   * source. Dropped while a gesture or a commit is in flight (never queued),
+   * like the inspector's own edits. */
+  const nudgeFromKey = (event: React.KeyboardEvent<SVGSVGElement>): void => {
+    if (!onNudge || !selectedSource || !dragEnabled || !editable(selectedSource)) return
+    if (phase !== 'idle') return
+    const nudge = stageNudgeForKey(event)
+    if (!nudge) return
+    event.preventDefault()
+    onNudge(selectedSource.id, nudge.directionX, nudge.directionY, nudge.large)
+  }
   const activeMotion = gestureRef.current
   const activeHandle =
     activeMotion && activeMotion.motion.kind !== 'move'
@@ -728,10 +757,16 @@ export function SceneStage({
           <svg
             ref={svgRef}
             aria-label="Scene composition editor"
-            className="block h-full w-full touch-none overflow-visible select-none"
+            // Focusable (plan 174 S3.9, C-31): a click on a source lands the
+            // keyboard here, and the arrows nudge it. The ring sits on the
+            // canvas box, which the docked surface never covers by more than
+            // its own rect.
+            className="block h-full w-full touch-none overflow-visible rounded-panel outline-hidden select-none focus-visible:ring-2 focus-visible:ring-ring"
             data-videorc-stage-live={liveSurface ? 'true' : undefined}
             role="group"
+            tabIndex={0}
             viewBox={`0 0 ${STAGE_W} ${stageH}`}
+            onKeyDown={nudgeFromKey}
             onPointerMove={moveGesture}
             onPointerUp={endGesture}
             onPointerCancel={(event) => {
@@ -783,10 +818,14 @@ export function SceneStage({
                   />
                 </g>
               ) : null}
-              {sources.map((source) => {
+              {sources.map((source, index) => {
                 const rect = displayed(source),
                   width = rect.width * STAGE_W,
                   height = rect.height * stageH
+                // The source's name on the schematic (plan 174 S3.9, C-34),
+                // clipped to its own box; a box too short for the chip has none.
+                const labelClipId = `${clipId}-source-${index}`
+                const labelled = height >= chipH + 2 * padPx
                 const shape = stageSourceShape(
                   rect,
                   STAGE_W,
@@ -856,23 +895,56 @@ export function SceneStage({
                         {...paint}
                       />
                     )}
+                    {labelled ? (
+                      <>
+                        <clipPath id={labelClipId}>
+                          <rect
+                            x={rect.x * STAGE_W}
+                            y={rect.y * stageH}
+                            width={width}
+                            height={height}
+                          />
+                        </clipPath>
+                        <g
+                          className={cn(
+                            !source.visible && 'opacity-40',
+                            liveSurface && 'invisible'
+                          )}
+                          clipPath={`url(#${labelClipId})`}
+                          pointerEvents="none"
+                          transform={`translate(${rect.x * STAGE_W + padPx} ${rect.y * stageH + padPx})`}
+                        >
+                          <text
+                            className="fill-foreground/80"
+                            data-videorc-stage-source-label={source.id}
+                            dominantBaseline="middle"
+                            fontSize={labelPx}
+                            fontWeight={600}
+                            x={padPx}
+                            y={chipH / 2}
+                          >
+                            {source.name}
+                          </text>
+                        </g>
+                      </>
+                    ) : null}
                   </g>
                 )
               })}
               {/* Overlay items (plan 164, D15): a second item layer after the
                   sources. Dashed hairline rects with a label chip; a
                   "stream only" / "recording only" badge when the item's two
-                  output switches differ. Hidden under the live surface like
-                  every painted element; the hit targets stay. */}
+                  output switches differ, and an item both switches turn off
+                  is drawn dimmed with an "off" chip (plan 174, C-13). Hidden
+                  under the live surface like every painted element; the hit
+                  targets stay. */}
               {overlayItems.map((entry) => {
                 const rect = displayedOverlay(entry)
-                const labelPx = 11 / pixelScale
-                const padPx = 4 / pixelScale
-                const chipH = 16 / pixelScale
                 return (
                   <g
                     key={entry.stageId}
                     data-videorc-stage-overlay={entry.item}
+                    data-videorc-stage-overlay-off={entry.off ? 'true' : undefined}
                     className={
                       overlays?.editable ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
                     }
@@ -921,6 +993,7 @@ export function SceneStage({
                       className={cn(
                         'fill-none stroke-foreground/30',
                         selectedOverlayItem === entry.item && 'stroke-foreground/60',
+                        entry.off && 'opacity-40',
                         liveSurface && 'invisible'
                       )}
                       pointerEvents="none"
@@ -933,7 +1006,7 @@ export function SceneStage({
                       height={rect.height * stageH}
                     />
                     <g
-                      className={cn(liveSurface && 'invisible')}
+                      className={cn(entry.off && 'opacity-40', liveSurface && 'invisible')}
                       pointerEvents="none"
                       transform={`translate(${rect.x * STAGE_W + padPx} ${rect.y * stageH + padPx})`}
                     >
@@ -1011,8 +1084,18 @@ export function SceneStage({
         </div>
       </div>
       {!sources.length ? (
-        <p className="px-3 pb-3 text-center text-xs text-muted-foreground">
-          No sources in the scene yet
+        // The next step rides with the empty state (plan 174, C-21): devices
+        // are chosen on Sources, never here.
+        <p className="flex flex-wrap items-center justify-center gap-x-1 px-3 pb-3 text-center text-xs text-muted-foreground">
+          No sources in the scene yet. Choose a screen or a camera in Sources.
+          <Button
+            className="h-auto p-0 text-xs font-normal"
+            size="xs"
+            variant="link"
+            onClick={() => openWorkspaceTab('sources')}
+          >
+            Open Sources
+          </Button>
         </p>
       ) : null}
       <Separator />
@@ -1031,9 +1114,22 @@ export function SceneStage({
             </span>
           ) : dragEnabled || overlays?.editable ? (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              {dragEnabled && onNudge ? (
+                <span className="inline-flex items-center gap-1.5" data-videorc-stage-nudge-hint>
+                  <span className="inline-flex items-center gap-0.5">
+                    <ShortcutKeys accelerator="Left" />
+                    <ShortcutKeys accelerator="Up" />
+                    <ShortcutKeys accelerator="Down" />
+                    <ShortcutKeys accelerator="Right" />
+                  </span>
+                  nudge
+                </span>
+              ) : null}
               <span className="inline-flex items-center gap-1.5">
                 <ShortcutKeys accelerator="Shift" />
-                constrain / aspect
+                {dragEnabled && onNudge
+                  ? 'constrain / aspect / bigger nudge'
+                  : 'constrain / aspect'}
               </span>
               {effectiveSnap ? (
                 <span className="inline-flex items-center gap-1.5">
@@ -1049,6 +1145,17 @@ export function SceneStage({
           ) : null}
         </div>
         <div className="flex h-7 items-center gap-1">
+          {/* Single-level undo of the last layout change (plan 174 S3.9,
+              D15), here for the mouse; the key works anywhere on the page. */}
+          {onUndo ? (
+            <>
+              <Button data-videorc-stage-undo size="sm" variant="ghost" onClick={onUndo}>
+                Undo
+                <ShortcutKeys accelerator="CmdOrCtrl+Z" />
+              </Button>
+              <Separator className="mx-1 my-1.5" orientation="vertical" />
+            </>
+          ) : null}
           {showFreeformHint && onRequestFreeform ? (
             <Button size="sm" variant="ghost" onClick={onRequestFreeform}>
               Make freeform

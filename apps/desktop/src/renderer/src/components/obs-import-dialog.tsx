@@ -215,7 +215,7 @@ export function ObsImportDialog({
       // Exactly the background the report promised: into its slot, and on.
       setRegistry((current) => withObsBackground(current, plan))
       toast.success('OBS setup imported', {
-        description: 'Check Sources and the Scene stage for anything that was approximated.'
+        description: 'Check Sources and Scene.'
       })
       onOpenChange(false)
     } finally {

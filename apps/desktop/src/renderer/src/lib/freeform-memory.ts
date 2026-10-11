@@ -5,7 +5,8 @@ import { layoutPresetOrientation, type LayoutOrientation } from '@/lib/capture'
 // and clears its per-source overrides, so one stray click used to lose an
 // arrangement for good: choosing Freeform again re-seeded it from the preset.
 // The overrides a preset replaces are remembered per orientation, and
-// Freeform starts from them the next time. The full undo is S3.9.
+// Freeform starts from them the next time. The undo below (S3.9, D15) takes
+// the whole last layout change back.
 
 export type FreeformOverrides = LayoutSettings['sourceTransformOverrides']
 export type FreeformMemory = Partial<Record<LayoutOrientation, FreeformOverrides>>
@@ -55,4 +56,60 @@ export function noteLayoutLeavingFreeform(layout: FreeformLayout): void {
 
 export function rememberedFreeform(): FreeformMemory {
   return windowMemory
+}
+
+// Layout undo (plan 174 S3.9, D15): a single level. The slot holds the
+// committed layout the last layout change replaced, with the saved scene it
+// belonged to, so one ⌘Z on the Scene page asks for it back. Undo itself is a
+// layout change, so after it the slot holds the undone layout: ⌘Z again
+// brings it back. There is no deeper history.
+
+/** A committed layout a single ⌘Z returns to. */
+export interface LayoutUndoEntry {
+  layout: LayoutSettings
+  savedSceneId: string | null
+  origin: 'builtin' | 'saved'
+}
+
+/** Two layouts the compositor would draw the same. */
+export function sameLayout(a: LayoutSettings, b: LayoutSettings): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/**
+ * The undo slot after `next` commits over `previous`. A commit that leaves
+ * the layout as it was (a background change, a reconnect's reconciliation)
+ * is not a layout change, so the slot keeps what it held.
+ */
+export function layoutUndoAfterCommit(
+  slot: LayoutUndoEntry | null,
+  previous: LayoutUndoEntry | null,
+  next: LayoutSettings
+): LayoutUndoEntry | null {
+  if (!previous || sameLayout(previous.layout, next)) return slot
+  return previous
+}
+
+let undoSlot: LayoutUndoEntry | null = null
+
+/** Called as a layout commit lands, with the committed layout it replaced. */
+export function noteLayoutCommitted(previous: LayoutUndoEntry | null, next: LayoutSettings): void {
+  undoSlot = layoutUndoAfterCommit(undoSlot, previous, next)
+}
+
+/** The layout ⌘Z would return to, or null when there is nothing to undo. */
+export function peekLayoutUndo(): LayoutUndoEntry | null {
+  return undoSlot
+}
+
+/** Takes the entry for an undo in flight; the slot is empty until that commit lands. */
+export function takeLayoutUndo(): LayoutUndoEntry | null {
+  const entry = undoSlot
+  undoSlot = null
+  return entry
+}
+
+/** Puts an entry back after its undo was refused, unless a newer change filled the slot. */
+export function restoreLayoutUndo(entry: LayoutUndoEntry | null): void {
+  if (entry && undoSlot === null) undoSlot = entry
 }

@@ -260,7 +260,7 @@ export function sceneSourceProblems(visual: SceneVisual, devices: readonly Devic
         (device) => device.id === id && device.kind === kind && device.status === 'available'
       )
     )
-      problems.push(`${label} unavailable. Choose a replacement.`)
+      problems.push(`${label} unavailable. Choose a replacement in Sources.`)
   }
   if (
     visual.layout.arrangementMode === 'freeform'

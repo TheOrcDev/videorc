@@ -496,7 +496,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     await walkToCreate()
     expect(gateOf()).toMatchObject({
       kind: 'premium',
-      actions: ['See Premium', 'Start from one of ours']
+      actions: ['View Premium', 'Start from one of ours']
     })
     await click(document.querySelector('[data-action="see-premium"]') as HTMLElement)
     expect(mocked.openLink).toHaveBeenCalledWith('https://example.test/premium')

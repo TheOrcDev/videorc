@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
 import { toast } from '@/lib/toast'
+import { toastUserError, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 
 import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
 import { AppErrorBoundary } from '@/components/error-boundary'
@@ -70,6 +71,18 @@ import {
 } from '../../shared/comments-snapshot-delta'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
 import '@/styles.css'
+
+/** What a failed Buddy action was, for its toast (plan 174 S2.4). */
+function buddyActionContext(command: BuddyActionBody): UserErrorContext {
+  switch (command.kind) {
+    case 'buddy-say':
+      return { action: 'send', object: "Buddy's line" }
+    case 'buddy-show-on-stream':
+      return { action: command.showOnStream ? 'show' : 'hide', object: 'Buddy on stream' }
+    case 'buddy-react':
+      return { action: 'play', object: "Buddy's reaction" }
+  }
+}
 
 // Long-lived second window: drop React's dev perf-track measures, which buffer
 // outside the V8 heap and leak over time (see videorc-react-dev-perf-track-leak).
@@ -328,9 +341,11 @@ function CommentsWindowApp(): ReactElement {
         }
       })
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not remove the message.', {
-          id: `chat-removal:${message.id}`
-        })
+        toastUserError(
+          error,
+          { action: 'remove', object: 'the message' },
+          { id: `chat-removal:${message.id}` }
+        )
       )
       .finally(() => flagId(setRemovalRequestIds, message.id, false))
   }
@@ -348,9 +363,13 @@ function CommentsWindowApp(): ReactElement {
     })
       .then(noteRemoval)
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer the removal.', {
-          id: `chat-removal:${operation.operationId}`
-        })
+        toastUserError(
+          error,
+          answer === 'confirm'
+            ? { action: 'remove', object: 'the message' }
+            : { action: 'keep', object: 'the message' },
+          { id: `chat-removal:${operation.operationId}` }
+        )
       )
       .finally(() => flagId(setRemovalAnsweringIds, operation.operationId, false))
   }
@@ -376,7 +395,7 @@ function CommentsWindowApp(): ReactElement {
         if (highlightIntentRef.current !== intent) return
         setHighlightFailure({
           messageId: message.id,
-          reason: error instanceof Error ? error.message : 'Highlight failed.'
+          reason: userErrorMessage(error, { action: 'show', object: 'the message on stream' }).text
         })
       })
       .finally(() => {
@@ -407,13 +426,14 @@ function CommentsWindowApp(): ReactElement {
           return state
         })
         .catch((error) => {
-          setSendFailures([
-            {
-              destinationId: 'cohost-command',
-              platform: 'custom',
-              reason: error instanceof Error ? error.message : 'Buddy action failed.'
-            }
-          ])
+          // A toast, not a send badge: this was never a chat send (H-4).
+          toastUserError(
+            error,
+            kind === 'approve-utterance'
+              ? { action: 'post', object: "Buddy's message" }
+              : { action: 'update', object: 'Buddy' },
+            { id: 'cohost-action' }
+          )
           return null
         })
         .finally(() => setCohostActionPending(false))
@@ -432,9 +452,7 @@ function CommentsWindowApp(): ReactElement {
     return send({ requestId: crypto.randomUUID(), ...command } as CohostBuddyActionCommand)
       .then(() => undefined)
       .catch((error) => {
-        toast.error(error instanceof Error ? error.message : 'Buddy action failed.', {
-          id: 'buddy-action'
-        })
+        toastUserError(error, buddyActionContext(command), { id: 'buddy-action' })
       })
       .finally(() => setBuddyPending(false))
   }
@@ -466,9 +484,11 @@ function CommentsWindowApp(): ReactElement {
         setCohost((current) => ({ ...current, state: applyCohostState(current.state, state) }))
       )
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer Buddy.', {
-          id: `cohost-command:${commandId}`
-        })
+        toastUserError(
+          error,
+          { action: 'answer', object: 'Buddy' },
+          { id: `cohost-command:${commandId}` }
+        )
       )
       .finally(() => setCommandAnsweringId((current) => (current === commandId ? null : current)))
   }
@@ -487,11 +507,10 @@ function CommentsWindowApp(): ReactElement {
       })
       .then((state) => state && setCohost(state))
       .catch((error) =>
-        toast.error(
-          error instanceof Error ? error.message : 'Could not change the Buddy setting.',
-          {
-            id: 'cohost-enable'
-          }
+        toastUserError(
+          error,
+          { action: on ? 'turn on' : 'turn off', object: 'Buddy Live' },
+          { id: 'cohost-enable' }
         )
       )
   }
@@ -508,9 +527,7 @@ function CommentsWindowApp(): ReactElement {
       ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled: true, grantConsent: true })
       .then((state) => state && setCohost(state))
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not turn on Buddy.', {
-          id: 'cohost-enable'
-        })
+        toastUserError(error, { action: 'turn on', object: 'Buddy Live' }, { id: 'cohost-enable' })
       )
   }
 
@@ -533,8 +550,9 @@ function CommentsWindowApp(): ReactElement {
       })
       .then((state) => state && setCohost(state))
       .catch((error) =>
-        toast.error(
-          error instanceof Error ? error.message : 'Could not change the Buddy chat mode.',
+        toastUserError(
+          error,
+          { action: 'change', object: "Buddy's chat mode" },
           { id: 'cohost-auto-chat' }
         )
       )
@@ -651,16 +669,12 @@ function CommentsWindowApp(): ReactElement {
                       sessionId: snapshot.sessionId!
                     })
                     .catch((error) =>
-                      setSendFailures([
-                        {
-                          destinationId: 'comments-clear-command',
-                          platform: 'custom',
-                          reason:
-                            error instanceof Error
-                              ? error.message
-                              : 'Could not clear the chat view.'
-                        }
-                      ])
+                      // A toast, not a send badge: Clear isn't a send (H-4).
+                      toastUserError(
+                        error,
+                        { action: 'clear', object: 'the chat view' },
+                        { id: 'comments-clear' }
+                      )
                     )
                 }
               : undefined
@@ -679,11 +693,10 @@ function CommentsWindowApp(): ReactElement {
                       })
                     })
                     .catch((error) =>
-                      toast.error(
-                        error instanceof Error ? error.message : 'Could not mark the clip.',
-                        {
-                          id: 'clip-marked'
-                        }
+                      toastUserError(
+                        error,
+                        { action: 'mark', object: 'the clip' },
+                        { id: 'clip-marked' }
                       )
                     )
                 }
@@ -697,14 +710,16 @@ function CommentsWindowApp(): ReactElement {
                 platform: 'twitch'
               })
               .then(() =>
-                toast.success('Allow the follow permission in your browser', {
+                // A step to take, so info (plan 174 S2.4, H-32).
+                toast.info('Approve the follow permission in your browser', {
                   id: 'follow-names',
                   description: 'New Twitch followers show by name once Twitch confirms.'
                 })
               )
               .catch((error) =>
-                toast.error(
-                  error instanceof Error ? error.message : 'Could not open the Twitch reconnect.',
+                toastUserError(
+                  error,
+                  { action: 'open', object: 'the Twitch page' },
                   { id: 'follow-names' }
                 )
               )
@@ -714,14 +729,15 @@ function CommentsWindowApp(): ReactElement {
             void window.videorc
               ?.reconnectScopesFromCommentsWindow?.({ requestId: crypto.randomUUID(), platform })
               .then(() =>
-                toast.success(started.title, {
+                toast.info(started.title, {
                   id: 'reconnect-scopes',
                   description: started.description
                 })
               )
               .catch((error) =>
-                toast.error(
-                  error instanceof Error ? error.message : 'Could not open the reconnect.',
+                toastUserError(
+                  error,
+                  { action: 'open', object: `the ${started.platformName} page` },
                   { id: 'reconnect-scopes' }
                 )
               )
@@ -815,7 +831,8 @@ function CommentsWindowApp(): ReactElement {
                   {
                     destinationId: 'comments-command',
                     platform: 'custom',
-                    reason: error instanceof Error ? error.message : 'Send failed.'
+                    reason: userErrorMessage(error, { action: 'send', object: 'the message' })
+                      .description
                   }
                 ])
               })

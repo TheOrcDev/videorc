@@ -9,11 +9,13 @@ import { removeMessagesReconnectCopy } from '../../../../shared/platform-scopes'
 export function removeMessagesReconnectStarted(platform: ScopeReconnectPlatform): {
   title: string
   description: string
+  platformName: string
 } {
   const name = CHAT_PLATFORM_LABELS[platform]
   return {
     title: `Approve the ${name} permission in your browser`,
-    description: `Buddy can remove messages once ${name} confirms.`
+    description: `Buddy can remove messages once ${name} confirms.`,
+    platformName: name
   }
 }
 

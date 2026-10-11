@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest'
 
-import type { CameraTransform, LayoutPreset } from '@/lib/backend'
+import type { CameraTransform, LayoutPreset, LayoutSettings } from '@/lib/backend'
+import { defaultCaptureConfig } from '@/lib/capture'
 import {
   freeformEntryOverrides,
+  layoutUndoAfterCommit,
+  noteLayoutCommitted,
   noteLayoutLeavingFreeform,
+  peekLayoutUndo,
   rememberFreeform,
   rememberedFreeform,
-  type FreeformMemory
+  restoreLayoutUndo,
+  takeLayoutUndo,
+  type FreeformMemory,
+  type LayoutUndoEntry
 } from './freeform-memory'
 
 // Plan 174, C-4: a preset click no longer loses a Freeform arrangement.
@@ -93,5 +100,64 @@ describe('Freeform memory (plan 174, C-4)', () => {
       sourceTransformOverrides: {}
     })
     expect(rememberedFreeform().horizontal).toEqual({ 'source:base': base(0.6) })
+  })
+})
+
+// Plan 174 S3.9 (D15, C-4): one ⌘Z returns to the layout the last change replaced.
+
+const layoutWith = (patch: Partial<LayoutSettings>): LayoutSettings => ({
+  ...defaultCaptureConfig.layout,
+  ...patch
+})
+const entry = (layout: LayoutSettings, savedSceneId: string | null = null): LayoutUndoEntry => ({
+  layout,
+  savedSceneId,
+  origin: savedSceneId ? 'saved' : 'builtin'
+})
+
+describe('Layout undo (plan 174 S3.9, D15)', () => {
+  const freeformLayout = layoutWith({
+    arrangementMode: 'freeform',
+    sourceTransformOverrides: { 'source:camera': camera(0.1) }
+  })
+  const presetLayout = layoutWith({ layoutPreset: 'screen-only' })
+
+  it('holds the layout a commit replaced, and keeps it through commits that change nothing', () => {
+    expect(layoutUndoAfterCommit(null, null, presetLayout)).toBeNull()
+    const slot = layoutUndoAfterCommit(null, entry(freeformLayout), presetLayout)
+    expect(slot).toEqual(entry(freeformLayout))
+    // A background-only commit or a reconciliation carries the same layout.
+    expect(layoutUndoAfterCommit(slot, entry(presetLayout), { ...presetLayout })).toBe(slot)
+    // The next real change replaces the slot: a single level, no history.
+    const sized = layoutWith({ layoutPreset: 'screen-only', cameraSize: 'large' })
+    expect(layoutUndoAfterCommit(slot, entry(presetLayout, 'scene-a'), sized)).toEqual(
+      entry(presetLayout, 'scene-a')
+    )
+  })
+
+  it('gives the entry to one undo at a time, and holds the undone layout afterwards', () => {
+    takeLayoutUndo()
+    noteLayoutCommitted(entry(freeformLayout), presetLayout)
+    expect(peekLayoutUndo()).toEqual(entry(freeformLayout))
+    const taken = takeLayoutUndo()
+    expect(taken).toEqual(entry(freeformLayout))
+    expect(peekLayoutUndo()).toBeNull()
+    // The undo's own commit lands: ⌘Z again brings the preset back.
+    noteLayoutCommitted(entry(presetLayout), freeformLayout)
+    expect(peekLayoutUndo()).toEqual(entry(presetLayout))
+  })
+
+  it('puts a refused undo back unless a newer change filled the slot', () => {
+    takeLayoutUndo()
+    noteLayoutCommitted(entry(freeformLayout), presetLayout)
+    const taken = takeLayoutUndo()
+    restoreLayoutUndo(taken)
+    expect(peekLayoutUndo()).toEqual(entry(freeformLayout))
+    takeLayoutUndo()
+    noteLayoutCommitted(entry(presetLayout, 'scene-b'), freeformLayout)
+    restoreLayoutUndo(taken)
+    expect(peekLayoutUndo()).toEqual(entry(presetLayout, 'scene-b'))
+    restoreLayoutUndo(null)
+    expect(peekLayoutUndo()).toEqual(entry(presetLayout, 'scene-b'))
   })
 })

@@ -145,6 +145,53 @@ describe('RemoteSettings confirms', () => {
   })
 })
 
+describe('RemoteSettings rows (plan 174 S3.17)', () => {
+  it('shows the pairing token as a read-only value its label names (I-22)', async () => {
+    await render()
+    const token = document.querySelector<HTMLInputElement>('#remote-token')!
+    expect(token.tagName).toBe('INPUT')
+    expect(token.readOnly).toBe(true)
+    expect(token.value).toBe('abcdefgh…mnop')
+    const label = [...document.querySelectorAll('label')].find(
+      (entry) => entry.textContent === 'Pairing token'
+    )
+    expect(label?.getAttribute('for')).toBe('remote-token')
+    expect(document.body.textContent).toContain('1 client connected.')
+  })
+
+  it('locks pairing with its reason when the network is the problem (I-8)', async () => {
+    mocked.core = core({ phone: { ...phoneStatus, addresses: [] } })
+    await render()
+    const alert = [...document.querySelectorAll('[data-slot="alert"]')].find((entry) =>
+      entry.textContent?.includes('No Wi-Fi or Ethernet network found.')
+    )
+    expect(alert).toBeTruthy()
+    const pair = button('Pair a phone…')
+    expect(pair.disabled).toBe(true)
+    const reasonId = pair.closest('[data-slot="disabled-reason"]')?.getAttribute('aria-describedby')
+    expect(document.getElementById(reasonId!)?.textContent).toContain('No Wi-Fi or Ethernet')
+  })
+
+  it('lists paired phones as rows with their state', async () => {
+    await render()
+    const list = document.querySelector(
+      '[data-slot="grouped-list"]:has([aria-label="Remove Pixel"])'
+    )
+    expect(list?.textContent).toContain('Pixel')
+    expect(list?.textContent).toContain('Connected')
+    expect(button('Pair a phone…').disabled).toBe(false)
+  })
+
+  it('never repeats the switch with an "Off." line when off (V-6)', async () => {
+    mocked.core = core({ remote: { enabled: false }, phone: { ...phoneStatus, enabled: false } })
+    await render()
+    const text = document.body.textContent ?? ''
+    expect(text).not.toMatch(/Off\. Turn on/)
+    expect(text).not.toContain('token below')
+    expect(text).toContain('Turning this on makes a pairing token')
+  })
+})
+
 describe('pairedPhonesClause', () => {
   it('agrees with its count', () => {
     expect(pairedPhonesClause(1)).toBe('1 paired phone is')

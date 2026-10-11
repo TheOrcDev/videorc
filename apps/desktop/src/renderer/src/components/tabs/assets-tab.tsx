@@ -12,7 +12,7 @@ import {
   WarningIcon
 } from '@/components/icons'
 import { useState, type ComponentProps, type ReactElement } from 'react'
-import { toast } from '@/lib/toast'
+import { toastUserError } from '@/lib/user-error'
 
 import { KebabMenu } from '@/components/kebab-menu'
 import { Gallery, PageHeader } from '@/components/page'
@@ -131,7 +131,7 @@ export function AssetsTab(): ReactElement {
 
   const importInto = async (explicitSlotId: string | null): Promise<void> => {
     if (!window.videorc?.importBackgroundImage) {
-      toast.error('Image import is unavailable outside Electron.')
+      console.warn('[assets] no image import in this renderer')
       return
     }
     // Plan 174 (C-2, D14): with every slot in use, which is every fresh
@@ -160,10 +160,10 @@ export function AssetsTab(): ReactElement {
         setPendingReplace({ asset, preselectedSlotId: target.preselectedSlotId })
         return
       }
+      // The new tile is the confirmation (plan 174 S2.4, J2-11).
       setRegistry((current) => importIntoSlot(current, target.slotId, asset))
-      toast.success(`Imported ${asset.name}.`)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not import the background.')
+      toastUserError(error, { action: 'import', object: 'the image' }, { id: 'background-import' })
     } finally {
       setImporting(false)
     }
@@ -172,7 +172,6 @@ export function AssetsTab(): ReactElement {
   const replaceWithImport = (slotId: string, asset: BackgroundAsset): void => {
     setRegistry((current) => importIntoSlot(current, slotId, asset))
     setPendingReplace(null)
-    toast.success(`Imported ${asset.name}.`)
   }
 
   return (
