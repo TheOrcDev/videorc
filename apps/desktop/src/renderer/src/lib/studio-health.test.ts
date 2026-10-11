@@ -33,19 +33,24 @@ describe('studioHealth', () => {
     expect(studioHealth(stats(), false)).toMatchObject({ tone: 'good', value: 'Ready' })
   })
 
-  it('degrades to "Preview may not match recording" on CPU fallback', () => {
+  it('degrades to "The preview may not match your recording" on CPU fallback', () => {
     const result = studioHealth(stats({ compositorBackend: 'cpu-fallback' }), false)
     expect(result.tone).toBe('error')
     expect(result.value).toBe('Degraded')
-    expect(result.detail).toContain('Preview may not match recording')
+    expect(result.detail).toContain('The preview may not match your recording.')
   })
 
-  it('includes the fallback reason in the degraded detail when known', () => {
+  // Plan 174 S3.18: the reason is engineering text; Health's Technical
+  // details show it, and the Studio alert opens Health.
+  it('keeps the raw fallback reason out of the degraded detail', () => {
     const result = studioHealth(
       stats({ compositorBackend: 'cpu-fallback', compositorFallbackReason: 'Metal disabled' }),
       true
     )
-    expect(result.detail).toBe('Preview may not match recording: Metal disabled')
+    expect(result.detail).toBe(
+      'The preview may not match your recording. Videorc is drawing it without the graphics card, so it can stutter.'
+    )
+    expect(result.detail).not.toContain('Metal disabled')
   })
 
   it('degrades when CPU fallback frames appear mid-recording even if the backend label is metal', () => {

@@ -51,8 +51,9 @@ describe('Electron IPC contract', () => {
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
     // 130: plan 169 D10 retired buddy-assets:import-image (no per-state uploads).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(130)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(130)
+    // 131: plan 174 S3.18 adds resource:reveal-support-bundle (Show in Finder).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(131)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(131)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

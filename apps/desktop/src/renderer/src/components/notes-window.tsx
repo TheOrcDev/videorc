@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
+import { ErrorIcon } from '@/components/icons'
 import { PinWindowButton } from '@/components/pin-window-button'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Textarea } from '@/components/ui/textarea'
 import { WindowHeader } from '@/components/window-frame'
 import type { NotesFontScale, NotesWindowState } from '@/lib/backend'
+import { plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { MAX_NOTES_TEXT_LENGTH } from '../../../shared/notes-limits'
 import { WINDOW_NAMES } from '../../../shared/window-names'
@@ -14,16 +17,31 @@ import { WINDOW_NAMES } from '../../../shared/window-names'
 // renderer window on the same glass, header and controls as Chat and Captions.
 // It is capture-protected by main (never in a recording) and follows the app theme.
 // It says so, and says it loudly when main could not hide it (plan 174 I-2).
+// The header carries the title only; text size and Keep on top sit in the
+// footer status line (plan 174 S3.19).
 
 const SAVE_DELAY_MS = 120
 
-export type NotesSaveStatus =
-  | 'Saved'
-  | 'Saving'
-  | 'Unsaved'
-  | 'Save failed'
-  | 'Pin unavailable'
-  | 'Pin failed'
+/** Where the notes are: written to disk, on their way, or not saved. */
+export type NotesSaveState = 'saved' | 'saving' | 'failed'
+
+/**
+ * The footer's save word. Visual only (plan 174 I-24): a live region here
+ * announced every keystroke. A failure gets its own status line with Retry.
+ */
+export const NOTES_SAVE_LABELS: Record<NotesSaveState, string> = {
+  saved: 'Saved',
+  saving: 'Saving…',
+  failed: 'Not saved'
+}
+
+/** Why Keep on top didn't take, said beside the pin. */
+export type NotesPinError = 'failed' | 'unavailable'
+
+const PIN_ERROR_LABELS: Record<NotesPinError, string> = {
+  failed: "Couldn't keep on top",
+  unavailable: "Keep on top isn't available"
+}
 
 // The Textarea is plain text-sm (plan 174 S1.8, J1-10), so one size wins.
 const FONT_SIZE_CLASS: Record<NotesFontScale, string> = {
@@ -32,10 +50,12 @@ const FONT_SIZE_CLASS: Record<NotesFontScale, string> = {
   lg: 'text-[32px]'
 }
 
+// Full names (plan 174 I-24): each size is named "Small text" and so on; the
+// visible word drops "text" so the footer fits the 360 px minimum width.
 const FONT_SCALE_OPTIONS: SegmentedControlOption<NotesFontScale>[] = [
-  { value: 'sm', label: 'S', 'aria-label': 'Small text' },
-  { value: 'md', label: 'M', 'aria-label': 'Medium text' },
-  { value: 'lg', label: 'L', 'aria-label': 'Large text' }
+  { value: 'sm', label: 'Small', 'aria-label': 'Small text' },
+  { value: 'md', label: 'Medium', 'aria-label': 'Medium text' },
+  { value: 'lg', label: 'Large', 'aria-label': 'Large text' }
 ]
 
 export function notesWordCount(text: string): number {
@@ -60,7 +80,8 @@ export function NotesWindow({
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   // Main's capture exclusion (`NotesWindowState.protected`); null until it reports.
   const [captureProtected, setCaptureProtected] = useState<boolean | null>(null)
-  const [status, setStatus] = useState<NotesSaveStatus>('Saved')
+  const [saveState, setSaveState] = useState<NotesSaveState>('saved')
+  const [pinError, setPinError] = useState<NotesPinError | null>(null)
   const [loaded, setLoaded] = useState(false)
   const textRef = useRef(text)
   const fontScaleRef = useRef(fontScale)
@@ -74,20 +95,20 @@ export function NotesWindow({
       window.clearTimeout(saveTimerRef.current)
       saveTimerRef.current = null
     }
-    setStatus('Saving')
+    setSaveState('saving')
     try {
       await window.videorc?.saveNotesDocument?.({
         text: textRef.current,
         fontScale: fontScaleRef.current
       })
-      setStatus('Saved')
+      setSaveState('saved')
     } catch {
-      setStatus('Save failed')
+      setSaveState('failed')
     }
   }, [])
 
   const queueSave = (): void => {
-    setStatus('Unsaved')
+    setSaveState('saving')
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current)
     }
@@ -136,17 +157,24 @@ export function NotesWindow({
   const togglePin = (): void => {
     const setPinned = window.videorc?.setNotesWindowAlwaysOnTop
     if (!setPinned) {
-      setStatus('Pin unavailable')
+      setPinError('unavailable')
       return
     }
     const next = !alwaysOnTop
     setAlwaysOnTop(next)
+    setPinError(null)
     void setPinned(next)
       .then((state) => state && setAlwaysOnTop(state.alwaysOnTop))
       .catch(() => {
         setAlwaysOnTop(!next)
-        setStatus('Pin failed')
+        setPinError('failed')
       })
+    textareaRef.current?.focus()
+  }
+
+  const retrySave = (): void => {
+    void save()
+    // The line and its button go while it saves: writing picks up again.
     textareaRef.current?.focus()
   }
 
@@ -155,25 +183,7 @@ export function NotesWindow({
 
   return (
     <div className="flex h-full flex-col text-foreground" data-smoke-marker={smokeMarker}>
-      <WindowHeader className={marker} title={WINDOW_NAMES.notes}>
-        {/* SegmentedControl has no Radix, so it splits no shared chunk the main
-            window loads eagerly (asset budget). A pick goes back to writing. */}
-        <SegmentedControl
-          activationMode="manual"
-          aria-label="Text size"
-          className={cn('[-webkit-app-region:no-drag]', marker)}
-          options={FONT_SCALE_OPTIONS}
-          size="sm"
-          value={fontScale}
-          onValueChange={(scale) => {
-            setFontScale(scale)
-            fontScaleRef.current = scale
-            queueSave()
-            textareaRef.current?.focus()
-          }}
-        />
-        <PinWindowButton className={marker} pinned={alwaysOnTop} onPinnedChange={togglePin} />
-      </WindowHeader>
+      <WindowHeader className={marker} title={WINDOW_NAMES.notes} />
       <Textarea
         ref={textareaRef}
         aria-label="Notes for this recording"
@@ -218,21 +228,85 @@ export function NotesWindow({
           </Alert>
         </div>
       ) : null}
+      {/* A save that failed, said once (role="status") with its fix. The
+          wrapper stays mounted so the line is announced when it appears. */}
+      <div className="shrink-0" data-testid="notes-save-failure" role="status">
+        {saveState === 'failed' ? (
+          <div
+            className={cn(
+              'flex items-center gap-2 border-t border-border py-1 pr-1.5 pl-3 text-xs text-foreground',
+              marker
+            )}
+          >
+            <ErrorIcon aria-hidden className="size-3.5 shrink-0 text-destructive" weight="fill" />
+            <span className="min-w-0 flex-1">
+              Couldn&apos;t save your notes. Your text is still here.
+            </span>
+            <Button
+              className="[-webkit-app-region:no-drag]"
+              size="xs"
+              type="button"
+              variant="outline"
+              onClick={retrySave}
+            >
+              Retry
+            </Button>
+          </div>
+        ) : null}
+      </div>
       <footer
         className={cn(
-          'flex h-6 shrink-0 items-center gap-3 border-t border-border px-3 text-[11px] text-muted-foreground select-none',
+          'flex h-status-bar shrink-0 items-center gap-3 border-t border-border pr-1.5 pl-3 text-[11px] text-muted-foreground select-none',
           marker
         )}
       >
-        <span>
-          {words} {words === 1 ? 'word' : 'words'}
+        <span className="shrink-0">{plural(words, 'word')}</span>
+        <span className="shrink-0" data-testid="notes-save-state">
+          {NOTES_SAVE_LABELS[saveState]}
         </span>
-        <span aria-live="polite">{status}</span>
         {captureProtected ? (
-          <span className="ml-auto min-w-0 truncate" data-testid="notes-capture-hidden">
+          <span className="min-w-0 truncate" data-testid="notes-capture-hidden">
             Hidden from recordings and streams
           </span>
         ) : null}
+        <div className="ml-auto flex shrink-0 items-center">
+          {/* SegmentedControl has no Radix, so it splits no shared chunk the
+              main window loads eagerly (asset budget). A pick goes back to
+              writing. */}
+          <SegmentedControl
+            activationMode="manual"
+            aria-label="Text size"
+            className={marker}
+            options={FONT_SCALE_OPTIONS}
+            size="sm"
+            value={fontScale}
+            onValueChange={(scale) => {
+              setFontScale(scale)
+              fontScaleRef.current = scale
+              queueSave()
+              textareaRef.current?.focus()
+            }}
+          />
+          {/* A pin that didn't take says so beside the pin. */}
+          <span
+            className="ml-2 flex items-center gap-1 text-foreground empty:ml-0"
+            data-testid="notes-pin-error"
+            role="status"
+          >
+            {pinError ? (
+              <>
+                <ErrorIcon aria-hidden className="size-3 shrink-0 text-destructive" weight="fill" />
+                {PIN_ERROR_LABELS[pinError]}
+              </>
+            ) : null}
+          </span>
+          <PinWindowButton
+            className={cn('ml-1', marker)}
+            pinned={alwaysOnTop}
+            variant="status-bar"
+            onPinnedChange={togglePin}
+          />
+        </div>
       </footer>
     </div>
   )

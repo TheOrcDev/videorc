@@ -28,6 +28,7 @@ import {
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { BUDDY_TABS } from '@/lib/buddy-tabs'
 import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
+import { HEALTH_SEARCH_KEYWORDS } from '@/lib/health-door'
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import { SETTINGS_TABS } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
@@ -114,6 +115,9 @@ export function CommandPalette({
               <CommandItem
                 key={tab.id}
                 value={`Go to ${tab.label}`}
+                // Health is out of the sidebar (plan 174 D9): ⌘K finds it by
+                // what people look for there.
+                keywords={tab.id === 'diagnostics' ? [...HEALTH_SEARCH_KEYWORDS] : undefined}
                 onSelect={() => run(() => setActive(tab.id))}
               >
                 <tab.icon className="size-4" />

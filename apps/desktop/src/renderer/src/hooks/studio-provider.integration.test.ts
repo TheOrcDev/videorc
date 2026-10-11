@@ -1481,6 +1481,19 @@ class StudioBackend {
       case 'performance.check.get':
         // Measured and current: the provider must not start a check on mount.
         return this.performanceCheck
+      case 'diagnostics.supportBundle.export':
+        return {
+          path: 'C:\\Videorc\\support-bundles\\videorc-support-bundle-20261011-093000Z.json',
+          includedSections: [],
+          redactionSummary: {
+            secretValues: 0,
+            databasePaths: 0,
+            mediaPaths: 0,
+            homePaths: 0,
+            urlCredentials: 0,
+            aiArtifactBodies: 0
+          }
+        }
       case 'encoder.preference.get':
         return { preference: 'auto', quickSyncAvailable: false, envOverride: false }
       case 'encoder.preference.set':
@@ -3175,6 +3188,44 @@ describe('real StudioProvider lifecycle', () => {
       JSON.parse(localStorage.getItem(STORAGE_KEYS.captureConfig) ?? '{}').audio.microphoneMuted
     ).toBe(false)
     expect(releaseWrites.slice(0, 2)).toEqual(['unmuted config', 'ownership removed'])
+  })
+
+  // Plan 174 S3.18 (I-1): the bundle lands in a folder Finder hides, so the
+  // export toast reveals it, through main, by the path the export returned.
+  it('offers to show an exported support bundle in the file manager', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const revealSupportBundle = vi.fn(async (_path: string) => {})
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      revealSupportBundle
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      await observations.at(-1)!.core.exportSupportBundle()
+    })
+    const exported = toastSpies.success.mock.calls.find(
+      ([title]) => title === 'Support bundle exported'
+    )
+    expect(exported?.[1]).toMatchObject({
+      description: 'videorc-support-bundle-20261011-093000Z.json',
+      action: { label: 'Show in Explorer' }
+    })
+    await act(async () => exported![1].action.onClick())
+    expect(revealSupportBundle).toHaveBeenCalledExactlyOnceWith(
+      'C:\\Videorc\\support-bundles\\videorc-support-bundle-20261011-093000Z.json'
+    )
   })
 
   it('shows one persistent recovery error when an active recording fails', async () => {
@@ -13971,6 +14022,7 @@ function createVideorcApi(options: {
   acknowledgeProvider: (id: string) => Promise<boolean>
   openSession?: (sessionId: string) => Promise<string>
   revealSession?: (sessionId: string) => Promise<void>
+  revealSupportBundle?: VideorcApi['revealSupportBundle']
   setPreviewAspectRatio?: (width: number, height: number) => Promise<void>
   nativePreview?: {
     getWindowState: () => PreviewWindowState
@@ -14078,6 +14130,7 @@ function createVideorcApi(options: {
       getCaptionLines: async () => null,
       openSession: options.openSession ?? (async () => ''),
       revealSession: options.revealSession ?? (async () => {}),
+      revealSupportBundle: options.revealSupportBundle ?? (async () => {}),
       getUpdateStatus: async () => ({ phase: 'unsupported' }),
       onBackendConnection: (callback: (value: unknown) => void) =>
         subscribe('backend:connection', callback),

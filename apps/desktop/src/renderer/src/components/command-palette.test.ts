@@ -163,3 +163,17 @@ describe('CommandPalette windows (plan 174 S2.3a, A-11)', () => {
     expect(mocked.core.openNotesWindow).not.toHaveBeenCalled()
   })
 })
+
+describe('CommandPalette Health door (plan 174 D9)', () => {
+  it('finds Health by what people look for there', async () => {
+    await render()
+    const input = document.querySelector<HTMLInputElement>('[cmdk-input]')!
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => {
+      setValue.call(input, 'support bundle')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(labels()).toContain('Health')
+    expect(labels()).not.toContain('Library')
+  })
+})

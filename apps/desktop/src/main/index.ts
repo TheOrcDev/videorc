@@ -275,6 +275,7 @@ import {
   type DeferredPermissionRestartState
 } from './deferred-permission-restart'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
+import { supportBundleRevealPath } from './support-bundle-reveal'
 import {
   BUDDY_LIBRARY_CACHE_DIR,
   isBuddyPersonaId,
@@ -13347,6 +13348,14 @@ async function grantSessionMedia(
   return { url: issued.url, expiresAt: issued.expiresAt }
 }
 
+// Show in Finder for an exported support bundle (plan 174 S3.18). The
+// backend's admin health reply names its database, and bundles live in
+// `support-bundles` beside it; anything else is refused.
+async function revealSupportBundle(path: unknown): Promise<void> {
+  const health = await requestBackendAdmin<{ databasePath?: unknown }>('health.ping', {}, 10_000)
+  shell.showItemInFolder(supportBundleRevealPath(path, health?.databasePath))
+}
+
 async function revealManagedBackground(assetId: unknown): Promise<void> {
   if (typeof assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(assetId)) {
     throw new Error('Managed background asset id is invalid.')
@@ -14497,6 +14506,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('resource:reveal-background', (_event, assetId: unknown) =>
     revealManagedBackground(assetId)
+  )
+  secureIpcHandle('resource:reveal-support-bundle', (_event, path: unknown) =>
+    revealSupportBundle(path)
   )
   // OBS setup import (O1): read-only discovery over OBS Studio's config files.
   // The stream key never rides these payloads — obs:read strips it; the apply

@@ -10,7 +10,8 @@ import {
   SessionTransport,
   TakeoverSection
 } from '@/components/studio/session-panel'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
@@ -22,6 +23,7 @@ import {
 import { videoProfileCompatibility } from '@/lib/capture'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
+import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
 import {
@@ -296,6 +298,12 @@ function StudioPreviewPanel(): ReactElement {
             {previewHealth.detail}
           </p>
         </AlertDescription>
+        {/* The door to Health (plan 174 D9): the details live there. */}
+        <AlertAction>
+          <Button size="xs" type="button" variant="outline" onClick={openHealth}>
+            {OPEN_HEALTH_LABEL}
+          </Button>
+        </AlertAction>
       </Alert>
     ) : null
 
