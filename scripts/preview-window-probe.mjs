@@ -716,7 +716,8 @@ async function runPassThroughScenario() {
       return {
         sourceId: chosen.getAttribute('data-videorc-stage-source'),
         index,
-        sourceName: toggles[index]?.getAttribute('title') ?? null,
+        // The chip's visible name (plan 174 S1.10 dropped its native title).
+        sourceName: toggles[index]?.textContent?.trim() || null,
         sourceCount: sources.length,
         center: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
         selectedBefore

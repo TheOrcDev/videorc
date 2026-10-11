@@ -3,11 +3,13 @@ import * as React from 'react'
 import { cn } from '@/lib/utils'
 import { useFieldLabelledBy } from '@/components/ui/field-context'
 import { tabsListVariants, tabsTriggerBaseClassName } from '@/components/ui/tabs-variants'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 /**
  * One segmented control (plan 174 S1.7, D13): pick one of 2–4 exclusive
- * options. It wears the Tabs track (`tabsListVariants`) without Radix, so it
- * costs the initial bundle nothing and works in every window.
+ * options. It wears the Tabs track (`tabsListVariants`) without Radix Tabs, so
+ * it costs the initial bundle nothing and works in every window (an icon
+ * option's `tooltip` uses the Tooltip every window already loads).
  *
  * Which control when:
  * - `SegmentedControl` chooses a value (Theme, Fit, Corner, Kind of cut).
@@ -49,6 +51,11 @@ type SegmentedControlOption<T extends string = string> = SegmentButtonProps &
     value: T
     label: React.ReactNode
     disabled?: boolean
+    /**
+     * The option's name on hover and on focus, for an option drawn as an icon
+     * (plan 174 S1.10): never a native `title`.
+     */
+    tooltip?: React.ReactNode
   }
 
 type SegmentedControlProps<T extends string = string> = Omit<
@@ -162,10 +169,11 @@ function SegmentedControl<T extends string>({
           disabled: _optionDisabled,
           className: optionClassName,
           onClick: onOptionClick,
+          tooltip,
           ...buttonProps
         } = option
         const checked = index === checkedIndex
-        return (
+        const button = (
           <button
             {...buttonProps}
             key={optionValue}
@@ -192,6 +200,14 @@ function SegmentedControl<T extends string>({
           >
             {label}
           </button>
+        )
+        if (!tooltip) return button
+        // The button's own data-state ("on"/"off") wins over the trigger's.
+        return (
+          <Tooltip key={optionValue}>
+            <TooltipTrigger asChild>{button}</TooltipTrigger>
+            <TooltipContent>{tooltip}</TooltipContent>
+          </Tooltip>
         )
       })}
     </div>

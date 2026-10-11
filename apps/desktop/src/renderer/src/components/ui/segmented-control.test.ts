@@ -270,6 +270,30 @@ describe('SegmentedControl', () => {
     expect(vertical.getAttribute('aria-checked')).toBe('true')
   })
 
+  it('names an icon option on hover and focus with a tooltip, never a title (S1.10)', async () => {
+    await render(
+      h(SegmentedControl<'h' | 'v'>, {
+        'aria-label': 'Orientation',
+        options: [
+          { value: 'h', label: h('svg'), 'aria-label': 'Horizontal', tooltip: 'Horizontal · 16:9' },
+          { value: 'v', label: h('svg'), 'aria-label': 'Vertical', tooltip: 'Vertical · 9:16' }
+        ],
+        value: 'v',
+        onValueChange: () => undefined
+      })
+    )
+    const radios = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+    expect(radios).toHaveLength(2)
+    // The segment keeps its own on/off state under the tooltip trigger.
+    expect(radios.map((radio) => radio.dataset.state)).toEqual(['off', 'on'])
+    expect(radios.some((radio) => radio.hasAttribute('title'))).toBe(false)
+    expect(radios[0].hasAttribute('tooltip')).toBe(false)
+    await act(async () => radios[1].focus())
+    expect(document.querySelector('[data-slot="tooltip-content"]')?.textContent).toContain(
+      'Vertical · 9:16'
+    )
+  })
+
   it('says why it is disabled, and describes the group with the reason', async () => {
     const reason = 'The canvas is fixed while you record or stream.'
     const changes: Theme[] = []

@@ -124,13 +124,13 @@ const SCENE_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = [
     value: 'horizontal',
     label: <DisplayIcon />,
     'aria-label': 'Horizontal (16:9)',
-    title: 'Horizontal · 16:9'
+    tooltip: 'Horizontal · 16:9'
   },
   {
     value: 'vertical',
     label: <MobileIcon />,
     'aria-label': 'Vertical (9:16)',
-    title: 'Vertical · 9:16'
+    tooltip: 'Vertical · 9:16'
   }
 ]
 

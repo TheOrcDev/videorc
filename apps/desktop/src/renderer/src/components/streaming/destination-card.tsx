@@ -34,6 +34,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Field, FieldDescription, FieldError, FieldLabel } from '@/components/ui/field'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -45,6 +46,7 @@ import {
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type {
   OAuthProviderCredentialStatus,
   PlatformAccount,
@@ -1096,14 +1098,12 @@ function OAuthAccountPanel({
           <span className="flex min-w-0 items-center gap-2">
             <span className="truncate text-sm font-medium">{account.accountLabel}</span>
             {status === 'ok' ? (
-              <span
-                aria-label="Connected"
-                className="flex shrink-0"
-                role="img"
-                title={validation?.message}
-              >
-                <StatusDot tone="good" />
-              </span>
+              // The last account check, on hover and on focus (S1.10).
+              <InfoTooltip className="shrink-0" content={validation?.message}>
+                <span aria-label="Connected" className="flex shrink-0" role="img">
+                  <StatusDot tone="good" />
+                </span>
+              </InfoTooltip>
             ) : null}
           </span>
           <span className="truncate text-xs text-muted-foreground">
@@ -1111,9 +1111,11 @@ function OAuthAccountPanel({
           </span>
         </div>
         {status === 'reconnect' ? (
-          <span className="flex shrink-0" title={validation?.message}>
-            <StatusBadge tone="warn" value="Needs reconnect" />
-          </span>
+          <InfoTooltip className="shrink-0" content={validation?.message}>
+            <span className="flex shrink-0">
+              <StatusBadge tone="warn" value="Needs reconnect" />
+            </span>
+          </InfoTooltip>
         ) : null}
         {status === 'reconnect' ? (
           <Button disabled={disabled} size="sm" variant="outline" onClick={connect}>
@@ -1209,16 +1211,23 @@ function OAuthAccountPanel({
                 ))}
               </SelectContent>
             </Select>
-            <Button
-              aria-label="Refresh channels"
-              disabled={disabled || youtubeChannelsLoading}
-              size="icon-sm"
-              title="Refresh channels"
-              variant="outline"
-              onClick={() => void onRefreshYouTubeChannels(account.accountId)}
-            >
-              <SyncIcon className={cn(youtubeChannelsLoading && 'animate-spin')} weight="bold" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="Refresh channels"
+                  disabled={disabled || youtubeChannelsLoading}
+                  size="icon-sm"
+                  variant="outline"
+                  onClick={() => void onRefreshYouTubeChannels(account.accountId)}
+                >
+                  <SyncIcon
+                    className={cn(youtubeChannelsLoading && 'animate-spin')}
+                    weight="bold"
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Refresh channels</TooltipContent>
+            </Tooltip>
           </div>
         </Field>
       ) : null}
@@ -1257,14 +1266,14 @@ function OAuthAccountPanel({
             <div className="flex flex-wrap items-center gap-2">
               {xNativeCapability.state === 'needs-authorization' ||
               xNativeCapability.state === 'account-mismatch' ? (
-                <Button
-                  disabled={disabled}
-                  size="sm"
-                  title="Opens x.com to approve live broadcasting for this account."
-                  onClick={() => void onAuthorizeXLive()}
+                <InfoTooltip
+                  content="Opens x.com to approve live broadcasting for this account."
+                  focusable={false}
                 >
-                  Authorize X Live
-                </Button>
+                  <Button disabled={disabled} size="sm" onClick={() => void onAuthorizeXLive()}>
+                    Authorize X Live
+                  </Button>
+                </InfoTooltip>
               ) : null}
               <Button disabled={disabled} size="sm" variant="outline" onClick={onUseManualRtmp}>
                 Use a stream key instead

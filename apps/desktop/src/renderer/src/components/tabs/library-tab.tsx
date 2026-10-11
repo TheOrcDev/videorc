@@ -41,6 +41,7 @@ import { PANE_OWNS_SCROLL, PaneStrip } from '@/components/pane'
 import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { DisabledReason } from '@/components/ui/disabled-reason'
@@ -1042,9 +1043,10 @@ function LibraryRow({
               {finalizingBadgeLabel(session)}
             </Badge>
           ) : exportFailed ? (
-            <Badge title={session.finalizationError} variant="destructive">
-              MP4 failed
-            </Badge>
+            // Why the export failed, on hover and on focus (plan 174 S1.10, E-23).
+            <InfoTooltip content={session.finalizationError} tabIndex={active ? 0 : -1}>
+              <Badge variant="destructive">MP4 failed</Badge>
+            </InfoTooltip>
           ) : format ? (
             // The container is a fact, not a status: a tag (E-21).
             <Badge variant="outline">{format}</Badge>

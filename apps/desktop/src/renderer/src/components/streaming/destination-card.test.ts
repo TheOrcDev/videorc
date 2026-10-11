@@ -128,7 +128,13 @@ function render(props: {
 
 /** Visible text only: a raw provider message may live in a title, never inline. */
 function visibleText(markup: string): string {
-  return markup.replace(/<[^>]*>/g, ' ')
+  // A hidden description (a tooltip's text) is not on screen.
+  return markup.replace(/<span[^>]*\shidden=""[^>]*>[^<]*<\/span>/g, ' ').replace(/<[^>]*>/g, ' ')
+}
+
+/** The hover-and-focus explanation of a chip (InfoTooltip, plan 174 S1.10). */
+function explanation(markup: string): string | undefined {
+  return /data-slot="info-tooltip-text"[^>]*>([^<]*)</.exec(markup)?.[1]
 }
 
 afterEach(() => {
@@ -228,7 +234,8 @@ describe('DestinationCard signed-in account', () => {
     for (const scope of TWITCH_ALL_SCOPES) expect(markup).not.toContain(scope)
     expect(markup).not.toContain('Validated')
     expect(visibleText(markup)).not.toContain('Account access is valid.')
-    expect(markup).toContain('title="Account access is valid."')
+    expect(explanation(markup)).toBe('Account access is valid.')
+    expect(markup).not.toContain('title="Account access is valid."')
     expect(markup).toContain('aria-label="Connected"')
     expect(visibleText(markup)).toContain('Disconnect')
     expect(markup).not.toContain('Needs reconnect')
@@ -260,7 +267,7 @@ describe('DestinationCard signed-in account', () => {
     )
     expect(markup).toContain('>Reconnect<')
     expect(visibleText(markup)).not.toContain('invalid_grant')
-    expect(markup).toContain('invalid_grant')
+    expect(explanation(markup)).toBe(raw)
   })
 
   it('shows no status dot before the account was checked', () => {

@@ -156,8 +156,10 @@ describe('Ready to go live', () => {
     expect(markup).toContain('Couldn&#x27;t check')
     expect(markup).toContain('Go Live checks again when you start.')
     expect(markup).toContain('Retry')
-    // The raw probe message is one hover away, not inline.
-    expect(markup).toContain('title="ffmpeg probe exited 1"')
+    // The raw probe message is one hover or focus away, not inline, and never
+    // a native title (plan 174 S1.10).
+    expect(markup).toMatch(/data-slot="info-tooltip-text"[^>]*>ffmpeg probe exited 1</)
+    expect(markup).not.toContain('title=')
   })
 
   it('says the quality once when every destination streams the same thing', () => {
@@ -182,9 +184,9 @@ describe('qualitySummary', () => {
       { target: target('instagram', 'Instagram'), video: vertical }
     ])
     expect(summary.text).toBe('Varies by destination')
-    expect(summary.title).toContain('TikTok: 1080 × 1920 · 30 fps · 6 Mbps')
-    expect(summary.title).toContain('Instagram: 1080 × 1920')
-    expect(summary.title).not.toContain('Custom')
+    expect(summary.lines).toContain('TikTok: 1080 × 1920 · 30 fps · 6 Mbps')
+    expect(summary.lines?.some((line) => line.startsWith('Instagram: 1080 × 1920'))).toBe(true)
+    expect(summary.lines?.join('\n')).not.toContain('Custom')
   })
 })
 

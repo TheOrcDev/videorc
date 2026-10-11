@@ -1,6 +1,7 @@
 import { AppIcon, ChevronRightIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 /**
@@ -14,15 +15,18 @@ export function NavigableRow({
   icon: RowIcon,
   label,
   value,
-  title,
+  hint,
   className,
   onNavigate
 }: {
   icon?: AppIcon
   label: string
   value: ReactNode
-  /** Native tooltip for a row whose value summarises more facts. */
-  title?: string
+  /**
+   * The facts a summarised value stands for, on hover and on focus (plan 174
+   * S1.10): only on a row that navigates, since only a button takes focus.
+   */
+  hint?: ReactNode
   className?: string
   /** When set, the row is a button that jumps to the value's one true home. */
   onNavigate?: () => void
@@ -47,24 +51,41 @@ export function NavigableRow({
   )
 
   if (onNavigate) {
-    return (
+    const button = (
       <button
         className={cn(
           rowClassName,
           'outline-hidden transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset'
         )}
         data-slot="navigable-row"
-        title={title}
         type="button"
         onClick={onNavigate}
       >
         {body}
       </button>
     )
+    if (!hint) return button
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>{button}</TooltipTrigger>
+        <TooltipContent align="start">{hint}</TooltipContent>
+      </Tooltip>
+    )
   }
   return (
-    <div className={rowClassName} data-slot="navigable-row" title={title}>
+    <div className={rowClassName} data-slot="navigable-row">
       {body}
     </div>
+  )
+}
+
+/** A hint of several facts, one per line (the tooltip lays out a row by default). */
+export function NavigableRowHintLines({ lines }: { lines: readonly string[] }): ReactElement {
+  return (
+    <span className="flex flex-col gap-0.5">
+      {lines.map((line, index) => (
+        <span key={`${index}-${line}`}>{line}</span>
+      ))}
+    </span>
   )
 }

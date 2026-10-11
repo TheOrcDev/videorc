@@ -14,6 +14,7 @@ import { PanelSection } from '@/components/panel-section'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
@@ -180,7 +181,10 @@ export function QuickSettings(): ReactElement {
   )
 }
 
-/** Short state beside the switch; the full health copy lives in its tooltip. */
+/**
+ * Short state beside the switch; the full health copy is its tooltip and its
+ * description, on hover and on focus (plan 174 S1.10).
+ */
 export function SystemAudioInspectorValue({
   view,
   platform,
@@ -203,35 +207,28 @@ export function SystemAudioInspectorValue({
       {view.permissionRequired ? (
         // The row is narrow: the permission route replaces the (disabled)
         // switch here; the mixer and Sources show both.
-        <Button
-          className="min-w-0"
-          size="xs"
-          title="System audio needs Screen Recording permission."
-          variant="ghost"
-          onClick={onOpenPermissions}
-        >
-          <span className="truncate">Needs permission</span>
-        </Button>
+        <InfoTooltip content="System audio needs Screen Recording permission." focusable={false}>
+          <Button className="min-w-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
+            <span className="truncate">Needs permission</span>
+          </Button>
+        </InfoTooltip>
       ) : (
         <>
           {view.issue === 'echo' ? (
-            // The row is narrow: Resume replaces the status; its title says why.
-            <Button
-              className="min-w-0"
-              size="xs"
-              title={systemAudioIssueCopy('echo', platform)}
-              variant="ghost"
-              onClick={onResume}
-            >
-              <span className="truncate">Resume</span>
-            </Button>
+            // The row is narrow: Resume replaces the status; its tooltip and
+            // description say why.
+            <InfoTooltip content={systemAudioIssueCopy('echo', platform)} focusable={false}>
+              <Button className="min-w-0" size="xs" variant="ghost" onClick={onResume}>
+                <span className="truncate">Resume</span>
+              </Button>
+            </InfoTooltip>
           ) : (
-            <span
-              className="min-w-0 truncate text-sm font-medium"
-              title={view.issue ? systemAudioIssueCopy(view.issue, platform) : undefined}
+            <InfoTooltip
+              className="min-w-0"
+              content={view.issue ? systemAudioIssueCopy(view.issue, platform) : null}
             >
-              {status}
-            </span>
+              <span className="min-w-0 truncate text-sm font-medium">{status}</span>
+            </InfoTooltip>
           )}
           <Switch
             aria-label="System audio"
