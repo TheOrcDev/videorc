@@ -73,7 +73,11 @@ describe('Toolbar', () => {
   it('titles the toolbar with the one window title recipe: 14 px / 600', () => {
     expect(WINDOW_TITLE_CLASS).toContain('text-sm font-semibold text-foreground')
     const markup = renderToStaticMarkup(createElement(Toolbar, { title: 'Studio' }))
-    expect(markup).toContain(`<h1 class="${WINDOW_TITLE_CLASS}">Studio</h1>`)
+    // Focusable by script only (plan 174 S3.21, A-18): the shell moves the
+    // focus here after keyboard navigation.
+    expect(markup).toContain(
+      `<h1 class="${WINDOW_TITLE_CLASS} outline-none" tabindex="-1">Studio</h1>`
+    )
   })
 })
 

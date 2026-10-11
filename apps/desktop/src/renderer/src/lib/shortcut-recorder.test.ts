@@ -71,7 +71,7 @@ describe('shortcutRecorderStep', () => {
   it("refuses Videorc's own keys and names what they do (plan 174 I-17)", () => {
     expect(shortcutRecorderStep(press('KeyK', { meta: true }), 'darwin', free)).toEqual({
       type: 'reject',
-      message: "⌘K is Videorc's shortcut for “Search & commands”. Pick another."
+      message: "⌘K is Videorc's shortcut for “Search”. Pick another."
     })
     expect(shortcutRecorderStep(press('Digit1', { control: true }), 'win32', free)).toEqual({
       type: 'reject',

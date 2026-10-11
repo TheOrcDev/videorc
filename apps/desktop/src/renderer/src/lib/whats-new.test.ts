@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
 
 import {
   changelogPlatformForRuntime,
+  checkWhatsNew,
   fetchChangelogEntries,
   filterChangelogEntriesByPlatform,
   formatChangelogVersion,
+  markWhatsNewSeen,
   parseChangelogEntries,
-  resolveWhatsNewAction
+  resolveWhatsNewAction,
+  WHATS_NEW_STORAGE_KEY
 } from './whats-new'
 
 const entry = (
@@ -165,5 +168,79 @@ describe('formatChangelogVersion', () => {
   it('formats releaseIds for the dialog title', () => {
     expect(formatChangelogVersion('0.9.2-beta.1')).toBe('0.9.2 Beta 1')
     expect(formatChangelogVersion('1.0.0')).toBe('1.0.0')
+  })
+})
+
+// The hook's check, moved here so it loads on demand (plan 174 S3.21):
+// the dialog shows the newest release and names the ones skipped on the
+// way (A-19).
+describe('checkWhatsNew', () => {
+  const fakeStore = (
+    lastSeen: string | null
+  ): Map<string, string> & Pick<Storage, 'getItem' | 'setItem'> => {
+    const store = new Map<string, string>() as Map<string, string> &
+      Pick<Storage, 'getItem' | 'setItem'>
+    if (lastSeen !== null) store.set(WHATS_NEW_STORAGE_KEY, lastSeen)
+    store.getItem = (key) => store.get(key) ?? null
+    store.setItem = (key, value) => void store.set(key, value)
+    return store
+  }
+  const answering = (entries: unknown[]): typeof fetch =>
+    (async () => new Response(JSON.stringify({ entries }), { status: 200 })) as typeof fetch
+
+  it('initializes silently on the first run, and stays quiet on an unchanged version', async () => {
+    const first = fakeStore(null)
+    expect(
+      await checkWhatsNew({ version: '0.9.2', runtimePlatform: 'darwin', store: first })
+    ).toBeNull()
+    expect(first.getItem(WHATS_NEW_STORAGE_KEY)).toBe('0.9.2')
+    const same = fakeStore('0.9.2')
+    expect(
+      await checkWhatsNew({
+        version: '0.9.2',
+        runtimePlatform: 'darwin',
+        store: same,
+        fetchImpl: answering([entry('0.9.2')])
+      })
+    ).toBeNull()
+  })
+
+  it('returns the newest release and names the skipped ones, newest first', async () => {
+    const store = fakeStore('0.9.0')
+    const found = await checkWhatsNew({
+      version: '0.9.3',
+      runtimePlatform: 'darwin',
+      store,
+      fetchImpl: answering([entry('0.9.3'), entry('0.9.2'), entry('0.9.1')])
+    })
+    expect(found?.entry.version).toBe('0.9.3')
+    expect(found?.skippedVersions).toEqual(['0.9.2', '0.9.1'])
+    // Seen only once the dialog is dismissed.
+    expect(store.getItem(WHATS_NEW_STORAGE_KEY)).toBe('0.9.0')
+    markWhatsNewSeen('0.9.3', store)
+    expect(store.getItem(WHATS_NEW_STORAGE_KEY)).toBe('0.9.3')
+  })
+
+  it('marks a good empty answer as seen, and leaves a failed fetch to retry next launch', async () => {
+    const empty = fakeStore('0.9.0')
+    expect(
+      await checkWhatsNew({
+        version: '0.9.3',
+        runtimePlatform: 'darwin',
+        store: empty,
+        fetchImpl: answering([])
+      })
+    ).toBeNull()
+    expect(empty.getItem(WHATS_NEW_STORAGE_KEY)).toBe('0.9.3')
+    const failed = fakeStore('0.9.0')
+    expect(
+      await checkWhatsNew({
+        version: '0.9.3',
+        runtimePlatform: 'darwin',
+        store: failed,
+        fetchImpl: (async () => new Response('nope', { status: 503 })) as typeof fetch
+      })
+    ).toBeNull()
+    expect(failed.getItem(WHATS_NEW_STORAGE_KEY)).toBe('0.9.0')
   })
 })

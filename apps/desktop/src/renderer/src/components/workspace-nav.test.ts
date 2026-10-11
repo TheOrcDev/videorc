@@ -10,6 +10,7 @@ import {
   shortcutDigitFor,
   sidebarOrderFor,
   workspaceTabLabel,
+  workspaceWindowTitle,
   type WorkspaceTab
 } from './workspace-nav'
 
@@ -114,6 +115,15 @@ describe('workspace navigation', () => {
     expect(rows.map((tab) => sidebarOrderFor(tab))).toEqual(rows.map((_, index) => index))
     // Health has no sidebar row.
     expect(sidebarOrderFor('diagnostics')).toBe(0)
+  })
+
+  // Plan 174 S3.21 (A-18): the window is named after its page, with no em
+  // dash (the copy rules).
+  it('titles the window after the page', () => {
+    expect(workspaceWindowTitle('studio')).toBe('Studio – Videorc')
+    expect(workspaceWindowTitle('recording')).toBe('Output – Videorc')
+    expect(workspaceWindowTitle('diagnostics')).toBe('Health – Videorc')
+    expect(workspaceWindowTitle('ai')).not.toContain('—')
   })
 
   it('classifies Assets and Captions as Studio panels and labels them', () => {
