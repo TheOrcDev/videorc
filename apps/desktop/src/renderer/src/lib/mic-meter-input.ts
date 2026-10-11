@@ -69,19 +69,21 @@ export function systemAudioMeterInput(input: {
  * once the OS has granted the mic, so only a real refusal may mention
  * permission. Since plan 093 it explains a microphone level with no live
  * reading (the Sources meter), where it used to explain a waveform preview.
+ * Plan 174 S3.8 (C-14): the fix for a refusal is the page's Microphone
+ * permission alert, so the line no longer points at Settings.
  */
 export function micLevelUnavailableCopy(reason: MicStreamFailureReason | undefined): string {
   switch (reason) {
     case 'permission-denied':
-      return "Videorc can't use this mic. Check Settings → Permissions."
+      return "Videorc doesn't have permission to use this microphone."
     case 'device-busy':
-      return "Another app is using this mic. Its level comes back when it's free. Recording still works."
+      return "Another app is using this microphone. Its level comes back when it's free. Recording still works."
     case 'no-label-match':
     case 'ambiguous-label':
     case 'labels-hidden':
     case 'device-missing':
     case 'overconstrained':
-      return 'No live level for this mic. Recording still works.'
+      return 'No live level for this microphone. Recording still works.'
     default:
       return 'Live level unavailable. Recording still works.'
   }

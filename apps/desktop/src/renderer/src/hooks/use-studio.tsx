@@ -1396,6 +1396,11 @@ export type StudioContextValue = {
   // actions
   /** `fresh` is for an explicit user Refresh: it never joins older in-flight work. */
   refreshBackend: (options?: { fresh?: boolean }) => Promise<void>
+  /**
+   * Sources' Refresh (plan 174 C-32): media access and `devices.list` only.
+   * Never joins a read that started before the click.
+   */
+  refreshDevices: () => Promise<void>
   loadMoreSessions: () => Promise<void>
   loadSessionDetails: (sessionId: string) => Promise<void>
   refreshEntitlements: () => Promise<void>
@@ -2172,6 +2177,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const providerOAuthCallbacksCompletedRef = useRef<Set<string>>(new Set())
   const bootstrapGenerationRef = useRef(0)
   const focusRefreshCoordinatorRef = useRef(new SingleFlightGeneration())
+  const deviceRefreshCoordinatorRef = useRef(new SingleFlightGeneration())
+  // Device lists commit in the order they were asked for: a full refresh that
+  // started earlier never overwrites a newer device-only Refresh.
+  const deviceListReadsRef = useRef({ issued: 0, committed: 0 })
   const [wsStatus, setWsStatus] = useState<WsStatus>('waiting')
   const wsStatusRef = useRef<WsStatus>('waiting')
   clientRef.current = client
@@ -6411,6 +6420,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ? sessionActivity(recordingRef.current)
       : undefined
     const focusRefreshCoordinator = focusRefreshCoordinatorRef.current
+    const deviceRefreshCoordinator = deviceRefreshCoordinatorRef.current
     const accountSnapshotCoordinator = accountSnapshotCoordinatorRef.current
     entitlementsRevisionRef.current += 1
     accountSnapshotCoordinator.invalidate()
@@ -6422,6 +6432,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const sessionDetailSingleFlight = sessionDetailSingleFlightRef.current
     const sessionDetailLiveEntries = sessionDetailLiveEntriesRef.current
     focusRefreshCoordinator.invalidate()
+    deviceRefreshCoordinator.invalidate()
     sessionListRefreshRequests.clear()
     sessionListMoreSingleFlight.clear()
     sessionListGenerationRef.current += 1
@@ -7919,6 +7930,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       disposed = true
       sessionRuntimeEpochRef.current += 1
       focusRefreshCoordinator.invalidate()
+      deviceRefreshCoordinator.invalidate()
       entitlementsRevisionRef.current += 1
       accountSnapshotCoordinator.invalidate()
       accountRefreshInFlightRef.current = null
@@ -8154,6 +8166,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sessionListMoreSingleFlightRef.current.invalidate('next-page')
           setSessionsLoadingMore(false)
           let accountFailure: { error: unknown } | null = null
+          const deviceRead = ++deviceListReadsRef.current.issued
           try {
             setLastError(null)
             const [
@@ -8218,7 +8231,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               return
             }
             setHealth(nextHealth)
-            setDeviceList(nextDevices)
+            if (deviceRead > deviceListReadsRef.current.committed) {
+              deviceListReadsRef.current.committed = deviceRead
+              setDeviceList(nextDevices)
+            }
             if (sessionListRefreshRequests.isCurrent('first-page', sessionListRequestToken)) {
               sessionListGenerationRef.current += 1
               setSessions(
@@ -8258,6 +8274,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshMediaAccess,
       reportError
     ]
+  )
+
+  // Sources' Refresh (plan 174 C-32): a full refresh ran 13 requests, and any
+  // unrelated failure (accounts, sessions) left the device list stale.
+  const refreshDevices = useCallback(
+    (): Promise<void> =>
+      deviceRefreshCoordinatorRef.current.runFresh(async (generationIsCurrent) => {
+        await refreshMediaAccess()
+        const activeClient = clientRef.current
+        if (!activeClient || wsStatusRef.current !== 'connected' || !generationIsCurrent()) {
+          return
+        }
+        const deviceRead = ++deviceListReadsRef.current.issued
+        try {
+          const nextDevices = await activeClient.request<DeviceList>('devices.list')
+          if (
+            generationIsCurrent() &&
+            clientRef.current === activeClient &&
+            deviceRead > deviceListReadsRef.current.committed
+          ) {
+            deviceListReadsRef.current.committed = deviceRead
+            setDeviceList(nextDevices)
+          }
+        } catch (error) {
+          if (generationIsCurrent() && clientRef.current === activeClient) {
+            reportError(error, { action: 'refresh', object: 'the device list' })
+          }
+        }
+      }),
+    [refreshMediaAccess, reportError]
   )
 
   const refreshEntitlements = useCallback(async (): Promise<void> => {
@@ -15963,6 +16009,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       lastError,
       runtimeInfo,
       refreshBackend,
+      refreshDevices,
       loadMoreSessions,
       loadSessionDetails,
       refreshEntitlements,
@@ -16206,6 +16253,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       lastError,
       runtimeInfo,
       refreshBackend,
+      refreshDevices,
       loadMoreSessions,
       loadSessionDetails,
       refreshEntitlements,

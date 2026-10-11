@@ -12,7 +12,10 @@ import type { SystemAudioSwitchView } from '@/lib/system-audio'
 export interface SourceStatus {
   label: string
   tone: StatusTone
-  /** The chip's tooltip: what to do about it. */
+  /**
+   * What to do about it, in words: a visible status line in the row's body
+   * (plan 174 C-10), never only a tooltip.
+   */
   hint?: string
 }
 
@@ -42,8 +45,8 @@ function notFound(kind: 'screen' | 'camera' | 'microphone'): SourceStatus {
     tone: 'warn',
     hint:
       kind === 'screen'
-        ? 'That screen or window is gone. Pick another.'
-        : 'It is not connected. Reconnect it, or pick another.'
+        ? 'That screen or window is gone. Choose another.'
+        : "It isn't connected. Reconnect it, or choose another."
   }
 }
 
@@ -67,7 +70,7 @@ export function videoSourceStatus(input: {
 }): SourceStatus | null {
   if (input.switching) return SWITCHING
   if (!input.selected) return null
-  const { state, frameAgeMs, message } = input.preview ?? {}
+  const { state, frameAgeMs } = input.preview ?? {}
   if (state === 'live') {
     if (
       input.kind === 'camera' &&
@@ -77,14 +80,16 @@ export function videoSourceStatus(input: {
       return {
         label: `Stale ${Math.round(frameAgeMs / 1000)}s`,
         tone: 'warn',
-        hint: 'No fresh frames. Re-select the source to restart it.'
+        hint: 'No fresh frames. Choose it again to restart it.'
       }
     }
     // Producing frames reads "Receiving" (plan 174 D4): "On air" is the livestream's alone.
     return { label: SOURCE_RECEIVING_LABEL, tone: 'good' }
   }
+  // The page's permission alert carries the fix (plan 174 C-8), so the chip
+  // adds no second line.
   if (state === 'permission-needed' || input.device === 'permission-required') {
-    return { label: 'Needs permission', tone: 'warn', hint: message }
+    return { label: 'Needs permission', tone: 'warn' }
   }
   // Only the device list says a source is gone. The preview's own
   // `source-missing` / `device-missing` is also its IDLE state (the backend's
@@ -95,8 +100,9 @@ export function videoSourceStatus(input: {
     return notFound(input.kind)
   }
   if (state === 'starting') return { label: 'Starting', tone: 'warn' }
+  // The preview's own message is raw text: it goes to Health, not the line.
   if (state === 'failed') {
-    return { label: 'Failed', tone: 'error', hint: message ?? 'Re-select the source to retry.' }
+    return { label: 'Failed', tone: 'error', hint: "Couldn't start it. Choose it again to retry." }
   }
   return null
 }
@@ -134,12 +140,13 @@ export function systemAudioStatus(
   >,
   sessionActive: boolean
 ): SourceStatus | null {
-  if (view.permissionRequired) return { label: 'Needs permission', tone: 'warn' }
-  if (view.issue === 'echo') {
+  // System audio rides on the Screen Recording grant, whose alert leads the
+  // page with the fix. An issue has its own alert in the row, so no hint.
+  if (view.permissionRequired) {
     return {
-      label: systemAudioIssueLabel('echo'),
+      label: 'Needs permission',
       tone: 'warn',
-      hint: 'Your stream came back as an echo.'
+      hint: 'Uses the Screen Recording permission. Turn it on above.'
     }
   }
   if (view.issue) return { label: systemAudioIssueLabel(view.issue), tone: 'warn' }
@@ -151,19 +158,16 @@ export function systemAudioStatus(
     : { label: 'On', tone: 'neutral' }
 }
 
+/** A backend warning about a permission: the page's curated alerts own those. */
+const PERMISSION_WARNING = /(camera|microphone|screen recording) permission/i
+
 /**
- * The device list's warnings, minus the permission ones the Video column
- * already shows with their fix ("Locked means disabled, with one reason"): the
- * backend says "Camera permission has not been granted yet…" while the column
- * says "Camera permission is required…" with its fix button.
+ * The device list's warnings that are not about a permission (plan 174 C-8).
+ * The curated permission alerts on Sources say those with their fix, and
+ * only for a source someone chose ("Locked means disabled, with one reason").
+ * What is left is raw backend text, so it lives in Health; Sources only says
+ * that something is there.
  */
-export function uncoveredDeviceWarnings(
-  warnings: readonly string[],
-  covered: { camera: boolean; screen: boolean }
-): string[] {
-  return warnings.filter(
-    (warning) =>
-      !(covered.camera && /camera permission/i.test(warning)) &&
-      !(covered.screen && /screen recording permission/i.test(warning))
-  )
+export function unknownDeviceWarnings(warnings: readonly string[] | undefined): string[] {
+  return (warnings ?? []).filter((warning) => !PERMISSION_WARNING.test(warning))
 }

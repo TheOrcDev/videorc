@@ -16,11 +16,13 @@ import { PanelSection } from '@/components/panel-section'
 import { SourceControlRow, SourceFacts, SourceItem } from '@/components/sources/source-item'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { MuteToggle } from '@/components/ui/channel-toggle'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Fader, FaderRange, FaderThumb, FaderTrack } from '@/components/ui/fader'
+import { SettingsRow } from '@/components/ui/field'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import {
   ParameterSlider,
@@ -68,6 +70,7 @@ import {
   type MeterInput
 } from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
+import { platformCopy } from '@/lib/platform-copy'
 import type { MicMonitorState } from '@/lib/state-labels'
 import {
   microphoneStatus,
@@ -99,9 +102,26 @@ const PARAMETER_THUMB =
 const MICROPHONE_GAIN_DETENTS = [0]
 const SYSTEM_AUDIO_GAIN_DETENTS = [SYSTEM_AUDIO_GAIN_DB_DEFAULT, 0]
 
+/** The microphone's Gain default: the readout resets to it (plan 174 C-38). */
+const MICROPHONE_GAIN_DB_DEFAULT = 0
+
 /**
- * A Sync change from the parameter slider. A reset restores the structural
- * default and clears the user-set flag, exactly as the old Reset button did;
+ * The readout's reset while a gain is off its default, or null at the
+ * default: "Reset to 0.0 dB".
+ */
+export function gainReset(
+  gainDb: number,
+  defaultDb: number,
+  onGainChange: (gainDb: number) => void
+): { label: string; onReset: () => void } | null {
+  return gainDb === defaultDb
+    ? null
+    : { label: `Reset to ${formatDb(defaultDb)}`, onReset: () => onGainChange(defaultDb) }
+}
+
+/**
+ * A Sync change from the parameter slider. A reset restores the default
+ * (0 ms) and clears the user-set flag, exactly as the old Reset button did;
  * anything else is a manual trim.
  */
 export function applySyncChange(
@@ -242,8 +262,7 @@ export function SourcesAudioMixer(): ReactElement {
                 }
                 onSyncChange={(offsetMs, reason) => {
                   setAudio((current) => applySyncChange(current, offsetMs, reason))
-                  if (reason === 'reset')
-                    setSyncMessage('Reset microphone sync to structural default.')
+                  if (reason === 'reset') setSyncMessage('Microphone sync is back to 0 ms.')
                 }}
               />
             </MixerRow>
@@ -373,14 +392,14 @@ export function MicrophoneChannel({
               onValueChange={(offsetMs, details) => onSyncChange(offsetMs, details.reason)}
             >
               <ParameterSliderHeader>
-                <ParameterSliderLabel>Sync</ParameterSliderLabel>
+                <ParameterSliderLabel>Microphone sync</ParameterSliderLabel>
                 <ParameterSliderReset />
                 <ParameterSliderInput />
               </ParameterSliderHeader>
               <ParameterSliderControl />
               {/* The offset is split once at session start (recording.rs). */}
               <ParameterSliderDescription>
-                Delays your voice to line up with the video.
+                Moves your voice later (+) or earlier (−) to line up with the video.
                 {sessionActive ? ' Applies from the next recording or stream.' : null}
               </ParameterSliderDescription>
             </ParameterSlider>
@@ -404,7 +423,11 @@ export function MicrophoneChannel({
             variant="segmented"
           />
         </div>
-        <SourceControlRow label="Gain" value={formatDb(gainDb)}>
+        <SourceControlRow
+          label="Gain"
+          reset={gainReset(gainDb, MICROPHONE_GAIN_DB_DEFAULT, onGainChange)}
+          value={formatDb(gainDb)}
+        >
           <Fader
             aria-label="Microphone gain"
             className="w-full"
@@ -414,7 +437,7 @@ export function MicrophoneChannel({
             max={24}
             min={-24}
             origin={0}
-            resetValue={0}
+            resetValue={MICROPHONE_GAIN_DB_DEFAULT}
             step={1}
             value={gainDb}
             onValueChange={onGainChange}
@@ -438,7 +461,7 @@ export function MicrophoneChannel({
   )
 }
 
-/** The flash/click measurement tools for Sync, folded away (plan 093, D3). */
+/** The flash-and-click measurement tools for Sync, folded away (plan 093, D3). */
 function SyncCalibration({
   audio,
   setAudio,
@@ -464,7 +487,7 @@ function SyncCalibration({
         if (!recommendation) return
         setAudio((current) => applyAudioSyncRecommendation(current, recommendation))
         if (state.recommendedOffsetMs != null) {
-          setMessage(`Applied ${state.recommendedOffsetMs} ms sync offset.`)
+          setMessage(`Microphone sync set to ${state.recommendedOffsetMs} ms.`)
         }
       }}
       onImport={async (file) => {
@@ -625,23 +648,23 @@ export function SystemAudioSettings({
   onOpenPermissions: () => void
   onResume: () => void
 }): ReactElement {
+  // Without Screen Recording the chip's line says so and the page's alert
+  // has the fix (plan 174 C-8): no second recovery here.
   const issueCopy = view.permissionRequired
-    ? 'Needs Screen Recording permission'
-    : view.issue === 'unavailable' && macOS
-      ? systemAudioIssueCopy('unavailable')
-      : view.issue
-        ? systemAudioIssueCopy(view.issue, macOS ? 'darwin' : undefined)
-        : null
-  const issueAction =
-    view.permissionRequired || (view.issue === 'unavailable' && macOS) ? (
-      <Button className="shrink-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
-        Open Settings
-      </Button>
-    ) : view.issue === 'echo' ? (
-      <Button className="shrink-0" size="xs" variant="ghost" onClick={onResume}>
-        Resume
-      </Button>
-    ) : null
+    ? null
+    : view.issue
+      ? systemAudioIssueCopy(view.issue, platform ?? (macOS ? 'darwin' : undefined))
+      : null
+  const issueAction = view.permissionRequired ? null : view.issue === 'unavailable' && macOS ? (
+    <Button className="-ml-2" size="xs" variant="ghost" onClick={onOpenPermissions}>
+      Open Permissions
+    </Button>
+  ) : view.issue === 'echo' ? (
+    <Button className="-ml-2" size="xs" variant="ghost" onClick={onResume}>
+      Resume
+    </Button>
+  ) : null
+  const computer = platformCopy(platform ?? (macOS ? 'darwin' : undefined)).deviceNoun
 
   return (
     <AudioConfigProvider value={{ disabled: view.permissionRequired }}>
@@ -664,23 +687,20 @@ export function SystemAudioSettings({
         id="system-audio"
         more={
           <>
-            <div className="flex items-center justify-between gap-3">
-              <span className="flex min-w-0 flex-col">
-                <span className="text-xs font-medium text-foreground">
-                  Pause if your stream echoes back
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  Stops System audio when your own stream plays on this computer.
-                </span>
-              </span>
+            {/* The echo guard is a labelled row (plan 174 C-38): the label
+                names the switch and the description describes it. */}
+            <SettingsRow
+              data-videorc-echo-guard=""
+              description={`Stops System audio when your own stream plays on this ${computer}.`}
+              label="Pause if your stream echoes back"
+            >
               <Switch
-                aria-label="Pause System audio if your stream echoes back"
                 checked={echoGuard}
                 disabled={view.permissionRequired}
                 size="sm"
                 onCheckedChange={onEchoGuardChange}
               />
-            </div>
+            </SettingsRow>
             <ul className="flex list-disc flex-col gap-1 pl-4 text-xs text-muted-foreground">
               <li>
                 Your own stream open in a browser tab is captured too. Mute that tab: headphones
@@ -688,7 +708,9 @@ export function SystemAudioSettings({
               </li>
               <li>Use headphones so your microphone doesn&apos;t pick up your speakers.</li>
               {macOS ? (
-                <li>Your Mac&apos;s volume and mute don&apos;t change what&apos;s recorded.</li>
+                <li>
+                  Your {computer}&apos;s volume and mute don&apos;t change what&apos;s recorded.
+                </li>
               ) : null}
             </ul>
           </>
@@ -697,11 +719,7 @@ export function SystemAudioSettings({
         status={systemAudioStatus(view, sessionActive)}
         title="System audio"
       >
-        <SourceFacts>
-          {macOS
-            ? 'Everything your Mac plays, except Videorc.'
-            : 'Everything your computer plays, except Videorc.'}
-        </SourceFacts>
+        <SourceFacts>Everything your {computer} plays, except Videorc.</SourceFacts>
         {view.checked ? (
           <>
             {meterHasNoReading(meter) ? (
@@ -721,7 +739,15 @@ export function SystemAudioSettings({
                 />
               </div>
             )}
-            <SourceControlRow label="Gain" value={formatDb(gainDb)}>
+            <SourceControlRow
+              label="Gain"
+              reset={
+                view.permissionRequired
+                  ? null
+                  : gainReset(gainDb, SYSTEM_AUDIO_GAIN_DB_DEFAULT, onGainChange)
+              }
+              value={formatDb(gainDb)}
+            >
               <Fader
                 aria-label="System audio gain"
                 className="w-full"
@@ -745,10 +771,12 @@ export function SystemAudioSettings({
           </>
         ) : null}
         {issueCopy ? (
-          <div className="flex items-start justify-between gap-2">
-            <SourceFacts tone="warning">{issueCopy}</SourceFacts>
-            {issueAction}
-          </div>
+          <Alert data-videorc-system-audio-issue={view.issue ?? undefined} variant="warning">
+            <AlertTitle>{issueCopy}</AlertTitle>
+            {issueAction ? (
+              <AlertDescription className="pt-1">{issueAction}</AlertDescription>
+            ) : null}
+          </Alert>
         ) : null}
       </SourceItem>
     </AudioConfigProvider>

@@ -4683,6 +4683,39 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.layout.cameraZoom).toBe(175)
   })
 
+  it('refreshes only the device list from Sources, and keeps it when other reads would fail (C-32)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        { id: 'camera:plugged', name: 'Plugged Camera', kind: 'camera', status: 'available' },
+        ...backend.deviceList.devices
+      ]
+    }
+    const sentBefore = backend.sentCommands.length
+    await act(async () => latest().refreshDevices())
+    const sent = backend.sentCommands.slice(sentBefore).map((command) => command.method)
+    expect(sent).toEqual(['devices.list'])
+    expect(latest().deviceList.devices.some((device) => device.id === 'camera:plugged')).toBe(true)
+  })
+
   it('restores saved Camera Off after On through device discovery and a finished session', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

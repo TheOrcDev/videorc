@@ -1530,16 +1530,16 @@ export function parseAudioSyncRecommendationJson(text: string): AudioSyncRecomme
   try {
     parsed = JSON.parse(text)
   } catch {
-    return { ok: false, error: 'Measurement JSON could not be parsed.' }
+    return { ok: false, error: "Couldn't read the measurement JSON." }
   }
 
   if (!parsed || typeof parsed !== 'object') {
-    return { ok: false, error: 'Measurement JSON must be an object.' }
+    return { ok: false, error: "The measurement JSON isn't an object." }
   }
 
   const candidate = parsed as Record<string, unknown>
   if (candidate.schemaVersion !== 1) {
-    return { ok: false, error: 'Measurement JSON must use schemaVersion 1.' }
+    return { ok: false, error: 'The measurement JSON needs schemaVersion 1.' }
   }
 
   return {
@@ -1562,7 +1562,7 @@ export function parseAudioSyncRecommendationJson(text: string): AudioSyncRecomme
 export function formatMeasuredAudioLag(offsetMs: number | null | undefined): string {
   const offset = typeof offsetMs === 'number' && Number.isFinite(offsetMs) ? offsetMs : null
   if (offset == null) {
-    return 'No paired flash/click measurement'
+    return 'Not measured yet'
   }
 
   const rounded = Math.round(offset)
@@ -1592,7 +1592,7 @@ export function audioSyncCalibrationState(
       status: 'unavailable',
       canApply: false,
       measuredLagLabel,
-      detail: 'Record a flash/click sample before applying calibration.',
+      detail: 'Record a flash-and-click test first, then import its JSON.',
       recommendedOffsetMs: null
     }
   }
@@ -1603,7 +1603,7 @@ export function audioSyncCalibrationState(
       status: 'current',
       canApply: false,
       measuredLagLabel,
-      detail: 'Current microphone sync offset already matches this recommendation.',
+      detail: 'Microphone sync already matches this measurement.',
       recommendedOffsetMs
     }
   }
@@ -1619,8 +1619,8 @@ export function audioSyncCalibrationState(
     canApply: true,
     measuredLagLabel,
     detail: withinTarget
-      ? 'Measurement is within target; applying the recommendation is optional.'
-      : 'Apply the measured recommendation, then record another flash/click sample.',
+      ? 'Within target. Applying it is optional.'
+      : 'Apply it, then record another flash-and-click test to check.',
     recommendedOffsetMs
   }
 }

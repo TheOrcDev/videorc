@@ -1,4 +1,4 @@
-import { ChevronDownIcon, WarningIcon, type AppIcon } from '@/components/icons'
+import { ChevronDownIcon, type AppIcon } from '@/components/icons'
 import { useId, useState, type ReactElement, type ReactNode } from 'react'
 
 import { ListRow } from '@/components/list-row'
@@ -35,20 +35,12 @@ function writeMoreOpen(id: string, open: boolean): void {
   }
 }
 
-/** The header's chip: its hint is the tooltip, and is read out with it. */
+/** The header's chip. Its hint is a visible line in the body (plan 174 C-10). */
 export function SourceStatusChip({ status }: { status: SourceStatus }): ReactElement {
-  const chip = <StatusBadge tone={status.tone} value={status.label} />
-  if (!status.hint) return <span data-slot="source-status">{chip}</span>
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex" data-slot="source-status">
-          {chip}
-          <span className="sr-only">{status.hint}</span>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{status.hint}</TooltipContent>
-    </Tooltip>
+    <span className="inline-flex" data-slot="source-status">
+      <StatusBadge tone={status.tone} value={status.label} />
+    </span>
   )
 }
 
@@ -147,12 +139,19 @@ export function SourceItem({
             </CollapsibleTrigger>
           ) : null}
         </ListRow>
-        {children ? (
+        {children || status?.hint ? (
           <div
             className={cn('flex min-w-0 flex-col gap-2 pr-3 pb-3 pl-10.5', bodyClassName)}
             data-slot="source-item-body"
           >
             {children}
+            {/* What to do about the chip, in words: it used to hide in a
+                tooltip only (plan 174 C-10). */}
+            {status?.hint ? (
+              <p className="text-xs text-foreground" data-slot="source-status-hint" role="status">
+                {status.hint}
+              </p>
+            ) : null}
           </div>
         ) : null}
         {more ? (
@@ -172,17 +171,24 @@ export function SourceItem({
 /**
  * A label, a fader (or any control) and its value on one line:
  * `Gain [——●——] 0.0 dB`. The value column is wide enough for "−60.0 dB", so
- * dragging never resizes the row.
+ * dragging never resizes the row. With `reset`, the value off its default is
+ * a button that puts it back (plan 174 C-38): a double-click on the thumb was
+ * the only way, and no one could find it.
  */
 export function SourceControlRow({
   label,
   value,
+  reset,
   children
 }: {
   label: string
   value?: ReactNode
+  /** The value is off its default: the readout resets it. */
+  reset?: { label: string; onReset: () => void } | null
   children: ReactNode
 }): ReactElement {
+  const valueClass =
+    'min-w-[8ch] shrink-0 justify-end text-right font-mono text-xs whitespace-nowrap text-muted-foreground tabular-nums'
   return (
     <div className="flex min-w-0 items-center gap-3" data-slot="source-control-row">
       <span aria-hidden className="w-9 shrink-0 text-xs text-muted-foreground">
@@ -190,41 +196,37 @@ export function SourceControlRow({
       </span>
       <div className="flex min-w-0 flex-1 items-center">{children}</div>
       {value != null ? (
-        <span
-          className="min-w-[8ch] shrink-0 text-right font-mono text-xs whitespace-nowrap text-muted-foreground tabular-nums"
-          data-slot="source-control-value"
-        >
-          {value}
+        <span className={cn(valueClass, 'inline-flex')} data-slot="source-control-value">
+          {reset ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  className="-mr-2 px-2 font-mono text-muted-foreground tabular-nums hover:text-foreground"
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                  onClick={reset.onReset}
+                >
+                  {value}
+                  <span className="sr-only">. {reset.label}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{reset.label}</TooltipContent>
+            </Tooltip>
+          ) : (
+            value
+          )}
         </span>
       ) : null}
     </div>
   )
 }
 
-/**
- * The facts line under a picker, or the warning that replaces it. Colour is
- * information: a warning's tone is its icon, the words stay monochrome.
- */
-export function SourceFacts({
-  children,
-  tone = 'neutral'
-}: {
-  children: ReactNode
-  tone?: 'neutral' | 'warning'
-}): ReactElement {
+/** The facts line under a picker: secondary text. A warning is an Alert instead. */
+export function SourceFacts({ children }: { children: ReactNode }): ReactElement {
   return (
-    <p
-      className={cn(
-        'flex items-start gap-1.5 text-xs tabular-nums',
-        tone === 'warning' ? 'text-foreground' : 'text-muted-foreground'
-      )}
-      data-slot="source-facts"
-      data-tone={tone}
-    >
-      {tone === 'warning' ? (
-        <WarningIcon className="mt-0.5 size-3.5 shrink-0 text-warning" weight="fill" />
-      ) : null}
-      <span className="min-w-0">{children}</span>
+    <p className="text-xs text-muted-foreground tabular-nums" data-slot="source-facts">
+      {children}
     </p>
   )
 }

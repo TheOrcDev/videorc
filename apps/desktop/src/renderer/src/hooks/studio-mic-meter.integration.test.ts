@@ -364,10 +364,10 @@ describe('production microphone meter demand', () => {
   )
 
   it.each([
-    ['NotAllowedError', "Videorc can't use this mic. Check Settings → Permissions."],
+    ['NotAllowedError', "Videorc doesn't have permission to use this microphone."],
     [
       'NotReadableError',
-      "Another app is using this mic. Its level comes back when it's free. Recording still works."
+      "Another app is using this microphone. Its level comes back when it's free. Recording still works."
     ]
   ])(
     'keeps %s truthful without repeatedly trying the failed browser device',
@@ -394,7 +394,7 @@ describe('production microphone meter demand', () => {
     await frames()
     expect(readMeter()).toBeCloseTo(-18, 1)
     expect(container.querySelector('[data-videorc-mic-monitor-state="live"]')).not.toBeNull()
-    expect(container.textContent).not.toContain('Another app is using this mic')
+    expect(container.textContent).not.toContain('Another app is using this microphone')
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
   })
 
