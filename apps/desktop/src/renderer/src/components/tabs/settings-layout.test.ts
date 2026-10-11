@@ -161,11 +161,15 @@ describe('Settings layout', () => {
     const titles = tabPanels().flatMap((panel) => sectionTitles(panel.jsx))
     expect(new Set(titles).size).toBe(titles.length)
 
-    // Plan 064: a studio behavior, not a storage setting.
-    expect(panelSources.GeneralSettings).toContain('id="animate-scene-changes"')
-    expect(panelSources.RecordingSettings).not.toContain('animate-scene-changes')
+    // Plan 064 moved "Animate scene changes" out of Recording; plan 174 D17
+    // moved the switch to the Scene page (it changes what viewers see), and
+    // General keeps one pointer row to it.
+    const layoutTabSource = read('./layout-tab.tsx')
+    expect(layoutTabSource.match(/id="animate-scene-changes"/g)?.length ?? 0).toBe(1)
+    expect(panelSources.GeneralSettings).toContain('label="Animate scene changes"')
+    expect(panelSources.GeneralSettings).toContain("openWorkspaceTab('layouts')")
     for (const source of Object.values(panelSources)) {
-      expect(source.match(/id="animate-scene-changes"/g)?.length ?? 0).toBeLessThanOrEqual(1)
+      expect(source).not.toContain('id="animate-scene-changes"')
     }
 
     // The recorders are the only home of a global binding; the in-app list

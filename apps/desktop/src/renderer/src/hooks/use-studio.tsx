@@ -31,7 +31,12 @@ import {
   type SavedScene
 } from '@/lib/scene-presets'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
-import { noteLayoutLeavingFreeform } from '@/lib/freeform-memory'
+import {
+  noteLayoutCommitted,
+  noteLayoutLeavingFreeform,
+  restoreLayoutUndo,
+  takeLayoutUndo
+} from '@/lib/freeform-memory'
 import {
   commitSceneTransform,
   transformLayoutIntent,
@@ -1266,6 +1271,8 @@ export type StudioContextValue = {
   setCaptureConfig: Dispatch<SetStateAction<CaptureConfig>>
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
+  /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
+  undoLayoutPatch: () => Promise<boolean>
   applyCameraPreset: (patch: Partial<LayoutSettings>) => void
   savedScenes: SavedScene[]
   activeSavedSceneId: string | null
@@ -8605,9 +8612,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const rememberLayoutTransactionSnapshot = useCallback((snapshot: LayoutTransactionSnapshot) => {
-    latestLayoutTransactionCommitRef.current = latestLayoutTransactionCommit(
-      latestLayoutTransactionCommitRef.current,
-      snapshot
+    const previous = latestLayoutTransactionCommitRef.current
+    const latest = latestLayoutTransactionCommit(previous, snapshot)
+    latestLayoutTransactionCommitRef.current = latest
+    if (latest !== snapshot) return
+    // The layout undo (plan 174 S3.9, D15) remembers the committed layout this
+    // commit replaced: the last commit's, or before any commit this launch,
+    // the layout the renderer started from. A commit that changes no layout
+    // field (a background edit, a reconciliation) leaves the slot alone.
+    noteLayoutCommitted(
+      previous
+        ? {
+            layout: previous.layout,
+            savedSceneId: previous.savedSceneId ?? null,
+            origin: previous.origin ?? 'builtin'
+          }
+        : {
+            layout: captureConfigRef.current.layout,
+            savedSceneId: activeSavedSceneIdRef.current,
+            origin: workingOriginRef.current
+          },
+      snapshot.layout
     )
   }, [])
 
@@ -9232,6 +9257,60 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [requestLayoutTransaction]
   )
+
+  // Single-level undo of the last committed layout change (plan 174 S3.9,
+  // D15): the remembered layout goes back through the same transaction, with
+  // the saved scene it belonged to and the orientation ⇄ canvas coupling a
+  // preset switch would carry. Resolves false, and keeps the entry, when there
+  // is nothing to undo or the commit was refused.
+  const undoLayoutPatch = useCallback(async (): Promise<boolean> => {
+    const entry = takeLayoutUndo()
+    if (!entry) return false
+    const current = captureConfigRef.current
+    const sessionActive = isActiveRecordingState(recordingRef.current.state)
+    const crossesOrientation =
+      layoutPresetOrientation(entry.layout.layoutPreset) !==
+      layoutPresetOrientation(current.layout.layoutPreset)
+    if (sessionActive && crossesOrientation) {
+      // The canvas is fixed mid-session; the transaction's own refusal would
+      // say so, but the entry must stay for after the session.
+      restoreLayoutUndo(entry)
+      toast.error('Stop the recording or stream before switching orientation.', {
+        id: 'scene-orientation-lock'
+      })
+      return false
+    }
+    // Undoing an entry into Freeform leaves it: remember the arrangement, as a
+    // preset click would (C-4).
+    if (
+      current.layout.arrangementMode === 'freeform' &&
+      entry.layout.arrangementMode !== 'freeform'
+    )
+      noteLayoutLeavingFreeform(current.layout)
+    const coupling = sessionActive
+      ? null
+      : verticalOrientationVideoPatch(
+          current.layout.layoutPreset,
+          entry.layout.layoutPreset,
+          current.video,
+          current.verticalRestoreVideo
+        )
+    const committed = await requestLayoutTransaction(entry.layout, {
+      savedSceneId: entry.savedSceneId,
+      origin: entry.origin,
+      ...(coupling
+        ? {
+            videoOverride: coupling.video,
+            captureConfigPatch: {
+              video: coupling.video,
+              verticalRestoreVideo: coupling.verticalRestoreVideo
+            }
+          }
+        : {})
+    })
+    if (!committed) restoreLayoutUndo(entry)
+    return committed
+  }, [requestLayoutTransaction])
 
   const requestCameraPresetTransaction = useCallback(
     (patch: Partial<LayoutSettings>) => {
@@ -15714,6 +15793,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCaptureConfig,
       patchLayout,
       applyLayoutPatch,
+      undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
       performanceCheck,
@@ -15952,6 +16032,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCaptureConfig,
       patchLayout,
       applyLayoutPatch,
+      undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
       performanceCheck,
