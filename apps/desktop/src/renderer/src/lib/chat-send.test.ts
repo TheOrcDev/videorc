@@ -4,6 +4,7 @@ import type { CommentsSendOperation, LiveChatProviderState } from '@/lib/backend
 import {
   CHAT_SEND_MAX_CHARS,
   chatSendFailures,
+  chatSendRetryPlan,
   destinationDelivery,
   pendingCommentsSendOperation,
   sendablePlatforms,
@@ -139,5 +140,50 @@ describe('validateChatDraft', () => {
     expect(validateChatDraft('   ')).toBeNull()
     expect(validateChatDraft('x'.repeat(CHAT_SEND_MAX_CHARS + 1))).toBeNull()
     expect(validateChatDraft('x'.repeat(CHAT_SEND_MAX_CHARS))).toHaveLength(CHAT_SEND_MAX_CHARS)
+  })
+})
+
+describe('chatSendRetryPlan (plan 174 S3.16a, H-26)', () => {
+  const operation = (
+    destinations: CommentsSendOperation['destinations']
+  ): CommentsSendOperation => ({
+    id: 'op',
+    sessionId: 's1',
+    text: 'hello',
+    phase: 'partial',
+    destinations,
+    createdAt: '2026-10-11T10:00:00Z',
+    updatedAt: '2026-10-11T10:00:01Z'
+  })
+
+  it('is nothing without a failure', () => {
+    expect(chatSendRetryPlan(null, [])).toBeNull()
+  })
+
+  it('restores the draft and retries everything when nobody got the message', () => {
+    expect(
+      chatSendRetryPlan(null, [
+        { destinationId: 'comments-command', platform: 'custom', reason: 'x' }
+      ])
+    ).toEqual({ destinationIds: null, restoreDraft: true })
+    const failed = operation([
+      { destinationId: 'yt', platform: 'youtube', phase: 'failed', reason: 'no' },
+      { destinationId: 'tw', platform: 'twitch', phase: 'failed', reason: 'no' }
+    ])
+    expect(chatSendRetryPlan(failed, chatSendFailures(failed))).toEqual({
+      destinationIds: null,
+      restoreDraft: true
+    })
+  })
+
+  it('retries only the destinations that failed after a partial send', () => {
+    const partial = operation([
+      { destinationId: 'yt', platform: 'youtube', phase: 'sent' },
+      { destinationId: 'tw', platform: 'twitch', phase: 'failed', reason: 'no' }
+    ])
+    expect(chatSendRetryPlan(partial, chatSendFailures(partial))).toEqual({
+      destinationIds: ['tw'],
+      restoreDraft: false
+    })
   })
 })

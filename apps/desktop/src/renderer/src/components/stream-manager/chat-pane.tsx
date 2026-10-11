@@ -11,6 +11,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactElement
 } from 'react'
 
@@ -21,6 +22,10 @@ import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platfo
 import { CohostNudge } from '@/components/cohost-nudge'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
+import {
+  PlatformFilter,
+  PlatformFilterMenuItems
+} from '@/components/stream-manager/platform-filter'
 import { AlertIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -31,8 +36,6 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
@@ -52,11 +55,21 @@ import type {
   CommentsSendOperation,
   LiveChatMessage,
   LiveChatProviderState,
-  ModerationOperation,
-  StreamPlatform
+  ModerationOperation
 } from '@/lib/backend'
-import { removalStatusView, removeFromChatAvailable } from '@/lib/chat-removal-view'
-import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
+import { copyChatText } from '@/lib/chat-link-actions'
+import { chatRowAfterMove, chatRowKeyCommand } from '@/lib/chat-list-keys'
+import {
+  removalStatusView,
+  removeFromChatAvailable,
+  removeFromChatBlockedReason
+} from '@/lib/chat-removal-view'
+import {
+  chatDraftMaxChars,
+  chatSendRetryPlan,
+  validateChatDraft,
+  type ChatSendFailure
+} from '@/lib/chat-send'
 import {
   chatPaneMessages,
   followChatOnResize,
@@ -116,7 +129,8 @@ export function ChatPane({
   onCohostNudgeTurnOn,
   onCohostNudgeDismiss,
   jumpTo = null,
-  searchFocusSignal = 0
+  searchFocusSignal = 0,
+  composerFocusSignal = 0
 }: {
   delivery?: ChatDelivery
   arrivalKey?: string
@@ -159,6 +173,8 @@ export function ChatPane({
   jumpTo?: { messageId: string; seq: number } | null
   /** Bumped by ⌘F in the window. */
   searchFocusSignal?: number
+  /** Bumped by ⌘L in the window (plan 174 S3.16a). */
+  composerFocusSignal?: number
 }): ReactElement {
   const [filter, setFilter] = useState<ChatPaneFilter>({
     platform: 'all',
@@ -360,6 +376,96 @@ export function ChatPane({
   }, [searchFocusSignal])
 
   const composerVisible = Boolean(onSend) && (live || Boolean(markerContext))
+  // Esc on a row returns to the composer; ⌘L comes from the window.
+  const [composerFocus, setComposerFocus] = useState(0)
+
+  // One tab stop with roving focus (plan 174 S3.16a, H-7): the active row
+  // (the newest until one is chosen) holds tabIndex 0, every other -1. A
+  // focused row answers ↑/↓, Home, End, R, C, ⇧⌫ and Esc; Enter and Space
+  // are its button's own click. A row that has scrolled out of the
+  // virtualized window is focused once it is rendered again.
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const activeIndex = useMemo(() => {
+    const index = activeId ? shown.findIndex((message) => message.id === activeId) : -1
+    return index >= 0 ? index : shown.length - 1
+  }, [activeId, shown])
+  const pendingFocusRef = useRef<string | null>(null)
+  const focusPendingRow = useCallback((): void => {
+    const id = pendingFocusRef.current
+    if (!id || typeof CSS === 'undefined') return
+    const row = rootRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
+    const target = row?.matches('[tabindex]')
+      ? row
+      : row?.querySelector<HTMLElement>(':scope > button')
+    if (!target) return
+    pendingFocusRef.current = null
+    target.focus({ preventScroll: true })
+  }, [])
+  useEffect(focusPendingRow)
+  const focusRow = (index: number): void => {
+    const message = shown[index]
+    if (!message) return
+    setActiveId(message.id)
+    pendingFocusRef.current = message.id
+    virtualizer.scrollToIndex(index, { align: 'auto' })
+    focusPendingRow()
+  }
+  /** The row's Remove from chat: the action, or why it is off (H-11). */
+  const rowRemoval = (
+    message: LiveChatMessage
+  ): { onRemove: ((message: LiveChatMessage) => void) | undefined; reason: string | null } => {
+    const available =
+      live &&
+      onRemoveFromChat &&
+      removeFromChatAvailable(
+        message,
+        removals?.get(message.id),
+        removalRequestIds?.has(message.id) ?? false
+      )
+    if (!available) return { onRemove: undefined, reason: null }
+    const reason = removeFromChatBlockedReason(message, providers)
+    return { onRemove: reason ? undefined : onRemoveFromChat, reason }
+  }
+  const handleListKeyDown = (event: ReactKeyboardEvent<HTMLOListElement>): void => {
+    const row = event.target instanceof Element ? event.target.closest('[data-message-id]') : null
+    const command = chatRowKeyCommand(event.nativeEvent, row)
+    if (!command || !row) return
+    const id = row.getAttribute('data-message-id')
+    const index = shown.findIndex((message) => message.id === id)
+    const message = shown[index]
+    if (!message) return
+    switch (command.kind) {
+      case 'move': {
+        const next = chatRowAfterMove(shown.length, index, command.move)
+        if (next === null) return
+        event.preventDefault()
+        focusRow(next)
+        return
+      }
+      case 'reply':
+        if (!composerVisible || (message.eventType !== 'message' && message.eventType !== 'paid'))
+          return
+        event.preventDefault()
+        pushPrefill(`@${message.authorName} `)
+        return
+      case 'copy':
+        event.preventDefault()
+        void copyChatText(`${message.authorName}: ${message.messageText}`)
+        return
+      case 'remove': {
+        const { onRemove } = rowRemoval(message)
+        if (!onRemove) return
+        event.preventDefault()
+        onRemove(message)
+        return
+      }
+      case 'composer':
+        if (!composerVisible) return
+        event.preventDefault()
+        setComposerFocus((value) => value + 1)
+        return
+    }
+  }
 
   return (
     <section
@@ -372,35 +478,12 @@ export function ChatPane({
         data-slot="chat-filters"
       >
         <div className={cn('flex-wrap items-center gap-1.5', 'flex', ABOVE_NARROW)}>
-          {platforms.length > 1 ? (
-            <ToggleGroup
-              aria-label="Show chat from"
-              size="sm"
-              type="single"
-              value={filter.platform}
-              onValueChange={(value) =>
-                setFilter((current) => ({
-                  ...current,
-                  platform: (value || 'all') as StreamPlatform | 'all'
-                }))
-              }
-            >
-              <ToggleGroupItem className="h-6 px-2 text-xs" value="all">
-                All
-              </ToggleGroupItem>
-              {platforms.map((platform) => (
-                <ToggleGroupItem
-                  key={platform}
-                  aria-label={CHAT_PLATFORM_LABELS[platform]}
-                  className="h-6 min-w-6 px-1.5"
-                  title={`Only ${CHAT_PLATFORM_LABELS[platform]}`}
-                  value={platform}
-                >
-                  <ChatPlatformIcon decorative platform={platform} />
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          ) : null}
+          <PlatformFilter
+            label="Show chat from"
+            platforms={platforms}
+            value={filter.platform}
+            onValueChange={(platform) => setFilter((current) => ({ ...current, platform }))}
+          />
           <ToggleGroup
             aria-label="Chat filters"
             size="sm"
@@ -417,13 +500,15 @@ export function ChatPane({
               }))
             }
           >
-            <ToggleGroupItem
-              className="h-6 px-2 text-xs"
-              title="Messages behind Buddy's open questions"
-              value="questions"
-            >
-              Questions
-            </ToggleGroupItem>
+            {questionMessageIds.size > 0 || filter.questions ? (
+              <ToggleGroupItem
+                className="h-6 px-2 text-xs"
+                title="Messages behind Buddy's open questions"
+                value="questions"
+              >
+                Questions
+              </ToggleGroupItem>
+            ) : null}
             <ToggleGroupItem
               className="h-6 px-2 text-xs"
               title="Messages that @mention your channel"
@@ -455,36 +540,26 @@ export function ChatPane({
           <DropdownMenuContent align="start" className="w-52">
             {platforms.length > 1 ? (
               <>
-                <DropdownMenuLabel>Show chat from</DropdownMenuLabel>
-                <DropdownMenuRadioGroup
+                <PlatformFilterMenuItems
+                  label="Show chat from"
+                  platforms={platforms}
                   value={filter.platform}
-                  onValueChange={(value) =>
-                    setFilter((current) => ({
-                      ...current,
-                      platform: value as StreamPlatform | 'all'
-                    }))
-                  }
-                >
-                  <DropdownMenuRadioItem value="all">Every platform</DropdownMenuRadioItem>
-                  {platforms.map((platform) => (
-                    <DropdownMenuRadioItem key={platform} value={platform}>
-                      <ChatPlatformIcon decorative platform={platform} />
-                      {CHAT_PLATFORM_LABELS[platform]}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
+                  onValueChange={(platform) => setFilter((current) => ({ ...current, platform }))}
+                />
                 <DropdownMenuSeparator />
               </>
             ) : null}
             <DropdownMenuGroup>
-              <DropdownMenuCheckboxItem
-                checked={filter.questions}
-                onCheckedChange={(checked) =>
-                  setFilter((current) => ({ ...current, questions: checked === true }))
-                }
-              >
-                Questions
-              </DropdownMenuCheckboxItem>
+              {questionMessageIds.size > 0 || filter.questions ? (
+                <DropdownMenuCheckboxItem
+                  checked={filter.questions}
+                  onCheckedChange={(checked) =>
+                    setFilter((current) => ({ ...current, questions: checked === true }))
+                  }
+                >
+                  Questions
+                </DropdownMenuCheckboxItem>
+              ) : null}
               <DropdownMenuCheckboxItem
                 checked={filter.mentions}
                 onCheckedChange={(checked) =>
@@ -538,12 +613,21 @@ export function ChatPane({
               aria-label="Chat messages"
               className="relative w-full"
               style={{ height: virtualizer.getTotalSize() }}
+              onFocusCapture={(event) => {
+                // A click or a Tab onto a row makes it the active one.
+                const id = event.target
+                  .closest('[data-message-id]')
+                  ?.getAttribute('data-message-id')
+                if (id) setActiveId(id)
+              }}
+              onKeyDown={handleListKeyDown}
             >
               {virtualizer.getVirtualItems().map((item) => {
                 const message = shown[item.index]
                 if (!message) return null
                 const removal = removals?.get(message.id)
                 const requesting = removalRequestIds?.has(message.id) ?? false
+                const { onRemove, reason } = rowRemoval(message)
                 return (
                   <CommentRow
                     key={item.key}
@@ -564,6 +648,8 @@ export function ChatPane({
                     mentionNames={mentionNames}
                     message={message}
                     removal={removalStatusView(message, removal, requesting)}
+                    removeFromChatReason={reason}
+                    tabIndex={item.index === activeIndex ? 0 : -1}
                     style={{
                       position: 'absolute',
                       top: 0,
@@ -573,13 +659,7 @@ export function ChatPane({
                       paddingBottom: 4
                     }}
                     onHighlight={live ? onHighlight : undefined}
-                    onRemoveFromChat={
-                      live &&
-                      onRemoveFromChat &&
-                      removeFromChatAvailable(message, removal, requesting)
-                        ? onRemoveFromChat
-                        : undefined
-                    }
+                    onRemoveFromChat={onRemove}
                     onReply={
                       composerVisible
                         ? (target) => pushPrefill(`@${target.authorName} `)
@@ -613,6 +693,7 @@ export function ChatPane({
           onUndoMarker={onUndoMarker}
           cohostNudge={cohostNudge}
           failures={sendFailures}
+          focusSignal={composerFocusSignal + composerFocus}
           operation={sendOperation}
           pending={sendPending}
           prefill={composerPrefill}
@@ -632,6 +713,7 @@ export function Composer({
   failures,
   operation,
   prefill,
+  focusSignal = 0,
   cohostNudge,
   onCohostNudgeTurnOn,
   onCohostNudgeDismiss,
@@ -648,6 +730,8 @@ export function Composer({
   failures: ChatSendFailure[]
   operation: CommentsSendOperation | null
   prefill: ChatPrefill | null
+  /** Bumped to put the caret in the composer (⌘L, Esc on a row). */
+  focusSignal?: number
   cohostNudge: boolean
   onCohostNudgeTurnOn?: () => void
   onCohostNudgeDismiss?: () => void
@@ -714,6 +798,35 @@ export function Composer({
     setReplyToQuestionId(prefill.questionId ?? null)
     inputRef.current?.focus()
   }, [prefill])
+  useEffect(() => {
+    if (focusSignal > 0) inputRef.current?.focus()
+  }, [focusSignal])
+
+  // A failed send keeps the draft and offers Retry (plan 174 S3.16a, H-26):
+  // the words come back into the composer when nobody got them, and Retry
+  // re-sends only where it failed after a partial send.
+  const [lastSend, setLastSend] = useState<{ text: string; options?: ChatSendOptions } | null>(null)
+  const retry = pending || !lastSend ? null : chatSendRetryPlan(operation, failures)
+  const failureKey = retry
+    ? failures.map((failure) => `${failure.destinationId}:${failure.reason}`).join('|')
+    : null
+  const restoreDraft = retry?.restoreDraft ?? false
+  const handledFailureRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!failureKey || !restoreDraft || !lastSend) return
+    if (handledFailureRef.current === failureKey) return
+    handledFailureRef.current = failureKey
+    setDraft((current) => (current.trim() === '' ? lastSend.text : current))
+  }, [failureKey, lastSend, restoreDraft])
+  const retrySend = (): void => {
+    if (!retry || !lastSend) return
+    const options = {
+      ...lastSend.options,
+      ...(retry.destinationIds ? { destinationIds: retry.destinationIds } : {})
+    }
+    onSend(lastSend.text, options)
+    if (draftRef.current === lastSend.text) setDraft('')
+  }
 
   const submit = (): void => {
     if (localPendingRef.current) return
@@ -758,10 +871,12 @@ export function Composer({
     }
     const text = validateChatDraft(command.text, maxChars)
     if (!text || !canSend) return
-    onSend(text, {
+    const options: ChatSendOptions = {
       ...(replyToQuestionId ? { inReplyToQuestionId: replyToQuestionId } : {}),
       ...(picked ? { destinationIds: targets.map((provider) => provider.id) } : {})
-    })
+    }
+    onSend(text, options)
+    setLastSend({ text, options })
     setDraft('')
     setReplyToQuestionId(null)
   }
@@ -906,7 +1021,11 @@ export function Composer({
                   ? 'Run local command'
                   : pending
                     ? 'Sending message'
-                    : 'Send message to all writable destinations'
+                    : targets.length === 0
+                      ? 'Send message: no destination picked'
+                      : picked === null || targets.length === writable.length
+                        ? 'Send message to all writable destinations'
+                        : `Send message to ${pickLabel}`
               }
               disabled={
                 localPending || (!local && (!canSend || !validateChatDraft(command.text, maxChars)))
@@ -990,6 +1109,21 @@ export function Composer({
             providers={[...providers]}
             sendTargets={targetPlatforms}
           />
+          {retry ? (
+            <Button
+              aria-label={
+                retry.restoreDraft ? 'Retry sending the message' : 'Retry where the send failed'
+              }
+              className="mt-1"
+              data-testid="chat-send-retry"
+              size="xs"
+              type="button"
+              variant="outline"
+              onClick={retrySend}
+            >
+              Retry
+            </Button>
+          ) : null}
           {cohostNudge && onCohostNudgeDismiss && onCohostNudgeTurnOn ? (
             <CohostNudge onDismiss={onCohostNudgeDismiss} onTurnOn={onCohostNudgeTurnOn} />
           ) : null}

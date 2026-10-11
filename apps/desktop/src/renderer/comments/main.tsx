@@ -63,7 +63,13 @@ import {
   commentsSendTransportFailureCanReplace
 } from '../../shared/comments-send-operation'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
-import { removalOutcomeToast, type RemovalAnswer } from '@/lib/chat-removal-view'
+import {
+  REMOVE_UNDO_MS,
+  removalOutcomeToast,
+  removalUndoToast,
+  type RemovalAnswer
+} from '@/lib/chat-removal-view'
+import { holdUndoableAction, type UndoableAction } from '@/lib/undoable-action'
 import { mergeModerationOperations } from '../../shared/chat-moderation'
 import {
   reconcileBrokerCommentsSnapshot,
@@ -318,36 +324,61 @@ function CommentsWindowApp(): ReactElement {
       else next.delete(id)
       return next
     })
-  // "Remove from chat" is the express consent: it runs at once, as manual.
+  // "Remove from chat" is the express consent, and it runs after a short
+  // Undo (plan 174 D20): the row says Removing… at once, and the toast's
+  // own lifecycle runs the removal when it closes, never a clock beside it
+  // (Sonner pauses the toast under the pointer and while the window is
+  // hidden), so Undo is never on screen for a removal that already ran.
+  const pendingRemovals = useRef(new Map<string, UndoableAction>())
   const removeFromChat = (message: LiveChatMessage): void => {
     const sessionId = snapshot.sessionId
     const moderate = window.videorc?.moderateFromCommentsWindow
-    if (!sessionId || !moderate) return
+    if (!sessionId || !moderate || pendingRemovals.current.has(message.id)) return
     flagId(setRemovalRequestIds, message.id, true)
-    void moderate({
-      requestId: crypto.randomUUID(),
-      sessionId,
-      action: 'remove',
-      operationId: crypto.randomUUID(),
-      messageId: message.id
-    })
-      .then((operation) => {
-        noteRemoval(operation)
-        const outcome = removalOutcomeToast(operation, { includeSuccess: false })
-        if (outcome) {
-          ;(outcome.kind === 'error' ? toast.error : toast.warning)(outcome.text, {
-            id: `chat-removal:${operation.operationId}`
-          })
-        }
+    const undoToast = removalUndoToast(message)
+    const action = holdUndoableAction(() => {
+      pendingRemovals.current.delete(message.id)
+      void moderate({
+        requestId: crypto.randomUUID(),
+        sessionId,
+        action: 'remove',
+        operationId: crypto.randomUUID(),
+        messageId: message.id
       })
-      .catch((error) =>
-        toastUserError(
-          error,
-          { action: 'remove', object: 'the message' },
-          { id: `chat-removal:${message.id}` }
+        .then((operation) => {
+          noteRemoval(operation)
+          const outcome = removalOutcomeToast(operation, { includeSuccess: false })
+          if (outcome) {
+            ;(outcome.kind === 'error' ? toast.error : toast.warning)(outcome.text, {
+              id: `chat-removal:${operation.operationId}`
+            })
+          }
+        })
+        .catch((error) =>
+          toastUserError(
+            error,
+            { action: 'remove', object: 'the message' },
+            { id: `chat-removal:${message.id}` }
+          )
         )
-      )
-      .finally(() => flagId(setRemovalRequestIds, message.id, false))
+        .finally(() => flagId(setRemovalRequestIds, message.id, false))
+    })
+    pendingRemovals.current.set(message.id, action)
+    toast.message(undoToast.title, {
+      id: undoToast.id,
+      duration: REMOVE_UNDO_MS,
+      onAutoClose: () => action.flush(),
+      onDismiss: () => action.flush(),
+      action: {
+        label: undoToast.action,
+        onClick: () => {
+          action.undo()
+          pendingRemovals.current.delete(message.id)
+          flagId(setRemovalRequestIds, message.id, false)
+          toast.dismiss(undoToast.id)
+        }
+      }
+    })
   }
   // A Buddy removal card's Remove or Cancel (Enter or Esc).
   const answerRemoval = (operation: ModerationOperation, answer: RemovalAnswer): void => {

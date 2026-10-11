@@ -79,7 +79,7 @@ import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { CHAT_HEADER_CONTAINER } from '@/lib/chat-header-tiers'
 import { sortMessagesChronological } from '@/lib/live-chat-view'
 import { activityItems, thankYouDraft, type ActivityItem } from '@/lib/stream-activity'
-import { statItems } from '@/lib/stream-manager-stats'
+import { formatHistoryDate, statItems } from '@/lib/stream-manager-stats'
 import {
   browserStorage,
   loadStatsLayout,
@@ -538,6 +538,7 @@ export function StreamManager({
   const [prefill, setPrefill] = useState<ChatPrefill | null>(null)
   const [jumpTo, setJumpTo] = useState<{ messageId: string; seq: number } | null>(null)
   const [searchFocus, setSearchFocus] = useState(0)
+  const [composerFocus, setComposerFocus] = useState(0)
   const chatRef = useRef<HTMLDivElement>(null)
   const activityRef = useRef<HTMLDivElement>(null)
   const buddyRef = useRef<HTMLDivElement>(null)
@@ -689,8 +690,19 @@ export function StreamManager({
     setRightPane((current) => (current === 'buddy' ? from.right : current))
   }, [buddyCardsActive])
 
-  // ⌘J focuses Buddy wherever it sits; ⌘F searches chat. The pane is shown
-  // first, so its own focus handling lands on a visible element.
+  // ⌘J focuses Buddy wherever it sits; ⌘F searches chat; ⌘L writes in it
+  // (plan 174 S3.16a). The pane is shown first, so its own focus handling
+  // lands on a visible element. The single-key row actions live on the chat
+  // list itself, never here.
+  const searchChat = useCallback((): void => {
+    setNarrowPane('chat')
+    setSearchFocus((value) => value + 1)
+  }, [])
+  const writeInChat = useCallback((): void => {
+    setNarrowPane('chat')
+    setComposerFocus((value) => value + 1)
+  }, [])
+  const composerAvailable = !inHistory && Boolean(onSend) && (live || Boolean(markerContext))
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) return
@@ -700,13 +712,15 @@ export function StreamManager({
         showBuddy()
       } else if (key === 'f') {
         event.preventDefault()
-        setNarrowPane('chat')
-        setSearchFocus((value) => value + 1)
+        searchChat()
+      } else if (key === 'l' && composerAvailable) {
+        event.preventDefault()
+        writeInChat()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [cohostVisible, showBuddy])
+  }, [cohostVisible, composerAvailable, searchChat, showBuddy, writeInChat])
 
   // Flagged messages Remove from chat can act on: still in chat, removable,
   // and with no removal in flight.
@@ -934,7 +948,7 @@ export function StreamManager({
           data-slot="history-bar"
         >
           <span className="min-w-0 flex-1 truncate text-muted-foreground">
-            {viewMode.title} · {new Date(viewMode.startedAt).toLocaleDateString()}
+            {viewMode.title} · {formatHistoryDate(viewMode.startedAt)}
           </span>
           {onBackToLive ? (
             <Button
@@ -1030,6 +1044,7 @@ export function StreamManager({
             providers={snapshot.providers}
             questionMessageIds={questionMessageIds}
             searchFocusSignal={searchFocus}
+            composerFocusSignal={composerFocus}
             sendFailures={sendFailures}
             sendOperation={sendOperation}
             sendPending={sendPending}
@@ -1065,9 +1080,10 @@ export function StreamManager({
             providers={snapshot.providers}
             onShowOnStream={live && onHighlight ? showActivityOnStream : undefined}
             onThank={live && onSend ? thankInChat : undefined}
-            onShowFollowNames={onShowFollowNames}
+            onShowFollowNames={inHistory ? undefined : onShowFollowNames}
             autoShow={autoShowActivity}
-            onAutoShowChange={onAutoShowActivityChange}
+            onAutoShowChange={inHistory ? undefined : onAutoShowActivityChange}
+            timestamps={live ? 'hover' : 'always'}
           />
         </div>
         {buddyPane ? (
@@ -1084,12 +1100,15 @@ export function StreamManager({
       <StreamManagerStatusBar
         alwaysOnTop={alwaysOnTop}
         audience={inHistory ? (history?.audience ?? null) : (dashboard?.audience ?? null)}
-        highlightAnchor={onHighlightAnchorChange ? highlightAnchor : undefined}
+        highlightAnchor={onHighlightAnchorChange && !inHistory ? highlightAnchor : undefined}
         providers={snapshot.providers}
         onClear={onClear}
-        onHighlightAnchorChange={onHighlightAnchorChange}
+        onFocusBuddy={cohostVisible ? showBuddy : undefined}
+        onFocusComposer={composerAvailable ? writeInChat : undefined}
+        onHighlightAnchorChange={inHistory ? undefined : onHighlightAnchorChange}
         onMarkClip={onAir ? onMarkClip : undefined}
         onOpenPreview={onOpenPreview}
+        onSearchChat={searchChat}
         onToggleAlwaysOnTop={onToggleAlwaysOnTop}
       />
     </div>

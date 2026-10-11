@@ -142,13 +142,18 @@ function timeOfDay(iso: string): string {
     : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/** A finished session's day, the one spelling the window uses (plan 174 H-30). */
+export function formatHistoryDate(iso: string): string {
+  const started = new Date(iso)
+  return Number.isNaN(started.getTime())
+    ? 'History'
+    : started.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
 function sessionItem(input: StatsInput): StatItemModel {
   const session = input.dashboard?.session
   if (input.history) {
-    const started = new Date(input.history.startedAt)
-    const date = Number.isNaN(started.getTime())
-      ? 'History'
-      : started.toLocaleDateString([], { month: 'short', day: 'numeric' })
+    const date = formatHistoryDate(input.history.startedAt)
     return {
       id: 'session',
       label: 'Session',

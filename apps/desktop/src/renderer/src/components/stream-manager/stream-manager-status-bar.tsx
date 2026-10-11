@@ -6,7 +6,7 @@ import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/co
 import { providerBadgeTitle } from '@/components/comments-destination-status'
 import { ClipIcon, FrameIcon, MoreIcon, PreviewIcon } from '@/components/icons'
 import { PIN_WINDOW_LABEL, PinWindowButton } from '@/components/pin-window-button'
-import { StatusBar, StatusBarAction } from '@/components/status-bar'
+import { StatusBar, StatusBarAction, StatusBarHint } from '@/components/status-bar'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import {
@@ -16,12 +16,15 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import type { AudienceSnapshot, CommentHighlightAnchor, LiveChatProviderState } from '@/lib/backend'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 import { cn } from '@/lib/utils'
@@ -117,7 +120,10 @@ export function StreamManagerStatusBar({
   onHighlightAnchorChange,
   onClear,
   onMarkClip,
-  onOpenPreview
+  onOpenPreview,
+  onSearchChat,
+  onFocusComposer,
+  onFocusBuddy
 }: {
   providers: readonly LiveChatProviderState[]
   audience: AudienceSnapshot | null
@@ -130,6 +136,12 @@ export function StreamManagerStatusBar({
    * is no time to hover. */
   onMarkClip?: () => void
   onOpenPreview?: () => void
+  /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
+   * is still clickable; below 800 px only the key shows, below 640 px they
+   * sit in the ⋯ menu. */
+  onSearchChat?: () => void
+  onFocusComposer?: () => void
+  onFocusBuddy?: () => void
 }): ReactElement {
   const anchorControl =
     highlightAnchor && onHighlightAnchorChange
@@ -139,6 +151,38 @@ export function StreamManagerStatusBar({
   // cannot be undone, so both its homes (the button, the ⋯ menu) ask first.
   const [confirmingClear, setConfirmingClear] = useState(false)
   const requestClear = onClear ? () => setConfirmingClear(true) : undefined
+  const hints = [
+    ...(onSearchChat
+      ? [
+          {
+            id: 'chat-search' as const,
+            label: 'Search',
+            menuLabel: 'Search chat',
+            run: onSearchChat
+          }
+        ]
+      : []),
+    ...(onFocusComposer
+      ? [
+          {
+            id: 'chat-composer' as const,
+            label: 'Write',
+            menuLabel: 'Write in chat',
+            run: onFocusComposer
+          }
+        ]
+      : []),
+    ...(onFocusBuddy
+      ? [
+          {
+            id: 'cohost-focus' as const,
+            label: 'Buddy',
+            menuLabel: 'Focus Buddy',
+            run: onFocusBuddy
+          }
+        ]
+      : [])
+  ]
   return (
     <>
       {/* 32 px, not the shared 26: the platform icons are 20 px (YouTube's
@@ -191,6 +235,15 @@ export function StreamManagerStatusBar({
           className={cn('items-center gap-0.5 [-webkit-app-region:no-drag]', 'flex', ABOVE_NARROW)}
           data-slot="stream-manager-actions"
         >
+          {hints.map((hint) => (
+            <StatusBarHint
+              key={hint.id}
+              accelerator={shortcutAccelerator(hint.id)}
+              label={hint.label}
+              labelClassName={COMPACT_LABEL}
+              onClick={hint.run}
+            />
+          ))}
           {onToggleAlwaysOnTop ? (
             <PinWindowButton
               pinned={alwaysOnTop}
@@ -251,6 +304,21 @@ export function StreamManagerStatusBar({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56" side="top">
+            {hints.length > 0 ? (
+              <>
+                <DropdownMenuGroup>
+                  {hints.map((hint) => (
+                    <DropdownMenuItem key={hint.id} onSelect={hint.run}>
+                      {hint.menuLabel}
+                      <DropdownMenuShortcut>
+                        <ShortcutKeys accelerator={shortcutAccelerator(hint.id)} variant="text" />
+                      </DropdownMenuShortcut>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
             <DropdownMenuGroup>
               {anchorControl ? (
                 <DropdownMenuSub>

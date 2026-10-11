@@ -7,6 +7,7 @@ import {
   REMOVAL_RESULT_VISIBLE_MS,
   REMOVAL_STATUS_LABELS,
   REMOVE_FROM_CHAT_LABEL,
+  REMOVE_UNDO_MS,
   YOUTUBE_CONFIRM_NOTE,
   removalCardView,
   removalOutcomeToast,
@@ -14,7 +15,9 @@ import {
   removalResultView,
   removalStatusView,
   removalToastView,
+  removalUndoToast,
   removeFromChatAvailable,
+  removeFromChatBlockedReason,
   secondsUntil
 } from './chat-removal-view'
 
@@ -366,5 +369,49 @@ describe('removalOutcomeToast', () => {
     expect(
       removalOutcomeToast(operation({ phase: 'cancelled' }), { includeSuccess: true })
     ).toBeNull()
+  })
+})
+
+describe('removeFromChatBlockedReason (plan 174 S3.16a, H-11)', () => {
+  const twitch = { platform: 'twitch', targetId: 't1', moderate: 'missing-scope' } as const
+  const youtube = { platform: 'youtube', targetId: 'y1', moderate: 'ready' } as const
+
+  it('names the reconnect when the account cannot delete there', () => {
+    expect(removeFromChatBlockedReason(row({ platform: 'twitch' }), [twitch, youtube])).toBe(
+      'Reconnect Twitch to remove messages'
+    )
+    expect(
+      removeFromChatBlockedReason(row({ platform: 'x' }), [
+        { platform: 'x', moderate: 'missing-scope' }
+      ])
+    ).toBe('Authorize X Live to remove messages')
+  })
+
+  it('is null when the platform can delete, hides locally, or is not listed', () => {
+    expect(removeFromChatBlockedReason(row({ platform: 'youtube' }), [twitch, youtube])).toBeNull()
+    expect(
+      removeFromChatBlockedReason(row({ platform: 'custom' }), [
+        { platform: 'custom', moderate: 'unsupported' }
+      ])
+    ).toBeNull()
+    expect(removeFromChatBlockedReason(row({ platform: 'kick' }), [twitch])).toBeNull()
+  })
+
+  it('prefers the destination the message came from', () => {
+    const ready = { platform: 'twitch', targetId: 't2', moderate: 'ready' } as const
+    expect(
+      removeFromChatBlockedReason(row({ platform: 'twitch', targetId: 't2' }), [twitch, ready])
+    ).toBeNull()
+  })
+})
+
+describe('removalUndoToast (plan 174 D20)', () => {
+  it('names the author and keys the toast by the message', () => {
+    expect(removalUndoToast(row({ id: 'm1', authorName: 'Ada' }))).toEqual({
+      id: 'chat-removal-undo:m1',
+      title: "Removing Ada's message",
+      action: 'Undo'
+    })
+    expect(REMOVE_UNDO_MS).toBe(3_000)
   })
 })
