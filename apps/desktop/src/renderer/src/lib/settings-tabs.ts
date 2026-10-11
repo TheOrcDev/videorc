@@ -14,7 +14,6 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
  */
 export const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
-  { id: 'recording', label: 'Recording' },
   { id: 'permissions', label: 'Permissions' },
   { id: 'shortcuts', label: 'Shortcuts' },
   { id: 'remote', label: 'Remote' },
@@ -29,6 +28,28 @@ export function isSettingsTabId(value: unknown): value is SettingsTabId {
   return SETTINGS_TABS.some((tab) => tab.id === value)
 }
 
+/**
+ * Tab ids older apps remembered or linked to, and the tab that replaced each.
+ * Settings → Recording is gone (plan 174 S3.6, D5): the recordings folder and
+ * Keep original recording live on the Output page, Keep microphone ready in
+ * Sources → Microphone, and the FFmpeg line in Health.
+ */
+const RETIRED_SETTINGS_TABS: Readonly<Record<string, SettingsTabId>> = {
+  recording: 'general'
+}
+
+/**
+ * A stored or linked tab id as today's tab: a current id as is, a retired one
+ * as the tab that replaced it, anything else as null.
+ */
+export function migrateSettingsTabId(value: unknown): SettingsTabId | null {
+  if (isSettingsTabId(value)) return value
+  if (typeof value === 'string' && Object.hasOwn(RETIRED_SETTINGS_TABS, value)) {
+    return RETIRED_SETTINGS_TABS[value] ?? null
+  }
+  return null
+}
+
 /** The page's localStorage, or null where reading the property itself throws. */
 function pageStorage(): Storage | null {
   try {
@@ -39,16 +60,16 @@ function pageStorage(): Storage | null {
 }
 
 /**
- * The tab Settings opens on: the last one used on this device, else General.
- * The choice is a convenience, so storage that is missing, holds an unknown
- * id, or throws falls back instead of breaking Settings.
+ * The tab Settings opens on: the last one used on this device (a retired tab
+ * as its replacement), else General. The choice is a convenience, so storage
+ * that is missing, holds an unknown id, or throws falls back instead of
+ * breaking Settings.
  */
 export function readLastSettingsTab(
   storage: Pick<Storage, 'getItem'> | null = pageStorage()
 ): SettingsTabId {
   try {
-    const stored = storage?.getItem(STORAGE_KEYS.settingsTab)
-    return isSettingsTabId(stored) ? stored : DEFAULT_SETTINGS_TAB
+    return migrateSettingsTabId(storage?.getItem(STORAGE_KEYS.settingsTab)) ?? DEFAULT_SETTINGS_TAB
   } catch {
     return DEFAULT_SETTINGS_TAB
   }

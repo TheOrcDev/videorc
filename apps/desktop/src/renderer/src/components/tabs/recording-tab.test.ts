@@ -7,13 +7,15 @@ import type { VideoSettings } from '@/lib/backend'
 import {
   coerceVideoToOrientation,
   defaultCaptureConfig,
+  defaultSettings,
   layoutPresetOrientation,
   videoPresets,
-  type CaptureConfig
+  type CaptureConfig,
+  type SettingsState
 } from '@/lib/capture'
 import { LANDSCAPE_CANVAS_RULE } from '@/lib/output-quality'
 import { QuickSettings } from '@/components/studio/quick-settings'
-import { RecordingTab } from './recording-tab'
+import { RecordingTab, SAVE_RECORDING_OFF, SAVE_RECORDING_ON } from './recording-tab'
 
 // Plan 174: the Output page's typed fields commit once and never transpose
 // (D-1), and the bitrate moves with the size (D-8). Studio has no second
@@ -29,6 +31,7 @@ let root: Root
 let container: HTMLDivElement
 let patches: Partial<VideoSettings>[]
 let stored: VideoSettings
+let storedSettings: SettingsState
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
@@ -45,12 +48,33 @@ afterEach(async () => {
 })
 
 /** The provider's `patchVideo`: merge, mark Custom, keep the scene's orientation. */
-function Harness({ surface, video }: { surface: () => ReactElement; video: VideoSettings }) {
-  const [config, setConfig] = useState<CaptureConfig>({ ...defaultCaptureConfig, video })
+function Harness({
+  surface,
+  video,
+  recordEnabled,
+  initialSettings
+}: {
+  surface: () => ReactElement
+  video: VideoSettings
+  recordEnabled: boolean
+  initialSettings: SettingsState
+}) {
+  const [config, setConfig] = useState<CaptureConfig>({
+    ...defaultCaptureConfig,
+    video,
+    recordEnabled
+  })
+  const [settings, setSettings] = useState<SettingsState>(initialSettings)
   stored = config.video
+  storedSettings = settings
   mocked.core = {
     captureConfig: config,
     setCaptureConfig: setConfig,
+    settings,
+    setSettings,
+    runtimeInfo: { platform: 'darwin' },
+    encoderPreference: null,
+    setEncoderPreference: vi.fn(),
     patchVideo: (patch: Partial<VideoSettings>) => {
       patches.push(patch)
       setConfig((current) => ({
@@ -90,9 +114,24 @@ function Harness({ surface, video }: { surface: () => ReactElement; video: Video
 
 async function render(
   surface: () => ReactElement,
-  video: VideoSettings = videoPresets['tutorial-1080p30']
+  video: VideoSettings = videoPresets['tutorial-1080p30'],
+  { recordEnabled = true, settings = defaultSettings } = {}
 ): Promise<void> {
-  await act(async () => root.render(createElement(Harness, { surface, video })))
+  await act(async () =>
+    root.render(
+      createElement(Harness, { surface, video, recordEnabled, initialSettings: settings })
+    )
+  )
+}
+
+function labelled(text: string): HTMLElement {
+  const label = [...document.querySelectorAll('label')].find((entry) => entry.textContent === text)!
+  expect(label, text).toBeTruthy()
+  return document.getElementById(label.htmlFor)!
+}
+
+function button(text: string): HTMLButtonElement | undefined {
+  return [...document.querySelectorAll('button')].find((entry) => entry.textContent === text)
 }
 
 function input(label: string): HTMLInputElement {
@@ -128,7 +167,10 @@ async function blur(element: HTMLInputElement): Promise<void> {
   })
 }
 
-const renderOutputPage = (): Promise<void> => render(() => createElement(RecordingTab))
+const renderOutputPage = (
+  video?: VideoSettings,
+  options?: { recordEnabled?: boolean; settings?: SettingsState }
+): Promise<void> => render(() => createElement(RecordingTab), video, options)
 
 describe('Output page typed fields (plan 174, D-1)', () => {
   it('typing 2560 into Width gives 2560×1080, committed once on blur', async () => {
@@ -200,5 +242,61 @@ describe('one resolution picker (plan 174, D-8 and S3.3 B-15)', () => {
     )
     expect(labels).not.toContain('Output')
     expect(document.querySelector('[aria-label="Output"]')).toBeNull()
+  })
+})
+
+describe('the Output page is the one home for the local file (plan 174 S3.6)', () => {
+  it('names Save a local recording as a settings row whose label names the switch (D-3)', async () => {
+    await renderOutputPage()
+    const row = document.querySelector('[data-testid="output-save-recording"]')!
+    const toggle = labelled('Save a local recording')
+    expect(toggle.getAttribute('role')).toBe('switch')
+    expect(row.contains(toggle)).toBe(true)
+    expect(row.textContent).toContain(SAVE_RECORDING_ON)
+    expect(input('Width').disabled).toBe(false)
+    await act(async () => toggle.click())
+    expect(row.textContent).toContain(SAVE_RECORDING_OFF)
+  })
+
+  it('turns the quality off with the switch, and says why (D-3)', async () => {
+    await renderOutputPage(undefined, { recordEnabled: false })
+    for (const label of ['Width', 'Height', 'FPS', 'Bitrate kbps']) {
+      expect(input(label).disabled, label).toBe(true)
+    }
+    expect((document.getElementById('video-preset') as HTMLButtonElement).disabled).toBe(true)
+    const radios = [...document.querySelectorAll('[role="radio"]')]
+    expect(radios.length).toBeGreaterThan(0)
+    expect(radios.every((radio) => radio.hasAttribute('disabled'))).toBe(true)
+    expect(document.body.textContent).toContain(SAVE_RECORDING_OFF)
+  })
+
+  it('shows the default recordings folder by its path, with Choose… and no reset (I-22, I-23)', async () => {
+    await renderOutputPage()
+    const folder = document.querySelector('[data-testid="recordings-folder"]')!
+    expect(folder.textContent).toContain('~/Movies/Videorc/Recordings')
+    expect(folder.querySelector('[id="output-directory"]')).toBeNull()
+    expect(button('Choose…')).toBeTruthy()
+    expect(button('Use default')).toBeUndefined()
+    expect(button('Show in Finder')).toBeUndefined()
+    expect(document.body.textContent).not.toMatch(/Browse|Reveal|Output directory|Blank uses/)
+  })
+
+  it('puts a chosen folder back to the default with Use default', async () => {
+    await renderOutputPage(undefined, {
+      settings: { ...defaultSettings, outputDirectory: 'Videos', outputDirectoryHandle: 'grant-1' }
+    })
+    const folder = document.querySelector('[data-testid="recordings-folder"]')!
+    expect(folder.textContent).toContain('Videos')
+    await act(async () => button('Use default')!.click())
+    expect(storedSettings).toMatchObject({ outputDirectory: '', outputDirectoryHandle: undefined })
+    expect(folder.textContent).toContain('~/Movies/Videorc/Recordings')
+  })
+
+  it('keeps Keep original recording here, as a labelled switch', async () => {
+    await renderOutputPage()
+    const toggle = labelled('Keep original recording')
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    await act(async () => toggle.click())
+    expect(storedSettings.keepOriginalRecording).toBe(true)
   })
 })

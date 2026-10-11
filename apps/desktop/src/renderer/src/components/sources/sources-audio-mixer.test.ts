@@ -10,6 +10,7 @@ import type { MeterInput } from '@/lib/mic-meter-input'
 import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system-audio'
 import {
   applySyncChange,
+  keepMicrophoneReadyHint,
   MicrophoneChannel,
   SyncCalibrationView,
   syncOffsetTag,
@@ -294,6 +295,25 @@ describe('Sources Microphone row (plans 093, 173)', () => {
   it('tags the header while Sync is off its default, so a folded setting never surprises', () => {
     expect(renderMicrophone({ syncOffsetMs: 150, syncUserSet: true })).toContain('>Sync +150 ms<')
     expect(renderMicrophone({ syncOffsetMs: 0, syncUserSet: true })).not.toContain('Sync +')
+  })
+
+  it('keeps Keep microphone ready in More, as a labelled switch (plan 174 S3.6, D5)', () => {
+    const markup = renderMicrophone({
+      defaultMoreOpen: true,
+      keepReady: {
+        checked: true,
+        description: keepMicrophoneReadyHint('darwin'),
+        onCheckedChange: noop
+      }
+    })
+    expect(markup).toContain('data-videorc-mic-keep-ready=""')
+    expect(markup).toContain('>Keep microphone ready<')
+    // A settings row: the Field's label names its switch once mounted.
+    expect(markup).toMatch(
+      /data-videorc-mic-keep-ready=""[^]*>Keep microphone ready<[^]*role="switch" aria-checked="true"/
+    )
+    expect(markup).toContain('macOS shows its microphone indicator while it&#x27;s open')
+    expect(renderMicrophone({ defaultMoreOpen: true })).not.toContain('Keep microphone ready')
   })
 
   it('shows Calibrate only when given (development builds, plan 173 D3)', () => {

@@ -16,7 +16,7 @@ import { createContext, useContext } from 'react'
 
 import { BUDDY_TAB_LABEL, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
 import { isLivestreamViewId } from '@/lib/livestream-tabs'
-import { isSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
+import { migrateSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
 import type { WorkspaceNavigation } from '@/lib/workspace-navigation'
 
 // Studio control pages, grouped under "Studio" in the sidebar: one click away, but
@@ -145,7 +145,11 @@ export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | 
     string,
     unknown
   >
-  if (tab === 'settings') return isSettingsTabId(settingsTab) ? { tab, settingsTab } : { tab }
+  if (tab === 'settings') {
+    // A link to a retired tab opens the tab that replaced it (plan 174 S3.6).
+    const current = migrateSettingsTabId(settingsTab)
+    return current ? { tab, settingsTab: current } : { tab }
+  }
   if (tab === 'ai') return isBuddyTabId(buddyTab) ? { tab, buddyTab } : { tab }
   if (tab === 'live') {
     return isLivestreamViewId(livestreamView) ? { tab, livestreamView } : { tab }

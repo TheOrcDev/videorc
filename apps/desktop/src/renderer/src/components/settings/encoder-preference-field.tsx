@@ -18,7 +18,8 @@ const OPTIONS: ReadonlyArray<{ value: WindowsH264EncoderPreference; label: strin
 ]
 
 /**
- * Settings → Recording, Windows PCs with Intel graphics only (plan 090 C5).
+ * The Output page (Settings → Recording until plan 174 S3.6), Windows PCs
+ * with Intel graphics only (plan 090 C5).
  * Chooses the encoder for the fallback path Videorc uses when its normal
  * hardware encoder can't start. Opt-in while Quick Sync is in beta: Automatic
  * keeps the software fallback.

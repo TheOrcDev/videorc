@@ -12,6 +12,7 @@ import {
   commitOutputField,
   outputFieldLimits,
   pickRecordingResolution,
+  recordingPresetOptions,
   streamQualityOverride,
   withStreamQuality
 } from './output-quality'
@@ -149,5 +150,41 @@ describe('typed Output fields (plan 174, D-1)', () => {
     expect(commitOutputField(fullHd, 'width', '1920', 'horizontal')).toEqual({
       kind: 'unchanged'
     })
+  })
+})
+
+describe('the Output page preset list (plan 174 S3.6, D-28)', () => {
+  const values = (current: Parameters<typeof recordingPresetOptions>[0], vertical = false) =>
+    recordingPresetOptions(current, vertical ? 'vertical' : 'horizontal').map(
+      (option) => option.value
+    )
+
+  it('holds the recording presets for the orientation, never the streaming ones', () => {
+    expect(values('tutorial-1080p30')).toEqual([
+      'record-4k30',
+      'record-4k60-experimental',
+      'tutorial-1440p30',
+      'tutorial-1080p30',
+      'tutorial-720p30',
+      'tutorial-540p30'
+    ])
+    expect(values('vertical-1080x1920', true)).toEqual(['vertical-1080x1920'])
+    expect(values('custom')).not.toContain('custom')
+  })
+
+  it('names every preset in the one video spelling', () => {
+    const labels = recordingPresetOptions('tutorial-1080p30', 'horizontal').map((o) => o.label)
+    expect(labels).toContain('1080p · 30 fps · 6 Mbps')
+    expect(labels.join(' ')).not.toMatch(/Tutorial|Stream|Legacy/)
+  })
+
+  it('keeps a preset picked some other way while it is the setting, so the field never reads blank', () => {
+    // The performance check's 1080p60 rung is a streaming preset.
+    const options = recordingPresetOptions('stream-safe-1080p60', 'horizontal')
+    expect(options.at(-1)).toEqual({
+      value: 'stream-safe-1080p60',
+      label: '1080p · 60 fps · 6 Mbps'
+    })
+    expect(options.filter((option) => option.value.startsWith('stream-'))).toHaveLength(1)
   })
 })
