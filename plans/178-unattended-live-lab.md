@@ -594,6 +594,18 @@ the next doctor.
 
 **Done when:** plan 166 S9's done-when.
 
+**BUILT (2026-10-12, branch `plan-178/u13`):** `scripts/live-lab/lib/{net-fault,proc-fault,faults-scenario}.mjs`
+with tests, `scripts/live-lab/scenarios/faults.mjs` (imports U6's
+`defineScenario`), doctor check "network faults" (FAIL on a leftover anchor
+rule or pipe, flushes it when it can), finalized
+`config/live-lab/sudoers.live-lab.example` (10 exact lines, test-checked
+against the code) and `config/live-lab/pf.anchor.example` (root-owned rules
+file). Owed on the lab machine: install the pf anchor file and the sudoers
+file, hook the anchor in `/etc/pf.conf`, `pfctl -n -f` parse check, one
+attended `faults` run to confirm the 30 s loss yields
+`stream-target-reconnecting` before the 30 s wedged timeout
+(`stream-output-failed`) and not after it.
+
 ### U14 — OAuth Go Live, vertical, scheduled events (plan 176 suites B, F)
 
 Run plan 176 suites B (OAuth Go Live on the lab client) and F (dual
