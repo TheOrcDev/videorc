@@ -9,6 +9,7 @@ import type {
 } from './backend'
 import type { EntitlementUiGate } from './entitlement-ui'
 import { SESSION_MODES } from './session-modes'
+import { userErrorMessage } from './user-error'
 import { VIDEORC_PREMIUM_URL } from './videorc-web-links'
 import { formatClipMarkClock } from '../../../shared/clip-marks'
 
@@ -391,6 +392,27 @@ export function cleanCutFailureCopy(code: string | undefined, message: string | 
   if (known) return known
   const text = message?.trim()
   return text || 'Clean cut stopped before it finished.'
+}
+
+const UNKNOWN_CLEAN_CUT_FAILURE = cleanCutFailureCopy(undefined, undefined)
+
+/**
+ * Plan 174 S2.4: a failed call in plain words. Clean cut's own codes keep
+ * their sentence; anything else gets the generic next step, never raw text
+ * (the raw text goes to the console).
+ */
+export function cleanCutErrorReason(error: unknown): string {
+  const code =
+    typeof error === 'object' &&
+    error !== null &&
+    typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : undefined
+  const known = code ? cleanCutFailureCopy(code, undefined) : UNKNOWN_CLEAN_CUT_FAILURE
+  if (known !== UNKNOWN_CLEAN_CUT_FAILURE) return known
+  const copy = userErrorMessage(error)
+  console.warn('[clean-cut] request failed:', copy.raw)
+  return copy.description
 }
 
 const UNAVAILABLE_COPY: Readonly<Record<string, string>> = {

@@ -75,7 +75,24 @@ export interface CleanCutTranscriptProps {
   onToggleRemoval: (id: string) => void
   onSeek: (ms: number) => void
   onToggleBlock: (block: CondensedBlock) => void
+  /** The word indexes a text selection in the transcript covers (E-14). */
+  onSelectWords?: (wordIndexes: readonly number[]) => void
   className?: string
+}
+
+const NO_WORDS: readonly number[] = []
+
+/** The words a selection covers inside `root`, by their `data-word` index. */
+function selectedWordIndexes(root: HTMLElement): readonly number[] {
+  const selection = window.getSelection?.()
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return NO_WORDS
+  const range = selection.getRangeAt(0)
+  if (!root.contains(range.commonAncestorContainer)) return NO_WORDS
+  const indexes: number[] = []
+  for (const element of root.querySelectorAll<HTMLElement>('[data-word]')) {
+    if (range.intersectsNode(element)) indexes.push(Number(element.dataset.word))
+  }
+  return indexes
 }
 
 /**
@@ -94,6 +111,7 @@ export function CleanCutTranscript({
   onToggleRemoval,
   onSeek,
   onToggleBlock,
+  onSelectWords,
   className
 }: CleanCutTranscriptProps): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null)
@@ -110,6 +128,17 @@ export function CleanCutTranscript({
     overscan: 6,
     getItemKey: (index) => items[index]?.key ?? index
   })
+
+  // A drag over the words selects them for "Cut selection".
+  useEffect(() => {
+    if (!onSelectWords) return
+    const read = (): void => {
+      const root = rootRef.current
+      onSelectWords(root ? selectedWordIndexes(root) : NO_WORDS)
+    }
+    document.addEventListener('selectionchange', read)
+    return () => document.removeEventListener('selectionchange', read)
+  }, [onSelectWords])
 
   useEffect(() => {
     if (!scrollRequest) return
@@ -309,6 +338,7 @@ function renderTokens(
             token.index === activeWord && 'bg-accent-pressed'
           )}
           data-seek-ms={token.startMs}
+          data-word={token.index}
         >
           {token.text}
         </span>,
@@ -328,10 +358,12 @@ function renderTokens(
       next += 1
     }
     const selected = selectedId === state.id
+    // A cut run is a deletion to assistive technology; the keys (↑ ↓, Enter)
+    // reach every cut from the review, so the run is no fake button (E-15).
+    const Run = state.cut ? 'del' : 'span'
     out.push(
-      <span
+      <Run
         key={`run-${state.id}-${token.index}`}
-        aria-pressed={state.cut}
         className={cn(
           'rounded-[3px] decoration-2 hover:bg-accent',
           state.cut ? STRUCK[state.tone] : SUGGESTED[state.tone],
@@ -340,16 +372,19 @@ function renderTokens(
         data-cut={state.cut ? 'on' : 'off'}
         data-removal-id={state.id}
         data-selected={selected || undefined}
-        role="button"
         title={removalTitle(state.removal, state.cut)}
       >
         {words.map((word, position) => (
-          <span key={word.index} className={cn(word.index === activeWord && 'bg-accent-pressed')}>
+          <span
+            key={word.index}
+            className={cn(word.index === activeWord && 'bg-accent-pressed')}
+            data-word={word.index}
+          >
             {position > 0 ? ' ' : null}
             {word.text}
           </span>
         ))}
-      </span>,
+      </Run>,
       ' '
     )
     index = next
@@ -375,7 +410,6 @@ function CutMarker({
   const tone = removalTone(removal.kind)
   return (
     <Badge
-      aria-pressed={removal.enabled}
       className={cn(
         'mx-px align-[1px] tabular-nums hover:bg-accent',
         removal.enabled ? 'decoration-muted-foreground' : 'opacity-70',
@@ -385,7 +419,6 @@ function CutMarker({
       data-kind={removal.kind}
       data-removal-id={removal.id}
       data-selected={selected || undefined}
-      role="button"
       title={removalTitle(removal, removal.enabled)}
       variant={removal.enabled ? 'outline' : 'ghost'}
     >
@@ -409,7 +442,6 @@ function PinMarker({ pin }: { pin: CleanCutPin }): ReactElement {
       className="mx-px align-[1px] hover:bg-accent"
       data-pin={pin.kind}
       data-seek-ms={pin.startMs}
-      role="button"
       title={pin.excerpt ? `${pin.label}: ${pin.excerpt}` : pin.label}
       variant="outline"
     >

@@ -183,23 +183,23 @@ function labels(items: HTMLElement[]): string[] {
   return items.map((item) => item.textContent?.trim() ?? '')
 }
 
-describe('Library → Clean cut (plan 119 S14)', () => {
+describe('Library → Clean cut (plan 119 S14; plan 174 S3.13)', () => {
   it('opens the Buddy tab on an eligible recording, right after Play and the report', async () => {
     await render()
     const recording = await openMenu('tutorial')
-    expect(labels(recording).slice(0, 2)).toEqual(['Play', 'Clean cut'])
+    expect(labels(recording).slice(0, 2)).toEqual(['Play', 'Make a clean cut…'])
     await act(async () => recording[1].click())
     expect(onOpenCleanCut).toHaveBeenCalledExactlyOnceWith('tutorial')
 
     const streamed = await openMenu('stream')
-    expect(labels(streamed).slice(0, 3)).toEqual(['Play', 'Buddy report', 'Clean cut'])
+    expect(labels(streamed).slice(0, 3)).toEqual(['Play', 'Buddy report', 'Make a clean cut…'])
     await closeMenu()
   })
 
   it('offers no Clean cut where the backend would refuse one', async () => {
     await render()
     for (const id of ['stream-only', 'short', 'imported', 'cut', 'condensed']) {
-      expect(labels(await openMenu(id)), id).not.toContain('Clean cut')
+      expect(labels(await openMenu(id)), id).not.toContain('Make a clean cut…')
       await closeMenu()
     }
   })

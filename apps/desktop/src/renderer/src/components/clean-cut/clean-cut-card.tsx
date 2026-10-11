@@ -7,6 +7,7 @@ import {
 } from '@/components/clean-cut/clean-cut-consent-dialog'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { LockAlert } from '@/components/lock-alert'
+import { ConfigGrid, CONFIG_GRID_PAIR } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -27,6 +28,8 @@ import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { setCleanCutAuto, useCleanCutAuto } from '@/hooks/use-clean-cut-auto'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import type { CleanCutJob, CleanCutMode } from '@/lib/backend'
+import { cleanCutDraftChanges, type CleanCutReviewTarget } from '@/lib/clean-cut-drafts'
+import type { CleanCutOrigin } from '@/lib/clean-cut-events'
 import {
   CLEAN_CUT_AUTO_LABEL,
   CLEAN_CUT_DESCRIPTION,
@@ -35,7 +38,7 @@ import {
   CONDENSED_DEFAULT_TARGET_MINUTES,
   CONDENSED_TARGET_MINUTES,
   cleanCutAutoStatus,
-  cleanCutFailureCopy,
+  cleanCutErrorReason,
   cleanCutMinutesLeftLabel,
   cleanCutStatusView,
   cleanCutUnlock,
@@ -50,24 +53,20 @@ import {
   type CleanCutStatusView
 } from '@/lib/clean-cut-view'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
-import { dayLabel, isActiveRecordingState } from '@/lib/format'
+import { dayLabel, isActiveRecordingState, plural } from '@/lib/format'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { toast } from '@/lib/toast'
-import { userErrorMessage } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
-/** Which cut the review opens. */
-export interface CleanCutReviewTarget {
-  sessionId: string
-  mode: CleanCutMode
-  jobId: string | null
-}
+export type { CleanCutReviewTarget } from '@/lib/clean-cut-drafts'
 
-/** Library's "Clean cut" ask: select this recording (the nonce re-applies the same one). */
+/** Library's "Make a clean cut…" ask: select this recording (the nonce re-applies the same one). */
 export interface CleanCutFocus {
   sessionId: string
   nonce: number
+  /** The review of this recording goes back where the ask came from (E-12). */
+  origin?: CleanCutOrigin
 }
 
 const CLEAN_CUT_MODE_OPTIONS: SegmentedControlOption<CleanCutMode>[] = [
@@ -80,26 +79,6 @@ const CONDENSED_LENGTH_OPTIONS: SegmentedControlOption[] = CONDENSED_TARGET_MINU
 )
 
 const UNTITLED = 'Untitled recording'
-
-const UNKNOWN_CLEAN_CUT_FAILURE = cleanCutFailureCopy(undefined, undefined)
-
-/**
- * Plan 174 S2.4: a failed call in plain words. Clean cut's own codes keep
- * their sentence; anything else gets the generic next step, never raw text.
- */
-function cleanCutErrorReason(error: unknown): string {
-  const code =
-    typeof error === 'object' &&
-    error !== null &&
-    typeof (error as { code?: unknown }).code === 'string'
-      ? (error as { code: string }).code
-      : undefined
-  const known = code ? cleanCutFailureCopy(code, undefined) : UNKNOWN_CLEAN_CUT_FAILURE
-  if (known !== UNKNOWN_CLEAN_CUT_FAILURE) return known
-  const copy = userErrorMessage(error)
-  console.warn('[clean-cut] request failed:', copy.raw)
-  return copy.description
-}
 
 /**
  * The Buddy tab's Clean cut tab (plan 119 S14, S19; plan 150 S7), in Settings'
@@ -268,164 +247,183 @@ export function CleanCutCard({
   }
 
   const review = (target: CleanCutJob): void =>
-    onReview({ sessionId: target.sourceSessionId, mode: target.mode, jobId: target.id })
+    onReview({
+      sessionId: target.sourceSessionId,
+      mode: target.mode,
+      jobId: target.id,
+      // Asked from a Library row: its review goes back to that row (E-12).
+      ...(focus?.origin && focus.sessionId === target.sourceSessionId
+        ? { origin: focus.origin }
+        : {})
+    })
+  // Edits kept from a review left open (E-5): the row says they wait.
+  const unsaved = job ? cleanCutDraftChanges(job.id) : 0
 
   const makeLabel = mode === 'condensed' ? 'Make a condensed cut' : 'Make a clean cut'
 
   return (
     <>
-      <PanelSection
-        action={
-          minutesLeft ? (
-            <Badge data-testid="clean-cut-minutes" variant="outline">
-              {minutesLeft}
-            </Badge>
-          ) : null
-        }
-        description={CLEAN_CUT_DESCRIPTION}
-        title={CLEAN_CUT_TITLE}
-      >
-        <Field orientation="horizontal">
-          <FieldContent>
-            <FieldLabel htmlFor="clean-cut-auto-switch">{CLEAN_CUT_AUTO_LABEL}</FieldLabel>
-            <CleanCutAutoStatusLine
-              status={autoStatus}
-              onAllowCloudAi={() => setAsk({ kind: 'auto' })}
-            />
-          </FieldContent>
-          <Switch
-            checked={auto}
-            disabled={!auto && unlock !== null}
-            id="clean-cut-auto-switch"
-            onCheckedChange={turnAuto}
-          />
-        </Field>
-
-        {unlock ? (
+      {/* Locked means disabled with one reason, in the strip every Buddy tab
+          leads with (plan 174 E-31): the switch and Make are off under it. */}
+      {unlock ? (
+        <div className="border-b border-border p-gutter" data-slot="buddy-tab-lock">
           <LockAlert action={unlock.action} data-testid="clean-cut-unlock" reason={unlock.reason} />
-        ) : null}
-      </PanelSection>
-      <PanelSection
-        description="Pick a recording to cut, or review a cut you made."
-        title="Recordings"
-      >
-        <div
-          className="flex min-w-0 scroll-mt-3 flex-col gap-3"
-          data-slot="clean-cut"
-          ref={sectionRef}
+        </div>
+      ) : null}
+      <ConfigGrid className={CONFIG_GRID_PAIR}>
+        <PanelSection
+          action={
+            minutesLeft ? (
+              <Badge data-testid="clean-cut-minutes" variant="outline">
+                {minutesLeft}
+              </Badge>
+            ) : null
+          }
+          description={CLEAN_CUT_DESCRIPTION}
+          title={CLEAN_CUT_TITLE}
         >
-          {selected ? (
-            <div className="flex min-w-0 flex-col gap-2" data-slot="clean-cut-recording">
-              <div className="flex flex-wrap items-center gap-2">
-                <RecordingPicker
-                  options={options}
-                  selected={selected}
-                  onSelect={(sessionId) =>
-                    setPicked(sessionId === recordings[0]?.id ? null : sessionId)
-                  }
-                />
-                <SegmentedControl
-                  aria-label="Kind of cut"
-                  options={CLEAN_CUT_MODE_OPTIONS}
-                  value={mode}
-                  onValueChange={setMode}
-                />
-                {mode === 'condensed' && !condensedBlocked && !status.busy ? (
-                  <div className="flex items-center gap-2" data-slot="clean-cut-target">
-                    <span className="text-xs text-muted-foreground">Length</span>
-                    <SegmentedControl
-                      aria-label="Condensed length"
-                      options={CONDENSED_LENGTH_OPTIONS}
-                      size="sm"
-                      value={String(targetMinutes)}
-                      onValueChange={(value) => setTargetMinutes(Number(value))}
+          <Field orientation="horizontal">
+            <FieldContent>
+              <FieldLabel htmlFor="clean-cut-auto-switch">{CLEAN_CUT_AUTO_LABEL}</FieldLabel>
+              <CleanCutAutoStatusLine
+                status={autoStatus}
+                onAllowCloudAi={() => setAsk({ kind: 'auto' })}
+              />
+            </FieldContent>
+            <Switch
+              checked={auto}
+              disabled={!auto && unlock !== null}
+              id="clean-cut-auto-switch"
+              onCheckedChange={turnAuto}
+            />
+          </Field>
+        </PanelSection>
+        <PanelSection
+          description="Pick a recording to cut, or review a cut you made."
+          title="Recordings"
+        >
+          <div
+            className="flex min-w-0 scroll-mt-3 flex-col gap-3"
+            data-slot="clean-cut"
+            ref={sectionRef}
+          >
+            {selected ? (
+              <div className="flex min-w-0 flex-col gap-2" data-slot="clean-cut-recording">
+                <div className="flex flex-wrap items-center gap-2">
+                  <RecordingPicker
+                    options={options}
+                    selected={selected}
+                    onSelect={(sessionId) =>
+                      setPicked(sessionId === recordings[0]?.id ? null : sessionId)
+                    }
+                  />
+                  <SegmentedControl
+                    aria-label="Kind of cut"
+                    options={CLEAN_CUT_MODE_OPTIONS}
+                    value={mode}
+                    onValueChange={setMode}
+                  />
+                  {mode === 'condensed' && !condensedBlocked && !status.busy ? (
+                    <div className="flex items-center gap-2" data-slot="clean-cut-target">
+                      <span className="text-xs text-muted-foreground">Length</span>
+                      <SegmentedControl
+                        aria-label="Condensed length"
+                        options={CONDENSED_LENGTH_OPTIONS}
+                        size="sm"
+                        value={String(targetMinutes)}
+                        onValueChange={(value) => setTargetMinutes(Number(value))}
+                      />
+                      {job && status.kind !== 'none' && status.kind !== 'cancelled' ? (
+                        <Button
+                          disabled={cannotStart}
+                          size="xs"
+                          type="button"
+                          variant="outline"
+                          onClick={make}
+                        >
+                          Make again
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+
+                {condensedBlocked && condensed && !condensed.eligible ? (
+                  <GroupedList>
+                    <ListRow
+                      data-testid="clean-cut-status"
+                      data-status="unavailable"
+                      icon={<ClipIcon aria-hidden className="text-muted-foreground" />}
+                      title="Not for this recording"
+                      context={<span title={condensed.reason}>{condensed.reason}</span>}
                     />
-                    {job && status.kind !== 'none' && status.kind !== 'cancelled' ? (
+                  </GroupedList>
+                ) : status.kind === 'failed' && job ? (
+                  <Alert data-testid="clean-cut-status" data-status="failed" variant="destructive">
+                    <AlertTitle>
+                      {mode === 'condensed' ? 'The condensed cut failed' : 'The clean cut failed'}
+                    </AlertTitle>
+                    <AlertDescription className="text-xs">{status.detail}</AlertDescription>
+                    <AlertAction className="flex items-center gap-1.5">
+                      {status.canReview ? (
+                        <Button size="xs" type="button" variant="ghost" onClick={() => review(job)}>
+                          Review
+                        </Button>
+                      ) : null}
                       <Button
-                        disabled={cannotStart}
+                        disabled={cannotRetry}
                         size="xs"
                         type="button"
                         variant="outline"
-                        onClick={make}
+                        onClick={() => retry(job)}
                       >
-                        Make again
+                        <ResetIcon data-icon="inline-start" />
+                        Retry
                       </Button>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-
-              {condensedBlocked && condensed && !condensed.eligible ? (
-                <GroupedList>
-                  <ListRow
-                    data-testid="clean-cut-status"
-                    data-status="unavailable"
-                    icon={<ClipIcon aria-hidden className="text-muted-foreground" />}
-                    title="Not for this recording"
-                    context={<span title={condensed.reason}>{condensed.reason}</span>}
-                  />
-                </GroupedList>
-              ) : status.kind === 'failed' && job ? (
-                <Alert data-testid="clean-cut-status" data-status="failed" variant="destructive">
-                  <AlertTitle>
-                    {mode === 'condensed' ? 'The condensed cut failed' : 'The clean cut failed'}
-                  </AlertTitle>
-                  <AlertDescription className="text-xs">{status.detail}</AlertDescription>
-                  <AlertAction className="flex items-center gap-1.5">
-                    {status.canReview ? (
-                      <Button size="xs" type="button" variant="ghost" onClick={() => review(job)}>
-                        Review
-                      </Button>
-                    ) : null}
-                    <Button
-                      disabled={cannotRetry}
-                      size="xs"
-                      type="button"
-                      variant="outline"
-                      onClick={() => retry(job)}
+                    </AlertAction>
+                  </Alert>
+                ) : (
+                  <GroupedList>
+                    <ListRow
+                      className="[&_[data-slot=list-row-title]]:shrink-0"
+                      context={
+                        unsaved > 0 ? (
+                          <span data-slot="clean-cut-unsaved">
+                            {plural(unsaved, 'unsaved change')} in its review
+                          </span>
+                        ) : status.detail ? (
+                          <span title={status.detail}>{status.detail}</span>
+                        ) : (
+                          selectedFacts(selected)
+                        )
+                      }
+                      data-testid="clean-cut-status"
+                      data-status={status.kind}
+                      icon={<StatusGlyph kind={status.kind} />}
+                      title={status.label}
                     >
-                      <ResetIcon data-icon="inline-start" />
-                      Retry
-                    </Button>
-                  </AlertAction>
-                </Alert>
-              ) : (
-                <GroupedList>
-                  <ListRow
-                    className="[&_[data-slot=list-row-title]]:shrink-0"
-                    context={
-                      status.detail ? (
-                        <span title={status.detail}>{status.detail}</span>
-                      ) : (
-                        selectedFacts(selected)
-                      )
-                    }
-                    data-testid="clean-cut-status"
-                    data-status={status.kind}
-                    icon={<StatusGlyph kind={status.kind} />}
-                    title={status.label}
-                  >
-                    <StatusActions
-                      cannotStart={cannotStart}
-                      job={job}
-                      makeLabel={makeLabel}
-                      status={status}
-                      onCancel={cancel}
-                      onMake={make}
-                      onOpenLibrary={(outputSessionId) => onOpenLibrarySession(outputSessionId)}
-                      onReview={review}
-                    />
-                  </ListRow>
-                </GroupedList>
-              )}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground" data-slot="clean-cut-empty">
-              {CLEAN_CUT_NO_RECORDINGS}
-            </p>
-          )}
-        </div>
-      </PanelSection>
+                      <StatusActions
+                        cannotStart={cannotStart}
+                        job={job}
+                        makeLabel={makeLabel}
+                        status={status}
+                        onCancel={cancel}
+                        onMake={make}
+                        onOpenLibrary={(outputSessionId) => onOpenLibrarySession(outputSessionId)}
+                        onReview={review}
+                      />
+                    </ListRow>
+                  </GroupedList>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground" data-slot="clean-cut-empty">
+                {CLEAN_CUT_NO_RECORDINGS}
+              </p>
+            )}
+          </div>
+        </PanelSection>
+      </ConfigGrid>
       <CleanCutConsentDialog ask={ask} onAnswer={answer} />
     </>
   )

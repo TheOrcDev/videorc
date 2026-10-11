@@ -6,6 +6,10 @@ import type { CleanCutMode } from './backend'
 
 export const OPEN_CLEAN_CUT_EVENT = 'videorc:open-clean-cut'
 
+/** Where the ask came from, so the review's back button returns there
+ * (plan 174 S3.13, E-12). No origin means the Buddy page itself. */
+export type CleanCutOrigin = 'library'
+
 export interface CleanCutOpenRequest {
   /** The source recording. */
   sessionId: string
@@ -14,6 +18,7 @@ export interface CleanCutOpenRequest {
   mode?: CleanCutMode
   /** Open the review, not just the card on that recording. */
   review?: boolean
+  origin?: CleanCutOrigin
 }
 
 /** What app-shell hands the Buddy tab; a new nonce re-applies the same ask. */
@@ -32,6 +37,7 @@ export function readCleanCutOpenRequest(detail: unknown): CleanCutOpenRequest | 
     sessionId: fields.sessionId,
     jobId: typeof fields.jobId === 'string' && fields.jobId ? fields.jobId : undefined,
     mode: fields.mode === 'clean' || fields.mode === 'condensed' ? fields.mode : undefined,
-    review: fields.review === true
+    review: fields.review === true,
+    ...(fields.origin === 'library' ? { origin: 'library' as const } : {})
   }
 }

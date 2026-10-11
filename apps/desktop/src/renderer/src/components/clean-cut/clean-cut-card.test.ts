@@ -277,6 +277,13 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       'Sign in to use Clean cut, part of Videorc Premium.'
     )
+    // The same lock strip Chat and Voice lead with, above both columns (E-31).
+    const strip = document.querySelector('[data-slot="buddy-tab-lock"]')
+    expect(strip?.querySelector('[data-testid="clean-cut-unlock"]')).toBeTruthy()
+    expect(
+      strip!.compareDocumentPosition(document.querySelector('[data-slot="config-grid"]')!) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
     expect(autoSwitch().disabled).toBe(true)
     expect(button('Make a clean cut').disabled).toBe(true)
     await act(async () => button('Sign in').click())

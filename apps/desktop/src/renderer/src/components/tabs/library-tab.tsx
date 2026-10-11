@@ -179,7 +179,7 @@ export function LibraryTab({
 }: {
   /** "Buddy report": the Buddy tab, opened on this session's report. */
   onOpenBuddyReport: (sessionId: string) => void
-  /** "Clean cut": the Buddy tab's Clean cut, on this recording (plan 119 S14). */
+  /** "Make a clean cut…": Buddy → Clean cut, on this recording (plan 174 S3.13). */
   onOpenCleanCut: (sessionId: string) => void
   /** Clean cut's "Open in Library": the row to show and focus. */
   focusSessionId?: string | null
@@ -1446,12 +1446,13 @@ function useSessionMenu({
       : []),
     ...(isCleanCutEligible(session)
       ? [
-          // The Buddy tab's Clean cut, on this recording (plan 119 S14).
+          // Buddy → Clean cut, on this recording (plan 174 S3.13, D6); its
+          // review goes back to this row.
           {
             id: 'clean-cut',
             group: 'open',
             icon: ClipIcon,
-            label: 'Clean cut',
+            label: 'Make a clean cut…',
             onSelect: onOpenCleanCut
           }
         ]
@@ -1465,7 +1466,12 @@ function useSessionMenu({
             icon: ClipIcon,
             label: 'Review clean cut',
             onSelect: () =>
-              openCleanCut({ sessionId: session.id, mode: cleanCutReview, review: true })
+              openCleanCut({
+                sessionId: session.id,
+                mode: cleanCutReview,
+                review: true,
+                origin: 'library'
+              })
           }
         ]
       : []),

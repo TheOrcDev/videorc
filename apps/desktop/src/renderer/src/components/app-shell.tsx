@@ -195,10 +195,10 @@ export function AppShell(): ReactElement {
   // 119 S3). Any other way to a page drops that ask, so the next visit to
   // Buddy shows the last stream again.
   const [buddyReportSessionId, setBuddyReportSessionId] = useState<string | null>(null)
-  // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
-  // the Buddy tab, and the ready toast opens a cut's review there. The card's
-  // "Open in Library" focuses the cut copy's row. Like the report ask, any
-  // other way to a page drops them.
+  // Clean cut (plan 119 S14): Library's "Make a clean cut…" selects a
+  // recording in the Buddy tab, and the ready toast opens a cut's review
+  // there. The card's "Open in Library" and the review's "Back to Library"
+  // focus a row. Like the report ask, any other way to a page drops them.
   const [cleanCutRequest, setCleanCutRequest] = useState<CleanCutTabRequest | null>(null)
   const [libraryFocusSessionId, setLibraryFocusSessionId] = useState<string | null>(null)
   const cleanCutNonceRef = useRef(0)
@@ -495,7 +495,7 @@ export function AppShell(): ReactElement {
                   {active === 'library' ? (
                     <LibraryTab
                       focusSessionId={libraryFocusSessionId}
-                      onOpenCleanCut={(sessionId) => openCleanCut({ sessionId })}
+                      onOpenCleanCut={(sessionId) => openCleanCut({ sessionId, origin: 'library' })}
                       onOpenBuddyReport={openBuddyReport}
                     />
                   ) : null}
