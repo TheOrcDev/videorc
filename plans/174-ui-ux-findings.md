@@ -77,10 +77,10 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-13** · P2 · ⌘K below palette scale (16px input, 20px icon, 12.5px headings), no footer/metadata/icons on some rows; group order; 4 names for palette
   - Evidence: ui/command.tsx:67-116; command-palette.tsx:72-261
   - Fix: retune + footer + order
-- **A-14** · P2 (= D-29) · Livestream strip scrolls away; shell hard-codes non-scrolling ids; strip hand-copied 5x; Livestream tab not remembered (sessionStorage + event)
+- **A-14** · P2 (= D-29) · Livestream strip scrolls away; shell hard-codes non-scrolling ids; strip hand-copied 5x; Livestream tab not remembered (sessionStorage + event) — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: app-shell.tsx:464; streaming-tab.tsx:55-73
   - Fix: PaneStrip/PageTabs; typed openLivestream
-- **A-15** · P2 · ListRow rounded-[5px]; interactive default true (11/14 pass false); hand-built interactive rows; bg-foreground/[0.03] fill copied ~30x; NavigableRow 36px off-scale (SessionRow better); KebabMenu size override
+- **A-15** · P2 · ListRow rounded-[5px]; interactive default true (11/14 pass false); hand-built interactive rows; bg-foreground/[0.03] fill copied ~30x; NavigableRow 36px off-scale (SessionRow better); KebabMenu size override — fixed in #647 (S1.6a `b5e1c5b7`)
   - Evidence: list-row.tsx:53,62,116; navigable-row.tsx:45; kebab-menu.tsx:49
   - Fix: fix primitives; bg-inset token
 - **A-16** · P2 · Onboarding permission rows = card stack, truncated detail (title-only), amber vs Settings red, "Open settings" ambiguous; alt="Videorc" redundant
@@ -105,12 +105,12 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **A-23** · P2 · Settings → Recording competes with Output page (both id 'recording')
   - Evidence: settings-tabs.ts:16; workspace-nav.tsx:71
   - Fix: rename tab "Storage"
-- **A-24** · P3 · Heading hierarchy h1 → h3
+- **A-24** · P3 · Heading hierarchy h1 → h3 — fixed in #647 (S1.6a `b5e1c5b7`)
   - Evidence: panel-section.tsx:43; page.tsx:45
   - Fix: h2 default
 - **A-25** · P3 · Update chip "Restart to update" while live only navigates; green dot; aria-label mismatch
   - Evidence: update-ui.ts:43; sidebar.tsx:126 |
-- **A-26** · P3 · Copy: "Your {settings} is blocking…", "Loading workspace…", "Search for a command to run..."
+- **A-26** · P3 · Copy: "Your {settings} is blocking…", "Loading workspace…", "Search for a command to run..." — partly fixed in #647 (S2.1 `e6379d71`, palette "..." and title); rest in S2.5
   - Evidence: system-access.ts:313; app-shell.tsx:103; ui/command.tsx:28 |
 - **A-27** · P3 · Skill/docs stale (fullscreen gutter; Comments window; Chat hints)
   - Evidence: SKILL.md:60; docs/buddy.md:412; App.tsx:41 |
@@ -181,7 +181,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **B-20** · P2 · Three scene-card looks + three selected markers (built-in, saved "✓ Applied", vertical leg, Assets green icon); disabled reason title-only and misleading ("unavailable. Choose a replacement." when camera Off)
   - Evidence: scenes-gallery.tsx:146-176; scene-presets.tsx:113-151; vertical-leg-monitor.tsx:68-82; scene-presets.ts:263; assets-tab.tsx:373
   - Fix: one SceneCard; reason line
-- **B-21** · P2 · Mic picker lacks SourceSwitchStatus; two picker styles in inspector; raw "(permission-required)" in device names
+- **B-21** · P2 · Mic picker lacks SourceSwitchStatus; two picker styles in inspector; raw "(permission-required)" in device names — partly fixed in #647 (S1.9 `819509ef`, one picker + mic status); rest in S3.3
   - Evidence: microphone-section.tsx:30,69; quick-settings.tsx:387-471; source-select.tsx:126 |
 - **B-22** · P2 · Jargon in start-blocking copy: "Backend socket is failed.", "Enable Record MKV, Stream RTMP…", "Checking FFmpeg…" (+34 Backend socket strings)
   - Evidence: use-studio.tsx:12058-12087
@@ -191,7 +191,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **B-24** · P2 (= V-X3) · Built-in scenes have three name tables
   - Evidence: scenes-gallery.tsx:25; layout-tab.tsx:65; layout-framing-memory.ts:4
   - Fix: LAYOUT_PRESET_LABELS
-- **B-25** · P2 · SessionRow duplicates NavigableRow; Inputs mirrors have no way home
+- **B-25** · P2 · SessionRow duplicates NavigableRow; Inputs mirrors have no way home — partly fixed in #647 (S1.6a `b5e1c5b7`, row tokens); rest in S3.3
   - Evidence: session-panel.tsx:419-466; quick-settings.tsx:354 |
 - **B-26** · P2 · "Degraded" preview alert vague + jargon + no action
   - Evidence: studio-tab.tsx:292; studio-health.ts:183 |
@@ -199,7 +199,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: go-live-dialog.tsx:180-184 |
 - **B-28** · P3 · ~25 title= on Studio, no Tooltip
   - Evidence: session-panel.tsx etc. |
-- **B-29** · P3 · Hand-rolled skeletons and links; Cancel outline vs ghost; 32px segmented in 20px slot; On/Off button pair for boolean
+- **B-29** · P3 · Hand-rolled skeletons and links; Cancel outline vs ghost; 32px segmented in 20px slot; On/Off button pair for boolean — fixed in #647 (S1.7 `466ff1e5`)
   - Evidence: studio-tab.tsx:249; session-panel.tsx:253; scenes-gallery.tsx:93,231; vertical-leg-monitor.tsx:112-137 |
 - **B-30** · P3 · Regex-trimmed lowercase labels ("off", "2 q", "ready"); "Could not start." period; Open Library vs Open in Library; missing "…"; hyphen separator
   - Evidence: session-panel.tsx:273,342; go-live-dialog.tsx:365,506 |
@@ -233,10 +233,10 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **C-7** · P1 · OBS import report false about background (dropped when no slot; never applied); failed read/discovery stuck "Reading…/Looking for OBS…" forever — fixed in #647 (S0.4b `355a1d4c`)
   - Evidence: obs-import-map.ts:358; obs-import-dialog.tsx:72-115,171-189,262
   - Fix: truthful report; apply; error states
-- **C-8** · P1 · Raw device statuses in pickers ("C920 (permission-required)", "· ScreenCaptureKit display discovery failed…"); every backend warning → Alert title (quotes helper exe path); duplicate alerts; curated alert omits "quit and reopen"
+- **C-8** · P1 · Raw device statuses in pickers ("C920 (permission-required)", "· ScreenCaptureKit display discovery failed…"); every backend warning → Alert title (quotes helper exe path); duplicate alerts; curated alert omits "quit and reopen" — partly fixed in #647 (S1.9 `819509ef`, item renderer); alerts in S3.8
   - Evidence: source-select.tsx:126; source-select-searchable.tsx:166; quick-settings.tsx:462; sources-tab.tsx:166-193; screen_capture.rs:546; devices.rs:177
   - Fix: shared item renderer; curated alerts; rest → Health
-- **C-9** · P1 · Three device picker implementations (filled Select 28px "None" / outline Button+Command 40px rows / inline Select "Off") side by side
+- **C-9** · P1 · Three device picker implementations (filled Select 28px "None" / outline Button+Command 40px rows / inline Select "Off") side by side — fixed in #647 (S1.9 `819509ef`)
   - Evidence: source-select.tsx:96-133; source-select-searchable.tsx:67-180; quick-settings.tsx:387-470
   - Fix: one DevicePicker
 - **C-10** · P1 · Fix-it reasons only in title= (source chip hints "No fresh frames…", locked preset reason on pointer-events-none item, truncated stage hint)
@@ -254,7 +254,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **C-14** · P2 · Four permission-recovery styles on Sources; none for microphone ("Check Settings → Permissions." text)
   - Evidence: sources-tab.tsx:172-219; sources-audio-mixer.tsx:679; mic-meter-input.ts:75
   - Fix: one flush Alert per permission
-- **C-15** · P2 · Layout preset row = raw aria-pressed buttons (no group name, no roving, cursor-not-allowed); Freeform looks like a 5th preset
+- **C-15** · P2 · Layout preset row = raw aria-pressed buttons (no group name, no roving, cursor-not-allowed); Freeform looks like a 5th preset — partly fixed in #647 (S1.7 `466ff1e5`, segmented controls); rest in S3.9
   - Evidence: layout-tab.tsx:319-344; recording-tab.tsx:171
   - Fix: ToggleGroup + separate Freeform toggle
 - **C-16** · P2 · Inspector segmented controls unnamed; labels "Top L/Bot R", "S/M/L", "Rect/Round", "Wide" (wrong for portrait camera); corners named 2 ways — partly fixed in #647 (S0.5 `e0140afc`, accessible names); rest in S3.9
@@ -266,7 +266,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **C-18** · P2 · "Reset camera settings" resets 18 values instantly, even live; no undo — fixed in #647 (S0.3 `1aeee1f1`)
   - Evidence: layout-tab.tsx:946-981
   - Fix: confirm or Undo
-- **C-19** · P2 (= D-35) · Amber status text (camera shortfall, System audio issues, preset items)
+- **C-19** · P2 (= D-35) · Amber status text (camera shortfall, System audio issues, preset items) — fixed in #647 (S1.8 `df1a6513`; Sources sites already fixed by #653)
   - Evidence: sources-tab.tsx:278; sources-audio-mixer.tsx:680-698; video-preset-select-items.tsx:95
   - Fix: Alert warning
 - **C-20** · P2 (= B-24) · Layout preset names x3; "layouts" vs "scenes" in adjacent hints
@@ -280,7 +280,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **C-23** · P2 · Orientation toggle + vertical Screen framing only in Studio; "Modified" saved scene w/o Update on Scene page
   - Evidence: layout-tab.tsx:62,238; scenes-gallery.tsx:80-186; scene-presets.tsx:81-195
   - Fix: bring onto Scene page
-- **C-24** · P2 · Camera/mic pickers always show "None" — never "Finding devices…"/"No camera found"; searchable popup shows two status lines
+- **C-24** · P2 · Camera/mic pickers always show "None" — never "Finding devices…"/"No camera found"; searchable popup shows two status lines — fixed in #647 (S1.9 `819509ef`)
   - Evidence: source-select.tsx:103-113; source-select-state.ts:8; source-select-searchable.tsx:135 |
 - **C-25** · P2 · Takeover tiles: green Ready badge on healthy tiles; amber "Active" (vs green ring on backgrounds); prints internal file path; 4:3 previews; "Upload" primary; doesn't say takeover mutes mic
   - Evidence: takeover-screens-section.tsx:41-215; screen-takeover-microphone.ts:20 |
@@ -301,7 +301,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **C-32** · P2 · Sources Refresh runs a 13-request full backend refresh; any unrelated failure leaves devices stale
   - Evidence: sources-tab.tsx:148; use-studio.tsx:8040-8112
   - Fix: device-only refresh
-- **C-33** · P3 · 12.5px sub-labels; 3 small-label recipes on one page
+- **C-33** · P3 · 12.5px sub-labels; 3 small-label recipes on one page — partly fixed in #647 (S1.6a `b5e1c5b7`, tokens); rest in S3.9
   - Evidence: layout-tab.tsx:371,516,773,854; source-transform-fields.tsx:82 |
 - **C-34** · P3 · Schematic stage sources unlabelled (Windows/Linux, preview detached)
   - Evidence: scene-stage.tsx:785-858 |
@@ -309,7 +309,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: layout-tab.tsx:494,996 |
 - **C-36** · P3 · Rename toast (routine); "Deleted Screen."
   - Evidence: use-studio.tsx:11412,11435 |
-- **C-37** · P3 · Jargon: "Vertical leg", "Its width is the rect", "Snap (horizontal)"; one-shot snaps as ToggleGroup; "Alt / ⌥"
+- **C-37** · P3 · Jargon: "Vertical leg", "Its width is the rect", "Snap (horizontal)"; one-shot snaps as ToggleGroup; "Alt / ⌥" — partly fixed in #647 (S1.7 `466ff1e5`, snaps as buttons); keys in S1.2, copy in S2.3a
   - Evidence: layout-tab.tsx:435,1139,1180-1196; scene-stage.tsx:1034 |
 - **C-38** · P3 · "Monitoring" idle state (no monitor bus); echo-guard label footnote; gain reset double-click only
   - Evidence: mic-visual-gate.ts:43; sources-audio-mixer.tsx:667; fader.tsx:209 |
@@ -360,7 +360,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **D-12** · P1 · Destination row: Switch nested inside role=button row — fixed in #647 (S0.5 `e0140afc`)
   - Evidence: destination-card.tsx:309-348
   - Fix: CollapsibleTrigger + sibling Switch
-- **D-13** · P2 · Premium/limit lock shown 6 ways (incl. Premium toast for a non-Premium gate); Output quality + Upcoming ignore livestream lock
+- **D-13** · P2 · Premium/limit lock shown 6 ways (incl. Premium toast for a non-Premium gate); Output quality + Upcoming ignore livestream lock — partly fixed in #647 (S1.5 `905ea8fe`, LockAlert); rest in S3.5a
   - Evidence: streaming-tab.tsx:206; recording-tab.tsx:140; captions-controls.tsx:232; go-live-dialog.tsx:281; video-preset-select-items.tsx:94; session-runtime-recovery.ts:516
   - Fix: shared LockAlert (from BuddyUnlockAlert)
 - **D-14** · P2 · 5-destination cap sentence repeated under every off row (2px rule); not in description; 3 forms auto-expand
@@ -390,7 +390,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: go-live-panel.tsx:312,274; destination-card.tsx:1014 |
 - **D-24** · P2 · Checklist links don't move focus; ~20px targets; FFmpeg row no action
   - Evidence: streaming-tab.tsx:185; go-live-panel.tsx:249,290 |
-- **D-25** · P2 · Captions reader title 12px subtle; hand-rolled dot; body ignores status; 3 window names
+- **D-25** · P2 · Captions reader title 12px subtle; hand-rolled dot; body ignores status; 3 window names — partly fixed in #647 (S1.6b `1bd4865c`, WindowHeader); rest in S3.7
   - Evidence: captions-reader.tsx:61-99; index.ts:3846
   - Fix: WindowTitleBar; StatusDot
 - **D-26** · P2 · Captions status vocab x3 (Armed/Listening vs Live/Waiting vs Idle); green "Live" chip in preview
@@ -399,9 +399,9 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **D-27** · P2 · Captions page: mic unnamed; "Realtime"/"Live transcription" jargon; Scene placement path w/o link; min vs credits units
   - Evidence: captions-controls.tsx:254-266,381
   - Fix: NavigableRows
-- **D-28** · P2 · Output: Resolution raw buttons not ToggleGroup; recording presets list includes stream/legacy presets; "Tutorial 1080p30"; folder not shown/linked
+- **D-28** · P2 · Output: Resolution raw buttons not ToggleGroup; recording presets list includes stream/legacy presets; "Tutorial 1080p30"; folder not shown/linked — partly fixed in #647 (S1.7 `466ff1e5`, resolution tiles); rest in S3.6
   - Evidence: recording-tab.tsx:167; video-preset-select-items.tsx:39; capture.ts:749 |
-- **D-29** · P2 · Livestream Setup/Upcoming strip scrolls away; last view not remembered
+- **D-29** · P2 · Livestream Setup/Upcoming strip scrolls away; last view not remembered — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: app-shell.tsx:464; streaming-tab.tsx:55-73
   - Fix: pin like Settings
 - **D-30** · P2 · Twitch/Kick category = Input + Search + Select (typed Twitch text shown as chosen); language free text "en"
@@ -416,7 +416,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **D-34** · P2 · Refresh no feedback; refresh-on-focus re-reads every event (quota); History toggle labelled by other view
   - Evidence: scheduled-streams.tsx:106-118; use-scheduled-streams.ts:72
   - Fix: throttle; Tabs Upcoming/Past
-- **D-35** · P2 · Coloured status text (text-warning etc.)
+- **D-35** · P2 · Coloured status text (text-warning etc.) — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: go-live-panel.tsx:422; recording-tab.tsx:105; video-preset-select-items.tsx:95; recording-settings.tsx:112; go-live-dialog.tsx:283
   - Fix: icon/Badge carries tone
 - **D-36** · P3 · "X / Twitter" vs "X"; "Custom" vs "Custom RTMP"; "saving it to tiktok."; ellipses on progress labels; "Stopped" vs "Failed"
@@ -424,7 +424,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: platformLabel()
 - **D-37** · P3 · rounded-[6px]; ListRow h-auto min-h-10; border-l-2; p-4 sm:p-6; hand-copied grouped classes; hand-built h3
   - Evidence: platform-glyph.tsx:91; destination-card.tsx:310,359 |
-- **D-38** · P3 · Every Alert role=alert (assertive on mount)
+- **D-38** · P3 · Every Alert role=alert (assertive on mount) — fixed in #647 (S1.5 `905ea8fe`)
   - Evidence: ui/alert.tsx:33
   - Fix: role=status default
 - **D-39** · P3 · Stream key saves on blur (can pop modal); key ending shown twice
@@ -570,7 +570,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: buddy-chat-controls.tsx:112,131-142,209; cohost-pane.tsx:841 |
 - **F-13** · P2 · Proposed post doesn't show destinations; failed rows read as faded text
   - Evidence: buddy-utterance-cards.tsx:83,134 |
-- **F-14** · P2 · Hand-rolled notice boxes, text-[10px] "alpha", "Premium alpha"
+- **F-14** · P2 · Hand-rolled notice boxes, text-[10px] "alpha", "Premium alpha" — partly fixed in #647 (S1.8 `df1a6513`, 10 px text); rest in S3.14c
   - Evidence: cohost-pane.tsx:417,1205; cohost-nudge.tsx:22
   - Fix: Alert + one Badge
 - **F-15** · P2 · FieldLabel htmlFor on ToggleGroup (unlabelled groups) x4 — fixed in #647 (S0.5 `e0140afc`)
@@ -578,7 +578,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: aria-labelledby
 - **F-16** · P2 · Voice list omits Marker command and that the Buddy's own name works
   - Evidence: buddy-tab-view.ts:200-248; buddy-command-view.ts:187 |
-- **F-17** · P2 · FieldDescription text-sm default vs text-xs overrides (14 vs 12px)
+- **F-17** · P2 · FieldDescription text-sm default vs text-xs overrides (14 vs 12px) — fixed in #647 (S1.6a `b5e1c5b7`)
   - Evidence: ui/field.tsx:138
   - Fix: 12px in grouped FieldGroup
 - **F-18** · P2 · "Show on stream" means 3 things on one surface
@@ -661,7 +661,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **G-15** · P2 · Moving Buddy has 6 names (Alive, living Buddy, pet pack, page-pet pack, pack, moves); "Buddy" used for the vision AI; 4 gate-copy families
   - Evidence: buddy-pet-view.ts:15,192; buddy-avatar-section.tsx:216,459; buddy-pet-creator.tsx:768,1021
   - Fix: glossary
-- **G-16** · P2 · Limits/Premium/warnings in text-subtle footnotes
+- **G-16** · P2 · Limits/Premium/warnings in text-subtle footnotes — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: buddy-onboarding.tsx:428; buddy-pet-creator.tsx:283; greetings :146,:412
   - Fix: descriptions/Alert
 - **G-17** · P2 · Buddy picture in 4 recipes, 3 selection signals, cards-in-cards; hover-only personality; alt duplicates name
@@ -686,7 +686,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: buddy-library-section.tsx:358 |
 - **G-25** · P3 · Copy nits (See Premium vs View Premium x9; New Buddy no ellipsis; "Not available yet"; manifest.json; back button "Buddy")
   - Evidence: |
-- **G-26** · P3 · A11y nits: every Alert role=alert (assertive for info lines); FieldLabel htmlFor on ToggleGroup div; smooth scroll ignores reduced motion
+- **G-26** · P3 · A11y nits: every Alert role=alert (assertive for info lines); FieldLabel htmlFor on ToggleGroup div; smooth scroll ignores reduced motion — partly fixed in #647 (S1.5 `905ea8fe`, Alert role); rest in S3.15b
   - Evidence: ui/alert.tsx:33
   - Fix: role=status variant
 
@@ -742,7 +742,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **H-16** · P2 · 73 title= in window, zero Tooltip; removal outcome/highlight failure (cleared after 5 s)/flag reason only in title
   - Evidence: comment-row.tsx:129,168,199; activity-pane.tsx:280; comments/main.tsx:129
   - Fix: Tooltip/HoverCard; inline failures
-- **H-17** · P2 · Badges h-4 text-[10px]; ad-hoc rounded-full pill; 10px text (row time, flag action, alpha); rounded-[4px], rounded-md; ToggleGroup h-6 overrides vs h-7
+- **H-17** · P2 · Badges h-4 text-[10px]; ad-hoc rounded-full pill; 10px text (row time, flag action, alpha); rounded-[4px], rounded-md; ToggleGroup h-6 overrides vs h-7 — partly fixed in #647 (S1.8 `df1a6513`, 10 px text); rest in S3.16b
   - Evidence: stream-manager.tsx:208; chat-pane.tsx:448,597,388-428; comment-row.tsx:198-204,282,367,422,688; activity-pane.tsx:257,375-406 |
 - **H-18** · P2 · Composer is rounded-panel bordered box with card (nudge) inside
   - Evidence: chat-pane.tsx:778; cohost-nudge.tsx:22
@@ -773,7 +773,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: restore + Retry
 - **H-27** · P2 (= F-26) · "the Buddy" vs "Buddy" vs persona name; alpha vs Alpha; Turn on vs Allow cloud AI
   - Evidence: buddy-utterance-cards.tsx:77; buddy-chat-controls.tsx:160 |
-- **H-28** · P3 · Window title rows differ (SM 12/500 span no heading; Captions 12/500 subtle; Notes 13/600; main 14/600 h1)
+- **H-28** · P3 · Window title rows differ (SM 12/500 span no heading; Captions 12/500 subtle; Notes 13/600; main 14/600 h1) — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: stream-manager.tsx:912; captions-reader.tsx:61; notes-window.tsx:153; pane.tsx:30
   - Fix: WindowTitleRow
 - **H-29** · P3 · Eye icon = Open Preview AND Show on stream
@@ -798,7 +798,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **I-NEW** · P1 ✔ · "Chat is not connected" toast action "Open Livestream" dispatches {tab:'streaming'} → isWorkspaceTab rejects → does nothing (plan 064 noted, unfixed) — fixed in #647 (S0.4a `d0dca074`)
   - Evidence: use-studio.tsx:2457-2461
   - Fix: typed openWorkspaceTab('live'); replace raw CustomEvents
-- **I-1** · P1 · Support bundle: written to hidden app-data folder; toast shows filename only, no reveal; no support contact anywhere; jargon error when backend down; two different buttons (About outline BugIcon vs Health primary ExternalLink)
+- **I-1** · P1 · Support bundle: written to hidden app-data folder; toast shows filename only, no reveal; no support contact anywhere; jargon error when backend down; two different buttons (About outline BugIcon vs Health primary ExternalLink) — partly fixed in #647 (S1.6b `1bd4865c`, one SupportBundleButton); reveal in S3.18; Contact support needs an owner-supplied address
   - Evidence: use-studio.tsx:10369,10397; support_bundle.rs:151; about-settings.tsx:33-46; diagnostics-tab.tsx:702
   - Fix: save panel / reveal action; Contact support; one SupportBundleButton
 - **I-2** · P1 · Notes never says it's hidden from capture; protection failure only logged to console (notes may appear on stream) — fixed in #647 (S0.6 `159c1155`)
@@ -814,7 +814,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Fix: --text-2
 - **I-6** · P2 · Health entry points: status dot not clickable (IA plan said it should be); no ⌘K keywords/command; Degraded alert no action; About no link
   - Evidence: app-shell.tsx:505; command-palette.tsx:99; studio-tab.tsx:291; about-settings.tsx:30 |
-- **I-7** · P2 · Settings rows hand-built (8 copied justify-between, 4 stacked, 2 fake inputs, Permissions/About/Phone no rows); root cause FieldDescription text-sm
+- **I-7** · P2 · Settings rows hand-built (8 copied justify-between, 4 stacked, 2 fake inputs, Permissions/About/Phone no rows); root cause FieldDescription text-sm — partly fixed in #647 (S1.6a `b5e1c5b7`, SettingsRow primitive); migration in S3.17
   - Evidence: general-settings.tsx:30-128; recording-settings.tsx:80-234; ui/field.tsx:138
   - Fix: SettingsRow + 12px description + aria-describedby
 - **I-8** · P2 · Locked w/o reason: Pair a phone (only text colour changes); 7TV+GIF both disabled, reason under one; Linux empty Permissions box
@@ -860,23 +860,23 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
   - Evidence: notes-window.tsx:17-244 |
 - **I-25** · P2 · Health details: mixed empty markers (--, None, Unknown, Off, -); "12 drop"; raw stage/state/code/level; "selected session" with no selector; logs truncated silently; xl breakpoint; icon-only Resolve
   - Evidence: diagnostics-tab.tsx:69-1307 |
-- **I-26** · P2 (= D-35) · Coloured status text; FieldError text-destructive; hand-tinted alert boxes
+- **I-26** · P2 (= D-35) · Coloured status text; FieldError text-destructive; hand-tinted alert boxes — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: recording-settings.tsx:112; about-settings.tsx:192; diagnostics-tab.tsx:250-879; ui/field.tsx:216 |
 - **I-27** · P2 · Settings IA: no Account/Buddy/Health pointers; "Stream destinations" under Recording; General mixes theme + 3 Stream Manager chat settings + scene animation + GPU
   - Evidence: general-settings.tsx:25-114; recording-settings.tsx:189
   - Fix: split sections + "Elsewhere" NavigableRows
 - **I-28** · P2 · Phone device rows hand-built 44px with hover on non-clickable; rename exists in hook but no UI; all named "iPhone · Safari"
   - Evidence: phone-remote-section.tsx:257-283; use-studio.tsx:15168 |
-- **I-29** · P3 · Notes header controls in title row corner; h-6/size-7 overrides; 4 Keep-on-top labels; no WindowToolbar
+- **I-29** · P3 · Notes header controls in title row corner; h-6/size-7 overrides; 4 Keep-on-top labels; no WindowToolbar — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: notes-window.tsx:141-203; window-frame.tsx:31 |
-- **I-30** · P3 · Theme ToggleGroup unnamed; theme vs Select for similar choices; sidebar toggle/D drops "System" silently
+- **I-30** · P3 · Theme ToggleGroup unnamed; theme vs Select for similar choices; sidebar toggle/D drops "System" silently — partly fixed in #647 (S1.7 `466ff1e5`, theme control); the D-key toggle still skips System
   - Evidence: general-settings.tsx:30; use-theme-toggle.ts:8 |
-- **I-31** · P3 · Copy-to-clipboard 3 behaviours; silent copies
+- **I-31** · P3 · Copy-to-clipboard 3 behaviours; silent copies — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: remote-settings.tsx:66; phone-remote-section.tsx:153; scheduled-streams.tsx:483
   - Fix: copyText + "Copied"
 - **I-32** · P3 · Missing ellipses ("Pair a phone", "Set up permissions", "What's new", "Browse"); shortcut labels "Open … window" for toggles; "Chat" group
   - Evidence: phone-remote-section.tsx:252; shortcuts.ts:28-42 |
-- **I-33** · P3 · SECTION_PAIR duplicates CONFIG_GRID_PAIR; 3 sub-group label styles
+- **I-33** · P3 · SECTION_PAIR duplicates CONFIG_GRID_PAIR; 3 sub-group label styles — partly fixed in #647 (S1.6a `b5e1c5b7`, tokens); rest in S3.17
   - Evidence: settings-tab.tsx:22; shortcuts-settings.tsx:105,139 |
 - **I-34** · P3 · Phone: no auto-lock guidance; no REC chip; can't forget computer
   - Evidence: remote_web/app.js:43,400 |
@@ -898,38 +898,38 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J1-3** · P1 · No AlertDialog: 12 destructive confirms in 3 styles (✕ shown 7/hidden 5; Cancel outline vs ghost; only 1 autofocuses safe button; verb mismatches); takeover delete unconfirmed (= C-1) — fixed in #647 (S0.3 `1aeee1f1`)
   - Evidence: ui/ (no alert-dialog.tsx)
   - Fix: install AlertDialog; one recipe; migrate 12
-- **J1-4** · P1 · text-subtle fails AA by token (3.99–4.11:1 on solid; ~2.5:1 dark over bright desktop); not in prefers-contrast block; ~60 of 99 uses are essential info (Premium rule, listening quota, data-retention disclosure in consent dialogs, overlay notices, consent consequence, instructions)
+- **J1-4** · P1 · text-subtle fails AA by token (3.99–4.11:1 on solid; ~2.5:1 dark over bright desktop); not in prefers-contrast block; ~60 of 99 uses are essential info (Premium rule, listening quota, data-retention disclosure in consent dialogs, overlay notices, consent consequence, instructions) — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: styles.css:89,214,336-359
   - Fix: raise --subtle (~L0.60 dark/0.55 light), add to contrast block, reserve tier for disabled/incidental; move essential copy
-- **J1-5** · P1 · Status copy coloured (28 text-destructive, 23 text-warning, 9 text-success ≈45 text); light amber 2.18:1; ~20 text-xs text-destructive paragraphs vs FieldError used once; go-live alert clones
+- **J1-5** · P1 · Status copy coloured (28 text-destructive, 23 text-warning, 9 text-success ≈45 text); light amber 2.18:1; ~20 text-xs text-destructive paragraphs vs FieldError used once; go-live alert clones — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: recording-settings.tsx:112,117; sources-audio-mixer.tsx:680-698; go-live-dialog.tsx:281-495
   - Fix: Alert / StatusDot+icon / restyled FieldError; guard on text-(warning|success|destructive)
 - **J1-6** · P1 ✔ · ~160 native title= vs 4 Tooltip roots; TooltipProvider only in main window → Tooltip would crash Stream Manager/Notes/Captions; shortcuts hidden in titles; explanations on non-focusable badges
   - Evidence: App.tsx:37; comments/main.tsx; notes/main.tsx; captions/main.tsx
   - Fix: WindowProviders (TooltipProvider+Toaster) for all 4 entries; promote ShortcutTooltip; migrate; title only for truncation
-- **J1-7** · P1 · Segmented choice built 6 ways (Tabs track; borderless ToggleGroup; outline ToggleGroup; joined spacing=0; hand-rolled buttons (eager budget); aria-pressed tiles); owner rule "segmented choices use Tabs" (plan 080)
+- **J1-7** · P1 · Segmented choice built 6 ways (Tabs track; borderless ToggleGroup; outline ToggleGroup; joined spacing=0; hand-rolled buttons (eager budget); aria-pressed tiles); owner rule "segmented choices use Tabs" (plan 080) — fixed in #647 (S1.7 `466ff1e5`)
   - Evidence: ui/tabs.tsx:22,82 + sites
   - Fix: Radix-free ui/segmented-control.tsx on tabsListVariants; ToggleGroup only for multi-select filters
-- **J1-8** · P2 · Alert role=alert always; 5 warning icon treatments; no info/locked variant (overrides x2+)
+- **J1-8** · P2 · Alert role=alert always; 5 warning icon treatments; no info/locked variant (overrides x2+) — fixed in #647 (S1.5 `905ea8fe`)
   - Evidence: ui/alert.tsx:33; buddy-tab.tsx:295; clean-cut-card.tsx:277
   - Fix: role by variant; default icon per variant; locked variant
 - **J1-9** · P2 · TabsContent outline-none but tabIndex 0 (13 invisible tab stops); Accordion trigger no focus style; Command tabIndex 0 outline-none; destination row nested switch; transcript role=button spans unfocusable; marker pins 16×24
   - Evidence: ui/tabs.tsx:76; ui/accordion.tsx:39; cohost-pane.tsx:504; destination-card.tsx:309; marker-pins.tsx:21 |
-- **J1-10** · P2 · Input/Textarea text-base md:text-sm (mobile rule) → 16px text in narrow Stream Manager/Notes/Captions windows; per-call overrides fail
+- **J1-10** · P2 · Input/Textarea text-base md:text-sm (mobile rule) → 16px text in narrow Stream Manager/Notes/Captions windows; per-call overrides fail — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: ui/input.tsx:7; ui/textarea.tsx:10; notes-window.tsx:24; cohost-pane.tsx:814
   - Fix: text-sm
 - **J1-11** · P2 · One control height eroded: 30% 24px buttons; sm == default; icon-sm == icon; Toggle sm == default → 9 h-6 overrides; InputGroup icon-sm 32px in 28px group
   - Evidence: ui/button.tsx:27-32; ui/toggle.tsx:20; ui/input-group.tsx:72
   - Fix: sanctioned xs (24px) where allowed; delete redundant sizes
-- **J1-12** · P2 · Arbitrary type sizes: tokens --text-label 11/600, --text-section 13/600, --text-meta 12; --radius-tag 7px; FieldDescription → text-xs; metadata 10–11px → 12px
+- **J1-12** · P2 · Arbitrary type sizes: tokens --text-label 11/600, --text-section 13/600, --text-meta 12; --radius-tag 7px; FieldDescription → text-xs; metadata 10–11px → 12px — partly fixed in #647 (S1.6a `b5e1c5b7`, tokens); guards in S4.1
   - Evidence: ui/field.tsx:138; ui/badge.tsx:15 |
-- **J1-13** · P2 · Empty primitive off-skill (text-lg title, icon tile, secondary desc); 4 empty looks
+- **J1-13** · P2 · Empty primitive off-skill (text-lg title, icon tile, secondary desc); 4 empty looks — fixed in #647 (S1.5 `905ea8fe`)
   - Evidence: ui/empty.tsx:34-73
   - Fix: retune + migrate
-- **J1-14** · P2 · Menu/select items rounded-md (8px) not 6px concentric; chart tooltip rounded-xl; separator strengths differ
+- **J1-14** · P2 · Menu/select items rounded-md (8px) not 6px concentric; chart tooltip rounded-xl; separator strengths differ — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: dropdown-menu.tsx:72-210; context-menu.tsx; select.tsx:117,139; chart.tsx:168
   - Fix: rounded-chip
-- **J1-15** · P2 · Switch knob ignores --knob (dark checked knob near-black; light knob translucent); transition-all
+- **J1-15** · P2 · Switch knob ignores --knob (dark checked knob near-black; light knob translucent); transition-all — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: ui/switch.tsx:18,25
   - Fix: bg-knob ring-knob-ring
 - **J1-16** · P2 · Kbd inside primary buttons 2.38:1 (dark); "Save ↵" literal
@@ -938,21 +938,21 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J1-17** · P2 ✔ · Stream Manager Toaster offset 16 over its 32px status bar controls; Notes/Captions no Toaster
   - Evidence: comments/main.tsx:821
   - Fix: WindowProviders offset
-- **J1-18** · P2 (= H-28/D-25) · Window title recipes x4
+- **J1-18** · P2 (= H-28/D-25) · Window title recipes x4 — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: pane.tsx:30; stream-manager.tsx:912; notes-window.tsx:154; captions-reader.tsx:61
   - Fix: WindowHeader 14/600
-- **J1-19** · P2 · Hand-rolled boxes: GroupedList string copied x4; tinted callouts x5; 4 card fills; composer box with card inside; fake inputs; glass-float on in-window buttons
+- **J1-19** · P2 · Hand-rolled boxes: GroupedList string copied x4; tinted callouts x5; 4 card fills; composer box with card inside; fake inputs; glass-float on in-window buttons — fixed in #647 (S1.6b `1bd4865c`, MediaCard; GroupedList copies with S1.6a)
   - Evidence: list-row.tsx:116 etc.
   - Fix: GroupedList; Alert; MediaCard; Button variant overlay
-- **J1-20** · P2 · DialogContent no size variants (7 widths, 5 height recipes); OBS dialog max-w-xl loses to sm:max-w-md (renders 448 not 576)
+- **J1-20** · P2 · DialogContent no size variants (7 widths, 5 height recipes); OBS dialog max-w-xl loses to sm:max-w-md (renders 448 not 576) — fixed in #647 (S1.6b `1bd4865c`)
   - Evidence: ui/dialog.tsx:59; obs-import-dialog.tsx:210
   - Fix: size prop + DialogBody
-- **J1-21** · P2 · No Spinner/Progress/Table: 19 ad-hoc spinners w/o role=status; 2 progress bars; Library CSS-grid table w/o semantics; native datetime-local; loading copy drift
+- **J1-21** · P2 · No Spinner/Progress/Table: 19 ad-hoc spinners w/o role=status; 2 progress bars; Library CSS-grid table w/o semantics; native datetime-local; loading copy drift — partly fixed in #647 (S1.5 `905ea8fe`, Spinner and Progress); table semantics in S3.11
   - Evidence: | install Spinner/Progress; Table semantics; copy rule
 - **J1-22** · P3 · ClipIcon (scissors) = Clean cut AND Markers AND Mark clip; unused licence slots (VerifiedIcon, BrainIcon, FastIcon); inline status icons 14 vs 16; ⋯ triggers 24/28 bold/regular
   - Evidence: icons.tsx:178,265,267; library-tab.tsx:965,970
   - Fix: MarkerIcon; remove dead slots
-- **J1-23** · P3 · Float motion zoom-in-95 + slide vs skill 0.98; smooth scroll ignores reduced motion; transition-all; duration-200
+- **J1-23** · P3 · Float motion zoom-in-95 + slide vs skill 0.98; smooth scroll ignores reduced motion; transition-all; duration-200 — fixed in #647 (S1.8 `df1a6513`)
   - Evidence: ui/select.tsx:70 etc. |
 - **J1-24** · P3 · Dead variants/tokens/classes; cursor-not-allowed x12 (never shows); palette scale; tracking-widest; skill drift (gutter)
   - Evidence: |
@@ -980,7 +980,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-5** · P1 (= B-3) · Start controls depend on hidden mode; "Streaming: Disabled" after a Record; Go Live shortcut refused
   - Evidence: studio-tab.tsx:128,140; session-panel.tsx:115; use-studio.tsx:13744,14834; global-shortcuts.ts:36-49; command-palette.tsx:195
   - Fix: "Record ␣" / "Go Live…"; explicit modes
-- **J2-6** · P1 · Engineering internals in copy: "Backend socket is not connected." x13 toasts + raw ws enum; RPC method names + ms timeouts; "Layout committed at revision n…"; "livestream providers"; "compositor"; "OAuth callback"; server codes "(ai-gateway-error: …)"; action ids; VIDEORC\_\* env vars; "unavailable outside Electron" x10; "entitlement"; "Metadata draft"; "quality gate"; "pet pack"; managed file path
+- **J2-6** · P1 · Engineering internals in copy: "Backend socket is not connected." x13 toasts + raw ws enum; RPC method names + ms timeouts; "Layout committed at revision n…"; "livestream providers"; "compositor"; "OAuth callback"; server codes "(ai-gateway-error: …)"; action ids; VIDEORC\_\* env vars; "unavailable outside Electron" x10; "entitlement"; "Metadata draft"; "quality gate"; "pet pack"; managed file path — partly fixed in #647 (S2.1 `e6379d71`, copy guard with ratchet); toast strings in S2.4
   - Evidence: use-studio.tsx (many); backendClient.ts:313,382,414,510; backend-transport.ts:34; session-runtime-recovery.ts:242-330; cohost-state.ts:125
   - Fix: banned-word guard; "Videorc is reconnecting. Try again in a moment."; dev strings → console
 - **J2-7** · P1 · 97 raw error.message passthroughs; ipcErrorMessage in 3 places; Stream Manager toasts show "Error invoking remote method 'comments-window:…'"; generic "Import failed." etc.
@@ -989,10 +989,10 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-8** · P1 · Library/Takeovers claim "No sessions yet"/"No takeovers yet" before data loads or while offline (sessions starts [])
   - Evidence: library-tab.tsx:356; use-studio.tsx:2145; takeover-screens-section.tsx:50; session-panel.tsx:363
   - Fix: sessionsLoaded/screensLoaded; Skeleton; offline Alert
-- **J2-9** · P1 · ~85% of 333 disabled controls show no reason; 7 wordings/4 styles of "locked while live"
+- **J2-9** · P1 · ~85% of 333 disabled controls show no reason; 7 wordings/4 styles of "locked while live" — partly fixed in #647 (S1.5 `905ea8fe`, SessionLockAlert); per-control reasons in S1.10, toasts in S2.4
   - Evidence: layout-tab.tsx:316; library-tab.tsx:337,938,1023-1051; recording-tab.tsx:62,74,81; quick-settings.tsx:222; account-menu.tsx:153; takeover-screens-section.tsx:33,46; streaming-tab.tsx:221; captions-controls.tsx:357; scenes-gallery.tsx:85; use-studio.tsx:11402
   - Fix: SessionLockAlert; offline alert; disabledReason tooltips
-- **J2-10** · P1 · Terminology map: going live; stream vs livestream; on-air state; recording vs session; Output; scene/layout/preset; source/input/device; destination/account/channel/stream key (never target/provider); Stream Manager vs chat/comments; Health vs diagnostics; takeover vs Screen; Import vs Upload; Stream details vs Broadcast info/metadata; Premium phrasing x6 ("{Feature} is part of Videorc Premium." + View Premium); remove/delete/discard/clear; microphone vs mic
+- **J2-10** · P1 · Terminology map: going live; stream vs livestream; on-air state; recording vs session; Output; scene/layout/preset; source/input/device; destination/account/channel/stream key (never target/provider); Stream Manager vs chat/comments; Health vs diagnostics; takeover vs Screen; Import vs Upload; Stream details vs Broadcast info/metadata; Premium phrasing x6 ("{Feature} is part of Videorc Premium." + View Premium); remove/delete/discard/clear; microphone vs mic — fixed in #647 (S2.1 `e6379d71`, glossary in CONTEXT.md)
   - Evidence: (see report)
   - Fix: adopt canonical terms; record in CONTEXT.md; copy guard
 - **J2-11** · P2 · 15 success toasts for routine visible actions (channel set, imported x2, HW accel retry scheduled, renamed, saved stream metadata, key saved/removed/restored, duplicated, noise cleanup queued, saved event selected, OAuth callback received)
@@ -1024,7 +1024,7 @@ Totals: 347 findings (17 P0 entries describing 11 distinct problems, 87 P1,
 - **J2-20** · P2 · Buddy naming in copy: persona name vs fixed "Buddy" in toasts; switch has 4 names ("Buddy Live", "Joins my streams", "chat mode"); "pet pack", "sheets"
   - Evidence: buddy-tab.tsx:377,380,545; cohost-view.ts:565; cohost-state.ts:109; buddy-tab-view.ts:250; buddy-avatar-section.tsx:216
   - Fix: "Buddy" for feature; persona name when character acts; one switch name
-- **J2-21** · P3 · Conventions: casing deviations; "..." x2; missing "…" on commands opening steps (Stream, Import, Upload, Rename, Browse, Choose thumbnail, Edit) and pending labels; British/American tie (cancelled/canceled, colours/color, behavior); contractions; toast title periods; placeholder styles; Select vs Choose
+- **J2-21** · P3 · Conventions: casing deviations; "..." x2; missing "…" on commands opening steps (Stream, Import, Upload, Rename, Browse, Choose thumbnail, Edit) and pending labels; British/American tie (cancelled/canceled, colours/color, behavior); contractions; toast title periods; placeholder styles; Select vs Choose — partly fixed in #647 (S2.1 `e6379d71`, rules in docs/ui-copy.md); sweep in S2.5
   - Evidence: (see report)
   - Fix: sentence case; "…" rules; American English; contractions; no period in toast titles
 
