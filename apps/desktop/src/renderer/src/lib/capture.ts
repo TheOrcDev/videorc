@@ -2049,6 +2049,27 @@ export function migrateStreamingSettings(loaded: Partial<CaptureConfig>): Stream
   }
 }
 
+/**
+ * Why a stream URL can't work, in the field's words, or null when it can (or
+ * is still empty). Videorc publishes only over rtmp:// and rtmps://, the
+ * backend's own rule, so a wrong URL is caught as it is typed instead of at
+ * Go Live (plan 174 S3.5a, D-19). `full` names a full URL (server and key).
+ */
+export function streamServerUrlIssue(url: string, full = false): string | null {
+  const value = url.trim()
+  if (!value) return null
+  if (!/^rtmps?:\/\//i.test(value)) {
+    return `${full ? 'Full URLs' : 'Server URLs'} start with rtmp:// or rtmps://.`
+  }
+  let host: string
+  try {
+    host = new URL(value).hostname
+  } catch {
+    host = ''
+  }
+  return host ? null : 'Add the server name after rtmp://, as your platform shows it.'
+}
+
 export function isStreamTargetReady(target: StreamTargetSettings): boolean {
   if (target.urlMode === 'full-url') {
     return (
@@ -2057,7 +2078,7 @@ export function isStreamTargetReady(target: StreamTargetSettings): boolean {
       target.streamKeyPresent
     )
   }
-  if (!target.serverUrl.trim()) {
+  if (!target.serverUrl.trim() || streamServerUrlIssue(target.serverUrl)) {
     return false
   }
   return (

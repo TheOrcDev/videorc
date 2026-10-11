@@ -15,6 +15,16 @@ export type UnlockAction = { kind: 'sign-in' } | { kind: 'view-premium'; url: st
 export const SESSION_LOCK_REASON =
   "Locked while you're recording or live. Changes apply the next time you record or go live."
 
+/**
+ * The session lock that names what it locks (plan 174 S3.5a, D-15): "Destinations
+ * and stream details are locked while you're recording or live. …". Without
+ * `locks` it is the plain SESSION_LOCK_REASON.
+ */
+export function sessionLockReason(locks?: string): string {
+  if (!locks) return SESSION_LOCK_REASON
+  return `${locks} are locked while you're recording or live. Changes apply the next time you record or go live.`
+}
+
 /** The one wording for controls that wait for the backend to come back. */
 export const OFFLINE_LOCK_REASON = 'Videorc is reconnecting. These controls come back in a moment.'
 

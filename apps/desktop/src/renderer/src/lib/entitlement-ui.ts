@@ -57,6 +57,29 @@ export function streamingDestinationEnableGate({
   return destinationsLimitGate(maxDestinations)
 }
 
+/**
+ * The destination cap in the Livestream page's words (plan 174 S3.5a, D-14):
+ * the rule for the section description, and the one notice above the list
+ * while every allowed destination is on. Never Premium: the cap is a shared
+ * pipeline limit, like `destinationsLimitGate`.
+ */
+export function streamingDestinationCap(
+  entitlements: EntitlementsSnapshot | null,
+  streaming: Pick<StreamingSettings, 'enabledTargetIds'>
+): { max: number; atCap: boolean; rule: string; notice: string | null } {
+  const max = streamingMaxDestinations(entitlements)
+  const atCap =
+    isFeatureEntitled(entitlements, 'livestreaming') && streaming.enabledTargetIds.length >= max
+  return {
+    max,
+    atCap,
+    rule: `Stream to up to ${max} at once.`,
+    notice: atCap
+      ? `${max} destinations are on, the most at once. Turn one off to add another.`
+      : null
+  }
+}
+
 export function goLiveEntitlementGate({
   entitlements,
   streaming

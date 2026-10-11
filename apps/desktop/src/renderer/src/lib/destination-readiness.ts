@@ -1,5 +1,5 @@
 import type { PlatformAccount, StreamTargetSettings } from '@/lib/backend'
-import { isStreamTargetReady, oauthUnavailableReason } from '@/lib/capture'
+import { isStreamTargetReady, oauthUnavailableReason, streamServerUrlIssue } from '@/lib/capture'
 
 /**
  * Whether a destination has what it needs to go live, in the words the
@@ -10,7 +10,7 @@ import { isStreamTargetReady, oauthUnavailableReason } from '@/lib/capture'
  */
 export type DestinationSetup =
   | { ready: true }
-  | { ready: false; reason: 'sign-in' | 'reconnect' | 'stream-key' }
+  | { ready: false; reason: 'sign-in' | 'reconnect' | 'stream-key' | 'server-url' }
 
 export function destinationSetup(
   target: StreamTargetSettings,
@@ -23,6 +23,9 @@ export function destinationSetup(
   if (signIn) {
     if (!account) return { ready: false, reason: 'sign-in' }
     return account.status === 'connected' ? { ready: true } : { ready: false, reason: 'reconnect' }
+  }
+  if (target.urlMode !== 'full-url' && streamServerUrlIssue(target.serverUrl)) {
+    return { ready: false, reason: 'server-url' }
   }
   return isStreamTargetReady(target) ? { ready: true } : { ready: false, reason: 'stream-key' }
 }
@@ -37,5 +40,7 @@ export function destinationSetupHint(setup: DestinationSetup): string | null {
       return 'reconnect your account'
     case 'stream-key':
       return 'add a stream key'
+    case 'server-url':
+      return 'fix the server URL'
   }
 }

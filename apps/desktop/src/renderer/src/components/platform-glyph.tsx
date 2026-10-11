@@ -88,7 +88,7 @@ export function PlatformGlyph({
     >
       <span
         className={cn(
-          'flex size-6 items-center justify-center rounded-[6px]',
+          'flex size-6 items-center justify-center rounded-chip',
           PLATFORM_GLYPH_TINT[platform]
         )}
       >

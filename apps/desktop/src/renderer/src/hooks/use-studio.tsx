@@ -1401,10 +1401,17 @@ export type StudioContextValue = {
   refreshEntitlements: () => Promise<void>
   refreshPlatformAccounts: () => Promise<void>
   validatePlatformAccounts: () => Promise<PlatformAccountValidation[]>
+  /**
+   * Starts a platform sign-in in the browser and resolves its link, or null
+   * when it never got there. A caller that shows the browser step itself
+   * (the destination card, plan 174 S3.5a) passes `showsBrowserStep` and the
+   * toast stays quiet.
+   */
   connectPlatformAccount: (
     platform: PlatformAccount['platform'],
-    options?: PlatformConnectOptions
-  ) => Promise<void>
+    options?: PlatformConnectOptions,
+    flow?: { showsBrowserStep?: boolean }
+  ) => Promise<string | null>
   disconnectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
   refreshYouTubeChannels: (accountId?: string) => Promise<void>
   selectYouTubeChannel: (channelId: string, accountId?: string) => Promise<void>
@@ -11833,20 +11840,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const connectPlatformAccount = useCallback(
-    async (platform: PlatformAccount['platform'], options?: PlatformConnectOptions) => {
+    async (
+      platform: PlatformAccount['platform'],
+      options?: PlatformConnectOptions,
+      flow?: { showsBrowserStep?: boolean }
+    ): Promise<string | null> => {
       if (oauthUnavailableReason(platform)) {
         // Silent: the destination card renders the unavailable reason inline
         // right next to the control that triggers this, so the toast only
         // duplicated visible copy (owner request 2026-08-14).
-        return
+        return null
       }
       if (!client || wsStatus !== 'connected') {
         toastOffline()
-        return
+        return null
       }
       if (!window.videorc?.openOAuthUrl) {
         console.warn('[oauth] no browser launcher in this renderer')
-        return
+        return null
       }
 
       try {
@@ -11876,9 +11887,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Callback-URL registration hints live in docs/distribution.md — they
         // are developer-portal instructions, not something an end user can act
         // on, so the toast stays quiet.
-        showBrowserApproval('Approve the connection in your browser', result.authUrl)
+        if (!flow?.showsBrowserStep) {
+          showBrowserApproval('Approve the connection in your browser', result.authUrl)
+        }
+        return result.authUrl
       } catch (error) {
         reportError(error, { action: 'connect', object: platformLabel(platform) })
+        return null
       }
     },
     [client, reportError, wsStatus]

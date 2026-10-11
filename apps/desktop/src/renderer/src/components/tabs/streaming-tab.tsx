@@ -1,5 +1,5 @@
 import { AlertIcon, SaveIcon, SearchIcon, TextIcon } from '@/components/icons'
-import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { PageTabs } from '@/components/page-tabs'
 import { TabsContent } from '@/components/ui/tabs'
 import { LIVESTREAM_VIEWS, type LivestreamViewId } from '@/lib/livestream-tabs'
@@ -40,6 +40,7 @@ import { useStudioCore } from '@/hooks/use-studio'
 import type {
   PlatformAccount,
   PlatformAccountValidation,
+  PlatformConnectOptions,
   OAuthProviderCredentialStatus,
   StreamMetadataDraft,
   StreamMetadataValidation,
@@ -50,10 +51,11 @@ import type {
   TwitchCategory,
   KickCategory
 } from '@/lib/backend'
-import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'
+import { streamingDestinationCap, streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 import { unlockActionForReason } from '@/lib/lock-view'
+import { destinationSetup } from '@/lib/destination-readiness'
 import { destinationLabel } from '@/lib/platform-copy'
 import { otherDestinationsLine } from '@/lib/stream-target-notices'
 import { destinationStateLabel } from '@/lib/state-labels'
@@ -188,15 +190,31 @@ function StreamingSetup(): ReactElement {
 
   // Plan 080 S7: the readiness list opens the card that needs attention.
   // Cards keep their own default until the user (or the list) toggles one.
+  // The list moves focus to the destination's row too (plan 174 S3.5a,
+  // D-24), so the keyboard lands where the eye goes.
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
   const openDestination = (targetId: string): void => {
     setExpandedOverrides((current) => ({ ...current, [targetId]: true }))
-    requestAnimationFrame(() =>
-      document
-        .getElementById(`destination-${targetId}`)
-        ?.scrollIntoView({ behavior: smoothScrollBehavior(), block: 'nearest' })
-    )
+    requestAnimationFrame(() => {
+      const card = document.getElementById(`destination-${targetId}`)
+      card?.scrollIntoView({ behavior: smoothScrollBehavior(), block: 'nearest' })
+      card
+        ?.querySelector<HTMLElement>('[data-slot="list-row-button"]')
+        ?.focus({ preventScroll: true })
+    })
   }
+  // Only the first destination that needs setup opens on its own (D-14).
+  const firstNeedsSetupId = streaming.targets.find(
+    (target) =>
+      target.enabled && !destinationSetup(target, accountByPlatform.get(target.platform)).ready
+  )?.id
+  const destinationCap = streamingDestinationCap(entitlements, streaming)
+  // The card shows the browser step itself (D-16), so the toast stays quiet.
+  const connectFromCard = useCallback(
+    (platform: StreamPlatform, options?: PlatformConnectOptions) =>
+      connectPlatformAccount(platform, options, { showsBrowserStep: true }),
+    [connectPlatformAccount]
+  )
 
   const scheduledTargets = streaming.targets.filter((target) => target.scheduledEventId)
   const showNotices =
@@ -224,7 +242,7 @@ function StreamingSetup(): ReactElement {
                 onEndLivestream={() => void requestStopSession('failure-banner')}
               />
             ) : null}
-            {isSessionActive ? <SessionLockAlert /> : null}
+            {isSessionActive ? <SessionLockAlert locks={LIVESTREAM_SETUP_LOCKS} /> : null}
             {scheduledTargets.map((target) => (
               <Alert key={`scheduled-${target.id}`}>
                 <AlertDescription className="flex flex-wrap items-center justify-between gap-2 text-foreground">
@@ -254,15 +272,22 @@ function StreamingSetup(): ReactElement {
           </div>
         ) : null}
         <PanelSection
-          description="Where the stream goes. Expand a destination for its account or key."
+          description={`Where the stream goes. ${destinationCap.rule} Open a destination for its account or key.`}
           title="Destinations"
         >
+          {destinationCap.notice && !streamingControlsDisabled ? (
+            <Alert id={DESTINATION_CAP_NOTICE_ID}>
+              <AlertTitle>{destinationCap.notice}</AlertTitle>
+            </Alert>
+          ) : null}
           <GroupedList>
             {streaming.targets.map((target) => (
               <DestinationCard
                 account={accountByPlatform.get(target.platform)}
                 credentials={credentialsByPlatform.get(target.platform)}
+                defaultExpanded={target.id === firstNeedsSetupId}
                 disabled={streamingControlsDisabled}
+                enableLockDescriptionId={DESTINATION_CAP_NOTICE_ID}
                 expanded={expandedOverrides[target.id]}
                 onExpandedChange={(expanded) =>
                   setExpandedOverrides((current) => ({ ...current, [target.id]: expanded }))
@@ -281,7 +306,7 @@ function StreamingSetup(): ReactElement {
                 xNativeCapabilityLoading={xNativeCapabilityLoading}
                 youtubeChannels={youtubeChannels}
                 youtubeChannelsLoading={youtubeChannelsLoading}
-                onConnect={connectPlatformAccount}
+                onConnect={connectFromCard}
                 onDisconnect={disconnectPlatformAccount}
                 onPatch={patchStreamingTarget}
                 onSaveManualStreamKey={saveManualStreamKey}
@@ -340,6 +365,12 @@ function sharedAccountLabel(
   )
   return owner?.label
 }
+
+/** What the session lock covers on Setup, named in its one notice (D-15). */
+const LIVESTREAM_SETUP_LOCKS = 'Destinations, stream quality and stream details'
+
+/** The one cap notice; a switch held off by the cap points at it (D-14). */
+const DESTINATION_CAP_NOTICE_ID = 'livestream-destination-cap'
 
 const DESTINATION_PROBLEM_STATES: ReadonlySet<StreamTargetRuntime['state']> = new Set([
   'failed',
