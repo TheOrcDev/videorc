@@ -93,6 +93,22 @@ export function removalKindName(kind: CleanCutRemovalKind): string {
   return KIND_NAMES[kind] ?? 'Cut'
 }
 
+/**
+ * What a screen reader hears when a cut is selected or flipped (plan 174
+ * E-15): "Um 0.4 s, cut. 2 of 14. Enter keeps it."
+ */
+export function removalAnnouncement(
+  removal: Pick<CleanCutRemoval, 'kind' | 'startMs' | 'endMs' | 'enabled'>,
+  position: number,
+  total: number
+): string {
+  const what = `${removalKindName(removal.kind)} ${formatCutLength(removal.endMs - removal.startMs)}`
+  const where = position > 0 && total > 0 ? ` ${position} of ${total}.` : ''
+  return removal.enabled
+    ? `${what}, cut.${where} Enter keeps it.`
+    : `${what}, kept.${where} Enter cuts it.`
+}
+
 /** "1.8 s", "12 s": a short length for inline markers. */
 export function formatCutLength(ms: number): string {
   const seconds = Math.max(0, ms) / 1000

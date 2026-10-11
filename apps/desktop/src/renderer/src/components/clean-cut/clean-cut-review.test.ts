@@ -7,6 +7,7 @@ import type { CleanCutReviewTarget } from '@/components/clean-cut/clean-cut-card
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import type { CleanCutEdl, CleanCutJob, CleanCutRemoval, CleanCutRemovalKind } from '@/lib/backend'
 import type { CleanCutTranscriptWord } from '@/lib/clean-cut-view'
+import { cleanCutDraftChanges, resetCleanCutDraftsForTests } from '@/lib/clean-cut-drafts'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
 
@@ -233,6 +234,7 @@ async function key(keyName: string, init: KeyboardEventInit = {}): Promise<void>
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  resetCleanCutDraftsForTests(null)
   onClose.mockClear()
   onOpenLibrarySession.mockClear()
   mocked.player.togglePlayback.mockClear()
@@ -456,18 +458,76 @@ describe('Clean cut review (plan 119 S14)', () => {
 
   it('asks before leaving unsaved changes, and discards on request', async () => {
     await render()
-    await act(async () => button('Buddy').click())
+    await act(async () => button('Back to Clean cut').click())
     expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onOpenLibrarySession).not.toHaveBeenCalled()
 
     onClose.mockClear()
     await act(async () => cut('r2').click())
-    await act(async () => button('Buddy').click())
+    await act(async () => button('Back to Clean cut').click())
     expect(onClose).not.toHaveBeenCalled()
     expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain(
       'Leave without saving?'
     )
     await act(async () => button('Discard changes').click())
     expect(onClose).toHaveBeenCalledTimes(1)
+    // Discarded means gone: the next visit starts clean.
+    expect(cleanCutDraftChanges('job-1')).toBe(0)
+  })
+
+  it('goes back to the Library row it was opened from (E-12)', async () => {
+    await render(client(), { sessionId: 'rec-1', mode: 'clean', jobId: 'job-1', origin: 'library' })
+    await act(async () => button('Back to Library').click())
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onOpenLibrarySession).toHaveBeenCalledExactlyOnceWith('rec-1')
+  })
+
+  it('keeps unsaved edits when the review leaves the screen, per job (E-5)', async () => {
+    await render()
+    await act(async () => cut('r2').click())
+    expect(cleanCutDraftChanges('job-1')).toBe(1)
+    // A tab or page switch unmounts the review; nothing asks, nothing is lost.
+    await act(async () => root.unmount())
+    expect(onClose).not.toHaveBeenCalled()
+    root = createRoot(container)
+    await render()
+    expect(cut('r2').getAttribute('data-cut')).toBe('off')
+    expect(footer()).toBe('1 unsaved change')
+    // Saving drops the kept draft.
+    await act(async () => button('Save changes').click())
+    await settle()
+    expect(cleanCutDraftChanges('job-1')).toBe(0)
+  })
+
+  it('says why a cut failed and retries it from the footer (E-24)', async () => {
+    const failed = job({ state: 'failed', errorCode: 'render-invalid' })
+    await render(
+      client({
+        jobs: [failed],
+        get: vi.fn(async () => ({ sessionId: 'rec-1', jobs: [{ job: failed, edl: edl() }] }))
+      })
+    )
+    expect(footer()).toBe(
+      "The clean cut failed. The cut didn't pass its checks, so it wasn't saved. Retry to cut again."
+    )
+    await act(async () =>
+      (document.querySelector('[data-testid="clean-cut-review-retry"]') as HTMLElement).click()
+    )
+    await settle()
+    expect(current.render).toHaveBeenCalledExactlyOnceWith('job-1')
+    expect(footer()).toBe('Waiting to cut')
+  })
+
+  it('reads the selected cut out in a polite live region (E-15)', async () => {
+    await render()
+    const announcer = document.querySelector('[data-slot="clean-cut-review-announcer"]')
+    expect(announcer?.getAttribute('aria-live')).toBe('polite')
+    await key('ArrowDown')
+    expect(announcer?.textContent).toBe('Start 0.7 s, cut. 1 of 5. Enter keeps it.')
+    await key('Enter')
+    expect(announcer?.textContent).toBe('Start 0.7 s, kept. 1 of 5. Enter cuts it.')
+    // The transcript has no fake buttons: the keys reach every cut.
+    expect(document.querySelector('[data-clean-cut="transcript"] [role="button"]')).toBeNull()
   })
 
   it('waits for the cut list when there is none yet', async () => {

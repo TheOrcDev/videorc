@@ -328,10 +328,12 @@ function renderTokens(
       next += 1
     }
     const selected = selectedId === state.id
+    // A cut run is a deletion to assistive technology; the keys (↑ ↓, Enter)
+    // reach every cut from the review, so the run is no fake button (E-15).
+    const Run = state.cut ? 'del' : 'span'
     out.push(
-      <span
+      <Run
         key={`run-${state.id}-${token.index}`}
-        aria-pressed={state.cut}
         className={cn(
           'rounded-[3px] decoration-2 hover:bg-accent',
           state.cut ? STRUCK[state.tone] : SUGGESTED[state.tone],
@@ -340,7 +342,6 @@ function renderTokens(
         data-cut={state.cut ? 'on' : 'off'}
         data-removal-id={state.id}
         data-selected={selected || undefined}
-        role="button"
         title={removalTitle(state.removal, state.cut)}
       >
         {words.map((word, position) => (
@@ -349,7 +350,7 @@ function renderTokens(
             {word.text}
           </span>
         ))}
-      </span>,
+      </Run>,
       ' '
     )
     index = next
@@ -375,7 +376,6 @@ function CutMarker({
   const tone = removalTone(removal.kind)
   return (
     <Badge
-      aria-pressed={removal.enabled}
       className={cn(
         'mx-px align-[1px] tabular-nums hover:bg-accent',
         removal.enabled ? 'decoration-muted-foreground' : 'opacity-70',
@@ -385,7 +385,6 @@ function CutMarker({
       data-kind={removal.kind}
       data-removal-id={removal.id}
       data-selected={selected || undefined}
-      role="button"
       title={removalTitle(removal, removal.enabled)}
       variant={removal.enabled ? 'outline' : 'ghost'}
     >
@@ -409,7 +408,6 @@ function PinMarker({ pin }: { pin: CleanCutPin }): ReactElement {
       className="mx-px align-[1px] hover:bg-accent"
       data-pin={pin.kind}
       data-seek-ms={pin.startMs}
-      role="button"
       title={pin.excerpt ? `${pin.label}: ${pin.excerpt}` : pin.label}
       variant="outline"
     >

@@ -58,10 +58,10 @@ describe('Library Noise Cleanup direct action', () => {
     expect(cleanup).toBeGreaterThan(play)
     expect(menu).toBeGreaterThan(cleanup)
     expect(rowActions.slice(menu)).toContain('label="Session actions"')
-    // The menu's "Buddy report" and "Clean cut" open the Buddy tab (plan 119).
+    // The menu's "Buddy report" and "Make a clean cut…" open the Buddy tab (plan 119).
     const menuPlay = rowActions.indexOf("label: 'Play'", items)
     const buddyReport = rowActions.indexOf("label: 'Buddy report'", items)
-    const cleanCut = rowActions.indexOf("label: 'Clean cut'", items)
+    const cleanCut = rowActions.indexOf("label: 'Make a clean cut…'", items)
     const reveal = rowActions.indexOf('revealInFileManagerLabel()', items)
     expect(items).toBeGreaterThan(-1)
     expect(menuPlay).toBeGreaterThan(items)

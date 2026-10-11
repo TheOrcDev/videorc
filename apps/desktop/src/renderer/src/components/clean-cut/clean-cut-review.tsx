@@ -4,6 +4,7 @@ import {
   ClipIcon,
   MicrophoneIcon,
   PinIcon,
+  ResetIcon,
   SaveIcon
 } from '@/components/icons'
 import {
@@ -18,18 +19,23 @@ import {
   type ReactElement
 } from 'react'
 
-import type { CleanCutReviewTarget } from '@/components/clean-cut/clean-cut-card'
 import {
   CleanCutTranscript,
   TONE_DOT,
   type CleanCutScrollRequest
 } from '@/components/clean-cut/clean-cut-transcript'
 import type { SessionPlayerHandle } from '@/components/media/session-player'
-import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PaneStrip } from '@/components/pane'
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle
+} from '@/components/ui/empty'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
@@ -39,6 +45,11 @@ import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { useBuddyReport } from '@/hooks/use-buddy-report'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import type { ClipMomentSource, CleanCutEdl, CleanCutJob, CleanCutMode } from '@/lib/backend'
+import {
+  readCleanCutDraft,
+  writeCleanCutDraft,
+  type CleanCutReviewTarget
+} from '@/lib/clean-cut-drafts'
 import {
   EMPTY_CLEAN_CUT_DRAFT,
   activeWordIndex,
@@ -55,6 +66,7 @@ import {
   normalizeTranscriptWords,
   prerollMs,
   rebaseDraft,
+  removalAnnouncement,
   removalRowIndex,
   stepRemoval,
   toggleCondensedBlock,
@@ -68,6 +80,7 @@ import {
   type CondensedBlock
 } from '@/lib/clean-cut-review'
 import {
+  cleanCutErrorReason,
   cleanCutJobEditable,
   cleanCutModeLabel,
   cleanCutSavedMs,
@@ -78,7 +91,7 @@ import {
   type CleanCutJobDetailWithKeeps,
   type CleanCutTranscript as CleanCutTranscriptData
 } from '@/lib/clean-cut-view'
-import { isActiveRecordingState } from '@/lib/format'
+import { isActiveRecordingState, plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
@@ -108,14 +121,11 @@ interface ReviewData {
 
 type ReviewLoad =
   | { kind: 'loading' }
+  /** The cut list couldn't be read: why, in plain words. */
   | { kind: 'error'; message: string }
   /** No cut list yet (or no job of this kind): the job's status, if any. */
   | { kind: 'waiting'; job: CleanCutJob | null }
   | { kind: 'ready'; data: ReviewData }
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function errorCode(error: unknown): string | null {
   if (!error || typeof error !== 'object' || !('code' in error)) return null
@@ -141,10 +151,15 @@ const EMPTY_SEGMENTS: CleanCutTranscriptData['segments'] = []
 /**
  * Clean cut review (plan 119 S14, S19). The source recording plays on top
  * with the cut list as a virtual preview (removed spans are skipped), the
- * transcript below shows every cut, and edits stay a local draft until "Save
+ * transcript below shows every cut, and edits stay a draft until "Save
  * changes" sends one `cleanCut.updateEdl` and renders the cut again.
  * Keyboard-first: Space plays, ← → seek, ↑ ↓ walk the cuts, Enter keeps or
  * cuts one, ⌘S saves.
+ *
+ * Plan 174 S3.13: the draft is kept per job (`lib/clean-cut-drafts.ts`), so
+ * leaving the tab, the page or the window never loses it; only the back
+ * button drops it, after the leave guard asks. The back button returns where
+ * the review was opened: the Library row, or the Clean cut list.
  */
 export function CleanCutReview({
   client,
@@ -168,6 +183,8 @@ export function CleanCutReview({
 
   const [draft, setDraft] = useState<CleanCutDraft>(EMPTY_CLEAN_CUT_DRAFT)
   const [draftJob, setDraftJob] = useState<string | null>(null)
+  // What a screen reader hears after a key or a click (E-15).
+  const [announcement, setAnnouncement] = useState('')
   const [preview, setPreview] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [positionMs, setPositionMs] = useState(0)
@@ -214,7 +231,7 @@ export function CleanCutReview({
           }
         })
       } catch (error) {
-        if (current) setLoad({ kind: 'error', message: errorMessage(error) })
+        if (current) setLoad({ kind: 'error', message: cleanCutErrorReason(error) })
       }
     })()
     return () => {
@@ -244,12 +261,17 @@ export function CleanCutReview({
   )
 
   const data = load.kind === 'ready' ? load.data : null
-  // A different job starts with a clean draft.
+  // A job opens on its kept draft (E-5), carried onto the saved list as it
+  // stands now: a change the list already has leaves the draft.
   if (data && data.job.id !== draftJob) {
     setDraftJob(data.job.id)
-    setDraft(EMPTY_CLEAN_CUT_DRAFT)
+    setDraft(rebaseDraft(readCleanCutDraft(data.job.id), data.edl.removals))
     setSelectedId(null)
   }
+  // Every change is kept at once, so no way out of the review loses it.
+  useEffect(() => {
+    if (draftJob) writeCleanCutDraft(draftJob, draft)
+  }, [draft, draftJob])
 
   const saved = data?.edl.removals ?? null
   const words = useMemo(
@@ -320,6 +342,11 @@ export function CleanCutReview({
   const job = data?.job ?? (load.kind === 'waiting' ? load.job : null)
   const status = cleanCutStatusView(job, { captureActive, streaming: sessionIsLive(recording) })
   const editable = data ? cleanCutJobEditable(data.job) : false
+  // E-24: a failure says why, not just "Failed".
+  const failed = status.kind === 'failed'
+  const failureLine = failed
+    ? `${cutTitle(job?.mode ?? mode)} failed. ${status.detail ?? ''}`.trim()
+    : ''
   const otherModeJob = latestCleanCutJob(
     client.jobs,
     target.sessionId,
@@ -335,18 +362,38 @@ export function CleanCutReview({
       if (row !== undefined) setScrollRequest({ row, nonce: Date.now() })
       const removal = removalsById.get(id)
       if (seek && removal) playerRef.current?.seekTo(prerollMs(removal))
+      if (removal) {
+        setAnnouncement(
+          removalAnnouncement(
+            removal,
+            order.findIndex((entry) => entry.id === id) + 1,
+            order.length
+          )
+        )
+      }
     },
-    [removalsById, rows]
+    [order, removalsById, rows]
   )
 
   const toggle = useCallback(
     (id: string): void => {
       if (!saved) return
-      setDraft((current) => toggleRemoval(current, saved, id))
+      const next = toggleRemoval(draft, saved, id)
+      setDraft(next)
       setSelectedId(id)
       setNotice(null)
+      const removal = effectiveRemovals(saved, next).find((entry) => entry.id === id)
+      if (removal) {
+        setAnnouncement(
+          removalAnnouncement(
+            removal,
+            order.findIndex((entry) => entry.id === id) + 1,
+            order.length
+          )
+        )
+      }
     },
-    [saved]
+    [draft, order, saved]
   )
 
   const toggleGroup = (groupId: CleanCutKindGroupId): void => {
@@ -396,13 +443,13 @@ export function CleanCutReview({
             : current
         )
       } catch (error) {
-        setNotice(`Your changes are saved, but the cut didn't start: ${errorMessage(error)}`)
+        setNotice(`Your changes are saved, but the cut didn't start. ${cleanCutErrorReason(error)}`)
       }
     } catch (error) {
       if (errorCode(error) === 'edl-revision-conflict') {
         await reloadAfterConflict(jobIdToSave)
       } else {
-        setNotice(errorMessage(error))
+        setNotice(`Couldn't save your changes. ${cleanCutErrorReason(error)}`)
       }
     } finally {
       setSaving(false)
@@ -429,13 +476,40 @@ export function CleanCutReview({
         'The cut list changed while you edited. Your changes are on the newest one; save again.'
       )
     } catch (error) {
-      setNotice(errorMessage(error))
+      setNotice(`Couldn't load the newest cut list. ${cleanCutErrorReason(error)}`)
     }
   }
 
+  // E-24: a failed render is retried from here; a cut with no list yet goes
+  // back to Clean cut, where Make asks for what it needs.
+  const [retrying, setRetrying] = useState(false)
+  const retryRender = async (failed: CleanCutJob): Promise<void> => {
+    setRetrying(true)
+    setNotice(null)
+    try {
+      const rendered = await client.render(failed.id)
+      setLoad((current) =>
+        current.kind === 'ready' && current.data.job.id === rendered.id
+          ? { kind: 'ready', data: { ...current.data, job: rendered } }
+          : current
+      )
+    } catch (error) {
+      setNotice(`Couldn't cut again. ${cleanCutErrorReason(error)}`)
+    } finally {
+      setRetrying(false)
+    }
+  }
+
+  // Back where the review was opened (E-12): the Library row, or the list.
+  const fromLibrary = target.origin === 'library'
+  const backLabel = fromLibrary ? 'Back to Library' : 'Back to Clean cut'
+  const leave = (): void => {
+    onClose()
+    if (fromLibrary) onOpenLibrarySession(target.sessionId)
+  }
   const close = (): void => {
     if (changes > 0) setLeaving(true)
-    else onClose()
+    else leave()
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
@@ -492,9 +566,15 @@ export function CleanCutReview({
       onKeyDown={handleKeyDown}
     >
       <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-gutter py-1.5">
-        <Button size="sm" type="button" variant="ghost" onClick={close}>
+        <Button
+          data-testid="clean-cut-review-back"
+          size="sm"
+          type="button"
+          variant="ghost"
+          onClick={close}
+        >
           <ArrowLeftIcon data-icon="inline-start" />
-          Buddy
+          {backLabel}
         </Button>
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2 className="truncate text-[13px] font-semibold text-foreground" title={title}>
@@ -539,7 +619,7 @@ export function CleanCutReview({
           <div className="flex shrink-0 gap-4 border-b border-border p-gutter lg:min-h-0 lg:flex-col lg:gap-3 lg:overflow-y-auto lg:border-r lg:border-b-0">
             <div className="w-[min(22rem,50%)] shrink-0 lg:w-full">
               {playable ? (
-                <Suspense fallback={<PlayerPlaceholder label="Loading the player" />}>
+                <Suspense fallback={<PlayerPlaceholder label="Loading the player…" />}>
                   <SessionPlayer
                     handleRef={playerRef}
                     sessionId={target.sessionId}
@@ -614,6 +694,7 @@ export function CleanCutReview({
         <ReviewPlaceholder
           load={load}
           statusLabel={status.label}
+          onBackToList={onClose}
           onRetry={() => setReloads((value) => value + 1)}
         />
       )}
@@ -624,19 +705,46 @@ export function CleanCutReview({
       >
         <p className="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground">
           {status.busy ? <Spinner aria-hidden className="size-3.5" /> : null}
-          <span
-            className="truncate"
-            data-slot="clean-cut-review-status"
-            title={notice ?? undefined}
-          >
+          <span className="min-w-0" data-slot="clean-cut-review-status">
             {notice ??
               (changes > 0
-                ? `${changes} unsaved ${changes === 1 ? 'change' : 'changes'}`
+                ? plural(changes, 'unsaved change')
                 : status.kind === 'ready'
                   ? 'Saved. The cut copy is in your Library.'
-                  : status.label)}
+                  : failed
+                    ? failureLine
+                    : status.label)}
           </span>
         </p>
+        {/* The footer's news, read out once it changes (E-15). */}
+        <p
+          aria-live="polite"
+          className="sr-only"
+          data-slot="clean-cut-review-announcer"
+          role="status"
+        >
+          {announcement}
+        </p>
+        <p aria-live="polite" className="sr-only" role="status">
+          {notice ?? (failed ? failureLine : status.kind === 'ready' ? 'Saved.' : '')}
+        </p>
+        {failed && changes === 0 && status.retry === 'render' && job ? (
+          <Button
+            data-testid="clean-cut-review-retry"
+            disabled={retrying || !connected}
+            size="sm"
+            type="button"
+            variant="outline"
+            onClick={() => void retryRender(job)}
+          >
+            {retrying ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <ResetIcon data-icon="inline-start" />
+            )}
+            Retry
+          </Button>
+        ) : null}
         {status.kind === 'ready' && changes === 0 && data?.job.outputSessionId ? (
           <Button
             size="sm"
@@ -689,11 +797,16 @@ export function CleanCutReview({
         onCancel={() => setLeaving(false)}
         onConfirm={() => {
           setLeaving(false)
-          onClose()
+          if (draftJob) writeCleanCutDraft(draftJob, EMPTY_CLEAN_CUT_DRAFT)
+          leave()
         }}
       />
     </div>
   )
+}
+
+function cutTitle(mode: CleanCutMode): string {
+  return mode === 'condensed' ? 'The condensed cut' : 'The clean cut'
 }
 
 function PlayerPlaceholder({ label }: { label: string }): ReactElement {
@@ -707,17 +820,20 @@ function PlayerPlaceholder({ label }: { label: string }): ReactElement {
 function ReviewPlaceholder({
   load,
   statusLabel,
-  onRetry
+  onRetry,
+  onBackToList
 }: {
   load: ReviewLoad
   statusLabel: string
   onRetry: () => void
+  onBackToList: () => void
 }): ReactElement {
   if (load.kind === 'error') {
     return (
       <div className="flex-1 p-gutter">
         <Alert variant="warning">
-          <AlertTitle>{load.message}</AlertTitle>
+          <AlertTitle>Couldn&apos;t open the cut</AlertTitle>
+          <AlertDescription>{load.message}</AlertDescription>
           <AlertAction>
             <Button size="xs" type="button" variant="outline" onClick={onRetry}>
               Try again
@@ -733,7 +849,7 @@ function ReviewPlaceholder({
       <EmptyHeader>
         <EmptyTitle>
           {load.kind === 'loading'
-            ? 'Loading the cut'
+            ? 'Loading the cut…'
             : waiting && load.job
               ? statusLabel
               : 'No cut yet'}
@@ -743,9 +859,16 @@ function ReviewPlaceholder({
             ? 'Reading the cut list and the transcript.'
             : waiting && load.job
               ? 'The review opens when the cut list is ready.'
-              : 'Make one from the Buddy tab.'}
+              : 'Make one from the list of recordings in Clean cut.'}
         </EmptyDescription>
       </EmptyHeader>
+      {load.kind === 'waiting' && !load.job ? (
+        <EmptyContent>
+          <Button size="sm" type="button" variant="outline" onClick={onBackToList}>
+            Open Clean cut
+          </Button>
+        </EmptyContent>
+      ) : null}
     </Empty>
   )
 }
