@@ -102,7 +102,6 @@ const COPY_RULE_RATCHET: Readonly<Record<string, number>> = {
   'src/backendClient.ts': 20,
   'src/components/settings/encoder-preference-field.tsx': 1,
   'src/components/streaming/go-live-panel.tsx': 1,
-  'src/hooks/use-scheduled-streams.ts': 3,
   'src/hooks/use-studio.tsx': 14,
   'src/lib/backend-transport.ts': 3,
   'src/lib/capture.ts': 2,

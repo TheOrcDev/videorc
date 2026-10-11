@@ -84,9 +84,11 @@ describe('Broadcast info', () => {
     }
     const markup = render(metadata, [target('kick', 'Kick')], validation)
 
-    expect(markup).toContain('Global title · Just Chatting')
+    expect(markup).toContain('Shared title · Just Chatting')
     expect(markup).toContain('id="kick-category"')
-    expect(markup).toContain('value="Just Chatting"')
+    // One combobox shows the picked category; typed text is only a search (D-30).
+    expect(markup).toMatch(/<button(?=[^>]*role="combobox")(?=[^>]*id="kick-category")[^>]*>/)
+    expect(markup).toContain('>Just Chatting<')
     expect(markup).not.toContain('id="twitch-language"')
   })
 
@@ -101,7 +103,7 @@ describe('Broadcast info', () => {
     expect(markup).toContain('id="stream-description"')
     expect(markup).toContain('data-slot="accordion"')
     expect(markup.indexOf('Orc TV')).toBeLessThan(markup.indexOf('Twitch main'))
-    expect(markup).toContain('Global title · Unlisted')
+    expect(markup).toContain('Shared title · Unlisted')
     expect(markup).not.toContain('Custom RTMP')
     // Closed rows draw no inputs: the page is one form, not four.
     expect(markup).not.toContain('id="youtube-metadata-title"')
@@ -113,7 +115,9 @@ describe('Broadcast info', () => {
     const markup = render(draft(), [target('custom', 'Custom RTMP')])
 
     expect(markup).not.toContain('data-slot="accordion"')
-    expect(markup).toContain('Connect YouTube, Twitch, Kick or X to set per-destination details.')
+    expect(markup).toContain(
+      'Turn on YouTube, Twitch, Kick or X in Destinations to set details for each.'
+    )
   })
 
   it('draws no rows when the draft has no override rows', () => {
@@ -137,7 +141,7 @@ describe('Broadcast info', () => {
 
     expect(markup).toContain('aria-label="Needs attention"')
     expect(markup).toContain('Custom title and description for Orc TV')
-    expect(markup).toContain('Uses the global title, description and privacy.')
+    expect(markup).toContain('Uses the title, description and privacy above.')
     expect(markup).toContain('Made for kids')
     expect(markup).not.toContain('id="youtube-metadata-title"')
     expect(markup).not.toContain('id="youtube-metadata-description"')
@@ -157,11 +161,11 @@ describe('Broadcast info', () => {
     }
     const markup = render(metadata, [target('youtube', 'Orc TV')], validation)
 
-    expect(markup).toContain('Custom title · Public')
+    expect(markup).toContain('Own title · Public')
     expect(markup).toContain('id="youtube-metadata-title"')
     expect(markup).toContain('value="Testing Videorc"')
     expect(markup).toContain('id="youtube-metadata-description"')
-    expect(markup).toContain('Replaces the global title, description and privacy for Orc TV.')
+    expect(markup).toContain('Replaces the title, description and privacy above for Orc TV.')
   })
 
   it('Twitch category and language sit outside the custom-text switch', () => {
@@ -198,6 +202,57 @@ describe('Broadcast info', () => {
     expect(markup).toContain(`src="videorc-asset://scheduled-thumbnail/${id}"`)
     expect(markup).toContain('Replace thumbnail')
     expect(markup).toContain('Remove thumbnail')
+  })
+})
+
+describe('Stream details (plan 174 S3.5b)', () => {
+  it('draws rows only for destinations that are on (D-18)', () => {
+    const off = { ...target('twitch', 'Twitch main'), enabled: false } as StreamTargetSettings
+    const markup = render(draft(), [target('youtube', 'Orc TV'), off])
+    expect(markup).toContain('Orc TV')
+    expect(markup).not.toContain('Twitch main')
+  })
+
+  it('shows no title error before the title is touched, even when the check found one (V-3)', () => {
+    const validation: StreamMetadataValidation = {
+      valid: false,
+      issues: [{ field: 'title', message: 'Global title is required before going live.' }]
+    }
+    const markup = render(draft({ title: '' }), [target('youtube', 'Orc TV')], validation)
+    expect(markup).not.toContain('Global title')
+    expect(markup).not.toContain('Add a title before you go live.')
+    expect(markup).not.toContain('aria-invalid="true"')
+  })
+
+  it('names the state: checked, or how many details need attention (D-5)', () => {
+    expect(render(draft(), [target('youtube', 'Orc TV')], { valid: true, issues: [] })).toContain(
+      '>Checked<'
+    )
+    const twoIssues: StreamMetadataValidation = {
+      valid: false,
+      issues: [
+        { field: 'title', message: 'x', platform: 'youtube' },
+        { field: 'title', message: 'y', platform: 'x' }
+      ]
+    }
+    const markup = render(draft(), [target('youtube', 'Orc TV')], twoIssues)
+    expect(markup).toContain('2 details need attention')
+    expect(markup).not.toContain('Metadata ready')
+    expect(markup.replace(/<[^>]*>/g, ' ')).not.toMatch(/metadata/i)
+    expect(render(draft(), [target('youtube', 'Orc TV')])).not.toContain(
+      'data-testid="stream-details-status"'
+    )
+  })
+
+  it('keeps the thumbnail picker off, with its reason, when only a stream key reaches YouTube', () => {
+    const markup = render(draft(), [target('youtube', 'Orc TV')])
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Choose thumbnail</)
+    expect(markup).toContain('Stream key destinations can&#x27;t receive a thumbnail.')
+  })
+
+  it('offers privacy as one segmented control only while YouTube is on', () => {
+    expect(render(draft(), [target('youtube', 'Orc TV')])).toContain('id="stream-privacy"')
+    expect(render(draft(), [target('twitch', 'Twitch main')])).not.toContain('id="stream-privacy"')
   })
 })
 

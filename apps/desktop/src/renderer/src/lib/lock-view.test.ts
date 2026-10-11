@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   OFFLINE_LOCK_REASON,
   SESSION_LOCK_REASON,
+  sessionLockReason,
   unlockActionForGate,
   unlockActionForReason,
   unlockActionLabel
@@ -21,6 +22,13 @@ describe('lock view', () => {
       'Videorc is reconnecting. These controls come back in a moment.'
     )
     for (const copy of [SESSION_LOCK_REASON, OFFLINE_LOCK_REASON]) expect(copy).not.toMatch(/—/)
+  })
+
+  it('names what a session lock locks when asked, with the same second sentence', () => {
+    expect(sessionLockReason()).toBe(SESSION_LOCK_REASON)
+    expect(sessionLockReason('Destinations and stream details')).toBe(
+      "Destinations and stream details are locked while you're recording or live. Changes apply the next time you record or go live."
+    )
   })
 
   it('labels the two actions', () => {

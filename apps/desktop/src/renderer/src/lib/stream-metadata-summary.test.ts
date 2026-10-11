@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import type { StreamTargetMetadataDraft, StreamTargetSettings } from '@/lib/backend'
 
-import { metadataOverrideSummary, visibleMetadataOverrides } from './stream-metadata-summary'
+import {
+  metadataOverrideSummary,
+  streamDetailsStatus,
+  visibleMetadataOverrides
+} from './stream-metadata-summary'
 
 function override(
   platform: StreamTargetMetadataDraft['platform'],
@@ -62,6 +66,11 @@ describe('visibleMetadataOverrides', () => {
     expect(visible.map((item) => item.override.platform)).toEqual(['kick', 'x'])
   })
 
+  it('draws no row for a destination that is off (plan 174 S3.5b, D-18)', () => {
+    const off = { ...target('twitch', 'Twitch main'), enabled: false } as StreamTargetSettings
+    expect(visibleMetadataOverrides([off, target('x', 'X')], allOverrides)).toHaveLength(1)
+  })
+
   it('draws nothing for a Custom RTMP-only setup', () => {
     expect(visibleMetadataOverrides([target('custom', 'Custom RTMP')], allOverrides)).toEqual([])
   })
@@ -92,7 +101,7 @@ describe('metadataOverrideSummary', () => {
 
   it('YouTube inherits: where the title comes from and the default privacy', () => {
     expect(metadataOverrideSummary(draft, override('youtube', { privacy: 'public' }))).toBe(
-      'Global title · Unlisted'
+      'Shared title · Unlisted'
     )
   })
 
@@ -102,41 +111,58 @@ describe('metadataOverrideSummary', () => {
         draft,
         override('youtube', { customize: true, privacy: 'public', youtubeMadeForKids: true })
       )
-    ).toBe('Custom title · Public · Made for kids')
+    ).toBe('Own title · Public · Made for kids')
     expect(metadataOverrideSummary(draft, override('youtube', { youtubeMadeForKids: false }))).toBe(
-      'Global title · Unlisted'
+      'Shared title · Unlisted'
     )
   })
 
   it('Twitch names the category and a non-English language only when set', () => {
     expect(metadataOverrideSummary(draft, override('twitch', { twitchLanguage: 'en' }))).toBe(
-      'Global title'
+      'Shared title'
     )
     expect(
       metadataOverrideSummary(
         draft,
         override('twitch', { twitchCategoryName: ' Just Chatting ', twitchLanguage: 'es' })
       )
-    ).toBe('Global title · Just Chatting · es')
+    ).toBe('Shared title · Just Chatting · es')
   })
 
   it('Kick names the category only when set', () => {
-    expect(metadataOverrideSummary(draft, override('kick'))).toBe('Global title')
+    expect(metadataOverrideSummary(draft, override('kick'))).toBe('Shared title')
     expect(
       metadataOverrideSummary(
         draft,
         override('kick', { customize: true, kickCategoryId: 15, kickCategoryName: 'Just Chatting' })
       )
-    ).toBe('Custom title · Just Chatting')
+    ).toBe('Own title · Just Chatting')
   })
 
   it('X says whether the announcement post goes out', () => {
-    expect(metadataOverrideSummary(draft, override('x'))).toBe('Global title · Announces')
+    expect(metadataOverrideSummary(draft, override('x'))).toBe('Shared title · Announces')
     expect(metadataOverrideSummary(draft, override('x', { xAnnounce: false }))).toBe(
-      'Global title · No announcement'
+      'Shared title · No announcement'
     )
     expect(
       metadataOverrideSummary(draft, override('x', { customize: true, xAnnounce: true }))
-    ).toBe('Custom title · Announces')
+    ).toBe('Own title · Announces')
+  })
+})
+
+describe('streamDetailsStatus (plan 174 S3.5b, D-5)', () => {
+  it('says unsaved first, then checked or what needs attention, and nothing before a check', () => {
+    expect(streamDetailsStatus({ dirty: true, validation: { valid: true, issues: [] } })).toEqual({
+      tone: 'neutral',
+      label: 'Unsaved changes'
+    })
+    expect(streamDetailsStatus({ dirty: false, validation: null })).toBeNull()
+    expect(streamDetailsStatus({ dirty: false, validation: { valid: true, issues: [] } })).toEqual({
+      tone: 'good',
+      label: 'Checked'
+    })
+    expect(
+      streamDetailsStatus({ dirty: false, validation: { valid: false, issues: [{}] } })?.label
+    ).toBe('1 detail needs attention')
   })
 })

@@ -3,6 +3,7 @@ import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
 import { useMemo, useState, type ReactElement } from 'react'
 
+import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -48,6 +49,7 @@ import {
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
 import { cn } from '@/lib/utils'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 // The Livestream right column (plan 080 S7). Owner, 2026-09-30: "Live stream
 // should be about connecting your accounts and not about reading some tech
@@ -263,10 +265,12 @@ export function ReadyToGoLive({
         ok={enabled.length > 0 && notReady.length === 0}
       />
       {notReady.length ? (
+        // Each link opens its destination and moves focus to it (plan 174
+        // S3.5a, D-24), on a 24 px target.
         <div className="-mt-1 flex flex-col pl-6" data-slot="destinations-not-ready">
           {notReady.map(({ target, hint }) => (
             <Button
-              className="h-auto justify-start px-0 py-0.5 text-xs font-normal text-muted-foreground hover:text-foreground"
+              className="h-auto min-h-6 justify-start px-0 py-0.5 text-xs font-normal text-muted-foreground hover:text-foreground"
               key={target.id}
               size="xs"
               variant="link"
@@ -321,7 +325,15 @@ export function ReadyToGoLive({
         <InfoRow detail={`About ${diskGbPerHour} GB per hour`} label="Disk" />
       ) : null}
       {ffmpegReady ? null : (
-        <ChecklistRow detail="Missing. Check Settings." label="FFmpeg" ok={false} />
+        // A row that goes where FFmpeg is fixed (D-24), like Studio's
+        // "Videorc's recorder isn't available".
+        <NavigableRow
+          className="-mx-3 w-[calc(100%+1.5rem)]"
+          icon={AlertIcon}
+          label="FFmpeg"
+          value="Missing"
+          onNavigate={() => openWorkspaceTab('settings', 'recording')}
+        />
       )}
     </PanelSection>
   )

@@ -4,7 +4,7 @@ import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   OFFLINE_LOCK_REASON,
-  SESSION_LOCK_REASON,
+  sessionLockReason,
   unlockActionLabel,
   type UnlockAction
 } from '@/lib/lock-view'
@@ -46,9 +46,16 @@ export function LockAlert({
   )
 }
 
-/** The one notice for controls a running recording or livestream locks (J2-9). */
-export function SessionLockAlert(props: LockAlertProps): ReactElement {
-  return <LockAlert reason={SESSION_LOCK_REASON} {...props} />
+/**
+ * The one notice for controls a running recording or livestream locks (J2-9).
+ * `locks` names what it locks, as a plural subject ("Destinations and stream
+ * details"), when the page holds more than one kind of control.
+ */
+export function SessionLockAlert({
+  locks,
+  ...props
+}: LockAlertProps & { locks?: string }): ReactElement {
+  return <LockAlert reason={sessionLockReason(locks)} {...props} />
 }
 
 /** The one notice for controls that wait for the backend to reconnect. */
