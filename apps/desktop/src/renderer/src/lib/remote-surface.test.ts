@@ -72,7 +72,7 @@ describe('executeRemoteIntent', () => {
         ['systemAudioOn', 'systemAudioOff', 'systemAudioToggle'].map((kind) => ({
           intentId: `sa-${kind}`,
           ok: false,
-          message: 'System audio is not available.'
+          message: "System audio isn't available."
         }))
       )
     }
@@ -85,7 +85,7 @@ describe('executeRemoteIntent', () => {
     expect(idle.requests).toEqual([
       {
         method: 'remote.intent.ack',
-        params: { intentId: 'clip-idle', ok: false, message: 'No active session.' }
+        params: { intentId: 'clip-idle', ok: false, message: "You're not recording or live." }
       }
     ])
 
@@ -139,7 +139,7 @@ describe('executeRemoteIntent', () => {
     expect(context.applyLayoutPreset).not.toHaveBeenCalled()
     expect(requests.at(-1)).toEqual({
       method: 'remote.intent.ack',
-      params: { intentId: 'intent-2', ok: false, message: 'Unknown layout preset "unknown".' }
+      params: { intentId: 'intent-2', ok: false, message: "That scene isn't available anymore." }
     })
   })
 
@@ -184,7 +184,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-scene-failed',
         ok: false,
-        message: 'The layout change was not committed.'
+        message: "Couldn't switch the scene."
       }
     })
   })
@@ -204,7 +204,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-start-not-committed',
         ok: false,
-        message: 'The capture session did not start. Check Studio for details.'
+        message: "Recording didn't start. Check Studio on your computer."
       }
     })
   })
@@ -225,7 +225,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-stop-not-committed',
         ok: false,
-        message: 'The active session did not stop. Check Studio for details.'
+        message: "Couldn't stop. Check Studio on your computer."
       }
     })
   })
@@ -245,7 +245,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-takeover-failed',
         ok: false,
-        message: 'The takeover was not activated.'
+        message: "Couldn't show the takeover."
       }
     })
   })
@@ -265,7 +265,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-takeover-clear-failed',
         ok: false,
-        message: 'The takeover was not cleared.'
+        message: "Couldn't hide the takeover."
       }
     })
   })
@@ -309,12 +309,13 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-mic-rejected',
         ok: false,
-        message: 'The microphone change was not applied.'
+        message: "Couldn't change the microphone."
       }
     })
   })
 
   it('forwards microphone toggles and action failures', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { context, requests } = remoteIntentContext({
       startSession: vi.fn(async () => {
         throw new Error('start rejected')
@@ -327,8 +328,15 @@ describe('executeRemoteIntent', () => {
     expect(context.setMicrophoneMuted).toHaveBeenCalledWith('toggle')
     expect(requests.at(-1)).toEqual({
       method: 'remote.intent.ack',
-      params: { intentId: 'intent-4', ok: false, message: 'start rejected' }
+      // The raw error goes to the console; the phone reads plain words.
+      params: {
+        intentId: 'intent-4',
+        ok: false,
+        message: 'Something went wrong. Check Studio on your computer.'
+      }
     })
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
   })
 
   it('shows a comment by id and relays the refusal reason verbatim', async () => {
@@ -366,7 +374,7 @@ describe('executeRemoteIntent', () => {
       },
       {
         method: 'remote.intent.ack',
-        params: { intentId: 'intent-h3', ok: false, message: 'commentHighlight needs a messageId.' }
+        params: { intentId: 'intent-h3', ok: false, message: 'Choose a message to put on stream.' }
       }
     ])
   })

@@ -82,3 +82,32 @@ export function phoneRemoteSummary(status: RemoteLanStatus): {
         : `Listening on ${where} · same Wi-Fi only`
   }
 }
+
+/** The backend keeps at most this many characters of a phone's name
+ * (`MAX_DEVICE_NAME_CHARS` in remote_lan.rs). */
+export const PHONE_NAME_MAX_CHARS = 40
+
+/** The name Rename… saves, or null when there is nothing to save (empty or
+ * unchanged), so Save stays disabled (plan 174 I-28). */
+export function renamedPhoneName(current: string, typed: string): string | null {
+  const next = typed.trim().slice(0, PHONE_NAME_MAX_CHARS)
+  return next === '' || next === current ? null : next
+}
+
+/**
+ * Each paired phone's name as the list shows it. Phones pair as
+ * "iPhone · Safari", so repeats are numbered in list order ("iPhone · Safari
+ * 2") until the streamer renames them (plan 174 I-28).
+ */
+export function phoneDisplayNames(
+  devices: readonly Pick<RemoteLanDevice, 'id' | 'name'>[]
+): Map<string, string> {
+  const seen = new Map<string, number>()
+  const names = new Map<string, string>()
+  for (const device of devices) {
+    const index = (seen.get(device.name) ?? 0) + 1
+    seen.set(device.name, index)
+    names.set(device.id, index > 1 ? `${device.name} ${index}` : device.name)
+  }
+  return names
+}

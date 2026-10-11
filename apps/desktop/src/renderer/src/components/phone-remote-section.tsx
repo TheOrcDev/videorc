@@ -1,7 +1,8 @@
-import { CopyIcon, DeleteIcon, MobileIcon, WarningIcon } from '@/components/icons'
+import { CopyIcon, DeleteIcon, EditIcon, MobileIcon, WarningIcon } from '@/components/icons'
 import { useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { KebabMenu } from '@/components/kebab-menu'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusDot } from '@/components/status-dot'
@@ -11,23 +12,28 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { FieldGroup, SettingsRow } from '@/components/ui/field'
+import { Field, FieldDescription, FieldGroup, FieldLabel, SettingsRow } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { RemoteLanDevice, RemoteLanPairing } from '@/lib/backend'
 import {
   PAIRING_TROUBLE_HINT_AFTER_MS,
+  PHONE_NAME_MAX_CHARS,
   PHONE_REMOTE_OFF_HINT,
   deviceActivityLabel,
   formatCountdown,
   pairingSecondsLeft,
+  phoneDisplayNames,
   phoneRemoteSummary,
-  qrCodePath
+  qrCodePath,
+  renamedPhoneName
 } from '@/lib/phone-remote-view'
 import { useCopyText } from '@/lib/copy-text'
 
@@ -182,6 +188,60 @@ function PairingDialog({
 }
 
 /**
+ * Rename… a paired phone (plan 174 I-28): every iPhone pairs as
+ * "iPhone · Safari", so the streamer names them. Saving an unchanged or
+ * empty name does nothing.
+ */
+function RenamePhoneDialog({
+  device,
+  onRename,
+  onClose
+}: {
+  device: RemoteLanDevice
+  onRename: (name: string) => void
+  onClose: () => void
+}): ReactElement {
+  const [name, setName] = useState(device.name)
+  const next = renamedPhoneName(device.name, name)
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent aria-describedby={undefined} data-testid="phone-rename-dialog" size="sm">
+        <form
+          className="flex flex-col gap-5"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (next !== null) onRename(next)
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Rename phone</DialogTitle>
+          </DialogHeader>
+          <Field>
+            <FieldLabel htmlFor="phone-rename-name">Name</FieldLabel>
+            <Input
+              autoFocus
+              id="phone-rename-name"
+              maxLength={PHONE_NAME_MAX_CHARS}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+            <FieldDescription>So you can tell your phones apart.</FieldDescription>
+          </Field>
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button data-testid="phone-rename-save" disabled={next === null} type="submit">
+              Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
  * Settings → Phone remote. Status is pushed (remote.lan.status) into the
  * studio context — this section only renders it and fires actions.
  */
@@ -194,6 +254,7 @@ export function PhoneRemoteSection(): ReactElement {
   const [pairing, setPairing] = useState<{ value: RemoteLanPairing; since: number } | null>(null)
   // Plan 174 S0.3 (I-15): removing a phone disconnects it at once, so it asks.
   const [removing, setRemoving] = useState<RemoteLanDevice | null>(null)
+  const [renaming, setRenaming] = useState<RemoteLanDevice | null>(null)
   const status = phone.status
   // A successful scan consumes the ticket: the pushed status drops
   // pairingExpiresAt while our countdown is still running — close the dialog.
@@ -229,6 +290,8 @@ export function PhoneRemoteSection(): ReactElement {
   // section as an Alert and stays on the disabled button, not only as a
   // change of text colour.
   const blocked = summary?.tone === 'warning' ? summary.text : null
+  // Two phones with one name read as one: number the repeats (I-28).
+  const names = phoneDisplayNames(status?.devices ?? [])
 
   return (
     <PanelSection
@@ -272,29 +335,43 @@ export function PhoneRemoteSection(): ReactElement {
 
           {status.devices.length > 0 ? (
             <GroupedList label="Paired phones">
-              {status.devices.map((device) => (
-                <ListRow
-                  key={device.id}
-                  context={
-                    <StatusDot
-                      label={deviceActivityLabel(device, now)}
-                      tone={device.connected ? 'good' : 'neutral'}
-                    />
-                  }
-                  icon={<MobileIcon className="text-muted-foreground" />}
-                  title={device.name}
-                >
-                  <Button
-                    aria-label={`Remove ${device.name}`}
-                    disabled={pending}
-                    size="icon-sm"
-                    variant="ghost"
-                    onClick={() => setRemoving(device)}
+              {status.devices.map((device) => {
+                const name = names.get(device.id) ?? device.name
+                return (
+                  <ListRow
+                    key={device.id}
+                    context={
+                      <StatusDot
+                        label={deviceActivityLabel(device, now)}
+                        tone={device.connected ? 'good' : 'neutral'}
+                      />
+                    }
+                    icon={<MobileIcon className="text-muted-foreground" />}
+                    title={name}
                   >
-                    <DeleteIcon />
-                  </Button>
-                </ListRow>
-              ))}
+                    <KebabMenu
+                      busy={pending}
+                      items={[
+                        {
+                          id: 'rename',
+                          group: 'edit',
+                          icon: EditIcon,
+                          label: 'Rename…',
+                          onSelect: () => setRenaming(device)
+                        },
+                        {
+                          id: 'remove',
+                          destructive: true,
+                          icon: DeleteIcon,
+                          label: 'Remove…',
+                          onSelect: () => setRemoving(device)
+                        }
+                      ]}
+                      label={`More actions for ${name}`}
+                    />
+                  </ListRow>
+                )
+              })}
             </GroupedList>
           ) : null}
         </>
@@ -308,7 +385,7 @@ export function PhoneRemoteSection(): ReactElement {
         description="It is disconnected now and needs a new pairing to come back. Your Stream Deck is not affected."
         open={removing !== null}
         testId="phone-remove"
-        title={`Remove ${removing?.name ?? 'this phone'}?`}
+        title={`Remove ${(removing && names.get(removing.id)) ?? removing?.name ?? 'this phone'}?`}
         onCancel={() => setRemoving(null)}
         onConfirm={() => {
           const device = removing
@@ -316,6 +393,19 @@ export function PhoneRemoteSection(): ReactElement {
           if (device) void run(() => phone.revokeDevice(device.id))
         }}
       />
+
+      {renaming ? (
+        <RenamePhoneDialog
+          key={renaming.id}
+          device={renaming}
+          onClose={() => setRenaming(null)}
+          onRename={(next) => {
+            const device = renaming
+            setRenaming(null)
+            void run(() => phone.renameDevice(device.id, next))
+          }}
+        />
+      ) : null}
 
       {shownPairing ? (
         <PairingDialog
