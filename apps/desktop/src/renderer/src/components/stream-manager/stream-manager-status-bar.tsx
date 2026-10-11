@@ -25,6 +25,7 @@ import type { AudienceSnapshot, CommentHighlightAnchor, LiveChatProviderState } 
 import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { chatStateLabel } from '@/lib/state-labels'
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
+import { WINDOW_NAMES } from '../../../../shared/window-names'
 import { cn } from '@/lib/utils'
 
 // The Stream Manager's status bar (plan 055, D6): each provider's chat state
@@ -224,7 +225,7 @@ export function StreamManagerStatusBar({
           {onOpenPreview ? (
             <StatusBarAction
               icon={<PreviewIcon aria-hidden />}
-              label="Open Preview"
+              label={`Open ${WINDOW_NAMES.preview}`}
               onClick={onOpenPreview}
             />
           ) : null}
@@ -272,7 +273,7 @@ export function StreamManagerStatusBar({
               {onOpenPreview ? (
                 <DropdownMenuItem onSelect={onOpenPreview}>
                   <PreviewIcon />
-                  Open Preview
+                  {`Open ${WINDOW_NAMES.preview}`}
                 </DropdownMenuItem>
               ) : null}
             </DropdownMenuGroup>

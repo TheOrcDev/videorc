@@ -6,6 +6,8 @@ import {
   LightModeIcon,
   LivestreamIcon,
   BuddyIcon,
+  NoteIcon,
+  PreviewIcon,
   RecordIcon,
   SettingsIcon,
   StopIcon
@@ -56,6 +58,11 @@ export function CommandPalette({
     startRecording,
     startLivestream,
     requestStopSession,
+    previewWindow,
+    togglePreviewWindow,
+    notesWindow,
+    openNotesWindow,
+    closeNotesWindow,
     commentsWindow,
     toggleCommentsWindow,
     captionsWindow,
@@ -222,6 +229,38 @@ export function CommandPalette({
               </CommandItem>
             </>
           )}
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        {/* Every window by its one name (plan 174 S2.3a, A-11), in the
+            Window menu's order. */}
+        <CommandGroup heading="Windows">
+          <CommandItem value="Toggle Preview window" onSelect={() => run(togglePreviewWindow)}>
+            <PreviewIcon className="size-4" />
+            {previewWindow.open ? `Close ${WINDOW_NAMES.preview}` : `Open ${WINDOW_NAMES.preview}`}
+            <CommandShortcut className="tracking-normal">
+              <ShortcutKeys
+                accelerator={shortcutAccelerator('preview-window')}
+                platform={platform}
+              />
+            </CommandShortcut>
+          </CommandItem>
+          {runtimeInfo?.notesWindowEnabled !== false ? (
+            <CommandItem
+              value="Toggle Notes window"
+              onSelect={() => run(notesWindow.open ? closeNotesWindow : openNotesWindow)}
+            >
+              <NoteIcon className="size-4" />
+              {notesWindow.open ? `Close ${WINDOW_NAMES.notes}` : `Open ${WINDOW_NAMES.notes}`}
+              <CommandShortcut className="tracking-normal">
+                <ShortcutKeys
+                  accelerator={shortcutAccelerator('notes-window')}
+                  platform={platform}
+                />
+              </CommandShortcut>
+            </CommandItem>
+          ) : null}
           {runtimeInfo?.commentsWindowEnabled ? (
             <CommandItem
               value="Toggle Stream Manager chat window"

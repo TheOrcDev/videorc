@@ -44,7 +44,13 @@ import {
 import { readLastSettingsTab, writeLastSettingsTab, type SettingsTabId } from '@/lib/settings-tabs'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 import { isActiveRecordingState } from '@/lib/format'
-import { sessionStatusLabel, sessionStatusPulses, sessionStatusTone } from '@/lib/state-labels'
+// Straight from the session view, not `state-labels`, so the other state
+// tables stay out of the eager bundle (plan 174 S2.3a).
+import {
+  sessionStatusLabel,
+  sessionStatusPulses,
+  sessionStatusTone
+} from '@/lib/studio-session-view'
 import {
   isMediaAccessSnapshotReady,
   shouldShowPermissionsOnboarding,

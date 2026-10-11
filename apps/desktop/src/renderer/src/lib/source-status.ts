@@ -1,6 +1,6 @@
 import type { StatusTone } from '@/components/status-badge'
 import type { Device, DeviceStatus, PreviewCameraState, PreviewScreenState } from '@/lib/backend'
-import { SOURCE_RECEIVING_LABEL } from '@/lib/state-labels'
+import { SOURCE_RECEIVING_LABEL, systemAudioIssueLabel } from '@/lib/state-labels'
 import type { SystemAudioSwitchView } from '@/lib/system-audio'
 
 // Plan 173: one status vocabulary for the four Sources rows. Each row's header
@@ -136,9 +136,13 @@ export function systemAudioStatus(
 ): SourceStatus | null {
   if (view.permissionRequired) return { label: 'Needs permission', tone: 'warn' }
   if (view.issue === 'echo') {
-    return { label: 'Paused', tone: 'warn', hint: 'Your stream came back as an echo.' }
+    return {
+      label: systemAudioIssueLabel('echo'),
+      tone: 'warn',
+      hint: 'Your stream came back as an echo.'
+    }
   }
-  if (view.issue) return { label: 'Stopped', tone: 'warn' }
+  if (view.issue) return { label: systemAudioIssueLabel(view.issue), tone: 'warn' }
   if (view.pending === 'on') return { label: 'Turning on…', tone: 'neutral' }
   if (view.pending === 'off') return { label: 'Turning off…', tone: 'neutral' }
   if (!view.checked) return null
@@ -151,7 +155,7 @@ export function systemAudioStatus(
  * The device list's warnings, minus the permission ones the Video column
  * already shows with their fix ("Locked means disabled, with one reason"): the
  * backend says "Camera permission has not been granted yet…" while the column
- * says "Camera permission is required…" with Enable Camera.
+ * says "Camera permission is required…" with its fix button.
  */
 export function uncoveredDeviceWarnings(
   warnings: readonly string[],

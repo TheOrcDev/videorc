@@ -14,9 +14,9 @@ import type {
   PreviewWindowState,
   SystemPermissionPane
 } from '@/lib/backend'
+import { systemAccessActionLabel } from '@/lib/system-access-view'
 import {
   systemAccessAction,
-  systemAccessActionLabel,
   systemAccessRows,
   type SystemAccessAction,
   type SystemAccessRow
@@ -40,12 +40,16 @@ type PreviewPermissionAccess = {
   row: SystemAccessRow | undefined
 }
 
-/** The fix button for the preview's missing grant, in the Sources wording. */
-function permissionActionLabel(access: PreviewPermissionAccess | null): string {
-  return (
-    systemAccessActionLabel(access?.action ?? null, access?.row?.label ?? 'access') ??
-    'Fix permission'
-  )
+/**
+ * The fix button for the preview's missing grant (plan 174 B-23): the
+ * Permissions list's one wording, "Allow access…" or "Open System
+ * Settings…", never "Resolve permission".
+ */
+function permissionActionLabel(
+  access: PreviewPermissionAccess | null,
+  platform: string | undefined
+): string {
+  return systemAccessActionLabel(access?.action ?? null, platform) ?? 'Open Permissions'
 }
 
 export function PreviewStage({
@@ -111,6 +115,7 @@ export function PreviewStage({
         onClose={() => void closePreviewWindow()}
         onOpenPermissions={onOpenPermissions}
         onPopOut={() => void setPreviewWindowMode('floating')}
+        platform={runtimeInfo?.platform}
       />
     )
   }
@@ -206,6 +211,7 @@ function DockedPreviewFrame({
   onClose,
   permissionAccess,
   onOpenPermissions,
+  platform,
   className
 }: {
   previewWindow: PreviewWindowState
@@ -216,6 +222,7 @@ function DockedPreviewFrame({
   onClose: () => void
   permissionAccess: PreviewPermissionAccess | null
   onOpenPermissions?: (pane: SystemPermissionPane) => void
+  platform?: string
   className?: string
 }): ReactElement {
   const supervisor = previewWindow.supervisor
@@ -272,7 +279,7 @@ function DockedPreviewFrame({
       <div className="flex items-center justify-end gap-1.5 pt-2">
         {permissionPane && permissionAccess?.action && onOpenPermissions ? (
           <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
-            {permissionActionLabel(permissionAccess)}
+            {permissionActionLabel(permissionAccess, platform)}
           </Button>
         ) : null}
         <Button data-videorc-preview-pop-out size="sm" variant="secondary" onClick={onPopOut}>
@@ -378,7 +385,7 @@ function DetachedPreviewCard({
     platform,
     previewLiveStatus?.message ??
       previewSurfaceStatus?.message ??
-      'Native preview surface is disabled.'
+      'Videorc is using a slower preview path.'
   )
   const permissionPane = previewPermissionPane(previewSupervisor)
   const showPermissionAction =
@@ -415,14 +422,14 @@ function DetachedPreviewCard({
             </div>
             <div className="flex flex-wrap justify-center gap-2">
               <Button size="sm" variant="secondary" onClick={onOpen}>
-                Show {WINDOW_NAMES.preview}
+                {`Show ${WINDOW_NAMES.preview}`}
               </Button>
               <Button data-videorc-preview-stick size="sm" variant="outline" onClick={onStick}>
                 <PinIcon className="size-4" />
                 Stick to app
               </Button>
               <Button size="sm" variant="outline" onClick={onClose}>
-                Close {WINDOW_NAMES.preview}
+                {`Close ${WINDOW_NAMES.preview}`}
               </Button>
               {showPermissionAction && permissionPane && onOpenPermissions ? (
                 <Button
@@ -430,7 +437,7 @@ function DetachedPreviewCard({
                   variant="outline"
                   onClick={() => onOpenPermissions(permissionPane)}
                 >
-                  {permissionActionLabel(permissionAccess)}
+                  {permissionActionLabel(permissionAccess, platform)}
                 </Button>
               ) : null}
             </div>
@@ -448,7 +455,7 @@ function DetachedPreviewCard({
               </span>
             </div>
             <Button data-videorc-open-preview-window size="sm" onClick={onOpen}>
-              Open {WINDOW_NAMES.preview}
+              {`Open ${WINDOW_NAMES.preview}`}
               <ShortcutKeys accelerator={shortcutAccelerator('preview-window')} className="ml-1" />
             </Button>
           </>
@@ -467,7 +474,7 @@ function DetachedPreviewCard({
             ) : null}
             {permissionPane && permissionAccess?.action && onOpenPermissions ? (
               <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
-                {permissionActionLabel(permissionAccess)}
+                {permissionActionLabel(permissionAccess, platform)}
               </Button>
             ) : null}
           </div>

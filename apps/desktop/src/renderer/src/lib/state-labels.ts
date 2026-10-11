@@ -7,7 +7,7 @@ import type {
   PreviewScreenState,
   StreamTargetState
 } from '@/lib/backend'
-import type { WsStatus } from '@/lib/capture'
+import type { SystemAudioIssue } from '@/lib/system-audio-session'
 import { statusWordFromValue } from '@/lib/status-word'
 
 // Plan 174 S1.3: one label function per state machine, so a status chip
@@ -20,6 +20,10 @@ import { statusWordFromValue } from '@/lib/status-word'
 // captions, a platform's chat, the microphone's signal and Videorc's own
 // connection. Every surface that shows one of these states asks here, so the
 // same state never reads two ways (J2-4).
+
+// The start-blocking copy lives in its own small module because the Studio
+// provider reads it eagerly; this file's other tables stay in lazy chunks.
+export { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/start-blocked-copy'
 
 export {
   sessionStatusGlyph,
@@ -206,28 +210,17 @@ export function micSignalLabel(state: MicMonitorState): string {
   return MIC_SIGNAL_LABELS[state]
 }
 
-/**
- * Why Record and Go Live wait while Videorc's engine is not connected (B-22),
- * or null when it is. Never "Backend socket is closed."
- */
-export function connectionBlockedReason(wsStatus: WsStatus): string | null {
-  switch (wsStatus) {
-    case 'connected':
-      return null
-    case 'waiting':
-    case 'connecting':
-      return "Starting Videorc's capture engine…"
-    default:
-      return 'Videorc is reconnecting. Try again in a moment.'
-  }
+const SYSTEM_AUDIO_ISSUE_LABELS: Record<SystemAudioIssue, string> = {
+  echo: 'Paused',
+  lost: 'Stopped',
+  bypassed: 'Off until you stop',
+  unavailable: "Couldn't start"
 }
 
-/** The start-blocking copy table (B-22): what to do next, in the streamer's words. */
-export const START_BLOCKED_COPY = {
-  sessionRunning: 'A recording or livestream is already running.',
-  noOutput: 'Turn on Save local recording in Output, or go live.',
-  destinationSetup: 'Finish setting up your destination in Livestream before you go live.',
-  noDestination: 'Turn on a destination in Livestream before you go live.',
-  checkingRecorder: 'Checking the recorder…',
-  recorderMissing: "Videorc's recorder isn't available. Export a support bundle from Health."
-} as const
+/**
+ * System audio's problem in a word or two, the same in Sources and the
+ * Studio's quick settings (J2-4). The line under it is `systemAudioIssueCopy`.
+ */
+export function systemAudioIssueLabel(issue: SystemAudioIssue): string {
+  return SYSTEM_AUDIO_ISSUE_LABELS[issue]
+}

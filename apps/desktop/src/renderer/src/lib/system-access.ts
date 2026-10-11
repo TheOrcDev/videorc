@@ -150,18 +150,6 @@ export function macosMediaAccessState(
   }
 }
 
-/**
- * The fix button for a missing grant, one wording wherever it appears
- * (plan 174 B-23): "Enable Camera" when Videorc can ask, "Open Camera
- * settings" when the OS settings must change it. `label` is the grant's
- * name ("Camera", "Screen Recording").
- */
-export function systemAccessActionLabel(action: SystemAccessAction, label: string): string | null {
-  if (action === 'request-media-access') return `Enable ${label}`
-  if (action === 'open-settings') return `Open ${label} settings`
-  return null
-}
-
 export function systemAccessAction({
   pane,
   state,

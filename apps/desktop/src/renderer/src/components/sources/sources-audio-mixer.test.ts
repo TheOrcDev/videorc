@@ -126,14 +126,14 @@ describe('Sources System audio row (plans 069, 173)', () => {
       { requested: true, sessionActive: true, confirmed: false, issue: 'unavailable' },
       { macOS: false }
     )
-    expect(failed).toContain('System audio could not start.')
+    expect(failed).toContain('System audio couldn&#x27;t start.')
     expect(failed).not.toContain('Open Settings')
     const bypassed = render(
       { requested: true, sessionActive: true, confirmed: false, issue: 'bypassed' },
       { macOS: false }
     )
     expect(bypassed).toContain(
-      'System audio is off for this session because the microphone is on a fallback input.'
+      'System audio is off until you stop, because the microphone is on a fallback input.'
     )
   })
 

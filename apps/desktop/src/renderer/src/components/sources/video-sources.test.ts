@@ -145,13 +145,13 @@ describe('Sources Video column (plan 173)', () => {
     const markup = render({
       cameraPermission: {
         targetName: 'Videorc',
-        actionLabel: 'Enable Camera',
+        actionLabel: 'Allow access…',
         onOpen: noop,
         onReveal: noop
       }
     })
     expect(markup).toContain('Camera permission is required for Videorc.')
-    expect(markup).toContain('>Enable Camera<')
+    expect(markup).toContain('>Allow access…<')
   })
 
   it('says how a live switch lands only while a session runs', () => {

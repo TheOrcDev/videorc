@@ -253,7 +253,7 @@ describe('recordingStartupHealthToast', () => {
     expect(fallback).toMatchObject({
       variant: 'warning',
       id: 'microphone-capture-worker-fallback',
-      title: "Microphone can't be changed this session"
+      title: "Microphone can't be changed until you stop"
     })
     expect(fallback?.description).toContain('probe timed out')
     const unavailable = recordingStartupHealthToast({

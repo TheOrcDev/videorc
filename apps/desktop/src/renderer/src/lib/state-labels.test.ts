@@ -19,7 +19,8 @@ import {
   previewSourceStateLabel,
   previewStateLabel,
   sessionStatusLabel,
-  START_BLOCKED_COPY
+  START_BLOCKED_COPY,
+  systemAudioIssueLabel
 } from './state-labels'
 import { isRawStatusValue } from './status-word'
 
@@ -173,6 +174,18 @@ describe('micSignalLabel (plan 174 S2.3a, C-38)', () => {
     expect(micSignalLabel('monitoring')).toBe('Receiving')
     expect(micSignalLabel('muted')).toBe('Muted')
     expect(micSignalLabel('idle')).toBe('No signal')
+  })
+})
+
+describe('systemAudioIssueLabel (plan 174 S2.3a, J2-4)', () => {
+  it('names each System audio problem once, for Sources and the Studio alike', () => {
+    expect(systemAudioIssueLabel('echo')).toBe('Paused')
+    expect(systemAudioIssueLabel('lost')).toBe('Stopped')
+    expect(systemAudioIssueLabel('bypassed')).toBe('Off until you stop')
+    expect(systemAudioIssueLabel('unavailable')).toBe("Couldn't start")
+    for (const issue of ['echo', 'lost', 'bypassed', 'unavailable'] as const) {
+      expect(systemAudioIssueLabel(issue)).not.toMatch(/session/i)
+    }
   })
 })
 

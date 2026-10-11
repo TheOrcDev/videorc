@@ -60,7 +60,7 @@ import {
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
-import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/state-labels'
+import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/start-blocked-copy'
 import { copyText } from '@/lib/copy-text'
 import { platformLabel } from '@/lib/platform-copy'
 import { currentPlatform, osSettingsName, trashName } from '@/lib/platform'

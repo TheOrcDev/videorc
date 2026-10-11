@@ -89,7 +89,7 @@ export function recordingStartupHealthToast(
     return {
       variant: 'warning',
       id: MICROPHONE_CAPTURE_WORKER_FALLBACK_CODE,
-      title: "Microphone can't be changed this session",
+      title: "Microphone can't be changed until you stop",
       description: event.message,
       duration: 15000
     }
