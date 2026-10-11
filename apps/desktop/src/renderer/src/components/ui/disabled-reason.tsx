@@ -24,6 +24,7 @@ export function DisabledReason({
   id,
   label,
   focusable = true,
+  tabIndex = 0,
   className,
   side,
   align
@@ -37,6 +38,11 @@ export function DisabledReason({
   /** The wrapper's accessible name, when the control's own name is not enough. */
   label?: string
   focusable?: boolean
+  /**
+   * The wrapper's tab stop: -1 keeps it out of the tab order while it still
+   * takes the hover (a control in a roving-focus row that isn't the active one).
+   */
+  tabIndex?: number
   /** Layout for the wrapper (`flex-1`, `w-full`), never styling. */
   className?: string
   side?: ComponentProps<typeof TooltipContent>['side']
@@ -60,7 +66,7 @@ export function DisabledReason({
                 className
               )}
               data-slot="disabled-reason"
-              tabIndex={0}
+              tabIndex={tabIndex}
             >
               {children}
             </span>

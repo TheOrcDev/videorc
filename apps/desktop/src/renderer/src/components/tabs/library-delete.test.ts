@@ -54,6 +54,7 @@ beforeEach(() => {
     deleteSessions: vi.fn(async () => undefined),
     renameSession: vi.fn(),
     noiseCleanupJobs: [],
+    cleanCutJobs: [],
     connection: null,
     ensureSessionPoster: vi.fn(async () => false),
     assessRecording: vi.fn(),

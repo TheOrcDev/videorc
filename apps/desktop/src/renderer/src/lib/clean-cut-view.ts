@@ -200,15 +200,8 @@ export function cleanCutJobEditable(job: Pick<CleanCutJob, 'state'>): boolean {
   return job.state === 'ready' || job.state === 'completed' || job.state === 'failed'
 }
 
-/** One entry per job id; a snapshot older than the one held is ignored. */
-export function upsertCleanCutJob(jobs: readonly CleanCutJob[], job: CleanCutJob): CleanCutJob[] {
-  const index = jobs.findIndex((entry) => entry.id === job.id)
-  if (index === -1) return [job, ...jobs]
-  if (jobs[index].updatedAt.localeCompare(job.updatedAt) > 0) return [...jobs]
-  const next = [...jobs]
-  next[index] = job
-  return next
-}
+/** One entry per job id (lib/clean-cut-jobs.ts, which the Studio provider shares). */
+export { upsertCleanCutJob } from './clean-cut-jobs'
 
 /** The newest job for one recording and mode. */
 export function latestCleanCutJob(

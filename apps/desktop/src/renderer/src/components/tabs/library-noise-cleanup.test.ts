@@ -12,8 +12,8 @@ function view(overrides: Partial<NoiseCleanupView> = {}): NoiseCleanupView {
   return {
     directAction: 'start',
     menuAction: 'start',
-    directLabel: 'Clean noise',
-    menuLabel: 'Clean noise',
+    directLabel: 'Reduce noise',
+    menuLabel: 'Reduce noise',
     disabledReason: null,
     detail: null,
     statusAnnouncement: null,
@@ -75,7 +75,7 @@ describe('Library Noise Cleanup direct action', () => {
 
     expect(markup).toContain('<button')
     expect(markup).toContain('aria-label="Clean up noise in Weekly update"')
-    expect(markup).toContain('Clean noise')
+    expect(markup).toContain('Reduce noise')
     expect(markup).not.toContain('disabled=""')
     expect(markup).toContain('min-[1280px]:inline')
   })

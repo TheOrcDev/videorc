@@ -278,6 +278,7 @@ import type {
   DeviceList,
   EntitlementsSnapshot,
   NoiseCleanupJob,
+  CleanCutJob,
   MediaAccessSnapshot,
   FileAssessment,
   EventsLaggedPayload,
@@ -435,6 +436,7 @@ import {
   buddyLiveSettingsPatch
 } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
+import { upsertCleanCutJob } from '@/lib/clean-cut-jobs'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-jobs'
 import {
   applyLiveChatMessages,
@@ -1096,6 +1098,11 @@ export type StudioContextValue = {
   health: BackendHealth | null
   entitlements: EntitlementsSnapshot | null
   noiseCleanupJobs: NoiseCleanupJob[]
+  /** Every Clean cut job this connection has heard on `cleanCut.status`
+   * (plan 174 S3.11, E-4): the Library's status chip and its file-action
+   * holds. A job reported before this window connected shows at its next
+   * status. */
+  cleanCutJobs: CleanCutJob[]
   account: VideorcAccountSnapshot | null
   aiCapabilities: AiCapabilities | null
   aiQuota: AiQuotaStatus | null
@@ -2103,6 +2110,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setEntitlements(snapshot)
   }, [])
   const [noiseCleanupJobs, setNoiseCleanupJobs] = useState<NoiseCleanupJob[]>([])
+  const [cleanCutJobs, setCleanCutJobs] = useState<CleanCutJob[]>([])
   const announcedNoiseCleanupCompletionsRef = useRef(new Set<string>())
   const entitlementRefreshInFlightRef = useRef<{
     client: BackendClient
@@ -6767,6 +6775,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // A clean cut that finished out of view (plan 119 S15): its copy joins
       // the Library, and the ready toast says so once per cut-list revision.
       nextClient.on('cleanCut.status', (job) => {
+        setCleanCutJobs((current) => upsertCleanCutJob(current, job))
         if (job.state !== 'completed') return
         void refreshSessions(nextClient)
         void import('@/lib/clean-cut-notify')
@@ -15564,6 +15573,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       health,
       entitlements,
       noiseCleanupJobs,
+      cleanCutJobs,
       account,
       aiCapabilities,
       aiQuota,
@@ -15800,6 +15810,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       health,
       entitlements,
       noiseCleanupJobs,
+      cleanCutJobs,
       account,
       aiCapabilities,
       aiQuota,

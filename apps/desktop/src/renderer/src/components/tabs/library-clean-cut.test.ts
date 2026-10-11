@@ -106,6 +106,7 @@ beforeEach(() => {
     deleteSessions: vi.fn(),
     renameSession: vi.fn(),
     noiseCleanupJobs: [],
+    cleanCutJobs: [],
     connection: null,
     ensureSessionPoster: vi.fn(async () => false),
     assessRecording: vi.fn(),
@@ -218,16 +219,16 @@ describe('Library → Clean cut (plan 119 S14)', () => {
     await render()
     const items = await openMenu('cut')
     expect(labels(items)).toContain('Show source recording')
-    expect(labels(items)).not.toContain('Clean noise')
+    expect(labels(items)).not.toContain('Reduce noise')
     await act(async () =>
       items.find((item) => item.textContent?.trim() === 'Show source recording')!.click()
     )
     await closeMenu()
-    expect(row('tutorial').className).toContain('ring-1')
+    expect(row('tutorial').dataset.revealed).toBe('true')
   })
 
   it('focuses the row Clean cut asked for', async () => {
     await render('condensed')
-    expect(row('condensed').className).toContain('ring-1')
+    expect(row('condensed').dataset.revealed).toBe('true')
   })
 })

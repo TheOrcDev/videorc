@@ -74,8 +74,8 @@ describe('Noise Cleanup Library view', () => {
       expect(derive({ entitlements })).toMatchObject({
         directAction: 'upgrade',
         menuAction: 'upgrade',
-        directLabel: 'Clean noise',
-        menuLabel: 'Clean noise · Premium',
+        directLabel: 'Reduce noise',
+        menuLabel: 'Reduce noise · Premium',
         premiumLocked: true,
         detail: 'Noise Cleanup requires Videorc Premium.'
       })
@@ -86,21 +86,21 @@ describe('Noise Cleanup Library view', () => {
     expect(derive()).toMatchObject({
       directAction: 'start',
       menuAction: 'start',
-      directLabel: 'Clean noise',
+      directLabel: 'Reduce noise',
       busy: false
     })
   })
 
   it('states truthful disabled reasons for live, imported, missing, and unfinished sessions', () => {
     expect(derive({ captureActive: true }).disabledReason).toBe(
-      'Available after the live session ends.'
+      'Available when the recording ends.'
     )
-    expect(derive({ session: session({ mode: 'imported' }) }).disabledReason).toContain('Imported')
+    expect(derive({ session: session({ mode: 'imported' }) }).disabledReason).toContain('imported')
     expect(
       derive({ session: session({ outputPath: undefined, mp4Path: undefined }) }).disabledReason
     ).toBe('The local recording file is missing.')
     expect(derive({ session: session({ status: 'failed' }) }).disabledReason).toBe(
-      'Noise Cleanup requires a finished recording.'
+      'Noise cleanup needs a finished recording.'
     )
   })
 
@@ -109,17 +109,17 @@ describe('Noise Cleanup Library view', () => {
       {
         session: session(),
         captureActive: true,
-        reason: 'Available after the live session ends.'
+        reason: 'Available when the recording ends.'
       },
       {
         session: session({ status: 'running' }),
         captureActive: false,
-        reason: 'Available after the live session ends.'
+        reason: 'Available when the recording ends.'
       },
       {
         session: session({ mode: 'imported' }),
         captureActive: false,
-        reason: 'Imported recordings are not supported by Noise Cleanup yet.'
+        reason: "Noise cleanup doesn't work on imported recordings yet."
       },
       {
         session: session({ outputPath: undefined, mp4Path: undefined }),
@@ -129,7 +129,7 @@ describe('Noise Cleanup Library view', () => {
       {
         session: session({ status: 'failed' }),
         captureActive: false,
-        reason: 'Noise Cleanup requires a finished recording.'
+        reason: 'Noise cleanup needs a finished recording.'
       }
     ]
 
@@ -323,7 +323,7 @@ describe('Noise Cleanup Library view', () => {
     expect(withNoiseCleanupConnectionState(connectedView, false)).toMatchObject({
       directAction: null,
       menuAction: 'start',
-      directLabel: 'Clean noise',
+      directLabel: 'Reduce noise',
       disabledReason: 'Videorc is reconnecting. Try again in a moment.'
     })
     expect(withNoiseCleanupConnectionState(connectedView, true)).toBe(connectedView)
