@@ -149,7 +149,7 @@ export function BuddyReportCard({
             Loading the report…
           </p>
         ) : view.kind === 'empty' ? (
-          <Empty data-slot="buddy-report-empty">
+          <Empty data-testid="buddy-report-empty">
             <EmptyHeader>
               <EmptyTitle>{BUDDY_REPORT_EMPTY_TITLE}</EmptyTitle>
               <EmptyDescription>{view.message}</EmptyDescription>

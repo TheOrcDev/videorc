@@ -115,7 +115,7 @@ export function BuddyGreetingsSection(): ReactElement | null {
       </FieldGroup>
       {templates.length === 0 && autoChat.greetings.enabled ? (
         // Plan 174 F-11: on with nothing to post says so, never silently.
-        <Alert data-slot="buddy-greetings-empty-note" variant="quiet">
+        <Alert data-testid="buddy-greetings-empty-note" variant="quiet">
           <AlertTitle>{BUDDY_GREETINGS_EMPTY_NOTE}</AlertTitle>
         </Alert>
       ) : null}

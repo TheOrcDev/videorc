@@ -271,7 +271,12 @@ describe('utteranceKeyAnswer', () => {
   })
 
   it('leaves every other key, and a key another handler or a modifier owns', () => {
-    expect(utteranceKeyAnswer(key('Escape'), null, document.body)).toBeNull()
+    // Plan 174 H-23: Esc declines on every Buddy card; ⌫ stays as its alias.
+    expect(utteranceKeyAnswer(key('Escape'), null, document.body)).toBe('dismiss')
+    const composer = document.createElement('input')
+    document.body.append(composer)
+    expect(utteranceKeyAnswer(key('Escape'), composer, document.body)).toBeNull()
+    composer.remove()
     expect(utteranceKeyAnswer(key('a'), null, document.body)).toBeNull()
     expect(utteranceKeyAnswer(key('Enter', { defaultPrevented: true }), null, document.body)).toBe(
       null

@@ -84,7 +84,7 @@ describe('SHORTCUTS registry', () => {
     const buddy = SHORTCUTS.filter((entry) => entry.id.startsWith('buddy-'))
     expect(buddy.map((entry) => [entry.id, entry.accelerators[0]])).toEqual([
       ['buddy-card-send', 'Enter'],
-      ['buddy-card-dismiss', 'Backspace'],
+      ['buddy-card-dismiss', 'Escape'],
       ['buddy-say', 'Enter'],
       ['buddy-say-laugh', 'CmdOrCtrl+Enter']
     ])

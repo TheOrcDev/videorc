@@ -111,7 +111,7 @@ const SHORTCUT_LIST = [
   },
   {
     id: 'buddy-card-dismiss',
-    accelerators: ['Backspace'],
+    accelerators: ['Escape', 'Backspace'],
     label: "Dismiss Buddy's proposed post",
     group: 'Stream Manager'
   },

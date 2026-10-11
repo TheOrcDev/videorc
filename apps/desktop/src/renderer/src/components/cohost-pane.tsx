@@ -1,4 +1,5 @@
-import { AlertIcon, ChevronDownIcon, MicrophoneIcon, BuddyIcon } from '@/components/icons'
+import { AlertIcon, MicrophoneIcon, BuddyIcon } from '@/components/icons'
+import type React from 'react'
 import {
   useEffect,
   useMemo,
@@ -14,9 +15,7 @@ import type { BuddyPetPreviewHandle } from '@/components/buddy-pet-preview'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import { CohostFlagRow } from '@/components/cohost-flag-row'
 import { CohostQuestionRow } from '@/components/cohost-question-row'
-import { CohostPresenceDot, CohostTypingDots } from '@/components/cohost-status'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Command, CommandList } from '@/components/ui/command'
@@ -45,7 +44,7 @@ import {
 } from '@/lib/buddy-pet-view'
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 import { shortcutLabel } from '@/lib/platform'
-import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
+import { cohostEmptyStateCopy, cohostPresenceView } from '@/lib/cohost-presence'
 import { activeCohostSpotlight } from '@/lib/cohost-marks'
 import { REMOVE_FROM_CHAT_LABEL } from '@/lib/chat-removal-view'
 import {
@@ -58,7 +57,6 @@ import {
   cohostFlagRowKey,
   cohostHighlightMessageId,
   cohostListenPromptVisible,
-  cohostMoodScoresLabel,
   cohostPaneMode,
   cohostPromiseTriggerLabel,
   cohostQuestionRowKey,
@@ -67,7 +65,6 @@ import {
   moveCohostSelection,
   persistCohostListenPromptDismissed,
   readCohostListenPromptDismissed,
-  reduceCohostUnread,
   resolveCohostSelection,
   sortedCohostFlags,
   sortedCohostQuestions,
@@ -75,27 +72,28 @@ import {
   COHOST_ACTS_ON_ASK_HINT,
   COHOST_LISTEN_DISCLOSURE,
   COHOST_MOOD_LABELS,
-  COHOST_REMOVE_FLAGGED_KEY,
-  EMPTY_COHOST_UNREAD
+  COHOST_REMOVE_FLAGGED_KEY
 } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { cn } from '@/lib/utils'
 import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 
 /**
- * The Buddy pane in the Stream Manager, which only the detached Comments
- * window mounts. Its header (plan 164 S-C4) operates the Buddy on stream:
- * the state image, the creature's name, the Show on stream switch and the
- * Say box (↵ talks, ⌘↵ laughs), free for everyone (D6). Under it the pane
- * renders the backend's `cohost.state` and nothing else: it never decides
- * what is a question and never sends anything to chat. A flag is only acted
- * on when the streamer asks: "Remove from chat" on the selected flag (plan
- * 140, S6) is the same manual removal as the chat row's ⋯ menu.
+ * The Buddy pane's triage list in the Stream Manager, which only the
+ * detached Comments window mounts (plan 174 S3.14c): the Stream Manager owns
+ * the pane's one header (identity, status, the Buddy Live switch, the posting
+ * mode: `BuddyIdentity` sits in it) and its footer (`BuddySayFooter`); this
+ * is what lies between. It renders the backend's `cohost.state` and nothing
+ * else: it never decides what is a question and never sends anything to
+ * chat. A flag is only acted on when the streamer asks: "Remove from chat"
+ * on the selected flag (plan 140, S6) is the same manual removal as the chat
+ * row's ⋯ menu.
  *
- * Keyboard-first (videorc-design): the rows stay dense single lines and the
- * footer bar carries the actions for the selected row with their key chips.
- * ⌘J focuses the pane; ↑/↓ move; R reply, H show on stream, A answered,
- * ⌫ dismiss, ⇧⌫ remove a flagged message from chat.
+ * Keyboard-first (videorc-design): the rows are dense 32 px lines, the list
+ * takes the pane's height and scrolls on its own, and the footer bar carries
+ * the actions for the selected row with their key chips. ⌘J focuses the
+ * list; ↑/↓ move; R reply, H show on stream, A answered, ⌫ dismiss, ⇧⌫
+ * remove a flagged message from chat.
  */
 export function CohostPane({
   state,
@@ -103,7 +101,6 @@ export function CohostPane({
   consented,
   enabled,
   starting = false,
-  flash = null,
   expandSignal = 0,
   highlightedMessageId = null,
   actionPending = false,
@@ -123,15 +120,7 @@ export function CohostPane({
   onSayHiGreeted,
   onJumpToMessage,
   onEnableConsent,
-  onOpenChange,
-  onUpgrade,
-  buddy = null,
-  sayPending = false,
-  sayPostsToChat = false,
-  sayChatCap = null,
-  onSay,
-  onShowOnStreamChange,
-  onReact
+  onUpgrade
 }: {
   state: CohostState | null
   gate: EntitlementUiGate
@@ -139,9 +128,7 @@ export function CohostPane({
   enabled: boolean
   /** The engine was asked to start but has not reported listening yet. */
   starting?: boolean
-  /** One-shot "grouped 2 questions" delta from the owner surface. */
-  flash?: string | null
-  /** Bumped by the header status element to scroll to + expand this pane. */
+  /** Bumped by the header status element to scroll to and focus the list. */
   expandSignal?: number
   highlightedMessageId?: string | null
   actionPending?: boolean
@@ -167,53 +154,19 @@ export function CohostPane({
   onSayHiGreeted?: (entry: CohostSayHi) => void
   onJumpToMessage?: (messageId: string) => void
   onEnableConsent?: () => void
-  /** Reports the segment's open/closed state so the owner can throttle the
-   * collapsed-pane question toast against what is actually on screen. */
-  onOpenChange?: (open: boolean) => void
   onUpgrade?: (url: string) => void
-  /** The Buddy on stream (plan 164 S-C4); null hides the header. */
-  buddy?: CohostWindowBuddy | null
-  /** A Say is on its way through the relay. */
-  sayPending?: boolean
-  /** Auto, on air: a Say also posts to every chat as you (plan 174 F-6). */
-  sayPostsToChat?: boolean
-  /** The shortest chat cap among the destinations a Say reaches, when it posts. */
-  sayChatCap?: number | null
-  /** Say something in the bubble (D7). Absent disables the box. */
-  onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
-  /** `overlayLayout.buddy.showOnStream`. Absent disables the switch. */
-  onShowOnStreamChange?: (showOnStream: boolean) => void
-  /** A reaction chip (plan 168 S-D3): `cohost.pet.react` through Studio.
-   * Absent disables the chips. */
-  onReact?: (reaction: string) => void
 }): ReactElement | null {
   const mode = cohostPaneMode({ gate, consented, enabled })
-  const header = buddy ? (
-    <BuddyHeader
-      buddy={buddy}
-      sayChatCap={sayChatCap}
-      sayPending={sayPending}
-      sayPostsToChat={sayPostsToChat}
-      onReact={onReact}
-      onSay={onSay}
-      onShowOnStreamChange={onShowOnStreamChange}
-    />
-  ) : null
-  const [open, setOpen] = useState(true)
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const rootRef = useRef<HTMLDivElement>(null)
   const paneRef = useRef<HTMLDivElement>(null)
-
-  const [unread, setUnread] = useState(EMPTY_COHOST_UNREAD)
-  const autoExpandedSessionRef = useRef<string | null>(null)
 
   const questions = useMemo(() => sortedCohostQuestions(state?.questions ?? []), [state?.questions])
   const flags = useMemo(() => sortedCohostFlags(state?.flags ?? []), [state?.flags])
   const rows = useMemo(() => cohostRows(state), [state])
   const activeKey = resolveCohostSelection(rows, selectedKey)
   const activeRow = cohostRowAt(rows, selectedKey)
-  const questionIds = useMemo(() => cohostQuestionIds(state), [state])
   // "Answered on air" (plan 060 D9): newest first, gone after the backend's
   // 60 s even when no cohost.state arrives in quiet chat (the backend only
   // filters when it snapshots, and a Restore on an aged entry is a no-op).
@@ -234,26 +187,8 @@ export function CohostPane({
   // stays while the backend still counts two corroborating viewers.
   const alerts = activeCohostAlerts(state, nowMs)
   const alertCount = state?.alerts?.length ?? 0
-  const presence = cohostPresenceView(state, nowMs, {
-    starting,
-    unread: open ? 0 : unread.count
-  })
-
-  // Unread while collapsed: the badge is the collapsed pane's only way to say
-  // "something arrived". Expanding re-baselines it to what is on screen.
-  useEffect(() => {
-    setUnread((current) => reduceCohostUnread(current, { questionIds, open }))
-  }, [open, questionIds])
-
-  // The FIRST question of a session opens the pane once — after that the
-  // streamer's collapse decision is theirs to keep.
-  useEffect(() => {
-    const sessionId = state?.sessionId ?? null
-    if (!sessionId || questionIds.length === 0) return
-    if (autoExpandedSessionRef.current === sessionId) return
-    autoExpandedSessionRef.current = sessionId
-    setOpen(true)
-  }, [questionIds.length, state?.sessionId])
+  // The empty-state copy follows what the engine is doing right now.
+  const presence = cohostPresenceView(state, nowMs, { starting })
 
   // Ages and alert expiry are the only time-dependent copy in the pane; one
   // slow tick keeps them honest without re-rendering the message list
@@ -266,21 +201,15 @@ export function CohostPane({
     return () => clearInterval(timer)
   }, [alertCount, recapPresent, rows.length, sayHiCount])
 
-  useEffect(() => {
-    onOpenChange?.(open)
-  }, [onOpenChange, open])
-
-  // The header status element takes you here: expand, scroll into view, focus.
+  // The header status element takes you here: scroll into view, focus the list.
   useEffect(() => {
     if (expandSignal <= 0) return
-    setOpen(true)
     paneRef.current?.scrollIntoView({ block: 'nearest', behavior: smoothScrollBehavior() })
-    // Focus lands on the row list once the collapsible content is mounted.
     const frame = requestAnimationFrame(() => rootRef.current?.focus())
     return () => cancelAnimationFrame(frame)
   }, [expandSignal])
 
-  // ⌘J focuses the pane. In the main window plain ⌘J already toggles the
+  // ⌘J focuses the list. In the main window plain ⌘J already toggles the
   // Comments window, so this only ever fires where the pane is mounted.
   useEffect(() => {
     if (mode.kind !== 'live') return
@@ -291,28 +220,33 @@ export function CohostPane({
       const root = rootRef.current
       if (!root) return
       event.preventDefault()
-      setOpen(true)
       root.focus()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [mode.kind])
 
-  // The header is free (D6): it stays above every notice, and alone when the
-  // AI side is off.
+  // Notices are flush Alerts (plan 174 F-14): the Premium lock with its one
+  // action, or the cloud-AI disclosure with its one action.
   if (mode.kind === 'upsell') {
     return (
-      <>
-        {header}
-        <CohostNotice label="Premium">
-          <span className="min-w-0 flex-1 truncate">{mode.reason}</span>
+      <div className="shrink-0 p-2" data-slot="cohost-notice">
+        <Alert data-testid="cohost-upsell" variant="locked">
+          <AlertTitle>{mode.reason}</AlertTitle>
           {mode.upgradeUrl && onUpgrade ? (
-            <Button size="xs" variant="ghost" onClick={() => onUpgrade(mode.upgradeUrl as string)}>
-              View Premium
-            </Button>
+            <AlertAction>
+              <Button
+                size="xs"
+                type="button"
+                variant="outline"
+                onClick={() => onUpgrade(mode.upgradeUrl as string)}
+              >
+                View Premium
+              </Button>
+            </AlertAction>
           ) : null}
-        </CohostNotice>
-      </>
+        </Alert>
+      </div>
     )
   }
 
@@ -322,7 +256,6 @@ export function CohostPane({
     // Nothing is granted by this click.
     return (
       <>
-        {header}
         <div className="shrink-0 p-2" data-slot="cohost-consent">
           <Alert aria-label="Buddy needs cloud AI" role="group" icon={BuddyIcon}>
             <AlertTitle className="text-xs">Buddy needs cloud AI</AlertTitle>
@@ -347,9 +280,8 @@ export function CohostPane({
     )
   }
 
-  if (mode.kind === 'disabled') {
-    return header
-  }
+  // Buddy Live off: the header's switch already says so (plan 174 S3.14a).
+  if (mode.kind === 'disabled') return null
 
   // The failed tick in the server's own words. The engine clears `detail` the
   // moment it listens again, so a stale detail is never shown.
@@ -419,331 +351,334 @@ export function CohostPane({
     }
   }
 
+  // The chat's weather, one quiet line: its mood, what you are talking about,
+  // and whether the last pass was partial. Plain words, never a tooltip.
+  const weather = [
+    ...(state?.mood ? [COHOST_MOOD_LABELS[state.mood]] : []),
+    ...(state?.partial ? ['Partial pass, newest messages used'] : [])
+  ]
+
   return (
-    <>
-      {header}
-      <Collapsible
-        ref={paneRef}
-        className="@container/cohost-pane shrink-0"
-        data-testid="cohost-pane"
-        open={open}
-        onOpenChange={setOpen}
-      >
-        <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 overflow-hidden px-3 py-1.5 text-left hover:bg-accent/60 @max-[400px]/cohost-pane:gap-1.5">
-          <ChevronDownIcon
-            aria-hidden
-            className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
-          />
-          <BuddyIcon
-            aria-hidden
-            className="size-4 shrink-0 text-muted-foreground"
-            weight="duotone"
-          />
-          <span className="shrink-0 text-xs font-medium text-foreground">Buddy</span>
-          {/* One tag, at the tag size (plan 174 S1.8, F-14: no 10 px text). */}
-          <Badge className={cn('shrink-0', PANE_NARROW_HIDDEN)} variant="outline">
-            Alpha
-          </Badge>
-          <CohostPresenceDot view={presence} />
-          <span
-            className="min-w-0 truncate text-[11px] text-muted-foreground"
-            data-slot="cohost-pane-status"
-            title={
-              [
-                ...presence.tooltipLines,
-                ...(state?.mood ? [`Chat mood: ${COHOST_MOOD_LABELS[state.mood]}`] : [])
-              ].join('\n') || undefined
-            }
-          >
-            {flash ?? presence.label}
-          </span>
-          {presence.dots ? <CohostTypingDots fast={presence.kind === 'thinking'} /> : null}
-          <span className="flex-1" />
-          {presence.unreadBadge ? (
-            <Badge
-              aria-label={`${presence.unreadBadge} new questions`}
-              className="shrink-0 tabular-nums"
-              data-testid="cohost-unread-badge"
-              variant="secondary"
-            >
-              {presence.unreadBadge} new
-            </Badge>
-          ) : null}
+    <div
+      ref={paneRef}
+      className="@container/cohost-pane flex min-h-0 flex-1 flex-col"
+      data-testid="cohost-pane"
+    >
+      {alerts.length > 0 ? (
+        // Viewers saying something is broken (plan 174 F-7): a flush warning
+        // row, never a toast; it stays while the backend counts two viewers.
+        <div className="flex shrink-0 flex-col gap-1 px-2 pt-2">
           {alerts.map((alert) => (
-            <Badge
-              key={alert.kind}
-              className="min-w-0 shrink"
-              data-testid="cohost-alert"
-              title="Several viewers said this in chat in the last two minutes."
-              variant="warning"
-            >
-              <span className="truncate">{cohostAlertLabel(alert)}</span>
-            </Badge>
+            <Alert key={alert.kind} data-testid="cohost-alert" variant="warning">
+              <AlertTitle>{cohostAlertLabel(alert)}</AlertTitle>
+              <AlertDescription className="text-xs">
+                Several viewers said this in chat in the last two minutes.
+              </AlertDescription>
+            </Alert>
           ))}
-          {state?.partial ? (
-            <Badge
-              className={cn('shrink-0', PANE_NARROW_HIDDEN)}
-              title="Chat outran one AI pass; the newest messages were used."
-              variant="outline"
-            >
-              Partial
-            </Badge>
-          ) : null}
-          {state?.mood ? (
-            <span
-              className={cn('shrink-0 text-[11px] text-subtle', PANE_NARROW_HIDDEN)}
-              title={cohostMoodScoresLabel(state.moodScores) ?? undefined}
-            >
-              {COHOST_MOOD_LABELS[state.mood]}
-            </span>
-          ) : null}
-        </CollapsibleTrigger>
-
-        <CollapsibleContent>
-          <Separator />
+        </div>
+      ) : null}
+      {weather.length > 0 || topic ? (
+        <p
+          className="truncate px-2.5 py-1 text-[11px] text-muted-foreground"
+          data-slot="cohost-topic"
+        >
+          {weather.join(' · ')}
+          {weather.length > 0 && topic ? ' · ' : ''}
           {topic ? (
-            // What the streamer is talking about (tick v3): one quiet line, the
-            // same tier as the error detail, present only when the server said.
-            <p
-              className="truncate px-2.5 py-1 text-[11px] text-muted-foreground"
-              data-slot="cohost-topic"
-              title={`Talking about: ${topic}`}
-            >
+            <>
               <span className="text-subtle">Talking about:</span> {topic}
-            </p>
+            </>
           ) : null}
-          {errorDetail ? (
-            // The failed tick in the server's own words, so "AI error" is never
-            // the whole story. Monochrome; the dot already carries the state.
-            <p
-              className="truncate px-2.5 py-1 text-[11px] text-muted-foreground"
-              data-slot="cohost-error-detail"
-              title={errorDetail}
+        </p>
+      ) : null}
+      {errorDetail ? (
+        // The failed tick in the server's own words, so "AI error" is never
+        // the whole story. Monochrome; the header's dot carries the state.
+        <p
+          className="truncate px-2.5 py-1 text-[11px] text-muted-foreground"
+          data-slot="cohost-error-detail"
+          title={errorDetail}
+        >
+          {errorDetail}
+        </p>
+      ) : null}
+      {/* The triage list takes the pane's height and scrolls on its own (plan
+          174 F-8, H-21): a stack of cards above never collapses it. */}
+      <Command
+        ref={rootRef}
+        aria-label="Buddy questions and flags"
+        className="min-h-0 flex-1 bg-transparent outline-none"
+        shouldFilter={false}
+        tabIndex={0}
+        value={activeKey ?? ''}
+        onKeyDown={handleKeyDown}
+        onValueChange={setSelectedKey}
+      >
+        <CommandList className="max-h-none min-h-0 flex-1 px-1 py-1">
+          {rows.length === 0 ? (
+            <p className="px-2 py-3 text-xs text-subtle" data-slot="cohost-empty-state">
+              {cohostEmptyStateCopy(presence, state)}
+            </p>
+          ) : (
+            <>
+              {questions.map((question) => (
+                <CohostQuestionRow
+                  key={question.id}
+                  nowMs={nowMs}
+                  onStream={
+                    highlightedMessageId !== null &&
+                    cohostHighlightMessageId(question) === highlightedMessageId
+                  }
+                  question={question}
+                  selected={activeKey === cohostQuestionRowKey(question.id)}
+                  talkingAbout={spotlightQuestionId === question.id}
+                  onReply={onReply}
+                  onSelect={setSelectedKey}
+                />
+              ))}
+              {flags.map((flag) => (
+                <CohostFlagRow
+                  key={flag.messageId}
+                  flag={flag}
+                  nowMs={nowMs}
+                  selected={activeKey === cohostFlagRowKey(flag.messageId)}
+                  onJump={(value) => onJumpToMessage?.(value.messageId)}
+                  onSelect={setSelectedKey}
+                />
+              ))}
+            </>
+          )}
+        </CommandList>
+      </Command>
+      {answeredOnAir.length > 0 ? (
+        <AnsweredOnAir
+          disabled={actionPending || !onRestoreQuestion}
+          items={answeredOnAir}
+          onRestore={(question) => onRestoreQuestion?.(question)}
+        />
+      ) : null}
+      {sayHi.length > 0 ? (
+        <CohostSayHiList
+          disabled={actionPending}
+          items={sayHi}
+          nowMs={nowMs}
+          onGreeted={onSayHiGreeted}
+        />
+      ) : null}
+      {promises.length > 0 ? (
+        <CohostPromises
+          disabled={actionPending}
+          items={promises}
+          onDismiss={onPromiseDismiss}
+          onDone={onPromiseDone}
+        />
+      ) : null}
+      {recap ? (
+        <CohostRecapCard
+          disabled={actionPending}
+          recap={recap}
+          onDismiss={onRecapDismiss}
+          onPost={onRecapPost}
+        />
+      ) : onRecapDraft ? (
+        <>
+          <Separator />
+          <div className="flex h-7 items-center gap-1 px-2" data-slot="cohost-recap-draft">
+            <span
+              className={cn('min-w-0 flex-1 truncate text-[11px] text-subtle', PANE_NARROW_HIDDEN)}
             >
-              {errorDetail}
-            </p>
-          ) : null}
-          <Command
-            ref={rootRef}
-            aria-label="Buddy questions and flags"
-            className="bg-transparent outline-none"
-            shouldFilter={false}
-            tabIndex={0}
-            value={activeKey ?? ''}
-            onKeyDown={handleKeyDown}
-            onValueChange={setSelectedKey}
-          >
-            <CommandList className="max-h-48 px-1 py-1">
-              {rows.length === 0 ? (
-                <p className="px-2 py-3 text-xs text-subtle" data-slot="cohost-empty-state">
-                  {cohostEmptyStateCopy(presence, state)}
-                </p>
-              ) : (
-                <>
-                  {questions.map((question) => (
-                    <CohostQuestionRow
-                      key={question.id}
-                      nowMs={nowMs}
-                      onStream={
-                        highlightedMessageId !== null &&
-                        cohostHighlightMessageId(question) === highlightedMessageId
-                      }
-                      question={question}
-                      selected={activeKey === cohostQuestionRowKey(question.id)}
-                      talkingAbout={spotlightQuestionId === question.id}
-                      onReply={onReply}
-                      onSelect={setSelectedKey}
-                    />
-                  ))}
-                  {flags.map((flag) => (
-                    <CohostFlagRow
-                      key={flag.messageId}
-                      flag={flag}
-                      nowMs={nowMs}
-                      selected={activeKey === cohostFlagRowKey(flag.messageId)}
-                      onJump={(value) => onJumpToMessage?.(value.messageId)}
-                      onSelect={setSelectedKey}
-                    />
-                  ))}
-                </>
-              )}
-            </CommandList>
-          </Command>
-          {answeredOnAir.length > 0 ? (
-            <AnsweredOnAir
-              disabled={actionPending || !onRestoreQuestion}
-              items={answeredOnAir}
-              onRestore={(question) => onRestoreQuestion?.(question)}
-            />
-          ) : null}
-          {sayHi.length > 0 ? (
-            <CohostSayHiList
+              For viewers who just arrived.
+            </span>
+            <Button
+              className="shrink-0"
               disabled={actionPending}
-              items={sayHi}
-              nowMs={nowMs}
-              onGreeted={onSayHiGreeted}
-            />
-          ) : null}
-          {promises.length > 0 ? (
-            <CohostPromises
-              disabled={actionPending}
-              items={promises}
-              onDismiss={onPromiseDismiss}
-              onDone={onPromiseDone}
-            />
-          ) : null}
-          {recap ? (
-            <CohostRecapCard
-              disabled={actionPending}
-              recap={recap}
-              onDismiss={onRecapDismiss}
-              onPost={onRecapPost}
-            />
-          ) : onRecapDraft ? (
-            <>
-              <Separator />
-              <div className="flex h-7 items-center gap-1 px-2" data-slot="cohost-recap-draft">
-                <span
-                  className={cn(
-                    'min-w-0 flex-1 truncate text-[11px] text-subtle',
-                    PANE_NARROW_HIDDEN
-                  )}
-                >
-                  For viewers who just arrived.
-                </span>
-                <Button
-                  className="shrink-0"
-                  disabled={actionPending}
-                  size="xs"
-                  type="button"
-                  variant="ghost"
-                  onClick={onRecapDraft}
-                >
-                  Draft a recap
-                </Button>
-              </div>
-            </>
-          ) : null}
+              size="xs"
+              type="button"
+              variant="ghost"
+              onClick={onRecapDraft}
+            >
+              Draft a recap
+            </Button>
+          </div>
+        </>
+      ) : null}
 
-          {activeRow ? (
-            <>
-              <Separator />
-              <div
-                className="flex flex-wrap items-center justify-end gap-1 px-2 py-1"
-                data-slot="cohost-actions"
-              >
-                <span
-                  className={cn(
-                    'min-w-0 flex-1 truncate text-[11px] text-muted-foreground',
-                    PANE_NARROW_HIDDEN
-                  )}
-                  data-slot="cohost-acts-on-ask"
-                  title={COHOST_ACTS_ON_ASK_COPY}
-                >
-                  {COHOST_ACTS_ON_ASK_HINT}
-                </span>
-                {activeRow.kind === 'question' ? (
-                  <>
-                    <CohostAction
-                      disabled={actionPending}
-                      accelerator="R"
-                      label="Reply"
-                      onClick={() => {
-                        const question = questions.find(
-                          (candidate) => candidate.id === activeRow.id
-                        )
-                        if (question) onReply(question)
-                      }}
-                    />
-                    {onShowOnStream ? (
-                      <CohostAction
-                        disabled={actionPending}
-                        accelerator="H"
-                        label="Show on stream"
-                        onClick={() => {
-                          const question = questions.find(
-                            (candidate) => candidate.id === activeRow.id
-                          )
-                          if (question) onShowOnStream(question)
-                        }}
-                      />
-                    ) : null}
-                    <CohostAction
-                      disabled={actionPending}
-                      accelerator="A"
-                      label="Answered"
-                      onClick={() => {
-                        const question = questions.find(
-                          (candidate) => candidate.id === activeRow.id
-                        )
-                        if (question) onAnswered(question)
-                      }}
-                    />
-                    <CohostAction
-                      disabled={actionPending}
-                      accelerator="Backspace"
-                      label="Dismiss"
-                      onClick={() => {
-                        const question = questions.find(
-                          (candidate) => candidate.id === activeRow.id
-                        )
-                        if (question) onDismissQuestion(question)
-                      }}
-                    />
-                  </>
-                ) : (
-                  <>
-                    {onJumpToMessage ? (
-                      <CohostAction
-                        accelerator="Enter"
-                        label="Jump to message"
-                        onClick={() => onJumpToMessage(activeRow.id)}
-                      />
-                    ) : null}
-                    <CohostAction
-                      disabled={actionPending}
-                      accelerator="Backspace"
-                      label="Dismiss"
-                      onClick={() => {
-                        const flag = flags.find((candidate) => candidate.messageId === activeRow.id)
-                        if (flag) onDismissFlag(flag)
-                      }}
-                    />
-                    {onRemoveFlagged && removableMessageIds?.has(activeRow.id) ? (
-                      <CohostAction
-                        accelerator={COHOST_REMOVE_FLAGGED_KEY}
-                        label={REMOVE_FROM_CHAT_LABEL}
-                        variant="destructive"
-                        onClick={() => {
-                          const flag = flags.find(
-                            (candidate) => candidate.messageId === activeRow.id
-                          )
-                          if (flag) onRemoveFlagged(flag)
-                        }}
-                      />
-                    ) : null}
-                  </>
-                )}
-              </div>
-            </>
-          ) : null}
-        </CollapsibleContent>
-      </Collapsible>
-    </>
+      {activeRow ? (
+        <>
+          <Separator />
+          <div
+            className="flex flex-wrap items-center justify-end gap-1 px-2 py-1"
+            data-slot="cohost-actions"
+          >
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate text-[11px] text-muted-foreground',
+                PANE_NARROW_HIDDEN
+              )}
+              data-slot="cohost-acts-on-ask"
+              title={COHOST_ACTS_ON_ASK_COPY}
+            >
+              {COHOST_ACTS_ON_ASK_HINT}
+            </span>
+            {activeRow.kind === 'question' ? (
+              <>
+                <CohostAction
+                  disabled={actionPending}
+                  accelerator="R"
+                  label="Reply"
+                  onClick={() => {
+                    const question = questions.find((candidate) => candidate.id === activeRow.id)
+                    if (question) onReply(question)
+                  }}
+                />
+                {onShowOnStream ? (
+                  <CohostAction
+                    disabled={actionPending}
+                    accelerator="H"
+                    label="Show on stream"
+                    onClick={() => {
+                      const question = questions.find((candidate) => candidate.id === activeRow.id)
+                      if (question) onShowOnStream(question)
+                    }}
+                  />
+                ) : null}
+                <CohostAction
+                  disabled={actionPending}
+                  accelerator="A"
+                  label="Answered"
+                  onClick={() => {
+                    const question = questions.find((candidate) => candidate.id === activeRow.id)
+                    if (question) onAnswered(question)
+                  }}
+                />
+                <CohostAction
+                  disabled={actionPending}
+                  accelerator="Backspace"
+                  label="Dismiss"
+                  onClick={() => {
+                    const question = questions.find((candidate) => candidate.id === activeRow.id)
+                    if (question) onDismissQuestion(question)
+                  }}
+                />
+              </>
+            ) : (
+              <>
+                {onJumpToMessage ? (
+                  <CohostAction
+                    accelerator="Enter"
+                    label="Jump to message"
+                    onClick={() => onJumpToMessage(activeRow.id)}
+                  />
+                ) : null}
+                <CohostAction
+                  disabled={actionPending}
+                  accelerator="Backspace"
+                  label="Dismiss"
+                  onClick={() => {
+                    const flag = flags.find((candidate) => candidate.messageId === activeRow.id)
+                    if (flag) onDismissFlag(flag)
+                  }}
+                />
+                {onRemoveFlagged && removableMessageIds?.has(activeRow.id) ? (
+                  <CohostAction
+                    accelerator={COHOST_REMOVE_FLAGGED_KEY}
+                    label={REMOVE_FROM_CHAT_LABEL}
+                    variant="destructive"
+                    onClick={() => {
+                      const flag = flags.find((candidate) => candidate.messageId === activeRow.id)
+                      if (flag) onRemoveFlagged(flag)
+                    }}
+                  />
+                ) : null}
+              </>
+            )}
+          </div>
+        </>
+      ) : null}
+    </div>
   )
 }
 
 /**
- * The Buddy on stream (plan 164 S-C4, plan 168 S-D3): the living preview at
- * 32 px (the pack it wears on stream, following the pointer in this window
- * and holding the frame of the state on air), the name, the bubble while
- * one is up, the Show on stream switch, and the Say box: ↵ says it talking,
- * ⌘↵ laughing, and the reaction chips beside it play a reaction on air
- * (each disabled when the pack has no such reaction). Free for everyone
- * (D6): no Premium, no consent, no live session.
+ * The Buddy's identity in the pane header (plan 164 S-C4, plan 168 S-D3,
+ * plan 174 S3.14c): the living preview at 32 px (the pack it wears on
+ * stream, following the pointer in this window and holding the frame of the
+ * state on air), the name, and the bubble while one is up. The pane's
+ * reactions come from the same preview, so the footer registers its handle
+ * through `onPreview`. Free for everyone (D6): no Premium, no consent, no
+ * live session.
  */
-export function BuddyHeader({
+export function BuddyIdentity({
   buddy,
+  previewRef,
+  onPackReactions
+}: {
+  buddy: CohostWindowBuddy
+  /** The footer's handle on the preview, to play a reaction on it. */
+  previewRef?: React.RefObject<BuddyPetPreviewHandle | null>
+  /** The loaded pack's reactions; null when it cannot load. */
+  onPackReactions?: (reactions: readonly string[] | null) => void
+}): ReactElement {
+  const image = buddyStateImageUrl(buddy.persona, buddy.state)
+  const avatar = buddy.persona.avatar
+  const packId = avatar?.kind === 'alive' ? avatar.packId : BUDDY_STILL_PACK_ID
+  return (
+    <div className="flex min-w-0 items-center gap-2" data-slot="buddy-header">
+      <div className="shrink-0" data-slot="buddy-avatar" data-state={buddy.state}>
+        <LazyBuddyPetPreview
+          ref={previewRef}
+          label={buddy.persona.name}
+          motion={buddy.persona.motion}
+          packId={packId}
+          personaId={buddy.persona.id}
+          placeholder={
+            <img
+              alt=""
+              className="size-8 rounded-chip bg-foreground/[0.04] object-contain"
+              data-slot="buddy-state-image"
+              data-state={buddy.state}
+              draggable={false}
+              src={image}
+            />
+          }
+          pose={buddy.state === 'idle' ? null : buddy.state}
+          size={BUDDY_HEADER_PREVIEW_PX}
+          stillImages={buddy.persona.images}
+          onError={() => onPackReactions?.(null)}
+          onLoad={(info) => onPackReactions?.(info.reactions)}
+        />
+      </div>
+      <span
+        className="min-w-0 shrink truncate text-xs font-medium text-foreground"
+        data-slot="buddy-name"
+        title={buddy.persona.name}
+      >
+        {buddy.persona.name}
+      </span>
+      {buddy.bubble ? (
+        <span
+          className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
+          data-slot="buddy-bubble"
+          title={buddy.bubble}
+        >
+          “{buddy.bubble}”
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * The Buddy pane's footer (plan 174 S3.14c, F-10): the Say box (↵ says it
+ * talking, ⌘↵ laughing), the reaction chips that play a reaction on air
+ * (each disabled when the pack has no such reaction), and the "{name} on
+ * stream" switch. Visible on air and off: all of it is free (D6).
+ */
+export function BuddySayFooter({
+  buddy,
+  previewRef,
+  packReactions = null,
   sayPending = false,
   sayPostsToChat = false,
   sayChatCap = null,
@@ -752,6 +687,10 @@ export function BuddyHeader({
   onReact
 }: {
   buddy: CohostWindowBuddy
+  /** The header preview's handle, so a reaction plays there too. */
+  previewRef?: React.RefObject<BuddyPetPreviewHandle | null>
+  /** The pack's reactions as the header preview reported them. */
+  packReactions?: readonly string[] | null
   sayPending?: boolean
   /** Auto, on air: the line also goes to every chat as you (plan 174 F-6). */
   sayPostsToChat?: boolean
@@ -764,12 +703,7 @@ export function BuddyHeader({
   const [draft, setDraft] = useState('')
   const name = buddy.persona.name
   const overCap = sayPostsToChat && sayChatCap !== null && draft.length > sayChatCap
-  const previewRef = useRef<BuddyPetPreviewHandle>(null)
-  // The loaded pack's reactions; null until it loads (or when it cannot).
-  const [packReactions, setPackReactions] = useState<readonly string[] | null>(null)
-  const image = buddyStateImageUrl(buddy.persona, buddy.state)
   const avatar = buddy.persona.avatar
-  const packId = avatar?.kind === 'alive' ? avatar.packId : BUDDY_STILL_PACK_ID
   const say = (state: CohostUtteranceState): void => {
     const text = draft.trim()
     if (!text || !onSay || sayPending) return
@@ -778,68 +712,15 @@ export function BuddyHeader({
   }
   const react = (reaction: string): void => {
     if (!onReact) return
-    previewRef.current?.react(reaction)
+    previewRef?.current?.react(reaction)
     onReact(reaction)
   }
   return (
-    <div className="@container/buddy-header shrink-0" data-slot="buddy-header">
-      <div className="flex h-10 min-w-0 items-center gap-2 px-3">
-        <div className="shrink-0" data-slot="buddy-avatar" data-state={buddy.state}>
-          <LazyBuddyPetPreview
-            ref={previewRef}
-            label={buddy.persona.name}
-            motion={buddy.persona.motion}
-            packId={packId}
-            personaId={buddy.persona.id}
-            placeholder={
-              <img
-                alt=""
-                className="size-8 rounded-chip bg-foreground/[0.04] object-contain"
-                data-slot="buddy-state-image"
-                data-state={buddy.state}
-                draggable={false}
-                src={image}
-              />
-            }
-            pose={buddy.state === 'idle' ? null : buddy.state}
-            size={BUDDY_HEADER_PREVIEW_PX}
-            stillImages={buddy.persona.images}
-            onError={() => setPackReactions(null)}
-            onLoad={(info) => setPackReactions(info.reactions)}
-          />
-        </div>
-        <span
-          className="min-w-0 shrink truncate text-xs font-medium text-foreground"
-          data-slot="buddy-name"
-          title={buddy.persona.name}
-        >
-          {buddy.persona.name}
-        </span>
-        {buddy.bubble ? (
-          <span
-            className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
-            data-slot="buddy-bubble"
-            title={buddy.bubble}
-          >
-            “{buddy.bubble}”
-          </span>
-        ) : null}
-        {/* Plan 174 F-18: the overlay switch is named after the Buddy, so it
-            never reads like a question's "Show on stream". */}
-        <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-          <Switch
-            aria-label={`${name} on stream`}
-            checked={buddy.showOnStream}
-            data-testid="buddy-show-on-stream"
-            disabled={!onShowOnStreamChange}
-            size="sm"
-            onCheckedChange={(checked) => onShowOnStreamChange?.(checked)}
-          />
-          <span className={HEADER_NARROW_HIDDEN}>{name} on stream</span>
-        </label>
-        <span className="flex-1" />
-      </div>
-      <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2" data-slot="buddy-say">
+    <div
+      className="@container/buddy-header shrink-0 border-t border-border"
+      data-slot="buddy-footer"
+    >
+      <div className="flex flex-wrap items-center gap-1.5 px-3 py-2" data-slot="buddy-say">
         <div className="flex min-w-48 flex-1 items-center gap-1.5">
           <Input
             aria-describedby={sayPostsToChat ? 'buddy-say-posts' : undefined}
@@ -919,8 +800,20 @@ export function BuddyHeader({
             )
           })}
         </div>
+        {/* Plan 174 F-18: the overlay switch is named after the Buddy, so it
+            never reads like a question's "Show on stream". */}
+        <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Switch
+            aria-label={`${name} on stream`}
+            checked={buddy.showOnStream}
+            data-testid="buddy-show-on-stream"
+            disabled={!onShowOnStreamChange}
+            size="sm"
+            onCheckedChange={(checked) => onShowOnStreamChange?.(checked)}
+          />
+          <span className={HEADER_NARROW_HIDDEN}>{name} on stream</span>
+        </label>
       </div>
-      <Separator />
     </div>
   )
 }
@@ -1261,20 +1154,3 @@ const PANE_NARROW_HIDDEN = '@max-[400px]/cohost-pane:hidden'
 // The Buddy header is its own container (plan 174 F-27): a class that names
 // the pane's container never applied there, so it names its own.
 const HEADER_NARROW_HIDDEN = '@max-[400px]/buddy-header:hidden'
-
-/** One-line explanation that REPLACES the pane (Premium, consent). Same shape
- * as the multistream upsell: state the reason, offer the one action. */
-function CohostNotice({ label, children }: { label: string; children: ReactNode }): ReactElement {
-  return (
-    <div
-      className="flex shrink-0 items-center gap-2 rounded-row bg-foreground/[0.04] px-2.5 py-1.5 text-[11px] text-muted-foreground"
-      data-slot="cohost-notice"
-    >
-      <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
-      <Badge className="shrink-0" variant="outline">
-        {label} Alpha
-      </Badge>
-      {children}
-    </div>
-  )
-}

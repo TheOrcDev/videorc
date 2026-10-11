@@ -402,7 +402,7 @@ describe('Reports tab layout (plan 150 S6)', () => {
 
   it('names the empty tab before any stream with Buddy', async () => {
     await render({ report: { payload: null, loading: false, error: null }, sessions: [] })
-    const empty = document.querySelector('[data-slot="buddy-report-empty"]')
+    const empty = document.querySelector('[data-testid="buddy-report-empty"]')
     expect(empty?.textContent).toContain('No stream reports yet')
     expect(empty?.textContent).toContain(
       'The report appears here after your first stream with Buddy.'
