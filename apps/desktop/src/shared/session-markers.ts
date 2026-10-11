@@ -12,6 +12,7 @@ import {
   runtimeSchema,
   RuntimeSchemaError
 } from './runtime-schema'
+import { formatTimecode } from './timecode'
 
 export interface SessionMarker {
   id: string
@@ -230,9 +231,7 @@ export function classifyComposerDraft(raw: string): ComposerCommand {
       'Unknown command. Use /marker [title] or /help. To send a literal slash, start with //.'
   }
 }
+/** A marker's place in the recording as the one timecode: "2:05", "1:02:05" (plan 174 S1.4). */
 export function markerTime(seconds: number): string {
-  const total = Math.floor(seconds)
-  return [Math.floor(total / 3600), Math.floor(total / 60) % 60, total % 60]
-    .map((v) => String(v).padStart(2, '0'))
-    .join(':')
+  return formatTimecode(seconds * 1000)
 }

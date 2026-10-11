@@ -1,5 +1,7 @@
 import type { GlobalShortcutsConfig } from '../../../shared/backend'
+import { formatBitrate, formatResolution, formatVideoQuality, resolutionName } from './format-video'
 import { normalizeLayoutFramingMemory, type LayoutFramingMemory } from './layout-framing-memory'
+import { platformLabel } from './platform-copy'
 import type {
   AudioSettings,
   CaptionStyleId,
@@ -349,18 +351,29 @@ export type ResolutionOption = {
 // Studio mode gets its own list — the vertical options are the transposed
 // twins of the landscape ones, so orientation can never contradict the mode
 // (the mode toggle is the one home for orientation).
+// Named and spelled by the one video formatter (plan 174 S1.4): "1440p",
+// never "2K"; "2560 × 1440".
+function resolutionOption(width: number, height: number): ResolutionOption {
+  return {
+    label: resolutionName({ width, height }),
+    detail: formatResolution({ width, height }),
+    width,
+    height
+  }
+}
+
 const HORIZONTAL_RESOLUTION_OPTIONS: ResolutionOption[] = [
-  { label: '4K', detail: '3840 × 2160', width: 3840, height: 2160 },
-  { label: '2K', detail: '2560 × 1440', width: 2560, height: 1440 },
-  { label: '1080p', detail: '1920 × 1080', width: 1920, height: 1080 },
-  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 }
+  resolutionOption(3840, 2160),
+  resolutionOption(2560, 1440),
+  resolutionOption(1920, 1080),
+  resolutionOption(1280, 720)
 ]
 
 const VERTICAL_RESOLUTION_OPTIONS: ResolutionOption[] = [
-  { label: '4K', detail: '2160 × 3840', width: 2160, height: 3840 },
-  { label: '2K', detail: '1440 × 2560', width: 1440, height: 2560 },
-  { label: '1080p', detail: '1080 × 1920', width: 1080, height: 1920 },
-  { label: '720p', detail: '720 × 1280', width: 720, height: 1280 }
+  resolutionOption(2160, 3840),
+  resolutionOption(1440, 2560),
+  resolutionOption(1080, 1920),
+  resolutionOption(720, 1280)
 ]
 
 export function resolutionOptionsForOrientation(
@@ -528,16 +541,6 @@ export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
   'custom'
 ]
 
-const STREAM_PLATFORM_LABELS: Record<StreamPlatform, string> = {
-  youtube: 'YouTube',
-  twitch: 'Twitch',
-  kick: 'Kick',
-  x: 'X / Twitter',
-  tiktok: 'TikTok',
-  instagram: 'Instagram',
-  custom: 'Custom RTMP'
-}
-
 /**
  * The built-in destination cards, ID-keyed (two YouTube cards share one
  * platform): the horizontal group (YouTube, Twitch, Kick, X), the vertical trio (YouTube Vertical is a
@@ -584,7 +587,7 @@ export function oauthUnavailableReason(platform: StreamPlatform): string | null 
     return 'Custom RTMP does not support OAuth.'
   }
   if (platform === 'tiktok' || platform === 'instagram') {
-    return `${STREAM_PLATFORM_LABELS[platform]} livestreams use a manual stream key. There is no OAuth to connect.`
+    return `${platformLabel(platform)} livestreams use a manual stream key. There is no OAuth to connect.`
   }
   return null
 }
@@ -746,26 +749,45 @@ export interface VideoPresetOption {
   tone?: 'default' | 'warning'
 }
 
+/**
+ * A preset's name is what it records, in the one video spelling (plan 174
+ * S1.4): "1080p · 30 fps · 6 Mbps". The group it sits in says what it is for;
+ * a qualifier is added only where two presets would otherwise read alike.
+ */
+function presetQuality(preset: VideoPreset): string {
+  return formatVideoQuality(videoPresets[preset], { bitrate: true })
+}
+
 export const recordingVideoPresetOptions: VideoPresetOption[] = [
-  { value: 'record-4k30', label: 'Record 4K30' },
-  { value: 'record-4k60-experimental', label: 'Record 4K60 experimental', tone: 'warning' },
-  { value: 'tutorial-1440p30', label: 'Tutorial 1440p30' },
-  { value: 'tutorial-1080p30', label: 'Tutorial 1080p30' },
-  { value: 'tutorial-720p30', label: 'Tutorial 720p30' },
-  { value: 'tutorial-540p30', label: 'Tutorial 540p30' },
-  { value: 'vertical-1080x1920', label: 'Vertical 1080×1920 (9:16)' }
+  { value: 'record-4k30', label: presetQuality('record-4k30') },
+  {
+    value: 'record-4k60-experimental',
+    label: `${presetQuality('record-4k60-experimental')} · experimental`,
+    tone: 'warning'
+  },
+  { value: 'tutorial-1440p30', label: presetQuality('tutorial-1440p30') },
+  { value: 'tutorial-1080p30', label: presetQuality('tutorial-1080p30') },
+  { value: 'tutorial-720p30', label: presetQuality('tutorial-720p30') },
+  { value: 'tutorial-540p30', label: presetQuality('tutorial-540p30') },
+  { value: 'vertical-1080x1920', label: presetQuality('vertical-1080x1920') }
 ]
 
 export const streamingVideoPresetOptions: VideoPresetOption[] = [
-  { value: 'stream-safe-1080p30', label: 'Stream-safe 1080p30' },
-  { value: 'stream-safe-1080p60', label: 'Stream-safe 1080p60' },
-  { value: 'stream-youtube-1080p30', label: 'YouTube 1080p30 · 10 Mbps' },
-  { value: 'stream-youtube-1080p60', label: 'YouTube 1080p60 · 12 Mbps' },
-  { value: 'stream-youtube-4k30', label: 'YouTube 4K30' }
+  { value: 'stream-safe-1080p30', label: presetQuality('stream-safe-1080p30') },
+  { value: 'stream-safe-1080p60', label: presetQuality('stream-safe-1080p60') },
+  {
+    value: 'stream-youtube-1080p30',
+    label: `YouTube · ${presetQuality('stream-youtube-1080p30')}`
+  },
+  {
+    value: 'stream-youtube-1080p60',
+    label: `YouTube · ${presetQuality('stream-youtube-1080p60')}`
+  },
+  { value: 'stream-youtube-4k30', label: `YouTube · ${presetQuality('stream-youtube-4k30')}` }
 ]
 
 export const legacyVideoPresetOptions: VideoPresetOption[] = [
-  { value: 'stream-1080p60', label: 'Legacy Stream 1080p60', tone: 'warning' }
+  { value: 'stream-1080p60', label: presetQuality('stream-1080p60'), tone: 'warning' }
 ]
 
 export const customVideoPresetOption: VideoPresetOption = { value: 'custom', label: 'Custom' }
@@ -1060,7 +1082,7 @@ export function streamVideoProfileValidationReason(
       named.fps !== video.fps ||
       named.bitrateKbps !== video.bitrateKbps)
   ) {
-    return `${video.preset} must use its exact ${named?.width ?? video.width}×${named?.height ?? video.height} @ ${named?.fps ?? video.fps} FPS and ${named?.bitrateKbps ?? video.bitrateKbps} kbps profile.`
+    return `${video.preset} must use its exact ${formatVideoQuality(named ?? video, { size: 'full', bitrate: true })} profile.`
   }
 
   if (platform && platform !== 'youtube' && isYouTubeProviderPreset(video.preset)) {
@@ -1085,7 +1107,7 @@ export function streamVideoProfileValidationReason(
     video.preset !== 'stream-youtube-1080p30' &&
     video.preset !== 'stream-youtube-1080p60'
   ) {
-    return 'Livestream output above 6000 kbps requires an exact YouTube 1080p30 or 1080p60 profile.'
+    return `Livestream output above ${formatBitrate(6000)} requires an exact YouTube 1080p30 or 1080p60 profile.`
   }
   return null
 }

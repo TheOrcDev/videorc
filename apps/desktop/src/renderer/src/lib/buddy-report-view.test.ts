@@ -336,7 +336,7 @@ describe('report view', () => {
     // The stream's own title wins over the Library name.
     expect(view.title).toBe('Rust night')
     expect(view.date).toBe(dayLabel(SESSION.startedAt))
-    expect(view.duration).toBe('1 hour and 30 minutes')
+    expect(view.duration).toBe('1:30:00')
     expect(view.chat.label).toBe('84 chat messages')
     expect(view.chat.platforms.map((entry) => entry.platform)).toEqual(['twitch', 'youtube'])
     expect(view.note).toBeNull()
@@ -382,7 +382,7 @@ describe('report view', () => {
     if (view.kind !== 'report') throw new Error(view.kind)
     expect(view.title).toBe('Untitled stream')
     expect(view.date).toBe(dayLabel('2026-08-22T10:00:30Z'))
-    expect(view.duration).toBe('1 hour and 29 minutes')
+    expect(view.duration).toBe('1:29:30')
     expect(view.promises[0].at).toBe('4:30')
 
     const named = buddyReportView({

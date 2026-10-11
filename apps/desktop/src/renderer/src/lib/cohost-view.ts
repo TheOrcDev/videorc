@@ -18,6 +18,7 @@ import type {
   StreamPlatform
 } from './backend'
 import { chatDraftMaxChars } from './chat-send'
+import { formatRelativeTime } from './format-time'
 import { cohostErrorDetail } from './cohost-state'
 import type { EntitlementUiGate } from './entitlement-ui'
 
@@ -335,17 +336,9 @@ export function cohostAskersLabel(askers: readonly string[]): string {
   return rest.length > 0 ? `${first} +${rest.length}` : first
 }
 
-/** Compact age for a dense row: "now", "4m", "2h", "1d". */
+/** Compact age for a dense row: "now", "4m", "2h", "1d", then a date (plan 174 S1.4). */
 export function cohostAgeLabel(iso: string, nowMs: number = Date.now()): string {
-  const at = Date.parse(iso)
-  if (!Number.isFinite(at)) return ''
-  const seconds = Math.max(0, Math.round((nowMs - at) / 1000))
-  if (seconds < 45) return 'now'
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${Math.max(1, minutes)}m`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h`
-  return `${Math.round(hours / 24)}d`
+  return formatRelativeTime(iso, nowMs)
 }
 
 export const COHOST_FLAG_KIND_LABELS: Record<CohostFlagKind, string> = {

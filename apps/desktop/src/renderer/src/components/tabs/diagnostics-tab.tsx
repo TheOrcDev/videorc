@@ -39,8 +39,10 @@ import type {
   WebSocketQueueDiagnosticStats
 } from '@/lib/backend'
 import { backendCrashView, latestBackendCrash } from '@/lib/backend-crash-view'
-import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
+import { NO_VALUE, compactTime, formatDroppedFrames, formatMetric, plural } from '@/lib/format'
 import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/lib/record-latency'
+import { formatBitrate, formatFrameRate } from '@/lib/format-video'
+import { isMacPlatform } from '@/lib/platform'
 import { previewSourceStateLabel, previewStateLabel } from '@/lib/state-labels'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isNativePreviewCapability } from '../../../../shared/native-preview-capability'
@@ -160,6 +162,8 @@ export function DiagnosticsTab(): ReactElement {
     [diagnosticStats.backendRssBytes]
   )
   const networkSummary = useMemo(() => networkSummaryCopy(streamTargets), [streamTargets])
+  // Before runtimeInfo arrives the page assumes macOS, like the rest of Health.
+  const macOS = isMacPlatform(runtimeInfo?.platform ?? 'darwin')
 
   return (
     <div className="grid xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
@@ -244,7 +248,7 @@ export function DiagnosticsTab(): ReactElement {
               />
             ) : null}
             {diagnosticStats.targetFps ? (
-              <Badge variant="outline">Target {diagnosticStats.targetFps} FPS</Badge>
+              <Badge variant="outline">Target {formatFrameRate(diagnosticStats.targetFps)}</Badge>
             ) : null}
           </div>
           {diagnosticStats.recordingAtRisk ? (
@@ -430,10 +434,13 @@ export function DiagnosticsTab(): ReactElement {
               label="Source fetch p95"
               value={formatMs(diagnosticStats.compositorSourceFetchP95Ms)}
             />
-            <DiagnosticMetric
-              label="Metal p95"
-              value={formatMs(diagnosticStats.compositorGpuTotalP95Ms)}
-            />
+            {/* Metal and VideoToolbox exist only on macOS (plan 174 I-9). */}
+            {macOS ? (
+              <DiagnosticMetric
+                label="Metal p95"
+                value={formatMs(diagnosticStats.compositorGpuTotalP95Ms)}
+              />
+            ) : null}
             <DiagnosticMetric
               label="Preview lag"
               value={formatFrameLag(diagnosticStats.previewCompositorFrameLag)}
@@ -504,11 +511,11 @@ export function DiagnosticsTab(): ReactElement {
             />
             <DiagnosticMetric
               label="Requested output"
-              value={diagnosticStats.encoderBridgeRequestedVideoOutput ?? '--'}
+              value={diagnosticStats.encoderBridgeRequestedVideoOutput ?? NO_VALUE}
             />
             <DiagnosticMetric
               label="Effective output"
-              value={diagnosticStats.encoderBridgeEffectiveVideoOutput ?? '--'}
+              value={diagnosticStats.encoderBridgeEffectiveVideoOutput ?? NO_VALUE}
             />
             <DiagnosticMetric
               label="Output fallback"
@@ -586,14 +593,18 @@ export function DiagnosticsTab(): ReactElement {
               label="Writer active p95"
               value={formatMs(diagnosticStats.encoderBridgeWriterActiveP95Ms)}
             />
-            <DiagnosticMetric
-              label="FIFO enqueue p95"
-              value={formatMs(diagnosticStats.encoderBridgeVideoToolboxFifoEnqueueP95Ms)}
-            />
-            <DiagnosticMetric
-              label="FIFO enqueue max"
-              value={formatMs(diagnosticStats.encoderBridgeVideoToolboxFifoEnqueueMaxMs)}
-            />
+            {macOS ? (
+              <>
+                <DiagnosticMetric
+                  label="FIFO enqueue p95"
+                  value={formatMs(diagnosticStats.encoderBridgeVideoToolboxFifoEnqueueP95Ms)}
+                />
+                <DiagnosticMetric
+                  label="FIFO enqueue max"
+                  value={formatMs(diagnosticStats.encoderBridgeVideoToolboxFifoEnqueueMaxMs)}
+                />
+              </>
+            ) : null}
             <DiagnosticMetric
               label="Record writer p95"
               value={formatMs(diagnosticStats.encoderBridgeRecordingWriterLoopP95Ms)}
@@ -606,22 +617,26 @@ export function DiagnosticsTab(): ReactElement {
               label="Deadline lag"
               value={`${formatMs(diagnosticStats.encoderBridgeDeadlineLagP95Ms)} / ${diagnosticStats.encoderBridgeLateDeadlineTicks}`}
             />
-            <DiagnosticMetric
-              label="Metal targets"
-              value={diagnosticStats.encoderBridgeMetalTargetFrames.toString()}
-            />
-            <DiagnosticMetric
-              label="VT probe"
-              value={`${diagnosticStats.encoderBridgeVideoToolboxProbeFrames} / ${formatBytes(diagnosticStats.encoderBridgeVideoToolboxProbeBytes)}`}
-            />
-            <DiagnosticMetric
-              label="VT output"
-              value={`${diagnosticStats.encoderBridgeVideoToolboxOutputFrames} / ${formatBytes(diagnosticStats.encoderBridgeVideoToolboxOutputBytes)}`}
-            />
-            <DiagnosticMetric
-              label="VT encode max"
-              value={formatMs(diagnosticStats.encoderBridgeVideoToolboxOutputEncodeMs)}
-            />
+            {macOS ? (
+              <>
+                <DiagnosticMetric
+                  label="Metal targets"
+                  value={diagnosticStats.encoderBridgeMetalTargetFrames.toString()}
+                />
+                <DiagnosticMetric
+                  label="VT probe"
+                  value={`${diagnosticStats.encoderBridgeVideoToolboxProbeFrames} / ${formatBytes(diagnosticStats.encoderBridgeVideoToolboxProbeBytes)}`}
+                />
+                <DiagnosticMetric
+                  label="VT output"
+                  value={`${diagnosticStats.encoderBridgeVideoToolboxOutputFrames} / ${formatBytes(diagnosticStats.encoderBridgeVideoToolboxOutputBytes)}`}
+                />
+                <DiagnosticMetric
+                  label="VT encode max"
+                  value={formatMs(diagnosticStats.encoderBridgeVideoToolboxOutputEncodeMs)}
+                />
+              </>
+            ) : null}
           </MetricGroup>
           <MetricGroup title="System & sources">
             <DiagnosticMetric
@@ -1051,7 +1066,7 @@ function encoderSummaryCopy(
   const speed = stats.encoderSpeed ?? streamHealth?.speed
   const drops = stats.droppedFrames || streamHealth?.droppedFrames || 0
   if (drops > 0) {
-    return { label: `${drops} drop`, tone: 'warn' }
+    return { label: plural(drops, 'drop'), tone: 'warn' }
   }
   if (typeof speed === 'number' && speed < 0.98) {
     return { label: `${speed.toFixed(2)}x`, tone: 'warn' }
@@ -1271,8 +1286,8 @@ function formatPreviewSourceStatus(
   sourceFps?: number,
   droppedFrames?: number
 ): string {
-  const fps = typeof sourceFps === 'number' ? `${sourceFps.toFixed(1)} fps` : '-- fps'
-  return `${state}, ${fps}, ${droppedFrames ?? 0} drop`
+  const fps = typeof sourceFps === 'number' ? `${sourceFps.toFixed(1)} fps` : NO_VALUE
+  return `${previewSourceStateLabel(state)}, ${fps}, ${plural(droppedFrames ?? 0, 'drop')}`
 }
 
 function formatFfmpegWork(stats: DiagnosticStats): string {
@@ -1292,28 +1307,26 @@ function formatFfmpegWork(stats: DiagnosticStats): string {
 }
 
 function formatMs(value?: number): string {
-  return typeof value === 'number' ? `${value.toFixed(0)} ms` : '-- ms'
+  return typeof value === 'number' ? `${value.toFixed(0)} ms` : NO_VALUE
 }
 
 function formatKbps(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? `${Math.round(value).toLocaleString()} kbps`
-    : '-- kbps'
+  return formatBitrate(value) || NO_VALUE
 }
 
 function formatOptionalCounter(value?: number): string {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.max(0, Math.round(value)).toLocaleString()
-    : '--'
+    : NO_VALUE
 }
 
 function formatFrameLag(value?: number): string {
-  return typeof value === 'number' ? `${value.toFixed(0)} frames` : '-- frames'
+  return typeof value === 'number' ? `${value.toFixed(0)} frames` : NO_VALUE
 }
 
 function formatBytes(value?: number): string {
   if (typeof value !== 'number') {
-    return '--'
+    return NO_VALUE
   }
   if (value < 1024 * 1024) {
     return `${(value / 1024).toFixed(0)} KiB`
@@ -1331,11 +1344,11 @@ function formatSourceTryLocks(cameraMisses: number, screenMisses: number): strin
 
 export function formatSlowestPhase(snapshot: Parameters<typeof slowestTimelinePhase>[0]): string {
   const slowest = slowestTimelinePhase(snapshot)
-  return slowest ? `${slowest.phase} · ${formatLatencyMs(slowest.deltaMs)}` : '--'
+  return slowest ? `${slowest.phase} · ${formatLatencyMs(slowest.deltaMs)}` : NO_VALUE
 }
 
 export function formatWebSocketQueue(queue: WebSocketQueueDiagnosticStats): string {
-  const oldest = queue.oldestAgeMs == null ? '--' : `${queue.oldestAgeMs} ms`
+  const oldest = queue.oldestAgeMs == null ? NO_VALUE : `${queue.oldestAgeMs} ms`
   return `${queue.currentDepth}/${queue.maxDepth} current/max · ${oldest} oldest · ${queue.coalescedCount} coalesced · ${queue.evictedOrDroppedCount} evicted/dropped`
 }
 
@@ -1380,12 +1393,12 @@ function formatPreviewSurfaceBacking(backing?: string): string {
     case 'none':
       return 'None'
     default:
-      return '--'
+      return NO_VALUE
   }
 }
 
 function formatCoverage(value?: number): string {
-  return typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : '--'
+  return typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : NO_VALUE
 }
 
 function formatEncodeBackend(backend?: string): string {
@@ -1405,7 +1418,7 @@ function formatEncodeBackend(backend?: string): string {
     case 'hardware-qsv':
       return 'Hardware (Intel Quick Sync)'
     default:
-      return '--'
+      return NO_VALUE
   }
 }
 
@@ -1423,13 +1436,13 @@ function formatCompositorBackend(stats: DiagnosticStats): string {
       return `CPU fallback (${frames})${reason}`
     }
     default:
-      return '--'
+      return NO_VALUE
   }
 }
 
 function formatImagePolls(counts?: DiagnosticStats['previewImagePollCounts']): string {
   if (!counts) {
-    return '--'
+    return NO_VALUE
   }
   const total =
     counts.cameraPng +
@@ -1499,7 +1512,7 @@ function recordingBadge(stats: DiagnosticStats): { label: string; tone: StatusTo
 
 function formatSourceFps(sourceFps?: Record<string, number>): string {
   if (!sourceFps || !Object.keys(sourceFps).length) {
-    return '-- fps'
+    return NO_VALUE
   }
 
   return Object.entries(sourceFps)

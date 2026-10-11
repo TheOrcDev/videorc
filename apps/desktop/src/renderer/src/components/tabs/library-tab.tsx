@@ -603,7 +603,7 @@ function LibraryRow({
         <LiveSessionDuration />
       ) : (
         <span className="text-xs text-muted-foreground tabular-nums">
-          {typeof session.durationMs === 'number' ? durationMsLabel(session.durationMs) : '-'}
+          {durationMsLabel(session.durationMs)}
         </span>
       )}
       <span className="text-xs text-muted-foreground tabular-nums">
@@ -648,9 +648,7 @@ function LiveSessionDuration(): ReactElement {
   const { recording } = useStudioRecording()
   const elapsedMs = useSessionElapsedMs(recording.startedAt) ?? recording.durationMs
   return (
-    <span className="text-xs text-muted-foreground tabular-nums">
-      {typeof elapsedMs === 'number' ? durationMsLabel(elapsedMs) : '-'}
-    </span>
+    <span className="text-xs text-muted-foreground tabular-nums">{durationMsLabel(elapsedMs)}</span>
   )
 }
 

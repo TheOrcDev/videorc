@@ -26,7 +26,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
 import { missingSelection, sourceSelectPlaceholder } from '@/lib/source-select-state'
-import { recordingQuality } from '@/lib/studio-session-view'
+import { formatVideoQuality } from '@/lib/format-video'
 import type { CaptionsStatus, Device } from '@/lib/backend'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { pickRecordingResolution } from '@/lib/output-quality'
@@ -101,7 +101,8 @@ export function QuickSettings(): ReactElement {
     captionsCommandPending,
     wsStatus,
     systemAudioConfirmed,
-    systemAudioIssue
+    systemAudioIssue,
+    runtimeInfo
   } = useStudioCore()
   const { openSettings } = useWorkspaceNav()
   const systemAudio = systemAudioSwitchView({
@@ -204,6 +205,7 @@ export function QuickSettings(): ReactElement {
         {systemAudio.visible ? (
           <InspectorRow icon={DesktopIcon} label="System audio">
             <SystemAudioInspectorValue
+              platform={runtimeInfo?.platform}
               view={systemAudio}
               onEnabledChange={(systemAudioEnabled) =>
                 setCaptureConfig((current) => ({
@@ -238,9 +240,10 @@ export function QuickSettings(): ReactElement {
               className="w-full justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent"
             >
               {/* Q7 (plan 022): the compact trigger shows the short canonical
-                form ("2K · 1440p30"); the full dimensions live in the items. */}
+                form ("1440p · 30 fps", plan 174 S1.4); the full dimensions
+                live in the items. */}
               <SelectValue placeholder="Custom">
-                {recordingQuality(captureConfig.video)}
+                {formatVideoQuality(captureConfig.video)}
               </SelectValue>
             </SelectTrigger>
             <SelectContent>
@@ -289,11 +292,14 @@ export function QuickSettings(): ReactElement {
 /** Short state beside the switch; the full health copy lives in its tooltip. */
 export function SystemAudioInspectorValue({
   view,
+  platform,
   onEnabledChange,
   onOpenPermissions,
   onResume
 }: {
   view: SystemAudioSwitchView
+  /** `runtimeInfo.platform`, so the health copy names this computer. */
+  platform?: string
   onEnabledChange: (enabled: boolean) => void
   onOpenPermissions: () => void
   /** Plan 076: turn System audio on again after the echo guard paused it. */
@@ -330,7 +336,7 @@ export function SystemAudioInspectorValue({
             <Button
               className="min-w-0"
               size="xs"
-              title={systemAudioIssueCopy('echo')}
+              title={systemAudioIssueCopy('echo', platform)}
               variant="ghost"
               onClick={onResume}
             >
@@ -339,7 +345,7 @@ export function SystemAudioInspectorValue({
           ) : (
             <span
               className="min-w-0 truncate text-sm font-medium"
-              title={view.issue ? systemAudioIssueCopy(view.issue) : undefined}
+              title={view.issue ? systemAudioIssueCopy(view.issue, platform) : undefined}
             >
               {status}
             </span>

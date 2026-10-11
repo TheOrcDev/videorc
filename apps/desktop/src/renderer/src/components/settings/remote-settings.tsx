@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
+import { platformCopy } from '@/lib/platform-copy'
 import type { RemoteControlStatus } from '@/lib/backend'
 
 /**
@@ -24,7 +25,8 @@ export function pairedPhonesClause(count: number): string {
 export const REMOTE_CONFIRM_COPY = {
   regenerate: {
     title: 'Regenerate the pairing token?',
-    body: 'Every paired client is disconnected and needs the new token to pair again. The Stream Deck plugin pairs again on its own on this Mac.',
+    body: (deviceNoun: string): string =>
+      `Every paired client is disconnected and needs the new token to pair again. The Stream Deck plugin pairs again on its own on this ${deviceNoun}.`,
     confirm: 'Regenerate token'
   },
   off: {
@@ -35,7 +37,9 @@ export const REMOTE_CONFIRM_COPY = {
 
 /** Settings → Remote: a Stream Deck or local remote, and the phone remote. */
 export function RemoteSettings(): ReactElement {
-  const { remoteControl } = useStudioCore()
+  const { remoteControl, runtimeInfo } = useStudioCore()
+  // Plan 174 I-9: the computer by its own name, never "this Mac" on a PC.
+  const { deviceNoun } = platformCopy(runtimeInfo?.platform)
 
   // Remote-control status is pushed into the studio context by the backend
   // (remote.control.status events) — this tab only renders it and fires
@@ -78,7 +82,7 @@ export function RemoteSettings(): ReactElement {
             }}
           />
         }
-        description="Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this Mac only."
+        description={`Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this ${deviceNoun} only.`}
         title="Remote control"
       >
         {remoteStatus?.enabled ? (
@@ -119,7 +123,7 @@ export function RemoteSettings(): ReactElement {
                   ? `${remoteStatus.connectedClients} client${remoteStatus.connectedClients === 1 ? '' : 's'} connected.`
                   : 'No clients connected.'}{' '}
                 Regenerating disconnects every paired client. The Stream Deck plugin pairs
-                automatically on this Mac.
+                automatically on this {deviceNoun}.
               </p>
             </Field>
           </FieldGroup>
@@ -133,7 +137,7 @@ export function RemoteSettings(): ReactElement {
       <ConfirmDialog
         confirmDisabled={remotePending}
         confirmLabel={REMOTE_CONFIRM_COPY.regenerate.confirm}
-        description={REMOTE_CONFIRM_COPY.regenerate.body}
+        description={REMOTE_CONFIRM_COPY.regenerate.body(deviceNoun)}
         open={confirmingRegenerate}
         testId="remote-token-regenerate"
         title={REMOTE_CONFIRM_COPY.regenerate.title}

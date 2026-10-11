@@ -211,7 +211,7 @@ describe('Buddy report card (plan 119 S3)', () => {
 
     const stream = document.querySelector('[data-slot="buddy-report-stream"]')?.textContent
     expect(stream).toContain('Rust night')
-    expect(stream).toContain('1 hour and 30 minutes')
+    expect(stream).toContain('1:30:00')
     expect(stream).toContain('84 chat messages')
     expect(
       document.querySelector('[data-slot="buddy-report-stream"] [title="Twitch: 60 messages"]')

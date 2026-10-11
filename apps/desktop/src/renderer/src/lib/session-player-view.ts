@@ -3,6 +3,7 @@
 // no React here, so the component never re-implements what the tests cover.
 
 import type { SessionMediaGrantRefusal } from '@/lib/backend'
+import { formatTimecode } from '@/lib/format-time'
 
 /** Renew a grant this long before it expires. */
 export const SESSION_MEDIA_RENEW_LEAD_MS = 60_000
@@ -28,14 +29,12 @@ export function mediaTimeHasHours(durationMs: number): boolean {
   return Number.isFinite(durationMs) && durationMs >= HOUR_MS
 }
 
-/** `mm:ss`, or `h:mm:ss` when `withHours`; negative, NaN and infinite times read as zero. */
+/**
+ * The one timecode (plan 174 S1.4, E-20): `m:ss`, or `h:mm:ss` from an hour
+ * and whenever `withHours`; negative, NaN and infinite times read as zero.
+ */
 export function formatMediaTime(ms: number, withHours: boolean): string {
-  const totalSeconds = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0
-  const seconds = totalSeconds % 60
-  const minutes = Math.floor(totalSeconds / 60) % (withHours ? 60 : Number.POSITIVE_INFINITY)
-  const hours = Math.floor(totalSeconds / 3600)
-  const mmss = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
-  return withHours ? `${hours}:${mmss}` : mmss
+  return formatTimecode(ms, { withHours })
 }
 
 /**
@@ -44,8 +43,7 @@ export function formatMediaTime(ms: number, withHours: boolean): string {
  */
 export function playheadValueText(positionMs: number, durationMs: number): string {
   const withHours = mediaTimeHasHours(durationMs)
-  const spoken = (ms: number): string => formatMediaTime(ms, withHours).replace(/^0(?=\d)/, '')
-  return `${spoken(positionMs)} of ${spoken(durationMs)}`
+  return `${formatMediaTime(positionMs, withHours)} of ${formatMediaTime(durationMs, withHours)}`
 }
 
 /** Keeps a seek inside the recording. Unknown durations clamp at zero only. */

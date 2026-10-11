@@ -184,8 +184,33 @@ describe('stats bar items (plan 057)', () => {
       tone: 'subtle',
       description: 'No viewer count yet'
     })
-    // No sample yet: health holds its place with a dash, not a zero.
-    expect(find(items, 'health')).toMatchObject({ value: '–', tone: 'neutral' })
+    // No sample yet: health holds its place with a dash, not a zero, and says
+    // why (plan 174 H-10).
+    expect(find(items, 'health')).toMatchObject({
+      value: '–',
+      tone: 'neutral',
+      description: 'Stream health: bitrate not reported yet'
+    })
+    expect(find(items, 'health')?.details).toContainEqual({
+      label: 'Bitrate',
+      value: '–',
+      note: 'Not reported yet'
+    })
+  })
+
+  it('shows no chat pace while no platform reads chat, with the reason (plan 174 H-10)', () => {
+    const offline = { ...provider('twitch'), state: 'reconnecting' as const }
+    const items = statItems({
+      dashboard: live(),
+      viewerSample: null,
+      messages: [],
+      providers: [offline],
+      nowMs: T0 + 5_000
+    })
+    const chat = find(items, 'chat')
+    expect(chat).toMatchObject({ value: '–', tone: 'subtle', description: "Chat isn't connected" })
+    expect(chat?.unit).toBeUndefined()
+    expect(chat?.value).not.toBe('0')
   })
 
   it('reports viewers with the peak on hover, greyed once stale', () => {
@@ -259,12 +284,12 @@ describe('stats bar items (plan 057)', () => {
       'health'
     )
     expect(health).toMatchObject({
-      value: '6,012 kbps',
+      value: '6 Mbps',
       tone: 'good',
-      description: 'Stream health: 6,012 kbps, 60 fps, no dropped frames'
+      description: 'Stream health: 6 Mbps, 60 fps, no dropped frames'
     })
     expect(health?.details).toEqual([
-      { label: 'Bitrate', value: '6,012 kbps' },
+      { label: 'Bitrate', value: '6 Mbps' },
       { label: 'Frame rate', value: '60 fps' },
       { label: 'Dropped frames', value: 'None' },
       { label: 'Twitch', value: 'Live', platform: 'twitch', dot: 'good' },
@@ -737,7 +762,7 @@ describe('stats bar items (plan 057)', () => {
       description: 'On air for 12:03'
     })
     expect(find(items, 'viewers')).toMatchObject({ value: '–' })
-    expect(find(items, 'health')).toMatchObject({ value: '6,000 kbps', tone: 'good' })
+    expect(find(items, 'health')).toMatchObject({ value: '6 Mbps', tone: 'good' })
   })
 
   it('summarises a finished session in History', () => {

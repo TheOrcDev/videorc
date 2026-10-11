@@ -3,12 +3,12 @@
 // status strings/tones are shared by the Session rows and the Preview badge.
 
 import { sessionIsLive } from '../../../shared/capture-state'
+import { formatTimecode } from '../../../shared/timecode'
 import { RECORDING_STOPS_TOO } from './session-stop'
 import { statusWordFromValue } from './status-word'
 
 export { sessionIsLive }
 
-export type SessionVideo = { width: number; height: number; fps: number }
 export type SessionTarget = { enabled: boolean; label: string; platform: string }
 export type SessionStatusTone = 'good' | 'warn' | 'error' | 'live' | 'neutral'
 /** The slice of `recording.status` the session chrome reads. */
@@ -26,37 +26,6 @@ export function sessionMode(recordEnabled: boolean, streamEnabled: boolean): str
     return 'Local recording'
   }
   return 'No output'
-}
-
-/** Friendly resolution class from the frame height (2160 → "4K"). */
-export function qualityName(height: number): string {
-  if (height >= 2160) {
-    return '4K'
-  }
-  if (height >= 1440) {
-    return '2K'
-  }
-  if (height >= 1080) {
-    return '1080p'
-  }
-  if (height >= 720) {
-    return '720p'
-  }
-  return `${height}p`
-}
-
-/** "4K · 2160p30" — resolution class + short edge + fps. When the class IS the
- *  resolution ("1080p"), skip the redundant doubling and show "1080p30". */
-export function recordingQuality(video: SessionVideo): string {
-  const resolution = Math.min(video.width, video.height)
-  const name = qualityName(resolution)
-  const detail = `${resolution}p${video.fps}`
-  return name === `${resolution}p` ? detail : `${name} · ${detail}`
-}
-
-/** "3840×2160 · 30fps" — the full output dimensions. */
-export function outputSummary(video: SessionVideo): string {
-  return `${video.width}×${video.height} · ${video.fps}fps`
 }
 
 /** "Disabled" off-air, else the single destination's name or a count. */
@@ -108,20 +77,12 @@ export function sessionElapsedMs(
 }
 
 /**
- * The inspector's session clock (plan 050 S12): m:ss under an hour, h:mm:ss
- * after. Fed by `sessionElapsedMs` while a session runs. Missing reads 0:00.
+ * The inspector's session clock (plan 050 S12): the one timecode, m:ss under
+ * an hour and h:mm:ss after (plan 174 S1.4). Fed by `sessionElapsedMs` while
+ * a session runs. Missing reads 0:00.
  */
 export function sessionClockLabel(durationMs?: number): string {
-  const total =
-    typeof durationMs === 'number' && Number.isFinite(durationMs)
-      ? Math.max(0, Math.floor(durationMs / 1000))
-      : 0
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const seconds = String(total % 60).padStart(2, '0')
-  return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}`
-    : `${minutes}:${seconds}`
+  return formatTimecode(typeof durationMs === 'number' ? durationMs : 0)
 }
 
 /**

@@ -1,17 +1,15 @@
 import { LAYOUT_PRESET_VALUES, type LayoutPreset, type LayoutSettings } from './backend'
+import { layoutPresetLabel } from './layout-labels'
 
-export const BUILTIN_LAYOUTS: readonly { id: LayoutPreset; label: string }[] = [
-  { id: 'screen-camera', label: 'Screen + Cam' },
-  { id: 'screen-only', label: 'Screen' },
-  { id: 'camera-only', label: 'Camera' },
-  { id: 'side-by-side', label: 'Side by side' },
-  { id: 'vertical-camera-top', label: 'Camera top' },
-  { id: 'vertical-camera-bottom', label: 'Camera bottom' },
-  { id: 'vertical-split', label: 'Split' },
-  { id: 'vertical-screen-camera', label: 'Vertical Screen + Cam' },
-  { id: 'vertical-screen-only', label: 'Vertical Screen' },
-  { id: 'vertical-camera-only', label: 'Vertical Camera' }
-]
+/**
+ * Every built-in layout, both orientations in one list, so the vertical
+ * twins say "Vertical …" (plan 174 S1.4: names from `layout-labels.ts`).
+ */
+export const BUILTIN_LAYOUTS: readonly { id: LayoutPreset; label: string }[] =
+  LAYOUT_PRESET_VALUES.map((id) => ({
+    id,
+    label: layoutPresetLabel(id, { bothOrientations: true })
+  }))
 export type CameraFraming = Pick<LayoutSettings, 'cameraZoom' | 'cameraOffsetX' | 'cameraOffsetY'>
 export type LayoutFramingMemory = { version: 1; layouts: Record<LayoutPreset, CameraFraming> }
 const DEFAULT_FRAMING: CameraFraming = { cameraZoom: 100, cameraOffsetX: 0, cameraOffsetY: 0 }

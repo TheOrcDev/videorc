@@ -30,11 +30,11 @@ import {
   useStudioShell
 } from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
+import { formatVideoQuality } from '@/lib/format-video'
 import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import {
-  outputSummary,
   sessionAlsoRecords,
   sessionClockLabel,
   sessionStatusGlyph,
@@ -259,7 +259,7 @@ export function SessionPanel({
         <SessionRow
           icon={FrameIcon}
           label="Output"
-          value={outputSummary(video)}
+          value={formatVideoQuality(video)}
           onNavigate={() => openStudioPanel('recording')}
         />
         {/* Presence W3: while a session runs, whether the co-host is reading

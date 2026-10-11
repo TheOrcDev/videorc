@@ -19,8 +19,10 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
+import { microphoneIndicatorCopy, platformCopy } from '@/lib/platform-copy'
 import type { DirectoryFacts } from '@/lib/backend'
-import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
+import { formatVideoQuality } from '@/lib/format-video'
+import { streamingSummary } from '@/lib/studio-session-view'
 
 /**
  * Settings → Recording: where recordings go and what Record keeps ready.
@@ -32,8 +34,15 @@ import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
  * captureConfig).
  */
 export function RecordingSettings(): ReactElement {
-  const { settings, setSettings, health, captureConfig, encoderPreference, setEncoderPreference } =
-    useStudioCore()
+  const {
+    settings,
+    setSettings,
+    health,
+    captureConfig,
+    encoderPreference,
+    setEncoderPreference,
+    runtimeInfo
+  } = useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
 
   // ST2: validate the output directory as it changes — a typo here used to
@@ -106,7 +115,7 @@ export function RecordingSettings(): ReactElement {
           </div>
           {!outputDirectory ? (
             <p className="text-xs text-muted-foreground">
-              Blank uses the default: ~/Movies/Videorc/Recordings.
+              Blank uses the default: {platformCopy(runtimeInfo?.platform).defaultRecordingsPath}.
             </p>
           ) : directoryFacts && !directoryFacts.exists ? (
             <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
@@ -154,8 +163,8 @@ export function RecordingSettings(): ReactElement {
               </FieldLabel>
               <p className="text-xs text-muted-foreground">
                 Opens the selected microphone as soon as Studio is on screen so Record starts
-                instantly. macOS shows its microphone indicator while Studio is visible; hiding the
-                window releases the microphone.
+                instantly. {microphoneIndicatorCopy(runtimeInfo?.platform)} while Studio is visible;
+                hiding the window releases the microphone.
               </p>
             </div>
             <Switch
@@ -183,7 +192,7 @@ export function RecordingSettings(): ReactElement {
         <NavigableRow
           icon={ClapperboardIcon}
           label="Recording preset"
-          value={recordingQuality(captureConfig.video)}
+          value={formatVideoQuality(captureConfig.video)}
           onNavigate={() => openStudioPanel('recording')}
         />
         <NavigableRow

@@ -15,26 +15,33 @@ import {
   studioModeTogglePreset,
   type LayoutOrientation
 } from '@/lib/capture'
+import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
 import { cn } from '@/lib/utils'
 
 // Built-in layouts and named visual snapshots share the Scenes surface.
 // The gallery is MODE-SCOPED: horizontal and vertical are two disjoint scene
 // vocabularies, and the orientation toggle in the header is the only way to
 // cross between them (off-air only — the canvas flips with the mode).
+// Names come from the one layout table (plan 174 S1.4, V-X3).
+const scene = (id: LayoutPreset): { id: LayoutPreset; label: string } => ({
+  id,
+  label: LAYOUT_PRESET_LABELS[id]
+})
+
 const HORIZONTAL_SCENES: { id: LayoutPreset; label: string }[] = [
-  { id: 'screen-camera', label: 'Screen + Cam' },
-  { id: 'screen-only', label: 'Screen' },
-  { id: 'camera-only', label: 'Camera' },
-  { id: 'side-by-side', label: 'Side by side' }
+  scene('screen-camera'),
+  scene('screen-only'),
+  scene('camera-only'),
+  scene('side-by-side')
 ]
 
 export const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
-  { id: 'vertical-camera-top', label: 'Camera top' },
-  { id: 'vertical-camera-bottom', label: 'Camera bottom' },
-  { id: 'vertical-split', label: 'Split' },
-  { id: 'vertical-screen-camera', label: 'Screen + Cam' },
-  { id: 'vertical-screen-only', label: 'Screen' },
-  { id: 'vertical-camera-only', label: 'Camera' }
+  scene('vertical-camera-top'),
+  scene('vertical-camera-bottom'),
+  scene('vertical-split'),
+  scene('vertical-screen-camera'),
+  scene('vertical-screen-only'),
+  scene('vertical-camera-only')
 ]
 
 export function ScenesGallery(): ReactElement {

@@ -1,10 +1,15 @@
 import type { StreamingSettings, StreamTargetSettings, VideoPreset, VideoSettings } from './backend'
 import { videoPresets, type LayoutOrientation } from './capture'
+import { formatVideoQuality } from './format-video'
 
+// The one video spelling (plan 174 S1.4): "1080p · 30 fps", never "Full HD".
 export const streamQualityOptions: { value: VideoPreset; label: string }[] = [
-  { value: 'stream-safe-1080p30', label: 'Full HD · 30 fps' },
-  { value: 'stream-safe-1080p60', label: 'Full HD · 60 fps' },
-  { value: 'stream-youtube-4k30', label: 'YouTube 4K · 30 fps' }
+  { value: 'stream-safe-1080p30', label: formatVideoQuality(videoPresets['stream-safe-1080p30']) },
+  { value: 'stream-safe-1080p60', label: formatVideoQuality(videoPresets['stream-safe-1080p60']) },
+  {
+    value: 'stream-youtube-4k30',
+    label: `YouTube · ${formatVideoQuality(videoPresets['stream-youtube-4k30'])}`
+  }
 ]
 
 export function withStreamQuality(

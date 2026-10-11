@@ -108,7 +108,7 @@ describe('real marker composer', () => {
     await type('/marker Shadcn New Library')
     await enter()
     expect(create).toHaveBeenCalledExactlyOnceWith('Shadcn New Library')
-    expect(container.textContent).toContain('00:00:12')
+    expect(container.textContent).toContain('0:12')
     expect(container.querySelector('input')!.value).toBe('')
     await type('/unknown')
     await enter()

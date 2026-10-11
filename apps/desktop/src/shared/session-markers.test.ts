@@ -69,7 +69,11 @@ describe('named marker trust boundaries', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:marker-result-push')).toBe(false)
     expect(roleCanInvokeChannel('notes', 'comments-window:marker')).toBe(false)
   })
-  it('formats stream timeline times', () => expect(markerTime(3672.7)).toBe('01:01:12'))
+  it('formats stream timeline times as the one timecode (plan 174 S1.4)', () => {
+    expect(markerTime(3672.7)).toBe('1:01:12')
+    expect(markerTime(12)).toBe('0:12')
+    expect(markerTime(125)).toBe('2:05')
+  })
   it('accepts the renamed marker RPC receipt and separate change event shape', () => {
     const marker = {
       id: 'm1',

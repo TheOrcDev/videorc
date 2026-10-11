@@ -117,8 +117,8 @@ describe('Go Live output advice (plan 090)', () => {
         sharedVideo: null
       })
     )
-    expect(markup).toContain('Streaming at 720p 30')
-    expect(markup).toContain('1080p 30')
+    expect(markup).toContain('Streaming at 720p · 30 fps')
+    expect(markup).toContain('1080p · 30 fps')
     expect(markup).toContain('for the recording too')
     expect(markup).toContain('Your saved settings stay as they are.')
     expect(markup).not.toContain('data-variant="warning"')
@@ -133,7 +133,7 @@ describe('Go Live output advice (plan 090)', () => {
       })
     )
     expect(markup).toContain('This computer may not keep up')
-    expect(markup).toContain('not even 720p 30')
+    expect(markup).toContain('not even 720p · 30 fps')
     expect(markup).not.toContain('Streaming at')
   })
 
@@ -146,7 +146,7 @@ describe('Go Live output advice (plan 090)', () => {
       })
     )
     expect(markup).toContain('Recording will match the stream')
-    expect(markup).toContain('1080p 30 at 6000 kbps')
+    expect(markup).toContain('1080p · 30 fps · 6 Mbps')
     expect(markup).not.toMatch(/HRESULT|Media Foundation/)
   })
 })
