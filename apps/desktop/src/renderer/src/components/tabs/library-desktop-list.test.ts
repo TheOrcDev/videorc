@@ -377,7 +377,9 @@ describe('Clean cut in the Library (E-4)', () => {
       expect((opened.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
         sessionId: 'bravo',
         mode: 'condensed',
-        review: true
+        review: true,
+        // Plan 174 S3.13: the review goes back to this row.
+        origin: 'library'
       })
     } finally {
       window.removeEventListener(OPEN_CLEAN_CUT_EVENT, opened)
