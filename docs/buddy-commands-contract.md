@@ -26,7 +26,7 @@ source are backend-owned. Creation retries return the current saved revision;
 deleted-operation receipts refuse resurrection without retaining the title.
 
 `session.marker.created` and `session.marker.changed` project committed
-metadata. The detached Comments window receives a separate marker context and
+metadata. The detached Stream Manager window (code name `comments`) receives a separate marker context and
 a bounded create/get/delete relay through Electron main and Studio. It gets
 no backend credential, arbitrary RPC method, media path or renderer-supplied
 timestamp. These methods and events are absent from remote-control and LAN

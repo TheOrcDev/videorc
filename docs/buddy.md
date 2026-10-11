@@ -1,10 +1,10 @@
 # Buddy
 
-The Buddy is the companion you create for your streams (plan 119 as Orcle,
+Buddy is the companion you create for your streams (plan 119 as Orcle,
 renamed and made yours in plan 164, called Golem until plan 171). You name
 it, give it a personality and its looks. It stands on your stream as an
 avatar with a comic bubble, reads your chat, hears you, and, when you turn
-the modes on, posts to your chats as you. There is no voice: the Buddy talks
+the modes on, posts to your chats as you. There is no voice: Buddy talks
 through its bubble.
 
 The code, wire and storage name is `cohost`. Everything a user reads says
@@ -17,26 +17,29 @@ moderation source `orcle-voice`, the service-flags `orcle` key and the
 
 ## The promise
 
-**The Buddy posts only in the modes you turn on. Everything is off by
+**Buddy posts only in the modes you turn on. Everything is off by
 default.** (D4). It removes a comment only when you tell it to. The old
 sentence "It never posts on its own" is gone; the modes below are the whole
-truth about what the Buddy sends.
+truth about what Buddy sends.
 
-Everything the Buddy posts goes out **as you**, on your own account, on the
+Everything Buddy posts goes out **as you**, on your own account, on the
 platforms you stream to (D3). There is no bot account.
 
 ## Where things live
 
-| Place                                     | Job                                                                                                                                                                                   |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Buddy tab** (sidebar, under Studio, ⌘9) | Creates. Name, personality, avatar (Still or Alive), reactions, motion, bubble style, greeting templates, the Answers and Banter switches, Cloud AI consent, voice commands, reports. |
-| **Stream Manager** (⇧⌘J, the Buddy pane)  | Operates. The chat mode (Off, Suggest, Auto), the three behaviour switches, Suggest cards, the Say box, the Show on stream switch, questions, flags.                                  |
-| **Live Scene** (Studio → Scene canvas)    | Places. Where the Buddy sits on each orientation, and whether it is on the stream and in the recording. See [overlays.md](overlays.md).                                               |
+| Place                                                       | Job                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Buddy page** (sidebar, second, directly under Studio, ⌘9) | Creates and sets up. **Profile**: the status row with Buddy Live and Open Stream Manager, My Buddies, name, personality, avatar (Still or Alive), reactions, motion, bubble style, listening, Cloud AI consent. **Chat**: Greetings, Answers, Banter and moderation. **Voice**: voice commands. **Reports**. **Clean cut**. |
+| **Stream Manager** (⇧⌘J, the Buddy pane)                    | Operates live. Buddy Live, Chat posting (Off, Suggest, Auto), Suggest cards, the Say box and reactions, the "{name} on stream" switch, questions, flags. Greetings, Answers and Banter show as read-only chips that open Buddy → Chat.                                                                                      |
+| **Scene page** (⌘3, the Live Scene canvas)                  | Places. Where Buddy sits on each orientation, and whether it is on the stream and in the recording. See [overlays.md](overlays.md).                                                                                                                                                                                         |
 
-Each control has one home. The Buddy tab shows the status of the chat mode
-and points at Stream Manager; it has no switch of its own any more.
+Each control has one home. The Buddy page stays where it is, second in the
+sidebar and directly under Studio, with Clean cut and every other feature in
+it: it shows what Premium does (owner call 2026-10-10). Buddy Live is the one
+switch shown twice, in Buddy → Profile's status row and in the Buddy pane's
+header; both flip the same setting.
 
-## Creating your Buddy (Buddy tab → Buddy)
+## Creating your Buddy (Buddy → Profile)
 
 - **Name** (1 to 24 characters). The creature's name is what it answers to in
   chat and in voice.
@@ -70,7 +73,7 @@ environment variable, never hardcoded in the desktop.
 
 ## My Buddies: the library (plan 170)
 
-My Buddies sits at the top of the Buddy tab and in your account on
+My Buddies sits in Buddy → Profile, under the status row, and in your account on
 videorc.com (`/account/buddies`); both show the same library.
 
 - **Official** (free, signed in or not, works offline): Buddy the Golem, Golmar
@@ -84,12 +87,12 @@ videorc.com (`/account/buddies`); both show the same library.
 - **Made by you** (signed in): every Buddy you create, here or on the web,
   up to 30. **Use**, **Rename**, **Edit personality** (with About you),
   **Delete** and **Make it Alive**. Using one downloads its four poses and
-  sets the name, personality and, when it has one, About you as the Buddy's
+  sets the name, personality and, when it has one, About you as Buddy's
   notes. Your edits to a linked Buddy's name, personality or notes go back
   to the account about 2 s after you stop typing.
 - **Sync** (D12): the app reads the account's choice at launch, when My
   Buddies opens, on window focus (at most once a minute) and from the
-  `videorc://buddy` link. A choice made on the web applies when the Buddy is
+  `videorc://buddy` link. A choice made on the web applies when Buddy is
   linked to the library or is still the untouched default; a Buddy made only
   on this computer (an imported pack, a look kept while signed out) is never
   overwritten, and My Buddies offers the web's choice with **Use** instead.
@@ -97,14 +100,14 @@ videorc.com (`/account/buddies`); both show the same library.
   the session to end. Signed out, nothing syncs and the official five still
   work.
 - **videorc://buddy** (D18), from "Open in Videorc" on the web, focuses the
-  app, opens the Buddy tab and syncs; `?alive=<id>` then uses that Buddy
+  app, opens the Buddy page and syncs; `?alive=<id>` then uses that Buddy
   and opens the Alive creator.
 - The first launch with the untouched default Buddy shows one line in My
   Buddies: "Make this Buddy your own, or pick another." with **Start**.
 
 ## Still and Alive (plan 168)
 
-The Avatar section of the Buddy tab picks how the Buddy looks:
+The Avatar section of Buddy → Profile picks how Buddy looks:
 
 - **Still** is the four state images above. It is free.
 - **Alive** is a pet pack: one transparent sprite atlas with 25 drawn look
@@ -148,7 +151,7 @@ Moderation flags never react on air.
 
 **Motion** (0 to 1, default 0.45) scales every bounce, squash and tilt; 0
 keeps the drawn poses and drops all movement. **Sleep after** (Never, 1, 3, 5
-or 10 minutes, default 3) puts the Buddy to sleep with no chat, activity or
+or 10 minutes, default 3) puts Buddy to sleep with no chat, activity or
 lines; anything wakes it with a surprised start. **Breathing** (on by
 default) is a slow squash between events so it never looks frozen.
 
@@ -161,7 +164,7 @@ looks up while an answer is on its way, cycles its talk frames while its
 bubble is up, blinks every few seconds and plays the reaction you mapped for
 each event. Each orientation computes its own gaze, so the pet looks toward
 the card wherever the card sits on that leg. The "nothing bounces" rule for
-scene and camera motion does not apply to the Buddy: it is a character.
+scene and camera motion does not apply to Buddy: it is a character.
 
 ### Test your Buddy (plan 169)
 
@@ -197,7 +200,7 @@ or the settings.
 4. **Review**: the 25 look directions in their grid with an arrow for the
    intended direction, the reactions below, and the live pet beside them.
    Mark each row "Looks right" or redo it. Saving needs every row marked.
-5. **Save**: name the pack; the Buddy becomes Alive.
+5. **Save**: name the pack; Buddy becomes Alive.
 
 Allowance: 3 creations per calendar month, each with 9 sheets and 6 redos;
 pilots are capped at 3 per creation and 6 a day. Abandoning at the pilot
@@ -209,9 +212,9 @@ computer.
 | Feature                                          | Needs                                  |
 | ------------------------------------------------ | -------------------------------------- |
 | Name, personality, uploaded images, bubble style | Nothing                                |
-| The official Buddies                              | Nothing                                |
+| The official Buddies                             | Nothing                                |
 | Your Buddy library across the web and computers  | A Videorc account                      |
-| The Buddy on stream and in the recording         | Nothing                                |
+| Buddy on stream and in the recording             | Nothing                                |
 | Greetings (your own templates, no AI)            | Nothing                                |
 | The Say box in Stream Manager                    | Nothing                                |
 | Answers                                          | Premium + Cloud AI consent             |
@@ -223,7 +226,7 @@ computer.
 
 (D6, owner decision 2026-10-08.)
 
-## The Buddy on stream
+## Buddy on stream
 
 A Still avatar is an image per state; an Alive avatar is a pet pack (see
 above). Either way the comic bubble sits above its head, inside a rect you
@@ -233,11 +236,12 @@ place on the Live Scene canvas. Still states are `idle`, `talk`, `laugh` and
 - A bubble stays for `max(2.5 s, 60 ms × characters)`, capped at 10 s, wraps
   to at most four lines at the rect's width, and is always the light variant
   (the stream is not themed).
-- The Buddy renders after captions and under the highlight card. The card is
+- Buddy renders after captions and under the highlight card. The card is
   the most urgent thing on screen, so it wins an overlap (owner answer 7).
 - The Buddy item ships with **both output switches off** (opt-in). Turn on
-  "Show on stream" in the Stream Manager's Buddy pane or on the Scene canvas;
-  "Show in recording" lives on the canvas. The avatar is visible whenever
+  "{name} on stream" in the footer of the Stream Manager's Buddy pane, or
+  "Show on stream" on the Scene page's canvas; "Show in recording" lives on
+  the canvas. The avatar is visible whenever
   the item is on for that output, bubble or not (D19).
 - The Say box in the Buddy pane puts your own words in the bubble: ↵ talks,
   ⌘↵ laughs. In Auto mode a Say also goes to chat; in Off and Suggest it is
@@ -245,47 +249,53 @@ place on the Live Scene canvas. Still states are `idle`, `talk`, `laugh` and
 - Every session start clears the bubble; the avatar rides into the new video
   if its switch is on.
 
-## Chat: the three modes and the consent
+## Buddy Live, chat posting and the consent
 
-The Stream Manager's Buddy pane holds the one control: the **Chat** mode,
-`Off | Suggest | Auto`, and three switches under it, Greetings, Answers and
-Banter.
+Two separate controls (plan 174 D7):
 
-- **Off** (the default): the Buddy never posts. Off also means the Buddy does
-  not join the stream (`enabled: false`).
-- **Suggest**: every message becomes a card in the Buddy pane; one click (or
-  ↵ on the newest) sends it, ⌫ dismisses it, and a card leaves on its own
-  after 45 s. This is the mode the consent dialog lands you in.
-- **Auto**: messages go out by themselves, within the throttle below. Auto
-  needs its own confirm after the consent, every time.
+- **Buddy Live** is the on switch: whether Buddy joins your streams and reads
+  your chat. It sits in the status row that leads Buddy → Profile and in the
+  Buddy pane's header in Stream Manager; both flip the same setting
+  (`enabled`). It never names the microphone: listening is its own choice
+  (the listening card, and the Buddy Live section of Buddy → Profile).
+- **Chat posting** (`Off | Suggest | Auto`, under the Buddy pane's header)
+  governs only what Buddy posts as you, with the chosen mode's meaning as a
+  line under it. It saves `{autoChat}` alone, so it never turns Buddy or its
+  microphone on (plan 174 S0.2).
+  - **Off** (the default): nothing is posted.
+  - **Suggest**: every message becomes a card in the Buddy pane; one click
+    (or ↵ on the newest) sends it, ⌫ dismisses it, and a card leaves on its
+    own after 45 s. This is the mode the consent dialog lands you in.
+  - **Auto**: messages go out by themselves, within the throttle below. Auto
+    needs its own confirm after the consent, every time.
+- **Greetings, Answers and Banter** have one home, Buddy → Chat. The Buddy
+  pane shows them as read-only chips, each a way to Buddy → Chat.
 
-The first time the mode leaves Off, the consent dialog says: "The Buddy
-posts to your chats as you, on the platforms you stream to, only in the
-modes you turn on. You can watch every message in Reports." Accepting lands
-in Suggest. Choosing Auto adds a second click under the sentence "Automatic
-messages are sent without asking you first." The window remembers the
-consent (`videorc.buddyAutoChatConsent`); Auto asks every time.
+The first time the mode leaves Off, the consent dialog asks "Let {name} post
+as you?" and says: "{name} posts to your chats as you, on the platforms you
+stream to, only in the modes you turn on. You can read every message later
+in Buddy → Reports." Accepting lands in Suggest. Choosing Auto adds a second
+click under the sentence "Automatic messages are sent without asking you
+first." The window remembers the consent (`videorc.buddyAutoChatConsent`);
+Auto asks every time.
 
-Suggest or Auto from Off saves `{enabled: true, listen: true}` with the mode,
-so the Buddy reads your chat and hears you. Off saves `{enabled: false}` and
-`mode: off`; your other settings stay as they are. A behaviour switch
-(Greetings, Answers, Banter) saves `{autoChat}` alone: it never turns the
-Buddy, or its microphone, back on (plan 174 S0.2). Where Cloud AI consent is
-missing, the Buddy pane says what consent covers and "Allow cloud AI…"
-opens the consent dialog; its Allow grants consent and turns the Buddy on,
-and the listening card then asks about the microphone separately.
+Where Cloud AI consent is missing, the Buddy pane says what consent covers
+and "Allow cloud AI…" opens the consent dialog; its Allow grants consent and
+turns Buddy Live on, and the listening card then asks about the microphone
+separately.
 
-The Buddy's chat producer starts with the stream's live chat and stops with
-it. The Buddy tab's status line says where it stands: Off; On, joins your
-next stream; Live now; or Needs attention, with a plain reason (sign in,
-Premium, Cloud AI off, or a pause or error from the Buddy server).
+Buddy's chat producer starts with the stream's live chat and stops with it.
+The status row on Buddy → Profile says where Buddy stands: Off; On ("Joins
+your next stream"); Reading chat while you're live; or Needs attention, with
+a plain reason (sign in, Premium, Cloud AI off, or a pause or error from the
+Buddy server).
 
 ## The three behaviours
 
 - **Greetings** (free, no AI): your own templates for follows, subs, resubs,
   gifted subs, community gifts, memberships, cheers, KICKs, Super Chats,
   Super Stickers, raids, watch streaks, Power-ups and redemptions, written in
-  Buddy tab → Chat → Greetings. Each template has a state (talk, laugh,
+  Buddy → Chat → Greetings. Each template has a state (talk, laugh,
   think), an optional platform, and fields in braces: `{name}`, `{handle}`,
   `{platform}`, `{months}`, `{streak}`, `{count}`, `{amount}`, `{reward}`
   (the channel's points name or the reward title), `{names}` and `{others}`
@@ -295,10 +305,10 @@ Premium, Cloud AI off, or a pause or error from the Buddy server).
   set ("Welcome, {name}!", "{name} joined the ranks ({months} months)",
   "{amount} from {name}, much obliged", "{name} brings {count} warriors.
   Welcome!", "{name}, {streak} streams strong").
-- **Answers** (Premium + Cloud AI): when a viewer asks the Buddy by name
+- **Answers** (Premium + Cloud AI): when a viewer asks Buddy by name
   (`@<name>` or the name in the message), the drafted reply becomes a
   message, at most one per cooldown (default 20 s, 1 to 3,600). Questions
-  that do not name the Buddy stay suggestions in the pane. Only while the
+  that do not name Buddy stay suggestions in the pane. Only while the
   web speaks tick contract v4.
 - **Banter** (Premium + Cloud AI, off by default): one short line when your
   microphone has been quiet for 20 s, never within a minute of a greeting or
@@ -362,8 +372,8 @@ gone. The commands are in [buddy-commands.md](buddy-commands.md).
 
 ## Reports
 
-**When.** The Buddy saves a report when its session ends: when the stream
-stops, or when you turn the Buddy off. Turning it off and on again during
+**When.** Buddy saves a report when its session ends: when the stream
+stops, or when you turn Buddy off. Turning it off and on again during
 the same stream folds both parts into one report. If the app crashes
 mid-stream, that stream has no report. A stream where only greetings ran
 still has a report (posts only, `segments: 0`).
@@ -380,7 +390,7 @@ still has a report (posts only, `segments: 0`).
 - first-timers seen and greeted, by voice, in chat or by hand;
 - the alerts viewers raised, with the most viewers who said it at once;
 - recaps offered, drafted and dismissed;
-- **posts** (plan 164): every message the Buddy sent as you, up to 200, with
+- **posts** (plan 164): every message Buddy sent as you, up to 200, with
   the trigger (greeting, answer, banter, say), the text, the platforms and
   the result (sent, partial, failed). Reports → "Posted as you".
 
@@ -389,14 +399,14 @@ session). It is deleted with the recording, and it is never sent to Videorc.
 It holds viewer names and question text, so it must never be added to the
 support bundle or to any upload.
 
-**Reading it.** The Buddy tab's Reports sub-tab shows the newest stream, with
+**Reading it.** Buddy → Reports shows the newest stream, with
 a switcher for recent ones. In Library, a stream's row menu has "Buddy
-report", which opens the tab on that session. A stream the Buddy was off for
+report", which opens the tab on that session. A stream Buddy was off for
 still shows its moments and chat totals.
 
 ## Clip that
 
-Say "clip that" while the Buddy hears you (or live captions are on), or
+Say "clip that" while Buddy hears you (or live captions are on), or
 press Mark clip: in the Stream Manager, from a Stream Deck or the phone
 remote, or with the Mark clip shortcut from Settings → Shortcuts. The toast
 reads "Clip marked at 12:34. It's in your stream report in Buddy."
@@ -411,20 +421,25 @@ the report is read and never stored. There is no clip file export.
 Session markers ("Buddy, make a marker here for [title]", or the free local
 `/marker [title]`) are covered in [session-markers.md](session-markers.md).
 
-## Where the Buddy works live
+## Where Buddy works live
 
-Live, the Buddy works in the Stream Manager, in the Comments window (⇧⌘J).
-The Buddy pane sits above the chat and is keyboard-first: ⌘J focuses it, ↑
-and ↓ move, R replies, H shows the comment on stream, A marks it answered
-and ⌫ dismisses. The pane's header shows the state image, the name, the
-bubble while one is up, the Show on stream switch, the Say box and the chat
-mode. While you're live, the Buddy tab shows "Open Stream Manager".
+Live, Buddy works in the Stream Manager window (⇧⌘J), in its Buddy pane. At
+Wide (1,040 px and up) the pane is the Buddy tab of the right pane, beside
+Chat (Activity · Buddy); narrower, it is the third tab after Chat and
+Activity. ⌘J opens the Buddy tab and focuses its list. The pane is
+keyboard-first: ↑ and ↓ move, R drafts a reply, H shows the question on
+stream, A marks it answered, ⌫ dismisses and ⇧⌫ removes a flagged message
+from chat. The header shows Buddy's identity (the living preview, the name,
+the bubble while one is up), the Alpha tag, listening, the status and the
+Buddy Live switch; Chat posting sits under it; the footer holds the Say box,
+the reaction chips and the "{name} on stream" switch. Buddy → Profile's
+status row has "Open Stream Manager" (⇧⌘J).
 
 ## Consent: Cloud AI
 
-Cloud AI has one home: the Cloud AI row in the Buddy tab. It is the only
-place to revoke it. The consent dialogs (Buddy Live, Clean cut, the chat
-mode in Stream Manager) can grant it too, and all write the same stored
+Cloud AI has one home: the Cloud AI section of Buddy → Profile. It is the only
+place to revoke it. The consent dialogs (Buddy Live, Clean cut, Chat
+posting in Stream Manager) can grant it too, and all write the same stored
 choice (`videorc.aiConsent`). There is no second consent store. A change
 applies to a stream that is already live.
 
@@ -538,7 +553,7 @@ The persona and its images (Phase A):
 "orcle", "orkle", "orcel", "orkel", "orcl", "orcal"]`; the persona tokens
   live in a process-wide slot set on every settings change.
 
-The Buddy on stream (Phase C):
+Buddy on stream (Phase C):
 
 - The state machine is `crates/videorc-backend/src/buddy_overlay.rs`:
   `BuddyOverlayState {persona_id, state, bubble, generation}`, pure and
@@ -547,7 +562,7 @@ The Buddy on stream (Phase C):
   appears, and `show_for_utterance(app, &utterance)` is the gate in front of
   it (D7/D18): a `sent` utterance bubbles as it lands, a `bubble-only` one
   and the Say box bubble at once, an answer on its way to chat may show
-  `think`, and nothing shows while the Buddy's `showOnStream` and
+  `think`, and nothing shows while Buddy's `showOnStream` and
   `showInRecording` are both off. `settle(app)` ends a `think` that never
   became a bubble; `clear(app)` runs at every session start.
 - RPCs: `cohost.buddy.status` (observation),
@@ -619,7 +634,7 @@ The report:
 
 - `cohost.report.get {sessionId}` returns
   `{sessionId, report, moments, chat: {messages, byPlatform}}`. `report` is
-  `null` when the Buddy left none for that session.
+  `null` when Buddy left none for that session.
 - `cohost.report.latest` takes no params and returns the same payload for the
   newest session that has a report, else the newest streamed session, or
   `null` when there is neither.
@@ -651,7 +666,7 @@ Code:
 
 Checks:
 
-- `pnpm smoke:cohost-fake` runs the Buddy against a fake server and asserts
+- `pnpm smoke:cohost-fake` runs Buddy against a fake server and asserts
   the saved report's counts (it has no capabilities route, so the desktop
   sends v3 there).
 - `pnpm smoke:live-chat-fake-providers` ends with the Buddy scenario: three
@@ -663,5 +678,5 @@ Checks:
   greeting engine, the throttle (a 50-follow burst: one now, one collapsed at
   +10 s, the rest deduped), the lane and the bubble state machine.
 - `node scripts/capture-ui-pages.mjs` captures every page and opens the
-  Buddy tab by its id `ai`; `--theme=light` or `--theme=dark` switches the
+  Buddy page by its id `ai`; `--theme=light` or `--theme=dark` switches the
   app first and adds the theme to every file name.

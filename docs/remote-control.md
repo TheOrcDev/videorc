@@ -10,7 +10,8 @@ Two integration tiers:
 1. **Global shortcuts (no protocol):** Settings → Shortcuts → Global shortcuts registers
    OS-wide accelerators for record/stream/mic/system audio. Bind them to any
    macro tool or a Stream Deck Hotkey action. Works while Videorc is in the
-   background.
+   background. While live, a stop needs a second press within 2 s ("Press
+   again to end the livestream", plan 174 D2).
 2. **The remote protocol below** — richer: scenes, takeovers, windows, and
    live state for key rendering. The official plugin lives in
    `apps/streamdeck-plugin`.
@@ -25,8 +26,11 @@ mode `0600`, deleted on disable and at shutdown:
 { "host": "127.0.0.1", "port": 54321, "token": "…", "protocol": 1 }
 ```
 
-Connect a WebSocket to `ws://<host>:<port>/ws?token=<token>`. The token is
-rotatable from Settings; **regenerating closes every paired client**.
+Connect a WebSocket to `ws://<host>:<port>/ws?token=<token>`. Settings →
+Remote → Remote control → Regenerate rotates the token after a confirmation
+("Regenerate the pairing token?"); **regenerating closes every paired
+client**. Turning Remote control off asks first too, because it closes
+Phone remote and every Stream Deck with it.
 
 ## Security model
 
@@ -58,17 +62,37 @@ Intent params (`kind` + fields):
 
 | kind                                                     | fields                                   | effect                                                                            |
 | -------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------- |
-| `recordStart` / `recordStop` / `recordToggle`            | —                                        | recording session                                                                 |
-| `streamStart` / `streamStop`                             | —                                        | streaming session (needs streaming configured)                                    |
+| `recordStart` / `recordStop` / `recordToggle`            | —                                        | start or stop recording (see [Starting and stopping](#starting-and-stopping))     |
+| `streamStart` / `streamStop`                             | —                                        | go live or end the livestream; `streamStart` needs a ready destination            |
 | `micMute` / `micUnmute` / `micToggle`                    | —                                        | microphone mute                                                                   |
 | `systemAudioOn` / `systemAudioOff` / `systemAudioToggle` | —                                        | system audio on/off (plan 069); refused while the device cannot run               |
 | `sceneApply`                                             | `layoutPreset`                           | switch layout preset                                                              |
 | `takeoverShow`                                           | `assetId`                                | show a takeover image (BRB etc.)                                                  |
 | `takeoverHide`                                           | —                                        | hide the takeover                                                                 |
-| `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward                                                              |
+| `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                           |
 | `commentHighlight`                                       | `messageId`                              | put that live-chat comment on stream (explicit show, idempotent — never a toggle) |
 | `commentHighlightClear`                                  | —                                        | take the on-stream comment down                                                   |
 | `clipMark`                                               | —                                        | mark this moment for a clip (plan 068); needs an active session and recording on  |
+
+### Starting and stopping
+
+Plan 174 S3.1 made every start explicit. `recordStart` records and
+`streamStart` goes live, whatever output mode the Studio saved last, and both
+run the Studio's own starts, so a remote can never start what the Studio
+would refuse. The failed ack carries the reason, so a deck key can say why.
+
+- `recordStart` refused: the Studio's reason ("Pick a screen or a camera
+  first."), or "You're already recording or live." while one runs.
+- `streamStart` needs a ready destination. Without one the ack is
+  `ok: false` with the Studio's reason ("Set up a destination to go live.").
+  With one it opens the Go Live dialog on the computer, where the streamer
+  confirms; the ack is `ok: false` with "The livestream didn't start. Finish
+  going live on your computer." Go Live records too only when Output's
+  recording is on (D19).
+- `recordStop` and `streamStop` stop the running recording or livestream at
+  once. Unlike an in-app stop, there is no End livestream confirmation: a
+  Stream Deck key and the phone's hold-to-stop are deliberate device actions
+  (plan 174 D2). `recordToggle` stops whatever runs.
 
 ## Events
 
@@ -107,7 +131,8 @@ backend-confirmed state, debounce, and regenerate-cuts-clients.
 A phone on the same Wi-Fi as a **live comment monitor + Stream Deck**: read
 every chat message, tap one to put it on stream, switch scenes, show takeovers,
 mute the mic, start/stop. **Off by default**; Settings → Remote → Phone remote. Turning
-it on also turns Remote control on; turning Remote control off closes it.
+it on also turns Remote control on; turning Remote control off closes it (the
+confirmation names how many paired phones it disconnects).
 
 The backend serves its own client at `http://<lan-ip>:<port>/` — a static page
 (`crates/videorc-backend/remote_web/`). `remote-client.js` in that folder is
