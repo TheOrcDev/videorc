@@ -46,6 +46,7 @@ import {
 } from '@/lib/health-checks'
 import { isMacPlatform } from '@/lib/platform'
 import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/lib/record-latency'
+import { unknownDeviceWarnings } from '@/lib/source-status'
 import { previewSourceStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
@@ -96,6 +97,7 @@ export function DiagnosticsTab(): ReactElement {
   }, [logSessionId, loadSessionDetails])
 
   const accessRows = systemAccessRows({ deviceList, audioMeter, platform, mediaAccess })
+  const deviceWarnings = unknownDeviceWarnings(deviceList.warnings)
   const permissionAction = (pane: SystemPermissionPane) =>
     systemAccessAction({
       pane,
@@ -258,8 +260,30 @@ export function DiagnosticsTab(): ReactElement {
         >
           <EncoderMetrics ffmpeg={health?.ffmpeg} macOS={isMacPlatform(platform ?? 'darwin')} />
         </MetricGroup>
-        <MetricGroup attention={needs('sources', 'memory')} title="System and sources">
+        <MetricGroup
+          attention={needs('sources', 'memory') || deviceWarnings.length > 0}
+          title="System and sources"
+        >
           <SystemMetrics stats={diagnosticStats} />
+          {/* What the device list reported that no Sources alert covers (plan
+              174 C-8): Sources says only that something is here. */}
+          {deviceWarnings.length > 0 ? (
+            <ul className="mt-3 flex flex-col gap-1 px-2" data-videorc-device-warnings="">
+              {deviceWarnings.map((warning) => (
+                <li
+                  key={warning}
+                  className="flex items-start gap-1.5 text-xs text-foreground select-text"
+                >
+                  <WarningIcon
+                    aria-hidden
+                    className="mt-0.5 size-3.5 shrink-0 text-warning"
+                    weight="fill"
+                  />
+                  {warning}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </MetricGroup>
         {/* The one Pipeline (V-7): the recording's stages, each state in words. */}
         <MetricGroup attention={pipelineFailed} title="Pipeline">

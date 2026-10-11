@@ -76,14 +76,23 @@ describe('SourceItem (plan 173)', () => {
     expect(open).toContain(`id="${controls}"`)
   })
 
-  it('reads a hint out with the chip and shows no chip without a status', () => {
+  it('shows a hint as a visible status line in the body, never only a tooltip (C-10)', () => {
     const markup = render({
-      status: { label: 'Not found', tone: 'warn', hint: 'Reconnect it, or pick another.' }
+      status: { label: 'Not found', tone: 'warn', hint: 'Reconnect it, or choose another.' }
     })
     expect(markup).toContain('>Not found<')
-    expect(markup).toContain('<span class="sr-only">Reconnect it, or pick another.</span>')
+    expect(markup).toMatch(
+      /<p[^>]*data-slot="source-status-hint"[^>]*role="status"[^>]*>Reconnect it, or choose another\.<\/p>/
+    )
+    expect(markup).not.toContain('sr-only')
+    expect(markup.indexOf('data-slot="source-item-body"')).toBeLessThan(
+      markup.indexOf('data-slot="source-status-hint"')
+    )
     expect(markup).toContain('data-tone="warn"')
     expect(render({ status: null })).not.toContain('data-slot="source-status"')
+    expect(render({ status: { label: 'Muted', tone: 'neutral' } })).not.toContain(
+      'source-status-hint'
+    )
   })
 
   it('marks a disabled item for its styles', () => {
@@ -106,14 +115,27 @@ describe('SourceControlRow and SourceFacts (plan 173)', () => {
     expect(markup).toContain('data-slot="source-control-value">0.0 dB<')
   })
 
-  it('gives a warning its icon in the tone, never tinted words', () => {
-    const warning = renderToStaticMarkup(
-      createElement(SourceFacts, { tone: 'warning', children: 'Runs at 25 fps.' })
-    )
-    expect(warning).toContain('data-tone="warning"')
-    expect(warning).toContain('text-warning')
-    expect(warning).toMatch(/<span class="min-w-0">Runs at 25 fps\.<\/span>/)
+  it('keeps facts secondary text, never tinted', () => {
     const facts = renderToStaticMarkup(createElement(SourceFacts, { children: '1920 × 1080' }))
+    expect(facts).toContain('data-slot="source-facts"')
+    expect(facts).toContain('text-muted-foreground')
     expect(facts).not.toContain('text-warning')
+  })
+
+  it('makes the value a reset button only when given a reset', () => {
+    const resettable = renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(SourceControlRow, {
+          label: 'Gain',
+          value: '+6.0 dB',
+          reset: { label: 'Reset to 0.0 dB', onReset: () => {} },
+          children: createElement('input', { 'aria-label': 'Microphone gain' })
+        })
+      )
+    )
+    expect(resettable).toMatch(/data-slot="source-control-value"[^>]*><button[^>]*>\+6\.0 dB/)
+    expect(resettable).toContain('<span class="sr-only">. Reset to 0.0 dB</span>')
   })
 })

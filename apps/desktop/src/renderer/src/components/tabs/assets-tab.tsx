@@ -3,10 +3,9 @@ import {
   AdjustIcon,
   DeleteIcon,
   EditIcon,
+  FolderIcon,
   ImageIcon,
-  PreviewIcon,
   ResetIcon,
-  SuccessIcon,
   SyncIcon,
   UploadIcon,
   WarningIcon
@@ -15,7 +14,7 @@ import { useState, type ComponentProps, type ReactElement } from 'react'
 import { toastUserError } from '@/lib/user-error'
 
 import { KebabMenu } from '@/components/kebab-menu'
-import { Gallery, PageHeader } from '@/components/page'
+import { Gallery, PageHeader, PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { PowerSlider } from '@/components/power-slider'
 import { Badge } from '@/components/ui/badge'
@@ -24,6 +23,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import {
@@ -53,7 +53,12 @@ import {
   BackgroundReplaceDialog,
   type PendingBackgroundReplace
 } from '@/components/background-replace-dialog'
-import { TakeoverScreensSection } from '@/components/takeover-screens-section'
+import {
+  IN_USE_RING,
+  InUseChip,
+  TakeoverScreensSection
+} from '@/components/takeover-screens-section'
+import { plural } from '@/lib/format'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
@@ -62,7 +67,7 @@ type BadgeVariant = NonNullable<ComponentProps<typeof Badge>['variant']>
 const STATUS_BADGE: Record<BackgroundAssetSlotStatus, { label: string; variant: BadgeVariant }> = {
   empty: { label: 'Empty', variant: 'outline' },
   ready: { label: 'Ready', variant: 'secondary' },
-  active: { label: 'Active', variant: 'success' },
+  active: { label: 'In use', variant: 'secondary' },
   'missing-file': { label: 'File missing', variant: 'warning' },
   unsupported: { label: 'Unsupported', variant: 'destructive' }
 }
@@ -88,7 +93,7 @@ function imageSrcOf(asset: BackgroundAsset): string | undefined {
 // style controls sit on the active tile (Adjust style), where they edit the one
 // background that has a visible consequence.
 export function AssetsTab(): ReactElement {
-  const { applyBackgroundSlot, applyWorkingBackgroundStyle, scene } = useStudioCore()
+  const { applyBackgroundSlot, applyWorkingBackgroundStyle, runtimeInfo, scene } = useStudioCore()
   const { registry, setRegistry } = useBackgroundAssets()
   const [removingSlotId, setRemovingSlotId] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
@@ -174,24 +179,54 @@ export function AssetsTab(): ReactElement {
     setPendingReplace(null)
   }
 
+  // The scene's own background, which may come from a saved scene rather
+  // than a slot: its row sits inside Backgrounds (C-26).
+  const sceneBackground = scene?.background ?? null
+  const sceneBackgroundName = sceneBackground
+    ? (registry.assets[sceneBackground.assetId]?.name ?? 'A background from a saved scene')
+    : null
+
   return (
-    <div className="flex flex-col">
+    <PageStack>
       <PageHeader
-        description="Backgrounds for your scenes and takeovers for the output. Click a preset to apply it, then tune it with Adjust style on its tile."
+        description="Backgrounds for your scenes and takeovers for the output. Click a background to apply it, then tune it with Adjust style on its tile."
         title="Assets"
       />
 
       <PanelSection
-        title="Background presets"
+        title="Backgrounds"
         icon={ImageIcon}
-        description={`${registry.slots.length} slots`}
+        description={`${plural(registry.slots.length, 'background')} · PNG, JPEG or WebP.`}
         action={
           <Button disabled={importing} size="sm" variant="outline" onClick={() => importInto(null)}>
-            <UploadIcon data-icon="inline-start" />
-            Import
+            <ImageIcon data-icon="inline-start" />
+            {importing ? 'Importing…' : 'Import image…'}
           </Button>
         }
       >
+        {sceneBackground && sceneBackgroundName ? (
+          <div className="flex min-w-0 items-center gap-2" data-videorc-scene-background="">
+            <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+              In this scene: <span className="text-foreground">{sceneBackgroundName}</span>
+            </span>
+            <BackgroundStylePopover
+              name={sceneBackgroundName}
+              asset={{
+                id: sceneBackground.assetId,
+                name: sceneBackgroundName,
+                kind: 'imported',
+                status: 'ready',
+                createdAt: '',
+                updatedAt: '',
+                styleDefaults: sceneBackground
+              }}
+              onStyle={(_id, patch) => applyWorkingBackgroundStyle(patch)}
+            />
+            <Button variant="ghost" size="sm" onClick={() => applyBackgroundSlot(null)}>
+              Use no background
+            </Button>
+          </div>
+        ) : null}
         <Gallery className="gap-3">
           {registry.slots.map((slot) => (
             <PresetTile
@@ -199,6 +234,7 @@ export function AssetsTab(): ReactElement {
               slot={slot}
               registry={registry}
               importing={importing}
+              platform={runtimeInfo?.platform}
               renaming={renamingSlotId === slot.id}
               onActivate={() => {
                 const status = slotDisplayStatus(slot, registry)
@@ -272,26 +308,6 @@ export function AssetsTab(): ReactElement {
           setRemovingSlotId(null)
         }}
       />
-      {scene?.background ? (
-        <div className="flex items-center gap-2">
-          <BackgroundStylePopover
-            name="Current scene background"
-            asset={{
-              id: scene.background.assetId,
-              name: 'Current scene background',
-              kind: 'imported',
-              status: 'ready',
-              createdAt: '',
-              updatedAt: '',
-              styleDefaults: scene.background
-            }}
-            onStyle={(_id, patch) => applyWorkingBackgroundStyle(patch)}
-          />
-          <Button variant="ghost" size="sm" onClick={() => applyBackgroundSlot(null)}>
-            Use no background
-          </Button>
-        </div>
-      ) : null}
       <TakeoverScreensSection />
       <BackgroundReplaceDialog
         pending={pendingReplace}
@@ -299,7 +315,7 @@ export function AssetsTab(): ReactElement {
         onCancel={() => setPendingReplace(null)}
         onReplace={replaceWithImport}
       />
-    </div>
+    </PageStack>
   )
 }
 
@@ -307,6 +323,7 @@ function PresetTile({
   slot,
   registry,
   importing,
+  platform,
   renaming,
   onActivate,
   onMissing,
@@ -322,6 +339,7 @@ function PresetTile({
   slot: BackgroundAssetSlot
   registry: BackgroundAssetRegistry
   importing: boolean
+  platform?: string
   renaming: boolean
   onActivate: () => void
   onMissing: () => void
@@ -344,23 +362,28 @@ function PresetTile({
   return (
     <div
       className={cn(
-        'group relative flex aspect-[16/9] items-end overflow-hidden rounded-row border transition-colors',
+        // `group/kebab-host`: the ⋯ menu shows on hover and while the tile
+        // holds focus (C-11).
+        'group/kebab-host relative flex aspect-video items-end overflow-hidden rounded-row border transition-colors',
         active
-          ? 'border-success ring-1 ring-success/60'
+          ? cn('border-foreground/25', IN_USE_RING)
           : 'border-border hover:border-foreground/30'
       )}
+      data-videorc-background-tile={slot.id}
     >
       <button
         type="button"
         aria-pressed={active}
-        title={
+        aria-label={
           status === 'empty'
             ? `Import into ${name}`
             : active
               ? `Remove ${name} from the scene`
               : `Apply ${name} to the scene`
         }
-        className="absolute inset-0"
+        // The tile clips its children, so the focus ring is drawn inset, on
+        // top of the image (C-11).
+        className="absolute inset-0 outline-none after:pointer-events-none after:absolute after:inset-0 after:rounded-row focus-visible:after:ring-2 focus-visible:after:ring-ring focus-visible:after:ring-inset"
         onClick={onActivate}
         onDoubleClick={() => asset && onStartRename()}
       >
@@ -384,78 +407,27 @@ function PresetTile({
         )}
       </button>
 
-      {active ? (
-        <SuccessIcon
-          weight="fill"
-          className="pointer-events-none absolute left-1.5 top-1.5 z-10 size-4 text-success"
-        />
-      ) : null}
+      {active ? <InUseChip className="pointer-events-none absolute top-1.5 left-1.5 z-10" /> : null}
 
       {!asset ? (
-        <div className="absolute right-1 top-1 z-10 flex gap-1">
+        <div className="absolute top-1 right-1 z-10 flex gap-1">
           <Button size="sm" variant="ghost" onClick={onReplace}>
-            Add image
+            Add image…
           </Button>
           <Button size="sm" variant="ghost" onClick={onRestore}>
             Restore default
           </Button>
         </div>
       ) : null}
-      {asset ? (
-        <div
-          className={cn(
-            'absolute right-1 top-1 z-10 flex items-center gap-1 transition-opacity focus-within:opacity-100 group-hover:opacity-100',
-            // The active tile keeps its style control in view: it is the only
-            // home for fit and the style sliders.
-            active ? 'opacity-100' : 'opacity-0'
-          )}
-        >
-          {active ? <BackgroundStylePopover asset={asset} name={name} onStyle={onStyle} /> : null}
-          <KebabMenu
-            label={`Actions for ${name}`}
-            className="border glass-float"
-            items={[
-              { id: 'rename', label: 'Rename', icon: EditIcon, onSelect: onStartRename },
-              {
-                id: 'replace',
-                label: 'Replace image…',
-                icon: SyncIcon,
-                disabled: importing,
-                onSelect: onReplace
-              },
-              {
-                id: 'reveal',
-                label: revealInFileManagerLabel(),
-                icon: PreviewIcon,
-                disabled: asset.kind !== 'imported' || !asset.assetPath,
-                onSelect: () => {
-                  void window.videorc?.revealBackgroundAsset?.(asset.id)
-                }
-              },
-              {
-                id: 'reset-style',
-                label: 'Reset style to defaults',
-                icon: ResetIcon,
-                onSelect: () => onResetStyle(asset.id)
-              },
-              {
-                id: 'remove',
-                label: 'Remove',
-                icon: DeleteIcon,
-                destructive: true,
-                onSelect: onRemove
-              }
-            ]}
-          />
-        </div>
-      ) : null}
 
-      <div className="pointer-events-none relative z-10 flex w-full items-center gap-1.5 bg-gradient-to-t from-background/95 via-background/70 to-transparent px-2 pb-1.5 pt-5">
+      {/* The name strip carries the tile's controls, so they never float on
+          the picture with their own glass (C-40). */}
+      <div className="pointer-events-none relative z-10 flex w-full items-center gap-1 bg-gradient-to-t from-background/95 via-background/70 to-transparent px-2 pt-5 pb-1">
         {renaming && asset ? (
           <Input
             autoFocus
             aria-label={`Rename ${asset.name}`}
-            className="pointer-events-auto h-6 px-1.5 text-xs"
+            className="pointer-events-auto"
             defaultValue={asset.name}
             onBlur={(event) => onRename(asset.id, event.target.value)}
             onKeyDown={(event) => {
@@ -469,11 +441,56 @@ function PresetTile({
           />
         ) : (
           <>
-            <span className="truncate text-xs font-medium">{name}</span>
+            <span className="min-w-0 truncate text-xs font-medium">{name}</span>
             {status !== 'ready' && status !== 'active' ? (
               <Badge className="ml-auto shrink-0" variant={badge.variant}>
                 {badge.label}
               </Badge>
+            ) : null}
+            {asset ? (
+              <span className="pointer-events-auto ml-auto flex shrink-0 items-center">
+                {/* The active tile keeps its style control in view: it is
+                    the only home for fit and the style sliders. */}
+                {active ? (
+                  <BackgroundStylePopover asset={asset} name={name} onStyle={onStyle} />
+                ) : null}
+                <KebabMenu
+                  label={`Actions for ${name}`}
+                  reveal={active ? 'always' : 'hover'}
+                  items={[
+                    { id: 'rename', label: 'Rename', icon: EditIcon, onSelect: onStartRename },
+                    {
+                      id: 'replace',
+                      label: 'Replace image…',
+                      icon: SyncIcon,
+                      disabled: importing,
+                      onSelect: onReplace
+                    },
+                    {
+                      id: 'reveal',
+                      label: revealInFileManagerLabel(platform),
+                      icon: FolderIcon,
+                      disabled: asset.kind !== 'imported' || !asset.assetPath,
+                      onSelect: () => {
+                        void window.videorc?.revealBackgroundAsset?.(asset.id)
+                      }
+                    },
+                    {
+                      id: 'reset-style',
+                      label: 'Reset style to defaults',
+                      icon: ResetIcon,
+                      onSelect: () => onResetStyle(asset.id)
+                    },
+                    {
+                      id: 'remove',
+                      label: 'Remove',
+                      icon: DeleteIcon,
+                      destructive: true,
+                      onSelect: onRemove
+                    }
+                  ]}
+                />
+              </span>
             ) : null}
           </>
         )}
@@ -498,17 +515,16 @@ function BackgroundStylePopover({
 
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        <Button
-          aria-label={`Adjust style for ${name}`}
-          className="border glass-float"
-          size="icon-sm"
-          title="Adjust style"
-          variant="ghost"
-        >
-          <AdjustIcon />
-        </Button>
-      </PopoverTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <Button aria-label={`Adjust style for ${name}`} size="icon-sm" variant="ghost">
+              <AdjustIcon />
+            </Button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Adjust style</TooltipContent>
+      </Tooltip>
       <PopoverContent align="end" className="flex w-80 flex-col gap-3">
         <div className="flex flex-col gap-1.5">
           <Label>Fit</Label>

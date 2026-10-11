@@ -1092,7 +1092,7 @@ describe('audio sync calibration helpers', () => {
     expect(parseAudioSyncRecommendationJson('nope')).toMatchObject({ ok: false })
     expect(parseAudioSyncRecommendationJson('{}')).toEqual({
       ok: false,
-      error: 'Measurement JSON must use schemaVersion 1.'
+      error: 'The measurement JSON needs schemaVersion 1.'
     })
   })
 
@@ -1100,7 +1100,7 @@ describe('audio sync calibration helpers', () => {
     expect(formatMeasuredAudioLag(121.4)).toBe('Audio lags video by 121 ms')
     expect(formatMeasuredAudioLag(-80.2)).toBe('Audio leads video by 80 ms')
     expect(formatMeasuredAudioLag(0)).toBe('Audio is aligned at 0 ms')
-    expect(formatMeasuredAudioLag(null)).toBe('No paired flash/click measurement')
+    expect(formatMeasuredAudioLag(null)).toBe('Not measured yet')
   })
 
   it('explains unavailable recommendations without changing audio settings', () => {
