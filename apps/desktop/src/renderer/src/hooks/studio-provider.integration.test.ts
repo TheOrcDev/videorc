@@ -84,6 +84,7 @@ import type {
   SessionChatTotals,
   StreamOutputTopologyProbeResult,
   StreamScreen,
+  StreamingSettings,
   VideorcAccountRefreshResult,
   VideorcAccountSnapshot,
   VideorcApi
@@ -10730,6 +10731,96 @@ describe('real StudioProvider lifecycle', () => {
     expect(
       backend.sentCommands.filter((command) => command.method === 'session.start')
     ).toHaveLength(2)
+  })
+
+  // Plan 174 S3.4 (B-8): "Go live without X" used to switch X off in the
+  // saved settings, so every later Go Live skipped it too.
+  it('leaves a destination out of one Go Live only, and never saves it', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const savedX = () =>
+      latest()!.core.captureConfig.streaming.targets.find((target) => target.id === 'x')
+    const lastValidation = () =>
+      backend.sentCommands
+        .filter((command) => command.method === 'streamTargets.confirmation.validate')
+        .at(-1)?.params as { streaming: StreamingSettings } | undefined
+
+    // Left out, then brought back, then left out again: the saved X stays on.
+    await openYouTubeAndXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual(['x'])
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'include')
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual([])
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube', 'x'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    expect(savedX()?.enabled).toBe(true)
+    expect(latest()!.core.captureConfig.streaming.enabledTargetIds).toContain('x')
+
+    // Cancelling forgets it.
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    expect(latest()!.core.goLiveExcludedTargetIds).toEqual([])
+
+    // Going live without X: X is never prepared or started, and stays saved on.
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(lastValidation()?.streaming.enabledTargetIds).toEqual(['youtube', 'x'])
+    await act(async () => {
+      await latest()!.core.resolveGoLiveBlocker('x', 'exclude')
+    })
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect((start?.params as { streaming: StreamingSettings }).streaming.enabledTargetIds).toEqual([
+      'youtube'
+    ])
+    expect(backend.xPrepareCount).toBe(0)
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(savedX()?.enabled).toBe(true)
+
+    // The attempt over, the next Go Live starts from the saved destinations.
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.state === 'idle' &&
+        latest()?.core.goLiveExcludedTargetIds.length === 0
+    )
+    expect(savedX()?.enabled).toBe(true)
   })
 
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {

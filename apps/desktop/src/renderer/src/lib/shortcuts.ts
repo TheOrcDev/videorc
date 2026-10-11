@@ -47,6 +47,13 @@ const SHORTCUT_LIST = [
     label: RECORD_SHORTCUT_LABEL,
     group: 'Studio'
   },
+  // The Go Live dialog's primary (plan 174 S3.4, B-14), shown on its button.
+  {
+    id: 'go-live-confirm',
+    accelerators: ['CmdOrCtrl+Enter'],
+    label: 'Go live, in the Go Live dialog',
+    group: 'Studio'
+  },
   {
     id: 'preview-window',
     accelerators: ['CmdOrCtrl+P'],
