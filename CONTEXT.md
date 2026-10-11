@@ -57,6 +57,11 @@ _Avoid_: broadcast (except a platform's own object, like an X broadcast), live s
 What Videorc writes to a file, and each item in Library.
 _Avoid_: session (in copy), take, capture
 
+**On stream**:
+Shown in what viewers see: a chat message, a takeover, Buddy. The actions
+are "Show on stream" and "Take off stream".
+_Avoid_: On air (for an item), live (for an item)
+
 **Receiving**:
 A source that is producing frames.
 _Avoid_: Live, Active, On air
@@ -85,6 +90,8 @@ _Avoid_: input, feed
 
 **Takeover**:
 A full-frame image the streamer puts on stream over everything else.
+Assets → Takeovers manages them; Studio's Takeover section puts one on
+stream.
 _Avoid_: screen, takeover screen
 
 **Off**:
@@ -168,6 +175,10 @@ _Avoid_: Captions window, caption viewer
 The two other windows, by these names.
 _Avoid_: Teleprompter, Preview window (as a title)
 
+**Keep on top**:
+The pin that keeps a window over other apps, the same name in every window.
+_Avoid_: Pin, Always on top, Float
+
 **Health**:
 The page with Videorc's verdicts, warnings and the support bundle.
 _Avoid_: diagnostics, Diagnostics tab
@@ -192,6 +203,17 @@ _Avoid_: the Buddy, co-host, Orcle, pet, sidekick
 **Buddy Live**:
 The switch that lets Buddy join a livestream.
 _Avoid_: Joins my streams, chat mode (for the on switch)
+
+**Chat posting**:
+What Buddy may post to your chats as you: Off, Suggest or Auto. It never
+turns Buddy on or off; Buddy Live does.
+_Avoid_: chat mode, auto chat
+
+**Profile**:
+The Buddy page's first tab: Buddy Live and its status, My Buddies, the look,
+the personality and Cloud AI. The page is Buddy; its tabs are Profile, Chat,
+Voice, Reports and Clean cut.
+_Avoid_: the Buddy tab (for the first tab)
 
 **Premium**:
 The paid plan. A locked feature says "{Feature} is part of Videorc Premium."

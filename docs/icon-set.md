@@ -26,7 +26,7 @@ Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
 
-The Buddy tab's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
+The Buddy page's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
 a small picture opened larger to look at it, a meaning no slot had
 (`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is
 the output frame). That made **92 slots over 88 glyphs**.
@@ -51,6 +51,10 @@ headings carry no icons any more.
 Check whether a slot already means what you need and reuse it. Add a slot only
 for a genuinely new meaning, and never add a second variant of an existing one
 — that is how the set reached 100.
+
+Copy names what an icon shows, never its slot: "Trash", not `DeleteIcon`.
+`renderer-copy-guards.test.ts` fails on a slot name in readable text (plan 174
+S2.1).
 
 ## Licence: the 100-icon ceiling
 
@@ -137,17 +141,17 @@ The registry preserved today's glyph for every slot: the migration was
 deliberately behaviour-free. These are the slots where the inherited glyph is
 **wrong or weak**, to settle before or during the export.
 
-| Slot                                         | Glyph today               | Verdict                                                                                                                                                                                        |
-| -------------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SourcesIcon`                                | Monitor                   | **Change.** The Sources page owns screen, window, camera _and_ microphone; a monitor names one of four. Prefer a plug/input or layered-devices glyph.                                          |
-| `OutputIcon`                                 | Record (dot)              | **Change.** The Output page configures destinations and encoding; the record dot is the Record _action_ and must not be diluted. Prefer export/arrow-out or sliders. Splits from `RecordIcon`. |
-| `SourcesIcon`/`DisplayIcon`                  | Monitor (shared)          | **Split** once Sources gets its own glyph; `DisplayIcon` keeps the monitor.                                                                                                                    |
-| `AssetsIcon`/`ImageIcon`                     | ImageSquare (shared)      | **Consider splitting.** Assets is a library of media, not one image — a stack/collection glyph would separate them.                                                                            |
-| `StudioIcon`/`CameraIcon`                    | VideoCamera (shared)      | **Keep shared** unless the export offers a distinct "studio/stage" glyph worth the extra count.                                                                                                |
-| `ClapperboardIcon` vs `LibraryIcon`          | FilmSlate / FilmReel      | **Review together.** Two film metaphors for "recordings" and "library"; one may be redundant.                                                                                                  |
-| `SaveIcon`                                   | FloppyDisk                | **Owner call.** Dated metaphor, universally understood. Keep unless the export has a better save affordance.                                                                                   |
-| `AlertIcon` vs `WarningIcon`                 | WarningCircle / Warning   | **Keep both, enforce the split**: triangle warns, circle alerts. This pairing already absorbed three previous variants.                                                                        |
-| `HealthIcon` / `HeartbeatIcon` / `GaugeIcon` | Pulse / Heartbeat / Gauge | **Review.** Three vitals metaphors across Health and streaming; probably two are enough.                                                                                                       |
+| Slot                                         | Glyph today               | Verdict                                                                                                                                                                                                                                          |
+| -------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SourcesIcon`                                | Monitor                   | **Change.** The Sources page owns screens, windows, cameras, microphones _and_ system audio; a monitor names one of them. Prefer a plug/input or layered-devices glyph.                                                                          |
+| `OutputIcon`                                 | Record (dot)              | **Change.** The Output page sets up the local file (where recordings go, quality; destinations live on Livestream); the record dot is the Record _action_ and must not be diluted. Prefer export/arrow-out or sliders. Splits from `RecordIcon`. |
+| `SourcesIcon`/`DisplayIcon`                  | Monitor (shared)          | **Split** once Sources gets its own glyph; `DisplayIcon` keeps the monitor.                                                                                                                                                                      |
+| `AssetsIcon`/`ImageIcon`                     | ImageSquare (shared)      | **Consider splitting.** Assets is a library of media, not one image — a stack/collection glyph would separate them.                                                                                                                              |
+| `StudioIcon`/`CameraIcon`                    | VideoCamera (shared)      | **Keep shared** unless the export offers a distinct "studio/stage" glyph worth the extra count.                                                                                                                                                  |
+| `ClapperboardIcon` vs `LibraryIcon`          | FilmSlate / FilmReel      | **Review together.** Two film metaphors for "recordings" and "library"; one may be redundant.                                                                                                                                                    |
+| `SaveIcon`                                   | FloppyDisk                | **Owner call.** Dated metaphor, universally understood. Keep unless the export has a better save affordance.                                                                                                                                     |
+| `AlertIcon` vs `WarningIcon`                 | WarningCircle / Warning   | **Keep both, enforce the split**: triangle warns, circle alerts. This pairing already absorbed three previous variants.                                                                                                                          |
+| `HealthIcon` / `HeartbeatIcon` / `GaugeIcon` | Pulse / Heartbeat / Gauge | **Review.** Three vitals metaphors across Health and streaming; probably two are enough.                                                                                                                                                         |
 
 Everything not listed keeps its meaning as-is; the export just needs a
 like-for-like glyph.
