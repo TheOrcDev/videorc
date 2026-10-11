@@ -197,7 +197,7 @@ try {
       )
     )
     const scrolling = await evaluate(
-      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-radix-scroll-area-viewport]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
+      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-slot="dialog-body"]')??dialog.querySelector('[data-radix-scroll-area-viewport]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
     )
     assert.ok(scrolling.viewportHeight >= 64, '200% form must retain a usable scroll viewport')
     assert.ok(scrolling.after > scrolling.initial, '200% form must actually scroll')
@@ -227,7 +227,7 @@ try {
       'dirty dismissal guard'
     )
     await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Discard');button.click();return true`
+      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Discard changes');button.click();return true`
     )
     await waitFor(
       () => evaluate(`return !document.querySelector('#schedule-title')`),
