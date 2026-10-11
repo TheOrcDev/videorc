@@ -32,6 +32,7 @@ import {
 } from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
 import { formatVideoQuality } from '@/lib/format-video'
+import { GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
@@ -48,12 +49,12 @@ import {
 } from '@/lib/studio-session-view'
 
 /**
- * The session transport (plan 050 S12): status, clock, and Record / Stream /
+ * The session transport (plan 050 S12): status, clock, and Record / Go Live… /
  * Stop at the top of the Studio inspector, right above Session (owner call,
  * 2026-09-23: no buttons in the toolbar's top-right corner). The buttons
  * reuse the transport handlers StudioTab owns (no second session state
- * machine). Space still records: that shortcut lives on the Studio page
- * (plan 174 S0.1), not on this button.
+ * machine). Record shows its Space key, which lives on the Studio page (plan
+ * 174 S0.1), not on this button. The words are D3's (lib/go-live-copy.ts).
  */
 export function SessionTransport({
   active,
@@ -117,7 +118,7 @@ export function SessionTransport({
                 onClick={onRecord}
               >
                 <RecordIcon data-icon="inline-start" weight="fill" />
-                Record
+                {RECORD_LABEL}
                 <ShortcutKeys
                   accelerator={shortcutAccelerator('record-toggle')}
                   className="ml-0.5"
@@ -133,7 +134,7 @@ export function SessionTransport({
                 onClick={onLiveStream}
               >
                 <LivestreamIcon data-icon="inline-start" weight="fill" />
-                Stream
+                {GO_LIVE_LABEL}
               </Button>
             </DisabledReason>
           </>
@@ -261,7 +262,7 @@ export function SessionPanel({
       <GroupedList>
         <NavigableRow
           icon={LivestreamIcon}
-          label="Streaming"
+          label="Livestream"
           value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
           onNavigate={() => openStudioPanel('live')}
         />

@@ -124,7 +124,7 @@ export function recordingFailurePresentation({
   const message =
     status.message ??
     (activityIsLive(activity)
-      ? 'Videorc could not finish this live session.'
+      ? 'Videorc could not finish this livestream.'
       : 'Videorc could not finish this recording.')
   return {
     dedupeKey,

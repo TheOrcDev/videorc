@@ -344,8 +344,8 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(captionsSource, /microphone-input-lost/)
     assert.match(captionsSource, /evaluateMicrophoneLossContinuity/)
     assert.match(captionsSource, /postLossAudio/)
-    // The smoke records and streams: its notice is the live session's (plan 174 B-6).
-    assert.match(captionsSource, /Microphone stopped: live session continues with silence/)
+    // The smoke records and streams: its notice is the livestream's (plan 174 B-6, S2.2).
+    assert.match(captionsSource, /Microphone stopped: livestream continues with silence/)
     assert.match(captionsSource, /data-testid=\"session-runtime-notice\"/)
     assert.match(captionsSource, /notice\?\.getAttribute\('role'\) === 'alert'/)
   })

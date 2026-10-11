@@ -45,14 +45,24 @@ describe('SHORTCUTS registry', () => {
     }
   })
 
-  it('groups cover Navigation, Session, Windows, Chat, and Appearance', () => {
+  // Plan 174 S2.2 (I-32): a group names where its keys work, and copy never
+  // says "session": Space works on Studio, the Buddy keys in Stream Manager.
+  it('groups cover Navigation, Studio, Windows, Stream Manager, and Appearance', () => {
     expect([...shortcutsByGroup().keys()]).toEqual([
       'Navigation',
-      'Session',
+      'Studio',
       'Windows',
-      'Chat',
+      'Stream Manager',
       'Appearance'
     ])
+  })
+
+  it('labels Space in the transport words (plan 174 D3)', () => {
+    expect(SHORTCUTS.find((entry) => entry.id === 'record-toggle')).toMatchObject({
+      accelerators: ['Space'],
+      label: 'Record / stop recording',
+      group: 'Studio'
+    })
   })
 
   // S2 (Live Chat Co-host): the pane advertises these chips, so the registry
@@ -68,7 +78,7 @@ describe('SHORTCUTS registry', () => {
       'cohost-answered',
       'cohost-dismiss'
     ])
-    expect(cohost.every((entry) => entry.group === 'Chat')).toBe(true)
+    expect(cohost.every((entry) => entry.group === 'Stream Manager')).toBe(true)
     expect(cohost.find((entry) => entry.id === 'cohost-focus')?.accelerators).toEqual([
       'CmdOrCtrl+J'
     ])

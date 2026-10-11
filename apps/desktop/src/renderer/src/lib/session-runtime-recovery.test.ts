@@ -60,7 +60,7 @@ describe('session runtime recovery', () => {
       events: [],
       priorSessionState: 'recording'
     })
-    // Plan 174 B-6: on air, so the notice says "live session"; it saved a
+    // Plan 174 B-6: on air, so the notice says "livestream"; it saved a
     // file, so it keeps Open Library and the reveal.
     expect(recovery).toMatchObject({ kind: 'recording-failed', activity: 'record+stream' })
     if (recovery?.kind !== 'recording-failed') throw new Error('Missing recovered failure')
@@ -69,8 +69,8 @@ describe('session runtime recovery', () => {
       activity: recovery.activity,
       currentDedupeKey: null
     })!
-    expect(presentation.notice.message).toBe('Videorc could not finish this live session.')
-    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe('Live session stopped unexpectedly')
+    expect(presentation.notice.message).toBe('Videorc could not finish this livestream.')
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe('Livestream stopped unexpectedly')
 
     vi.stubGlobal('window', { videorc: { revealSession: vi.fn() } })
     try {
@@ -79,7 +79,7 @@ describe('session runtime recovery', () => {
       vi.unstubAllGlobals()
     }
     expect(toastSpies.error).toHaveBeenCalledWith(
-      'Live session stopped unexpectedly',
+      'Livestream stopped unexpectedly',
       expect.objectContaining({
         action: expect.objectContaining({ label: 'Open Library' }),
         cancel: expect.objectContaining({ onClick: expect.any(Function) })
@@ -416,7 +416,7 @@ describe('session audio news (plan 076)', () => {
 
 // Plan 174 B-6: Go Live leaves recording on, and the backend reports that
 // record+stream session as `recording` with a stream URL. Its notices speak of
-// the live session (the audience lost something) and keep the saved file's
+// the livestream (the audience lost something) and keep the saved file's
 // actions (it recorded too).
 describe('record+stream notices (plan 174 B-6)', () => {
   const goLive = {
@@ -435,7 +435,7 @@ describe('record+stream notices (plan 174 B-6)', () => {
 
   beforeEach(() => vi.clearAllMocks())
 
-  it('says a microphone dropout during Go Live leaves the live session silent', () => {
+  it('says a microphone dropout during Go Live leaves the livestream silent', () => {
     const presentation = microphoneLossPresentation({
       event: microphoneLost,
       recording: goLive,
@@ -444,7 +444,7 @@ describe('record+stream notices (plan 174 B-6)', () => {
     })!
     expect(presentation.activity).toBe('record+stream')
     expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe(
-      'Microphone stopped: live session continues with silence'
+      'Microphone stopped: livestream continues with silence'
     )
 
     const recordingOnly = microphoneLossPresentation({

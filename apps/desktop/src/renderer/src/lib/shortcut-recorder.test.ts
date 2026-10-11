@@ -63,9 +63,9 @@ describe('shortcutRecorderStep', () => {
       shortcutRecorderStep(
         press('KeyR', { meta: true, shift: true }),
         'darwin',
-        () => 'Already used by Start / stop recording.'
+        () => 'Already used by Record / stop recording.'
       )
-    ).toEqual({ type: 'reject', message: 'Already used by Start / stop recording.' })
+    ).toEqual({ type: 'reject', message: 'Already used by Record / stop recording.' })
   })
 
   it("refuses Videorc's own keys and names what they do (plan 174 I-17)", () => {

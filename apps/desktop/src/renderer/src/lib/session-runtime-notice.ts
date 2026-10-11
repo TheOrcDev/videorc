@@ -8,7 +8,7 @@ import type { SessionActivity } from '../../../shared/capture-state'
  */
 export type SessionRuntimeActivity = SessionActivity
 
-/** Viewers were watching: the notice speaks of the live session. */
+/** Viewers were watching: the notice speaks of the livestream. */
 export function activityIsLive(activity: SessionRuntimeActivity): boolean {
   return activity !== 'recording'
 }
@@ -40,7 +40,7 @@ export type SessionRuntimeNotice =
 export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string {
   if (notice.kind === 'recording-failed') {
     return activityIsLive(notice.activity)
-      ? 'Live session stopped unexpectedly'
+      ? 'Livestream stopped unexpectedly'
       : 'Recording stopped unexpectedly'
   }
 
@@ -65,17 +65,17 @@ export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string 
 
   if (notice.phase === 'ended') {
     return activityIsLive(notice.activity)
-      ? 'Microphone stopped during the live session'
+      ? 'Microphone stopped during the livestream'
       : 'Microphone stopped: saved recording contains silence'
   }
 
   if (notice.phase === 'ending') {
     return activityIsLive(notice.activity)
-      ? 'Microphone stopped as the live session ends'
+      ? 'Microphone stopped as the livestream ends'
       : 'Microphone stopped: finishing recording with silence'
   }
 
   return activityIsLive(notice.activity)
-    ? 'Microphone stopped: live session continues with silence'
+    ? 'Microphone stopped: livestream continues with silence'
     : 'Microphone stopped: recording continues with silence'
 }

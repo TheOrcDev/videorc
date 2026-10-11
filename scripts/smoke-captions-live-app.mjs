@@ -374,10 +374,10 @@ try {
     'microphone-input-lost health event'
   )
   // This session records AND streams, so the audience hears the silence: the
-  // notice speaks of the live session (plan 174 B-6).
+  // notice speaks of the livestream (plan 174 B-6, S2.2).
   await waitForRendererRuntimeNotice(
     smoke,
-    'Microphone stopped: live session continues with silence',
+    'Microphone stopped: livestream continues with silence',
     'persistent microphone-loss warning'
   )
 
