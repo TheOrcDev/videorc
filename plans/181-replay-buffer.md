@@ -30,7 +30,7 @@
 - **Category**: Feature. Covers recording output, global shortcuts and the
   Studio UI.
 - **Planned at**: commit `672b185c` (origin/main), 2026-10-12
-- **Executed**: 2026-10-12, branch `plan-181-replay-buffer` (S0 decisions below; Phase A and Phase B in one PR at the owner's request)
+- **Executed**: 2026-10-12, branch `plan-181-replay-buffer`, PR #694 (S0 decisions below; Phase A and Phase B in one PR at the owner's request)
 - **Route**: The orchestrator planned it, fit 10. Execution owner is
   Implementation, fit 9: recording output and FFmpeg trigger the
   recording-studio gates. Model lane `fable-5` (multi-system,
