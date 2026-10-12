@@ -156,7 +156,15 @@ function defaultDeps() {
   }
 }
 
-export function buildFaultsScenario({ defineScenario, ...overrides }) {
+// `goLiveSteps` / `stopSteps` (plan 178 U9): the shared steps that take the
+// stream live before the faults and end it after; the scenario file passes
+// U6's common steps, the unit tests pass none and drive the fault steps alone.
+export function buildFaultsScenario({
+  defineScenario,
+  goLiveSteps = [],
+  stopSteps = [],
+  ...overrides
+}) {
   if (typeof defineScenario !== 'function') {
     throw new Error('buildFaultsScenario needs the step engine defineScenario')
   }
@@ -221,6 +229,7 @@ export function buildFaultsScenario({ defineScenario, ...overrides }) {
     estimatedQuotaUnits: 40,
     usesBundledClient: false,
     steps: [
+      ...goLiveSteps,
       {
         id: 'network-loss-30s',
         deadlineMs: NETWORK_LOSS_MS + RECOVERY_DEADLINE_MS + 30_000,
@@ -249,7 +258,8 @@ export function buildFaultsScenario({ defineScenario, ...overrides }) {
         deadlineMs: RECOVERY_DEADLINE_MS + 30_000,
         expect: `${EVENT.stalled} then ${EVENT.outputResumed} (plans 087/161); no failure code`,
         run: (ctx) => pauseStep(ctx, 'ffmpeg-pause-6s', PAUSE_LONG_MS)
-      }
+      },
+      ...stopSteps
     ]
   })
 }

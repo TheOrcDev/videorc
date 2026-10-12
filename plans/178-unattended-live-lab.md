@@ -536,6 +536,35 @@ it off the lab is observer-only, which is the plan's STOP fallback.
 message never arrives; highlight card missing from frames) give the
 expected verdicts.
 
+**BUILT** (branch `plan-178/u9`): the U8 observer, viewer bot and clip
+puller are wired into every `destination: 'youtube'` run
+(`lib/youtube-side.mjs`: `observer.ndjson`, `clips/pulls.ndjson`,
+`quota.json`, Studio-ended into the kill switch, `ctx.observe.incidents()`,
+clip pulls only with policy `clipPull: true` and `isOwnVideo`, else recorded
+as skipped); the app observer also records chat, highlight, caption,
+clip-mark and Buddy events to `events.ndjson` (`lib/feature-events.mjs`);
+`ctx.speech` plays U7 phrases (`lib/speech-rig.mjs`). Scenarios
+`first-light` (params `profile`, `minutes`), `oauth-golive`, `chat`,
+`features`, `resilience`, `marathon` (`marathonHours`), `churn` (`cycles`),
+`idle` (`idleMinutes`, local sink), `vertical`, `scheduled`, `release`
+compose `lib/scenario-steps.mjs`; `faults` now goes live first and stops
+after. Frame checks (`lib/frame-checks.mjs`), the verdict engine
+(`lib/verdict.mjs`, `config/live-lab/thresholds.v1.json`, `mode: report`),
+`report.md` + pure-JS PNG charts (`lib/report.mjs`, `lib/charts.mjs`,
+`lib/png.mjs`) and the fail-closed redaction pass (`lib/redact.mjs`) run at
+the end of every `live:run` (before the lock is released) and offline with
+`node scripts/live-lab/verdict.mjs <runDir>`. Fixture runs under
+`scripts/live-lab/fixtures/` give the four expected verdicts in
+`lib/verdict.test.mjs`. Not built: a plan 166 `update` scenario (U5's
+`live:install` plus the schedule's `update-check` action cover it); the
+bundled-client Go Live is a U15 run (`release` skips that step while the
+policy cap is 0). Owed on the lab machine: a real `first-light` run whose
+`observer.ndjson`, `events.ndjson` and `features.ndjson` fill and whose
+report reads correctly; a BRB `screens.importImage` through the harness;
+captions and Buddy voice steps are skipped until those features are on in
+the lab profile; frame checks need `clipPull: true` (owner decision), until
+then every frame item is needs-eyes.
+
 ### U10 — Remote runner and publishing (plan 166 S8 step 3) — BUILT
 
 **Built:** `live:remote` (SSH with BatchMode, no agent forwarding, validated

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 
 import { collectProcessCensus } from '../../lib/process-census.mjs'
 import { snapshotFromJournalLine } from './card-state.mjs'
+import { featureRecordsFromEvent } from './feature-events.mjs'
 import { systemClock } from './step-engine.mjs'
 
 // Plan 178 U6 (plan 176 L2 step 3). What the app thinks happened:
@@ -279,6 +280,8 @@ export function createAppObserver({
 }) {
   const journal = []
   const health = []
+  const features = []
+  const seenChat = new Set()
   let lastCensus = null
   let lastJournal = null
   let censusTimer = null
@@ -353,11 +356,26 @@ export function createAppObserver({
     /** Feed every renderer-socket message here. */
     onBackendMessage(message) {
       const record = healthRecordFromEvent(message)
-      if (!record) return
-      health.push(record)
-      write('health.ndjson', `${JSON.stringify(record)}\n`)
-      bus.emit('health', record)
+      if (record) {
+        health.push(record)
+        write('health.ndjson', `${JSON.stringify(record)}\n`)
+        bus.emit('health', record)
+      }
+      // Plan 178 U9: chat, highlight, caption, clip-mark and Buddy events.
+      for (const feature of featureRecordsFromEvent(message, new Date(clock.now()).toISOString())) {
+        if (feature.kind === 'chat') {
+          const key = `${feature.id}:${feature.isDeleted ? 'deleted' : 'live'}`
+          if (seenChat.has(key)) continue
+          seenChat.add(key)
+        }
+        features.push(feature)
+        if (features.length > 20_000) features.splice(0, features.length - 20_000)
+        write('events.ndjson', `${JSON.stringify(feature)}\n`)
+        bus.emit('feature', feature)
+      }
     },
+    featureEvents: (kind = null) =>
+      kind ? features.filter((feature) => feature.kind === kind) : [...features],
     pollJournal: () => tail.poll(),
     sampleCensus,
     latestJournal: () => lastJournal,

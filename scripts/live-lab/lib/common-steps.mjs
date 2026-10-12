@@ -78,8 +78,11 @@ export function goLiveSteps({
       title: 'Go live',
       deadlineMs: 120_000,
       async run(ctx) {
+        const confirmedAt = Date.now()
         await ctx.ui.confirmGoLive()
-        return ctx.ui.readGoLiveOutcome({ deadlineMs: 100_000 })
+        const outcome = await ctx.ui.readGoLiveOutcome({ deadlineMs: 100_000 })
+        // Start latency for the verdict (plan 166 "Start latency" signal).
+        return { ...outcome, liveAfterMs: Date.now() - confirmedAt }
       },
       expect: (outcome) =>
         outcome.outcome === 'live' || `${outcome.outcome}: ${outcome.reason ?? ''}`

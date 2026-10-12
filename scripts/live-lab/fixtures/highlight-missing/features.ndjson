@@ -1,0 +1,3 @@
+{"at":"2026-10-12T06:02:30.000Z","id":"scene-screen-camera","kind":"scene","preset":"screen-camera","sceneId":2}
+{"at":"2026-10-12T06:03:00.000Z","id":"comment-highlight","kind":"highlight","via":"click"}
+{"at":"2026-10-12T06:03:01.000Z","id":"highlight-card-look","kind":"needs-eyes","question":"Does the highlight card look right on the stream?","frameHint":"comment-highlight"}
