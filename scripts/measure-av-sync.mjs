@@ -44,6 +44,7 @@ import {
   flashClickFixtureArgs,
   measureAvSync
 } from './lib/av-sync.mjs'
+import { fixtureH264EncoderArgs } from './lib/ffmpeg-available.mjs'
 import {
   SYSTEM_AUDIO_SYNC_TOLERANCE_MS,
   SYSTEM_AUDIO_TONE_HZ,
@@ -71,7 +72,14 @@ async function main() {
     }
     const seconds = numFlag(argv, '--seconds') ?? 10
     const audioDelayMs = numFlag(argv, '--audio-delay-ms') ?? 0
-    await runFfmpeg(ffmpegPath, flashClickFixtureArgs(out, { seconds, audioDelayMs }))
+    await runFfmpeg(
+      ffmpegPath,
+      flashClickFixtureArgs(out, {
+        seconds,
+        audioDelayMs,
+        videoCodecArgs: fixtureH264EncoderArgs(ffmpegPath)
+      })
+    )
     console.log(`Wrote flash+click fixture: ${out} (${seconds}s, audio delay ${audioDelayMs}ms)`)
     return 0
   }

@@ -536,6 +536,12 @@ export interface SourceSelection {
   cameraOff?: boolean
   microphoneId?: string
   microphoneName?: string
+  /**
+   * The user chose no microphone (plan 0027), the microphone twin of
+   * `cameraOff`: without it None reads as "never chosen" and any scene click or
+   * device refresh turns the first microphone back on. Renderer intent only.
+   */
+  microphoneOff?: boolean
   testPattern?: boolean
 }
 
@@ -1802,7 +1808,13 @@ export interface StreamOutputTopologyProbeResult {
   effectiveBridgeOutput: StreamOutputBridge
   effectiveEncodeBackend: EncodeBackend
   probeState: StreamOutputTopologyProbeState
+  /** Topology fallback only: a rejected/unsupported probe or a changed bridge. */
   fallbackReason?: string
+  /**
+   * Why the raw path uses this encoder (Linux OpenH264, VAAPI rejected, a
+   * failed Quick Sync check). Informational in every probe state (plan 0015).
+   */
+  encoderSelectionReason?: string
 }
 
 export type CompositorBackend = 'metal' | 'd3d11' | 'cpu' | 'cpu-fallback'

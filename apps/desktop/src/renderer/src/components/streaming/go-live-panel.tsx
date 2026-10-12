@@ -449,6 +449,9 @@ export function TechnicalDetails({
   const fallbackReason = liveOutputActive
     ? diagnosticStats.encoderBridgeEncodedOutputFallbackReason
     : probeResult?.fallbackReason
+  // Plan 0015: why the raw path uses this encoder (Linux OpenH264, VAAPI
+  // rejected). Informational; the live diagnostics fold it into the reason.
+  const encoderNote = liveOutputActive ? undefined : probeResult?.encoderSelectionReason
   const coalescedFrames = diagnosticStats.encoderBridgeSeparateOutputEncodersActive
     ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
     : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
@@ -532,6 +535,9 @@ export function TechnicalDetails({
             }
           />
           {fallbackReason ? <DetailRow label="Fallback reason" value={fallbackReason} /> : null}
+          {encoderNote && !fallbackReason ? (
+            <DetailRow label="Encoder note" value={encoderNote} />
+          ) : null}
           <DetailRow label="Keyframe interval" value={`${STREAM_OUTPUT_GOP_SECONDS} s`} />
           <DetailRow
             label="Encode sharing"

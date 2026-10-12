@@ -313,7 +313,11 @@ function titleCaseOffenders(path: string, source: string): string[] {
   })
 }
 
-describe('renderer copy guards (plan 174)', () => {
+// Whole-renderer source scans are CPU-bound: under a parallel full run on a
+// laptop they pass vitest's 5 s default (ogre 2026-10-12: 6.9 s; 1.5 s alone).
+const SOURCE_SCAN_TIMEOUT = { timeout: 30_000 }
+
+describe('renderer copy guards (plan 174)', SOURCE_SCAN_TIMEOUT, () => {
   const files = rendererSources().map((path) => ({
     path: relative(RENDERER_ROOT, path).split(sep).join('/'),
     source: readFileSync(path, 'utf8')

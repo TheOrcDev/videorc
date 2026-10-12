@@ -20,9 +20,10 @@ import {
   startupReportBaseName,
   summarizeDimensionRuns,
 } from './startup-resolution-analyzer.mjs'
-import { ffmpegAvailable } from './ffmpeg-available.mjs'
+import { ffmpegAvailable, fixtureH264EncoderArgs } from './ffmpeg-available.mjs'
 
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+const videoCodecArgs = fixtureH264EncoderArgs(ffmpegPath)
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 
 describe('startupReportBaseName', () => {
@@ -189,17 +190,17 @@ describe('analyzeStartupResolution (integration)', { skip: ffmpegAvailable(ffmpe
 
     await generate([
       '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=30',
-      '-t', '3', '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-t', '3', '-fps_mode', 'cfr', ...videoCodecArgs, '-pix_fmt', 'yuv420p',
       clean,
     ])
     await generate([
       '-f', 'lavfi', '-i', 'color=c=blue:size=320x240:rate=30',
-      '-t', '3', '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-t', '3', '-fps_mode', 'cfr', ...videoCodecArgs, '-pix_fmt', 'yuv420p',
       staticFile,
     ])
     await generate([
       '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30',
-      '-t', '3', '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-t', '3', '-fps_mode', 'cfr', ...videoCodecArgs, '-pix_fmt', 'yuv420p',
       previewSized,
     ])
   })

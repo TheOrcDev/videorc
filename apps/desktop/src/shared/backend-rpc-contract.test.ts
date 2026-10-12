@@ -309,6 +309,42 @@ describe('backend RPC contract', () => {
     ]) {
       expect(() => validateBackendRpcResult('stream.output.topology.probe', malformed)).toThrow()
     }
+
+    // Plan 0015: Linux OpenH264 / VAAPI raw path. The encoder note is
+    // informational in every state; a fallbackReason on a healthy topology is
+    // still a contract violation.
+    const linux: StreamOutputTopologyProbeResult = {
+      capabilityKey: `stream-output-topology-v1:${'b'.repeat(64)}`,
+      streamProfile: params.streamProfile,
+      outputRoles: ['shared'],
+      requestedBridgeOutput: 'raw-yuv420p',
+      effectiveBridgeOutput: 'raw-yuv420p',
+      effectiveEncodeBackend: 'software-open-h264',
+      probeState: 'not-required',
+      encoderSelectionReason: 'OpenH264 software encoding was selected explicitly for this session.'
+    }
+    expect(validateBackendRpcResult('stream.output.topology.probe', linux)).toEqual(linux)
+    const vaapi = { ...linux, effectiveEncodeBackend: 'hardware-vaapi' as const }
+    delete (vaapi as Partial<StreamOutputTopologyProbeResult>).encoderSelectionReason
+    expect(validateBackendRpcResult('stream.output.topology.probe', vaapi)).toEqual(vaapi)
+    expect(
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...result,
+        encoderSelectionReason: 'Intel Quick Sync was selected but its check failed.'
+      })
+    ).toMatchObject({ probeState: 'rejected' })
+    expect(() =>
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...linux,
+        fallbackReason: linux.encoderSelectionReason
+      })
+    ).toThrow('fallbackReason')
+    expect(() =>
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...linux,
+        encoderSelectionReason: ''
+      })
+    ).toThrow('encoderSelectionReason')
   })
 
   it('types and exactly validates authoritative secret-free stream-target snapshots', () => {

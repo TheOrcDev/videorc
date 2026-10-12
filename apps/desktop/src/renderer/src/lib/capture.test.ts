@@ -111,6 +111,43 @@ describe('reconcileSourceSelection', () => {
     })
   })
 
+  describe('microphone None (plan 0027)', () => {
+    const devices = [
+      { id: 'screen:1', name: 'Display 1', kind: 'screen', status: 'available' },
+      { id: 'mic:1', name: 'Built-in Microphone', kind: 'microphone', status: 'available' },
+      { id: 'mic:2', name: 'USB Microphone', kind: 'microphone', status: 'available' }
+    ] as const satisfies Device[]
+
+    it('keeps an explicit None through every device refresh and layout transaction', () => {
+      const none = buildMicrophoneSources(
+        { screenId: 'screen:1', microphoneId: 'mic:1' },
+        [...devices],
+        undefined
+      )
+      const once = reconcileSourceSelection(none, [...devices])
+      expect(once.microphoneId).toBeUndefined()
+      expect(once.microphoneName).toBeUndefined()
+      expect(once.microphoneOff).toBe(true)
+      expect(reconcileSourceSelection(once, [...devices])).toEqual(once)
+      expect(reconcileSourceSelectionForLayoutTransaction(once, [...devices])).toEqual(once)
+    })
+
+    it('still picks the first microphone when none was ever chosen', () => {
+      const next = reconcileSourceSelection({ screenId: 'screen:1' }, [...devices])
+      expect(next.microphoneId).toBe('mic:1')
+      expect(next.microphoneOff).toBeUndefined()
+    })
+
+    it('drops a stale None once a microphone is set, and falls back if it vanished', () => {
+      expect(
+        reconcileSourceSelection({ microphoneId: 'mic:2', microphoneOff: true }, [...devices])
+      ).toMatchObject({ microphoneId: 'mic:2', microphoneOff: undefined })
+      expect(
+        reconcileSourceSelection({ microphoneId: 'mic:gone', microphoneOff: true }, [...devices])
+      ).toMatchObject({ microphoneId: 'mic:1', microphoneOff: undefined })
+    })
+  })
+
   it('keeps the dev synthetic source authoritative across later device refreshes', () => {
     const next = reconcileSourceSelection(
       {
@@ -1835,13 +1872,16 @@ describe('buildCaptureSources / buildCameraSources / buildMicrophoneSources', ()
     expect(on.cameraOff).toBeUndefined()
   })
 
-  it('sets microphone id + name and clears it for undefined', () => {
+  it('sets microphone id + name and records an explicit None for undefined', () => {
     const set = buildMicrophoneSources({}, microphones, 'mic:1')
     expect(set.microphoneId).toBe('mic:1')
     expect(set.microphoneName).toBe('MacBook Mic')
+    expect(set.microphoneOff).toBeUndefined()
     const cleared = buildMicrophoneSources({ microphoneId: 'mic:1' }, microphones, undefined)
     expect(cleared.microphoneId).toBeUndefined()
     expect(cleared.microphoneName).toBeUndefined()
+    expect(cleared.microphoneOff).toBe(true)
+    expect(buildMicrophoneSources(cleared, microphones, 'mic:1').microphoneOff).toBeUndefined()
   })
 })
 
