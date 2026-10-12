@@ -18,6 +18,7 @@ import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-sh
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { shortcutsByGroup } from '@/lib/shortcuts'
+import { systemAudioDevice } from '@/lib/system-audio'
 
 const GLOBAL_ACTION_ROWS = [
   'record-toggle',
@@ -30,12 +31,33 @@ const GLOBAL_ACTION_ROWS = [
 ] as const satisfies readonly GlobalShortcutAction[]
 
 /**
+ * The global shortcut rows this computer can act on. System audio has no
+ * producer on Linux, so its shortcut only ever toasted "isn't available"
+ * (Linux plan 0019); a binding saved elsewhere stays visible so it can be
+ * cleared.
+ */
+export function globalShortcutRows(input: {
+  systemAudioAvailable: boolean
+  systemAudioBound: boolean
+}): readonly GlobalShortcutAction[] {
+  return GLOBAL_ACTION_ROWS.filter(
+    (action) =>
+      action !== 'system-audio-toggle' || input.systemAudioAvailable || input.systemAudioBound
+  )
+}
+
+/**
  * Settings → Shortcuts: the global shortcuts you record, beside every key that
  * works inside Videorc. The recorders are the only home of a global binding,
  * so the in-app list does not repeat them.
  */
 export function ShortcutsSettings(): ReactElement {
-  const { settings, setSettings, runtimeInfo } = useStudioCore()
+  const { settings, setSettings, runtimeInfo, deviceList } = useStudioCore()
+  const systemAudio = systemAudioDevice(deviceList)
+  const actionRows = globalShortcutRows({
+    systemAudioAvailable: Boolean(systemAudio && systemAudio.status !== 'unavailable'),
+    systemAudioBound: Boolean(settings.globalShortcuts?.systemAudioToggle)
+  })
 
   // Plan 062: shortcuts are recorded by pressing them, not typed.
   const shortcutRegistration = useSyncExternalStore(
@@ -68,7 +90,7 @@ export function ShortcutsSettings(): ReactElement {
         title="Global shortcuts"
       >
         <FieldGroup variant="grouped">
-          {GLOBAL_ACTION_ROWS.map((action) => (
+          {actionRows.map((action) => (
             <ShortcutRecorderField
               key={action}
               id={`global-shortcut-${action}`}

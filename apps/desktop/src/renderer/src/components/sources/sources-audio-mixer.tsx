@@ -71,6 +71,7 @@ import {
 } from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
 import { microphoneIndicatorCopy, platformCopy } from '@/lib/platform-copy'
+import { isCoreAudioMicrophoneId } from '@/lib/warm-microphone-gate'
 import type { MicMonitorState } from '@/lib/state-labels'
 import {
   microphoneStatus,
@@ -224,12 +225,18 @@ export function SourcesAudioMixer(): ReactElement {
                   ) : null
                 }
                 gainDb={audio.microphoneGainDb}
-                keepReady={{
-                  checked: settings.keepMicrophoneWarm !== false,
-                  description: keepMicrophoneReadyHint(platform),
-                  onCheckedChange: (keepMicrophoneWarm) =>
-                    setSettings((current) => ({ ...current, keepMicrophoneWarm }))
-                }}
+                // Only a CoreAudio input can be kept warm (warm-microphone-gate):
+                // on Linux and Windows the switch did nothing (Linux plan 0019).
+                keepReady={
+                  isCoreAudioMicrophoneId(captureConfig.sources.microphoneId)
+                    ? {
+                        checked: settings.keepMicrophoneWarm !== false,
+                        description: keepMicrophoneReadyHint(platform),
+                        onCheckedChange: (keepMicrophoneWarm) =>
+                          setSettings((current) => ({ ...current, keepMicrophoneWarm }))
+                      }
+                    : undefined
+                }
                 meter={microphone.meter}
                 microphoneSelected={Boolean(selectedMicrophone)}
                 monitorState={microphone.monitorState}
