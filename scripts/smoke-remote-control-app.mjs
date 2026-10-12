@@ -203,6 +203,23 @@ try {
   }
   console.log('remote-control smoke: clipMark relay + refusal reason OK')
 
+  // 4b'. replaySave (plan 181 S5) is on the allowlist too: with the ring off
+  // the renderer refuses it with its reason, so admission + relay + ack are
+  // proven without arming a session here (pnpm smoke:replay-buffer saves).
+  const replayAckPromise = waitForRemoteEvent(remote, 'remote.ack')
+  const replayTicket = await remoteRequest(remote, 'remote.intent', { kind: 'replaySave' })
+  if (!replayTicket.payload?.accepted) fail('replaySave intent was not accepted')
+  const replayAck = await replayAckPromise
+  if (replayAck?.intentId !== replayTicket.payload.intentId || replayAck?.ok !== false) {
+    fail(
+      `replaySave with the ring off was not refused through the renderer: ${JSON.stringify(replayAck)}`
+    )
+  }
+  if (replayAck?.message !== 'The replay buffer is off. Turn it on in Studio.') {
+    fail(`replaySave refusal carried the wrong reason: ${JSON.stringify(replayAck)}`)
+  }
+  console.log('remote-control smoke: replaySave relay + refusal reason OK')
+
   // 4c. System audio (plan 069 S6): the projection carries exactly two
   // booleans, and systemAudioToggle relays through the renderer. With the
   // Screen Recording grant it flips the confirmed state (and is flipped back);

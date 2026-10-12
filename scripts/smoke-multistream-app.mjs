@@ -33,7 +33,14 @@ const targetCount = Math.min(
   Math.max(1, Number(process.env.VIDEORC_SMOKE_TARGETS ?? Math.min(3, maxDestinations)))
 )
 const basePort = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 11935)
-const streamMs = Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 5000)
+// Plan 181 S7: with VIDEORC_SMOKE_REPLAY_SECONDS=N the replay ring rides the
+// record + stream session, a replay saves mid-stream, and the recording and
+// every leg must pass the same gates they pass without it.
+const replaySeconds = Math.max(0, Number(process.env.VIDEORC_SMOKE_REPLAY_SECONDS ?? 0))
+const streamMs = Math.max(
+  Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 5000),
+  replaySeconds > 0 ? (replaySeconds + 6) * 1000 : 0
+)
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 2500)
 
 const PLATFORMS = [
@@ -164,6 +171,7 @@ try {
   // the offline destination is reported failed while the healthy ones stay live.
   const targetSnapshots = []
   const diagnosticSamples = []
+  const replayOutcomes = []
   ws.addEventListener('message', (event) => {
     let message
     try {
@@ -176,6 +184,9 @@ try {
     }
     if (message?.event === 'diagnostics.stats') {
       diagnosticSamples.push(message.payload)
+    }
+    if (message?.event === 'replay.saved' || message?.event === 'replay.saveFailed') {
+      replayOutcomes.push({ event: message.event, payload: message.payload })
     }
   })
   try {
@@ -206,10 +217,42 @@ try {
     )
     console.log(`  stream targets: ${started.streamUrl ?? 'n/a'}`)
 
+    if (replaySeconds > 0) {
+      // The ring rides this session: on, not buffer-only, this session's.
+      const ring = await waitForReplayRing(
+        ws,
+        (state) =>
+          state?.state === 'on' && state?.replayOnly !== true && state?.sessionId === started.sessionId,
+        'the ring riding the record + stream session'
+      )
+      console.log(`Replay ring riding session ${ring.sessionId} (${ring.seconds} s)`)
+    }
+
     await sleep(streamMs)
+
+    let replay = null
+    if (replaySeconds > 0) {
+      const accepted = await request(ws, timeoutMs, 'replay.save')
+      console.log(`Save replay mid-stream accepted (${accepted.saveId})`)
+      const deadline = Date.now() + 45_000
+      while (!replayOutcomes.some((outcome) => outcome.payload?.saveId === accepted.saveId)) {
+        if (Date.now() > deadline) throw new Error('No replay.saved or replay.saveFailed within 45 s.')
+        await sleep(200)
+      }
+      replay = replayOutcomes.find((outcome) => outcome.payload?.saveId === accepted.saveId)
+      if (replay.event !== 'replay.saved') {
+        throw new Error(`Save replay mid-stream failed: ${JSON.stringify(replay.payload)}`)
+      }
+    }
 
     const stopped = await request(ws, timeoutMs, 'session.stop')
     await sleep(2000) // let listeners flush + finalize their FLV after the publisher disconnects
+
+    if (replaySeconds > 0) {
+      await verifyReplay(replay.payload)
+      // Nothing re-arms here (no renderer switch): the ring ends with the session.
+      await waitForReplayRing(ws, (state) => state?.state === 'off', 'the ring off after Stop')
+    }
 
     await verifyResults(
       stopped.outputPath ?? started.outputPath,
@@ -225,6 +268,56 @@ try {
     await stopListener(listener)
   }
   await stopApp()
+}
+
+async function waitForReplayRing(ws, predicate, label) {
+  const deadline = Date.now() + 20_000
+  let last = null
+  while (Date.now() < deadline) {
+    last = await request(ws, timeoutMs, 'replay.status')
+    if (predicate(last)) return last
+    await sleep(250)
+  }
+  throw new Error(`Timed out waiting for ${label}; last replay.status: ${JSON.stringify(last)}`)
+}
+
+/** Plan 181 S7: the replay saved mid-stream is a real MP4 of the program. */
+async function verifyReplay(saved) {
+  if (!saved?.path || !existsSync(saved.path)) {
+    throw new Error(`Replay missing on disk: ${saved?.path}`)
+  }
+  if (saved.seconds !== replaySeconds) {
+    throw new Error(`Replay event seconds ${saved.seconds} != ${replaySeconds}`)
+  }
+  const quality = await analyzeRecording(saved.path, {
+    ffmpegPath,
+    ffprobePath: process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
+    intendedFps: 30,
+    expectAudio: true,
+    gates: {
+      requireMotion: false,
+      keyframeMaxIntervalSeconds: 2.5,
+      requireKeyframeEvidence: true,
+      avSyncTargetMs: Number.POSITIVE_INFINITY,
+      avSyncHardFailMs: Number.POSITIVE_INFINITY,
+      frameCountTolerance: Number.POSITIVE_INFINITY,
+      maxDurationStretchRatio: Number.POSITIVE_INFINITY
+    }
+  })
+  if (!quality.verdict.pass) {
+    throw new Error(`Replay failed quality gates: ${quality.verdict.failures.join('; ')}`)
+  }
+  const { durationSeconds, hasAudio } = quality.metrics
+  const expected = saved.complete ? replaySeconds : saved.coveredSeconds
+  if (!hasAudio) throw new Error(`Replay ${saved.path} has no audio stream`)
+  if (durationSeconds < expected - 0.75 || durationSeconds > expected + 2.5) {
+    throw new Error(
+      `Replay runs ${durationSeconds.toFixed(2)} s, expected ${expected} to ${expected + 2.5} s`
+    )
+  }
+  console.log(
+    `  ✓ replay ${saved.path} · ${durationSeconds.toFixed(2)} s · complete=${saved.complete} · row ${saved.replaySessionId}`
+  )
 }
 
 async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
@@ -454,6 +547,7 @@ function multistreamBaseParams(outputDirectoryCapability, timestamp) {
       // kept valid so the fallback path never chokes on empty credentials.
       rtmp: { preset: 'custom', serverUrl: targets[0].serverUrl, streamKey: targets[0].streamKey }
     },
+    ...(replaySeconds > 0 ? { replay: { seconds: replaySeconds } } : {}),
     streaming: {
       enabled: true,
       mode: allTargets.length > 1 ? 'multi' : 'single',

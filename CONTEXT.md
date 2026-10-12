@@ -57,6 +57,22 @@ _Avoid_: broadcast (except a platform's own object, like an X broadcast), live s
 What Videorc writes to a file, and each item in Library.
 _Avoid_: session (in copy), take, capture
 
+**Replay buffer**:
+The feature and its switch (plan 181): Videorc keeps the last N seconds of
+the program ready, writing nothing permanent. Its state reads "Replay ·
+0:30"; it is never "Recording" or "On air".
+_Avoid_: instant replay, replay cache, buffer (alone)
+
+**Save replay**:
+The action that writes the replay buffer's last seconds to a file: the
+Studio button, the global key, ⌘K, a deck key.
+_Avoid_: Clip, Save clip, Capture replay
+
+**Replay**:
+The saved file ("Replay 2026-10-12 18-30-05.mp4" in the Replays folder, a
+row in Library). A replay is not a clip: a clip is a clip mark.
+_Avoid_: clip, highlight (for the file)
+
 **On stream**:
 Shown in what viewers see: a chat message, a takeover, Buddy. The actions
 are "Show on stream" and "Take off stream".

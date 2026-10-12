@@ -72,7 +72,8 @@ Intent params (`kind` + fields):
 | `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                           |
 | `commentHighlight`                                       | `messageId`                              | put that live-chat comment on stream (explicit show, idempotent — never a toggle) |
 | `commentHighlightClear`                                  | —                                        | take the on-stream comment down                                                   |
-| `clipMark`                                               | —                                        | mark this moment for a clip (plan 068); needs an active session and recording on  |
+| `clipMark`                                               | —                                        | mark this moment for a clip (plan 068); recording off: saves a replay (plan 181)  |
+| `replaySave`                                             | —                                        | save the replay buffer's last seconds as a replay (plan 181); refused while off   |
 
 ### Starting and stopping
 

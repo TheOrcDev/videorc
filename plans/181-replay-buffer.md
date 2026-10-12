@@ -545,3 +545,84 @@ list parser, `keep_count` (`ceil(N/2)+2`), `segments_to_prune`,
 tails, `replay_file_name`, `required_free_bytes` and the `split` rewrite
 for the raw and legacy encoder graphs. `cargo test -p videorc-backend
 replay_buffer`: 13 passed.
+
+### Architecture as built (S2-S5, S7, S8)
+
+- **The ring is one more output on the session's FFmpeg child.** Every arg
+  builder (record-only bridge, shared bridge with copy fan-out or tee, the
+  split dual/caption builder, the legacy all-in-FFmpeg path) appends
+  `-f segment` when `StartSessionParams.replay` is set: a stream copy
+  behind the encoded bridges, a `split` of the graph plus a second encode
+  on the raw and legacy paths. So Phase A (buffer-only) and Phase B S7
+  (ride-along) are the same code; a buffer-only session is the case with no
+  primary output.
+- **A buffer-only session composes exactly like a record-only session.**
+  `start_session` raises `record_enabled` for every pipeline decision
+  (bridge, encoder posture, overlay plan, Windows D3D11 candidacy) and
+  every file-only step checks `replay_only`: no output path, no Library
+  row (`register_rowless_session`; logs, health events and finalization
+  persistence skip the `sessions` foreign key), no remembered capture, no
+  captions, mode `replay`.
+- **The wire tells the truth instead of hiding the session.** The plan's
+  "the renderer never sees a buffer-only session as Recording" is met with
+  `recording.status.replayOnly`, not by hiding the session: the Studio
+  keeps its live paths (mute, system audio, layout, sources reach the
+  ring), while `sessionStatusKind` reads Ready, `isSessionTransportActive`
+  keeps Record and Go Live, main's `recordingStateFromPayload` reads idle
+  (quit, update and permission restarts never wait on a ring), and the
+  remote `sessionActive` excludes it. Hiding it would have sent every live
+  control down the idle path, so a mute would not have muted the ring.
+- **The handover lives in the backend.** `session.start` from any caller
+  (button, Space, ⌘K, global key, deck, phone, smoke) stops a running
+  buffer-only session first (bounded, nothing to finalize), waits for its
+  microphone and slot to release, then starts the real session with the
+  ring attached. The renderer's part is one pure decision
+  (`lib/replay-buffer-reconcile.ts`): start the buffer-only session when
+  the switch is on and nothing runs, stop it when the switch goes off,
+  re-arm after a session ends, back off and give up after three failed
+  starts. D4's "paused" is now only the restart gap at a session boundary:
+  Save replay then marks the recording instead (toast), or says the buffer
+  is off.
+- **Save replay answers at once** (`replay.save` → `{saveId, queued}`) and
+  reports by `replay.saved` / `replay.saveFailed`, because the renderer's
+  mutation lane is ordered and a save can take 4 s (the boundary wait)
+  plus a concat. A press during a save queues one more; a third joins it.
+- **S8**: `clip.mark` with no file and the ring on routes to the save,
+  answers `reason: "replay-saved"` and emits no `clip.marked`; the Stream
+  Manager's own result reads "Saving a replay instead".
+- **`replay.state` carries `segmentFiles`** after each prune pass, so the
+  smoke holds the disk bound from the wire without a path.
+- **New global action** `replay-save` (`replaySave`, unbound), remote
+  intent `replaySave` (debounce bucket `replay`), palette "Save replay",
+  settings `captureConfig.replayBuffer { seconds, startOnLaunch }`.
+- **UI** follows the design skill: a `Switch` in a `Field` with the ring's
+  words on a `StatusDot`, Save replay as a 28 px outline button with its
+  `ShortcutKeys`, the Output section as `SettingsRow`s in a grouped
+  `FieldGroup` with the `ShortcutRecorderField`, the status bar chip a
+  neutral `StatusDot`. The ring's controls ride their own context
+  (`useStudioReplay`), so its once-a-second tick never re-renders the
+  shell or every `useStudioCore` consumer. The Studio row is a lazy chunk.
+
+### Deviations from the plan text
+
+- S2's "headless backend test ... arms for 40 s" and S3's "backend test
+  ... waits 40 s, and saves": no cargo test in this crate drives
+  `start_session` through a real pipeline (the one that reaches Recording
+  uses a stub); every recording proof here runs under the app harness. So
+  the 40 s arm, the disk bound over 3 × N and the saves are proven by
+  `pnpm smoke:replay-buffer` against the real app; cargo covers the args
+  per path, the registry, pruning, and the save flow against a real ring
+  built from a test pattern and a sine tone (ignored test, run locally).
+- S4's handover is backend-side (above), so the renderer helper is the
+  reconcile decision rather than a stop-then-start sequence.
+- `replay.state` has no `paused`: the backend never pauses a ring. The
+  renderer's words say "Starts after this session" when armed mid-session.
+- The smokes' audio is the dev binary's silent session bus (no microphone
+  or Screen Recording grant for a worktree binary; the diagnostic FFmpeg
+  tone needs no requested microphone, and the renderer always requests
+  one). The analyzer proves AAC continuity and the stop tail; the audible
+  offset is the real-game acceptance's.
+- The renderer asset budget: eager JS 1,942,670 raw / 388,847 gzip on this
+  Mac against 2,000,000 / 390,000 (CI Linux gzip reads about 1.6 KB
+  lower). No earlier report exists in the worktree to state the exact
+  delta; the Studio row, the Output section and the toasts are lazy.
