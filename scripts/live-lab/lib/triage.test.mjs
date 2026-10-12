@@ -32,6 +32,9 @@ import {
   verdictSummary
 } from './triage.mjs'
 
+// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
+const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+
 const settings = JSON.parse(await readFile(SETTINGS_PATH, 'utf8'))
 const skillText = await readFile(SKILL_PATH, 'utf8')
 
@@ -580,101 +583,105 @@ function fakeExec(calls, { ghView = null } = {}) {
 
 const redactor = { redactText: localRedactText, findSensitive: localFindSensitive, source: 'local' }
 
-test('triageRun end to end with a fake claude: prompt in, validated comment out, triaged.json written', async () => {
-  const dir = await freshDir()
-  const runDir = await seedRun(dir)
-  const calls = []
-  const invocations = []
-  const analysis = {
-    summary: 'The leg died while the app said On air.',
-    likelyCauses: [
-      { signature: 'stream:noData-while-live', commit: 'abc1234', why: 'touches the leg monitor' }
-    ],
-    needsEyes: [{ id: 'highlight-card-look', frame: 'frames/h1.png', seen: 'A blank frame.' }],
-    comments: [
-      {
-        issue: 701,
-        body: 'The run saw noData for 90 s (observer.ndjson) while the app stayed On air; may come from abc1234.'
-      },
-      {
-        issue: 999,
-        body: 'This issue is not in published.json and must be refused by the wrapper.'
-      }
-    ]
-  }
-  const record = await triageRun({
-    runDir,
-    harnessDir: '/x/videorc',
-    now: () => new Date('2026-10-12T13:40:00Z'),
-    env: { PATH: '/usr/bin', GH_TOKEN: 'ghp_secret_value_here_1234567890' },
-    deps: {
-      exec: fakeExec(calls),
-      redactor,
-      invoke: async (call) => {
-        invocations.push(call)
-        return {
-          code: 0,
-          signal: null,
-          stdout: claudeResult(analysis),
-          stderr: '',
-          timedOut: false
+test(
+  'triageRun end to end with a fake claude: prompt in, validated comment out, triaged.json written',
+  macOnly,
+  async () => {
+    const dir = await freshDir()
+    const runDir = await seedRun(dir)
+    const calls = []
+    const invocations = []
+    const analysis = {
+      summary: 'The leg died while the app said On air.',
+      likelyCauses: [
+        { signature: 'stream:noData-while-live', commit: 'abc1234', why: 'touches the leg monitor' }
+      ],
+      needsEyes: [{ id: 'highlight-card-look', frame: 'frames/h1.png', seen: 'A blank frame.' }],
+      comments: [
+        {
+          issue: 701,
+          body: 'The run saw noData for 90 s (observer.ndjson) while the app stayed On air; may come from abc1234.'
+        },
+        {
+          issue: 999,
+          body: 'This issue is not in published.json and must be refused by the wrapper.'
+        }
+      ]
+    }
+    const record = await triageRun({
+      runDir,
+      harnessDir: '/x/videorc',
+      now: () => new Date('2026-10-12T13:40:00Z'),
+      env: { PATH: '/usr/bin', GH_TOKEN: 'ghp_secret_value_here_1234567890' },
+      deps: {
+        exec: fakeExec(calls),
+        redactor,
+        invoke: async (call) => {
+          invocations.push(call)
+          return {
+            code: 0,
+            signal: null,
+            stdout: claudeResult(analysis),
+            stderr: '',
+            timedOut: false
+          }
         }
       }
-    }
-  })
-  assert.equal(invocations.length, 1)
-  const call = invocations[0]
-  assert.equal(call.cwd, runDir)
-  assert.equal(call.env.GH_TOKEN, undefined, 'the agent never sees the GitHub token')
-  assert.equal(call.env.PATH, '/usr/bin')
-  assert.equal(call.args[call.args.indexOf('--settings') + 1], SETTINGS_PATH)
-  assert.equal(call.args[call.args.indexOf('--add-dir') + 1], '/x/videorc')
-  assert.match(call.prompt, /## Triage a run/)
-  assert.match(call.prompt, /### #701 noData while live \(OPEN\)/)
-  assert.match(call.prompt, /abc1234 2026-10-11 fix\(stream\)/)
-  assert.ok(!call.prompt.includes(dir), 'the prompt never carries the run folder path')
+    })
+    assert.equal(invocations.length, 1)
+    const call = invocations[0]
+    assert.equal(call.cwd, runDir)
+    assert.equal(call.env.GH_TOKEN, undefined, 'the agent never sees the GitHub token')
+    assert.equal(call.env.PATH, '/usr/bin')
+    assert.equal(call.args[call.args.indexOf('--settings') + 1], SETTINGS_PATH)
+    assert.equal(call.args[call.args.indexOf('--add-dir') + 1], '/x/videorc')
+    assert.match(call.prompt, /## Triage a run/)
+    assert.match(call.prompt, /### #701 noData while live \(OPEN\)/)
+    assert.match(call.prompt, /abc1234 2026-10-11 fix\(stream\)/)
+    assert.ok(!call.prompt.includes(dir), 'the prompt never carries the run folder path')
 
-  assert.ok(calls.some((c) => c[0] === 'git' && c.includes('/x/videorc') && c.includes('log')))
-  assert.ok(
-    calls.some(
-      (c) =>
-        c.join(' ') ===
-        `gh issue view 701 --repo ${ISSUES_REPO} --json number,title,state,body,comments`
+    assert.ok(calls.some((c) => c[0] === 'git' && c.includes('/x/videorc') && c.includes('log')))
+    assert.ok(
+      calls.some(
+        (c) =>
+          c.join(' ') ===
+          `gh issue view 701 --repo ${ISSUES_REPO} --json number,title,state,body,comments`
+      )
     )
-  )
-  const posted = calls.filter((c) => c[0] === 'gh' && c[2] === 'comment')
-  assert.equal(posted.length, 1, 'only the allowed issue gets a comment')
-  assert.deepEqual(posted[0].slice(0, 5), ['gh', 'issue', 'comment', '701', '--repo'])
-  assert.equal(posted[0][5], ISSUES_REPO)
-  assert.equal(posted[0][7], join(runDir, 'triage', 'comment-701.md'))
-  const bodyText = await readFile(join(runDir, 'triage', 'comment-701.md'), 'utf8')
-  assert.match(bodyText, /Live lab triage/)
-  assert.match(bodyText, /may come from abc1234/)
+    const posted = calls.filter((c) => c[0] === 'gh' && c[2] === 'comment')
+    assert.equal(posted.length, 1, 'only the allowed issue gets a comment')
+    assert.deepEqual(posted[0].slice(0, 5), ['gh', 'issue', 'comment', '701', '--repo'])
+    assert.equal(posted[0][5], ISSUES_REPO)
+    assert.equal(posted[0][7], join(runDir, 'triage', 'comment-701.md'))
+    const bodyText = await readFile(join(runDir, 'triage', 'comment-701.md'), 'utf8')
+    assert.match(bodyText, /Live lab triage/)
+    assert.match(bodyText, /may come from abc1234/)
 
-  assert.equal(record.status, 'posted')
-  assert.equal(record.reason, '1 posted, 1 refused')
-  assert.deepEqual(record.issues, [701])
-  assert.equal(record.comments[0].posted, true)
-  assert.deepEqual(record.comments[1], {
-    issue: 999,
-    posted: false,
-    reason: 'issue not in published.json'
-  })
-  assert.equal(record.claude.costUsd, 0.42)
-  assert.equal(record.claude.numTurns, 7)
-  const written = JSON.parse(await readFile(join(runDir, TRIAGED_FILE), 'utf8'))
-  assert.equal(written.schema, 1)
-  assert.equal(written.runId, '2026-10-12-chat-a1b2c3')
-  assert.equal(written.status, 'posted')
-  assert.ok(!JSON.stringify(written).includes(dir), 'triaged.json carries no run folder path')
-  assert.ok(!JSON.stringify(written).includes('ghp_secret'))
+    assert.equal(record.status, 'posted')
+    assert.equal(record.reason, '1 posted, 1 refused')
+    assert.deepEqual(record.issues, [701])
+    assert.equal(record.comments[0].posted, true)
+    assert.deepEqual(record.comments[1], {
+      issue: 999,
+      posted: false,
+      reason: 'issue not in published.json'
+    })
+    assert.equal(record.claude.costUsd, 0.42)
+    assert.equal(record.claude.numTurns, 7)
+    const written = JSON.parse(await readFile(join(runDir, TRIAGED_FILE), 'utf8'))
+    assert.equal(written.schema, 1)
+    assert.equal(written.runId, '2026-10-12-chat-a1b2c3')
+    assert.equal(written.status, 'posted')
+    assert.ok(!JSON.stringify(written).includes(dir), 'triaged.json carries no run folder path')
+    assert.ok(!JSON.stringify(written).includes('ghp_secret'))
 
-  assert.deepEqual(
-    await findRunsToTriage({ runsDir: join(dir, 'runs') }),
-    [],
-    'a triaged run is not picked again'
-  )
-})
+    assert.deepEqual(
+      await findRunsToTriage({ runsDir: join(dir, 'runs') }),
+      [],
+      'a triaged run is not picked again'
+    )
+  }
+)
 
 test('triageRun: a sensitive comment body is refused and recorded, never posted', async () => {
   const dir = await freshDir()

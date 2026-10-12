@@ -21,6 +21,9 @@ import { writeState } from './schedule-state.mjs'
 import { formatStatus, gatherStatus } from './schedule-status.mjs'
 import { validateScheduleTable } from './schedule-table.mjs'
 
+// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
+const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+
 const execFileAsync = promisify(execFile)
 
 async function freshDir(prefix = 'live-lab-agent-') {
@@ -37,44 +40,52 @@ function fakeRunner(results = {}) {
   return { calls, runner }
 }
 
-test('renderAgentPlist swaps in home, repo and node, and keeps the schedule shape', async () => {
-  const template = await readFile(TEMPLATE_PATH, 'utf8')
-  const rendered = renderAgentPlist(template, {
-    home: '/Users/tester',
-    repoRoot: '/opt/lab/videorc',
-    nodePath: '/usr/local/bin/node'
-  })
-  assert.ok(!rendered.includes('/Users/videorc-lab'))
-  assert.match(rendered, /<string>\/usr\/local\/bin\/node<\/string>/)
-  assert.match(
-    rendered,
-    /<string>\/opt\/lab\/videorc\/scripts\/live-lab\/schedule\.mjs<\/string>\s*<string>tick<\/string>/
-  )
-  assert.match(rendered, /<key>WorkingDirectory<\/key>\s*<string>\/opt\/lab\/videorc<\/string>/)
-  assert.match(rendered, /<key>HOME<\/key>\s*<string>\/Users\/tester<\/string>/)
-  assert.match(
-    rendered,
-    /<key>StandardOutPath<\/key>\s*<string>\/Users\/tester\/videorc-live-lab\/logs\/schedule\.log<\/string>/
-  )
-  assert.match(rendered, /<key>StartInterval<\/key>\s*<integer>300<\/integer>/)
-  assert.match(rendered, /<key>LimitLoadToSessionType<\/key>\s*<string>Aqua<\/string>/)
-  assert.match(rendered, /<key>RunAtLoad<\/key>\s*<true\/>/)
-  assert.match(rendered, /<key>ExitTimeOut<\/key>\s*<integer>90<\/integer>/)
-  assert.throws(
-    () => renderAgentPlist(template, { home: 'relative', nodePath: '/n' }),
-    /absolute home/
-  )
-  assert.throws(() => renderAgentPlist('<plist/>', { home: '/h', nodePath: '/n' }), /label/)
-  const escaped = renderAgentPlist(template, { home: '/Users/a&b', repoRoot: '/r', nodePath: '/n' })
-  assert.match(escaped, /\/Users\/a&amp;b\/videorc-live-lab/)
+test(
+  'renderAgentPlist swaps in home, repo and node, and keeps the schedule shape',
+  macOnly,
+  async () => {
+    const template = await readFile(TEMPLATE_PATH, 'utf8')
+    const rendered = renderAgentPlist(template, {
+      home: '/Users/tester',
+      repoRoot: '/opt/lab/videorc',
+      nodePath: '/usr/local/bin/node'
+    })
+    assert.ok(!rendered.includes('/Users/videorc-lab'))
+    assert.match(rendered, /<string>\/usr\/local\/bin\/node<\/string>/)
+    assert.match(
+      rendered,
+      /<string>\/opt\/lab\/videorc\/scripts\/live-lab\/schedule\.mjs<\/string>\s*<string>tick<\/string>/
+    )
+    assert.match(rendered, /<key>WorkingDirectory<\/key>\s*<string>\/opt\/lab\/videorc<\/string>/)
+    assert.match(rendered, /<key>HOME<\/key>\s*<string>\/Users\/tester<\/string>/)
+    assert.match(
+      rendered,
+      /<key>StandardOutPath<\/key>\s*<string>\/Users\/tester\/videorc-live-lab\/logs\/schedule\.log<\/string>/
+    )
+    assert.match(rendered, /<key>StartInterval<\/key>\s*<integer>300<\/integer>/)
+    assert.match(rendered, /<key>LimitLoadToSessionType<\/key>\s*<string>Aqua<\/string>/)
+    assert.match(rendered, /<key>RunAtLoad<\/key>\s*<true\/>/)
+    assert.match(rendered, /<key>ExitTimeOut<\/key>\s*<integer>90<\/integer>/)
+    assert.throws(
+      () => renderAgentPlist(template, { home: 'relative', nodePath: '/n' }),
+      /absolute home/
+    )
+    assert.throws(() => renderAgentPlist('<plist/>', { home: '/h', nodePath: '/n' }), /label/)
+    const escaped = renderAgentPlist(template, {
+      home: '/Users/a&b',
+      repoRoot: '/r',
+      nodePath: '/n'
+    })
+    assert.match(escaped, /\/Users\/a&amp;b\/videorc-live-lab/)
 
-  if (process.platform === 'darwin') {
-    const dir = await freshDir()
-    const file = join(dir, 'agent.plist')
-    await writeFile(file, rendered)
-    await execFileAsync('/usr/bin/plutil', ['-lint', file])
+    if (process.platform === 'darwin') {
+      const dir = await freshDir()
+      const file = join(dir, 'agent.plist')
+      await writeFile(file, rendered)
+      await execFileAsync('/usr/bin/plutil', ['-lint', file])
+    }
   }
-})
+)
 
 test('install-agent refuses any user but the lab user unless --force-user', async () => {
   const home = await freshDir()
@@ -104,38 +115,44 @@ test('install-agent refuses while a run holds the lock unless --force', async ()
   assert.deepEqual(calls, [])
 })
 
-test('install-agent writes the plist and logs dir, lints, boots out the old one and bootstraps', async () => {
-  const home = await freshDir()
-  const { calls, runner } = fakeRunner({
-    'launchctl bootout': { code: 3, stdout: '', stderr: 'No such process' }
-  })
-  const result = await installAgent({
-    home,
-    uid: 501,
-    username: 'tester',
-    forceUser: true,
-    runner,
-    nodePath: '/opt/homebrew/bin/node'
-  })
-  const target = agentPlistPath(home)
-  assert.equal(result.path, target)
-  assert.equal(result.domain, 'gui/501')
-  assert.equal((await stat(target)).mode & 0o777, 0o644)
-  assert.ok((await readFile(target, 'utf8')).includes(`${home}/videorc-live-lab/logs/schedule.log`))
-  await access(agentLogsDir(home))
-  assert.deepEqual(
-    calls.map((call) =>
-      call.slice(0, 2).concat(call.slice(2).map((arg) => arg.replace(home, '~')))
-    ),
-    [
-      ['/usr/bin/plutil', '-lint', calls[0][2].replace(home, '~')],
-      ['/bin/launchctl', 'bootout', `gui/501/${AGENT_LABEL}`],
-      ['/bin/launchctl', 'bootstrap', 'gui/501', `~/Library/LaunchAgents/${AGENT_LABEL}.plist`]
-    ]
-  )
-})
+test(
+  'install-agent writes the plist and logs dir, lints, boots out the old one and bootstraps',
+  macOnly,
+  async () => {
+    const home = await freshDir()
+    const { calls, runner } = fakeRunner({
+      'launchctl bootout': { code: 3, stdout: '', stderr: 'No such process' }
+    })
+    const result = await installAgent({
+      home,
+      uid: 501,
+      username: 'tester',
+      forceUser: true,
+      runner,
+      nodePath: '/opt/homebrew/bin/node'
+    })
+    const target = agentPlistPath(home)
+    assert.equal(result.path, target)
+    assert.equal(result.domain, 'gui/501')
+    assert.equal((await stat(target)).mode & 0o777, 0o644)
+    assert.ok(
+      (await readFile(target, 'utf8')).includes(`${home}/videorc-live-lab/logs/schedule.log`)
+    )
+    await access(agentLogsDir(home))
+    assert.deepEqual(
+      calls.map((call) =>
+        call.slice(0, 2).concat(call.slice(2).map((arg) => arg.replace(home, '~')))
+      ),
+      [
+        ['/usr/bin/plutil', '-lint', calls[0][2].replace(home, '~')],
+        ['/bin/launchctl', 'bootout', `gui/501/${AGENT_LABEL}`],
+        ['/bin/launchctl', 'bootstrap', 'gui/501', `~/Library/LaunchAgents/${AGENT_LABEL}.plist`]
+      ]
+    )
+  }
+)
 
-test('install-agent fails loudly when plutil or bootstrap fails', async () => {
+test('install-agent fails loudly when plutil or bootstrap fails', macOnly, async () => {
   const home = await freshDir()
   const lint = fakeRunner({ 'plutil -lint': { code: 1, stdout: 'bad plist', stderr: '' } })
   await assert.rejects(

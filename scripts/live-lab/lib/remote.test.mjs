@@ -25,6 +25,9 @@ import {
   validateScenario
 } from './remote.mjs'
 
+// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
+const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+
 const RUN_ID = '2026-10-12-chat-a1b2c3'
 const LAB_RUN_DIR = `/Users/videorc-lab/videorc-live-lab/runs/${RUN_ID}`
 
@@ -49,7 +52,7 @@ function sh(command, env = {}) {
   return spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', env })
 }
 
-test('shellQuote survives a real shell for hostile strings', () => {
+test('shellQuote survives a real shell for hostile strings', macOnly, () => {
   const nasty = [
     '',
     'plain',
@@ -184,46 +187,50 @@ echo "RUN_EXIT=0"`)
   return { root, home, log, run }
 }
 
-test('the SSH script checks out the ref, installs only on a lockfile change, and passes params intact', async (t) => {
-  const lab = await fakeLab(t)
-  const params = JSON.stringify({ note: 'it\'s $(rm -rf /) `id` "q" \\ $HOME', hours: 4 })
-  const options = {
-    scenario: 'chat',
-    build: { text: 'candidate:abcdef1', kind: 'candidate', id: 'abcdef1' },
-    privacy: 'unlisted',
-    paramsJson: params,
-    ref: 'refs/pull/812/head',
-    publish: true
+test(
+  'the SSH script checks out the ref, installs only on a lockfile change, and passes params intact',
+  macOnly,
+  async (t) => {
+    const lab = await fakeLab(t)
+    const params = JSON.stringify({ note: 'it\'s $(rm -rf /) `id` "q" \\ $HOME', hours: 4 })
+    const options = {
+      scenario: 'chat',
+      build: { text: 'candidate:abcdef1', kind: 'candidate', id: 'abcdef1' },
+      privacy: 'unlisted',
+      paramsJson: params,
+      ref: 'refs/pull/812/head',
+      publish: true
+    }
+    const first = lab.run(buildRemoteScript(options))
+    assert.equal(first.status, 0, first.stderr)
+    assert.match(first.stdout, /lockfile changed/)
+    let calls = await readFile(lab.log, 'utf8')
+    assert.match(calls, /git fetch --quiet origin/)
+    assert.match(calls, /git checkout --quiet --detach refs\/pull\/812\/head/)
+    assert.match(calls, /pnpm install --frozen-lockfile --ignore-scripts/)
+    assert.ok(
+      calls.includes(
+        'node [scripts/live-lab/remote.mjs] [--lab-side] [--scenario] [chat] [--build] [candidate:abcdef1] [--privacy] [unlisted] [--publish]'
+      ),
+      calls
+    )
+    assert.ok(calls.includes(`params=[${params}] set=yes`), calls)
+
+    await writeFile(lab.log, '')
+    const second = lab.run(buildRemoteScript({ ...options, paramsJson: null }))
+    assert.equal(second.status, 0, second.stderr)
+    calls = await readFile(lab.log, 'utf8')
+    assert.doesNotMatch(calls, /pnpm install/)
+    assert.match(calls, /params=\[\] set=\n/)
+
+    await writeFile(join(lab.root, 'lock-sha'), 'sha-two\n')
+    await writeFile(lab.log, '')
+    lab.run(buildRemoteScript(options))
+    assert.match(await readFile(lab.log, 'utf8'), /pnpm install/)
   }
-  const first = lab.run(buildRemoteScript(options))
-  assert.equal(first.status, 0, first.stderr)
-  assert.match(first.stdout, /lockfile changed/)
-  let calls = await readFile(lab.log, 'utf8')
-  assert.match(calls, /git fetch --quiet origin/)
-  assert.match(calls, /git checkout --quiet --detach refs\/pull\/812\/head/)
-  assert.match(calls, /pnpm install --frozen-lockfile --ignore-scripts/)
-  assert.ok(
-    calls.includes(
-      'node [scripts/live-lab/remote.mjs] [--lab-side] [--scenario] [chat] [--build] [candidate:abcdef1] [--privacy] [unlisted] [--publish]'
-    ),
-    calls
-  )
-  assert.ok(calls.includes(`params=[${params}] set=yes`), calls)
+)
 
-  await writeFile(lab.log, '')
-  const second = lab.run(buildRemoteScript({ ...options, paramsJson: null }))
-  assert.equal(second.status, 0, second.stderr)
-  calls = await readFile(lab.log, 'utf8')
-  assert.doesNotMatch(calls, /pnpm install/)
-  assert.match(calls, /params=\[\] set=\n/)
-
-  await writeFile(join(lab.root, 'lock-sha'), 'sha-two\n')
-  await writeFile(lab.log, '')
-  lab.run(buildRemoteScript(options))
-  assert.match(await readFile(lab.log, 'utf8'), /pnpm install/)
-})
-
-test('the SSH script stops at the first failing step', async (t) => {
+test('the SSH script stops at the first failing step', macOnly, async (t) => {
   const lab = await fakeLab(t)
   await writeFile(join(lab.home, '..', 'bin', 'git'), '#!/bin/sh\nexit 128\n')
   const result = lab.run(buildRemoteScript({ scenario: 'dry', ref: 'origin/main' }))
@@ -278,45 +285,49 @@ const baseOptions = {
   publish: false
 }
 
-test('runRemote streams sanitized lines, copies back only guarded files, and keeps the run exit', async (t) => {
-  const source = await labFolder(t)
-  const outRoot = join(await tempDir(t), 'remote-runs')
-  const { ssh, calls } = fakeSsh([
-    'live:run: going live',
-    'viewer said hi from someone@example.com',
-    `RUN_DIR=${LAB_RUN_DIR}`,
-    'RUN_FILES=verdict.json,report.md,charts,secrets.txt',
-    'RUN_EXIT=1',
-    `RUN_DIR=${LAB_RUN_DIR}`
-  ])
-  const scpCalls = []
-  const out = []
-  const code = await runRemote({
-    options: baseOptions,
-    ssh,
-    scp: fakeScp(source, scpCalls),
-    redactor: fakeRedactor,
-    outRoot,
-    print: (line) => out.push(line),
-    printErr: (line) => out.push(line)
-  })
-  assert.equal(code, 1)
-  assert.equal(calls.length, 1)
-  const text = out.join('\n')
-  assert.match(text, /\[lab\] live:run: going live/)
-  assert.match(text, /\[lab\] viewer said hi from \[redacted\]/)
-  assert.doesNotMatch(text, /example\.com|\/Users\//)
-  assert.match(text, new RegExp(`run folder runs/${RUN_ID}`))
-  // secrets.txt was not an allowed artifact name: never requested.
-  assert.deepEqual(
-    scpCalls.map((args) => args.at(-2)),
-    ['verdict.json', 'report.md', 'charts'].map((name) => `lab:${LAB_RUN_DIR}/${name}`)
-  )
-  const dest = join(outRoot, RUN_ID)
-  assert.deepEqual((await readdir(dest)).sort(), ['charts', 'report.md', 'verdict.json'])
-  assert.equal((await stat(dest)).mode & 0o777, 0o700)
-  assert.ok(out.includes(`REPORT_DIR=${dest}`))
-})
+test(
+  'runRemote streams sanitized lines, copies back only guarded files, and keeps the run exit',
+  macOnly,
+  async (t) => {
+    const source = await labFolder(t)
+    const outRoot = join(await tempDir(t), 'remote-runs')
+    const { ssh, calls } = fakeSsh([
+      'live:run: going live',
+      'viewer said hi from someone@example.com',
+      `RUN_DIR=${LAB_RUN_DIR}`,
+      'RUN_FILES=verdict.json,report.md,charts,secrets.txt',
+      'RUN_EXIT=1',
+      `RUN_DIR=${LAB_RUN_DIR}`
+    ])
+    const scpCalls = []
+    const out = []
+    const code = await runRemote({
+      options: baseOptions,
+      ssh,
+      scp: fakeScp(source, scpCalls),
+      redactor: fakeRedactor,
+      outRoot,
+      print: (line) => out.push(line),
+      printErr: (line) => out.push(line)
+    })
+    assert.equal(code, 1)
+    assert.equal(calls.length, 1)
+    const text = out.join('\n')
+    assert.match(text, /\[lab\] live:run: going live/)
+    assert.match(text, /\[lab\] viewer said hi from \[redacted\]/)
+    assert.doesNotMatch(text, /example\.com|\/Users\//)
+    assert.match(text, new RegExp(`run folder runs/${RUN_ID}`))
+    // secrets.txt was not an allowed artifact name: never requested.
+    assert.deepEqual(
+      scpCalls.map((args) => args.at(-2)),
+      ['verdict.json', 'report.md', 'charts'].map((name) => `lab:${LAB_RUN_DIR}/${name}`)
+    )
+    const dest = join(outRoot, RUN_ID)
+    assert.deepEqual((await readdir(dest)).sort(), ['charts', 'report.md', 'verdict.json'])
+    assert.equal((await stat(dest)).mode & 0o777, 0o700)
+    assert.ok(out.includes(`REPORT_DIR=${dest}`))
+  }
+)
 
 test('runRemote keeps nothing when the guard refuses a copied file', async (t) => {
   for (const report of ['# Report\nkey abcd-efgh-ijkl-mnop-qrst\n', '# Report\nU9-HIT\n']) {
