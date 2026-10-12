@@ -314,6 +314,8 @@ fn main() -> Result<()> {
     if windows_mf_probe::run_cli(&std::env::args().skip(1).collect::<Vec<_>>())? {
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
+    mark_inherited_descriptors_close_on_exec();
     publish_backend_process_ownership()?;
     // Live-control handlers are third-party/platform integration boundaries.
     // Keep at least one runtime worker available for the process-owned shutdown
@@ -330,6 +332,31 @@ fn main() -> Result<()> {
     // owner ignores its cooperative shutdown signal.
     runtime.shutdown_timeout(PROCESS_RUNTIME_BLOCKING_TASK_SHUTDOWN_GRACE);
     result
+}
+
+/// Electron hands the backend dozens of descriptors it never needed (ICU
+/// data, resource packs, sockets, pipes) without close-on-exec, and every
+/// FFmpeg child inherited them too. An inherited write end is how a dead
+/// session's FIFO stayed open in a camera FFmpeg (Linux plans 0017/0026).
+/// Nothing in the backend passes descriptors by inheritance (children get
+/// theirs through stdio), so mark everything above stderr close-on-exec.
+/// `close_range` needs Linux 5.11; an older kernel keeps today's behaviour.
+#[cfg(target_os = "linux")]
+fn mark_inherited_descriptors_close_on_exec() {
+    mark_descriptors_close_on_exec_from(3);
+}
+
+#[cfg(target_os = "linux")]
+fn mark_descriptors_close_on_exec_from(first: libc::c_uint) -> bool {
+    // SAFETY: CLOSE_RANGE_CLOEXEC only sets FD_CLOEXEC; no descriptor closes.
+    unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            first,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        ) == 0
+    }
 }
 
 /// The backend runs on its own thread so the process main thread can service
@@ -13134,6 +13161,24 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
     use tokio::sync::broadcast;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_descriptors_become_close_on_exec() {
+        // An fd opened without O_CLOEXEC stands in for one Electron handed us.
+        let path = std::ffi::CString::new("/dev/null").unwrap();
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
+        assert!(fd > 2, "open /dev/null");
+        let cloexec = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0;
+        assert!(!cloexec(fd));
+        // From this descriptor up only, so the harness's own stdio is untouched.
+        assert!(mark_descriptors_close_on_exec_from(fd as libc::c_uint));
+        assert!(
+            cloexec(fd),
+            "the inherited descriptor must not reach FFmpeg"
+        );
+        unsafe { libc::close(fd) };
+    }
 
     const HARD_EXIT_CHILD_ENV: &str = "VIDEORC_TEST_ZERO_IO_HARD_EXIT";
 
