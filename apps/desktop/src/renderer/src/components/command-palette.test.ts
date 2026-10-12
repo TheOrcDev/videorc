@@ -202,27 +202,27 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
     expect(values()).not.toContain('Mute microphone')
   })
 
-  it('offers Mark clip only while recording or live', async () => {
+  it('offers Save clip while recording or live (plan 181 R4: one clip action)', async () => {
     await render()
-    expect(values()).not.toContain('Mark clip')
+    expect(values()).not.toContain('Save clip')
     mocked.recording = { state: 'recording', sessionId: 'rec' }
     await render()
-    await act(async () => item('Mark clip').click())
+    await act(async () => item('Save clip').click())
     expect(mocked.core.markClip).toHaveBeenCalledOnce()
   })
 
-  it('offers Save replay only while the replay buffer holds frames (plan 181)', async () => {
+  it('offers Save clip while the ring holds frames with nothing recording (plan 181)', async () => {
     await render()
+    expect(values()).not.toContain('Save clip')
     expect(values()).not.toContain('Save replay')
-    const save = vi.fn(async () => undefined)
     mocked.replay = {
       ...mocked.replay,
-      state: { state: 'on', seconds: 30, bufferedSeconds: 12, sessionId: 'ring' },
-      save
+      state: { state: 'on', seconds: 30, bufferedSeconds: 12, sessionId: 'ring' }
     }
     await render()
-    await act(async () => item('Save replay').click())
-    expect(save).toHaveBeenCalledOnce()
+    await act(async () => item('Save clip').click())
+    expect(mocked.core.markClip).toHaveBeenCalledOnce()
+    expect(values()).not.toContain('Save replay')
     mocked.replay = { ...mocked.replay, state: { state: 'off', seconds: 30, bufferedSeconds: 0 } }
   })
 })

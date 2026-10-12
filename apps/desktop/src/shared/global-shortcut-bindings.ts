@@ -11,7 +11,6 @@ const ACTION_CONFIG_KEYS = {
   'mic-toggle': 'micToggle',
   'system-audio-toggle': 'systemAudioToggle',
   'clip-mark': 'clipMark',
-  'replay-save': 'replaySave',
   'layout-next': 'layoutNext',
   'layout-previous': 'layoutPrevious'
 } as const satisfies Record<

@@ -10,7 +10,6 @@ import {
   NoteIcon,
   PreviewIcon,
   RecordIcon,
-  SaveIcon,
   SceneIcon,
   SettingsIcon,
   SpeakerOffIcon,
@@ -237,27 +236,17 @@ export function CommandPalette({
             {muteLabel}
             {shortcut(settings.globalShortcuts?.micToggle)}
           </CommandItem>
-          {live ? (
+          {/* The one clip action (plan 181 R4): the last seconds whenever the
+              ring holds frames, and a mark in the recording while one runs. */}
+          {live || replayBuffer.state.state === 'on' ? (
             <CommandItem
-              value="Mark clip"
-              keywords={['clip', 'highlight', 'marker', 'moment']}
+              value="Save clip"
+              keywords={['clip', 'replay', 'last', 'seconds', 'highlight', 'marker', 'moment']}
               onSelect={() => run(() => void markClip())}
             >
               <ClipIcon className="size-4" />
-              Mark clip
+              Save clip
               {shortcut(settings.globalShortcuts?.clipMark)}
-            </CommandItem>
-          ) : null}
-          {/* Plan 181: the ring holds frames, so the last seconds can be saved. */}
-          {replayBuffer.state.state === 'on' ? (
-            <CommandItem
-              value="Save replay"
-              keywords={['replay', 'buffer', 'last', 'seconds', 'instant']}
-              onSelect={() => run(() => void replayBuffer.save())}
-            >
-              <SaveIcon className="size-4" />
-              Save replay
-              {shortcut(settings.globalShortcuts?.replaySave)}
             </CommandItem>
           ) : null}
         </CommandGroup>

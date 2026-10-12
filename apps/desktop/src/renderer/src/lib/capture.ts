@@ -136,11 +136,17 @@ export type CaptureConfig = {
   replayBuffer: ReplayBufferSettings
 }
 
-/** The replay buffer (plan 181): how long it keeps, and whether it arms
- * itself when Videorc opens (D6, default off). */
+/**
+ * Clips (plan 181, the owner's redesign R2): the ring keeps the last
+ * `seconds` whenever Videorc is open. `enabled` is the one switch on the
+ * Output page, on by default; `explicit` says the user set it, so a default
+ * that the backend refuses (a software encoder path) stays off and says
+ * why, while a choice runs anywhere.
+ */
 export type ReplayBufferSettings = {
   seconds: number
-  startOnLaunch: boolean
+  enabled: boolean
+  explicit: boolean
 }
 
 export const REPLAY_BUFFER_DEFAULT_SECONDS = 30
@@ -156,7 +162,8 @@ export function normalizeReplayBufferSettings(value: unknown): ReplayBufferSetti
       : REPLAY_BUFFER_DEFAULT_SECONDS
   return {
     seconds,
-    startOnLaunch: typeof loaded.startOnLaunch === 'boolean' ? loaded.startOnLaunch : false
+    enabled: typeof loaded.enabled === 'boolean' ? loaded.enabled : true,
+    explicit: typeof loaded.explicit === 'boolean' ? loaded.explicit : false
   }
 }
 
@@ -1329,7 +1336,7 @@ export const defaultCaptureConfig: CaptureConfig = {
   streamKey: '',
   streaming: defaultStreamingSettings(),
   captions: defaultCaptionsCaptureSettings(),
-  replayBuffer: { seconds: REPLAY_BUFFER_DEFAULT_SECONDS, startOnLaunch: false }
+  replayBuffer: { seconds: REPLAY_BUFFER_DEFAULT_SECONDS, enabled: true, explicit: false }
 }
 
 export function defaultCaptionsCaptureSettings(): CaptionsCaptureSettings {

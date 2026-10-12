@@ -16,7 +16,13 @@ import {
 } from 'react'
 
 import { classifyComposerDraft, markerTime } from '../../../../shared/session-markers'
-import type { MarkerContext, SessionMarker } from '@/lib/backend'
+import type { ClipContext, MarkerContext, SessionMarker } from '@/lib/backend'
+import { clipLengthWords } from '../../../../shared/clip-marks'
+
+/** "30 seconds" for the composer's clip words. */
+function clipSeconds(clip: ClipContext | undefined): string {
+  return clipLengthWords(clip?.seconds)
+}
 import { Command, CommandItem, CommandList } from '@/components/ui/command'
 import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platform-icon'
 import { CohostNudge } from '@/components/cohost-nudge'
@@ -125,6 +131,7 @@ export function ChatPane({
   onSend,
   markerContext,
   onMarker,
+  onClip,
   onUndoMarker,
   prefill = null,
   cohostNudge = false,
@@ -166,6 +173,8 @@ export function ChatPane({
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
+  /** `/clip` (plan 181 R4): the Clip button's action, answered with its words. */
+  onClip?: () => Promise<string>
   onSend?: (text: string, options?: ChatSendOptions) => void
   prefill?: ChatPrefill | null
   cohostNudge?: boolean
@@ -688,6 +697,7 @@ export function ChatPane({
           markerContext={markerContext}
           onMarker={onMarker}
           onUndoMarker={onUndoMarker}
+          onClip={onClip}
           cohostNudge={cohostNudge}
           failures={sendFailures}
           focusSignal={composerFocusSignal + composerFocus}
@@ -717,11 +727,13 @@ export function Composer({
   onSend,
   markerContext,
   onMarker,
-  onUndoMarker
+  onUndoMarker,
+  onClip
 }: {
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
+  onClip?: () => Promise<string>
   providers: readonly LiveChatProviderState[]
   pending: boolean
   failures: ChatSendFailure[]
@@ -772,12 +784,14 @@ export function Composer({
   const maxChars = chatDraftMaxChars(targetPlatforms)
   const command = classifyComposerDraft(draft)
   const local = command.kind !== 'chat'
+  const clipContext = markerContext?.clip
   const canSend = local
     ? !localPending &&
       (command.kind !== 'marker' ||
-        Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker))
+        Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker)) &&
+      (command.kind !== 'clip' || Boolean(clipContext?.available && onClip))
     : targets.length > 0 && !pending
-  const completions = ['/marker', '/help'].filter(
+  const completions = ['/marker', '/clip', '/help'].filter(
     (value) =>
       draft.startsWith('/') && !draft.includes(' ') && value.startsWith(draft.toLowerCase())
   )
@@ -833,8 +847,33 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        '/marker [title] saves a point on this recording or livestream. // sends a literal slash to chat. Markers are in Library → Session actions → Markers.'
+        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip. // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
+      return
+    }
+    if (command.kind === 'clip') {
+      // Plan 181 R4: the Clip button's action from the keyboard. The
+      // streamer's own composer only; chat never triggers it.
+      if (!clipContext?.available || !onClip) {
+        setNotice(clipContext?.reason ?? 'Clips are off. Turn them on on the Output page.')
+        return
+      }
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(`Saving the last ${clipSeconds(clipContext)} as a clip…`)
+      void onClip()
+        .then((outcome) => {
+          setNotice(outcome)
+          if (draftRef.current === submitted) setDraft('')
+        })
+        .catch((error) =>
+          setNotice(error instanceof Error ? error.message : "Couldn't save the clip.")
+        )
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
       return
     }
     if (command.kind === 'marker') {
@@ -951,8 +990,8 @@ export function Composer({
             aria-label="Message or local command"
             placeholder={
               writable.length > 0
-                ? 'Message or /marker [title]…'
-                : '/marker [title] · Local commands'
+                ? 'Message, /marker [title] or /clip…'
+                : '/marker [title], /clip · Local commands'
             }
             value={draft}
             onChange={(event) => {
@@ -1046,7 +1085,11 @@ export function Composer({
               {completions.map((value) => (
                 <CommandItem key={value} value={value} onSelect={() => complete(value)}>
                   {value}
-                  {value === '/marker' ? ' [title] · Save a timeline point' : ' · Command help'}
+                  {value === '/marker'
+                    ? ' [title] · Save a timeline point'
+                    : value === '/clip'
+                      ? ` · Save the last ${clipSeconds(clipContext)} as a clip`
+                      : ' · Command help'}
                 </CommandItem>
               ))}
             </CommandList>

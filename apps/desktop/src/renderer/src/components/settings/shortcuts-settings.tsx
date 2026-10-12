@@ -26,7 +26,6 @@ const GLOBAL_ACTION_ROWS = [
   'mic-toggle',
   'system-audio-toggle',
   'clip-mark',
-  'replay-save',
   'layout-next',
   'layout-previous'
 ] as const satisfies readonly GlobalShortcutAction[]

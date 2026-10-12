@@ -15,24 +15,51 @@ export interface ClipMarkedToast {
 /** Where a saved mark shows up: the stream's report in the Buddy tab (plan 119 S3). */
 export const CLIP_MARK_IN_REPORT = "It's in your stream report in Buddy."
 
-/** The mark became a replay (plan 181 S8): recording was off and the replay
- * buffer held the moment. Mirrors `clip_marks::REPLAY_SAVED_REASON`. */
-export const CLIP_MARK_REPLAY_SAVED_REASON = 'replay-saved'
+/** The ring saved the last seconds as a clip (plan 181, redesign R4);
+ * `saved` then says whether a recording also kept the mark. Mirrors
+ * `clip_marks::CLIP_SAVED_REASON`. */
+export const CLIP_MARK_CLIP_SAVED_REASON = 'clip-saved'
 
-export function clipMarkBecameReplay(event: Pick<ClipMarkedEvent, 'saved' | 'reason'>): boolean {
-  return !event.saved && event.reason === CLIP_MARK_REPLAY_SAVED_REASON
+export function clipMarkSavedClip(event: Pick<ClipMarkedEvent, 'reason'>): boolean {
+  return event.reason === CLIP_MARK_CLIP_SAVED_REASON
+}
+
+/** The ring's length in words: "30 seconds", "1 minute", "2 minutes". */
+export function clipLengthWords(seconds: number | undefined): string {
+  if (!seconds) return 'seconds'
+  if (seconds < 60) return `${seconds} seconds`
+  const minutes = seconds / 60
+  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minute${minutes === 1 ? '' : 's'}`
+}
+
+/** The press kept something: a clip, a mark, or both. */
+export function clipMarkKeptSomething(event: Pick<ClipMarkedEvent, 'saved' | 'reason'>): boolean {
+  return event.saved || clipMarkSavedClip(event)
 }
 
 /**
- * The toast for a `clip.marked` event: where the mark landed, or why the
- * moment could not be kept. One copy for every window that shows it.
+ * The toast for a `clip.marked` event or a `clip.mark` reply: what the press
+ * kept, or why nothing was. One copy for every window that shows it.
  * `streaming: false` is a recording that never went live: it has no stream
- * report, so the toast does not point at one.
+ * report, so the toast does not point at one. `seconds` is the ring's
+ * length, for the clip's words.
  */
 export function clipMarkedToast(
   event: ClipMarkedEvent,
-  { streaming = true }: { streaming?: boolean } = {}
+  { streaming = true, seconds }: { streaming?: boolean; seconds?: number } = {}
 ): ClipMarkedToast {
+  if (clipMarkSavedClip(event)) {
+    // The main window hears replay.saved itself; this is what another
+    // window (the Stream Manager's Clip) shows for the same press.
+    const last = seconds ? `the last ${formatClipMarkClock(seconds)}` : 'the last seconds'
+    return {
+      kind: 'success',
+      title: `Saving ${last} as a clip`,
+      description: event.saved
+        ? `It's in Library, and this moment is marked in your recording.`
+        : "It's in Library in a moment."
+    }
+  }
   if (event.saved) {
     return {
       kind: 'success',
@@ -40,18 +67,9 @@ export function clipMarkedToast(
       description: streaming ? CLIP_MARK_IN_REPORT : undefined
     }
   }
-  if (clipMarkBecameReplay(event)) {
-    // The main window hears replay.saved itself; this is what another
-    // window (the Stream Manager's Mark clip) shows for the same press.
-    return {
-      kind: 'success',
-      title: 'Saving a replay instead',
-      description: "Recording is off, so the replay buffer is saving this moment. It's in Library."
-    }
-  }
   return {
     kind: 'warning',
-    title: "Recording is off, so this clip can't be saved.",
-    description: 'Turn on Save local recording on the Output page.'
+    title: 'Clips are off, and nothing is recording.',
+    description: 'Turn on Keep the last seconds on the Output page, or start a recording.'
   }
 }

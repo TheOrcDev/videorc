@@ -22,7 +22,16 @@ import { RecordingTab, SAVE_RECORDING_OFF, SAVE_RECORDING_ON } from './recording
 // resolution picker: its Output row opens this page (S3.3, B-15).
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  // Plan 181: the Clips section reads the ring; off and unblocked here.
+  useStudioReplay: () => ({
+    state: { state: 'off', seconds: 30, bufferedSeconds: 0 },
+    armed: false,
+    blockedReason: null,
+    setEnabled: () => {}
+  })
+}))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: () => {} })
 }))

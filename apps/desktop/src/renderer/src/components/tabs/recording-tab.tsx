@@ -5,7 +5,7 @@ import {
   recordingPresetOptions,
   type OutputNumberField
 } from '@/lib/output-quality'
-import { FolderIcon, SaveIcon, VideoFileIcon, WarningIcon } from '@/components/icons'
+import { ClipIcon, FolderIcon, VideoFileIcon, WarningIcon } from '@/components/icons'
 import { useEffect, useId, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { findAcceleratorOwner } from '../../../../shared/accelerator'
@@ -13,7 +13,8 @@ import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
 import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
 import {
-  REPLAY_BUFFER_LABEL,
+  CLIPS_LABEL,
+  KEEP_LAST_SECONDS_LABEL,
   estimatedReplayDiskBytes,
   formatBytes,
   replayLengthLabel
@@ -44,7 +45,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore, useStudioReplay } from '@/hooks/use-studio'
 import type { DirectoryFacts, VideoPreset, VideoSettings } from '@/lib/backend'
 import {
   REPLAY_BUFFER_LENGTH_OPTIONS,
@@ -76,21 +77,25 @@ export function RecordingTab(): ReactElement {
   return (
     <div className="flex flex-col">
       <LocalRecordingSection />
-      <ReplayBufferSection />
+      <ClipsSection />
       <RecordingsFolderSection />
     </div>
   )
 }
 
 /**
- * The replay buffer's settings (plan 181 S5.2): its length, whether it arms
- * at launch (D6), what it takes on disk at the current quality (D2), the
- * Save replay key (D5) and where replays go (D7). The switch itself has
- * one home, the Studio.
+ * Clips (plan 181, the owner's redesign): the one switch that keeps the last
+ * seconds whenever Videorc is open (R2, on by default), the length (R1), what
+ * it takes on disk at the current quality, the Save clip key, and where
+ * clips go (R4). On a software encoder path the backend keeps the default
+ * off and this section says why; the switch still turns it on.
  */
-function ReplayBufferSection(): ReactElement {
+function ClipsSection(): ReactElement {
   const { captureConfig, setCaptureConfig, settings, setSettings, runtimeInfo } = useStudioCore()
-  const { seconds, startOnLaunch } = captureConfig.replayBuffer
+  const clips = useStudioReplay()
+  const { seconds, enabled } = captureConfig.replayBuffer
+  const blocked = clips.blockedReason
+  const on = enabled && !blocked
   const estimate = formatBytes(estimatedReplayDiskBytes(seconds, captureConfig.video.bitrateKbps))
   const shortcutRegistration = useSyncExternalStore(
     globalShortcutRegistration.subscribe,
@@ -98,14 +103,31 @@ function ReplayBufferSection(): ReactElement {
   )
   return (
     <PanelSection
-      description="Keeps the last seconds of what you record or stream, so one key saves them as a replay. Turn it on in Studio."
-      icon={SaveIcon}
-      title={REPLAY_BUFFER_LABEL}
+      description={`Videorc keeps the last ${replayLengthLabel(seconds)} of your screen and microphone while it is open, so one key saves them as a clip. While you record, the moment is also marked in the recording.`}
+      icon={ClipIcon}
+      title={CLIPS_LABEL}
     >
       <FieldGroup variant="grouped">
         <SettingsRow
-          data-testid="output-replay-length"
-          description="How much the buffer keeps. A replay runs this long, plus up to two seconds."
+          data-testid="output-clips-switch"
+          description={
+            blocked
+              ? `Off on this computer. ${blocked}`
+              : on
+                ? 'The newest seconds are on disk, ready to save, and deleted as they age. Nothing is kept for longer.'
+                : 'Off. A clip can only be marked while you record.'
+          }
+          label={KEEP_LAST_SECONDS_LABEL}
+        >
+          <Switch
+            checked={on}
+            data-testid="output-clips-enabled"
+            onCheckedChange={(checked) => clips.setEnabled(checked)}
+          />
+        </SettingsRow>
+        <SettingsRow
+          data-testid="output-clips-length"
+          description="How much is kept. A clip runs this long, plus up to two seconds."
           label="Length"
         >
           <Select
@@ -117,7 +139,7 @@ function ReplayBufferSection(): ReactElement {
               }))
             }
           >
-            <SelectTrigger className="w-32 shrink-0" id="replay-length">
+            <SelectTrigger className="w-32 shrink-0" id="clips-length">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -130,57 +152,38 @@ function ReplayBufferSection(): ReactElement {
           </Select>
         </SettingsRow>
         <SettingsRow
-          data-testid="output-replay-start-on-launch"
-          description="While it is on, your screen and microphone are being written to disk until you turn it off."
-          label="Turn on when Videorc opens"
-        >
-          <Switch
-            checked={startOnLaunch}
-            onCheckedChange={(checked) =>
-              setCaptureConfig((current) => ({
-                ...current,
-                replayBuffer: { ...current.replayBuffer, startOnLaunch: checked }
-              }))
-            }
-          />
-        </SettingsRow>
-        <SettingsRow
-          data-testid="output-replay-disk"
-          description={`At ${formatVideoQuality(captureConfig.video)}, however long the buffer runs. It is deleted when the buffer turns off.`}
+          data-testid="output-clips-disk"
+          description={`At ${formatVideoQuality(captureConfig.video)}, however long it runs.`}
           label="Disk use"
         >
           <span className="text-sm tabular-nums text-muted-foreground">about {estimate}</span>
         </SettingsRow>
         <ShortcutRecorderField
-          id="global-shortcut-replay-save"
-          label={globalShortcutLabel('replay-save')}
+          id="global-shortcut-clip-mark"
+          label={globalShortcutLabel('clip-mark')}
           platform={runtimeInfo?.platform}
-          registrationFailed={shortcutRegistration['replay-save'] === false}
+          registrationFailed={shortcutRegistration['clip-mark'] === false}
           validate={(accelerator) => {
             const owner = findAcceleratorOwner(
               settings.globalShortcuts ?? {},
               accelerator,
-              'replay-save',
+              'clip-mark',
               runtimeInfo?.platform
             )
             return owner ? `Already used by ${globalShortcutLabel(owner)}.` : null
           }}
-          value={settings.globalShortcuts?.replaySave}
+          value={settings.globalShortcuts?.clipMark}
           onChange={(accelerator) =>
             setSettings((current) => ({
               ...current,
-              globalShortcuts: withGlobalShortcut(
-                current.globalShortcuts,
-                'replay-save',
-                accelerator
-              )
+              globalShortcuts: withGlobalShortcut(current.globalShortcuts, 'clip-mark', accelerator)
             }))
           }
         />
         <SettingsRow
-          data-testid="output-replay-folder"
-          description="A Replays folder inside your recordings folder. Every replay is listed in Library."
-          label="Where replays go"
+          data-testid="output-clips-folder"
+          description="A Clips folder inside your recordings folder. Every clip is listed in Library."
+          label="Where clips go"
         />
       </FieldGroup>
     </PanelSection>

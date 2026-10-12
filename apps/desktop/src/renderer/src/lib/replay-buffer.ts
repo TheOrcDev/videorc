@@ -7,25 +7,28 @@ import type {
 import { formatTimecode } from '../../../shared/timecode'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { toast } from '@/lib/toast'
-import { userErrorMessage } from '@/lib/user-error'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
-// Plan 181: the replay buffer's words, numbers and toasts. Loaded lazily by
-// the Studio provider and the UI that shows the ring; the eager provider
-// keeps only the switch, the events and the pure reconcile decision.
+// Plan 181 (the owner's redesign, R4): the clip buffer's words, numbers and
+// toasts. Loaded lazily by the Studio provider and the UI that shows the
+// ring; the eager provider keeps only the switch, the events and the pure
+// reconcile decision.
 //
-// Words (CONTEXT.md): "Replay buffer" is the feature and its switch, "Save
-// replay" the action, and a "replay" the saved file. Never "clip": a clip
-// is a clip mark.
+// Words (CONTEXT.md): a **clip** is the saved video (the last N seconds),
+// **Clip** / **Save clip** the one action, **Clips** the Output section and
+// its switch ("Keep the last seconds"). Never "replay" in copy.
 
-export const REPLAY_BUFFER_LABEL = 'Replay buffer'
-export const SAVE_REPLAY_LABEL = 'Save replay'
+export const CLIPS_LABEL = 'Clips'
+export const SAVE_CLIP_LABEL = 'Save clip'
+export const CLIP_BUTTON_LABEL = 'Clip'
+export const KEEP_LAST_SECONDS_LABEL = 'Keep the last seconds'
 
-/** The ring's segment length, so a replay runs N to N + 2 s (D3). */
+/** The ring's segment length, so a clip runs N to N + 2 s (D3). */
 export const REPLAY_SEGMENT_SECONDS = 2
 /** The ring's AAC audio, beside the video bitrate, in the disk estimate. */
 const REPLAY_AUDIO_KBPS = 192
 
-const TOAST_ID = 'replay-buffer'
+const TOAST_ID = 'clips'
 
 /** "15 s", "30 s", "1 min", "2 min", "5 min". */
 export function replayLengthLabel(seconds: number): string {
@@ -58,51 +61,19 @@ export function formatBytes(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1_000_000))} MB`
 }
 
-export type ReplayRowTone = 'good' | 'neutral' | 'warn'
-
 /**
- * The one line under the switch (plan 181 S5.1). The switch is the intent;
- * this is what the ring does right now, in the Studio's words.
+ * The status bar chip while the ring holds frames: "Clip · 0:30" (what a
+ * press saves right now), "Clips starting…" while it fills.
  */
-export function replayStatusLine(
-  ring: ReplayStateEvent,
-  armed: boolean,
-  transportActive: boolean
-): { label: string; tone: ReplayRowTone } {
-  switch (ring.state) {
-    case 'on':
-      return {
-        label: `${replayClock(ring.bufferedSeconds)} / ${replayClock(ring.seconds)}`,
-        tone: 'good'
-      }
-    case 'starting':
-      return { label: 'Starting…', tone: 'neutral' }
-    case 'error':
-      return { label: 'Stopped', tone: 'warn' }
-    default:
-      if (armed && transportActive) return { label: 'Starts after this session', tone: 'neutral' }
-      if (armed) return { label: 'Starting…', tone: 'neutral' }
-      return { label: 'Off', tone: 'neutral' }
-  }
-}
-
-/** The status bar chip while the ring holds frames: "Replay · 0:30". */
 export function replayStatusBarLabel(ring: ReplayStateEvent): string | null {
-  if (ring.state === 'on') return `Replay · ${replayClock(ring.bufferedSeconds)}`
-  if (ring.state === 'starting') return 'Replay starting…'
+  if (ring.state === 'on') return `Clip · ${replayClock(ring.bufferedSeconds)}`
+  if (ring.state === 'starting') return 'Clips starting…'
   return null
 }
 
-/** Why a Save replay press did nothing, by the ring's state. */
-function replayOffDescription(state: ReplayBufferState, armed: boolean): string {
-  if (state === 'starting' || armed)
-    return 'The replay buffer is still starting. Try again in a moment.'
-  return 'Turn it on in Studio to keep the last seconds ready to save.'
-}
-
-export function showReplaySaved(event: ReplaySavedEvent): void {
+export function showClipSaved(event: ReplaySavedEvent): void {
   const held = replayClock(Math.round(event.coveredSeconds))
-  toast.success('Replay saved', {
+  toast.success('Clip saved', {
     id: `${TOAST_ID}-saved-${event.saveId}`,
     duration: 12_000,
     description: event.complete ? `Last ${held}.` : `Last ${held}, the buffer was still filling.`,
@@ -113,54 +84,64 @@ export function showReplaySaved(event: ReplaySavedEvent): void {
   })
 }
 
-export function showReplaySaveFailed(event: ReplaySaveFailedEvent): void {
-  toast.error("Couldn't save the replay", {
+export function showClipSaveFailed(event: ReplaySaveFailedEvent): void {
+  toast.error("Couldn't save the clip", {
     id: `${TOAST_ID}-failed-${event.saveId}`,
     duration: 10_000,
     description: event.message
   })
 }
 
-/** The `replay.save` RPC refused before any work started (off, starting). */
-export function showReplaySaveRefused(error: unknown): void {
-  toast.warning("Couldn't save the replay", {
+/**
+ * A Clip press with nothing to save: the ring holds no frames and nothing
+ * records. Says which, and points at the one switch.
+ */
+export function showNothingToClip(input: {
+  state: ReplayBufferState
+  enabled: boolean
+  blockedReason: string | null
+}): void {
+  const openOutput = { label: 'Open Output', onClick: () => openWorkspaceTab('recording') }
+  if (input.blockedReason) {
+    toast.warning('Clips are off on this computer', {
+      id: TOAST_ID,
+      description: input.blockedReason,
+      action: openOutput
+    })
+    return
+  }
+  if (!input.enabled) {
+    toast.warning('Clips are off', {
+      id: TOAST_ID,
+      description: `Turn on ${KEEP_LAST_SECONDS_LABEL} on the Output page, or start a recording.`,
+      action: openOutput
+    })
+    return
+  }
+  if (input.state === 'starting') {
+    toast.info('Clips are still starting', {
+      id: TOAST_ID,
+      description: 'Try again in a moment.'
+    })
+    return
+  }
+  toast.warning('Nothing to clip yet', {
     id: TOAST_ID,
-    description: userErrorMessage(error).description
-  })
-}
-
-export function showReplayBufferOff(
-  state: ReplayBufferState,
-  armed: boolean,
-  turnOn: () => void
-): void {
-  toast.warning('Replay buffer is off', {
-    id: TOAST_ID,
-    description: replayOffDescription(state, armed),
-    ...(armed || state === 'starting' ? {} : { action: { label: 'Turn on', onClick: turnOn } })
-  })
-}
-
-/** D4: a Save replay press while a recording runs without the ring. */
-export function showReplayMarkedInstead(): void {
-  toast.info('Marked in your recording instead', {
-    id: TOAST_ID,
-    description:
-      'The replay buffer restarts with each recording, so this moment was marked in the recording.'
+    description: 'The last seconds are not being kept right now. Start a recording, or go live.'
   })
 }
 
 /** The ring ended with its session, not by the switch. */
-export function showReplayBufferStopped(reason: string | undefined): void {
-  toast.warning('Replay buffer stopped', {
+export function showClipsStopped(reason: string | undefined): void {
+  toast.warning('Clips stopped', {
     id: TOAST_ID,
     duration: 10_000,
-    description: reason ?? 'Turn it on again in Studio.'
+    description: reason ?? `Turn on ${KEEP_LAST_SECONDS_LABEL} again on the Output page.`
   })
 }
 
-export function showReplayBufferCouldNotStart(reason: string): void {
-  toast.error("Couldn't start the replay buffer", {
+export function showClipsCouldNotStart(reason: string): void {
+  toast.error("Clips couldn't start", {
     id: TOAST_ID,
     duration: 10_000,
     description: reason

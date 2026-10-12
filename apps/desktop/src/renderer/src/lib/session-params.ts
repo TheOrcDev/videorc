@@ -83,6 +83,15 @@ export function buildStartSessionParams(input: {
     // Present only when a vertical destination is armed on a horizontal
     // session — the backend refuses vertical targets without this leg.
     simulcast: buildSimulcastParams(captureConfig),
-    ...(replayArmed ? { replay: { seconds: captureConfig.replayBuffer.seconds } } : {})
+    // `auto` (redesign R2): a ring the user never asked for, which the
+    // backend keeps off a software encoder path; a chosen one runs anywhere.
+    ...(replayArmed
+      ? {
+          replay: {
+            seconds: captureConfig.replayBuffer.seconds,
+            ...(captureConfig.replayBuffer.explicit ? {} : { auto: true })
+          }
+        }
+      : {})
   }
 }
