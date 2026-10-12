@@ -141,8 +141,17 @@ pub async fn start_portal_session(
         outcome = negotiate_stream(&proxy, &session, source, restore_token, include_cursor) => outcome,
         () = cancelled => PortalStart::Abandoned,
     };
-    if !matches!(outcome, PortalStart::Granted(_)) {
-        close_session(&session).await;
+    match outcome {
+        PortalStart::Granted(_) => {}
+        // The portal answers Close only after its share dialog is gone, so
+        // waiting here held the next transition (and Record) for the whole
+        // 10 s call bound (ogre, 2026-10-12). Close on the persistent portal
+        // runtime instead; nothing waits for the answer.
+        PortalStart::Abandoned => {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move { close_session(&session).await });
+        }
+        PortalStart::Denied(_) => close_session(&session).await,
     }
     outcome
 }
