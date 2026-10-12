@@ -1589,6 +1589,18 @@ export interface ReplayBufferControls {
 }
 
 const REPLAY_STATE_OFF: ReplayStateEvent = { state: 'off', seconds: 30, bufferedSeconds: 0 }
+
+/** The backend's idle after a buffer-only stop, bounded (the stop's own reply
+ * may still say stopping). */
+async function waitForRecordingIdle(
+  recordingRef: { current: { state: string } },
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (recordingRef.current.state !== 'idle' && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+  }
+}
 /** `session.start`'s code for a default ring start the backend keeps off a
  * software encoder path (mirrors `replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE`). */
 const REPLAY_SOFTWARE_ENCODER_REFUSAL = 'replay-software-encoder'
@@ -2330,6 +2342,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const replayGaveUpToastedRef = useRef(false)
   const replayLaunchArmedRef = useRef(false)
   const setReplayArmedRef = useRef<(armed: boolean) => void>(() => {})
+  const stopReplayBufferRef = useRef<() => Promise<void>>(async () => {})
+  const scheduleReplayReconcileRef = useRef<(delayMs?: number) => void>(() => {})
+  // Held while a layout transaction stops the default ring to change the
+  // canvas orientation, so the reconcile does not re-arm it in the old
+  // orientation before the new layout lands.
+  const replayReconcileHoldRef = useRef(false)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
   // Plan 069: the newest system-audio health issue, kept apart from the
@@ -9168,12 +9186,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         origin?: 'builtin' | 'saved'
       }
     ): Promise<boolean> => {
-      const sessionActive = isActiveRecordingState(recordingRef.current.state)
-      if (
-        sessionActive &&
+      const crossesOrientation =
         layoutPresetOrientation(layout.layoutPreset) !==
-          layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
-      ) {
+        layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
+      if (crossesOrientation && sessionIsReplayOnly(recordingRef.current)) {
+        // Plan 181: the default ring is no reason to keep the canvas. It
+        // stops here, the transaction runs as idle, and the reconcile re-arms
+        // it in the new orientation once the layout has landed.
+        replayReconcileHoldRef.current = true
+        return stopReplayBufferRef
+          .current()
+          .then(() => waitForRecordingIdle(recordingRef, 5_000))
+          .then(() => requestLayoutTransactionRef.current(layout, options))
+          .finally(() => {
+            replayReconcileHoldRef.current = false
+            scheduleReplayReconcileRef.current()
+          })
+      }
+      const sessionActive = isActiveRecordingState(recordingRef.current.state)
+      if (sessionActive && crossesOrientation) {
         toast.warning('Stop the recording or stream before switching orientation', {
           id: 'scene-orientation-lock'
         })
@@ -9476,6 +9507,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       wsStatus
     ]
   )
+  const requestLayoutTransactionRef = useRef(requestLayoutTransaction)
+  requestLayoutTransactionRef.current = requestLayoutTransaction
 
   // Library edits request a new working background. Only the committed target
   // drives preview/session parameters; applying a saved snapshot never edits the library.
@@ -9508,10 +9541,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const entry = takeLayoutUndo()
     if (!entry) return false
     const current = captureConfigRef.current
-    const sessionActive = isActiveRecordingState(recordingRef.current.state)
     const crossesOrientation =
       layoutPresetOrientation(entry.layout.layoutPreset) !==
       layoutPresetOrientation(current.layout.layoutPreset)
+    if (crossesOrientation && sessionIsReplayOnly(recordingRef.current)) {
+      // Plan 181: the default ring steps aside for the undo, as for a preset.
+      replayReconcileHoldRef.current = true
+      try {
+        await stopReplayBufferRef.current()
+        await waitForRecordingIdle(recordingRef, 5_000)
+      } finally {
+        replayReconcileHoldRef.current = false
+        scheduleReplayReconcileRef.current()
+      }
+    }
+    const sessionActive = isActiveRecordingState(recordingRef.current.state)
     if (sessionActive && crossesOrientation) {
       // The canvas is fixed mid-session; the transaction's own refusal would
       // say so, but the entry must stay for after the session.
@@ -14965,6 +15009,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       reconcileReplayBufferRef.current()
     }, delayMs)
   }, [])
+  scheduleReplayReconcileRef.current = scheduleReplayReconcile
 
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
@@ -15054,6 +15099,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       replayStartInFlightRef.current = false
     }
   }, [applyRecordingStatus, client, reportError])
+  stopReplayBufferRef.current = stopReplayBuffer
 
   const reconcileReplayBuffer = useCallback(() => {
     const action = replayBufferReconcileAction({
@@ -15065,7 +15111,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startPending:
         sessionStartInFlightRef.current !== null || sessionStartLifecycleActiveRef.current,
       stopPending: stopSessionInFlightPromiseRef.current !== null,
-      replayStartInFlight: replayStartInFlightRef.current,
+      replayStartInFlight: replayStartInFlightRef.current || replayReconcileHoldRef.current,
       failedStarts: replayFailedStartsRef.current
     })
     if (action === 'start') void startReplayBuffer()

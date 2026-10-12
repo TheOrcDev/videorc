@@ -4449,6 +4449,7 @@ async fn start_session_with_timeline(
                         width: params.output.video.width,
                         height: params.output.video.height,
                         frame_consumer: compositor_frame_consumer,
+                        replay_only,
                         caption_overlay_on_primary: session_caption_plan.primary,
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
@@ -5735,6 +5736,17 @@ async fn start_session_with_timeline(
     timeline.mark(RecordingStartPhase::Running);
     state.emit_event("session.sources.changed", sources_snapshot);
     state.emit_event("recording.status", running_status.clone());
+    if !replay_only {
+        // Decision 4 (plan 058) with the ring on by default (plan 181): a
+        // scene editor draft that landed in the handover gap must not outlive
+        // the real session's start, whichever compositor run it took. The
+        // slot above already refuses the next sample; this ends the last one.
+        // Spawned, so the compositor lock is never taken under the slot's.
+        let clear_state = state.clone();
+        tokio::spawn(async move {
+            crate::compositor::clear_editor_draft(&clear_state).await;
+        });
+    }
     if let Some(ring) = replay_ring.take() {
         crate::replay_buffer::attach(&state, ring);
     }
