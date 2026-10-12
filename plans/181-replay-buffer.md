@@ -527,4 +527,21 @@ tests only. State this plainly in the handoff and never claim them.
 
 ## As built
 
-(fill after execution)
+### S1: FFmpeg capability check
+
+| Platform | Binary | `segment` | `mpegts` (mux+demux) | `concat` | `aac_adtstoasc` | How |
+| --- | --- | --- | --- | --- | --- | --- |
+| macOS | `vendor/ffmpeg/current/bin/ffmpeg` 8.1.1 (own build, 2026-10-12) | yes | yes | yes | yes | run locally: `-muxers`, `-demuxers`, `-bsfs` |
+| Windows | BtbN `ffmpeg-n8.1.2-34-g9b6c8969e0-win64-lgpl-8.1` (`vendor/ffmpeg/windows-pin.json`) | expected | expected | expected | expected | BtbN LGPL autobuilds enable every core muxer/demuxer/bsf; `scripts/preflight-windows-package.mjs` now runs `-muxers`/`-demuxers`/`-bsfs` on the Windows host and refuses to package without them (`scripts/lib/windows-ffmpeg-capabilities.mjs`) |
+| Linux | BtbN `ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-lgpl-8.1` (`vendor/ffmpeg/linux-pin.json`) | expected | expected | expected | expected | same build family; `scripts/fetch-ffmpeg-linux.mjs` and `scripts/validate-linux-release-artifact.mjs` now fail closed without the three listings (`scripts/lib/ffmpeg-linux-pin.mjs`) |
+
+"expected" is not "verified": the Windows and Linux binaries cannot run on
+this Mac. Their package and release gates are the verification, and they
+fail closed.
+
+`crates/videorc-backend/src/replay_buffer.rs` holds the pure half: the CSV
+list parser, `keep_count` (`ceil(N/2)+2`), `segments_to_prune`,
+`select_segments`, the concat script, the segment-muxer and save argument
+tails, `replay_file_name`, `required_free_bytes` and the `split` rewrite
+for the raw and legacy encoder graphs. `cargo test -p videorc-backend
+replay_buffer`: 13 passed.

@@ -2,11 +2,36 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  REQUIRED_WINDOWS_FFMPEG_BITSTREAM_FILTERS,
+  REQUIRED_WINDOWS_FFMPEG_DEMUXERS,
   REQUIRED_WINDOWS_FFMPEG_ENCODERS,
   REQUIRED_WINDOWS_FFMPEG_FILTERS,
+  REQUIRED_WINDOWS_FFMPEG_MUXERS,
   REQUIRED_WINDOWS_FFMPEG_PROTOCOLS,
   assessWindowsFfmpegCapabilities
 } from './windows-ffmpeg-capabilities.mjs'
+
+const MUXERS_WITH_SEGMENT = [
+  'File formats:',
+  ' D. = Demuxing supported',
+  ' .E = Muxing supported',
+  ' --',
+  '  E  mp4             MP4 (MPEG-4 Part 14)',
+  '  E  mpegts          MPEG-TS (MPEG-2 Transport Stream)',
+  '  E  segment         segment',
+  '  E  stream_segment,ssegment streaming segment muxer'
+].join('\n')
+const DEMUXERS_WITH_CONCAT = [
+  'File formats:',
+  ' D   concat          Virtual concatenation script',
+  ' D   mpegts          MPEG-TS (MPEG-2 Transport Stream)'
+].join('\n')
+const BSFS_WITH_ADTSTOASC = ['Bitstream filters:', 'aac_adtstoasc', 'h264_mp4toannexb'].join('\n')
+const RING = {
+  muxersOutput: MUXERS_WITH_SEGMENT,
+  demuxersOutput: DEMUXERS_WITH_CONCAT,
+  bitstreamFiltersOutput: BSFS_WITH_ADTSTOASC
+}
 
 const PROTOCOLS_WITH_TLS = [
   'Supported file protocols:',
@@ -47,6 +72,7 @@ const FILTERS_WITH_NOISE_CLEANUP = [
 
 test('a fully capable ffmpeg passes', () => {
   const result = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: ENCODERS_WITH_MF,
     filtersOutput: FILTERS_WITH_NOISE_CLEANUP
@@ -57,6 +83,7 @@ test('a fully capable ffmpeg passes', () => {
 
 test('Quick Sync and the OpenH264 fallback are reported but never required', () => {
   const without = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: ENCODERS_WITH_MF,
     filtersOutput: FILTERS_WITH_NOISE_CLEANUP
@@ -65,6 +92,7 @@ test('Quick Sync and the OpenH264 fallback are reported but never required', () 
   assert.deepEqual(without.optionalMissing, ['encoder:h264_qsv', 'encoder:libopenh264'])
 
   const withBoth = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: [
       ENCODERS_WITH_MF,
@@ -92,6 +120,7 @@ test('the Windows bundle requires every filter the Clean cut render uses (plan 1
     assert.ok(REQUIRED_WINDOWS_FFMPEG_FILTERS.includes(name), name)
   }
   const withoutAfade = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: ENCODERS_WITH_MF,
     filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
@@ -104,6 +133,7 @@ test('the Windows bundle requires every filter the Clean cut render uses (plan 1
 
 test('an ffmpeg without a TLS stack fails on rtmps and tls (the 0.9.23 class)', () => {
   const result = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: PROTOCOLS_WITH_TLS.split('\n')
       .filter((line) => !/rtmps|tls/.test(line))
       .join('\n'),
@@ -116,6 +146,7 @@ test('an ffmpeg without a TLS stack fails on rtmps and tls (the 0.9.23 class)', 
 
 test('rtmps does not substring-match as rtmp', () => {
   const result = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: 'Input:\n  rtmps\n  tls',
     encodersOutput: ENCODERS_WITH_MF,
     filtersOutput: FILTERS_WITH_NOISE_CLEANUP
@@ -126,6 +157,7 @@ test('rtmps does not substring-match as rtmp', () => {
 
 test('missing required video and MKV audio encoders fail closed', () => {
   const result = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: 'Encoders:\n A....D aac    AAC',
     filtersOutput: FILTERS_WITH_NOISE_CLEANUP
@@ -136,6 +168,7 @@ test('missing required video and MKV audio encoders fail closed', () => {
 
 test('the Windows bundle requires PCM for MKV Noise Cleanup outputs', () => {
   const result = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: ENCODERS_WITH_MF.replace(/\n A\.\.\.\.D pcm_s16le.*$/, ''),
     filtersOutput: FILTERS_WITH_NOISE_CLEANUP
@@ -149,12 +182,58 @@ test('empty output reports the whole required set (fail closed)', () => {
   assert.deepEqual(result.missing, [
     ...REQUIRED_WINDOWS_FFMPEG_PROTOCOLS.map((name) => `protocol:${name}`),
     ...REQUIRED_WINDOWS_FFMPEG_ENCODERS.map((name) => `encoder:${name}`),
-    ...REQUIRED_WINDOWS_FFMPEG_FILTERS.map((name) => `filter:${name}`)
+    ...REQUIRED_WINDOWS_FFMPEG_FILTERS.map((name) => `filter:${name}`),
+    ...REQUIRED_WINDOWS_FFMPEG_MUXERS.map((name) => `muxer:${name}`),
+    ...REQUIRED_WINDOWS_FFMPEG_DEMUXERS.map((name) => `demuxer:${name}`),
+    ...REQUIRED_WINDOWS_FFMPEG_BITSTREAM_FILTERS.map((name) => `bsf:${name}`)
   ])
+})
+
+test('the replay buffer needs the segment ring, the concat demuxer and aac_adtstoasc (plan 181)', () => {
+  assert.deepEqual(REQUIRED_WINDOWS_FFMPEG_MUXERS, ['segment', 'mpegts', 'mp4'])
+  assert.deepEqual(REQUIRED_WINDOWS_FFMPEG_DEMUXERS, ['concat', 'mpegts'])
+  assert.deepEqual(REQUIRED_WINDOWS_FFMPEG_BITSTREAM_FILTERS, ['aac_adtstoasc'])
+  const capable = assessWindowsFfmpegCapabilities({
+    ...RING,
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_WITH_MF,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP,
+    muxersOutput: MUXERS_WITH_SEGMENT,
+    demuxersOutput: DEMUXERS_WITH_CONCAT,
+    bitstreamFiltersOutput: BSFS_WITH_ADTSTOASC
+  })
+  assert.equal(capable.ok, true, capable.missing.join(', '))
+  const withoutRing = assessWindowsFfmpegCapabilities({
+    ...RING,
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_WITH_MF,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP,
+    muxersOutput: MUXERS_WITH_SEGMENT.split('\n')
+      .filter((line) => !/ segment /.test(line))
+      .join('\n'),
+    demuxersOutput: DEMUXERS_WITH_CONCAT.split('\n')
+      .filter((line) => !/ concat /.test(line))
+      .join('\n'),
+    bitstreamFiltersOutput: 'Bitstream filters:\nh264_mp4toannexb'
+  })
+  assert.deepEqual(withoutRing.missing, ['muxer:segment', 'demuxer:concat', 'bsf:aac_adtstoasc'])
+  // `stream_segment,ssegment` must not pass for `segment`, nor `mpegtsraw` for `mpegts`.
+  const lookalikes = assessWindowsFfmpegCapabilities({
+    ...RING,
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_WITH_MF,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP,
+    muxersOutput: '  E  stream_segment,ssegment streaming segment muxer\n  E  mp4             MP4',
+    demuxersOutput:
+      ' D   mpegtsraw       raw MPEG-TS\n D   concat          Virtual concatenation script',
+    bitstreamFiltersOutput: BSFS_WITH_ADTSTOASC
+  })
+  assert.deepEqual(lookalikes.missing, ['muxer:segment', 'muxer:mpegts', 'demuxer:mpegts'])
 })
 
 test('the Windows bundle requires the model-free noise cleanup filter', () => {
   const result = assessWindowsFfmpegCapabilities({
+    ...RING,
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: ENCODERS_WITH_MF,
     filtersOutput: [

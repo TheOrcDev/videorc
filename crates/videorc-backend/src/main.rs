@@ -99,6 +99,7 @@ mod remote_control;
 mod remote_lan;
 mod remote_lan_server;
 mod repair;
+mod replay_buffer;
 mod repair_service;
 mod resource_authority;
 mod scene;

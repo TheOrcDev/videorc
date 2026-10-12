@@ -101,12 +101,12 @@ if (process.platform === 'win32') {
   if (!capabilities.ok) {
     console.error(
       `preflight-windows-package: bundled ffmpeg is missing required capabilities: ${capabilities.missing.join(', ')}.\n` +
-        'Refusing to package — an ffmpeg without rtmps/tls stalls livestreams silently, and one without afftdn/aac/pcm_s16le cannot run Noise Cleanup for every supported container. Re-pin a build that carries them.'
+        'Refusing to package — an ffmpeg without rtmps/tls stalls livestreams silently, one without afftdn/aac/pcm_s16le cannot run Noise Cleanup for every supported container, and one without the segment muxer, the concat demuxer or aac_adtstoasc cannot save a replay. Re-pin a build that carries them.'
     )
     process.exit(1)
   }
   console.log(
-    'preflight-windows-package: bundled ffmpeg capability probe passed (rtmp/rtmps/tls, h264_mf, aac, pcm_s16le, afftdn).'
+    'preflight-windows-package: bundled ffmpeg capability probe passed (rtmp/rtmps/tls, h264_mf, aac, pcm_s16le, afftdn, segment/mpegts/mp4 muxers, concat/mpegts demuxers, aac_adtstoasc).'
   )
   if (capabilities.optionalMissing.length) {
     console.warn(
