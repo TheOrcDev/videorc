@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "mode": "report",
+  "about": "Plan 178 U9 / plan 166 'Incident signals and first thresholds'. Report-only until 14 days of data exist; U15's calibrate.mjs proposes thresholds.v2.json with mode gate. In report mode a breach is a warn; P0 incidents, crashes and failed steps are fails regardless of mode.",
+  "leak": {
+    "warmupMinutes": 30,
+    "windowMinutes": 120,
+    "minDurationMinutes": 40,
+    "mbPerHourByRole": {
+      "backend": 20,
+      "electron-main": 10,
+      "electron-renderer": 30,
+      "electron-gpu": 30,
+      "ffmpeg": 10,
+      "preview-helper": 20
+    }
+  },
+  "memory": { "maxOwnedRssGb": 3, "footprintDoubleFromWarmup": true },
+  "handles": { "maxFdsPerHour": 50, "maxThreadsPerHour": 20 },
+  "orphans": { "graceSeconds": 10 },
+  "droppedFrames": { "maxPercent": 0.5, "windowMinutes": 5 },
+  "encoderSpeed": { "min": 0.97, "forSeconds": 60 },
+  "bitrate": { "minFractionOfTarget": 0.7, "forSeconds": 60, "defaultTargetKbps": 6000 },
+  "destination": {
+    "codes": [
+      "stream-target-reconnecting",
+      "stream-target-failed",
+      "stream-output-stalled",
+      "stream-output-failed"
+    ],
+    "expectedInScenarios": ["faults"]
+  },
+  "noDataWhileLive": { "polls": 2, "severity": "P0" },
+  "youtubeHealth": { "okSustainedPolls": 3 },
+  "clips": {
+    "maxFreezeMs": 1000,
+    "maxAudioGapMs": 100,
+    "maxAvOffsetMs": 150,
+    "maxDriftMsPer30Min": 20
+  },
+  "crashes": { "severity": "P1", "severityWhenStreamEnded": "P0" },
+  "previewDowngrade": { "any": true },
+  "hostOverload": { "code": "host-overloaded" },
+  "startLatency": { "maxMs": 10000, "slopeMsPerCycle": 100 },
+  "chat": { "maxArrivalMs": 10000 },
+  "frames": {
+    "analysisWidth": 640,
+    "analysisHeight": 360,
+    "offsetsSeconds": [2, 5],
+    "baselineOffsetSeconds": -3,
+    "overlayDiffMin": 0.08,
+    "regions": {
+      "highlight": [0.15, 0.45, 0.7, 0.3],
+      "caption": [0.1, 0.78, 0.8, 0.18],
+      "takeover": [0, 0, 1, 1]
+    }
+  }
+}

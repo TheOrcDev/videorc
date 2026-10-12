@@ -72,6 +72,7 @@ mod live_scene;
 mod live_source_switch;
 mod marker_voice;
 mod metal_compositor;
+mod metrics_journal;
 mod moments;
 mod mpeg_ts;
 mod native_preview_host;
@@ -603,6 +604,22 @@ async fn run_backend() -> Result<()> {
         Ok(None) => {}
         Err(error) => tracing::warn!("Could not load the saved encoder preference: {error}"),
     }
+    // Plan 166 S1: the metrics journal, off unless the setting or
+    // VIDEORC_METRICS_JOURNAL=1 turns it on. Nothing is running yet, so there
+    // is no state to seed.
+    let metrics_journal_setting = state
+        .database
+        .load_setting::<bool>(metrics_journal::SETTING_KEY)
+        .unwrap_or_else(|error| {
+            tracing::warn!("Could not load the metrics journal setting: {error}");
+            None
+        })
+        .unwrap_or(false);
+    metrics_journal::configure(
+        metrics_journal_setting,
+        state.events.subscribe(),
+        Vec::new(),
+    );
     state.emit_log("info", "Videorc backend ready.");
     if let Err(error) = sync_remote_discovery_file(&state) {
         state.emit_log(
@@ -5581,7 +5598,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cleanCut.render"
         | "performance.check.run"
         | "performance.check.cancel"
-        | "encoder.preference.set" => Some(DEFAULT_MUTATION_POLICY),
+        | "encoder.preference.set"
+        | "diagnostics.metricsJournal.set" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -5635,6 +5653,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "stream.output.topology.probe"
         | "performance.check.get"
         | "encoder.preference.get"
+        | "diagnostics.metricsJournal.get"
         | "sessions.list"
         | "sessions.healthEvents.list"
         | "sessions.logs.list"
@@ -9942,6 +9961,37 @@ async fn handle_text_message_with_role(
         "diagnostics.stats" => {
             ServerResponse::ok(command.id, current_diagnostics_stats(state).await)
         }
+        "diagnostics.metricsJournal.get" => {
+            ServerResponse::ok(command.id, metrics_journal::current_state())
+        }
+        "diagnostics.metricsJournal.set" => {
+            match serde_json::from_value::<metrics_journal::MetricsJournalSetParams>(command.params)
+            {
+                Ok(params) => match state
+                    .database
+                    .save_setting(metrics_journal::SETTING_KEY, &params.enabled)
+                {
+                    Ok(()) => {
+                        // Subscribe before reading the seed so nothing falls
+                        // between the snapshot and the first bus event.
+                        let events = state.events.subscribe();
+                        let seed = metrics_journal_seed(state).await;
+                        ServerResponse::ok(
+                            command.id,
+                            metrics_journal::configure(params.enabled, events, seed),
+                        )
+                    }
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "metrics-journal-not-saved",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "capture.recovery.status" => ServerResponse::ok(
             command.id,
             capture_recovery::capture_recovery_status(state).await,
@@ -13046,6 +13096,18 @@ async fn backend_health(state: &AppState, ffmpeg_path: &str) -> BackendHealth {
     }
 }
 
+/// Current session state for a metrics journal switched on mid-session.
+async fn metrics_journal_seed(state: &AppState) -> Vec<protocol::ServerEvent> {
+    let mut seed = vec![
+        protocol::ServerEvent::new("recording.status", current_recording_status(state).await),
+        protocol::ServerEvent::new("diagnostics.stats", current_diagnostics_stats(state).await),
+    ];
+    if let Ok(snapshot) = recording::current_stream_targets_snapshot(state).await {
+        seed.push(protocol::ServerEvent::new("stream.targets", snapshot));
+    }
+    seed
+}
+
 async fn current_diagnostics_stats(state: &AppState) -> protocol::DiagnosticStats {
     let stats = state.diagnostics.lock().await.clone();
     let recovery = capture_recovery::capture_recovery_status(state).await;
@@ -13112,6 +13174,7 @@ async fn export_support_bundle_for_state(
         logs: state.recent_logs(200),
         sessions,
         performance_check: performance_check::current_state(state).await.result,
+        metrics_journal: metrics_journal::support_bundle_lines(),
     })
 }
 

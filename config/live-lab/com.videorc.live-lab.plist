@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Plan 178 U11: the live lab schedule agent. Template; the lab user installs it
+  with
+
+    pnpm live:schedule install-agent
+
+  which renders it into ~/Library/LaunchAgents/ with this checkout's paths,
+  creates ~/videorc-live-lab/logs (launchd does not create the folder of
+  StandardOutPath) and bootstraps it into gui/$(id -u).
+
+  It runs `scripts/live-lab/schedule.mjs tick` every 300 s in the lab user's
+  GUI session (capture needs the Aqua session, not a daemon). The tick decides
+  what is due from the policy, the lock and config/live-lab/schedule.json; a
+  missed slot is skipped, never piled up. Nothing here holds a secret: the
+  stream keys and tokens stay in ~/.videorc-live-lab/config.json (0600) and the
+  policy stays owner-owned under /Library/Application Support/VideorcLab/.
+
+  Paths assume the lab user `videorc-lab` with the repo at ~/videorc and
+  Homebrew node at /opt/homebrew/bin (Apple Silicon); install-agent swaps in
+  the real ones.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.videorc.live-lab</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/videorc-lab/videorc/scripts/live-lab/schedule.mjs</string>
+    <string>tick</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/videorc-lab/videorc</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/videorc-lab</string>
+  </dict>
+
+  <!-- GUI session only: a tick in a non-Aqua session could never capture. -->
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- One tick at login too, so the post-reboot doctor run (U11 step 3) happens. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    The tick's own lines. Each slot's run output goes to
+    logs/schedule-<date>.log next to it (30 days kept).
+  -->
+  <key>StandardOutPath</key>
+  <string>/Users/videorc-lab/videorc-live-lab/logs/schedule.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/videorc-lab/videorc-live-lab/logs/schedule.log</string>
+
+  <!--
+    A tick that is already running (a live run) is never started twice:
+    launchd runs one instance per label, and a StartInterval firing while the
+    job runs is skipped (launchd.plist(5)). The tick also holds its own lock
+    against a hand-typed `live:schedule tick`. It runs each due slot to
+    completion, so a marathon keeps this job alive for hours; that is expected.
+  -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>Nice</key>
+  <integer>0</integer>
+
+  <!--
+    On bootout or logout launchd sends SIGTERM; the tick forwards it to the
+    run, which ends the stream and tears down (the kill switch budget is 60 s).
+    Give it 90 s before SIGKILL instead of the default 20 s.
+  -->
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
+</dict>
+</plist>

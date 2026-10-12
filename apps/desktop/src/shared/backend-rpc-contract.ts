@@ -111,6 +111,8 @@ import type {
   PerformanceCheckRunParams,
   EncoderPreferenceSetParams,
   EncoderPreferenceState,
+  MetricsJournalSetParams,
+  MetricsJournalState,
   PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
@@ -319,6 +321,11 @@ export interface BackendRpcMethodMap {
   'performance.check.cancel': BackendRpcDefinition<undefined, PerformanceCheckState>
   'encoder.preference.get': BackendRpcDefinition<undefined, EncoderPreferenceState>
   'encoder.preference.set': BackendRpcDefinition<EncoderPreferenceSetParams, EncoderPreferenceState>
+  'diagnostics.metricsJournal.get': BackendRpcDefinition<undefined, MetricsJournalState>
+  'diagnostics.metricsJournal.set': BackendRpcDefinition<
+    MetricsJournalSetParams,
+    MetricsJournalState
+  >
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
@@ -757,6 +764,15 @@ const encoderPreferenceSetParamsSchema = objectSchema(
   { preference: windowsH264EncoderPreferenceSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<EncoderPreferenceSetParams>
+const metricsJournalStateSchema = objectSchema({
+  enabled: booleanSchema,
+  setting: booleanSchema,
+  envOverride: booleanSchema
+}) as RuntimeSchema<MetricsJournalState>
+const metricsJournalSetParamsSchema = objectSchema(
+  { enabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<MetricsJournalSetParams>
 const streamOutputTopologyProbeStateSchema = enumSchema([
   'not-required',
   'passed',
@@ -4018,6 +4034,14 @@ const runtimeContracts = {
   'encoder.preference.set': {
     params: encoderPreferenceSetParamsSchema,
     result: encoderPreferenceStateSchema
+  },
+  'diagnostics.metricsJournal.get': {
+    params: undefinedSchema,
+    result: metricsJournalStateSchema
+  },
+  'diagnostics.metricsJournal.set': {
+    params: metricsJournalSetParamsSchema,
+    result: metricsJournalStateSchema
   },
   'stream.targets.snapshot': {
     params: undefinedSchema,

@@ -1,0 +1,36 @@
+# Plan 178 U13: the lab's pf anchor rules. EXAMPLE ONLY; the live copy is
+# root-owned so the harness can load it but never change it.
+#
+# The harness runs `sudo -n /sbin/pfctl -a com.videorc.live-lab -f
+# "/Library/Application Support/VideorcLab/pf.anchor"` to start a network
+# fault and `... -F all` to end it. Because sudoers names this exact path and
+# root owns the file, the lab user cannot make pfctl load any other rule.
+#
+# Install (owner, admin account):
+#
+#   sudo install -d -o root -g wheel -m 0755 "/Library/Application Support/VideorcLab"
+#   sudo install -o root -g wheel -m 0644 config/live-lab/pf.anchor.example \
+#     "/Library/Application Support/VideorcLab/pf.anchor"
+#   sudo pfctl -a com.videorc.live-lab -n -f "/Library/Application Support/VideorcLab/pf.anchor"   # parse only
+#
+# Then hand the anchor to pf once, in /etc/pf.conf (after Apple's anchors):
+#
+#   dummynet-anchor "com.videorc.live-lab"
+#   anchor "com.videorc.live-lab"
+#
+# and reload: `sudo pfctl -f /etc/pf.conf && sudo pfctl -E`. The doctor's
+# "network faults" check reads /etc/pf.conf and fails when the two lines are
+# missing. A macOS update can rewrite /etc/pf.conf; rerun this step if the
+# doctor says so.
+#
+# What the rules do: outbound TCP to YouTube's ingest hosts on 443 (RTMPS)
+# and 1935 (RTMP) goes through dummynet pipe 2178, which the harness
+# configures as 100% loss or 1 Mbit/s and deletes afterwards. Nothing else
+# on the Mac is touched: the API, the kill switch and chat use other hosts.
+# pf resolves the host names when the rules load, so the table holds the
+# addresses current at that moment (the harness compares them with its own
+# lookup and logs a mismatch).
+
+table <videorc_lab_ingest> { a.rtmps.youtube.com, b.rtmps.youtube.com, a.rtmp.youtube.com, b.rtmp.youtube.com }
+
+dummynet out quick proto tcp from any to <videorc_lab_ingest> port { 443, 1935 } pipe 2178

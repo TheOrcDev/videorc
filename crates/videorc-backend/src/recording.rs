@@ -1225,6 +1225,7 @@ fn spawn_ffmpeg_stderr_reader(
     stderr: Option<ChildStderr>,
     mut startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
     progress: FfmpegProgressBeacon,
+    tee: Option<crate::metrics_journal::FfmpegStderrTee>,
 ) -> Option<mpsc::Receiver<FfmpegStderrEvent>> {
     let Some(stderr) = stderr else {
         if let Some(sender) = startup_ready.take() {
@@ -1236,11 +1237,12 @@ fn spawn_ffmpeg_stderr_reader(
         return None;
     };
     let (sender, receiver) = mpsc::channel(256);
-    tokio::spawn(relay_ffmpeg_stderr(
+    tokio::spawn(relay_ffmpeg_stderr_teed(
         BufReader::new(stderr),
         sender,
         startup_ready,
         progress,
+        tee,
     ));
     Some(receiver)
 }
@@ -1270,17 +1272,35 @@ async fn read_bounded_ffmpeg_line<R: AsyncBufRead + Unpin>(
     }
 }
 
+#[cfg(test)]
 async fn relay_ffmpeg_stderr<R>(
+    reader: R,
+    sender: mpsc::Sender<FfmpegStderrEvent>,
+    startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    progress: FfmpegProgressBeacon,
+) where
+    R: AsyncBufRead + Unpin,
+{
+    relay_ffmpeg_stderr_teed(reader, sender, startup_ready, progress, None).await;
+}
+
+/// `tee` (metrics journal on, plan 166 S3) receives every raw line before
+/// any filtering; it never blocks and redacts at write time.
+async fn relay_ffmpeg_stderr_teed<R>(
     mut reader: R,
     sender: mpsc::Sender<FfmpegStderrEvent>,
     mut startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
     progress: FfmpegProgressBeacon,
+    tee: Option<crate::metrics_journal::FfmpegStderrTee>,
 ) where
     R: AsyncBufRead + Unpin,
 {
     loop {
         match read_bounded_ffmpeg_line(&mut reader).await {
             Ok(Some(raw_line)) => {
+                if let Some(tee) = tee.as_ref() {
+                    tee.offer(&raw_line);
+                }
                 // Plan 161: bridge FFmpeg runs with `-loglevel level+info` so
                 // fifo reconnects are visible. Informational chatter goes to
                 // its own event; every existing reader below sees the same
@@ -4865,6 +4885,7 @@ async fn start_session_with_timeline(
         stderr,
         Some(ffmpeg_output_startup_sender),
         ffmpeg_progress.clone(),
+        crate::metrics_journal::ffmpeg_stderr_tee(&session_id),
     );
     // Legacy capture also writes preview JPEGs to stdout. Drain before waiting
     // for media progress so that a full preview pipe cannot block that proof.

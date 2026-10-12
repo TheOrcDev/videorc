@@ -1,0 +1,227 @@
+{
+  "schema": 1,
+  "runId": "2026-10-12-first-light-f1x7ur",
+  "scenario": "first-light",
+  "trigger": "manual",
+  "privacy": "unlisted",
+  "destination": "youtube",
+  "plannedMinutes": 15,
+  "estimatedQuotaUnits": 40,
+  "usesBundledClient": false,
+  "usesLabYoutubeClient": false,
+  "params": {
+    "profile": "1080p30",
+    "minutes": 10
+  },
+  "build": {
+    "source": "release",
+    "version": "0.9.142",
+    "sha": "abc1234def56",
+    "teamId": "C2PA37RB58",
+    "appPath": "/Applications/Videorc.app",
+    "installedAt": "2026-10-12T05:00:00.000Z"
+  },
+  "harness": {
+    "commit": "0123456789ab",
+    "dirty": false
+  },
+  "macOS": {
+    "productVersion": "15.5",
+    "buildVersion": "24F74"
+  },
+  "hardware": {
+    "model": "Mac16,10",
+    "chip": "Apple M4",
+    "memoryBytes": 17179869184,
+    "logicalCpus": 10
+  },
+  "policy": {
+    "sha256": "fixturepolicy"
+  },
+  "startedAt": "2026-10-12T06:00:00.000Z",
+  "endedAt": "2026-10-12T06:12:00.000Z",
+  "outcome": "pass",
+  "exitCode": 0,
+  "stopReason": null,
+  "clearedStaleLock": null,
+  "session": {
+    "appVersion": "0.9.142"
+  },
+  "steps": [
+    {
+      "id": "card-up",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:00:05.000Z",
+      "endedAt": "2026-10-12T06:00:06.200Z",
+      "durationMs": 1200
+    },
+    {
+      "id": "open-go-live",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:00:06.700Z",
+      "endedAt": "2026-10-12T06:00:09.000Z",
+      "durationMs": 2300
+    },
+    {
+      "id": "fill-details",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:00:09.500Z",
+      "endedAt": "2026-10-12T06:00:10.400Z",
+      "durationMs": 900
+    },
+    {
+      "id": "destinations",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:00:10.900Z",
+      "endedAt": "2026-10-12T06:00:11.300Z",
+      "durationMs": 400
+    },
+    {
+      "id": "go-live",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:00:11.800Z",
+      "endedAt": "2026-10-12T06:00:18.200Z",
+      "durationMs": 6400,
+      "evidence": {
+        "outcome": "live",
+        "liveAfterMs": 5800
+      }
+    },
+    {
+      "id": "live-sample",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:00:18.700Z",
+      "endedAt": "2026-10-12T06:00:23.800Z",
+      "durationMs": 5100
+    },
+    {
+      "id": "youtube-health",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:00:24.300Z",
+      "endedAt": "2026-10-12T06:00:27.300Z",
+      "durationMs": 3000,
+      "evidence": {
+        "ok": true,
+        "problems": [],
+        "matches": {
+          "resolution": true,
+          "frameRate": true
+        },
+        "healthStatus": "good"
+      }
+    },
+    {
+      "id": "clip-early",
+      "status": "skipped",
+      "startedAt": "2026-10-12T06:00:27.800Z",
+      "endedAt": "2026-10-12T06:00:27.810Z",
+      "durationMs": 10,
+      "reason": "clip-pull-disabled"
+    },
+    {
+      "id": "hold-live",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:00:28.310Z",
+      "endedAt": "2026-10-12T06:10:28.310Z",
+      "durationMs": 600000,
+      "evidence": {
+        "minutes": 10,
+        "samples": 120,
+        "notLive": null
+      }
+    },
+    {
+      "id": "clip-late",
+      "status": "skipped",
+      "startedAt": "2026-10-12T06:10:28.810Z",
+      "endedAt": "2026-10-12T06:10:28.820Z",
+      "durationMs": 10,
+      "reason": "clip-pull-disabled"
+    },
+    {
+      "id": "stop",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:10:29.320Z",
+      "endedAt": "2026-10-12T06:10:31.420Z",
+      "durationMs": 2100,
+      "evidence": {
+        "ok": true
+      }
+    },
+    {
+      "id": "vod",
+      "status": "pass",
+      "startedAt": "2026-10-12T06:10:31.920Z",
+      "endedAt": "2026-10-12T06:10:33.420Z",
+      "durationMs": 1500,
+      "evidence": {
+        "videoId": "fixtVideo01A",
+        "lifecycle": "complete",
+        "actualStartTime": "2026-10-12T06:00:20.000Z",
+        "actualEndTime": "2026-10-12T06:11:00.000Z"
+      }
+    }
+  ],
+  "teardown": {
+    "clean": true,
+    "streamEndedMs": 2100,
+    "durationMs": 9000,
+    "steps": [
+      {
+        "name": "end-stream",
+        "ok": true,
+        "detail": "stopped",
+        "ms": 2100
+      },
+      {
+        "name": "stop-observer",
+        "ok": true,
+        "detail": null,
+        "ms": 10
+      },
+      {
+        "name": "quit-app",
+        "ok": true,
+        "detail": "terminated",
+        "ms": 1800
+      },
+      {
+        "name": "clean-ledger",
+        "ok": true,
+        "detail": "clean",
+        "ms": 400
+      },
+      {
+        "name": "stop-browser",
+        "ok": true,
+        "detail": "terminated",
+        "ms": 50
+      },
+      {
+        "name": "stop-caffeinate",
+        "ok": true,
+        "detail": "terminated",
+        "ms": 20
+      },
+      {
+        "name": "collect-artifacts",
+        "ok": true,
+        "detail": {
+          "crashReports": [],
+          "crashpad": [],
+          "backendCrashes": false,
+          "logs": [
+            "backend.log"
+          ]
+        },
+        "ms": 200
+      },
+      {
+        "name": "close-card",
+        "ok": true,
+        "detail": null,
+        "ms": 5
+      }
+    ]
+  }
+}
