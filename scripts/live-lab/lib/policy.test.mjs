@@ -7,6 +7,7 @@ import test from 'node:test'
 import {
   CONTROL_UNREACHABLE_LIMIT_MS,
   DEFAULT_POLICY_PATH,
+  LINUX_POLICY_PATH,
   canStart,
   inspectPolicyAccess,
   loadPolicy,
@@ -87,9 +88,28 @@ function liveState(overrides = {}) {
 }
 
 test('policy path defaults to the owner-owned file and honours the test override', () => {
-  assert.equal(policyPath({}), DEFAULT_POLICY_PATH)
+  assert.equal(policyPath({}, 'darwin'), DEFAULT_POLICY_PATH)
   assert.equal(DEFAULT_POLICY_PATH, '/Library/Application Support/VideorcLab/policy.json')
   assert.equal(policyPath({ VIDEORC_LIVE_LAB_POLICY: '/tmp/p.json' }), '/tmp/p.json')
+})
+
+test('plan 179: the Linux lab reads /etc/videorc-lab/policy.json; the override still wins', () => {
+  assert.equal(policyPath({}, 'linux'), LINUX_POLICY_PATH)
+  assert.equal(LINUX_POLICY_PATH, '/etc/videorc-lab/policy.json')
+  assert.equal(
+    policyPath({ VIDEORC_LIVE_LAB_POLICY: '/tmp/p.json' }, 'linux'),
+    '/tmp/p.json'
+  )
+})
+
+test('plan 179: labUser is optional, videorc-lab when absent, a login name when present', () => {
+  assert.equal(validatePolicy(examplePolicy()).policy.labUser, 'videorc-lab')
+  assert.equal(validatePolicy(examplePolicy({ labUser: 'orcdev' })).policy.labUser, 'orcdev')
+  for (const bad of ['', 'Orc Dev', '../root', 7, 'a'.repeat(33)]) {
+    const result = validatePolicy(examplePolicy({ labUser: bad }))
+    assert.equal(result.policy, null, String(bad))
+    assert.match(result.problems[0], /labUser must be a login name/)
+  }
 })
 
 test('the plan 178 example policy validates and comes back frozen', () => {
