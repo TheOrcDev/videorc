@@ -396,10 +396,10 @@ export async function publishRun(ctx, { runDir, runId, verdict, previous }) {
       print(`${prefix} a real publish would stop here: no reports repo (${ctx.targetProblem})`)
     // A dry run without a policy still shows the rest, with placeholder links.
     const target = ctx.target ?? {
-      owner: '<reports-owner>',
-      repo: '<reports-repo>',
+      owner: 'reports-owner',
+      repo: 'reports-repo',
       ref: 'main',
-      name: '<reports-owner>/<reports-repo>'
+      name: 'reports-owner/reports-repo'
     }
     state.reportsRepo = `${target.name}@${target.ref}`
     const pushedRels = new Set()

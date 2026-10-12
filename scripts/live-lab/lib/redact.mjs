@@ -83,15 +83,50 @@ function globalOf(pattern) {
   return new RegExp(pattern.source, flags)
 }
 
+// The opaque-string pattern counts `/` as a secret character, so the path of
+// every report or issue link (github.com/TheOrcDev/videorc-...) would match
+// it and no issue could ever be filed. Only for that pattern, the path of an
+// https link on these hosts is ignored. The query string and fragment are
+// never ignored, and every other pattern still scans the whole link.
+export const LINK_HOSTS = Object.freeze([
+  'github.com',
+  'raw.githubusercontent.com',
+  'www.youtube.com',
+  'youtube.com',
+  'youtu.be',
+  'www.videorc.com',
+  'videorc.com'
+])
+const OPAQUE_PATTERN_NAME = 'opaque-string'
+const LINK_RE = /https:\/\/([A-Za-z0-9.-]+)(\/[A-Za-z0-9._~%/-]*)?/g
+
+/** [start, end) spans of allowlisted link paths in `text`. */
+function allowlistedLinkPaths(text) {
+  const spans = []
+  for (const match of text.matchAll(LINK_RE)) {
+    if (!LINK_HOSTS.includes(match[1].toLowerCase())) continue
+    spans.push([match.index, match.index + match[0].length])
+  }
+  return spans
+}
+
+function insideSpan(spans, start, end) {
+  return spans.some(([from, to]) => start >= from && end <= to)
+}
+
 /** Every hit in `text`: { pattern, index }. Never the matched text. */
 export function findSensitive(text, patterns = REDACTION_PATTERNS) {
   const hits = []
   if (typeof text !== 'string' || text.length === 0) return hits
+  const links = allowlistedLinkPaths(text)
   for (const { name, pattern } of patterns) {
     const re = globalOf(pattern)
     let match
     while ((match = re.exec(text)) !== null) {
-      hits.push({ pattern: name, index: match.index })
+      const end = match.index + match[0].length
+      if (!(name === OPAQUE_PATTERN_NAME && insideSpan(links, match.index, end))) {
+        hits.push({ pattern: name, index: match.index })
+      }
       if (match[0].length === 0) re.lastIndex += 1
     }
   }
@@ -102,7 +137,15 @@ export function findSensitive(text, patterns = REDACTION_PATTERNS) {
 export function redactText(text, patterns = REDACTION_PATTERNS) {
   let output = String(text ?? '')
   for (const { name, pattern } of patterns) {
-    output = output.replace(globalOf(pattern), `[redacted:${name}]`)
+    if (name !== OPAQUE_PATTERN_NAME) {
+      output = output.replace(globalOf(pattern), `[redacted:${name}]`)
+      continue
+    }
+    const links = allowlistedLinkPaths(output)
+    output = output.replace(globalOf(pattern), (match, ...rest) => {
+      const index = rest.at(-2)
+      return insideSpan(links, index, index + match.length) ? match : `[redacted:${name}]`
+    })
   }
   return output
 }

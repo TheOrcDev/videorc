@@ -79,3 +79,26 @@ test('assertPublishable fails closed on text files and skips binary ones', async
       !error.message.includes('abcd-1234')
   )
 })
+
+test('report and issue links stay publishable; secrets beside them do not', () => {
+  const report =
+    'Report: https://github.com/TheOrcDev/videorc-live-lab-reports/blob/main/runs/2026-10-12-marathon-a1b2c3/report.md'
+  assert.deepEqual(findSensitive(report), [])
+  assert.equal(redactText(report), report)
+  const vod = 'VOD https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+  assert.deepEqual(findSensitive(vod), [])
+
+  const opaque = `Zq9${'xY7'.repeat(11)}`
+  const inQuery = `https://github.com/TheOrcDev/videorc?key=${opaque}`
+  assert.ok(findSensitive(inQuery).some((hit) => hit.pattern === 'opaque-string'))
+  assert.ok(redactText(inQuery).includes('[redacted:opaque-string]'))
+
+  const otherHost = `https://example.com/TheOrcDev/videorc/${opaque}`
+  assert.ok(findSensitive(otherHost).some((hit) => hit.pattern === 'opaque-string'))
+
+  const bare = `a token ${opaque} in prose`
+  assert.ok(findSensitive(bare).some((hit) => hit.pattern === 'opaque-string'))
+
+  const keyInLink = 'https://github.com/x/abcd-1234-efgh-5678-ijkl'
+  assert.ok(findSensitive(keyInLink).some((hit) => hit.pattern === 'youtube-stream-key'))
+})
