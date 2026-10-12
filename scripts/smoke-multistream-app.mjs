@@ -250,8 +250,14 @@ try {
 
     if (replaySeconds > 0) {
       await verifyReplay(replay.payload)
-      // Nothing re-arms here (no renderer switch): the ring ends with the session.
-      await waitForReplayRing(ws, (state) => state?.state === 'off', 'the ring off after Stop')
+      // The ring ends with the session; the renderer then re-arms its own
+      // buffer-only ring (on by default, redesign R2), so what is proven is
+      // that this session's ring is gone, not that no ring runs.
+      await waitForReplayRing(
+        ws,
+        (state) => state?.sessionId !== started.sessionId,
+        'the ring leaving the stream session after Stop'
+      )
     }
 
     await verifyResults(

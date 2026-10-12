@@ -1,20 +1,24 @@
-// Replay buffer smoke (plan 181 S6).
+// Clip buffer smoke (plan 181 S6, the owner's redesign R1-R4).
 //
-// Drives the REAL dev app through the Studio's own switch and Save replay:
+// Drives the REAL dev app through the Output switch's own path and the one
+// clip action (clip.mark: the Stream Manager's Clip, its key, ⌘K, a deck key,
+// /clip and the spoken "clip that" all call it):
 //
-//   1. arms the replay buffer (a buffer-only session: recording.status says
-//      replayOnly, no Library row, the status bar never says Recording);
+//   1. proves the ring runs by default at launch (R2: a buffer-only session:
+//      recording.status says replayOnly, no Library row, the status bar never
+//      says Recording), then turns the switch off and on at the requested
+//      length;
 //   2. watches the ring for 3 × N seconds: the backend's segment count never
 //      passes ceil(N/2) + 3 (the disk bound), and the ring fills to N;
-//   3. saves a replay from the Studio button, then from a remote replaySave
-//      intent, then from a clipMark intent (S8: no recording, so a mark
-//      saves a replay);
-//   4. checks every replay with ffprobe and the recording analyzer: H.264 +
+//   3. saves a clip through clip.mark (the reply says clip-saved, nothing
+//      marked: no recording runs), then through a remote clipMark intent;
+//   4. checks every clip with ffprobe and the recording analyzer: H.264 +
 //      AAC, a length of N to N + 2.5 s, no audio gap, a 2 s keyframe cadence,
-//      and a Library row whose mp4Path is the file;
+//      and a Library row titled Clip whose mp4Path is the file;
 //   5. records while armed: the backend hands over, the ring rides the
-//      recording (S7), a replay saves mid-recording, the recording itself
-//      passes the analyzer, and the ring re-arms after Stop;
+//      recording (S7), one clip.mark mid-recording saves a clip AND keeps a
+//      mark in the recording (R4), the recording itself passes the analyzer,
+//      and the ring re-arms after Stop;
 //   6. turns the switch off: the ring reports off and no session runs.
 //
 // The dev binary has no microphone or Screen Recording grant, so the
@@ -116,7 +120,7 @@ async function seedRendererProfile(smoke) {
           layout,
           recordEnabled: true,
           streamEnabled: false,
-          replayBuffer: { seconds: params.seconds, startOnLaunch: false }
+          replayBuffer: { seconds: params.seconds, enabled: true, explicit: false }
         };
         localStorage.setItem(key, JSON.stringify(seeded));
         setTimeout(() => location.reload(), 50);
@@ -170,12 +174,12 @@ async function verifyReplay(event, label) {
   const path = saved.path
   if (!path || !existsSync(path)) fail(`${label}: replay missing on disk: ${path}`)
   // The smoke's recordings folder is the harness's isolated one
-  // (smokeAppEnv: <state>/app-data/recordings); replays go under its Replays.
-  if (!path.startsWith(outputDirectory) || !path.includes(join('recordings', 'Replays') + '/')) {
-    fail(`${label}: replay is outside <recordings>/Replays: ${path}`)
+  // (smokeAppEnv: <state>/app-data/recordings); clips go under its Clips.
+  if (!path.startsWith(outputDirectory) || !path.includes(join('recordings', 'Clips') + '/')) {
+    fail(`${label}: clip is outside <recordings>/Clips: ${path}`)
   }
-  if (!/\/Replay \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}( \(\d+\))?\.mp4$/.test(path)) {
-    fail(`${label}: replay is not named Replay YYYY-MM-DD HH-MM-SS.mp4: ${path}`)
+  if (!/\/Clip \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}( \(\d+\))?\.mp4$/.test(path)) {
+    fail(`${label}: clip is not named Clip YYYY-MM-DD HH-MM-SS.mp4: ${path}`)
   }
   if (saved.seconds !== seconds) fail(`${label}: event seconds ${saved.seconds} != ${seconds}`)
   const analysis = await analyzeRecording(path, {
@@ -216,7 +220,7 @@ async function verifyReplay(event, label) {
   const page = await request(renderer, timeoutMs, 'sessions.list', { limit: 50 })
   const row = page?.items?.find((item) => item.id === saved.replaySessionId)
   if (!row) fail(`${label}: no Library row ${saved.replaySessionId}`)
-  if (row.title !== 'Replay') fail(`${label}: Library row title ${row.title} != Replay`)
+  if (row.title !== 'Clip') fail(`${label}: Library row title ${row.title} != Clip`)
   if (row.mp4Path !== path) fail(`${label}: Library row mp4Path ${row.mp4Path} != ${path}`)
   if (row.status !== 'completed') fail(`${label}: Library row status ${row.status}`)
   if (row.processingKind) fail(`${label}: Library row has processingKind ${row.processingKind}`)
@@ -285,14 +289,34 @@ try {
   remote = await connectRemote(discovery.host, discovery.port, discovery.token, { timeoutMs })
   await waitForRemoteDescribe(remote, { timeoutMs })
 
-  // 1. Arm: a buffer-only session, marked as such, with no Library row.
-  const ringOff = await request(renderer, timeoutMs, 'replay.status')
-  if (ringOff?.state !== 'off') fail(`ring is not off before arming: ${JSON.stringify(ringOff)}`)
+  // 1. The default (R2): the ring runs whenever Videorc is open, so the dev
+  // app armed itself at launch with nobody touching a switch, at the seeded
+  // length. Then the Output switch's own path: off, and on again.
+  const defaultRing = await waitForBackendState(
+    'replay.status',
+    (ring) => ring?.state === 'on' && ring?.replayOnly === true,
+    'the default buffer-only session at launch',
+    45_000
+  )
+  if (defaultRing.seconds !== seconds) {
+    fail(`the default ring keeps ${defaultRing.seconds} s, expected ${seconds} s`)
+  }
+  log(`ring on by default at launch: session ${defaultRing.sessionId} (${defaultRing.seconds} s)`)
+  await setReplayBuffer(smoke, false)
+  await waitForBackendState(
+    'replay.status',
+    (ring) => ring?.state === 'off',
+    'the ring off after the switch',
+    30_000
+  )
   const armedAt = Date.now()
   await setReplayBuffer(smoke, true)
   const ringOn = await waitForBackendState(
     'replay.status',
-    (ring) => ring?.state === 'on' && ring?.replayOnly === true,
+    (ring) =>
+      ring?.state === 'on' &&
+      ring?.replayOnly === true &&
+      ring?.sessionId !== defaultRing.sessionId,
     'the buffer-only session'
   )
   const status = await request(renderer, timeoutMs, 'recording.status')
@@ -350,41 +374,17 @@ try {
     `disk bound held: at most ${report.ring.maxSegmentFilesSeen} segment files (bound ${maxSegmentFiles}) over ${report.ring.samples} samples`
   )
 
-  // 3a. Save replay from the Studio button (the same action the global key
-  // runs). The synthetic-source command leaves the renderer on Sources; the
-  // row lives on the Studio page.
-  await requestSmokeCommand(smoke, 'open-tab', { tab: 'studio' }, { timeoutMs })
-  await sleep(1000)
-  const buttonOutcome = replayOutcome('the Studio button')
-  const clicked = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `
-        const button = document.querySelector('[data-testid="replay-save-button"]');
-        if (!button) return { clicked: false };
-        button.click();
-        return { clicked: true };
-      `
-    },
-    { timeoutMs }
-  )
-  if (clicked?.result?.clicked !== true)
-    fail('the Studio has no Save replay button while the ring is on')
-  report.replays.push(await verifyReplay(await buttonOutcome, 'save from the Studio button'))
-
-  // 3b. Save replay from a remote intent (a Stream Deck key).
-  const remoteOutcome = replayOutcome('the remote intent')
-  const remoteAck = waitForRemoteEvent(remote, 'remote.ack', () => true, { timeoutMs })
-  const ticket = await remoteRequest(remote, 'remote.intent', { kind: 'replaySave' }, { timeoutMs })
-  if (!ticket.payload?.accepted) fail('replaySave intent was not accepted')
-  const ack = await remoteAck
-  if (ack?.intentId !== ticket.payload.intentId || ack?.ok !== true) {
-    fail(`replaySave was not acknowledged: ${JSON.stringify(ack)}`)
+  // 3a. The one clip action (R4): clip.mark is what the Stream Manager's
+  // Clip, its key, ⌘K, /clip and the spoken "clip that" call. No recording
+  // runs, so the reply says clip-saved and nothing was marked.
+  const rpcOutcome = replayOutcome('clip.mark')
+  const rpcReply = await request(renderer, timeoutMs, 'clip.mark')
+  if (rpcReply?.reason !== 'clip-saved' || rpcReply?.saved !== false) {
+    fail(`clip.mark with the ring on did not save a clip: ${JSON.stringify(rpcReply)}`)
   }
-  report.replays.push(await verifyReplay(await remoteOutcome, 'save from the remote intent'))
+  report.replays.push(await verifyReplay(await rpcOutcome, 'save from clip.mark'))
 
-  // 3c. S8: with no recording, a clip mark saves a replay.
+  // 3b. The same action from a remote intent (a Stream Deck key).
   const markOutcome = replayOutcome(
     'the clipMark intent',
     (payload) => payload?.source === 'manual'
@@ -401,8 +401,8 @@ try {
   if (markAcked?.intentId !== markTicket.payload.intentId || markAcked?.ok !== true) {
     fail(`clipMark with the ring on was not acknowledged: ${JSON.stringify(markAcked)}`)
   }
-  const marked = await verifyReplay(await markOutcome, 'save from a clip mark (S8)')
-  if (marked.source !== 'manual') fail(`the clip-mark replay carries source ${marked.source}`)
+  const marked = await verifyReplay(await markOutcome, 'save from the remote clipMark intent')
+  if (marked.source !== 'manual') fail(`the clip-mark clip carries source ${marked.source}`)
   report.replays.push(marked)
 
   // 5. Record while armed: the handover, the ride-along, a mid-recording save,
@@ -436,19 +436,23 @@ try {
     `Record handed over: ${ringOn.sessionId} → ${cycle.sessionId}; click→recording ${report.handover.clickToRecordingMs} ms; ring riding the recording`
   )
   await sleep((seconds + 6) * 1000)
-  const midOutcome = replayOutcome('the mid-recording save')
-  const midAck = waitForRemoteEvent(remote, 'remote.ack', () => true, { timeoutMs })
-  const midTicket = await remoteRequest(
-    remote,
-    'remote.intent',
-    { kind: 'replaySave' },
-    { timeoutMs }
-  )
-  if (!midTicket.payload?.accepted) fail('mid-recording replaySave intent was not accepted')
-  const midAcked = await midAck
-  if (midAcked?.ok !== true) fail(`mid-recording replaySave refused: ${JSON.stringify(midAcked)}`)
+  // R4 mid-recording: one press saves the clip AND keeps a mark in the
+  // recording (the reply says both), with no clip.marked event.
+  const midOutcome = replayOutcome('the mid-recording clip')
+  const midReply = await request(renderer, timeoutMs, 'clip.mark')
+  if (midReply?.reason !== 'clip-saved' || midReply?.saved !== true) {
+    fail(`clip.mark during a recording did not save a clip and a mark: ${JSON.stringify(midReply)}`)
+  }
   const midRecording = await verifyReplay(await midOutcome, 'save during a recording (S7)')
   report.replays.push(midRecording)
+  const marks = await request(renderer, timeoutMs, 'clip.marks.list', {
+    sessionId: cycle.sessionId
+  })
+  const manualMarks = (marks ?? []).filter((mark) => mark.source === 'manual')
+  if (manualMarks.length !== 1) {
+    fail(`the recording keeps ${manualMarks.length} manual marks after one press, expected 1`)
+  }
+  log(`the recording keeps the mark at ${manualMarks[0].atSeconds.toFixed(1)} s beside the clip`)
 
   const stop = await stopRecordLatencyCycle({
     remote,

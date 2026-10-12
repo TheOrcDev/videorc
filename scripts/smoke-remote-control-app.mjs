@@ -186,39 +186,53 @@ try {
   await sceneStatePromise
   console.log('remote-control smoke: sceneApply ack + confirmed state OK')
 
-  // 4b. clipMark (plan 068 D6) is on the allowlist and relays through the
-  // renderer: with no session running the renderer refuses it with a reason,
-  // so the round trip proves admission + relay + ack without touching disk.
+  // 4b. clipMark (plan 068 D6; plan 181 R4) is on the allowlist and relays
+  // through the renderer. The ring runs by default (R2), so with nothing
+  // recording the press is admitted and saves a clip (the file is proven by
+  // pnpm smoke:replay-buffer); with the switch off the renderer refuses it
+  // with the reason, so the round trip proves admission + relay + ack both
+  // ways.
+  const ringOn = await waitForBackendState(
+    renderer,
+    'replay.status',
+    (ring) => ring?.state === 'on',
+    'the default ring'
+  )
+  console.log(`remote-control smoke: ring on by default (${ringOn.seconds} s)`)
+  const clipOnAckPromise = waitForRemoteEvent(remote, 'remote.ack')
+  const clipOnTicket = await remoteRequest(remote, 'remote.intent', { kind: 'clipMark' })
+  if (!clipOnTicket.payload?.accepted) fail('clipMark intent was not accepted')
+  const clipOnAck = await clipOnAckPromise
+  if (clipOnAck?.intentId !== clipOnTicket.payload.intentId || clipOnAck?.ok !== true) {
+    fail(`clipMark with the ring on was not acknowledged: ${JSON.stringify(clipOnAck)}`)
+  }
+  console.log('remote-control smoke: clipMark relay with the ring on OK')
+  const switched = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
+    { timeoutMs }
+  )
+  if (switched?.result !== true) fail('the renderer has no clip buffer smoke hook')
+  await waitForBackendState(
+    renderer,
+    'replay.status',
+    (ring) => ring?.state === 'off',
+    'the ring off after the switch'
+  )
   const clipAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const clipTicket = await remoteRequest(remote, 'remote.intent', { kind: 'clipMark' })
   if (!clipTicket.payload?.accepted) fail('clipMark intent was not accepted')
   const clipAck = await clipAckPromise
   if (clipAck?.intentId !== clipTicket.payload.intentId || clipAck?.ok !== false) {
     fail(
-      `clipMark without a session was not refused through the renderer: ${JSON.stringify(clipAck)}`
+      `clipMark with the ring off and no session was not refused through the renderer: ${JSON.stringify(clipAck)}`
     )
   }
-  if (clipAck?.message !== "You're not recording or live.") {
+  if (clipAck?.message !== "Clips are off, and you're not recording or live.") {
     fail(`clipMark refusal carried the wrong reason: ${JSON.stringify(clipAck)}`)
   }
   console.log('remote-control smoke: clipMark relay + refusal reason OK')
-
-  // 4b'. replaySave (plan 181 S5) is on the allowlist too: with the ring off
-  // the renderer refuses it with its reason, so admission + relay + ack are
-  // proven without arming a session here (pnpm smoke:replay-buffer saves).
-  const replayAckPromise = waitForRemoteEvent(remote, 'remote.ack')
-  const replayTicket = await remoteRequest(remote, 'remote.intent', { kind: 'replaySave' })
-  if (!replayTicket.payload?.accepted) fail('replaySave intent was not accepted')
-  const replayAck = await replayAckPromise
-  if (replayAck?.intentId !== replayTicket.payload.intentId || replayAck?.ok !== false) {
-    fail(
-      `replaySave with the ring off was not refused through the renderer: ${JSON.stringify(replayAck)}`
-    )
-  }
-  if (replayAck?.message !== 'The replay buffer is off. Turn it on in Studio.') {
-    fail(`replaySave refusal carried the wrong reason: ${JSON.stringify(replayAck)}`)
-  }
-  console.log('remote-control smoke: replaySave relay + refusal reason OK')
 
   // 4c. System audio (plan 069 S6): the projection carries exactly two
   // booleans, and systemAudioToggle relays through the renderer. With the

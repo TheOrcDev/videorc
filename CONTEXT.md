@@ -16,7 +16,7 @@ its owner wants to find again. It identifies where that subject starts.
 _Avoid_: Chapter, clip, chat message
 
 **Clip mark**:
-A hint from the owner that the moment leading up to a point in a recording is worth clipping.
+A hint from the owner that the moment leading up to a point in a recording is worth clipping. A Clip press while recording keeps one beside the saved clip.
 _Avoid_: Marker, exported clip
 
 **Moment**:
@@ -57,21 +57,24 @@ _Avoid_: broadcast (except a platform's own object, like an X broadcast), live s
 What Videorc writes to a file, and each item in Library.
 _Avoid_: session (in copy), take, capture
 
-**Replay buffer**:
-The feature and its switch (plan 181): Videorc keeps the last N seconds of
-the program ready, writing nothing permanent. Its state reads "Replay ·
-0:30"; it is never "Recording" or "On air".
-_Avoid_: instant replay, replay cache, buffer (alone)
+**Clips**:
+The Output section and its one switch, "Keep the last seconds" (plan 181,
+the owner's redesign): whenever Videorc is open it keeps the last N seconds
+of the program ready, writing nothing permanent. The status bar reads
+"Clip · 0:30"; the ring is never "Recording" or "On air".
+_Avoid_: Replay buffer, instant replay, replay cache, buffer (alone)
 
-**Save replay**:
-The action that writes the replay buffer's last seconds to a file: the
-Studio button, the global key, ⌘K, a deck key.
-_Avoid_: Clip, Save clip, Capture replay
+**Clip** (the action):
+The one action that saves the last seconds as a clip: the Stream Manager's
+Clip button, the Save a clip key, ⌘K "Save clip", a deck key, `/clip`, the
+spoken "clip that". While a recording runs the moment is also kept as a
+mark in the recording and its report.
+_Avoid_: Mark clip, Save replay, Capture replay
 
-**Replay**:
-The saved file ("Replay 2026-10-12 18-30-05.mp4" in the Replays folder, a
-row in Library). A replay is not a clip: a clip is a clip mark.
-_Avoid_: clip, highlight (for the file)
+**Clip** (the file):
+The saved video ("Clip 2026-10-12 18-30-05.mp4" in the Clips folder, a row
+in Library titled Clip).
+_Avoid_: replay, highlight (for the file)
 
 **On stream**:
 Shown in what viewers see: a chat message, a takeover, Buddy. The actions

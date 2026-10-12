@@ -525,6 +525,78 @@ tests only. State this plainly in the handoff and never claim them.
 - Two VideoToolbox sessions are needed at once in Phase A. The design keeps
   one, and plan 006 records stalls with two.
 
+## Owner redesign (2026-10-12)
+
+The owner tried PR #694's dev build and redesigned the feature: "I don't want
+it like that. it shouldn't be in studio right next to record and livestream,
+it should be just a simple button somewhere to click and put next 30 seconds
+to video. and we should also be able to trigger it with Orcle by voice to say
+it, and to have command in the chat like /marker". The answers, all at the
+recommended option:
+
+- **R1, which 30 s**: the LAST 30 s. The rolling ring stays.
+- **R2, when the buffer runs**: ALWAYS, whenever Videorc is open. One switch
+  on the Output page turns it off (default on). The status bar keeps showing
+  it is on. "Turn on when Videorc opens" is gone: on means on at launch,
+  re-armed after every session, riding along on Record and Go Live.
+- **R3, where the button lives**: the Stream Manager toolbar, where the
+  Comments window already had Mark clip. Nothing replay-related sits next
+  to Record and Go Live; the Studio row and its lazy chunk are gone.
+- **R4, naming**: the saved 30 s video is a **clip**. Chat command `/clip`,
+  voice "Buddy, clip that". Mark clip and the spoken "clip that" save the
+  video instead of only a timestamp. User-facing words say "clip" ("Save
+  clip", "Clip", "Clips", "Keep the last seconds"), never "replay"; files go
+  to `<recordings folder>/Clips/Clip YYYY-MM-DD HH-MM-SS.mp4`, the Library
+  row is titled "Clip". Internal identifiers (`replay.*` RPCs,
+  `replay_buffer.rs`, `RecordingStatus.replayOnly`) stay.
+- **One action, not two**: `clip.mark` (the Stream Manager button, the
+  existing `clipMark` global shortcut, ⌘K "Save clip", the remote intent
+  `clipMark`, `/clip`, voice) saves the clip whenever the ring holds frames,
+  and during a recording ALSO keeps the mark in the recording and its
+  report. The separate `replay-save` global action, its Settings row and the
+  `replaySave` remote intent are removed (unreleased, nothing to keep).
+  Ring off (the user turned it off): the old behaviour, a mark while
+  recording, else a warning pointing at the Output switch.
+- **Guard**: the ring never auto-runs on a software encoder path (OpenH264,
+  a software Media Foundation encoder, x264 on weak Windows or Linux
+  boxes): there the switch defaults off and the Output section says why;
+  the user can still turn it on. The free-space refusal stays.
+- **Voice**: "clip that" / "Buddy, clip that" trigger it wherever Buddy
+  already listens. No paid transcription or captions start because the
+  idle ring runs.
+- **Default on means every existing smoke launches with the ring running.**
+  The gates run with the new default; each break is classed as a real bug
+  (fix the app) or a harness assumption (fix the harness) in As built,
+  with the idle CPU/GPU/RSS with the ring on against off.
+
+### Slices cut for the redesign
+
+- **RS1, backend**: Clips folder and file names, "Clip" rows; `clip.mark`
+  saves the clip and keeps the mark while recording (`reason: "clip-saved"`,
+  no `clip.marked` when the ring took the press); `ReplayParams.auto` and
+  the typed `replay-software-encoder` refusal after the encoder decision;
+  `RemoteIntent::ReplaySave` removed; user-visible backend messages say
+  clips; fixtures and tests.
+- **RS2, renderer model**: `captureConfig.replayBuffer { seconds, enabled,
+  explicit }` (on by default); the provider arms at launch from `enabled`,
+  re-arms after sessions, keeps the guard's reason and never retries it;
+  `markClip` is the one action; the `replay-save` action, context and
+  `replaySave` remote case are gone; the words module says clips.
+- **RS3, UI**: the Studio row deleted; Output → Clips (switch, Length, Disk
+  use, Save a clip recorder, where clips go, the guard's reason); the
+  status bar chip "Clip · 0:30"; ⌘K "Save clip"; Settings → Shortcuts
+  without the replay row; the Stream Manager's Clip button with the key in
+  its hint, shown whenever the ring holds frames; `/clip` in the composer
+  with completion and help copy; the clip facts ride the marker context.
+- **RS4, harness and docs**: `pnpm smoke:replay-buffer` proves the default
+  arm, the switch, `clip.mark` alone and with a mark; the remote smoke
+  proves admission with the ring on and the refusal with it off; the
+  multistream smoke expects the re-arm after Stop; the latency gate runs
+  with the ring on by default and `--no-replay-buffer` for the baseline;
+  `docs/replay-buffer.md`, `CONTEXT.md`, `docs/remote-control.md`.
+- **RS5, gates with the default on**: the whole bundle, the idle cost
+  measurement, the by-eye pass in both themes, and the As built.
+
 ## As built
 
 ### S1: FFmpeg capability check
