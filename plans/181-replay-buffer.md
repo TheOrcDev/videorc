@@ -595,6 +595,14 @@ replay_buffer`: 13 passed.
 - **New global action** `replay-save` (`replaySave`, unbound), remote
   intent `replaySave` (debounce bucket `replay`), palette "Save replay",
   settings `captureConfig.replayBuffer { seconds, startOnLaunch }`.
+- **Buffer-only sessions in every reader of `recording.status`.** The
+  screenshots found readers that took the ring for a recording: ⌘K's
+  "Stop recording", the voice marker context (a marker needs the Library
+  row the ring never has), the Stream Manager relay and dashboard (the ring
+  is off air to the window), and the "Recording saved" toast after a
+  session ends (the ring ending for the switch or the handover saves
+  nothing). Each now checks `replayOnly` beside its old predicate, so with
+  the buffer off nothing changes.
 - **UI** follows the design skill: a `Switch` in a `Field` with the ring's
   words on a `StatusDot`, Save replay as a 28 px outline button with its
   `ShortcutKeys`, the Output section as `SettingsRow`s in a grouped
@@ -602,6 +610,32 @@ replay_buffer`: 13 passed.
   neutral `StatusDot`. The ring's controls ride their own context
   (`useStudioReplay`), so its once-a-second tick never re-renders the
   shell or every `useStudioCore` consumer. The Studio row is a lazy chunk.
+
+### Gates (2026-10-12, this Mac, dev build, bundled FFmpeg 8.1.1)
+
+| Gate | Result |
+| --- | --- |
+| `pnpm typecheck` | pass |
+| `pnpm lint` | pass (the one `react-hooks/exhaustive-deps` warning in `use-studio.tsx` is pre-existing, `captureConfig` at the scene effect) |
+| `pnpm format:check` | pass (2,700 tracked text files) |
+| `pnpm test:scripts` | pass (31 record-latency lib tests among them; the capability gates have 17 new cases) |
+| `pnpm --filter @videorc/desktop test` | pass: 471 files, 4,855 tests, 1 skipped (after the by-eye commit) |
+| `pnpm build` + `pnpm check:renderer-assets` | pass: eager JS 1,943,373 raw / 389,075 gzip (ceilings 2,000,000 / 390,000) |
+| `cargo fmt --check --all` | pass |
+| `cargo clippy -p videorc-backend -- -D warnings` | **fails on main's inherited `map_source_pixel` dead code** (`compositor.rs:9395`, from #686; its only caller is `cfg(target_os = "windows")`). Main's CI Rust job at `672b185c` (run 38256641724) fails on the same line. This branch does not touch `compositor.rs`; no other clippy finding. |
+| `cargo test -p videorc-backend replay` | pass: 46 (13 pure, the registry and prune, 8 arg-builder cases, the fixture); the ignored real-FFmpeg save test passes with `--include-ignored` and the bundled binary |
+| `cargo test … clip_marks` / `remote_control` / `shared_high_risk_contract_fixture` | pass: 17 / 7 / 19 |
+| `cargo test … split_output_bridge` / `bridge_recording` / `record_only` | pass: 4 / 5 / 7 (buffer off: the pre-181 arg shapes are byte-for-byte unchanged, asserted in `record_only_bridge_keeps_pcm_and_adds_the_ring`) |
+| `pnpm smoke:replay-buffer` (N = 30) | **pass**: buffer-only session, status bar "Ready" / "Replay · 0:00"; ring full at 31.3 s; disk bound held at 18 segment files (bound 18) over 90 samples; four replays of 30.00 s (button, remote `replaySave`, `clipMark` S8, mid-recording S7), each H.264 1920×1080 BT.709 + AAC 48 kHz, analyzer pass (motion, 2 s keyframe cadence, colour tags, no audio gap, tail ≤ 500 ms), Library row; Record handover 126 ms click→recording, ring riding the recording after 141 ms; the recording 40.60 s, analyzer pass, stop 91 ms click→idle; re-armed after Stop; switch off → ring off, idle. Re-run after the by-eye commit: pass again (handover 137 ms click→recording, the recording 40.47 s, four 30.00 s replays) |
+| `pnpm smoke:remote-control` | pass, with `replaySave` admitted, relayed and refused while off |
+| `pnpm smoke:multistream` (buffer off) | pass: 3 healthy legs 276,323 bytes each, recording 176,245 bytes, dead leg isolated |
+| `VIDEORC_SMOKE_REPLAY_SECONDS=15 pnpm smoke:multistream` (buffer on) | pass: a 16.00 s replay saved mid-stream, 3 legs 1,245,147 bytes each and their quality gates, the recording finalized and passed, dead leg isolated |
+| `pnpm smoke:record-latency:gate` (buffer off) | pass in enforce mode: warm click→recording p50 62 ms, p95 92 ms; stop click→idle p95 93 ms; 5/5 compositor armed in place |
+| `pnpm smoke:record-latency:gate --replay-buffer` (buffer on) | pass in enforce mode: every Record hands over from a buffer-only session; warm click→recording p50 124 ms, p95 128 ms (budget 350); stop click→idle p95 123 ms (budget 300); 5/5 armed in place; the ring re-armed after every Stop. Re-run after the by-eye commit: pass in enforce mode, warm click→recording p50 135 ms, p95 185 ms; stop click→idle p95 120 ms |
+| `pnpm probe:preview-lifecycle` | pass: 100/100 cycles |
+| `pnpm smoke:recording-matrix` | pass: 18/18 profiles |
+| `pnpm smoke:recording-studio` | pass, in three runs on the same build: the head through `smoke:scene-switch-pixels` (unit, scripts, live-audio-controls, the live_layout / scene / recording / audio / noise_cleanup cargo suites, four pixel artifacts) in the bundle; `smoke:freeform-editor` failed once in that bundle on a timing budget (landscape resize 6 pointer-to-paint p95 34.80 ms against 33 ms, right after the pixel step) and passed alone on the quiet host (landscape 59.97 fps mean, portrait 59.94 fps, every pointer matrix and the final-artifact proof); the 24 steps after it (captions contract and live, noise cleanup, all-layout artifacts, quit during finalization, the record latency gate again, output stall, screens, real launch, layout/source loop, live layout switch, comment highlight stream, Buddy pet, Comments relay, preview scene commit / pump / click-focus / stress / lifecycle / window / surface reattach, real ScreenCaptureKit recording, Notes invisibility, system audio) pass in order. No A/B against base was run for the freeform timing: the branch passes the step alone, the editor is untouched by the branch, and with the buffer off the pipeline is byte-for-byte the pre-181 one. |
+| Light and dark, by screenshot (CDP, dev app, synthetic source) | both themes: the Studio row off ("Off"), on ("0:06 / 0:30", Save replay, Set shortcut), the "Replay saved" toast with Show in Finder, the "Couldn't start the replay buffer" toast, the Output section (Length, Turn on when Videorc opens, Disk use, the Save replay recorder, Where replays go), the Shortcuts tab, the status bar chip "Replay · 0:06" and ⌘K with "Save replay". Two findings, fixed in the by-eye commit: the on-state row overflowed the inspector (the ring's words painted over Save replay) and now wraps its actions under the switch line; ⌘K said "Stop recording" for the buffer-only session and now keeps the two starts. The owner's own pass on a real machine is still owed. |
 
 ### Deviations from the plan text
 
@@ -622,7 +656,7 @@ replay_buffer`: 13 passed.
   tone needs no requested microphone, and the renderer always requests
   one). The analyzer proves AAC continuity and the stop tail; the audible
   offset is the real-game acceptance's.
-- The renderer asset budget: eager JS 1,942,670 raw / 388,847 gzip on this
+- The renderer asset budget: eager JS 1,943,373 raw / 389,075 gzip on this
   Mac against 2,000,000 / 390,000 (CI Linux gzip reads about 1.6 KB
   lower). No earlier report exists in the worktree to state the exact
   delta; the Studio row, the Output section and the toasts are lazy.
