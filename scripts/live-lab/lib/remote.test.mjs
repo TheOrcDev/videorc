@@ -121,6 +121,13 @@ test('parseRemoteArgs validates every flag and keeps the defaults', () => {
   assert.throws(() =>
     parseRemoteArgs(['--host', 'lab', '--scenario', 'chat', '--build', 'nightly'])
   )
+  // Plan 179: file:/local: are paths on the lab; never a remote --build, on any host.
+  for (const build of ['file:/tmp/Videorc.AppImage', 'local:/tmp/linux-unpacked']) {
+    assert.throws(
+      () => parseRemoteArgs(['--host', 'lab', '--scenario', 'chat', '--build', build]),
+      RemoteUsageError
+    )
+  }
   assert.throws(() => parseRemoteArgs(['--host', 'lab', '--scenario', 'chat', '--privacy', 'x']))
   assert.throws(() => parseRemoteArgs(['--host', 'lab', '--scenario', 'chat', '--evil']))
   assert.throws(() => parseRemoteArgs(['--scenario', 'chat']), /--host/)

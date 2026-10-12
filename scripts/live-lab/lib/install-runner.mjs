@@ -2,12 +2,14 @@ import { spawn } from 'node:child_process'
 
 // Plan 178 U5. Every shell-out of live:install goes through a runner with this
 // shape, so the unit tests can swap in a fake:
-//   runner(command, args, { timeoutMs }) -> Promise<{ code, stdout, stderr }>
+//   runner(command, args, { timeoutMs, cwd }) -> Promise<{ code, stdout, stderr }>
 // A non-zero exit resolves (callers read `code`); only a spawn failure rejects.
+// `cwd` is for the Linux AppImage, which extracts itself into the current
+// directory (plan 179).
 export function createRunner({ defaultTimeoutMs = 120_000 } = {}) {
-  return function run(command, args, { timeoutMs = defaultTimeoutMs } = {}) {
+  return function run(command, args, { timeoutMs = defaultTimeoutMs, cwd } = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
       const stdout = []
       const stderr = []
       child.stdout.on('data', (chunk) => stdout.push(chunk))
