@@ -3008,10 +3008,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   } | null>(null)
   useEffect(() => client?.on('session.marker.voice.status', setMarkerVoice), [client])
   useEffect(() => {
+    // A buffer-only session (plan 181) has no Library row to hold a marker,
+    // so the voice marker waits for a recording or a livestream.
     const available = Boolean(
       client &&
       recording.sessionId &&
-      (recording.state === 'recording' || recording.state === 'streaming')
+      (recording.state === 'recording' || recording.state === 'streaming') &&
+      recording.replayOnly !== true
     )
     void window.videorc?.pushMarkerContext?.({
       sessionId: recording.sessionId,
@@ -3026,7 +3029,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => {
       void window.videorc?.pushMarkerContext?.(null)
     }
-  }, [client, recording.sessionId, recording.state, markerVoice, lastVoiceMarker])
+  }, [
+    client,
+    recording.sessionId,
+    recording.state,
+    recording.replayOnly,
+    markerVoice,
+    lastVoiceMarker
+  ])
   // Backend-authoritative comment highlight. The renderer owns only the
   // temporary rasterization phase; `On stream` comes from the backend state.
   const [commentHighlightState, setCommentHighlightState] = useState<CommentHighlightState>({
@@ -5268,8 +5278,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const applyRecordingStatus = useCallback(
     (status: RecordingStatus) => {
-      if (status.state === 'recording' || status.state === 'streaming') {
-        // Go Live reports `recording` with a stream URL (plan 174 B-6).
+      if (
+        (status.state === 'recording' || status.state === 'streaming') &&
+        !sessionIsReplayOnly(status)
+      ) {
+        // Go Live reports `recording` with a stream URL (plan 174 B-6). A
+        // buffer-only session (plan 181) saves nothing, so it never becomes
+        // the activity a finished session is announced as.
         lastSessionActivityRef.current = sessionActivity(status)
       }
       recordingRef.current = status
@@ -6930,6 +6945,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const incomingStatus = payload as RecordingStatus
         const previousState = recordingRef.current.state ?? lastRecordingStateRef.current
         const previouslyLive = sessionIsLive(recordingRef.current)
+        const previouslyReplayOnly = sessionIsReplayOnly(recordingRef.current)
         const previousSessionId =
           recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current
         const exactTerminalSessionId =
@@ -7012,9 +7028,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // A terminal session moves a persistent degradation notice to past
         // tense. A saved recording also gets its two natural next steps: watch
         // it, or find it in the Library. Stream-only sessions have no local
-        // artifact, so they must not claim that a recording was saved.
+        // artifact, so they must not claim that a recording was saved; nor
+        // does a buffer-only session (plan 181) ending for the switch or the
+        // handover into a real session.
         if (
           status.state === 'idle' &&
+          !previouslyReplayOnly &&
           ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
         ) {
           const finishedActivity = lastSessionActivityRef.current

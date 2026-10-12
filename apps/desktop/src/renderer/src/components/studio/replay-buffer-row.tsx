@@ -37,13 +37,21 @@ export function ReplayBufferRow(): ReactElement {
   const switchBlockedReason =
     connectionBlockedReason(wsStatus) ??
     (!replayBuffer.armed && !transportActive ? recordBlockedReason : null)
+  const showSave = ring.state === 'on'
+  // D5: the key ships unbound; a game's keys are never stolen. Until it is
+  // set, the row says where to set it.
+  const showSetShortcut = replayBuffer.armed && !shortcut
+  // The switch, the label and the ring's words always share one line. The
+  // actions sit at its end while the inspector is wide enough and wrap under
+  // it, right-aligned, when it is not, so the words never paint over Save
+  // replay.
   return (
     <section
       aria-label={REPLAY_BUFFER_LABEL}
-      className="flex min-h-10 items-center gap-3 border-b border-border px-gutter py-1.5"
+      className="flex min-h-10 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-gutter py-1.5"
       data-slot="replay-buffer"
     >
-      <Field className="min-w-0 flex-1 items-center gap-2" orientation="horizontal">
+      <Field className="min-w-[14rem] flex-1 items-center gap-2" orientation="horizontal">
         <DisabledReason reason={switchBlockedReason}>
           <Switch
             checked={replayBuffer.armed}
@@ -55,35 +63,35 @@ export function ReplayBufferRow(): ReactElement {
         <FieldLabel className="min-w-0 truncate">{REPLAY_BUFFER_LABEL}</FieldLabel>
         <StatusDot className="shrink-0" label={line.label} tone={line.tone} />
       </Field>
-      {ring.state === 'on' ? (
-        <Button
-          className="shrink-0"
-          data-testid="replay-save-button"
-          variant="outline"
-          onClick={() => void replayBuffer.save()}
-        >
-          <SaveIcon data-icon="inline-start" />
-          {SAVE_REPLAY_LABEL}
-          {shortcut ? (
-            <ShortcutKeys
-              accelerator={shortcut}
-              className="ml-0.5"
-              platform={runtimeInfo?.platform}
-            />
+      {showSave || showSetShortcut ? (
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          {showSave ? (
+            <Button
+              data-testid="replay-save-button"
+              variant="outline"
+              onClick={() => void replayBuffer.save()}
+            >
+              <SaveIcon data-icon="inline-start" />
+              {SAVE_REPLAY_LABEL}
+              {shortcut ? (
+                <ShortcutKeys
+                  accelerator={shortcut}
+                  className="ml-0.5"
+                  platform={runtimeInfo?.platform}
+                />
+              ) : null}
+            </Button>
           ) : null}
-        </Button>
-      ) : null}
-      {/* D5: the key ships unbound; a game's keys are never stolen. Until it
-          is set, the row says where to set it. */}
-      {replayBuffer.armed && !shortcut ? (
-        <Button
-          className="shrink-0"
-          data-testid="replay-set-shortcut"
-          variant="ghost"
-          onClick={() => openSettingsTab('shortcuts')}
-        >
-          Set shortcut
-        </Button>
+          {showSetShortcut ? (
+            <Button
+              data-testid="replay-set-shortcut"
+              variant="ghost"
+              onClick={() => openSettingsTab('shortcuts')}
+            >
+              Set shortcut
+            </Button>
+          ) : null}
+        </div>
       ) : null}
     </section>
   )

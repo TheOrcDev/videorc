@@ -49,6 +49,7 @@ import {
   type WorkspaceTabGroup
 } from '@/components/workspace-nav'
 import { useStudioCore, useStudioRecordingState, useStudioReplay } from '@/hooks/use-studio'
+import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // ⌘K (plan 174 S3.21, A-9, A-13): Session first (the transport's own
@@ -143,8 +144,11 @@ export function CommandPalette({
 
   // Running, not starting: while a start is in flight the two starts stay,
   // disabled, so the row the streamer reached for does not change under
-  // the cursor.
-  const live = recording.state === 'recording' || recording.state === 'streaming'
+  // the cursor. A buffer-only session (plan 181) owns no transport: the two
+  // starts stay, and "Stop recording" never names the ring.
+  const live =
+    (recording.state === 'recording' || recording.state === 'streaming') &&
+    !sessionIsReplayOnly(recording)
   const busy = recording.state === 'starting' || recording.state === 'stopping'
   // The transport's own stop words (plan 174 D3): "End livestream" on air,
   // "Stop recording" for a recording.
