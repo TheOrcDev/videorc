@@ -3139,12 +3139,25 @@ async fn start_session_with_timeline(
             "The standby microphone is still opening. Wait for it to finish before starting the session."
         );
     }
-    if crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count())
-        && state.recording.lock().await.is_none()
-    {
-        bail!(
-            "The previous microphone is still opening or closing. Wait for cleanup before starting another session."
-        );
+    // With the ring on by default (plan 181) the previous session's
+    // microphone teardown and the standby microphone's re-open can still be
+    // in flight when the next start lands (the re-arm right after a Stop, a
+    // Record that hands over from it): give them a moment under this
+    // admission instead of refusing outright.
+    let cleanup_deadline = Instant::now() + MICROPHONE_CLEANUP_GRACE;
+    loop {
+        let pending =
+            crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count())
+                && state.recording.lock().await.is_none();
+        if !pending {
+            break;
+        }
+        if Instant::now() >= cleanup_deadline {
+            bail!(
+                "The previous microphone is still opening or closing. Wait for cleanup before starting another session."
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     timeline.mark(RecordingStartPhase::Admission);
     let mut session_start_admission = Some(session_start_admission);
@@ -17486,6 +17499,10 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
 /// How long the handover waits for the buffer session's microphone and slot
 /// to release before the real session is admitted.
 const REPLAY_HANDOVER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long an admitted start waits for the previous session's microphone
+/// cleanup (and the standby microphone's re-open) before refusing.
+const MICROPHONE_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 fn bridge_recording_ffmpeg_args_with_encoder(
