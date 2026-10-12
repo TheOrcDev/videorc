@@ -119,7 +119,18 @@ pub fn open_writer(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid FIFO path"))?;
 
     while !stop.load(Ordering::Relaxed) {
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+        // O_CLOEXEC: every child the backend spawns while a session runs
+        // (a camera FFmpeg restarted mid-take, a quality check) would
+        // otherwise inherit this write end and keep the FIFO open after the
+        // bridge closes it. FFmpeg then never reads EOF, ignores the graceful
+        // stop, and is SIGKILLed with an unfinalized file (Linux plans
+        // 0017/0026: ogre's camera FFmpeg held a dead session's FIFO).
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
         if fd >= 0 {
             if clear_nonblock {
                 let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, 0) };
@@ -491,6 +502,59 @@ mod tests {
         assert_eq!(&reader.join().expect("reader thread"), b"ping");
         stop.store(true, Ordering::Relaxed);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_child_spawned_while_writing_never_holds_the_fifo_open() {
+        // Linux plans 0017/0026: a process spawned during a session inherited
+        // the writer, so the reader (FFmpeg) never saw EOF after Stop.
+        let path = temp_fifo_path("cloexec");
+        let _ = std::fs::remove_file(&path);
+        create(&path).expect("create fifo");
+
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut file = std::fs::File::open(reader_path).expect("reader open");
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).expect("reader reaches EOF");
+            contents
+        });
+
+        let stop = AtomicBool::new(false);
+        let mut writer = open_writer(
+            &path,
+            &stop,
+            Duration::from_millis(5),
+            true,
+            "writer stopped before FIFO opened",
+        )
+        .expect("writer opens once the reader is attached");
+        {
+            use std::os::fd::AsRawFd;
+            let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFD) };
+            assert!(
+                flags & libc::FD_CLOEXEC != 0,
+                "FIFO writer must be close-on-exec"
+            );
+        }
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn a child while the writer is open");
+        writer.write_all(b"frame").expect("write to fifo");
+        drop(writer);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(reader.join().expect("reader thread"));
+        });
+        let contents = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the reader never saw EOF while a child was alive");
+        assert_eq!(contents, b"frame");
+        let _ = child.kill();
+        let _ = child.wait();
         let _ = std::fs::remove_file(&path);
     }
 }
