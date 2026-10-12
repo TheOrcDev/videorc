@@ -246,7 +246,11 @@ function unnamedControls(path: string, source: string): string[] {
   return found
 }
 
-describe('renderer style guards (plan 050)', () => {
+// Whole-renderer source scans are CPU-bound: under a parallel full run on a
+// laptop they pass vitest's 5 s default (ogre 2026-10-12: 6.9 s; 1.5 s alone).
+const SOURCE_SCAN_TIMEOUT = { timeout: 30_000 }
+
+describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
   it('scans the renderer sources', () => {
     expect(files.length).toBeGreaterThan(100)
     expect(files.some(({ path }) => path === 'src/styles.css')).toBe(true)
@@ -385,7 +389,7 @@ function toneTextOffenders(path: string, source: string): string[] {
   return found
 }
 
-describe('status colour discipline (plan 174 S1.8)', () => {
+describe('status colour discipline (plan 174 S1.8)', SOURCE_SCAN_TIMEOUT, () => {
   it('never colours status words: the tone rides on an icon, a dot, a chip or an Alert', () => {
     const offending = files
       .filter(({ path }) => path.endsWith('.tsx') && !path.startsWith('src/components/ui/'))
@@ -462,7 +466,7 @@ function handSizedDialogs(path: string, source: string): string[] {
   return found
 }
 
-describe('dialog anatomy (plan 174 S1.6b)', () => {
+describe('dialog anatomy (plan 174 S1.6b)', SOURCE_SCAN_TIMEOUT, () => {
   it('sizes every dialog with `size`, never a hand-set max width or height', () => {
     const offending = files
       .filter(({ path, code }) => path.endsWith('.tsx') && /DialogContent\b/.test(code))
@@ -482,7 +486,7 @@ describe('dialog anatomy (plan 174 S1.6b)', () => {
   })
 })
 
-describe('renderer accessible names (plan 174 S0.5)', () => {
+describe('renderer accessible names (plan 174 S0.5)', SOURCE_SCAN_TIMEOUT, () => {
   const withControls = files.filter(
     ({ path, code }) =>
       path.endsWith('.tsx') &&
@@ -685,7 +689,7 @@ const OFF_TIER_RADIUS_ALLOWLIST = new Set([
   'src/components/ui/mixer.tsx'
 ])
 
-describe('guardrails consolidated (plan 174 S4.1)', () => {
+describe('guardrails consolidated (plan 174 S4.1)', SOURCE_SCAN_TIMEOUT, () => {
   const tsx = files.filter(({ path }) => path.endsWith('.tsx'))
   const parsed = (check: (path: string, source: string) => string[]): string[] =>
     tsx.flatMap(({ path }) => check(path, readFileSync(join(RENDERER_ROOT, path), 'utf8')))

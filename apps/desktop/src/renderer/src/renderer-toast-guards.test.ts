@@ -84,7 +84,11 @@ function rawErrorToasts(path: string, source: string): string[] {
   return found
 }
 
-describe('renderer toast guards (plan 174 S2.4)', () => {
+// Whole-renderer source scans are CPU-bound: under a parallel full run on a
+// laptop they pass vitest's 5 s default (ogre 2026-10-12: 6.9 s; 1.5 s alone).
+const SOURCE_SCAN_TIMEOUT = { timeout: 30_000 }
+
+describe('renderer toast guards (plan 174 S2.4)', SOURCE_SCAN_TIMEOUT, () => {
   it('never hands a toast raw error text', () => {
     const offenders = rendererSources().flatMap((path) =>
       rawErrorToasts(relative(RENDERER_ROOT, path).split(sep).join('/'), readFileSync(path, 'utf8'))
