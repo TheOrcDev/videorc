@@ -23,6 +23,9 @@ import { STATE_FILE, TICK_LOCK_FILE, readState, writeState } from './schedule-st
 import { validateScheduleTable } from './schedule-table.mjs'
 import { reportSince, runTick } from './schedule-tick.mjs'
 
+// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
+const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+
 const MADRID = 'Europe/Madrid'
 const POLICY = Object.freeze({
   enabled: true,
@@ -138,39 +141,43 @@ test('policy problems, enabled false and schedule.enabled false end the tick qui
   }
 })
 
-test('a due run slot runs once, is recorded, logged and not run again on the next tick', async () => {
-  const dir = await freshDir()
-  await seed(dir, { days: { '2026-10-12': { 'update-check': { status: 'passed' } } } })
-  const { calls, actions } = fakeActions({
-    run: { status: 'passed', exitCode: 0, runDir: '/lab/runs/2026-10-12-churn-a1' }
-  })
-  const time = clock('2026-10-12T02:31:00Z') // 04:31 CEST
-  const tick = tickWith(dir, { actions, now: time.now })
-  const result = await tick.run()
-  assert.equal(result.outcome, 'acted')
-  assert.deepEqual(result.ran, [
-    { date: '2026-10-12', slotId: 'churn', status: 'passed', reason: null }
-  ])
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].args.slot.scenario, 'churn')
+test(
+  'a due run slot runs once, is recorded, logged and not run again on the next tick',
+  macOnly,
+  async () => {
+    const dir = await freshDir()
+    await seed(dir, { days: { '2026-10-12': { 'update-check': { status: 'passed' } } } })
+    const { calls, actions } = fakeActions({
+      run: { status: 'passed', exitCode: 0, runDir: '/lab/runs/2026-10-12-churn-a1' }
+    })
+    const time = clock('2026-10-12T02:31:00Z') // 04:31 CEST
+    const tick = tickWith(dir, { actions, now: time.now })
+    const result = await tick.run()
+    assert.equal(result.outcome, 'acted')
+    assert.deepEqual(result.ran, [
+      { date: '2026-10-12', slotId: 'churn', status: 'passed', reason: null }
+    ])
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].args.slot.scenario, 'churn')
 
-  const state = await readState(dir)
-  const entry = state.days['2026-10-12'].churn
-  assert.equal(entry.status, 'passed')
-  assert.equal(entry.runDir, '/lab/runs/2026-10-12-churn-a1')
-  assert.equal(entry.slotAt, '2026-10-12T02:30:00.000Z')
-  assert.equal(state.history.at(-1).slotId, 'churn')
-  assert.equal((await stat(join(dir, STATE_FILE))).mode & 0o777, 0o600)
+    const state = await readState(dir)
+    const entry = state.days['2026-10-12'].churn
+    assert.equal(entry.status, 'passed')
+    assert.equal(entry.runDir, '/lab/runs/2026-10-12-churn-a1')
+    assert.equal(entry.slotAt, '2026-10-12T02:30:00.000Z')
+    assert.equal(state.history.at(-1).slotId, 'churn')
+    assert.equal((await stat(join(dir, STATE_FILE))).mode & 0o777, 0o600)
 
-  const log = await readFile(scheduleLogPath(dir, '2026-10-12'), 'utf8')
-  assert.match(log, /2026-10-12 churn: starting run churn/)
-  assert.match(log, /2026-10-12 churn: passed run \/lab\/runs\/2026-10-12-churn-a1/)
+    const log = await readFile(scheduleLogPath(dir, '2026-10-12'), 'utf8')
+    assert.match(log, /2026-10-12 churn: starting run churn/)
+    assert.match(log, /2026-10-12 churn: passed run \/lab\/runs\/2026-10-12-churn-a1/)
 
-  time.set('2026-10-12T02:36:00Z')
-  const again = await tick.run()
-  assert.equal(again.outcome, 'idle')
-  assert.equal(calls.length, 1, 'state persisted: no second run the same day')
-})
+    time.set('2026-10-12T02:36:00Z')
+    const again = await tick.run()
+    assert.equal(again.outcome, 'idle')
+    assert.equal(calls.length, 1, 'state persisted: no second run the same day')
+  }
+)
 
 test('a held run lock defers the slot to the next tick inside the window, then it is missed', async () => {
   const dir = await freshDir()

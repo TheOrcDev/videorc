@@ -16,6 +16,9 @@ import {
   validatePolicy
 } from './policy.mjs'
 
+// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
+const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+
 const KILL_SWITCH_URL =
   'https://raw.githubusercontent.com/example-org/lab-reports/main/control.json'
 
@@ -202,16 +205,20 @@ test('access check: owned by me, group/other writable, access() yes, missing, no
   )
 })
 
-test('loadPolicy refuses a file the current user owns (the real fs, real uid)', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'live-lab-policy-'))
-  const path = join(dir, 'policy.json')
-  await writeFile(path, JSON.stringify(examplePolicy()))
-  await chmod(path, 0o644)
-  const mine = await loadPolicy({ path })
-  assert.equal(mine.policy, null)
-  assert.ok(mine.problems.some((problem) => /owned by the current user/.test(problem)))
-  assert.ok(mine.problems.some((problem) => /writable by the current user/.test(problem)))
-})
+test(
+  'loadPolicy refuses a file the current user owns (the real fs, real uid)',
+  macOnly,
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-lab-policy-'))
+    const path = join(dir, 'policy.json')
+    await writeFile(path, JSON.stringify(examplePolicy()))
+    await chmod(path, 0o644)
+    const mine = await loadPolicy({ path })
+    assert.equal(mine.policy, null)
+    assert.ok(mine.problems.some((problem) => /owned by the current user/.test(problem)))
+    assert.ok(mine.problems.some((problem) => /writable by the current user/.test(problem)))
+  }
+)
 
 test('loadPolicy with injected stat/access: owner-owned read-only file passes, 0666 and bad JSON fail', async () => {
   const path = '/Library/Application Support/VideorcLab/policy.json'

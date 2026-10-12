@@ -16,6 +16,9 @@ import {
 import { installRecordPath, previousAppPath, readInstallRecord } from './install-swap.mjs'
 import { LAB_TEAM_ID, parseCodesignDetails, verifyApp } from './install-verify.mjs'
 
+// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
+const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+
 const SHA = '0123abcd'.repeat(5)
 const SHORT = SHA.slice(0, 7)
 const RUN_ID = '987654321'
@@ -307,41 +310,45 @@ test('verifyApp refuses ad-hoc, wrong team, bad signature, Gatekeeper and quaran
   }
 })
 
-test('release install verifies sha512, codesign and Gatekeeper, keeps the old app', async () => {
-  const box = await sandbox()
-  try {
-    await writeApp(box.appPath, profile({ marker: 'old', version: '0.9.140' }))
-    const zipText = JSON.stringify(profile({ marker: 'new' }))
-    const { fetchImpl, requested } = releaseFetch(zipText)
-    const { runner, calls } = fakeRunner()
-    const record = await installBuild({
-      spec: parseBuildSpec('release'),
-      appPath: box.appPath,
-      labDir: box.labDir,
-      runner,
-      fetchImpl,
-      now: () => new Date('2026-10-12T12:00:00Z')
-    })
-    assert.equal(await marker(box.appPath), 'new')
-    assert.equal(await marker(previousAppPath(box.appPath)), 'old')
-    assert.deepEqual(requested, [
-      `${RELEASE_FEED_URL}latest-mac.yml`,
-      `${RELEASE_FEED_URL}Videorc-0.9.141-mac-arm64.zip`
-    ])
-    assert.ok(calls.some(([command]) => command === 'spctl'))
-    assert.equal(record.source, 'release')
-    assert.equal(record.version, '0.9.141')
-    assert.equal(record.sha, null)
-    assert.equal(record.verifiedAt, '2026-10-12T12:00:00.000Z')
-    assert.deepEqual(record.previous, { source: 'unknown', version: '0.9.140', sha: null })
-    assert.deepEqual(await readInstallRecord(box.labDir), record)
-    assert.equal((await stat(installRecordPath(box.labDir))).mode & 0o777, 0o600)
-    assert.deepEqual(await leftovers(box.appPath), [])
-    assert.deepEqual(await readdir(join(box.labDir, 'downloads')), [])
-  } finally {
-    await box.cleanup()
+test(
+  'release install verifies sha512, codesign and Gatekeeper, keeps the old app',
+  macOnly,
+  async () => {
+    const box = await sandbox()
+    try {
+      await writeApp(box.appPath, profile({ marker: 'old', version: '0.9.140' }))
+      const zipText = JSON.stringify(profile({ marker: 'new' }))
+      const { fetchImpl, requested } = releaseFetch(zipText)
+      const { runner, calls } = fakeRunner()
+      const record = await installBuild({
+        spec: parseBuildSpec('release'),
+        appPath: box.appPath,
+        labDir: box.labDir,
+        runner,
+        fetchImpl,
+        now: () => new Date('2026-10-12T12:00:00Z')
+      })
+      assert.equal(await marker(box.appPath), 'new')
+      assert.equal(await marker(previousAppPath(box.appPath)), 'old')
+      assert.deepEqual(requested, [
+        `${RELEASE_FEED_URL}latest-mac.yml`,
+        `${RELEASE_FEED_URL}Videorc-0.9.141-mac-arm64.zip`
+      ])
+      assert.ok(calls.some(([command]) => command === 'spctl'))
+      assert.equal(record.source, 'release')
+      assert.equal(record.version, '0.9.141')
+      assert.equal(record.sha, null)
+      assert.equal(record.verifiedAt, '2026-10-12T12:00:00.000Z')
+      assert.deepEqual(record.previous, { source: 'unknown', version: '0.9.140', sha: null })
+      assert.deepEqual(await readInstallRecord(box.labDir), record)
+      assert.equal((await stat(installRecordPath(box.labDir))).mode & 0o777, 0o600)
+      assert.deepEqual(await leftovers(box.appPath), [])
+      assert.deepEqual(await readdir(join(box.labDir, 'downloads')), [])
+    } finally {
+      await box.cleanup()
+    }
   }
-})
+)
 
 test('release install refuses a zip whose sha512 does not match the feed', async () => {
   const box = await sandbox()

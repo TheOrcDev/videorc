@@ -17,6 +17,9 @@ import {
 import { createFakeClock } from './harness-test-fakes.mjs'
 import { createEventBus } from './step-engine.mjs'
 
+// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
+const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+
 const FIXTURE = join(
   import.meta.dirname,
   '..',
@@ -64,7 +67,7 @@ test('the parser is tolerant and keeps only allowlisted fields', () => {
   assert.ok(!JSON.stringify(line).includes('rtmp://'))
 })
 
-test('journal dirs: <userData>/logs/metrics first, then beside the database', () => {
+test('journal dirs: <userData>/logs/metrics first, then beside the database', macOnly, () => {
   assert.deepEqual(
     journalDirCandidates({
       userDataDir: '/p/user-data',
