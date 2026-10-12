@@ -8,6 +8,7 @@ import {
   buildCaptureConfig,
   pickLabDevices,
   plannedTargets,
+  pickLinuxLabDevices,
   seedProfile,
   verifySeededConfig
 } from './seed.mjs'
@@ -209,6 +210,7 @@ test('seedProfile stores the key through the backend, writes the config over CDP
   const calls = []
   let saved = null
   const result = await seedProfile({
+    platform: 'darwin',
     rpc: async (method, params) => {
       calls.push({ method, params })
       if (method === 'devices.list') return DEVICES
@@ -245,4 +247,66 @@ test('seedProfile stores the key through the backend, writes the config over CDP
   assert.deepEqual(result.remote, { host: '127.0.0.1', port: 51234, token: 'remote-token-value' })
   assert.equal(JSON.parse(saved).streaming.targets[0].serverUrl, SINK.serverUrl)
   assert.equal(CAPTURE_CONFIG_KEY, 'videorc.captureConfig')
+})
+
+// Plan 179: Linux lists one portal screen row and Pulse microphones whose
+// detail names the source. Only the lab remap source is ever picked.
+const LINUX_DEVICES = {
+  devices: [
+    {
+      id: 'screen:portal:monitor',
+      name: 'Screen (portal)',
+      kind: 'screen',
+      status: 'available'
+    },
+    { id: 'window:portal:window', name: 'Window (portal)', kind: 'window', status: 'available' },
+    {
+      id: 'microphone:linux-pulse:616c7361',
+      name: 'Built-in Audio Analog Stereo',
+      kind: 'microphone',
+      status: 'available',
+      detail:
+        'PulseAudio/PipeWire source alsa_input.pci-0000_00_1f.3.analog-stereo (system default)'
+    },
+    {
+      id: 'microphone:linux-pulse:766964',
+      name: 'Videorc-Lab-Mic',
+      kind: 'microphone',
+      status: 'available',
+      detail: 'PulseAudio/PipeWire source videorc_lab_mic'
+    }
+  ]
+}
+
+test('plan 179: Linux picks the portal screen and the lab remap source, nothing else', () => {
+  assert.deepEqual(pickLinuxLabDevices(LINUX_DEVICES), {
+    screen: { id: 'screen:portal:monitor', name: 'Screen (portal)' },
+    microphone: { id: 'microphone:linux-pulse:766964', name: 'Videorc-Lab-Mic' }
+  })
+  const code = (list) => {
+    try {
+      pickLinuxLabDevices(list)
+      return null
+    } catch (error) {
+      return error.code
+    }
+  }
+  const without = (predicate) => ({ devices: LINUX_DEVICES.devices.filter((d) => !predicate(d)) })
+  assert.equal(code(without((d) => d.kind === 'screen')), 'lab-display-missing')
+  assert.equal(code(without((d) => d.name === 'Videorc-Lab-Mic')), 'lab-mic-missing')
+  // A description that looks right is not enough: the source name decides.
+  const lookalike = {
+    devices: LINUX_DEVICES.devices.map((d) =>
+      d.name === 'Videorc-Lab-Mic'
+        ? { ...d, detail: 'PulseAudio/PipeWire source videorc_lab_mic_room' }
+        : d
+    )
+  }
+  assert.equal(code(lookalike), 'lab-mic-missing')
+  const unavailable = {
+    devices: LINUX_DEVICES.devices.map((d) =>
+      d.kind === 'screen' ? { ...d, status: 'unavailable', detail: 'no portal' } : d
+    )
+  }
+  assert.equal(code(unavailable), 'lab-display-unavailable')
 })

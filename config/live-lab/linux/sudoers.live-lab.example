@@ -1,0 +1,44 @@
+# Plan 179: network fault injection on the Linux lab machine. EXAMPLE ONLY.
+# The twin of config/live-lab/sudoers.live-lab.example (macOS pf/dnctl).
+#
+# The lab user never gets a general sudo. This file allows the four fixed
+# verbs of the root-owned fault helper and nothing else. It is only installed
+# when the owner sets `faults.network` to true in /etc/videorc-lab/policy.json;
+# with it false the harness never calls sudo at all.
+#
+# The command lines below are generated from LINUX_ALLOWED_COMMANDS in
+# scripts/live-lab/lib/net-fault.mjs and a unit test (net-fault.test.mjs)
+# fails when this file and that list differ, in either direction. Edit the
+# code first, then this file.
+#
+# Install as root, after the helper (config/live-lab/linux/videorc-lab-netfault,
+# root:root 0755 at /usr/local/sbin/videorc-lab-netfault). Replace
+# `videorc-lab` on the last line if the policy's `labUser` names another
+# account:
+#
+#   sudo visudo -cf config/live-lab/linux/sudoers.live-lab.example   # syntax check first
+#   sudo install -o root -g root -m 0440 config/live-lab/linux/sudoers.live-lab.example /etc/sudoers.d/videorc-live-lab
+#
+# Why each line is safe:
+#   videorc-lab-netfault loss       100% loss on TCP 443/1935 to the ingest hosts only
+#   videorc-lab-netfault throttle   the same traffic at 1000 kbit/s
+#   videorc-lab-netfault clear      removes the lab nft table and the lab qdiscs only
+#   videorc-lab-netfault status     read-back
+#
+# The helper takes no argument but the verb and resets PATH itself; sudo's
+# env_reset (the default) drops the caller's environment. Not allowed on
+# purpose: `nft` and `tc` themselves (they would let a compromised harness
+# rewrite the firewall or shape any interface), and any wildcard.
+#
+# Removal of a fault that outlived the harness: `pnpm live:doctor` reports a
+# leftover table or qdisc as FAIL with the cleanup command, and when it can
+# it runs it itself.
+
+Cmnd_Alias LIVE_LAB_FAULTS = \
+  /usr/local/sbin/videorc-lab-netfault loss, \
+  /usr/local/sbin/videorc-lab-netfault throttle, \
+  /usr/local/sbin/videorc-lab-netfault clear, \
+  /usr/local/sbin/videorc-lab-netfault status
+
+Defaults!LIVE_LAB_FAULTS env_reset
+videorc-lab ALL=(root) NOPASSWD: LIVE_LAB_FAULTS

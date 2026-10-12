@@ -1,0 +1,16 @@
+# Plan 179: xdg-desktop-portal-hyprland settings for the Linux lab. Copy to
+# ~/.config/hypr/xdph.conf (lab user), fix the path, then restart the portal:
+#
+#   systemctl --user restart xdg-desktop-portal-hyprland
+#
+# allow_token_by_default  the share picker's "Allow a restore token" starts
+#                         ticked, so a grant made by hand is remembered.
+# custom_picker_binary    config/live-lab/linux/videorc-lab-share-picker,
+#                         installed at ~/.local/bin. While a lab run is live
+#                         it answers with the lab output and nothing else;
+#                         otherwise it runs the normal hyprland-share-picker.
+
+screencopy {
+  allow_token_by_default = true
+  custom_picker_binary = /home/videorc-lab/.local/bin/videorc-lab-share-picker
+}

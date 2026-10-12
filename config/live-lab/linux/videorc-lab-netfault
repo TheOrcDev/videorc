@@ -1,0 +1,177 @@
+#!/bin/sh
+# Plan 179: network faults for the Linux live lab (the twin of the macOS pf
+# anchor + dummynet pipe in config/live-lab/pf.anchor.example). EXAMPLE ONLY;
+# the live copy is root-owned so the lab user can run it but never change it.
+#
+# Install (owner, as root):
+#
+#   sudo install -o root -g root -m 0755 config/live-lab/linux/videorc-lab-netfault \
+#     /usr/local/sbin/videorc-lab-netfault
+#
+# then config/live-lab/linux/sudoers.live-lab.example (visudo -cf first). The
+# harness runs it only as `sudo -n /usr/local/sbin/videorc-lab-netfault <verb>`
+# with one of the four fixed verbs below; sudoers names each line and nothing
+# else. The script takes no other input: no argument, no environment (sudo
+# resets it and PATH is set here), no file the lab user can write.
+#
+# Verbs:
+#   loss      100% loss on outbound TCP 443/1935 to YouTube's ingest hosts
+#   throttle  the same traffic limited to 1000 kbit/s
+#   clear     remove the lab's nft table and tc qdiscs (idempotent)
+#   status    read-back, one `key=value` line per fact (parsed by
+#             scripts/live-lab/lib/net-fault.mjs)
+#
+# How a fault bites:
+#   - the ingest hosts are resolved here, at apply time (IPv4 and IPv6);
+#   - nft table `inet videorc_lab` marks outbound TCP to those addresses on
+#     443 (RTMPS) and 1935 (RTMP) with 0x2178 (OR'ed into the mark, so marks
+#     other tools use in other bits survive). Nothing else is matched: the
+#     YouTube API, chat and the kill switch use other hosts;
+#   - on each interface that routes to an ingest address, a root `prio`
+#     qdisc 2178: with 4 bands. The priomap only ever uses bands 0-2, so band
+#     3 (class 2178:4) receives nothing but what the fw filter sends there:
+#     packets carrying the 0x2178 mark. Band 3's child is netem 2179: with
+#     `loss 100%` or `rate 1000kbit`. Unmarked traffic is not shaped.
+# `clear` deletes the table and every root qdisc whose handle is 2178:; the
+# kernel then puts the interface's default qdisc back. It never touches
+# another nft table or a root qdisc with another handle. A reboot clears
+# everything too (nothing here is persistent).
+
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+
+TABLE=videorc_lab
+MARK=0x2178
+QDISC=2178
+NETEM=2179
+THROTTLE=1000kbit
+HOSTS='a.rtmps.youtube.com b.rtmps.youtube.com a.rtmp.youtube.com b.rtmp.youtube.com'
+
+say() {
+  printf '%s\n' "$*"
+}
+
+die() {
+  say "error=$*" >&2
+  exit 1
+}
+
+# Interfaces whose root qdisc is the lab's (`qdisc prio 2178: dev X root ...`).
+lab_qdisc_devs() {
+  tc qdisc show 2>/dev/null | awk -v h="${QDISC}:" '$1 == "qdisc" && $2 == "prio" && $3 == h && $4 == "dev" && $6 == "root" { print $5 }'
+}
+
+table_present() {
+  nft list table inet "$TABLE" >/dev/null 2>&1
+}
+
+clear_all() {
+  rc=0
+  if table_present; then
+    nft delete table inet "$TABLE" || rc=1
+  fi
+  for dev in $(lab_qdisc_devs); do
+    tc qdisc del dev "$dev" root handle "${QDISC}:" || rc=1
+  done
+  return $rc
+}
+
+status() {
+  if table_present; then say 'table=present'; else say 'table=absent'; fi
+  for dev in $(lab_qdisc_devs); do
+    mode=none
+    detail=$(tc qdisc show dev "$dev" 2>/dev/null | awk -v h="${NETEM}:" '$2 == "netem" && $3 == h')
+    case "$detail" in
+      *'loss 100%'*) mode=loss ;;
+      *rate*) mode=throttle ;;
+    esac
+    say "qdisc=$dev mode=$mode"
+  done
+  if table_present; then
+    nft list set inet "$TABLE" ingest4 2>/dev/null | tr -s ' ,{}=\t' '\n' |
+      grep -E '^[0-9]+(\.[0-9]+){3}$' | sed 's/^/ingest=/'
+    nft list set inet "$TABLE" ingest6 2>/dev/null | tr -s ' ,{}=\t' '\n' |
+      grep -E '^[0-9a-fA-F]*:[0-9a-fA-F:]+$' | sed 's/^/ingest=/'
+  fi
+}
+
+resolve() {
+  family=$1
+  for host in $HOSTS; do
+    getent "ahosts$family" "$host" 2>/dev/null | awk '{ print $1 }'
+  done | sort -u
+}
+
+route_dev() {
+  ip -o route get "$1" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
+
+join_commas() {
+  paste -sd, - | sed 's/,/, /g'
+}
+
+apply() {
+  netem_args=$1
+  clear_all || die 'could not clear the previous fault'
+
+  v4=$(resolve v4)
+  # ahostsv6 answers with v4-mapped addresses when a host has no AAAA.
+  v6=$(resolve v6 | grep ':' | grep -vi '^::ffff:' || true)
+  [ -n "$v4$v6" ] || die 'no ingest address resolved'
+
+  devs=$(for addr in $v4 $v6; do route_dev "$addr"; done | sort -u)
+  [ -n "$devs" ] || die 'no route to the ingest addresses'
+
+  sets=''
+  rules=''
+  if [ -n "$v4" ]; then
+    sets="$sets
+  set ingest4 { type ipv4_addr; elements = { $(printf '%s\n' $v4 | join_commas) } }"
+    rules="$rules
+    ip daddr @ingest4 tcp dport { 443, 1935 } meta mark set meta mark | $MARK"
+  fi
+  if [ -n "$v6" ]; then
+    sets="$sets
+  set ingest6 { type ipv6_addr; elements = { $(printf '%s\n' $v6 | join_commas) } }"
+    rules="$rules
+    ip6 daddr @ingest6 tcp dport { 443, 1935 } meta mark set meta mark | $MARK"
+  fi
+
+  if ! nft -f - <<EOF
+table inet $TABLE {$sets
+  chain output {
+    type filter hook output priority mangle; policy accept;$rules
+  }
+}
+EOF
+  then
+    clear_all
+    die 'nft refused the lab table'
+  fi
+
+  for dev in $devs; do
+    if ! tc qdisc replace dev "$dev" root handle "${QDISC}:" prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 ||
+      ! tc qdisc add dev "$dev" parent "${QDISC}:4" handle "${NETEM}:" netem $netem_args ||
+      ! tc filter add dev "$dev" parent "${QDISC}:" protocol all prio 1 handle "$MARK/0xffff" fw flowid "${QDISC}:4"; then
+      clear_all
+      die "tc refused the lab qdisc on $dev"
+    fi
+  done
+  status
+}
+
+[ "$(id -u)" -eq 0 ] || die 'run me through sudo'
+[ $# -eq 1 ] || die 'usage: videorc-lab-netfault loss|throttle|clear|status'
+
+case "$1" in
+  loss) apply 'loss 100%' ;;
+  throttle) apply "rate $THROTTLE" ;;
+  clear)
+    clear_all || die 'clear failed'
+    status
+    ;;
+  status) status ;;
+  *) die 'usage: videorc-lab-netfault loss|throttle|clear|status' ;;
+esac

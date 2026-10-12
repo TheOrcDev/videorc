@@ -8,13 +8,27 @@ import {
 } from './config.mjs'
 import {
   DN_PIPE,
+  LINUX_NETFAULT_HELPER,
+  LINUX_NFT_TABLE,
+  LINUX_QDISC_HANDLE,
   PF_ANCHOR,
   PF_CONF,
   cleanupCommandLines,
+  linuxCleanupCommandLines,
+  linuxNetFaultResidue,
   netFaultResidue,
   pfConfHooksAnchor,
   residueIsClean
 } from './net-fault.mjs'
+import {
+  LAB_MIC_DESCRIPTION,
+  LAB_MIC_SOURCE,
+  LAB_SPEECH_SINK,
+  outputBounds,
+  parsePulseDevices,
+  pickLabOutput,
+  sessionProblems
+} from './linux-desktop.mjs'
 
 // Plan 176 L0. Pure verdicts for live:doctor, so each failure mode can be
 // tested without a Mac, a network or a Google account.
@@ -513,6 +527,381 @@ export function evaluateNetFaultsClean(
     networkFaults ? `, ${PF_CONF} hooks the anchor` : ''
   }`
   return check(name, PASS, detail)
+}
+
+// Plan 179: the Linux twin of evaluateNetFaultsClean. `statusText` is the
+// helper's `status` read-back (null when sudo refused it), `helper` the stat
+// of LINUX_NETFAULT_HELPER: { present, rootOwned, writable } (null when not
+// inspected). A helper the lab user could change is a FAIL whatever the
+// policy says: sudoers would run any code put there as root.
+export function evaluateLinuxNetFaultsClean(
+  statusText,
+  { networkFaults = null, cleaned = false, helper = null } = {}
+) {
+  const name = 'network faults'
+  if (helper?.present && (!helper.rootOwned || helper.writable)) {
+    return check(
+      name,
+      FAIL,
+      `${LINUX_NETFAULT_HELPER} is ${helper.writable ? 'writable by the lab user' : 'not owned by root'}; reinstall it: sudo install -o root -g root -m 0755 config/live-lab/linux/videorc-lab-netfault ${LINUX_NETFAULT_HELPER}`
+    )
+  }
+  if (statusText === null) {
+    if (!networkFaults) {
+      return check(name, SKIP, 'faults.network is off and the sudoers file is not installed.')
+    }
+    return check(
+      name,
+      FAIL,
+      helper && !helper.present
+        ? `faults.network is on but ${LINUX_NETFAULT_HELPER} is missing. Install config/live-lab/linux/videorc-lab-netfault and its sudoers file (owner step).`
+        : 'faults.network is on but sudo refused the read-back. Install config/live-lab/linux/sudoers.live-lab.example (owner step).'
+    )
+  }
+  const residue = linuxNetFaultResidue(statusText)
+  if (!residueIsClean(residue)) {
+    const parts = []
+    if (residue.rules.length) parts.push(`nft table ${LINUX_NFT_TABLE} present`)
+    if (residue.pipes.length) {
+      parts.push(`qdisc ${LINUX_QDISC_HANDLE} on ${residue.pipes.length} interface(s)`)
+    }
+    return check(
+      name,
+      FAIL,
+      `${parts.join(', ')}: a fault outlived its run. Run: ${linuxCleanupCommandLines().join(' && ')}`
+    )
+  }
+  if (cleaned) {
+    return check(
+      name,
+      WARN,
+      'a leftover fault was flushed by this doctor run. The previous run leaked; read its log.'
+    )
+  }
+  return check(name, PASS, `nft table ${LINUX_NFT_TABLE} absent, no ${LINUX_QDISC_HANDLE} qdisc`)
+}
+
+// ---------------------------------------------------------------------------
+// Plan 179: the Linux lab. Same rules as the macOS checks above (pure
+// verdicts over what a command printed), different evidence: Hyprland's
+// monitors instead of system_profiler, Pulse devices instead of Core Audio,
+// systemd and the display manager instead of pmset and loginwindow.
+
+const LINUX_FIX_DOC = 'see docs/live-lab-machine.md (Linux)'
+
+// labSessionEnv()'s answer: the Wayland/Hyprland/D-Bus variables the app,
+// Chrome and the portal need.
+export function evaluateLinuxSession(sessionEnv) {
+  const problems = sessionProblems(sessionEnv ?? {})
+  if (problems.length) {
+    return check(
+      'desktop session',
+      FAIL,
+      `${problems.join(', ')}. The Linux lab needs a logged-in Hyprland session (auto-login) for the portal and the lab output; ${LINUX_FIX_DOC}.`
+    )
+  }
+  return check(
+    'desktop session',
+    PASS,
+    `Hyprland on ${sessionEnv.WAYLAND_DISPLAY} (${sessionEnv.XDG_CURRENT_DESKTOP ?? 'desktop unknown'})`
+  )
+}
+
+// `hyprctl -j monitors all` (or the error reading it): the lab output must
+// exist, be enabled and powered, and should not hold focus (new windows and
+// notifications go to the focused output).
+export function evaluateLinuxLabDisplay(monitors, configuredName, error = null) {
+  if (error) {
+    return check(
+      'lab display',
+      FAIL,
+      `Could not read Hyprland's outputs: ${error.message ?? error}`
+    )
+  }
+  const picked = pickLabOutput(monitors, configuredName)
+  if (!picked.output) {
+    return check('lab display', FAIL, `${picked.problem} Outputs seen: ${picked.seen}.`)
+  }
+  const output = picked.output
+  if (output.disabled) {
+    return check(
+      'lab display',
+      FAIL,
+      `"${output.name}" is disabled. Enable it in the monitor rule.`
+    )
+  }
+  if (output.dpmsStatus === false) {
+    return check(
+      'lab display',
+      FAIL,
+      `"${output.name}" is off (DPMS). hyprctl dispatch dpms on ${output.name}`
+    )
+  }
+  const bounds = outputBounds(output)
+  const shown = `"${output.name}" ${bounds.width}x${bounds.height}`
+  if (bounds.width < 1280 || bounds.height < 720) {
+    return check('lab display', FAIL, `${shown} is too small; set 1920x1080 in its monitor rule.`)
+  }
+  const enabled = (Array.isArray(monitors) ? monitors : []).filter((entry) => !entry.disabled)
+  if (bounds.focused && enabled.length > 1) {
+    return check(
+      'lab display',
+      WARN,
+      `${shown} has focus; notifications and new windows land there. Focus another output.`
+    )
+  }
+  return check('lab display', PASS, shown)
+}
+
+// The ScreenCast grant. Every Linux run deletes the lab profile's portal
+// restore token (session.mjs preparePortalGrant), so the only grant a run
+// gets is the lab share picker's. `xdphConf` is ~/.config/hypr/xdph.conf (or
+// null), `picker` the configured binary: { path, executable, isLabPicker }
+// (null when not inspected), `fallback` whether hyprland-share-picker is on
+// PATH (what the lab picker hands every other app to).
+export function parseXdphPicker(xdphConf) {
+  return /^\s*custom_picker_binary\s*=\s*(\S+)/m.exec(String(xdphConf ?? ''))?.[1] ?? null
+}
+
+export function evaluateLinuxScreenGrant({ xdphConf, picker, fallback }) {
+  const name = 'screen grant'
+  const fix = `Install config/live-lab/linux/videorc-lab-share-picker and point xdph at it (config/live-lab/linux/xdph.conf.example); ${LINUX_FIX_DOC}.`
+  const configured = parseXdphPicker(xdphConf)
+  if (!configured) {
+    return check(
+      name,
+      FAIL,
+      `xdg-desktop-portal-hyprland has no custom_picker_binary, so a run would wait on the share dialog. ${fix}`
+    )
+  }
+  if (!picker?.executable) {
+    return check(
+      name,
+      FAIL,
+      `custom_picker_binary ${configured} is missing or not executable. ${fix}`
+    )
+  }
+  if (!picker.isLabPicker) {
+    return check(
+      name,
+      FAIL,
+      `custom_picker_binary ${configured} is not the lab share picker (it never reads portal-pick). ${fix}`
+    )
+  }
+  if (!fallback) {
+    return check(
+      name,
+      WARN,
+      `${configured} is the lab picker, but hyprland-share-picker is not on PATH: other apps get no picker. Install xdg-desktop-portal-hyprland's picker.`
+    )
+  }
+  return check(name, PASS, `lab share picker ${configured}; no restore token is ever reused`)
+}
+
+// `ffmpeg -hide_banner -sinks pulse` and `-sources pulse`: the speech sink
+// and the lab mic must exist, and the mic must not be the system default
+// (a default mic is what other apps on the box would open).
+export function evaluateLinuxLabAudio(sinksText, sourcesText) {
+  const sinks = parsePulseDevices(sinksText, { dropMonitors: false })
+  const sources = parsePulseDevices(sourcesText)
+  const sink = sinks.find((entry) => entry.name === LAB_SPEECH_SINK)
+  const mic = sources.find((entry) => entry.name === LAB_MIC_SOURCE)
+  const fix = `Load the lab devices: config/live-lab/linux/pipewire-pulse.videorc-lab.conf; ${LINUX_FIX_DOC}.`
+  if (!sink && !mic) {
+    return check(
+      'lab audio',
+      FAIL,
+      `No ${LAB_SPEECH_SINK} sink and no ${LAB_MIC_SOURCE} source. ${fix}`
+    )
+  }
+  if (!sink) return check('lab audio', FAIL, `No ${LAB_SPEECH_SINK} sink. ${fix}`)
+  if (!mic) {
+    return check(
+      'lab audio',
+      FAIL,
+      `No ${LAB_MIC_SOURCE} source (a monitor never counts: Videorc hides monitors). ${fix}`
+    )
+  }
+  const defaultSink = sinks.find((entry) => entry.isDefault)
+  if (mic.isDefault || defaultSink?.name === LAB_SPEECH_SINK) {
+    return check(
+      'lab audio',
+      FAIL,
+      `${mic.isDefault ? LAB_MIC_SOURCE : LAB_SPEECH_SINK} is the system default; other apps would use it. Set a real device as default (pactl set-default-${mic.isDefault ? 'source' : 'sink'} <name>).`
+    )
+  }
+  return check(
+    'lab audio',
+    PASS,
+    `speech sink ${LAB_SPEECH_SINK}, mic "${mic.description || LAB_MIC_DESCRIPTION}" (${LAB_MIC_SOURCE})`
+  )
+}
+
+// `systemctl is-enabled sleep.target suspend.target hibernate.target
+// hybrid-sleep.target`: one word per line, all must be `masked` (that also
+// stops a lid close from suspending: logind starts suspend.target).
+export const LINUX_SLEEP_TARGETS = Object.freeze([
+  'sleep.target',
+  'suspend.target',
+  'hibernate.target',
+  'hybrid-sleep.target'
+])
+
+export function evaluateLinuxSleep(output) {
+  const states = String(output ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (states.length !== LINUX_SLEEP_TARGETS.length) {
+    return check('sleep', FAIL, 'Could not read the sleep targets (systemctl is-enabled).')
+  }
+  const awake = LINUX_SLEEP_TARGETS.filter((_, index) => states[index] !== 'masked')
+  return awake.length
+    ? check(
+        'sleep',
+        FAIL,
+        `${awake.join(', ')} not masked. Fix: sudo systemctl mask ${LINUX_SLEEP_TARGETS.join(' ')}`
+      )
+    : check('sleep', PASS, 'sleep, suspend and hibernate masked')
+}
+
+// Whether hypridle / hyprlock run in the lab session ({ hypridle, hyprlock }
+// booleans). A locked session draws the lock screen on every output,
+// including the lab output; hypridle locks and powers outputs off between
+// runs (runs themselves hold a systemd idle inhibitor).
+export function evaluateLinuxScreenLock({ hypridle, hyprlock }) {
+  if (hyprlock) {
+    return check(
+      'screen lock',
+      FAIL,
+      'The session is locked (hyprlock runs). Unlock it at the console.'
+    )
+  }
+  if (hypridle) {
+    return check(
+      'screen lock',
+      FAIL,
+      'hypridle runs and would lock the session or turn the outputs off between runs. Stop it for the lab user (Omarchy: remove it from autostart).'
+    )
+  }
+  return check('screen lock', PASS, 'no idle locker running')
+}
+
+// Which notification daemon runs and whether it is in Do Not Disturb:
+// { daemon: 'mako' | 'dunst' | 'swaync' | null, output }. mako: `makoctl
+// mode` lists do-not-disturb; dunst: `dunstctl is-paused` says true;
+// swaync: `swaync-client -D` says true.
+export function evaluateLinuxNotifications({ daemon, output }) {
+  const text = String(output ?? '').trim()
+  if (!daemon) {
+    return check(
+      'focus',
+      WARN,
+      'No known notification daemon (mako, dunst, swaync) found; check nothing can draw on the lab output.'
+    )
+  }
+  const quiet = daemon === 'mako' ? /\bdo-not-disturb\b/.test(text) : /^true$/m.test(text)
+  if (quiet) return check('focus', PASS, `${daemon}: do not disturb`)
+  const fix = {
+    mako: 'makoctl mode -a do-not-disturb',
+    dunst: 'dunstctl set-paused true',
+    swaync: 'swaync-client -dn'
+  }[daemon]
+  return check('focus', FAIL, `${daemon} shows notifications. Turn on do not disturb: ${fix}`)
+}
+
+// The display manager's auto-login: `files` maps a path to its text (SDDM
+// conf, greetd config, getty override). PASS when one of them logs `user`
+// in without a password.
+export function evaluateLinuxAutoLogin(files, user) {
+  const found = []
+  for (const [path, text] of Object.entries(files ?? {})) {
+    const body = String(text ?? '')
+    if (/sddm/.test(path)) {
+      const block = /^\s*\[Autologin\]([\s\S]*?)(?=^\s*\[|(?![\s\S]))/m.exec(body)?.[1] ?? ''
+      const named = /^\s*User\s*=\s*(\S+)/m.exec(block)?.[1]
+      if (named) found.push({ path, user: named })
+    } else if (/greetd/.test(path)) {
+      const block = /^\s*\[initial_session\]([\s\S]*?)(?=^\s*\[|(?![\s\S]))/m.exec(body)?.[1] ?? ''
+      const named = /^\s*user\s*=\s*"?([^"\s]+)"?/m.exec(block)?.[1]
+      if (named) found.push({ path, user: named })
+    } else {
+      const named = /--autologin\s+(\S+)/.exec(body)?.[1]
+      if (named) found.push({ path, user: named })
+    }
+  }
+  if (found.length === 0) {
+    return check(
+      'auto-login',
+      FAIL,
+      `Nothing logs ${user} in at boot (no SDDM [Autologin], greetd initial_session or getty --autologin). ${LINUX_FIX_DOC}.`
+    )
+  }
+  const mine = found.find((entry) => entry.user === user)
+  return mine
+    ? check('auto-login', PASS, `${user} (${mine.path})`)
+    : check(
+        'auto-login',
+        FAIL,
+        `Auto-login user is "${found[0].user}" (${found[0].path}), must be ${user}.`
+      )
+}
+
+// `loginctl show-user <user> -p Linger`: with linger the user manager (and
+// the schedule timer) starts at boot and survives a logout.
+export function evaluateLinuxLinger(output, user) {
+  const value = /^Linger=(yes|no)$/m.exec(String(output ?? ''))?.[1]
+  if (value === 'yes') return check('linger', PASS, `${user}: yes`)
+  return check(
+    'linger',
+    WARN,
+    `${value ? 'off' : 'unknown'}: the schedule timer stops when the session ends. Fix: sudo loginctl enable-linger ${user}`
+  )
+}
+
+// `lsblk -n -o TYPE`: a LUKS volume means every boot waits for the
+// passphrase at the console, so a reboot (weekly, or after a power cut)
+// ends unattended operation until someone types it.
+export function evaluateLinuxUnattendedBoot(lsblkTypes) {
+  const encrypted = String(lsblkTypes ?? '')
+    .split('\n')
+    .some((line) => line.trim() === 'crypt')
+  return encrypted
+    ? check(
+        'unattended boot',
+        WARN,
+        'The disk is LUKS-encrypted: a reboot waits for the passphrase at the console. Skip the weekly reboot timer, or unlock with a TPM (systemd-cryptenroll --tpm2-device=auto).'
+      )
+    : check('unattended boot', PASS, 'no passphrase at boot')
+}
+
+// `sudo -n -l` (stdout+stderr) and `id -Gn`. The policy is only the owner's
+// if the lab user cannot become root: passwordless sudo for anything beyond
+// the fault helper is a FAIL; an admin group with a password is a WARN.
+export function evaluateLinuxSudo(sudoList, groups, user) {
+  const text = String(sudoList ?? '')
+  const lines = text.split('\n').map((line) => line.trim())
+  const unrestricted = lines.some((line) =>
+    /^\((?:ALL|root)(?:\s*:\s*\S+)?\)\s+NOPASSWD:\s*ALL\s*$/i.test(line)
+  )
+  if (unrestricted) {
+    return check(
+      'lab user rights',
+      FAIL,
+      `${user} has passwordless sudo for everything, so anything running as it can rewrite the policy. Remove it from the NOPASSWD rule; only config/live-lab/linux/sudoers.live-lab.example may stay.`
+    )
+  }
+  const admin = String(groups ?? '')
+    .split(/\s+/)
+    .filter((group) => ['wheel', 'sudo', 'admin'].includes(group))
+  if (admin.length) {
+    return check(
+      'lab user rights',
+      WARN,
+      `${user} is in ${admin.join(', ')} (sudo with a password). Nothing unattended can use it, but a dedicated non-admin lab account is the safe setup.`
+    )
+  }
+  return check('lab user rights', PASS, `${user} cannot become root`)
 }
 
 export function summarize(results) {

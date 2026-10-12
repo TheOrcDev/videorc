@@ -96,10 +96,7 @@ test('policy path defaults to the owner-owned file and honours the test override
 test('plan 179: the Linux lab reads /etc/videorc-lab/policy.json; the override still wins', () => {
   assert.equal(policyPath({}, 'linux'), LINUX_POLICY_PATH)
   assert.equal(LINUX_POLICY_PATH, '/etc/videorc-lab/policy.json')
-  assert.equal(
-    policyPath({ VIDEORC_LIVE_LAB_POLICY: '/tmp/p.json' }, 'linux'),
-    '/tmp/p.json'
-  )
+  assert.equal(policyPath({ VIDEORC_LIVE_LAB_POLICY: '/tmp/p.json' }, 'linux'), '/tmp/p.json')
 })
 
 test('plan 179: labUser is optional, videorc-lab when absent, a login name when present', () => {

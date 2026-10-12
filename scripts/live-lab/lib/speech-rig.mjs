@@ -1,12 +1,15 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { isLinux } from './platform.mjs'
 import {
-  DEFAULT_DEVICE,
+  assertPulseSink,
+  defaultSpeechDevice,
   findAudioDeviceIndex,
   loadPhrases,
   playPhrase,
   renderPhrase,
+  speechFileExtension,
   speechStartDelay
 } from './speech.mjs'
 
@@ -16,7 +19,8 @@ import {
 
 export function createSpeechRig({
   runDir,
-  device = DEFAULT_DEVICE,
+  platform = process.platform,
+  device = defaultSpeechDevice(platform),
   ffmpegPath = process.env.VIDEORC_LIVE_LAB_FFMPEG ?? 'ffmpeg',
   runner,
   now = () => Date.now(),
@@ -45,8 +49,8 @@ export function createSpeechRig({
   async function render(id, text) {
     if (rendered.has(id)) return rendered.get(id)
     await mkdir(join(runDir, 'speech'), { recursive: true })
-    const file = join(runDir, 'speech', `${id}.aiff`)
-    await renderPhrase(text, file, runner ? { runner } : {})
+    const file = join(runDir, 'speech', `${id}.${speechFileExtension(platform)}`)
+    await renderPhrase(text, file, runner ? { runner, platform } : { platform })
     rendered.set(id, file)
     return file
   }
@@ -61,10 +65,9 @@ export function createSpeechRig({
     if (!entry) throw new Error(`unknown phrase "${phraseId}"`)
     const file = await render(entry.id, entry.text)
     if (deviceIndex === null) {
-      deviceIndex = await findAudioDeviceIndex(
-        device,
-        runner ? { runner, ffmpegPath } : { ffmpegPath }
-      )
+      deviceIndex = isLinux(platform)
+        ? await assertPulseSink(device, runner ? { runner, ffmpegPath } : { ffmpegPath })
+        : await findAudioDeviceIndex(device, runner ? { runner, ffmpegPath } : { ffmpegPath })
     }
     const delay = speechStartDelay(now(), durationMs)
     if (delay > 0) await wait(delay)
@@ -75,6 +78,7 @@ export function createSpeechRig({
       phraseId: entry.id,
       text: entry.text,
       ffmpegPath,
+      platform,
       ...(runner ? { runner } : {}),
       log: logPath
     })
