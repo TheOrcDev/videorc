@@ -480,11 +480,15 @@ impl CompositorFrameConsumer {
         !matches!(self, Self::NativePreview)
     }
 
-    /// Native preview is Metal-only on macOS. Off macOS — and whenever no GPU
-    /// compositor exists — it is the Electron proof surface, so the CPU path
-    /// must sample live BGRA (Linux portal PipeWire frames included).
-    const fn composes_cpu_pixels(self, gpu_available: bool) -> bool {
-        self.requires_cpu_fallback() || (!gpu_available && matches!(self, Self::NativePreview))
+    /// Native preview never CPU-composes. On macOS it is Metal; off macOS (and
+    /// with no GPU compositor) it is the Electron proof surface, which draws
+    /// the per-source `/preview/{camera,screen}/latest.bmp` layers and never
+    /// reads composed frames. Composing them anyway cost ~7 of 12 logical CPUs
+    /// on an idle Linux Studio with a screen source (Linux plan 0014). The
+    /// tick still publishes a metadata frame and its evidence, so scene/layout
+    /// proofs and the capture-health heartbeat keep advancing.
+    const fn composes_cpu_pixels(self) -> bool {
+        self.requires_cpu_fallback()
     }
 
     const fn label(self) -> &'static str {
@@ -7751,7 +7755,7 @@ async fn publish_compositor_frame(
                 } else {
                     let _ = reason;
                 }
-                if frame_consumer.composes_cpu_pixels(gpu_available) {
+                if frame_consumer.composes_cpu_pixels() {
                     bytes = {
                         let mut store = frame_store
                             .lock()
@@ -11270,7 +11274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_preview_cpu_composes_when_gpu_is_absent_and_jpeg_consumer_still_gets_yuv() {
+    async fn native_preview_publishes_without_cpu_pixels_and_jpeg_consumer_still_gets_yuv() {
         let state = test_state();
         let mut live_sources = CompositorLiveSources::default();
         let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
@@ -11300,8 +11304,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .latest()
-            .expect("native preview CPU frame");
-        assert_eq!(native.bytes.len(), raw_yuv420p_len(16, 8));
+            .expect("native preview metadata frame");
+        // Linux plan 0014: nothing reads composed native-preview pixels.
+        assert_eq!(native.sequence, 1);
+        assert!(native.bytes.is_empty());
 
         publish_compositor_frame(
             &state,
@@ -11334,7 +11340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_preview_cpu_composes_portal_screen_bgra_when_gpu_is_absent() {
+    async fn native_preview_attaches_portal_screen_without_composing_pixels() {
         let state = test_state();
         let video = VideoSettings {
             preset: VideoPreset::Custom,
@@ -11421,12 +11427,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .latest()
-            .expect("CPU-composed portal preview frame");
-        assert_eq!(latest.bytes.len(), raw_yuv420p_len(16, 8));
-        assert!(
-            latest.bytes.iter().any(|byte| *byte != 0),
-            "portal pixels must survive CPU composition; empty/black means the proof surface stays synthetic"
-        );
+            .expect("portal preview metadata frame");
+        // The proof surface draws the screen's own BMP layer; the compositor
+        // only proves the source is attached (plan 0014).
+        assert_eq!(latest.sequence, 4);
+        assert!(latest.bytes.is_empty());
         assert!(crate::linux_portal_capture::parse_portal_source_id(portal_id).is_some());
         assert!(crate::screen_capture::parse_screencapturekit_display_id(portal_id).is_none());
     }
