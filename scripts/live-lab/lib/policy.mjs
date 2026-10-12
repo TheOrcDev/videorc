@@ -36,7 +36,9 @@ const TOP_LEVEL_KEYS = Object.freeze([
 // Optional in v1, false when absent. YouTube's Terms do not expressly permit
 // recording our own live output with yt-dlp, so clip pulling (U8) stays off
 // until the owner turns it on here.
-const OPTIONAL_KEYS = Object.freeze({ clipPull: false })
+// `triage` (plan 178 U12) lets the headless Claude triage run after a publish;
+// off until the owner turns it on, like clipPull.
+const OPTIONAL_KEYS = Object.freeze({ clipPull: false, triage: false })
 
 // VIDEORC_LIVE_LAB_POLICY exists for the unit tests and for a doctor run on
 // a machine that is not the lab machine. A run never honours a policy that
@@ -193,6 +195,9 @@ export function validatePolicy(parsed) {
   }
   if (has('clipPull') && typeof parsed.clipPull !== 'boolean') {
     problems.push('clipPull must be true or false')
+  }
+  if (has('triage') && typeof parsed.triage !== 'boolean') {
+    problems.push('triage must be true or false')
   }
   if (has('killSwitchUrl')) validateKillSwitchUrl(parsed.killSwitchUrl, problems)
 

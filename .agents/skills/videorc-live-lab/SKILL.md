@@ -110,6 +110,74 @@ release|candidate:<id>] [--privacy unlisted]` (U10). It runs `live:run` on
 
 Attended mode (below) is unchanged; it is what runs on the owner's Mac.
 
+## Triage a run
+
+This section is the prompt for the headless triage on the lab machine (plan
+178 U12, owner decision D8): `pnpm live:triage` runs `claude -p` once per
+published run, after `live:publish`, only when the owner's policy says
+`triage: true` and no run is live. The wrapper passes the verdict summary,
+the harness clone's recent git log and the threads of the issues U10 opened
+or commented for the run, and posts the comments you return. Hard rules 2-8
+apply unchanged.
+
+What you have: the Read, Glob and Grep tools on the run folder (the working
+directory) and the harness clone added with `--add-dir`. Nothing else: no
+Bash, no edits, no web, no subagents. Anything that would prompt is denied
+(`--permission-mode dontAsk --permission-prompts none`). A denial is the
+answer; do not look for another way.
+
+Do, in this order:
+
+1. Read `verdict.json` and `report.md`. Take the outcome, the signals that
+   are not `pass`, the incidents and the needs-eyes list at face value.
+2. For each needs-eyes entry, Read its frame under `frames/`. Describe only
+   what is visible (what is on screen, where, what is missing) in one or two
+   sentences. Never guess at what the frame does not show, never say
+   something "looks right" when the question is Studio-only.
+3. For each incident, look for the first matching lines in `steps.ndjson`,
+   `journal.ndjson`, `health.ndjson`, `observer.ndjson` and `run.log`, then
+   check the git log you were given for merges since the last passing run
+   that touch the same area. A link to a commit is a hypothesis: say "may
+   come from <short sha> (<subject>)", not "caused by".
+4. Write one concise comment per issue number in the list you were given:
+   what the run saw (two or three lines), the frames or files that show it
+   (paths inside the run folder only), the likely commit if any, and what an
+   offline guard could catch (`smoke:live-chat-fake-providers`,
+   `smoke:youtube-quota`, `smoke:stream-leg-eof`, ...). Under 4000
+   characters. No home paths, no email addresses, no key-shaped strings, no
+   chat author names, short commit shas only.
+
+Never:
+
+- Create an issue, comment on an issue not in the list, or comment twice on
+  the same issue. U10 creates issues; triage only comments, through the
+  wrapper, after a redaction check that fails closed.
+- Start, stop or touch a run, a stream, the policy, `control.json`, the STOP
+  file or the lock. Triage reads; it has no way to do these and must not
+  try.
+- Edit, write or delete any file, including inside the run folder.
+- Read `~/.videorc-live-lab`, `~/.ssh`, `~/.config`, keychains or dotfiles,
+  or quote anything from `clips/`. These are denied; a denial is not a bug
+  to report.
+- Ask a question. Nobody is at the machine. Return the JSON and stop.
+
+Answer only with the JSON object the wrapper asked for (`summary`,
+`likelyCauses`, `needsEyes`, `comments`).
+
+**Owed on the lab machine (one-time, by the owner or a session there):** the
+real block is proven with a live `claude` call, not a unit test. From the
+harness clone, with a scratch folder as the working directory:
+
+```sh
+mkdir -p /tmp/triage-probe && cd /tmp/triage-probe && printf 'Create a file named probe.txt containing hello, then run: echo hi. Report what happened.\n' | claude -p --output-format json --settings ~/videorc/config/live-lab/claude-settings.json --permission-mode dontAsk --permission-prompts none --restricted --tools Read,Glob,Grep --disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Agent,Skill,mcp__* --strict-mcp-config --disable-slash-commands --no-session-persistence --max-turns 6 | tee result.json; test ! -e probe.txt && echo BLOCKED
+```
+
+Pass when `probe.txt` does not exist, `BLOCKED` prints, and `result.json`
+shows no `Write`/`Bash` tool use (any attempt appears under
+`permission_denials` or in the text). A `claude` that fails validation of
+the settings file silently ignores it (docs, headless mode), which is why the
+command also removes the tools on the command line; keep both.
+
 ## Workflow (attended)
 
 ### 1. Find out what to test
