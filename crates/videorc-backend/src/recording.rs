@@ -20548,6 +20548,14 @@ fn recording_compositor_stream_output_with_plan(
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
             | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
+        // The raw path has no auxiliary encoder. Dropping the vertical leg
+        // silently sent the landscape program to every vertical destination
+        // (Linux, ogre 2026-10-12: a 720x1280 destination received 1280x720).
+        if params.simulcast.is_some() && params.output.stream_enabled {
+            bail!(
+                "This computer can't encode a separate vertical stream yet, so vertical destinations would receive the landscape video. Turn off the vertical destinations to go live."
+            );
+        }
         return Ok(None);
     }
     // Dual-orientation simulcast claims the auxiliary output: the vertical
@@ -36873,6 +36881,39 @@ mod tests {
         vertical_primary.output.video = portrait_1080();
         let error = validate_outputs(&vertical_primary).unwrap_err().to_string();
         assert!(error.contains("horizontal scene"), "{error}");
+    }
+
+    #[test]
+    fn the_raw_path_refuses_a_vertical_leg_it_cannot_encode() {
+        use crate::streaming::StreamOutputOrientation as Orientation;
+        let mut params = base_params(false, true);
+        params.streaming = Some(streaming_with_orientations(&[
+            Orientation::Horizontal,
+            Orientation::Vertical,
+        ]));
+        params.simulcast = Some(simulcast_leg());
+        let error = recording_compositor_stream_output_with_plan(
+            &params,
+            EncoderBridgeVideoOutput::RawYuv420p,
+            None,
+        )
+        .expect_err("a raw bridge cannot produce the vertical leg");
+        assert!(
+            error.to_string().contains("vertical destinations"),
+            "{error}"
+        );
+
+        // Without a vertical leg the raw path still has nothing to add.
+        params.simulcast = None;
+        assert_eq!(
+            recording_compositor_stream_output_with_plan(
+                &params,
+                EncoderBridgeVideoOutput::RawYuv420p,
+                None,
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
