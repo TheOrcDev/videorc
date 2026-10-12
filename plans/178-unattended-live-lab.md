@@ -34,8 +34,11 @@
   Mac) and decisions D1-D10.
 - **Category**: test infrastructure + small product additions
 - **Planned at**: commit `c0e87e53` (origin/main), 2026-10-12
-- **Executed**: U0 built on branch `feat/live-lab-l0` (`5353ca22`, not yet
-  merged); real consent and an all-PASS doctor are owed on the lab machine.
+- **Executed**: 2026-10-12, all code slices built (U0-U13, U15 step 1) on
+  `plan-178-live-lab`. Offline gates and the streaming/recording smokes with
+  the journal on are green. Everything that needs the lab machine, the
+  owner's visit, real keys or 14 days of data is owed (U8a, U14, U15 steps
+  2-3, every "Owed" line below).
 - **Route**: Orchestrator, fit 10, model lane `fable-5` (multi-system,
   public output, secrets, unattended). Per-slice lanes in "Model lane note".
 
@@ -606,10 +609,11 @@ secrets (redaction test run on the published files).
 Built on branch `plan-178/u11`: `live:schedule tick | status |
 install-agent | uninstall-agent`, `config/live-lab/schedule.json` (D9 table,
 report window 6 h), `lib/schedule-{time,table,plan,state,actions,tick,status,agent}.mjs`
-+ tests (DST, grace, missed, lock deferral, policy off, state, plist), plist
-`ExitTimeOut` 90, runbook section 8. Owed on the lab machine:
-`install-agent` as `videorc-lab`, the admin's `pmset repeat`, and one
-untouched D9 day (needs U6 `run.mjs`, U9 scenarios, U10 `publish.mjs`).
+
+- tests (DST, grace, missed, lock deferral, policy off, state, plist), plist
+  `ExitTimeOut` 90, runbook section 8. Owed on the lab machine:
+  `install-agent` as `videorc-lab`, the admin's `pmset repeat`, and one
+  untouched D9 day (needs U6 `run.mjs`, U9 scenarios, U10 `publish.mjs`).
 
 **Files:** `config/live-lab/com.videorc.live-lab.plist` (template),
 `scripts/live-lab/schedule.mjs` + tests, `package.json` script
@@ -715,7 +719,7 @@ during the U3 visit, and the frame checks confirm the vertical output.
 
 **Done when:** both suites are green or every red has an issue.
 
-### U15 — Calibrate, gate, release suite (plan 166 S10 + plan 176 L6)
+### U15 — Calibrate, gate, release suite (plan 166 S10 + plan 176 L6) — STEP 1 BUILT
 
 1. After 14 days of report-only data, `scripts/live-lab/calibrate.mjs`
    proposes `thresholds.v2.json` (`mode: "gate"`, p95 of clean runs plus
@@ -724,6 +728,17 @@ during the U3 visit, and the frame checks confirm the vertical output.
    client is used only if the owner raises
    `quota.bundledClientMaxUnitsPerDay` (about 300 per run).
 3. After 3 green runs on 3 candidates, propose the release-skill gate (D10).
+
+**Built (step 1):** `pnpm live:calibrate [--runs-dir] [--out] [--dry-run]`
+(`lib/calibrate.mjs`): usable runs are report-only verdicts that ended pass
+or warn; nothing is proposed under 14 distinct days; per signal p95 x ratio
+(min p95 + floor) for upper bounds and p5 for encoder speed; signals with
+under 10 samples keep v1; looser-than-v1 proposals are flagged in the
+markdown table for the owner's PR. `lib/verdict.mjs` now loads
+`config/live-lab/thresholds.v2.json` (version 2, mode gate) automatically
+once it exists, else v1. **Owed:** 14 days of runs, the owner's review PR,
+the release suite on a candidate (step 2) and the release-skill proposal
+(step 3, D10).
 
 **Done when:** thresholds v2 merged and used by the next 3 runs; one release
 suite green on a candidate.

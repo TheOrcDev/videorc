@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -998,10 +999,21 @@ function firstAtOf(entry, { noData, ended, observerIncidents, flatHealth, manife
   return manifest.startedAt ?? null
 }
 
-export async function loadThresholds(path = DEFAULT_THRESHOLDS_PATH) {
+// Plan 178 U15: once the owner merges the calibrated thresholds.v2.json, every
+// verdict uses it; until then v1 (report-only) applies.
+export const CALIBRATED_THRESHOLDS_PATH = join(
+  dirname(DEFAULT_THRESHOLDS_PATH),
+  'thresholds.v2.json'
+)
+
+export function activeThresholdsPath({ exists = existsSync } = {}) {
+  return exists(CALIBRATED_THRESHOLDS_PATH) ? CALIBRATED_THRESHOLDS_PATH : DEFAULT_THRESHOLDS_PATH
+}
+
+export async function loadThresholds(path = activeThresholdsPath()) {
   const parsed = JSON.parse(await readFile(path, 'utf8'))
-  if (parsed.version !== 1 || !['report', 'gate'].includes(parsed.mode)) {
-    throw new Error(`${path}: expected thresholds version 1 with mode report|gate`)
+  if (![1, 2].includes(parsed.version) || !['report', 'gate'].includes(parsed.mode)) {
+    throw new Error(`${path}: expected thresholds version 1 or 2 with mode report|gate`)
   }
   return parsed
 }
