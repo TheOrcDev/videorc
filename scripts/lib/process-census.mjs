@@ -67,7 +67,7 @@ export async function collectProcessCensus({
   }
   const processRows = processTable
     .filter((row) => interestingPids.has(row.pid))
-    .map((row) => ({ ...row, role: classifyProcess(row) }))
+    .map((row) => ({ ...row, role: classifyProcessInTable(row, rowsByPid) }))
     .sort((a, b) => a.pid - b.pid)
   const aliveRecords = records.filter((record) => rowsByPid.has(record.pid))
   const deadRecords = records.filter((record) => !rowsByPid.has(record.pid))
@@ -77,7 +77,10 @@ export async function collectProcessCensus({
     aliveRecords,
     deadRecords,
     processRows,
-    processGroupRows: processGroupRows.map((row) => ({ ...row, role: classifyProcess(row) })),
+    processGroupRows: processGroupRows.map((row) => ({
+      ...row,
+      role: classifyProcessInTable(row, rowsByPid)
+    })),
     summary: summarizeRows(processRows)
   }
 }
@@ -488,6 +491,24 @@ export function parseWindowsProcessTable(stdout) {
     .sort((a, b) => a.pid - b.pid)
 }
 
+/**
+ * Linux Chromium forks renderers and the GPU process from its zygotes, so
+ * `ps` shows them all as `--type=zygote` (they inherit the zygote's argv).
+ * Their role follows from ancestry instead: main → sandboxed zygote →
+ * zygote init → renderer (two zygote ancestors), and main → no-sandbox
+ * zygote → GPU. Without this the lifecycle gate counted no renderer on Linux
+ * (Linux plan 0020).
+ */
+export function classifyProcessInTable(row, rowsByPid) {
+  const role = classifyProcess(row)
+  if (role !== 'electron-child' || !/--type=zygote(?:\s|$)/.test(row.args ?? '')) return role
+  const isZygote = (candidate) => /--type=zygote(?:\s|$)/.test(candidate?.args ?? '')
+  const parent = rowsByPid.get(row.ppid)
+  if (!isZygote(parent)) return role
+  if (/--no-zygote-sandbox/.test(parent.args ?? '')) return 'electron-gpu'
+  return isZygote(rowsByPid.get(parent.ppid)) ? 'electron-renderer' : role
+}
+
 export function classifyProcess(row) {
   const text = `${row.command} ${row.args}`
   const lowerText = text.toLowerCase()
@@ -529,6 +550,9 @@ export function classifyProcess(row) {
   if (
     (executableNames.has('electron') &&
       /electron\.app\/contents\/macos\/electron/.test(lowerText)) ||
+    // Linux dev: `node_modules/.pnpm/electron@…/dist/electron .` (no --type,
+    // and its path contains "pnpm", which read as tooling).
+    commandName === 'electron' ||
     executableNames.has('electron.exe') ||
     executableNames.has('videorc') ||
     executableNames.has('videorc.exe')
