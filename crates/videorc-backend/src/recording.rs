@@ -3619,6 +3619,20 @@ async fn start_session_with_timeline(
         requested_encoder_bridge_video_output,
     )
     .await?;
+    // Plan 181 (owner redesign, guard): the ring runs by default whenever
+    // Videorc is open, but never on its own on a software encoder path (the
+    // raw CPU encode of a weak Windows or Linux box), where it would be a
+    // second encode. The decision above is the one the session would use;
+    // nothing has been spawned yet, so the typed refusal costs nothing. A
+    // start the user chose (`auto: false`) runs anywhere.
+    if replay_only
+        && params.replay.as_ref().is_some_and(|replay| replay.auto)
+        && let Some(refusal) = crate::replay_buffer::auto_start_refusal(
+            windows_encoded_bridge_decision.effective_encode_backend,
+        )
+    {
+        return Err(refusal.into());
+    }
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
     // Intel iGPU MFTs that reject the requested CBR at probe time are only kept
     // alive if every MF leg encodes at the bitrate the probe validated; encode
@@ -4703,7 +4717,7 @@ async fn start_session_with_timeline(
                     Some(&session_id),
                     HealthLevel::Warn,
                     "replay-buffer-unavailable",
-                    &format!("The replay buffer is off for this session: {error:#}"),
+                    &format!("Clips are off for this session: {error:#}"),
                 );
                 params.replay = None;
                 None
@@ -9094,7 +9108,7 @@ async fn monitor_session(
             crate::replay_buffer::RetireOutcome::Stopped
         } else {
             crate::replay_buffer::RetireOutcome::Failed(
-                "The session ended before you stopped it, so the replay buffer is off.".to_string(),
+                "The session ended before you stopped it, so clips are off.".to_string(),
             )
         },
     );
@@ -17422,7 +17436,7 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
         .await
         .context("Could not stop the replay buffer before starting the session")?;
     if !matches!(status.state, RecordingState::Idle | RecordingState::Failed) {
-        bail!("The replay buffer is still stopping. Try again in a moment.");
+        bail!("The clip buffer is still stopping. Try again in a moment.");
     }
     let deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
     loop {
@@ -17433,7 +17447,7 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("The replay buffer is still releasing the microphone. Try again in a moment.");
+            bail!("The clip buffer is still releasing the microphone. Try again in a moment.");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -30939,7 +30953,10 @@ mod tests {
         /// for the pipeline decisions: the builder still gets no output path.
         fn buffer_only_params() -> StartSessionParams {
             let mut params = base_params(false, false);
-            params.replay = Some(ReplayParams { seconds: 30 });
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
             assert!(params.replay_only());
             params.output.record_enabled = true;
             params
@@ -31048,7 +31065,10 @@ mod tests {
         #[test]
         fn record_only_bridge_keeps_pcm_and_adds_the_ring() {
             let mut params = base_params(true, false);
-            params.replay = Some(ReplayParams { seconds: 30 });
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
             let args = bridge_recording_ffmpeg_args_with_encoder_and_replay(
                 &capture(),
                 &params,
@@ -31115,7 +31135,10 @@ mod tests {
         #[test]
         fn raw_bridge_ride_along_splits_the_graph_and_encodes_twice() {
             let mut params = base_params(true, false);
-            params.replay = Some(ReplayParams { seconds: 30 });
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
             let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &capture(),
                 &params,
@@ -31145,7 +31168,10 @@ mod tests {
         #[test]
         fn split_output_bridge_copies_the_recording_leg_into_the_ring() {
             let mut params = base_params(true, true);
-            params.replay = Some(ReplayParams { seconds: 30 });
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
             params.output.video = VideoSettings {
                 preset: VideoPreset::Record4k30,
                 width: 3840,
@@ -31230,7 +31256,10 @@ mod tests {
             assert_ring_output(&args);
 
             let mut params = base_params(true, false);
-            params.replay = Some(ReplayParams { seconds: 30 });
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
             let args = ffmpeg_args_with_encoder_and_replay(
                 &capture(),
                 &params,
@@ -31251,7 +31280,10 @@ mod tests {
         fn validate_outputs_accepts_a_buffer_only_request() {
             let mut params = base_params(false, false);
             assert!(validate_outputs(&params).is_err());
-            params.replay = Some(ReplayParams { seconds: 30 });
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
             validate_outputs(&params).unwrap();
             assert!(params.replay_only());
             params.output.record_enabled = true;

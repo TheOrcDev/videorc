@@ -1606,6 +1606,13 @@ export interface StartSessionParams {
 /** The replay buffer's request (plan 181): how many seconds the ring keeps. */
 export interface ReplayParams {
   seconds: number
+  /**
+   * A buffer-only start nobody asked for (the ring runs by default whenever
+   * Videorc is open; owner redesign R2). The backend refuses it on a
+   * software encoder path with `replay-software-encoder`; a start the user
+   * chose omits it and runs anywhere.
+   */
+  auto?: boolean
 }
 
 /** Where the replay buffer is (plan 181). `paused` never comes from the
@@ -4360,10 +4367,9 @@ export interface GlobalShortcutsConfig {
   micToggle?: string
   /** Turn system audio on/off (plan 069 S6). Unbound by default. */
   systemAudioToggle?: string
-  /** Mark a clip at the current moment (plan 068 D6). Unbound by default. */
+  /** Save a clip: the last seconds, and a mark while recording (plan 068
+   * D6; plan 181, redesign R4). Unbound by default. */
   clipMark?: string
-  /** Save the last seconds from the replay buffer (plan 181 D5). Unbound by default. */
-  replaySave?: string
 }
 
 export interface GlobalShortcutsResult {

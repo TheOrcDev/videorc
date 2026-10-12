@@ -1130,6 +1130,13 @@ impl StartSessionParams {
 #[serde(rename_all = "camelCase")]
 pub struct ReplayParams {
     pub seconds: u32,
+    /// The ring runs by default whenever Videorc is open (owner redesign,
+    /// R2), so a buffer-only start nobody asked for says so: on a software
+    /// encoder path the backend refuses it with `replay-software-encoder`
+    /// and the Output page explains. A start the user chose carries `false`
+    /// and runs anywhere.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
 }
 
 /// Where the replay buffer is, for `replay.state` and `replay.status`.
@@ -6768,6 +6775,16 @@ mod tests {
                 .get("replayOnly")
                 .is_none()
         );
+
+        // The request: `auto` rides the wire only when true (redesign R2).
+        let params_wire = shared_high_risk_contract_fixture_value("/replay/params");
+        let params: ReplayParams = serde_json::from_value(params_wire.clone()).unwrap();
+        assert!(!params.auto);
+        assert_eq!(serde_json::to_value(params).unwrap(), params_wire);
+        let auto_wire = shared_high_risk_contract_fixture_value("/replay/paramsAuto");
+        let auto: ReplayParams = serde_json::from_value(auto_wire.clone()).unwrap();
+        assert!(auto.auto);
+        assert_eq!(serde_json::to_value(auto).unwrap(), auto_wire);
 
         for pointer in ["/replay/stateOn", "/replay/stateOff", "/replay/stateError"] {
             let wire = shared_high_risk_contract_fixture_value(pointer);

@@ -724,7 +724,10 @@ const recordingStatusSchema = objectSchema(
 
 // --- Replay buffer (plan 181) ---
 const replayParamsSchema = objectSchema(
-  { seconds: numberSchema({ integer: true, min: 1, max: 3600 }) },
+  {
+    seconds: numberSchema({ integer: true, min: 1, max: 3600 }),
+    auto: optionalSchema(booleanSchema)
+  },
   { allowUnknown: false }
 )
 const replayStateEventSchema = objectSchema(

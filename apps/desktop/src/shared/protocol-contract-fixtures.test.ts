@@ -225,6 +225,7 @@ interface HighRiskContractFixtures {
   }
   replay: {
     params: ReplayParams
+    paramsAuto: ReplayParams
     replayOnlyStatus: RecordingStatus
     stateOn: ReplayStateEvent
     stateOff: ReplayStateEvent
@@ -1027,7 +1028,9 @@ describe('shared high-risk protocol fixture', () => {
       expect(validateBackendRpcResult('replay.status', event)).toStrictEqual(event)
     }
     expect(replay.stateOff).not.toHaveProperty('sessionId')
-    expect(replay.stateError.reason).toMatch(/replay buffer is off/)
+    expect(replay.stateError.reason).toMatch(/clips are off/)
+    // The request: `auto` rides the wire only on a default start (redesign R2).
+    expect(fixtures.replay.paramsAuto).toEqual({ seconds: 30, auto: true })
     for (const accepted of [replay.saveAccepted, replay.saveAcceptedMinimal]) {
       expect(validateBackendRpcResult('replay.save', accepted)).toStrictEqual(accepted)
     }

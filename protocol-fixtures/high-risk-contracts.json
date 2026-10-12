@@ -1995,6 +1995,7 @@
   },
   "replay": {
     "params": { "seconds": 30 },
+    "paramsAuto": { "seconds": 30, "auto": true },
     "replayOnlyStatus": {
       "state": "recording",
       "sessionId": "replay-session-fixture",
@@ -2019,7 +2020,7 @@
       "state": "error",
       "seconds": 30,
       "bufferedSeconds": 0.0,
-      "reason": "The session ended before you stopped it, so the replay buffer is off."
+      "reason": "The session ended before you stopped it, so clips are off."
     },
     "saveAccepted": {
       "saveId": "save-fixture",
@@ -2031,7 +2032,7 @@
       "saveId": "save-fixture",
       "sessionId": "replay-session-fixture",
       "replaySessionId": "replay-row-fixture",
-      "path": "Replays/Replay 2026-10-12 18-30-05.mp4",
+      "path": "Clips/Clip 2026-10-12 18-30-05.mp4",
       "seconds": 30,
       "coveredSeconds": 30.03,
       "complete": true,

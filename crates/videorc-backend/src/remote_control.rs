@@ -88,12 +88,11 @@ pub enum RemoteIntent {
         message_id: String,
     },
     CommentHighlightClear,
-    /// Mark the current moment for a clip (plan 068 D6). Idempotent by time:
-    /// the backend stamps the capture clock, never a toggle.
+    /// Save a clip (plan 068 D6; plan 181, the owner's redesign R4): the
+    /// last N seconds whenever the ring holds frames, and a mark in the
+    /// recording while one runs. Idempotent by time: the backend stamps the
+    /// capture clock, never a toggle.
     ClipMark,
-    /// Save the last N seconds from the replay buffer (plan 181 S5). The
-    /// renderer runs it through the same Save replay the Studio button uses.
-    ReplaySave,
 }
 
 /// Live-chat message ids are `{platform}:{providerMessageId}`; anything far
@@ -122,7 +121,6 @@ impl RemoteIntent {
             Self::WindowFront { .. } => "window",
             Self::CommentHighlight { .. } | Self::CommentHighlightClear => "highlight",
             Self::ClipMark => "clip",
-            Self::ReplaySave => "replay",
         }
     }
 
@@ -326,16 +324,9 @@ mod tests {
             serde_json::to_value(&intent).unwrap(),
             serde_json::json!({ "kind": "clipMark" })
         );
-        // Plan 181 S5: Save replay is its own bucket, so a bouncing deck key
-        // cannot queue a second save behind the first.
-        let intent = serde_json::from_str::<RemoteIntent>(r#"{"kind":"replaySave"}"#).unwrap();
-        assert_eq!(intent, RemoteIntent::ReplaySave);
-        assert!(intent.validate().is_ok());
-        assert_eq!(intent.debounce_kind(), "replay");
-        assert_eq!(
-            serde_json::to_value(&intent).unwrap(),
-            serde_json::json!({ "kind": "replaySave" })
-        );
+        // Plan 181 (owner redesign R4): one action saves the clip, so the
+        // separate replaySave intent is gone from the wire.
+        assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"replaySave"}"#).is_err());
     }
 
     #[test]

@@ -10886,11 +10886,21 @@ async fn handle_text_message_with_role(
                             }
                             ServerResponse::ok(command.id, status)
                         }
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "session-start-failed",
-                            error.to_string(),
-                        ),
+                        Err(error) => {
+                            // Plan 181 (owner redesign, guard): an automatic
+                            // buffer-only start on a software encoder is a
+                            // typed refusal, so the renderer keeps the switch
+                            // off and says why instead of retrying.
+                            let code = if error
+                                .downcast_ref::<replay_buffer::AutoStartRefused>()
+                                .is_some()
+                            {
+                                replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE
+                            } else {
+                                "session-start-failed"
+                            };
+                            ServerResponse::error(command.id, code, error.to_string())
+                        }
                     }
                 }
                 Err(error) => {

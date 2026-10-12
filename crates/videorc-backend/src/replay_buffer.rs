@@ -1,6 +1,7 @@
 //! The replay buffer (plan 181): a session keeps the last N seconds of the
-//! composed program as a rolling set of 2-second MPEG-TS segments, and
-//! "Save replay" stream-copies the newest segments into an MP4.
+//! composed program as a rolling set of 2-second MPEG-TS segments, and a
+//! clip (the owner's word, redesign R4: the Clip button, `/clip`, the
+//! spoken "clip that") stream-copies the newest segments into an MP4.
 //!
 //! This file holds the pure half: the segment list, pruning, selection, the
 //! FFmpeg argument tails and the file names. Everything here is unit-tested
@@ -34,8 +35,9 @@ pub const MAX_OVERSHOOT_SECONDS: f64 = 2.5;
 /// How long `replay.save` waits for the segment that holds the press to
 /// close before it saves what is complete.
 pub const SAVE_BOUNDARY_TIMEOUT_MS: u64 = 4_000;
-/// Replays go here, under the recordings folder (D7).
-pub const REPLAYS_FOLDER_NAME: &str = "Replays";
+/// Clips go here, under the recordings folder (D7, renamed by the owner's
+/// redesign R4).
+pub const REPLAYS_FOLDER_NAME: &str = "Clips";
 
 /// A complete segment as `segments.csv` lists it: `filename,start,end` with
 /// stream-time seconds.
@@ -270,21 +272,21 @@ pub fn save_args(concat_list_path: &Path, partial_output: &Path) -> Vec<String> 
     ]
 }
 
-/// `Replay 2026-10-12 18-30-05.mp4`: the user's wall clock, no characters a
+/// `Clip 2026-10-12 18-30-05.mp4`: the user's wall clock, no characters a
 /// file system or a shell would mind (D7).
 pub fn replay_file_name<Tz: TimeZone>(now: &DateTime<Tz>) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
-    format!("Replay {}.mp4", now.format("%Y-%m-%d %H-%M-%S"))
+    format!("Clip {}.mp4", now.format("%Y-%m-%d %H-%M-%S"))
 }
 
-/// The Library row's title for a saved replay.
+/// The Library row's title for a saved clip.
 pub fn replay_title() -> &'static str {
-    "Replay"
+    "Clip"
 }
 
-/// Where a replay goes: `<recordings folder>/Replays`.
+/// Where a clip goes: `<recordings folder>/Clips`.
 pub fn replays_dir(recordings_dir: &Path) -> PathBuf {
     recordings_dir.join(REPLAYS_FOLDER_NAME)
 }
@@ -294,7 +296,7 @@ pub fn partial_path(target: &Path) -> PathBuf {
     let mut name = target
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Replay.mp4".to_string());
+        .unwrap_or_else(|| "Clip.mp4".to_string());
     name.push_str(".partial");
     target.with_file_name(name)
 }
@@ -553,7 +555,7 @@ pub fn prepare(state: &AppState, request: RingRequest<'_>) -> Result<RingGuard> 
         && available < required
     {
         bail!(
-            "Not enough free space for the replay buffer: it needs about {} MB free and this disk has {} MB.",
+            "Not enough free space to keep the last seconds: it needs about {} MB free and this disk has {} MB.",
             required.div_ceil(1_000_000),
             available / 1_000_000
         );
@@ -822,16 +824,51 @@ impl SaveRefusal {
     fn off() -> Self {
         Self {
             code: "replay-off",
-            message: "The replay buffer is off.".to_string(),
+            message: "Clips are off, so there is nothing to save.".to_string(),
         }
     }
 
     fn starting() -> Self {
         Self {
             code: "replay-starting",
-            message: "The replay buffer is still starting.".to_string(),
+            message: "Clips are still starting. Try again in a moment.".to_string(),
         }
     }
+}
+
+/// The `session.start` error code for a buffer-only start the renderer did
+/// not choose (`ReplayParams::auto`) on a software encoder path. Mirrored in
+/// the renderer, which then keeps the switch off and says why.
+pub const SOFTWARE_ENCODER_REFUSAL_CODE: &str = "replay-software-encoder";
+
+/// Why an automatic buffer-only start was refused (owner redesign, guard):
+/// the ring on a raw CPU encode path is a second encode on a computer that
+/// already struggles with one, so it never runs on its own there. The user
+/// may still turn it on (`auto: false`).
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct AutoStartRefused {
+    pub message: String,
+}
+
+/// The automatic start's verdict for the encoder a session would use. `None`
+/// means run.
+pub fn auto_start_refusal(backend: crate::protocol::EncodeBackend) -> Option<AutoStartRefused> {
+    use crate::protocol::EncodeBackend;
+    let encoder = match backend {
+        EncodeBackend::SoftwareOpenH264 => "OpenH264",
+        EncodeBackend::SoftwareMediaFoundation => "a software Media Foundation encoder",
+        EncodeBackend::SoftwareX264 => "x264",
+        EncodeBackend::HardwareVideotoolbox
+        | EncodeBackend::HardwareVaapi
+        | EncodeBackend::HardwareMediaFoundation
+        | EncodeBackend::HardwareQsv => return None,
+    };
+    Some(AutoStartRefused {
+        message: format!(
+            "This computer encodes video on its processor ({encoder}), so keeping the last seconds would run a second encode. Turn it on here if the computer keeps up."
+        ),
+    })
 }
 
 /// `replay.save`: answers at once. A running save takes the next press as
@@ -894,7 +931,7 @@ async fn run_saves(state: AppState, first_save_id: String, first_source: Option<
                     save_id: save_id.clone(),
                     session_id: None,
                     reason: "timeout".to_string(),
-                    message: "Saving the replay took too long and was stopped.".to_string(),
+                    message: "Saving the clip took too long and was stopped.".to_string(),
                 },
             ),
         }
@@ -1044,24 +1081,24 @@ pub fn parse_replay_probe(json: &str) -> Result<ReplayProbe, String> {
 pub fn check_replay_probe(probe: &ReplayProbe, covered_seconds: f64) -> Result<f64, String> {
     if probe.video_codec.as_deref() != Some("h264") {
         return Err(format!(
-            "the replay has no H.264 video ({})",
+            "the clip has no H.264 video ({})",
             probe.video_codec.as_deref().unwrap_or("none")
         ));
     }
     if probe.audio_codec.as_deref() != Some("aac") {
         return Err(format!(
-            "the replay has no AAC audio ({})",
+            "the clip has no AAC audio ({})",
             probe.audio_codec.as_deref().unwrap_or("none")
         ));
     }
     let Some(duration) = probe.duration_seconds.filter(|value| value.is_finite()) else {
-        return Err("the replay has no duration".to_string());
+        return Err("the clip has no duration".to_string());
     };
     let shortest = (covered_seconds - DURATION_SHORTFALL_SECONDS).max(0.0);
     let longest = covered_seconds + MAX_OVERSHOOT_SECONDS;
     if duration < shortest || duration > longest {
         return Err(format!(
-            "the replay is {duration:.2} s long, expected {shortest:.2} s to {longest:.2} s"
+            "the clip is {duration:.2} s long, expected {shortest:.2} s to {longest:.2} s"
         ));
     }
     Ok(duration)
@@ -1103,7 +1140,7 @@ async fn perform_save(
     source: Option<ClipMarkSource>,
 ) -> Result<ReplaySavedEvent, ReplaySaveFailedEvent> {
     let Some(snapshot) = save_snapshot(state) else {
-        return Err(failure(save_id, None, "off", "The replay buffer is off."));
+        return Err(failure(save_id, None, "off", "Clips are off."));
     };
     let session_id = snapshot.session_id.clone();
     let listed = wait_for_boundary(&snapshot.dir).await;
@@ -1113,7 +1150,7 @@ async fn perform_save(
             save_id,
             Some(&session_id),
             "empty",
-            "The replay buffer is still filling. Try again in a moment.",
+            "The last seconds are still filling. Try again in a moment.",
         ));
     }
     // Staging: hard links (a copy when the file system refuses) keep the
@@ -1132,7 +1169,7 @@ async fn perform_save(
 
 fn stage_selection(ring: &Path, staging: &Path, selection: &Selection) -> Result<PathBuf, String> {
     std::fs::create_dir_all(staging)
-        .map_err(|error| format!("Could not create the replay staging folder: {error}"))?;
+        .map_err(|error| format!("Could not create the clip staging folder: {error}"))?;
     for segment in &selection.segments {
         let from = ring.join(&segment.file_name);
         let to = staging.join(&segment.file_name);
@@ -1143,7 +1180,7 @@ fn stage_selection(ring: &Path, staging: &Path, selection: &Selection) -> Result
     }
     let list_path = staging.join("list.txt");
     std::fs::write(&list_path, concat_list(selection, staging))
-        .map_err(|error| format!("Could not write the replay list: {error}"))?;
+        .map_err(|error| format!("Could not write the clip list: {error}"))?;
     Ok(list_path)
 }
 
@@ -1182,7 +1219,7 @@ async fn write_replay(
                 save_id,
                 Some(session_id),
                 "ffmpeg",
-                format!("Could not start FFmpeg to save the replay: {error}"),
+                format!("Could not start FFmpeg to save the clip: {error}"),
             ));
         }
     };
@@ -1941,18 +1978,18 @@ mod pure_tests {
             .unwrap()
             .with_ymd_and_hms(2026, 10, 12, 18, 30, 5)
             .unwrap();
-        assert_eq!(replay_file_name(&at), "Replay 2026-10-12 18-30-05.mp4");
+        assert_eq!(replay_file_name(&at), "Clip 2026-10-12 18-30-05.mp4");
         assert_eq!(
             replays_dir(Path::new("/Users/me/Movies")),
-            PathBuf::from("/Users/me/Movies/Replays")
+            PathBuf::from("/Users/me/Movies/Clips")
         );
         assert_eq!(
             partial_path(Path::new(
-                "/Users/me/Movies/Replays/Replay 2026-10-12 18-30-05.mp4"
+                "/Users/me/Movies/Clips/Clip 2026-10-12 18-30-05.mp4"
             )),
-            PathBuf::from("/Users/me/Movies/Replays/Replay 2026-10-12 18-30-05.mp4.partial")
+            PathBuf::from("/Users/me/Movies/Clips/Clip 2026-10-12 18-30-05.mp4.partial")
         );
-        assert_eq!(replay_title(), "Replay");
+        assert_eq!(replay_title(), "Clip");
     }
 
     #[test]
