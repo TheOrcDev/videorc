@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { ownedProcessLedgerPaths } from '../../lib/process-census.mjs'
 import {
@@ -17,6 +17,7 @@ import {
   labProfileDirs,
   launchApp,
   buildLaunchEnv,
+  inhibitorHeld,
   isMacAppBundle,
   linuxCardBrowserArgs,
   startCaffeinate,
@@ -27,12 +28,12 @@ import {
 import {
   CHROME_NAMES,
   LAB_SPEECH_SINK,
-  PORTAL_PICK_FILE,
   findOnPath,
   focusLabOutput,
   labSessionEnv,
   linuxLabOutputBounds,
   placeCardWindow,
+  portalPickPath,
   sessionProblems
 } from './linux-desktop.mjs'
 import { isLinux } from './platform.mjs'
@@ -57,17 +58,17 @@ const READY_DEADLINE_MS = 30_000
 // portal, and a restore token is opaque: one saved from a hand pick could
 // point at the real desktop. So every Linux run starts with no token, and the
 // only grant it can get is the lab share picker's, which names the lab output
-// written here (config/live-lab/linux/videorc-lab-share-picker).
+// written to portalPickPath() (config/live-lab/linux/videorc-lab-share-picker).
 export function portalRestoreTokensPath(appDataDir) {
   return join(appDataDir, 'linux-portal', 'restore-tokens.json')
 }
 
-export async function preparePortalGrant({ workDir, appDataDir, outputName }) {
+export async function preparePortalGrant({ appDataDir, outputName, pickPath = portalPickPath() }) {
   if (!/^[A-Za-z0-9_.-]+$/.test(String(outputName ?? ''))) {
     throw new Error(`The lab output name "${outputName}" is not one the share picker accepts.`)
   }
   await rm(portalRestoreTokensPath(appDataDir), { force: true })
-  const pickPath = join(workDir, PORTAL_PICK_FILE)
+  await mkdir(dirname(pickPath), { recursive: true })
   await writeFile(pickPath, `${outputName}\n`, { mode: 0o600 })
   return {
     label: 'portal-pick',
@@ -304,6 +305,11 @@ export function createSessionStarter({
         }
       }
       parts.caffeinate = linux ? startSleepInhibitor({ env: sessionEnv }) : startCaffeinate()
+      if (linux && !(await inhibitorHeld(parts.caffeinate))) {
+        log(
+          'systemd-inhibit exited at once (polkit refuses block inhibitors outside the active seat session); relying on the masked sleep targets and on hypridle being off.'
+        )
+      }
       parts.card = await startCardServer({
         runInfo: {
           runId: runInfo.runId,
@@ -316,7 +322,6 @@ export function createSessionStarter({
       if (linux) {
         const bounds = await linuxLabOutputBounds(config?.labDisplay?.name, { sessionEnv })
         parts.portalPick = await preparePortalGrant({
-          workDir,
           appDataDir: dirs.appDataDir,
           outputName: bounds.name
         })
@@ -343,11 +348,13 @@ export function createSessionStarter({
           previousOutput,
           sessionEnv
         })
-        if (!placed.onLabOutput) {
-          throw new Error(`The test card window did not land on the lab output "${bounds.name}".`)
+        if (!placed.onLabOutput || !placed.fullscreen) {
+          throw new Error(
+            `The test card window is ${placed.onLabOutput ? 'not fullscreen on' : 'not on'} the lab output "${bounds.name}".`
+          )
         }
         log(
-          `Test card on the lab output ${bounds.name} (${bounds.width}x${bounds.height}${placed.fullscreen ? ', fullscreen' : ', NOT fullscreen'}).`
+          `Test card fullscreen on the lab output ${bounds.name} (${bounds.width}x${bounds.height}).`
         )
       } else {
         const bounds = await labDisplayBounds(config?.labDisplay?.name)

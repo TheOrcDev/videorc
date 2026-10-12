@@ -14,6 +14,7 @@ import {
   PF_ANCHOR,
   PF_CONF,
   cleanupCommandLines,
+  linuxAllowedCommandLines,
   linuxCleanupCommandLines,
   linuxNetFaultResidue,
   netFaultResidue,
@@ -530,22 +531,71 @@ export function evaluateNetFaultsClean(
 }
 
 // Plan 179: the Linux twin of evaluateNetFaultsClean. `statusText` is the
-// helper's `status` read-back (null when sudo refused it), `helper` the stat
-// of LINUX_NETFAULT_HELPER: { present, rootOwned, writable } (null when not
-// inspected). A helper the lab user could change is a FAIL whatever the
-// policy says: sudoers would run any code put there as root.
+// helper's `status` read-back (null when sudo refused it), `helper` what the
+// doctor saw of LINUX_NETFAULT_HELPER: { present, rootOwned, writable,
+// unsafeParent } (null when not inspected). A helper the lab user could
+// change, or put a new file in place of (a directory on its path that is not
+// root's or is writable), is a FAIL whatever the policy says: sudoers would
+// run whatever sits at that path as root.
+function linuxHelperProblem(helper) {
+  if (!helper?.present) return null
+  if (helper.unsafeParent) {
+    return `${helper.unsafeParent} (on the helper's path) is not root's or is writable by the lab user, so the helper could be swapped; fix its owner/mode`
+  }
+  if (!helper.rootOwned || helper.writable) {
+    return `${LINUX_NETFAULT_HELPER} is ${helper.writable ? 'writable by the lab user' : 'not owned by root'}; reinstall it: sudo install -o root -g root -m 0755 config/live-lab/linux/videorc-lab-netfault ${LINUX_NETFAULT_HELPER}`
+  }
+  return null
+}
+
+/** Interfaces carrying the lab's root qdisc, from `tc qdisc show` (pure). */
+export function labQdiscDevs(tcQdiscShow) {
+  const devs = []
+  for (const line of String(tcQdiscShow ?? '').split('\n')) {
+    const fields = line.trim().split(/\s+/)
+    if (
+      fields[0] === 'qdisc' &&
+      fields[1] === 'prio' &&
+      fields[2] === LINUX_QDISC_HANDLE &&
+      fields[3] === 'dev' &&
+      fields[5] === 'root'
+    ) {
+      devs.push(fields[4])
+    }
+  }
+  return devs
+}
+
+// With faults.network off the doctor never calls sudo (a refused sudo is
+// logged, and may be mailed, on every boot doctor). `tc qdisc show` needs no
+// privilege, so a leftover lab qdisc is still caught; the nft table is not
+// readable without root, and on its own it only marks packets.
+export function evaluateLinuxNetFaultsOff(tcQdiscShow, { helper = null } = {}) {
+  const name = 'network faults'
+  const problem = linuxHelperProblem(helper)
+  if (problem) return check(name, FAIL, problem)
+  const devs = labQdiscDevs(tcQdiscShow)
+  if (devs.length) {
+    return check(
+      name,
+      FAIL,
+      `qdisc ${LINUX_QDISC_HANDLE} still on ${devs.join(', ')}: a fault outlived its run. As root: ${LINUX_NETFAULT_HELPER} clear`
+    )
+  }
+  return check(
+    name,
+    SKIP,
+    `faults.network is off (no sudo call); no ${LINUX_QDISC_HANDLE} qdisc left.`
+  )
+}
+
 export function evaluateLinuxNetFaultsClean(
   statusText,
   { networkFaults = null, cleaned = false, helper = null } = {}
 ) {
   const name = 'network faults'
-  if (helper?.present && (!helper.rootOwned || helper.writable)) {
-    return check(
-      name,
-      FAIL,
-      `${LINUX_NETFAULT_HELPER} is ${helper.writable ? 'writable by the lab user' : 'not owned by root'}; reinstall it: sudo install -o root -g root -m 0755 config/live-lab/linux/videorc-lab-netfault ${LINUX_NETFAULT_HELPER}`
-    )
-  }
+  const problem = linuxHelperProblem(helper)
+  if (problem) return check(name, FAIL, problem)
   if (statusText === null) {
     if (!networkFaults) {
       return check(name, SKIP, 'faults.network is off and the sudoers file is not installed.')
@@ -875,20 +925,43 @@ export function evaluateLinuxUnattendedBoot(lsblkTypes) {
     : check('unattended boot', PASS, 'no passphrase at boot')
 }
 
+// `sudo -n -l` rules (pure): one entry per command the account may run
+// without a password. Lines look like `    (root) NOPASSWD: /a x, /b` and tags
+// (NOPASSWD:, PASSWD:, SETENV:, ...) may change inside a list. `!cmd`
+// entries take rights away, so they never count.
+export function passwordlessSudoCommands(sudoList) {
+  const commands = []
+  for (const raw of String(sudoList ?? '').split('\n')) {
+    const rule = /^\s*\(([^)]*)\)\s*(.*)$/.exec(raw)
+    if (!rule) continue
+    let nopasswd = false
+    for (const item of rule[2].split(/,\s*/)) {
+      let rest = item.trim()
+      for (let tag = /^([A-Z_]+):\s*/.exec(rest); tag; tag = /^([A-Z_]+):\s*/.exec(rest)) {
+        if (tag[1] === 'NOPASSWD') nopasswd = true
+        if (tag[1] === 'PASSWD') nopasswd = false
+        rest = rest.slice(tag[0].length)
+      }
+      if (nopasswd && rest && !rest.startsWith('!')) commands.push(rest.replace(/\s+/g, ' '))
+    }
+  }
+  return commands
+}
+
 // `sudo -n -l` (stdout+stderr) and `id -Gn`. The policy is only the owner's
-// if the lab user cannot become root: passwordless sudo for anything beyond
-// the fault helper is a FAIL; an admin group with a password is a WARN.
-export function evaluateLinuxSudo(sudoList, groups, user) {
-  const text = String(sudoList ?? '')
-  const lines = text.split('\n').map((line) => line.trim())
-  const unrestricted = lines.some((line) =>
-    /^\((?:ALL|root)(?:\s*:\s*\S+)?\)\s+NOPASSWD:\s*ALL\s*$/i.test(line)
-  )
-  if (unrestricted) {
+// if the lab user cannot become root: any passwordless sudo command beyond
+// the fault helper's four verbs (`allowed`) is a FAIL, because most commands
+// (an editor, systemctl, nft, ALL) are a way to root. An admin group with a
+// password is a WARN.
+export function evaluateLinuxSudo(sudoList, groups, user, allowed = linuxAllowedCommandLines()) {
+  const extra = passwordlessSudoCommands(sudoList).filter((command) => !allowed.includes(command))
+  if (extra.length) {
+    const shown =
+      extra.slice(0, 3).join(', ') + (extra.length > 3 ? ` and ${extra.length - 3} more` : '')
     return check(
       'lab user rights',
       FAIL,
-      `${user} has passwordless sudo for everything, so anything running as it can rewrite the policy. Remove it from the NOPASSWD rule; only config/live-lab/linux/sudoers.live-lab.example may stay.`
+      `${user} may run ${shown} with sudo and no password, so anything running as it can rewrite the policy. Only config/live-lab/linux/sudoers.live-lab.example may grant passwordless sudo.`
     )
   }
   const admin = String(groups ?? '')

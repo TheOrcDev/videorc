@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { readdir, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -31,7 +32,14 @@ export const DEFAULT_LAB_OUTPUT = 'videorc-lab'
 // Written by the harness for the length of a session; the lab share picker
 // (config/live-lab/linux/videorc-lab-share-picker) answers the portal with
 // the output named in it, and defers to the normal picker when it is absent.
+// Always under the home's default work dir, whatever VIDEORC_LIVE_LAB_WORK_DIR
+// says: the picker runs in xdph's environment, not the harness's, and the two
+// must agree on one path.
 export const PORTAL_PICK_FILE = 'portal-pick'
+
+export function portalPickPath(home = homedir()) {
+  return join(home, 'videorc-live-lab', PORTAL_PICK_FILE)
+}
 
 export const SESSION_VARS = Object.freeze([
   'WAYLAND_DISPLAY',
@@ -213,8 +221,9 @@ export function clientForPid(clients, pid) {
 /**
  * Puts the card's Chrome window on the lab output, fullscreen. Chrome is
  * spawned while the lab output has focus (focusLabOutput), so it maps there;
- * this waits for the window, moves it there if it mapped elsewhere, and
- * gives focus back to the output that had it. Returns what it saw.
+ * this waits for the window, moves it there if it mapped elsewhere, makes it
+ * fullscreen if it is not, and gives focus back to the output that had it.
+ * Returns what it saw; the caller refuses anything short of both.
  */
 export async function placeCardWindow({
   pid,
@@ -239,6 +248,13 @@ export async function placeCardWindow({
       sessionEnv,
       exec
     })
+    client = clientForPid(await hyprctlJson(['clients'], { sessionEnv, exec }), pid) ?? client
+  }
+  if (!client.fullscreen) {
+    // `fullscreen` toggles the focused window, so it is only sent when the
+    // window is not fullscreen yet, and only after focusing that window.
+    await hyprctlDispatch(['focuswindow', `pid:${pid}`], { sessionEnv, exec })
+    await hyprctlDispatch(['fullscreen', '0'], { sessionEnv, exec })
     client = clientForPid(await hyprctlJson(['clients'], { sessionEnv, exec }), pid) ?? client
   }
   if (previousOutput && previousOutput !== bounds.name) {

@@ -10,11 +10,13 @@ import { promisify } from 'node:util'
 import {
   FAIL,
   PASS,
+  SKIP,
   WARN,
   evaluateLinuxAutoLogin,
   evaluateLinuxLabAudio,
   evaluateLinuxLabDisplay,
   evaluateLinuxLinger,
+  evaluateLinuxNetFaultsOff,
   evaluateLinuxNotifications,
   evaluateLinuxScreenGrant,
   evaluateLinuxScreenLock,
@@ -22,10 +24,13 @@ import {
   evaluateLinuxSleep,
   evaluateLinuxSudo,
   evaluateLinuxUnattendedBoot,
-  parseXdphPicker
+  labQdiscDevs,
+  parseXdphPicker,
+  passwordlessSudoCommands
 } from './doctor-checks.mjs'
 import {
   appExecutablePath,
+  inhibitorHeld,
   launchApp,
   linuxCardBrowserArgs,
   sleepInhibitorArgs,
@@ -40,7 +45,8 @@ import {
   parseEnvironmentBlock,
   parsePulseDevices,
   pickLabOutput,
-  placeCardWindow
+  placeCardWindow,
+  portalPickPath
 } from './linux-desktop.mjs'
 import { labPlatform, requireLabPlatform } from './platform.mjs'
 import { clipboardCommands } from './prompt.mjs'
@@ -415,19 +421,20 @@ test(
       const tokens = portalRestoreTokensPath(appDataDir)
       await mkdir(dirname(tokens), { recursive: true })
       await writeFile(tokens, '{"tokens":{"screen:portal:monitor":"old-hand-pick"}}')
+      const pick = portalPickPath(dir)
+      assert.equal(pick, join(dir, 'videorc-live-lab', PORTAL_PICK_FILE))
       const helper = await preparePortalGrant({
-        workDir: dir,
         appDataDir,
-        outputName: 'videorc-lab'
+        outputName: 'videorc-lab',
+        pickPath: pick
       })
       await assert.rejects(stat(tokens), { code: 'ENOENT' })
-      const pick = join(dir, PORTAL_PICK_FILE)
       assert.equal(await readFile(pick, 'utf8'), 'videorc-lab\n')
       assert.equal((await stat(pick)).mode & 0o777, 0o600)
       await helper.stop()
       await assert.rejects(stat(pick), { code: 'ENOENT' })
       await assert.rejects(
-        preparePortalGrant({ workDir: dir, appDataDir, outputName: 'eDP-1; rm -rf ~' }),
+        preparePortalGrant({ appDataDir, outputName: 'eDP-1; rm -rf ~', pickPath: pick }),
         /not one the share picker accepts/
       )
     } finally {
@@ -450,14 +457,21 @@ test(
       const pick = async () =>
         (
           await execFileAsync('/bin/sh', [join(LINUX_CONFIG, 'videorc-lab-share-picker')], {
-            env: { PATH: `${dir}:/usr/bin:/bin`, HOME: dir, VIDEORC_LIVE_LAB_WORK_DIR: dir }
+            // A work dir override never moves the pick file (xdph's
+            // environment would not carry it).
+            env: {
+              PATH: `${dir}:/usr/bin:/bin`,
+              HOME: dir,
+              VIDEORC_LIVE_LAB_WORK_DIR: '/elsewhere'
+            }
           })
         ).stdout.trim()
       assert.equal(await pick(), '[SELECTION]/screen:eDP-1')
-      await writeFile(join(dir, PORTAL_PICK_FILE), 'videorc-lab\n')
+      await mkdir(join(dir, 'videorc-live-lab'))
+      await writeFile(portalPickPath(dir), 'videorc-lab\n')
       assert.equal(await pick(), '[SELECTION]r/screen:videorc-lab')
       // A name the picker cannot vouch for falls back to the human picker.
-      await writeFile(join(dir, PORTAL_PICK_FILE), 'eDP-1 window:0x1\n')
+      await writeFile(portalPickPath(dir), 'eDP-1 window:0x1\n')
       assert.equal(await pick(), '[SELECTION]/screen:eDP-1')
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -530,4 +544,91 @@ test('config examples: the mic and sink names match the code', posixOnly, async 
   assert.match(hypr, /^exec-once = hyprctl output create headless videorc-lab$/m)
   const xdph = await readFile(join(LINUX_CONFIG, 'xdph.conf.example'), 'utf8')
   assert.equal(parseXdphPicker(xdph), '/home/videorc-lab/.local/bin/videorc-lab-share-picker')
+})
+
+test('card window: a window that is not fullscreen is focused and made fullscreen once', async () => {
+  const calls = []
+  let full = 0
+  const exec = async (command, args) => {
+    calls.push(args.join(' '))
+    if (args[0] === '-j' && args[1] === 'clients') {
+      return {
+        code: 0,
+        stdout: JSON.stringify([{ pid: 78, monitor: 1, fullscreen: full, size: [1920, 1080] }]),
+        stderr: ''
+      }
+    }
+    if (args.join(' ') === 'dispatch fullscreen 0') full = 2
+    return { code: 0, stdout: 'ok', stderr: '' }
+  }
+  const placed = await placeCardWindow({
+    pid: 78,
+    bounds: { id: 1, name: 'videorc-lab', activeWorkspaceId: 9 },
+    previousOutput: 'eDP-1',
+    sessionEnv: {},
+    exec,
+    wait: async () => {}
+  })
+  assert.equal(placed.fullscreen, true)
+  const focus = calls.indexOf('dispatch focuswindow pid:78')
+  assert.ok(focus !== -1 && calls[focus + 1] === 'dispatch fullscreen 0')
+  assert.ok(!calls.some((line) => line.startsWith('dispatch movetoworkspacesilent')))
+})
+
+test('inhibitorHeld: false when systemd-inhibit exits at once, true while it runs', async () => {
+  const { EventEmitter } = await import('node:events')
+  const quitting = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null })
+  setTimeout(() => {
+    quitting.exitCode = 1
+    quitting.emit('exit', 1)
+  }, 5)
+  assert.equal(await inhibitorHeld({ child: quitting }, 200), false)
+  const running = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null })
+  assert.equal(await inhibitorHeld({ child: running }, 20), true)
+  assert.equal(await inhibitorHeld({ child: { exitCode: 1, signalCode: null } }), false)
+})
+
+test('doctor: any passwordless sudo beyond the helper verbs is a FAIL', () => {
+  const allowed = [
+    '/usr/local/sbin/videorc-lab-netfault loss',
+    '/usr/local/sbin/videorc-lab-netfault clear'
+  ]
+  const fails = [
+    '    (root) NOPASSWD: /usr/bin/nft, /usr/bin/tc',
+    '    (root) NOPASSWD: /usr/bin/systemctl',
+    '    (ALL) SETENV: NOPASSWD: ALL',
+    '    (ALL) NOPASSWD:SETENV: ALL',
+    '    (ALL) NOPASSWD: ALL, !/usr/bin/su',
+    '    (root) NOPASSWD: /usr/local/sbin/videorc-lab-netfault loss, /usr/bin/vim'
+  ]
+  for (const line of fails) {
+    assert.equal(evaluateLinuxSudo(`${line}\n`, '', 'videorc-lab', allowed).status, FAIL, line)
+  }
+  const ok = [
+    '    (root) NOPASSWD: /usr/local/sbin/videorc-lab-netfault loss, /usr/local/sbin/videorc-lab-netfault clear',
+    '    (ALL) ALL',
+    '    (root) PASSWD: /usr/bin/vim',
+    '    (root) NOPASSWD: /usr/local/sbin/videorc-lab-netfault loss, PASSWD: /usr/bin/vim',
+    '    (root) NOPASSWD: !/usr/bin/vim'
+  ]
+  for (const line of ok) {
+    assert.notEqual(evaluateLinuxSudo(`${line}\n`, '', 'videorc-lab', allowed).status, FAIL, line)
+  }
+  assert.deepEqual(passwordlessSudoCommands('    (ALL) NOPASSWD:SETENV: ALL\n'), ['ALL'])
+})
+
+test('doctor: faults off never calls sudo but still catches a leftover qdisc', () => {
+  const clean = 'qdisc fq_codel 0: dev wlan0 root refcnt 2 limit 10240p\n'
+  assert.equal(evaluateLinuxNetFaultsOff(clean).status, SKIP)
+  const leftover = `${clean}qdisc prio 2178: dev wlan0 root refcnt 2 bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1\n`
+  const verdict = evaluateLinuxNetFaultsOff(leftover)
+  assert.equal(verdict.status, FAIL)
+  assert.match(verdict.detail, /wlan0.*videorc-lab-netfault clear/)
+  assert.deepEqual(labQdiscDevs(leftover), ['wlan0'])
+  // A helper that could be swapped is a FAIL even with faults off.
+  const swapped = evaluateLinuxNetFaultsOff(clean, {
+    helper: { present: true, rootOwned: true, writable: false, unsafeParent: '/usr/local/sbin' }
+  })
+  assert.equal(swapped.status, FAIL)
+  assert.match(swapped.detail, /\/usr\/local\/sbin.*could be swapped/)
 })

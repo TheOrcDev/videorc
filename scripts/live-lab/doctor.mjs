@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
 import { access, readFile, readdir, stat } from 'node:fs/promises'
 import { homedir, userInfo } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { connect } from 'node:tls'
 import { promisify } from 'node:util'
 
@@ -44,6 +44,7 @@ import {
   evaluateLinuxLabDisplay,
   evaluateLinuxLinger,
   evaluateLinuxNetFaultsClean,
+  evaluateLinuxNetFaultsOff,
   evaluateLinuxNotifications,
   evaluateLinuxScreenGrant,
   evaluateLinuxScreenLock,
@@ -464,12 +465,25 @@ async function linuxMachineChecks(sessionEnv) {
 
 async function linuxHelperState() {
   const info = await stat(LINUX_NETFAULT_HELPER).catch(() => null)
-  if (!info) return { present: false, rootOwned: false, writable: false }
+  if (!info) return { present: false, rootOwned: false, writable: false, unsafeParent: null }
   const writable = await access(LINUX_NETFAULT_HELPER, constants.W_OK).then(
     () => true,
     () => false
   )
-  return { present: true, rootOwned: info.uid === 0, writable }
+  let unsafeParent = null
+  for (let dir = dirname(LINUX_NETFAULT_HELPER); ; dir = dirname(dir)) {
+    const entry = await stat(dir).catch(() => null)
+    const dirWritable = await access(dir, constants.W_OK).then(
+      () => true,
+      () => false
+    )
+    if (!entry || entry.uid !== 0 || (entry.mode & 0o022) !== 0 || dirWritable) {
+      unsafeParent = dir
+      break
+    }
+    if (dir === '/') break
+  }
+  return { present: true, rootOwned: info.uid === 0, writable, unsafeParent }
 }
 
 // Plan 179: the Linux twin of netFaultChecks. The helper's own read-back;
@@ -477,6 +491,9 @@ async function linuxHelperState() {
 async function linuxNetFaultChecks(policy) {
   const networkFaults = policy?.faults?.network ?? null
   const helper = await linuxHelperState()
+  if (!networkFaults) {
+    return evaluateLinuxNetFaultsOff(await runText('tc', ['qdisc', 'show']), { helper })
+  }
   const readStatus = async () => {
     if (!helper.present) return null
     const result = await sudoRunner(LINUX_ALLOWED_COMMANDS.status)

@@ -303,7 +303,9 @@ session.
 
 Why no restore token: a portal token is opaque, so one saved from a hand pick
 could point at the real desktop. Every Linux run deletes the lab profile's
-token and writes the lab output's name to `~/videorc-live-lab/portal-pick`;
+token and writes the lab output's name to `~/videorc-live-lab/portal-pick`
+(always that path, even with `VIDEORC_LIVE_LAB_WORK_DIR` set, because the
+picker runs in the portal's environment);
 the lab share picker answers the portal with exactly that output, and the
 file is removed at teardown. Without the file (any other app sharing the
 screen, or no run) the picker hands over to the normal
@@ -427,7 +429,11 @@ pactl get-default-sink; pactl get-default-source   # must be real devices, never
 
 The headless output must not hold focus (the doctor WARNs when it does): new
 windows and notifications land on the focused output. The harness focuses it
-only while it opens the card, then gives focus back.
+only while it opens the card, makes the card fullscreen there (a run is
+refused when it cannot), then gives focus back. `systemd-inhibit` holds
+sleep, idle and the lid for the run; polkit may refuse it outside the seat's
+active session (SSH, a user unit), which the run log says, and then the
+masked sleep targets and the stopped hypridle are what keep the box awake.
 
 ### L5. The build under test
 
@@ -489,7 +495,7 @@ prints:
 | screen lock       | neither hypridle nor hyprlock runs                                               |
 | sleep             | the four sleep targets are masked                                                |
 | focus             | mako / dunst / swaync is in do not disturb                                       |
-| lab user rights   | the account cannot become root (FAIL: passwordless sudo; WARN: an admin group)   |
+| lab user rights   | no passwordless sudo beyond the fault helper's verbs (FAIL); admin group (WARN)  |
 | policy, network faults, gh auth, kill switch, run lock, stop file | as on the Mac              |
 
 Prove the important ones fail: `chmod 666` the policy as root (FAIL), unmask
@@ -539,16 +545,23 @@ sudo /usr/local/sbin/videorc-lab-netfault status    # table=absent, no qdisc lin
 The lab account may run exactly `videorc-lab-netfault loss|throttle|clear|status`
 (a unit test checks the sudoers file against the code both ways), never
 `nft` or `tc`. `loss` and `throttle` resolve YouTube's four ingest hosts,
-mark outbound TCP 443/1935 to them in nft table `inet videorc_lab`, and send
-only marked packets through a netem band (`loss 100%` or `rate 1000kbit`)
-under a root `prio` qdisc `2178:` on the interface that routes there.
-Nothing else is shaped; the API, chat and the kill switch use other hosts.
+set one dedicated mark bit (`0x20000000`, OR-ed in, so other tools' marks
+survive and cannot hide a packet) on outbound TCP 443/1935 to them in nft
+table `inet videorc_lab`, and send only packets carrying that bit through a
+netem band (`loss 100%` or `rate 1000kbit`) under a root `prio` qdisc
+`2178:` on the interface that routes there. Nothing else is shaped. The API,
+chat and the kill switch use other host names, but Google may serve one of
+them from the same front-end address as `a.rtmps.youtube.com`; then the
+lab's own API polls stall for the 30 s too (the macOS pf table has the same
+property), which reads as a YouTube-side incident in that window.
 The deadline timer, the detached watchdog (`sleep N; sudo -n ... clear`) and
 the read-back after removal are the same as on the Mac. The doctor reports a
 leftover table or qdisc as FAIL with `sudo -n
 /usr/local/sbin/videorc-lab-netfault clear`, runs it itself when it can,
-and FAILs when the helper is not owned by root or is writable by the lab
-account. A reboot clears any fault.
+and FAILs when the helper, or any directory on its path, is not root's or is
+writable by the lab account. With `faults.network` off the doctor never calls
+sudo: it reads `tc qdisc show` (no privilege needed) for a leftover `2178:`
+qdisc and SKIPs otherwise. A reboot clears any fault.
 
 ### Stopping everything on Linux
 

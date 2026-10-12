@@ -24,13 +24,16 @@
 # How a fault bites:
 #   - the ingest hosts are resolved here, at apply time (IPv4 and IPv6);
 #   - nft table `inet videorc_lab` marks outbound TCP to those addresses on
-#     443 (RTMPS) and 1935 (RTMP) with 0x2178 (OR'ed into the mark, so marks
-#     other tools use in other bits survive). Nothing else is matched: the
-#     YouTube API, chat and the kill switch use other hosts;
+#     443 (RTMPS) and 1935 (RTMP) by OR-ing one dedicated bit, 0x20000000,
+#     into the packet mark, so marks other tools set in other bits survive
+#     and cannot hide a packet from the filter (it matches the bit, not the
+#     whole value). Nothing else is matched: the YouTube API, chat and the
+#     kill switch use other hosts (unless Google serves them from the same
+#     front-end address, see docs/live-lab-machine.md L8);
 #   - on each interface that routes to an ingest address, a root `prio`
 #     qdisc 2178: with 4 bands. The priomap only ever uses bands 0-2, so band
 #     3 (class 2178:4) receives nothing but what the fw filter sends there:
-#     packets carrying the 0x2178 mark. Band 3's child is netem 2179: with
+#     packets carrying the lab bit. Band 3's child is netem 2179: with
 #     `loss 100%` or `rate 1000kbit`. Unmarked traffic is not shaped.
 # `clear` deletes the table and every root qdisc whose handle is 2178:; the
 # kernel then puts the interface's default qdisc back. It never touches
@@ -43,7 +46,7 @@ export PATH
 umask 022
 
 TABLE=videorc_lab
-MARK=0x2178
+MARK=0x20000000
 QDISC=2178
 NETEM=2179
 THROTTLE=1000kbit
@@ -154,7 +157,7 @@ EOF
   for dev in $devs; do
     if ! tc qdisc replace dev "$dev" root handle "${QDISC}:" prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 ||
       ! tc qdisc add dev "$dev" parent "${QDISC}:4" handle "${NETEM}:" netem $netem_args ||
-      ! tc filter add dev "$dev" parent "${QDISC}:" protocol all prio 1 handle "$MARK/0xffff" fw flowid "${QDISC}:4"; then
+      ! tc filter add dev "$dev" parent "${QDISC}:" protocol all prio 1 handle "$MARK/$MARK" fw flowid "${QDISC}:4"; then
       clear_all
       die "tc refused the lab qdisc on $dev"
     fi

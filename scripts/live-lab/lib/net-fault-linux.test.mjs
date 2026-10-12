@@ -409,7 +409,7 @@ test(
       assert.match(table, /type filter hook output priority mangle; policy accept;/)
       assert.match(
         table,
-        /ip daddr @ingest4 tcp dport \{ 443, 1935 \} meta mark set meta mark \| 0x2178/
+        /ip daddr @ingest4 tcp dport \{ 443, 1935 \} meta mark set meta mark \| 0x20000000/
       )
       assert.ok(!/\bdrop\b|\breject\b/.test(table), 'nft only marks; tc does the damage')
 
@@ -421,7 +421,7 @@ test(
       assert.match(calls, /tc qdisc add dev wlan0 parent 2178:4 handle 2179: netem loss 100%/)
       assert.match(
         calls,
-        /tc filter add dev wlan0 parent 2178: protocol all prio 1 handle 0x2178\/0xffff fw flowid 2178:4/
+        /tc filter add dev wlan0 parent 2178: protocol all prio 1 handle 0x20000000\/0x20000000 fw flowid 2178:4/
       )
       // The priomap never names band 3, so unmarked traffic never meets netem.
       const priomap = /priomap ((?:\d )+\d)/.exec(calls)[1].split(' ').map(Number)

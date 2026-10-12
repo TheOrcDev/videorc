@@ -254,6 +254,29 @@ export function sleepInhibitorArgs(harnessPid = process.pid) {
   ]
 }
 
+/**
+ * True when the inhibitor still runs after `ms`. polkit allows block-mode
+ * inhibitors only to the seat's active session by default, so from SSH or a
+ * user unit `systemd-inhibit` may exit at once; the run then relies on the
+ * masked sleep targets and on hypridle being off (both doctor checks).
+ */
+export function inhibitorHeld(helper, ms = 500) {
+  const child = helper?.child
+  if (!child) return Promise.resolve(false)
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(false)
+  return new Promise((resolveHeld) => {
+    const timer = setTimeout(() => {
+      child.off?.('exit', onExit)
+      resolveHeld(true)
+    }, ms)
+    const onExit = () => {
+      clearTimeout(timer)
+      resolveHeld(false)
+    }
+    child.once('exit', onExit)
+  })
+}
+
 export function startSleepInhibitor({ spawnFn = spawn, harnessPid = process.pid, env } = {}) {
   const child = spawnFn('systemd-inhibit', sleepInhibitorArgs(harnessPid), {
     stdio: 'ignore',
