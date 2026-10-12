@@ -110,6 +110,15 @@ test('clipPull is optional, false when absent, and must be a boolean when presen
   assert.match(bad.problems[0], /clipPull must be true or false/)
 })
 
+test('triage (U12) is optional, false when absent, and must be a boolean when present', () => {
+  const absent = validatePolicy(examplePolicy())
+  assert.equal(absent.policy.triage, false)
+  assert.equal(validatePolicy(examplePolicy({ triage: true })).policy.triage, true)
+  const bad = validatePolicy(examplePolicy({ triage: 1 }))
+  assert.equal(bad.policy, null)
+  assert.match(bad.problems[0], /triage must be true or false/)
+})
+
 test('schema v1: each bad field is a named problem, unknown fields are refused', () => {
   const cases = [
     [{ version: 2 }, /version must be 1/],

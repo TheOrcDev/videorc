@@ -14,5 +14,6 @@
   "faults": { "network": false, "process": true },
   "camera": false,
   "clipPull": false,
+  "triage": false,
   "killSwitchUrl": "https://raw.githubusercontent.com/TheOrcDev/videorc-live-lab-reports/main/control.json"
 }

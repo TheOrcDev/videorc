@@ -9,6 +9,7 @@ import { runLockPath } from './run-lock.mjs'
 import {
   SCENARIO_PARAMS_ENV,
   classifyRunExit,
+  classifyTriageExit,
   parseBootTime,
   parseInstallRecord,
   parseRunOutput,
@@ -521,6 +522,62 @@ test('reportSlot skips when publish is not installed and passes --since when it 
   })
   assert.equal(outcome.status, 'passed')
   assert.deepEqual(seen[0], ['--since', '2026-10-11T11:30:00Z'])
+})
+
+test('reportSlot runs triage (U12) after a passing publish, never after a failed one', async () => {
+  const dir = await freshDir()
+  await writeFile(join(dir, 'publish.mjs'), '')
+  const scripts = []
+  const fakeRun = (exit) => async (call) => {
+    scripts.push([call.script, call.args])
+    return {
+      code: exit[call.script] ?? 0,
+      signal: null,
+      stdout: '',
+      stderr: 'REFUSED (policy.triage is not true)\n'
+    }
+  }
+  const missing = await reportSlot({
+    since: '2026-10-11T11:30:00Z',
+    publishScript: join(dir, 'publish.mjs'),
+    triageScript: join(dir, 'triage.mjs'),
+    run: fakeRun({})
+  })
+  assert.deepEqual(missing.triage, {
+    status: 'skipped',
+    exitCode: null,
+    reason: 'triage not installed'
+  })
+  assert.equal(scripts.length, 1)
+
+  await writeFile(join(dir, 'triage.mjs'), '')
+  const refused = await reportSlot({
+    since: '2026-10-11T11:30:00Z',
+    publishScript: join(dir, 'publish.mjs'),
+    triageScript: join(dir, 'triage.mjs'),
+    run: fakeRun({ [join(dir, 'triage.mjs')]: 2 })
+  })
+  assert.equal(refused.status, 'passed', 'a refused triage never fails the report')
+  assert.deepEqual(refused.triage, {
+    status: 'refused',
+    exitCode: 2,
+    reason: 'policy.triage is not true'
+  })
+  assert.deepEqual(scripts[2], [join(dir, 'triage.mjs'), ['--since', '2026-10-11T11:30:00Z']])
+
+  const publishFailed = await reportSlot({
+    since: '2026-10-11T11:30:00Z',
+    publishScript: join(dir, 'publish.mjs'),
+    triageScript: join(dir, 'triage.mjs'),
+    run: fakeRun({ [join(dir, 'publish.mjs')]: 1 })
+  })
+  assert.equal(publishFailed.status, 'failed')
+  assert.equal(publishFailed.triage, undefined)
+  assert.equal(scripts.length, 4, 'triage is not run when publish fails')
+
+  assert.deepEqual(classifyTriageExit({ code: 0 }), { status: 'passed', exitCode: 0 })
+  assert.equal(classifyTriageExit({ code: null, signal: 'SIGTERM' }).reason, 'killed by SIGTERM')
+  assert.equal(classifyTriageExit({ code: 1, stderr: 'boom\n' }).status, 'failed')
 })
 
 test('small parsers: boot time, install record, log pruning', async () => {

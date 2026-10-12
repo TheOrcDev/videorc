@@ -588,7 +588,47 @@ its reports.
 
 ### Phase C: triage, faults, gates
 
-### U12 — Headless Claude triage on the lab machine (D8)
+### U12 — Headless Claude triage on the lab machine (D8) — BUILT
+
+Built on branch `plan-178/u12`: `config/live-lab/claude-settings.json`,
+`scripts/live-lab/triage.mjs` (`pnpm live:triage [--since] [--run] [--dry-run]
+[--json]`), `lib/triage.mjs` + tests, policy field `triage` (optional,
+default false), `reportSlot` runs triage after a passing publish, skill
+section "Triage a run". **Tighter than written below, on purpose:** the agent
+gets no Bash at all (`--tools Read,Glob,Grep`; Bash, Edit, Write,
+NotebookEdit, WebFetch, WebSearch, Agent, Skill and `mcp__*` removed on the
+command line and denied in the settings file), because a prefix rule cannot
+pin `gh issue comment` to one repo, stop `git log --output=<file>` or
+`gh issue view --repo <other>`, and `dontAsk` still auto-runs read-only Bash
+(the docs' own words). So the wrapper gathers the git log and the issue
+threads itself and posts the comments after validating the issue number
+against `published.json` and running the redaction check (U9 `redact.mjs`
+when present, else the test-card patterns), fail closed. The child env is an
+allowlist (no `VIDEORC_*`, `GH_TOKEN`, Discord or YouTube variables). Gates:
+policy `triage: true`, run lock free (a live run refuses triage), 10-minute
+timeout, `--max-turns 40`, `--max-budget-usd 5`, `--restricted` (file tools
+confined to the run folder plus `--add-dir` harness clone; user/project
+settings not loaded), `--permission-mode dontAsk --permission-prompts none`,
+hooks off, no MCP, no skills, no session persistence. `published.json` is
+read in every shape U10 may use (`issues[].number|url`, `issueNumbers`,
+plain numbers); only `TheOrcDev/videorc` numbers count. Output:
+`triaged.json` (schema 1, redacted) + `triage/comment-<n>.md`.
+Relied on (2026-10-12): `claude --help` of the installed 2.1.296 (flags
+`--permission-prompts none`, `--restricted`, `--tools`, `--settings`,
+`--disallowedTools`, `--strict-mcp-config`, `--json-schema`), and
+code.claude.com/docs/en/{cli-reference,headless,permissions,permission-modes,
+settings,settings-reference,env-vars,tools-reference,agent-sdk/typescript}.md:
+deny beats allow and matches inside compound commands and `$(...)`; `Read`
+rules also cover Glob/Grep; a `-p` run silently ignores a settings file that
+fails validation (hence the command-line layer); `permission_denials` and
+`structured_output` in the JSON result; `--max-turns` is documented and
+accepted by 2.1.296 though absent from its `--help`. No offline evaluator of
+permission rules exists, so `lib/triage.test.mjs` checks the file's shape and
+a documented-semantics model of it; the real block is **owed on the lab
+machine** with the one-line probe in the skill section. Also owed: a fixture
+run against a test repo (`gh` auth as the lab user), the owner's `triage:
+true` flip, and `redact.mjs` from U9 landing (the fallback guard runs until
+then).
 
 **Files:** `config/live-lab/claude-settings.json` (permission allowlist),
 `scripts/live-lab/triage.mjs`, skill section "Triage a run".

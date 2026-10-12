@@ -19,6 +19,7 @@ export const RUN_SCRIPT = join(REPO_ROOT, 'scripts', 'live-lab', 'run.mjs')
 export const INSTALL_SCRIPT = join(REPO_ROOT, 'scripts', 'live-lab', 'install.mjs')
 export const PUBLISH_SCRIPT = join(REPO_ROOT, 'scripts', 'live-lab', 'publish.mjs')
 export const DOCTOR_SCRIPT = join(REPO_ROOT, 'scripts', 'live-lab', 'doctor.mjs')
+export const TRIAGE_SCRIPT = join(REPO_ROOT, 'scripts', 'live-lab', 'triage.mjs')
 
 // Scenario parameters (the marathon's hours, ...) reach run.mjs through this
 // environment variable as JSON, so the run CLI stays exactly
@@ -271,14 +272,21 @@ export async function updateCheckSlot({
   }
 }
 
-/** Slot action `report`: `publish.mjs --since <iso>` when U10 is installed. */
+/**
+ * Slot action `report`: `publish.mjs --since <iso>` when U10 is installed,
+ * then `triage.mjs --since <iso>` (U12) when it is installed and publish
+ * passed. Triage decides for itself whether the policy allows it (exit 2 =
+ * refused); its outcome rides along in `triage` and never fails the slot,
+ * because the report is already out.
+ */
 export async function reportSlot({
   since,
   env = process.env,
   run = runNodeScript,
   logStream,
   onChild,
-  publishScript = PUBLISH_SCRIPT
+  publishScript = PUBLISH_SCRIPT,
+  triageScript = TRIAGE_SCRIPT
 }) {
   if (!(await exists(publishScript))) {
     return { status: 'skipped', exitCode: null, reason: 'publish not installed' }
@@ -290,7 +298,10 @@ export async function reportSlot({
     logStream,
     onChild
   })
-  if (result.code === 0) return { status: 'passed', exitCode: 0, since }
+  if (result.code === 0) {
+    const triage = await triageAfterPublish({ since, env, run, logStream, onChild, triageScript })
+    return { status: 'passed', exitCode: 0, since, triage }
+  }
   return {
     status: result.code === null ? 'crashed' : 'failed',
     exitCode: result.code,
@@ -299,6 +310,37 @@ export async function reportSlot({
       ? `killed by ${result.signal}`
       : lastLine(result.stderr) || `exit ${result.code}`
   }
+}
+
+/** Pure: triage.mjs's exit contract to a small outcome for the state file. */
+export function classifyTriageExit({ code, signal, stderr = '' }) {
+  if (code === 0) return { status: 'passed', exitCode: 0 }
+  if (code === 2) {
+    const refused = /REFUSED \((.+)\)/.exec(stderr)
+    return { status: 'refused', exitCode: 2, reason: refused?.[1] ?? 'refused' }
+  }
+  if (code === null) {
+    return {
+      status: 'crashed',
+      exitCode: null,
+      reason: signal ? `killed by ${signal}` : lastLine(stderr) || 'did not start'
+    }
+  }
+  return { status: 'failed', exitCode: code, reason: lastLine(stderr) || `exit ${code}` }
+}
+
+async function triageAfterPublish({ since, env, run, logStream, onChild, triageScript }) {
+  if (!(await exists(triageScript))) {
+    return { status: 'skipped', exitCode: null, reason: 'triage not installed' }
+  }
+  const result = await run({
+    script: triageScript,
+    args: ['--since', since],
+    env,
+    logStream,
+    onChild
+  })
+  return classifyTriageExit(result)
 }
 
 /** Pure: seconds since the epoch of the last boot, from `sysctl -n kern.boottime`. */
