@@ -11,7 +11,7 @@ import {
 import { subscribeVisualMicrophoneEpoch, visualMicrophoneEpoch } from '@/lib/mic-visual-ownership'
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore } from '@/hooks/use-studio'
-import { micVisualAnalyserEnabled } from '@/lib/mic-visual-gate'
+import { micVisualAnalyserEnabled, microphoneAccessOpen } from '@/lib/mic-visual-gate'
 import { warmMicrophoneWanted } from '@/lib/warm-microphone-gate'
 import type {
   MicVisualLifecycleSnapshot,
@@ -188,7 +188,9 @@ export function MicVisualPipelineProvider({
 
   return (
     <StudioMicVisualContext.Provider value={pipeline}>
-      <StudioMicVisualDemandContext.Provider value={enabled && permissionStatus === 'granted'}>
+      <StudioMicVisualDemandContext.Provider
+        value={enabled && microphoneAccessOpen(permissionStatus)}
+      >
         {children}
       </StudioMicVisualDemandContext.Provider>
     </StudioMicVisualContext.Provider>
