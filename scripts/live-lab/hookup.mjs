@@ -56,7 +56,8 @@ the broadcaster and the viewer. Needs a terminal for the hidden prompts.
   --client                    Type the client id and (hidden) secret.
   --role <broadcaster|viewer> Run Google consent for one role.
   --handle <@handle>          The lab channel (default @VideorcApp).
-  --lab-display <name>        The virtual display Videorc captures, as macOS names it.
+  --lab-display <name>        The virtual display Videorc captures: as macOS names it, or the
+                              Hyprland output on Linux (e.g. videorc-lab).
   --discord-webhook           Store the P0 Discord webhook URL from the clipboard, then clear
                               the clipboard (live:publish pings it on a P0 incident).
   --show                      Print what is stored (fingerprints only).
