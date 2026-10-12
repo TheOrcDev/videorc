@@ -480,6 +480,30 @@ fn ensure_session_start_process_live(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Drains the older source transitions, but never behind a person: a Linux
+/// share dialog has no device deadline, so a start that queued behind it held
+/// the ordered command lane until the dialog closed and then ran admission for
+/// an abandoned Record (plan 0010 addendum 3). Fail fast with the reason.
+async fn wait_for_prior_source_transitions(
+    state: &AppState,
+    transitions: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    tokio::pin!(transitions);
+    loop {
+        if let Some(reason) =
+            crate::preview_screen::session_start_blocked_by_share_dialog(state).await
+        {
+            anyhow::bail!(reason);
+        }
+        tokio::select! {
+            () = &mut transitions => return Ok(()),
+            () = tokio::time::sleep(SESSION_START_SHARE_DIALOG_POLL) => {}
+        }
+    }
+}
+
+const SESSION_START_SHARE_DIALOG_POLL: Duration = Duration::from_millis(250);
+
 async fn admit_session_start(
     state: &AppState,
 ) -> Result<(
@@ -513,7 +537,7 @@ async fn admit_session_start(
     // and therefore drains the exact camera/screen supervisors admitted by
     // those older commands before capture ownership can be published.
     let prior_source_transitions = state.source_transition_fence.observe();
-    prior_source_transitions.wait().await;
+    wait_for_prior_source_transitions(state, prior_source_transitions.wait()).await?;
     ensure_session_start_process_live(state)?;
 
     // Native transition waits deliberately never own the publication/shutdown

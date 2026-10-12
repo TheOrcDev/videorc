@@ -5,6 +5,7 @@ import {
   selectedDeviceStatus,
   systemAudioStatus,
   unknownDeviceWarnings,
+  SCREEN_SHARE_DIALOG_PENDING_MESSAGE,
   videoSourceStatus
 } from '@/lib/source-status'
 
@@ -100,6 +101,26 @@ describe('videoSourceStatus', () => {
     expect(
       videoSourceStatus({ ...base, device: 'available', preview: { state: 'device-missing' } })
     ).toBeNull()
+  })
+
+  it('says who a Linux share dialog is waiting on (plan 0010)', () => {
+    expect(
+      videoSourceStatus({
+        ...base,
+        kind: 'screen',
+        preview: { state: 'starting', message: SCREEN_SHARE_DIALOG_PENDING_MESSAGE }
+      })
+    ).toEqual({
+      label: 'Waiting for you',
+      tone: 'warn',
+      hint: 'Choose a screen in the share dialog. It may be behind this window.'
+    })
+    expect(
+      videoSourceStatus({
+        ...base,
+        preview: { state: 'starting', message: 'Starting screen capture.' }
+      })
+    ).toEqual({ label: 'Starting', tone: 'warn' })
   })
 
   it('says Starting, then Failed with a retry hint, never the raw backend message', () => {

@@ -39,6 +39,14 @@ export function selectedDeviceStatus(
 
 const SWITCHING: SourceStatus = { label: 'Switching', tone: 'warn' }
 
+/**
+ * The Starting message the backend publishes while a Linux portal share
+ * dialog waits on a person (`SHARE_DIALOG_PENDING_MESSAGE` in
+ * preview_screen.rs, plan 0010).
+ */
+export const SCREEN_SHARE_DIALOG_PENDING_MESSAGE =
+  'Waiting for you to choose a screen in the share dialog.'
+
 function notFound(kind: 'screen' | 'camera' | 'microphone'): SourceStatus {
   return {
     label: 'Not found',
@@ -99,7 +107,16 @@ export function videoSourceStatus(input: {
   if (input.device === 'missing' || input.device === 'unavailable') {
     return notFound(input.kind)
   }
-  if (state === 'starting') return { label: 'Starting', tone: 'warn' }
+  if (state === 'starting') {
+    // Linux portal (plan 0010): the start is waiting on a person, not a device.
+    return input.preview?.message === SCREEN_SHARE_DIALOG_PENDING_MESSAGE
+      ? {
+          label: 'Waiting for you',
+          tone: 'warn',
+          hint: 'Choose a screen in the share dialog. It may be behind this window.'
+        }
+      : { label: 'Starting', tone: 'warn' }
+  }
   // The preview's own message is raw text: it goes to Health, not the line.
   if (state === 'failed') {
     return { label: 'Failed', tone: 'error', hint: "Couldn't start it. Choose it again to retry." }
