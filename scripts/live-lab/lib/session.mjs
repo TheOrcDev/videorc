@@ -21,10 +21,13 @@ import {
   startCardBrowser,
   startLocalSink
 } from './launch.mjs'
+import { createQuotaLedger } from './quota-ledger.mjs'
 import { seedProfile } from './seed.mjs'
+import { createSpeechRig } from './speech-rig.mjs'
 import { createWaitFor, systemClock } from './step-engine.mjs'
 import { collectArtifacts, teardown } from './teardown.mjs'
 import { CdpClient, createUiDriver, httpBaseFromDevtools, pickMainTarget } from './ui-driver.mjs'
+import { createYoutubeSide, isLiveJournalState } from './youtube-side.mjs'
 
 // Plan 178 U6. The real session behind ctx: owned helpers (caffeinate, card
 // server and browser, local sink), the app (LaunchServices, lab profile), the
@@ -188,10 +191,16 @@ export function createSessionStarter({
   config,
   install,
   workDir,
+  labDir = null,
+  ledger = null,
   clock = systemClock,
   launcher,
   chromePath,
-  ffmpegPath = process.env.VIDEORC_LIVE_LAB_FFMPEG ?? 'ffmpeg'
+  ffmpegPath = process.env.VIDEORC_LIVE_LAB_FFMPEG ?? 'ffmpeg',
+  // Plan 178 U9: the YouTube side (U8 observer, viewer bot, clip pulls) and
+  // the speech rig (U7), both injectable for tests.
+  youtubeSide = createYoutubeSide,
+  speechRig = createSpeechRig
 }) {
   return async function startSession({ runInfo, scenario, policy, runDir, bus, signal, log }) {
     const dirs = labProfileDirs(workDir, scenario.destination)
@@ -206,7 +215,14 @@ export function createSessionStarter({
       teardown({
         remote: parts.remote ?? null,
         waitFor: teardownWait,
-        observer: parts.observer,
+        observer: {
+          async stop() {
+            // The YouTube side stops first so its last poll can still see the
+            // broadcast end; it must never outlive the app observer.
+            if (parts.youtube) parts.youtubeSummary = await parts.youtube.stop()
+            parts.observer?.stop()
+          }
+        },
         quitApp: parts.app?.stop,
         ledgerPaths: parts.app ? () => ledgerPathsFor(dirs, install.appPath) : [],
         rootPid: parts.appPid ?? undefined,
@@ -325,6 +341,33 @@ export function createSessionStarter({
       await parts.observer.start()
 
       const observe = parts.observer
+      if (scenario.destination === 'youtube') {
+        const quotaLedger =
+          ledger ??
+          createQuotaLedger({
+            dir: labDir ?? workDir,
+            maxUnitsPerDay: policy.quota?.labProjectMaxUnitsPerDay ?? undefined
+          })
+        parts.youtube = youtubeSide({
+          config,
+          policy,
+          ledger: quotaLedger,
+          runDir,
+          bus,
+          clock,
+          log,
+          appOnAir: () => {
+            const latest = observe.latestJournal()
+            return latest ? isLiveJournalState(latest.state) : null
+          }
+        })
+        // ctx.observe.incidents() is the one place steps and verdicts read
+        // YouTube-side incidents (U13's faults scenario depends on it).
+        observe.incidents = () => parts.youtube.observer.incidents()
+        await parts.youtube.start()
+      }
+      parts.speech = speechRig({ runDir, ffmpegPath, log })
+
       const ledgerPaths = await ledgerPathsFor(dirs, install.appPath)
       return {
         ctx: {
@@ -333,7 +376,12 @@ export function createSessionStarter({
           observe,
           card: parts.card,
           sink: parts.sink ?? null,
-          observer: null,
+          observer: parts.youtube?.observer ?? null,
+          viewer: parts.youtube?.viewer ?? null,
+          speech: parts.speech,
+          rpc,
+          profile: { recordingsDir: dirs.recordingsDir },
+          quitApp: () => parts.app.stop(),
           describe: parts.describe,
           healthEvents: () => observe.healthEventsFlat(),
           ledger: { ledgerPaths },
@@ -352,7 +400,9 @@ export function createSessionStarter({
           seed: { devices: parts.seed.devices, targetIds: parts.seed.targetIds },
           journalLines: observe.journalLines().length,
           healthEvents: observe.healthEvents().length,
-          cardPulse: Boolean(parts.card.lastPulse())
+          featureEvents: observe.featureEvents().length,
+          cardPulse: Boolean(parts.card.lastPulse()),
+          youtube: parts.youtubeSummary ?? null
         })
       }
     } catch (error) {

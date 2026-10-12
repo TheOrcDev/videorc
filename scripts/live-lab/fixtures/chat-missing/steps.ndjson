@@ -1,0 +1,16 @@
+{"id":"card-up","status":"pass","startedAt":"2026-10-12T06:00:05.000Z","endedAt":"2026-10-12T06:00:06.200Z","durationMs":1200}
+{"id":"open-go-live","status":"pass","startedAt":"2026-10-12T06:00:06.700Z","endedAt":"2026-10-12T06:00:09.000Z","durationMs":2300}
+{"id":"fill-details","status":"pass","startedAt":"2026-10-12T06:00:09.500Z","endedAt":"2026-10-12T06:00:10.400Z","durationMs":900}
+{"id":"destinations","status":"pass","startedAt":"2026-10-12T06:00:10.900Z","endedAt":"2026-10-12T06:00:11.300Z","durationMs":400}
+{"id":"go-live","status":"pass","startedAt":"2026-10-12T06:00:11.800Z","endedAt":"2026-10-12T06:00:18.200Z","durationMs":6400,"evidence":{"outcome":"live","liveAfterMs":5800}}
+{"id":"live-sample","status":"pass","startedAt":"2026-10-12T06:00:18.700Z","endedAt":"2026-10-12T06:00:23.800Z","durationMs":5100}
+{"id":"chat-live-chat","status":"pass","startedAt":"2026-10-12T06:00:24.300Z","endedAt":"2026-10-12T06:00:26.300Z","durationMs":2000,"evidence":{"liveChatId":true}}
+{"id":"chat-script","status":"pass","startedAt":"2026-10-12T06:00:26.800Z","endedAt":"2026-10-12T06:07:26.800Z","durationMs":420000,"evidence":{"sent":14,"deleted":true}}
+{"id":"chat-arrival","status":"fail","startedAt":"2026-10-12T06:07:27.300Z","endedAt":"2026-10-12T06:09:27.300Z","durationMs":120000,"evidence":{"sent":14,"arrived":13,"missing":["long"],"maxLatencyMs":4200},"reason":"never arrived in the app: long"}
+{"id":"chat-reply","status":"skipped","startedAt":"2026-10-12T06:09:27.800Z","endedAt":"2026-10-12T06:09:27.810Z","durationMs":10,"reason":"after failure of chat-arrival"}
+{"id":"chat-highlight","status":"skipped","startedAt":"2026-10-12T06:09:28.310Z","endedAt":"2026-10-12T06:09:28.320Z","durationMs":10,"reason":"after failure of chat-arrival"}
+{"id":"chat-deleted","status":"skipped","startedAt":"2026-10-12T06:09:28.820Z","endedAt":"2026-10-12T06:09:28.830Z","durationMs":10,"reason":"after failure of chat-arrival"}
+{"id":"chat-links","status":"skipped","startedAt":"2026-10-12T06:09:29.330Z","endedAt":"2026-10-12T06:09:29.340Z","durationMs":10,"reason":"after failure of chat-arrival"}
+{"id":"clip-highlight","status":"skipped","startedAt":"2026-10-12T06:09:29.840Z","endedAt":"2026-10-12T06:09:29.850Z","durationMs":10,"reason":"after failure of chat-arrival"}
+{"id":"stop","status":"skipped","startedAt":"2026-10-12T06:09:30.350Z","endedAt":"2026-10-12T06:09:30.360Z","durationMs":10,"reason":"after failure of chat-arrival"}
+{"id":"vod","status":"skipped","startedAt":"2026-10-12T06:09:30.860Z","endedAt":"2026-10-12T06:09:30.870Z","durationMs":10,"reason":"after failure of chat-arrival"}

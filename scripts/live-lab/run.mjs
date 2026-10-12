@@ -74,7 +74,9 @@ const result = await executeRun({
       createSessionStarter({
         config: await readConfig(lab),
         install: await readInstallRecord(lab),
-        workDir: work
+        workDir: work,
+        labDir: lab,
+        ledger
       })(options),
     attachSignals: true
   }

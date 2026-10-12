@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "videoId": "fixtVideo01A",
+  "recordedAt": "2026-10-12T06:02:00.000Z",
+  "seconds": 120,
+  "inputs": 1,
+  "clipKept": true,
+  "clipFile": "clips/clip-fixtVideo01A-20261012T060200Z.ts",
+  "summary": {
+    "hasVideo": true,
+    "hasAudio": true,
+    "durationSeconds": 120,
+    "width": 1920,
+    "height": 1080,
+    "avgFps": 30,
+    "longestFreezeMs": 0,
+    "freezeCount": 0,
+    "maxAudioGapMs": 0,
+    "longestSilenceMs": 0,
+    "avOffsetMs": 12,
+    "avPairs": 11,
+    "avSyncError": null,
+    "analyzerFailures": [],
+    "analyzerWarnings": []
+  },
+  "incidents": []
+}

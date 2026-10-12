@@ -5,6 +5,7 @@ import { cpus, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { parseArgs, promisify } from 'node:util'
 
+import { finalizeRunFolder } from './finalize.mjs'
 import { CONTROL_FETCH_INTERVAL_MS, createKillSwitch } from './kill-switch.mjs'
 import { BUILDS, PRIVACIES, TRIGGERS, canStart } from './policy.mjs'
 import {
@@ -524,6 +525,19 @@ export async function executeRun({ argv, deps }) {
       await writeManifest(manifest)
     } catch (error) {
       out(`Could not write the manifest: ${error.message}`)
+    }
+    // Plan 178 U9: verdict.json, report.md and charts for every run, after
+    // teardown and before the lock goes. A verdict failure never changes the
+    // run's exit code; it is logged and the folder keeps its raw evidence.
+    if (deps.finalizeRun !== null) {
+      try {
+        const { verdict } = await (deps.finalizeRun ?? finalizeRunFolder)({ runDir })
+        log(
+          `Verdict ${verdict.outcome}: ${verdict.incidents.length} incident(s), ${verdict.needsEyes.length} needs-eyes (report.md).`
+        )
+      } catch (error) {
+        log(`Verdict failed: ${error.message}`)
+      }
     }
     const released = await deps.releaseRunLock({ runId })
     if (!released.released) log(`Run lock not released: ${released.reason}`)

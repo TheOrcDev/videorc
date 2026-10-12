@@ -520,3 +520,41 @@ test('buildManifest keeps only allowlisted build fields', () => {
   assert.equal(manifest.build.previous, undefined)
   assert.equal(manifest.outcome, 'running')
 })
+
+test('every run ends with verdict.json and report.md in the run folder (plan 178 U9)', async () => {
+  const workDir = await tmpWork()
+  const clock = createFakeClock()
+  const unit = scenario([{ id: 'one', deadlineMs: 1000, run: () => 'ok' }])
+  const r = await rig({ workDir, clock, scenarios: { unit } })
+  const result = await executeRun({
+    argv: ['--scenario', 'unit', '--trigger', 'manual'],
+    deps: r.deps
+  })
+  assert.equal(result.exitCode, EXIT.ok)
+  const verdict = JSON.parse(await readFile(join(result.runDir, 'verdict.json'), 'utf8'))
+  assert.equal(verdict.schema, 1)
+  assert.equal(verdict.runId, '2026-10-12-unit-a1b2c3')
+  assert.equal(verdict.outcome, 'pass')
+  assert.equal(verdict.thresholdsMode, 'report')
+  const report = await readFile(join(result.runDir, 'report.md'), 'utf8')
+  assert.match(report, /Outcome: PASS/)
+  assert.ok(r.out.some((line) => /Verdict pass/.test(line)))
+  // The verdict is written before the lock is released and never changes the exit code.
+  const broken = await rig({
+    workDir,
+    clock,
+    scenarios: { unit },
+    overrides: {
+      random: () => 'b2c3d4',
+      finalizeRun: async () => {
+        throw new Error('verdict exploded')
+      }
+    }
+  })
+  const second = await executeRun({
+    argv: ['--scenario', 'unit', '--trigger', 'manual'],
+    deps: broken.deps
+  })
+  assert.equal(second.exitCode, EXIT.ok)
+  assert.ok(broken.out.some((line) => /Verdict failed: verdict exploded/.test(line)))
+})
