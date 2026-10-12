@@ -8028,11 +8028,13 @@ async fn stop_fallback(
     };
     sleep(base_delay).await;
 
-    // A live RTMP leg keeps its own longer, fixed grace. A record-only FFmpeg
-    // that is still advancing its output clock is draining admitted frames
-    // (below-realtime software encode), not hung: TERM here truncates the
-    // file and used to surface as a fake encoder failure.
-    if !streaming && let Some(progress) = progress.as_ref() {
+    // An FFmpeg that is still advancing its output clock is draining admitted
+    // frames (below-realtime software encode), not hung: TERM here truncates
+    // the file and used to surface as a fake encoder failure. That holds with
+    // a live RTMP leg too (Linux plan 0017: ogre's sink kept receiving 25 fps
+    // through the whole 8 s grace before the TERM). A dead ingest stops the
+    // clock, so it still escalates at the next poll.
+    if let Some(progress) = progress.as_ref() {
         let mut waited = base_delay;
         let mut drain_logged = false;
         loop {
@@ -8919,6 +8921,7 @@ async fn monitor_session(
                 keep_original_media: active.keep_original_media,
                 performance_check: active.performance_check,
                 native_audio_stats,
+                records_file: active.output_path.is_some(),
             }
         });
     let retired_active = monitored_recording
@@ -9700,6 +9703,7 @@ async fn monitor_session(
                 monitored_recording.stop_escalated,
                 recording_bridge_terminal_failure.as_deref(),
                 &exit_status.to_string(),
+                monitored_recording.records_file,
             );
             monitored_recording
                 .pipeline
@@ -11316,6 +11320,8 @@ struct MonitoredRecording {
     keep_original_media: bool,
     performance_check: bool,
     native_audio_stats: Option<NativeAudioStats>,
+    /// False for a stream-only session: there is no file to keep.
+    records_file: bool,
 }
 
 fn should_finalize_recording_session(
@@ -11356,13 +11362,20 @@ fn classify_failed_ffmpeg_exit(
     stop_escalated: bool,
     recording_bridge_terminal_failure: Option<&str>,
     exit_status: &str,
+    records_file: bool,
 ) -> (RecordingPipelineStage, &'static str, String) {
     if stop_intent_preceded_exit && stop_escalated {
+        // A stream-only session has no file to keep (Linux plan 0017).
+        let outcome = if records_file {
+            "The file was kept as recovery media and may be cut short."
+        } else {
+            "The stream server may not have seen a clean end of the stream."
+        };
         return (
             RecordingPipelineStage::Muxer,
             "recording-stop-forced",
             format!(
-                "FFmpeg did not finish after Stop, so Videorc forced it to stop. The file was kept as recovery media and may be cut short. (FFmpeg exit: {exit_status})"
+                "FFmpeg did not finish after Stop, so Videorc forced it to stop. {outcome} (FFmpeg exit: {exit_status})"
             ),
         );
     }
@@ -39707,6 +39720,22 @@ mod low_end_windows_recording_tests {
     }
 
     #[test]
+    fn a_forced_stream_only_stop_never_mentions_a_file() {
+        // Linux plan 0017: a stream-only session has no recovery media.
+        let (stage, code, message) =
+            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)", false);
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-stop-forced");
+        assert!(!message.contains("file"), "{message}");
+        assert!(!message.contains("recovery"), "{message}");
+        assert!(message.contains("forced it to stop"), "{message}");
+        assert!(
+            message.contains("(FFmpeg exit: signal: 9 (SIGKILL))"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn forced_stop_is_never_reported_as_an_encoder_failure() {
         let (stage, code, message) = classify_failed_ffmpeg_exit(
             true,
@@ -39715,6 +39744,7 @@ mod low_end_windows_recording_tests {
                 "recording raw-video encoder output stopped: The pipe is being closed. (os error 232)",
             ),
             "exit code: 1",
+            true,
         );
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
@@ -39748,7 +39778,8 @@ mod low_end_windows_recording_tests {
 
     #[test]
     fn forced_stop_without_bridge_error_preserves_windows_exit() {
-        let (stage, code, message) = classify_failed_ffmpeg_exit(true, true, None, "exit code: 1");
+        let (stage, code, message) =
+            classify_failed_ffmpeg_exit(true, true, None, "exit code: 1", true);
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
         assert_forced_stop_message_reports_only_confirmed_outcome(&message, "exit code: 1");
@@ -39761,6 +39792,7 @@ mod low_end_windows_recording_tests {
             true,
             Some("Broken pipe (os error 32)"),
             "signal: 9 (SIGKILL)",
+            true,
         );
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
@@ -39772,7 +39804,7 @@ mod low_end_windows_recording_tests {
     #[test]
     fn forced_stop_without_bridge_error_preserves_sigkill_exit() {
         let (stage, code, message) =
-            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)");
+            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)", true);
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
         assert_forced_stop_message_reports_only_confirmed_outcome(&message, "signal: 9 (SIGKILL)");
@@ -39782,20 +39814,21 @@ mod low_end_windows_recording_tests {
     fn unsolicited_failures_keep_their_original_owner() {
         // Bridge died on its own: no stop intent, no escalation.
         let (stage, code, message) =
-            classify_failed_ffmpeg_exit(false, false, Some("FIFO timed out"), "exit code: 1");
+            classify_failed_ffmpeg_exit(false, false, Some("FIFO timed out"), "exit code: 1", true);
         assert_eq!(stage, RecordingPipelineStage::VideoEncoder);
         assert_eq!(code, "encoder-bridge-failed");
         assert!(message.contains("FIFO timed out"));
         // Bridge failed first and the user then pressed Stop, but FFmpeg left
         // by itself: still the bridge's failure, not a forced stop.
         let (_, code, _) =
-            classify_failed_ffmpeg_exit(true, false, Some("FIFO timed out"), "exit code: 1");
+            classify_failed_ffmpeg_exit(true, false, Some("FIFO timed out"), "exit code: 1", true);
         assert_eq!(code, "encoder-bridge-failed");
         // An escalation without a user stop cannot happen through the ladder;
         // never let the flag alone relabel a crash.
-        let (_, code, _) = classify_failed_ffmpeg_exit(false, true, None, "exit code: 1");
+        let (_, code, _) = classify_failed_ffmpeg_exit(false, true, None, "exit code: 1", true);
         assert_eq!(code, "ffmpeg-exit");
-        let (stage, code, _) = classify_failed_ffmpeg_exit(false, false, None, "exit code: 1");
+        let (stage, code, _) =
+            classify_failed_ffmpeg_exit(false, false, None, "exit code: 1", true);
         assert_eq!(
             (stage, code),
             (RecordingPipelineStage::Muxer, "ffmpeg-exit")
@@ -39819,8 +39852,11 @@ mod low_end_windows_recording_tests {
             "progress cannot hold the ladder open forever"
         );
         // TERM + KILL must still land inside the stop RPC's finalize window so
-        // the first Stop click reaches a terminal status.
+        // the first Stop click reaches a terminal status, with or without a
+        // live RTMP leg (plan 0017: streams drain too).
         assert!(STOP_TERM_DRAIN_MAX + STOP_KILL_DELAY < STOP_FINALIZE_TIMEOUT);
+        assert!(STOP_TERM_DRAIN_MAX + STOP_KILL_DELAY_STREAMING < STOP_FINALIZE_TIMEOUT);
+        assert!(STOP_TERM_DELAY_STREAMING < STOP_TERM_DRAIN_MAX);
     }
 
     #[test]
