@@ -1,4 +1,5 @@
 import type { MicMonitorState } from '@/lib/state-labels'
+import type { MediaAccessStatus } from '@/lib/backend'
 
 // Live feedback batch 3, B2 — the one place that decides whether the
 // renderer's visual-only microphone analyser may run. The owner's complaint
@@ -63,4 +64,14 @@ export function audioMixerMonitorState(input: {
     return 'idle'
   }
   return input.sessionActive ? 'live' : 'monitoring'
+}
+
+/**
+ * No OS gate stands between the renderer and the microphone: macOS/Windows
+ * granted it, or Linux has no OS grant at all (`not-applicable`, Linux plan
+ * 0011: the level never showed on Linux). Anything else stays closed so a
+ * meter never becomes an implicit permission prompt.
+ */
+export function microphoneAccessOpen(permissionStatus: MediaAccessStatus | undefined): boolean {
+  return permissionStatus === 'granted' || permissionStatus === 'not-applicable'
 }
