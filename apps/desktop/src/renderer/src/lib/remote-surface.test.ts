@@ -35,6 +35,8 @@ function remoteIntentContext(overrides: Partial<RemoteIntentContext> = {}) {
     showCommentHighlight: vi.fn(async () => ({ ok: true })),
     clearCommentHighlight: vi.fn(async () => ({ ok: true })),
     markClip: vi.fn(async () => ({ ok: true })),
+    replayOn: false,
+    saveReplay: vi.fn(async () => ({ ok: true })),
     ...overrides
   }
   return { context, requests }
@@ -78,6 +80,47 @@ describe('executeRemoteIntent', () => {
         }))
       )
     }
+  })
+
+  it('saves a replay only while the ring is on, and lets a mark through with it (plan 181)', async () => {
+    const off = remoteIntentContext()
+    await executeRemoteIntent({ intentId: 'rs-off', intent: { kind: 'replaySave' } }, off.context)
+    expect(off.context.saveReplay).not.toHaveBeenCalled()
+    expect(off.requests).toEqual([
+      {
+        method: 'remote.intent.ack',
+        params: {
+          intentId: 'rs-off',
+          ok: false,
+          message: 'The replay buffer is off. Turn it on in Studio.'
+        }
+      }
+    ])
+    const on = remoteIntentContext({ replayOn: true })
+    await executeRemoteIntent({ intentId: 'rs-on', intent: { kind: 'replaySave' } }, on.context)
+    expect(on.context.saveReplay).toHaveBeenCalledOnce()
+    expect(on.requests).toEqual([
+      { method: 'remote.intent.ack', params: { intentId: 'rs-on', ok: true } }
+    ])
+    // S8: a mark with no recording but the ring on saves a replay (the backend routes it).
+    await executeRemoteIntent({ intentId: 'clip-ring', intent: { kind: 'clipMark' } }, on.context)
+    expect(on.context.markClip).toHaveBeenCalledOnce()
+    const failed = remoteIntentContext({
+      replayOn: true,
+      saveReplay: vi.fn(async () => ({
+        ok: false,
+        message: 'The replay buffer is still starting.'
+      }))
+    })
+    await executeRemoteIntent(
+      { intentId: 'rs-failed', intent: { kind: 'replaySave' } },
+      failed.context
+    )
+    expect(failed.requests[0]?.params).toEqual({
+      intentId: 'rs-failed',
+      ok: false,
+      message: 'The replay buffer is still starting.'
+    })
   })
 
   it('marks a clip only while a session runs and relays the refusal reason (plan 068 D6)', async () => {

@@ -28,6 +28,8 @@ export interface GlobalShortcutContext {
   toggleMicrophoneMute: () => void
   /** Plan 068 D6: mark a clip at the current moment. */
   markClip?: () => void
+  /** Plan 181: save the last seconds from the replay buffer. */
+  saveReplay?: () => void
   /** Plan 069 S6: the system-audio device status and the state the Studio
    * shows (the session's confirmed mix, else the request). */
   systemAudio?: readonly [status: DeviceStatus | undefined, shown: boolean]
@@ -58,6 +60,7 @@ export function executeGlobalShortcut(
   if (action === 'mic-toggle') context.toggleMicrophoneMute()
   if (action === 'system-audio-toggle') toggleSystemAudio(context)
   if (action === 'clip-mark') context.markClip?.()
+  if (action === 'replay-save') context.saveReplay?.()
 }
 
 function toggleSystemAudio(context: GlobalShortcutContext): void {
@@ -90,6 +93,7 @@ const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
   'mic-toggle': 'Mute / unmute microphone',
   'system-audio-toggle': 'Turn system audio on or off',
   'clip-mark': 'Mark a clip',
+  'replay-save': 'Save replay',
   'layout-next': 'Next scene',
   'layout-previous': 'Previous scene'
 }

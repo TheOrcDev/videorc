@@ -4360,6 +4360,8 @@ export interface GlobalShortcutsConfig {
   systemAudioToggle?: string
   /** Mark a clip at the current moment (plan 068 D6). Unbound by default. */
   clipMark?: string
+  /** Save the last seconds from the replay buffer (plan 181 D5). Unbound by default. */
+  replaySave?: string
 }
 
 export interface GlobalShortcutsResult {

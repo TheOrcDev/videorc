@@ -24,6 +24,7 @@ describe('global layout shortcuts', () => {
       stopSession: vi.fn(),
       toggleMicrophoneMute: vi.fn(),
       markClip: vi.fn(),
+      saveReplay: vi.fn(),
       switchLayout: vi.fn()
     }
     for (const action of GLOBAL_SHORTCUT_ACTIONS.filter((action) => action.startsWith('layout')))
@@ -33,6 +34,11 @@ describe('global layout shortcuts', () => {
     executeGlobalShortcut('clip-mark', context)
     expect(context.markClip).toHaveBeenCalledOnce()
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
+    // Plan 181: Save replay is its own key, unbound by default (D5).
+    executeGlobalShortcut('replay-save', context)
+    expect(context.saveReplay).toHaveBeenCalledOnce()
+    expect(globalShortcutEntries({}).find(([id]) => id === 'replay-save')?.[1]).toBeUndefined()
+    expect(withGlobalShortcut({}, 'replay-save', 'Alt+Shift+S').replaySave).toBe('Alt+Shift+S')
     executeGlobalShortcut('invalid' as GlobalShortcutAction, context)
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
     expect(context.switchLayout).toHaveBeenCalledTimes(12)
@@ -72,7 +78,8 @@ describe('global layout shortcuts', () => {
     expect(active.startLivestream).toHaveBeenCalledOnce()
   })
   it('keeps stable IDs, unassigned defaults and validates unknown actions', () => {
-    expect(globalShortcutEntries({})).toHaveLength(17)
+    // Plan 181 D5: Save replay joins the list, unbound.
+    expect(globalShortcutEntries({})).toHaveLength(18)
     // Plan 068 D6: Mark clip ships unbound.
     expect(globalShortcutEntries({}).find(([id]) => id === 'clip-mark')?.[1]).toBeUndefined()
     expect(withGlobalShortcut({}, 'clip-mark', 'Cmd+Shift+K').clipMark).toBe('Cmd+Shift+K')

@@ -19,6 +19,20 @@ function captureConfig(patch: Partial<CaptureConfig> = {}): CaptureConfig {
 }
 
 describe('buildStartSessionParams', () => {
+  it('carries the replay ring only while the switch is on (plan 181)', () => {
+    const base = {
+      captureConfig: {
+        ...defaultCaptureConfig,
+        replayBuffer: { seconds: 60, startOnLaunch: false }
+      },
+      scene: null,
+      settings: { outputDirectory: '', keepOriginalRecording: false }
+    }
+    expect(buildStartSessionParams(base)).not.toHaveProperty('replay')
+    expect(buildStartSessionParams({ ...base, replayArmed: false })).not.toHaveProperty('replay')
+    expect(buildStartSessionParams({ ...base, replayArmed: true }).replay).toEqual({ seconds: 60 })
+  })
+
   it('never forwards renderer-owned filesystem or executable paths', () => {
     const params = buildStartSessionParams({
       captureConfig: captureConfig(),

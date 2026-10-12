@@ -134,6 +134,10 @@ export interface RemoteIntentContext {
   /** Plan 068 D6: mark the current moment for a clip. The backend stamps the
    * capture clock; `ok: false` carries why nothing was kept. */
   markClip: () => Promise<RemoteIntentOutcome>
+  /** Plan 181: the replay buffer holds frames right now. */
+  replayOn: boolean
+  /** Plan 181 S5: Save replay, through the Studio's own action. */
+  saveReplay: () => Promise<RemoteIntentOutcome>
 }
 
 export interface RemoteIntentOutcome {
@@ -261,6 +265,7 @@ export const REMOTE_INTENT_COPY = {
   takeoverHide: "Couldn't hide the takeover.",
   windowMissing: "That window isn't available.",
   messageMissing: 'Choose a message to put on stream.',
+  replayOff: 'The replay buffer is off. Turn it on in Studio.',
   unsupported: "This version of Videorc can't do that. Update Videorc.",
   failed: 'Something went wrong. Check Studio on your computer.'
 } as const
@@ -404,8 +409,15 @@ export async function executeRemoteIntent(
         return void (await ack(outcome.ok, outcome.message))
       }
       case 'clipMark': {
-        if (!context.sessionActive) return void (await ack(false, REMOTE_INTENT_COPY.notRunning))
+        // Plan 181 S8: with the buffer on and no recording, a mark saves a replay.
+        if (!context.sessionActive && !context.replayOn)
+          return void (await ack(false, REMOTE_INTENT_COPY.notRunning))
         const outcome = await context.markClip()
+        return void (await ack(outcome.ok, outcome.message))
+      }
+      case 'replaySave': {
+        if (!context.replayOn) return void (await ack(false, REMOTE_INTENT_COPY.replayOff))
+        const outcome = await context.saveReplay()
         return void (await ack(outcome.ok, outcome.message))
       }
       default:

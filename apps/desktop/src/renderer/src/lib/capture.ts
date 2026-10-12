@@ -132,6 +132,32 @@ export type CaptureConfig = {
   streamKey: string
   streaming: StreamingSettings
   captions: CaptionsCaptureSettings
+  /** The replay buffer's settings (plan 181 S5.6). Arming is runtime state. */
+  replayBuffer: ReplayBufferSettings
+}
+
+/** The replay buffer (plan 181): how long it keeps, and whether it arms
+ * itself when Videorc opens (D6, default off). */
+export type ReplayBufferSettings = {
+  seconds: number
+  startOnLaunch: boolean
+}
+
+export const REPLAY_BUFFER_DEFAULT_SECONDS = 30
+/** The lengths the Output page offers, in seconds (plan 181). */
+export const REPLAY_BUFFER_LENGTH_OPTIONS = [15, 30, 60, 120, 300] as const
+
+export function normalizeReplayBufferSettings(value: unknown): ReplayBufferSettings {
+  const loaded = (value ?? {}) as Partial<ReplayBufferSettings>
+  const seconds =
+    typeof loaded.seconds === 'number' &&
+    (REPLAY_BUFFER_LENGTH_OPTIONS as readonly number[]).includes(loaded.seconds)
+      ? loaded.seconds
+      : REPLAY_BUFFER_DEFAULT_SECONDS
+  return {
+    seconds,
+    startOnLaunch: typeof loaded.startOnLaunch === 'boolean' ? loaded.startOnLaunch : false
+  }
 }
 
 /** The vertical simulcast leg's user-facing settings. */
@@ -1302,7 +1328,8 @@ export const defaultCaptureConfig: CaptureConfig = {
   rtmpServerUrl: rtmpDefaults.youtube,
   streamKey: '',
   streaming: defaultStreamingSettings(),
-  captions: defaultCaptionsCaptureSettings()
+  captions: defaultCaptionsCaptureSettings(),
+  replayBuffer: { seconds: REPLAY_BUFFER_DEFAULT_SECONDS, startOnLaunch: false }
 }
 
 export function defaultCaptionsCaptureSettings(): CaptionsCaptureSettings {
@@ -1423,7 +1450,8 @@ export function loadCaptureConfig(): CaptureConfig {
     rtmpServerUrl: loaded.rtmpServerUrl ?? defaultCaptureConfig.rtmpServerUrl,
     streamKey: loaded.streamKey ?? defaultCaptureConfig.streamKey,
     streaming: migrateStreamingSettings(loaded),
-    captions: normalizeCaptionsCaptureSettings(loaded.captions)
+    captions: normalizeCaptionsCaptureSettings(loaded.captions),
+    replayBuffer: normalizeReplayBufferSettings(loaded.replayBuffer)
   }
 }
 
