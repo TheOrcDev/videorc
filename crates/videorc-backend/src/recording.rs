@@ -3108,6 +3108,10 @@ async fn start_session_with_timeline(
         params.output.record_enabled = true;
         params.captions = None;
     }
+    // Held until this start has run or failed, so a Record or Go Live that
+    // lands meanwhile waits in `hand_over_replay_only_session`.
+    let _replay_start_in_flight =
+        replay_only.then(|| crate::replay_buffer::begin_start_in_flight(&state));
     if let Some(replay) = params.replay.as_mut() {
         replay.seconds = crate::replay_buffer::clamp_seconds(replay.seconds);
     }
@@ -17421,15 +17425,29 @@ fn append_replay_segment_output(
 /// for the pieces the admission checks below need, so the Record that
 /// follows is not refused for a microphone still closing.
 async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
-    let replay_only_session = state
-        .recording
-        .lock()
-        .await
-        .as_ref()
-        .filter(|active| active.replay_only)
-        .map(|active| active.session_id.clone());
-    let Some(session_id) = replay_only_session else {
-        return Ok(());
+    // The ring re-arms right after every Stop (redesign R2), so the next
+    // press can land while that buffer-only start is still between admission
+    // and its running session. Wait for it (bounded) and hand over from the
+    // running session instead of meeting "A capture session is starting".
+    let wait_deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
+    let session_id = loop {
+        let replay_only_session = state
+            .recording
+            .lock()
+            .await
+            .as_ref()
+            .filter(|active| active.replay_only)
+            .map(|active| active.session_id.clone());
+        if let Some(session_id) = replay_only_session {
+            break session_id;
+        }
+        if !crate::replay_buffer::start_in_flight(state) {
+            return Ok(());
+        }
+        if Instant::now() >= wait_deadline {
+            bail!("Clips are still starting. Try again in a moment.");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     };
     tracing::info!("Replay buffer session {session_id} hands over to a new session.");
     let status = stop_recording_with_intent(state.clone(), SessionStopParams::default())

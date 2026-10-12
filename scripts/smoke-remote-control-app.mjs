@@ -220,9 +220,14 @@ try {
     (ring) => ring?.state === 'off',
     'the ring off after the switch'
   )
+  // A buffer-only stop is quick enough to land inside the 150 ms debounce
+  // window of the clip intent above: let it pass, this is not the bounce test.
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
   const clipAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const clipTicket = await remoteRequest(remote, 'remote.intent', { kind: 'clipMark' })
-  if (!clipTicket.payload?.accepted) fail('clipMark intent was not accepted')
+  if (!clipTicket.payload?.accepted) {
+    fail(`clipMark intent was not accepted: ${JSON.stringify(clipTicket.payload)}`)
+  }
   const clipAck = await clipAckPromise
   if (clipAck?.intentId !== clipTicket.payload.intentId || clipAck?.ok !== false) {
     fail(

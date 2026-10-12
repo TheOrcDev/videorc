@@ -413,6 +413,9 @@ pub struct ReplayRegistry {
     /// The last published event, so `replay.status` and a fresh socket get
     /// the same answer the renderer last saw.
     last_event: Option<ReplayStateEvent>,
+    /// A buffer-only `session.start` is between admission and its running
+    /// session (see `begin_start_in_flight`).
+    start_in_flight: bool,
 }
 
 fn lock(state: &AppState) -> std::sync::MutexGuard<'_, ReplayRegistry> {
@@ -420,6 +423,32 @@ fn lock(state: &AppState) -> std::sync::MutexGuard<'_, ReplayRegistry> {
         .replay
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Marks a buffer-only start in flight for the whole of its `session.start`
+/// (the ring runs by default and re-arms right after every Stop, so a Record
+/// pressed in that gap used to meet "A capture session is starting"). The
+/// handover waits for the flag instead; dropping the guard clears it,
+/// whether the start ran or failed.
+pub struct StartInFlightGuard {
+    state: AppState,
+}
+
+pub fn begin_start_in_flight(state: &AppState) -> StartInFlightGuard {
+    lock(state).start_in_flight = true;
+    StartInFlightGuard {
+        state: state.clone(),
+    }
+}
+
+impl Drop for StartInFlightGuard {
+    fn drop(&mut self) {
+        lock(&self.state).start_in_flight = false;
+    }
+}
+
+pub fn start_in_flight(state: &AppState) -> bool {
+    lock(state).start_in_flight
 }
 
 /// The ring root: under the backend's managed app data, beside the
