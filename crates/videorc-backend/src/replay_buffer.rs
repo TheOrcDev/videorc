@@ -386,6 +386,8 @@ pub struct ReplayRuntime {
     pub state: ReplayBufferState,
     pub buffered_seconds: f64,
     pub reason: Option<String>,
+    /// Segment files on disk after the last prune pass.
+    pub segment_files: Option<u32>,
     prune_task: Option<JoinHandle<()>>,
     /// A save is running on its own task.
     pub save_in_progress: bool,
@@ -517,6 +519,7 @@ impl Drop for RingGuard {
                 buffered_seconds: 0.0,
                 replay_only: false,
                 reason: Some("The session did not start.".to_string()),
+                segment_files: None,
             };
             registry.last_event = Some(event.clone());
             drop(registry);
@@ -576,6 +579,7 @@ pub fn prepare(state: &AppState, request: RingRequest<'_>) -> Result<RingGuard> 
         state: ReplayBufferState::Starting,
         buffered_seconds: 0.0,
         reason: None,
+        segment_files: None,
         prune_task: None,
         save_in_progress: false,
         queued_save: None,
@@ -626,6 +630,8 @@ pub fn attach(state: &AppState, mut guard: RingGuard) {
                     return;
                 };
                 runtime.buffered_seconds = report.buffered_seconds;
+                runtime.segment_files =
+                    Some(u32::try_from(report.segment_files).unwrap_or(u32::MAX));
             }
             emit_state(&task_state);
         }
@@ -684,6 +690,7 @@ pub fn retire(state: &AppState, session_id: &str, outcome: RetireOutcome) {
             buffered_seconds: 0.0,
             replay_only: false,
             reason,
+            segment_files: None,
         });
         dir
     };
@@ -710,6 +717,7 @@ pub fn snapshot(state: &AppState) -> ReplayStateEvent {
             buffered_seconds: runtime.buffered_seconds,
             replay_only: runtime.replay_only,
             reason: runtime.reason.clone(),
+            segment_files: runtime.segment_files,
         },
         None => registry.last_event.clone().unwrap_or(ReplayStateEvent {
             state: ReplayBufferState::Off,
@@ -718,6 +726,7 @@ pub fn snapshot(state: &AppState) -> ReplayStateEvent {
             buffered_seconds: 0.0,
             replay_only: false,
             reason: None,
+            segment_files: None,
         }),
     }
 }
@@ -1280,6 +1289,25 @@ async fn write_replay(
     })
 }
 
+/// A buffer-only request for tests in other modules (plan 181 S8).
+#[cfg(test)]
+pub(crate) fn replay_only_test_params() -> StartSessionParams {
+    serde_json::from_value(serde_json::json!({
+        "sources": { "screenId": null, "windowId": null, "cameraId": null, "microphoneId": null, "testPattern": true },
+        "layout": { "cameraCorner": "bottom-right", "cameraSize": "medium", "cameraShape": "rectangle", "cameraMargin": 32 },
+        "output": {
+            "recordEnabled": false,
+            "streamEnabled": false,
+            "outputDirectory": null,
+            "ffmpegPath": null,
+            "video": { "preset": "tutorial-1080p30", "width": 1280, "height": 720, "fps": 30, "bitrateKbps": 4000 },
+            "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+        },
+        "replay": { "seconds": 30 }
+    }))
+    .unwrap()
+}
+
 #[cfg(test)]
 mod runtime_tests {
     use super::*;
@@ -1541,20 +1569,7 @@ mod runtime_tests {
     }
 
     fn replay_only_params() -> StartSessionParams {
-        serde_json::from_value(serde_json::json!({
-            "sources": { "screenId": null, "windowId": null, "cameraId": null, "microphoneId": null, "testPattern": true },
-            "layout": { "cameraCorner": "bottom-right", "cameraSize": "medium", "cameraShape": "rectangle", "cameraMargin": 32 },
-            "output": {
-                "recordEnabled": false,
-                "streamEnabled": false,
-                "outputDirectory": null,
-                "ffmpegPath": null,
-                "video": { "preset": "tutorial-1080p30", "width": 1280, "height": 720, "fps": 30, "bitrateKbps": 4000 },
-                "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
-            },
-            "replay": { "seconds": 30 }
-        }))
-        .unwrap()
+        replay_only_test_params()
     }
 
     /// Plan 181 S3: a real ring (test pattern plus a sine tone, encoded by

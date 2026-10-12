@@ -2011,7 +2011,8 @@
       "sessionId": "replay-session-fixture",
       "seconds": 30,
       "bufferedSeconds": 12.5,
-      "replayOnly": true
+      "replayOnly": true,
+      "segmentFiles": 8
     },
     "stateOff": { "state": "off", "seconds": 30, "bufferedSeconds": 0.0 },
     "stateError": {

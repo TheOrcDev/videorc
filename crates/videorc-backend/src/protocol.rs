@@ -1159,6 +1159,10 @@ pub struct ReplayStateEvent {
     pub replay_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Segment files in the ring after the last prune pass (diagnostics and
+    /// the replay smoke's disk bound: never above `ceil(N/2) + 3`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_files: Option<u32>,
 }
 
 /// `replay.save` answers at once; the save runs on its own task and reports

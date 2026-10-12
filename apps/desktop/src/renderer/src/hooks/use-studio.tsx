@@ -7,7 +7,7 @@ import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import { streamOutputCheckFailureMessage } from '@/lib/stream-output-check-message'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
-import { clipMarkedToast } from '../../../shared/clip-marks'
+import { clipMarkBecameReplay, clipMarkedToast } from '../../../shared/clip-marks'
 import {
   sessionActivity,
   sessionIsLive,
@@ -15777,7 +15777,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       markClip: async () => {
         try {
           const event = await client.request<ClipMarkedEvent>('clip.mark')
-          return event.saved ? { ok: true } : { ok: false, message: clipMarkedToast(event).title }
+          // Plan 181 S8: a mark that became a replay is a success for a deck key.
+          return event.saved || clipMarkBecameReplay(event)
+            ? { ok: true }
+            : { ok: false, message: clipMarkedToast(event).title }
         } catch (error) {
           return {
             ok: false,

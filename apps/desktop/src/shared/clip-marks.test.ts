@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { CLIP_MARK_IN_REPORT, clipMarkedToast, formatClipMarkClock } from './clip-marks'
+import {
+  CLIP_MARK_IN_REPORT,
+  CLIP_MARK_REPLAY_SAVED_REASON,
+  clipMarkBecameReplay,
+  clipMarkedToast,
+  formatClipMarkClock
+} from './clip-marks'
 
 describe('clip mark clock', () => {
   it('reads m:ss below an hour and h:mm:ss from one hour', () => {
@@ -42,6 +48,24 @@ describe('clip marked toast', () => {
         { streaming: false }
       )
     ).toEqual({ kind: 'success', title: 'Clip marked at 12:34', description: undefined })
+  })
+
+  it('says a mark became a replay when recording was off and the buffer was on (plan 181 S8)', () => {
+    const event = {
+      sessionId: 's',
+      atSeconds: 61.5,
+      source: 'manual' as const,
+      saved: false,
+      reason: CLIP_MARK_REPLAY_SAVED_REASON
+    }
+    expect(clipMarkBecameReplay(event)).toBe(true)
+    expect(clipMarkBecameReplay({ saved: true, reason: undefined })).toBe(false)
+    expect(clipMarkBecameReplay({ saved: false, reason: 'recording-off' })).toBe(false)
+    expect(clipMarkedToast(event)).toEqual({
+      kind: 'success',
+      title: 'Saving a replay instead',
+      description: "Recording is off, so the replay buffer is saving this moment. It's in Library."
+    })
   })
 
   it('explains an unsaved mark instead of confirming it', () => {

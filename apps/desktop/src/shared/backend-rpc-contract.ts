@@ -734,7 +734,8 @@ const replayStateEventSchema = objectSchema(
     seconds: numberSchema({ integer: true, min: 0, max: 3600 }),
     bufferedSeconds: numberSchema({ min: 0 }),
     replayOnly: optionalSchema(booleanSchema),
-    reason: optionalSchema(stringSchema({ maxLength: 2000 }))
+    reason: optionalSchema(stringSchema({ maxLength: 2000 })),
+    segmentFiles: optionalSchema(nonNegativeInteger)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<import('./backend').ReplayStateEvent>

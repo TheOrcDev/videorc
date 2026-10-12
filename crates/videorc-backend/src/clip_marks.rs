@@ -495,6 +495,21 @@ async fn record_mark(
             saved: true,
             reason: None,
         }
+    } else if let Ok(accepted) = crate::replay_buffer::request_save(state, Some(source)) {
+        // Plan 181 S8: no file to stamp, but the replay buffer holds the
+        // moment. The save reports through replay.saved / replay.saveFailed,
+        // so no clip.marked event here: one toast per window, never two.
+        tracing::info!(
+            "Clip mark on {session_id} with recording off saves a replay ({}).",
+            accepted.save_id
+        );
+        return Ok(ClipMarkedEvent {
+            session_id,
+            at_seconds,
+            source,
+            saved: false,
+            reason: Some(REPLAY_SAVED_REASON.to_string()),
+        });
     } else {
         ClipMarkedEvent {
             session_id,
@@ -507,6 +522,10 @@ async fn record_mark(
     state.emit_event("clip.marked", event.clone());
     Ok(event)
 }
+
+/// The `clip.mark` reply when the mark became a replay instead (plan 181
+/// S8). Mirrored in `shared/clip-marks.ts`.
+pub const REPLAY_SAVED_REASON: &str = "replay-saved";
 
 fn note_manual_target(state: &AppState, target: &MarkTarget, at_seconds: f64) {
     if target.records_to_file
@@ -845,6 +864,61 @@ mod tests {
         note_transcript_final(&state, "clip that", &[], 40.0, None);
         assert!(events.try_recv().is_err());
         assert_eq!(list_marks(&state, "voice-b").unwrap().len(), 1);
+    }
+
+    /// Plan 181 S8: recording off, replay buffer on: the mark saves a replay.
+    /// The ring here has no segments yet, so the save reports `empty`; the
+    /// routing, the reply and the missing clip.marked are what this proves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_with_recording_off_saves_a_replay_when_the_ring_is_on() {
+        let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
+        let state = mark_test_state();
+        let params = crate::replay_buffer::replay_only_test_params();
+        let recordings =
+            std::env::temp_dir().join(format!("videorc-clip-mark-replay-{}", uuid::Uuid::new_v4()));
+        let guard = crate::replay_buffer::prepare(
+            &state,
+            crate::replay_buffer::RingRequest {
+                session_id: "ring-only",
+                params: &params,
+                replay_only: true,
+                recordings_dir: &recordings,
+                ffmpeg_path: "ffmpeg",
+            },
+        )
+        .unwrap();
+        crate::replay_buffer::attach(&state, guard);
+        let mut active = crate::recording::test_active_recording_stub("ring-only");
+        active.output_path = None;
+        active.replay_only = true;
+        *state.recording.lock().await = Some(active);
+        let mut events = state.events.subscribe();
+        let reply = mark_manual(&state).await.unwrap();
+        assert!(!reply.saved);
+        assert_eq!(reply.reason.as_deref(), Some(REPLAY_SAVED_REASON));
+        assert_eq!(reply.session_id, "ring-only");
+        // No clip.marked for this press; the save answers by its own event.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                assert_ne!(event.event, "clip.marked");
+                if event.event == "replay.saveFailed" || event.event == "replay.saved" {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome.event, "replay.saveFailed");
+        assert_eq!(outcome.payload["reason"], "empty");
+        assert_eq!(list_marks(&state, "ring-only").unwrap().len(), 0);
+        state.recording.lock().await.take();
+        crate::replay_buffer::retire(
+            &state,
+            "ring-only",
+            crate::replay_buffer::RetireOutcome::Stopped,
+        );
+        let _ = std::fs::remove_dir_all(&recordings);
     }
 
     #[test]

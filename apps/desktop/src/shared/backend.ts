@@ -1624,6 +1624,8 @@ export interface ReplayStateEvent {
   /** The session exists only for the buffer (no file, no stream). */
   replayOnly?: boolean
   reason?: string
+  /** Segment files in the ring after the last prune pass: never above ceil(N/2) + 3. */
+  segmentFiles?: number
 }
 
 /** `replay.save` answers at once; `replay.saved` or `replay.saveFailed`
