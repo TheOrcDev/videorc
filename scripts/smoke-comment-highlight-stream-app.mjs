@@ -98,6 +98,17 @@ const modernScenarios = [
     allowHighlightUnavailable: false
   }
 ]
+// Linux's raw bridge runs one encode for the recording and the stream, so a
+// recording below the stream is refused rather than capping the stream (plan
+// 0016). There the split scenario records at the stream profile: one shared
+// encode that still proves the card reaches the stream and the recording.
+function recordingVideoFor(scenario) {
+  if (process.platform === 'linux' && scenario.label === 'split-record-stream') {
+    return { ...scenario.streamProfile, height: 1080, fps: scenario.fps }
+  }
+  return { preset: 'custom', width: 640, height: 360, fps: scenario.fps, bitrateKbps: 2000 }
+}
+
 const legacyScenario = {
   label: 'legacy-stream-only-60fps',
   anchor: 'bottom-left',
@@ -705,13 +716,7 @@ function baseSessionParams({ scenario, outputDirectoryCapability, target, timest
       recordEnabled: scenario.recordEnabled,
       streamEnabled: true,
       outputDirectoryCapability,
-      video: {
-        preset: 'custom',
-        width: 640,
-        height: 360,
-        fps: scenario.fps,
-        bitrateKbps: 2000
-      },
+      video: recordingVideoFor(scenario),
       rtmp: {
         preset: 'custom',
         serverUrl: target.serverUrl,

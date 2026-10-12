@@ -20863,10 +20863,35 @@ fn resolve_provider_stream_output_plan_with_separate_roles(
             }
         })
         .collect::<Vec<_>>();
+    let destinations_shared = strictest_shared_stream_profile(&shared_candidates)?;
     if params.output.record_enabled {
         shared_candidates.push(provider_safe_shared_profile(&params.output.video));
     }
     let shared = strictest_shared_stream_profile(&shared_candidates)?;
+    // One encode serves both: a recording below the destinations' profile
+    // would silently send the livestream at the recording's quality (Linux
+    // raw path, plan 0016: a 1080p stream arrived at 640x360). Refuse instead;
+    // the renderer re-plans the recording to follow the stream. Simulcast is
+    // left as it was: its horizontal leg is the session's primary encode. A
+    // recording that differs from the shared encode is already refused by
+    // the profile policy ("share one encoder"); this is the case it misses.
+    if params.simulcast.is_none()
+        && params.output.record_enabled
+        && same_video_profile(&params.output.video, &shared)
+        && !same_video_profile(&shared, &destinations_shared)
+    {
+        bail!(
+            "This computer runs one encode for the recording and the livestream, so recording at {}x{}@{}fps, {} kbps would send the livestream at that quality too. Record at the stream's {}x{}@{}fps, {} kbps or turn recording off.",
+            params.output.video.width,
+            params.output.video.height,
+            params.output.video.fps,
+            params.output.video.bitrate_kbps,
+            destinations_shared.width,
+            destinations_shared.height,
+            destinations_shared.fps,
+            destinations_shared.bitrate_kbps
+        );
+    }
     for target in &mut targets {
         target.video = shared.clone();
     }
@@ -28404,6 +28429,49 @@ mod tests {
             plan.targets
                 .iter()
                 .all(|target| target.video.bitrate_kbps == 6000)
+        );
+        assert!(!plan.separate_encoded_output_role);
+    }
+
+    #[test]
+    fn a_shared_encode_never_sends_the_stream_at_a_smaller_recordings_quality() {
+        // Plan 0016: Linux's raw path has no separate stream role. Recording
+        // 640x360 with a 1080p destination used to collapse the stream to the
+        // recording's profile and stream it silently at 640x360.
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::Tutorial720p30);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6000;
+        params.streaming = Some(streaming);
+
+        let refused = resolve_provider_stream_output_plan_with_separate_roles(&params, false)
+            .expect_err("a smaller recording must not cap the livestream");
+        assert!(
+            refused
+                .to_string()
+                .contains("send the livestream at that quality"),
+            "{refused}"
+        );
+
+        // A lower recording bitrate at the same size is the same downgrade.
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            bitrate_kbps: 4000,
+            ..video_preset_defaults(VideoPreset::StreamSafe1080p30)
+        };
+        assert!(resolve_provider_stream_output_plan_with_separate_roles(&params, false).is_err());
+
+        // The recording following the stream (the renderer's re-plan) shares.
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        let plan = resolve_provider_stream_output_plan_with_separate_roles(&params, false).unwrap();
+        assert_eq!(
+            plan.stream_video,
+            video_preset_defaults(VideoPreset::StreamSafe1080p30)
         );
         assert!(!plan.separate_encoded_output_role);
     }

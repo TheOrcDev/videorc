@@ -37,7 +37,7 @@ export function StreamQualityControl({
         {custom ? 'Using a saved custom profile. ' : ''}
         {value === 'stream-youtube-4k30'
           ? '4K needs normal latency on YouTube. Other destinations keep their supported quality.'
-          : 'Streaming quality is independent of your local recording.'}
+          : 'Your recording keeps its own quality when this computer can run two encodes. Otherwise it matches the stream.'}
       </FieldDescription>
     </Field>
   )

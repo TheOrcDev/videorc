@@ -88,6 +88,21 @@ describe('settleGoLiveSessionOutput (plan 090)', () => {
     expect(output.streaming).toBe(config.streaming)
   })
 
+  // Plan 0016: Linux's raw bridge never splits. With the default 720p record
+  // and 1080p stream (or only a lower recording bitrate) Go Live was refused.
+  it.each([
+    ['a smaller recording', { ...videoPresets['tutorial-720p30'] }],
+    ['a lower recording bitrate', { ...stream, preset: 'custom' as const, bitrateKbps: 4000 }]
+  ])('raises %s to the stream profile when the host cannot split', async (_, video) => {
+    const config = recordAndStreamConfig({ video })
+    const output = await settleGoLiveSessionOutput(deps(config))
+
+    expect(output.reason).toBeNull()
+    expect(output.video).toMatchObject({ width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 })
+    expect(output.sharedFallbackVideo).toMatchObject({ width: 1920, bitrateKbps: 6000 })
+    expect(goLiveSessionOutputNotice(output)?.title).toBe('Recording will match the stream.')
+  })
+
   it('materializes the shared effective profile before preparing mixed destinations', async () => {
     const config = recordAndStreamConfig({
       recordEnabled: false,
