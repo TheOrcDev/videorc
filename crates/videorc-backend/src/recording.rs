@@ -17443,6 +17443,7 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
 /// to release before the real session is admitted.
 const REPLAY_HANDOVER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
 fn bridge_recording_ffmpeg_args_with_encoder(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -17506,6 +17507,7 @@ fn bridge_compositor_ffmpeg_args(
     )
 }
 
+#[cfg(test)]
 fn bridge_compositor_ffmpeg_args_with_encoder(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -17739,6 +17741,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn bridge_compositor_split_output_ffmpeg_args(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -18353,6 +18356,7 @@ fn ffmpeg_args(
     )
 }
 
+#[cfg(test)]
 fn ffmpeg_args_with_encoder(
     capture: &CaptureInputs,
     params: &StartSessionParams,

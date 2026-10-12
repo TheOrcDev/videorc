@@ -5443,6 +5443,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.utterance.dismiss"
         | "cohost.utterance.say"
         | "clip.mark"
+        // Plan 181 S3: answers at once; the save runs on its own task and
+        // reports through replay.saved / replay.saveFailed.
+        | "replay.save"
         | "session.marker.voice.configure"
         | "session.marker.create"
         | "session.marker.rename"
@@ -12713,6 +12716,10 @@ async fn handle_text_message_with_role(
             Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
         },
         "replay.status" => ServerResponse::ok(command.id, replay_buffer::snapshot(state)),
+        "replay.save" => match replay_buffer::request_save(state, None) {
+            Ok(accepted) => ServerResponse::ok(command.id, accepted),
+            Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
+        },
         "clip.marks.list" => {
             match serde_json::from_value::<protocol::ClipMarksListParams>(command.params) {
                 Ok(params) => match clip_marks::list_marks(state, &params.session_id) {
