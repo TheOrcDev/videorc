@@ -151,6 +151,11 @@ export const SMOKE_BACKEND_RPC_METHOD_NAMES = new Set([
   // main does after copying a folder (admin only in the backend).
   'cohost.pet.import',
   'compositor.scene.update',
+  // Read-only. The preview lifecycle and window probes check which transport
+  // and backing the backend reports (Windows D3D11/fallback, Linux proof
+  // surface); without it `probe:preview-lifecycle:linux` failed every run
+  // (Linux plan 0020).
+  'diagnostics.stats',
   'encoder_bridge.synthetic_record',
   'recording.start_test'
 ])

@@ -182,10 +182,14 @@ describe('smoke command security', () => {
         'captions.test.snapshot',
         'cohost.pet.import',
         'compositor.scene.update',
+        'diagnostics.stats',
         'encoder_bridge.synthetic_record',
         'recording.start_test'
       ])
     )
+    expect(
+      validateSmokeBackendRpcRequest({ method: 'diagnostics.stats', params: {}, timeoutMs: 30_000 })
+    ).toEqual({ method: 'diagnostics.stats', params: {}, timeoutMs: 30_000 })
     expect(
       validateSmokeBackendRpcRequest({
         method: 'audio.test.disconnect',
