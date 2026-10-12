@@ -30,6 +30,11 @@ import {
 } from './install-swap.mjs'
 import { LAB_TEAM_ID, parseCodesignDetails, verifyApp } from './install-verify.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 const SHA = '0123abcd'.repeat(5)
 const SHORT = SHA.slice(0, 7)
 const RUN_ID = '987654321'
@@ -331,42 +336,46 @@ test('verifyApp refuses ad-hoc, wrong team, bad signature, Gatekeeper and quaran
   }
 })
 
-test('release install verifies sha512, codesign and Gatekeeper, keeps the old app', async () => {
-  const box = await sandbox()
-  try {
-    await writeApp(box.appPath, profile({ marker: 'old', version: '0.9.140' }))
-    const zipText = JSON.stringify(profile({ marker: 'new' }))
-    const { fetchImpl, requested } = releaseFetch(zipText)
-    const { runner, calls } = fakeRunner()
-    const record = await installBuild({
-      platform: 'darwin',
-      spec: parseBuildSpec('release'),
-      appPath: box.appPath,
-      labDir: box.labDir,
-      runner,
-      fetchImpl,
-      now: () => new Date('2026-10-12T12:00:00Z')
-    })
-    assert.equal(await marker(box.appPath), 'new')
-    assert.equal(await marker(previousAppPath(box.appPath)), 'old')
-    assert.deepEqual(requested, [
-      `${RELEASE_FEED_URL}latest-mac.yml`,
-      `${RELEASE_FEED_URL}Videorc-0.9.141-mac-arm64.zip`
-    ])
-    assert.ok(calls.some(([command]) => command === 'spctl'))
-    assert.equal(record.source, 'release')
-    assert.equal(record.version, '0.9.141')
-    assert.equal(record.sha, null)
-    assert.equal(record.verifiedAt, '2026-10-12T12:00:00.000Z')
-    assert.deepEqual(record.previous, { source: 'unknown', version: '0.9.140', sha: null })
-    assert.deepEqual(await readInstallRecord(box.labDir), record)
-    assert.equal((await stat(installRecordPath(box.labDir))).mode & 0o777, 0o600)
-    assert.deepEqual(await leftovers(box.appPath), [])
-    assert.deepEqual(await readdir(join(box.labDir, 'downloads')), [])
-  } finally {
-    await box.cleanup()
+test(
+  'release install verifies sha512, codesign and Gatekeeper, keeps the old app',
+  posixOnly,
+  async () => {
+    const box = await sandbox()
+    try {
+      await writeApp(box.appPath, profile({ marker: 'old', version: '0.9.140' }))
+      const zipText = JSON.stringify(profile({ marker: 'new' }))
+      const { fetchImpl, requested } = releaseFetch(zipText)
+      const { runner, calls } = fakeRunner()
+      const record = await installBuild({
+        platform: 'darwin',
+        spec: parseBuildSpec('release'),
+        appPath: box.appPath,
+        labDir: box.labDir,
+        runner,
+        fetchImpl,
+        now: () => new Date('2026-10-12T12:00:00Z')
+      })
+      assert.equal(await marker(box.appPath), 'new')
+      assert.equal(await marker(previousAppPath(box.appPath)), 'old')
+      assert.deepEqual(requested, [
+        `${RELEASE_FEED_URL}latest-mac.yml`,
+        `${RELEASE_FEED_URL}Videorc-0.9.141-mac-arm64.zip`
+      ])
+      assert.ok(calls.some(([command]) => command === 'spctl'))
+      assert.equal(record.source, 'release')
+      assert.equal(record.version, '0.9.141')
+      assert.equal(record.sha, null)
+      assert.equal(record.verifiedAt, '2026-10-12T12:00:00.000Z')
+      assert.deepEqual(record.previous, { source: 'unknown', version: '0.9.140', sha: null })
+      assert.deepEqual(await readInstallRecord(box.labDir), record)
+      assert.equal((await stat(installRecordPath(box.labDir))).mode & 0o777, 0o600)
+      assert.deepEqual(await leftovers(box.appPath), [])
+      assert.deepEqual(await readdir(join(box.labDir, 'downloads')), [])
+    } finally {
+      await box.cleanup()
+    }
   }
-})
+)
 
 test('release install refuses a zip whose sha512 does not match the feed', async () => {
   const box = await sandbox()
@@ -775,7 +784,7 @@ function linuxInstall(box, spec, extra = {}) {
   })
 }
 
-test('Linux build grammar, default paths and the previous dir', () => {
+test('Linux build grammar, default paths and the previous dir', posixOnly, () => {
   assert.deepEqual(parseBuildSpec('file:~/Downloads/a.AppImage', { platform: LINUX }), {
     kind: 'file',
     path: '~/Downloads/a.AppImage'
@@ -812,155 +821,177 @@ test('Linux build grammar, default paths and the previous dir', () => {
   assert.equal(parseDesktopVersion('[Desktop Entry]\n'), null)
 })
 
-test('Linux release: feed sha512, magic, extract, structure, version, swap, record', async () => {
-  const box = await linuxSandbox()
-  try {
-    await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old', version: '0.9.140' }))
-    const { fetchImpl, requested } = linuxReleaseFetch(appImageBytes(linuxProfile()))
-    const { runner, calls } = fakeLinuxRunner()
-    const lines = []
-    const record = await linuxInstall(box, 'release', {
-      runner,
-      fetchImpl,
-      log: (line) => lines.push(line)
-    })
-    assert.equal(await linuxMarker(box.appPath), 'new')
-    assert.equal(await linuxMarker(previousAppPath(box.appPath)), 'old')
-    assert.ok(((await stat(join(box.appPath, 'videorc'))).mode & 0o111) !== 0)
-    assert.deepEqual(requested, [
-      `${RELEASE_FEED_URL}latest-linux.yml`,
-      `${RELEASE_FEED_URL}${APPIMAGE_NAME}`
-    ])
-    // The only thing ever executed: the hash-checked AppImage, extracting into staging.
-    assert.equal(calls.length, 1)
-    assert.equal(basename(calls[0].command), APPIMAGE_NAME)
-    assert.ok(calls[0].command.startsWith(join(box.labDir, 'downloads')))
-    assert.deepEqual(calls[0].args, ['--appimage-extract'])
-    assert.equal(dirname(dirname(calls[0].cwd)), dirname(box.appPath))
-    assert.match(basename(dirname(calls[0].cwd)), /^\.videorc-install-/)
-    assert.deepEqual(record, {
-      schema: 1,
-      source: 'release',
-      version: LINUX_VERSION,
-      sha: null,
-      feedUrl: RELEASE_FEED_URL,
-      platform: 'linux',
-      verified: 'sha512',
-      appPath: box.appPath,
-      verifiedAt: '2026-10-12T12:00:00.000Z',
-      installedAt: '2026-10-12T12:00:00.000Z',
-      previous: { source: 'unknown', version: '0.9.140', sha: null }
-    })
-    assert.deepEqual(await readInstallRecord(box.labDir), record)
-    assert.equal((await stat(installRecordPath(box.labDir))).mode & 0o777, 0o600)
-    assert.deepEqual(await leftovers(box.appPath), [])
-    assert.deepEqual(await readdir(join(box.labDir, 'downloads')), [])
-    assert.ok(lines.some((line) => /sha512 verified/.test(line)))
-  } finally {
-    await box.cleanup()
+test(
+  'Linux release: feed sha512, magic, extract, structure, version, swap, record',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old', version: '0.9.140' }))
+      const { fetchImpl, requested } = linuxReleaseFetch(appImageBytes(linuxProfile()))
+      const { runner, calls } = fakeLinuxRunner()
+      const lines = []
+      const record = await linuxInstall(box, 'release', {
+        runner,
+        fetchImpl,
+        log: (line) => lines.push(line)
+      })
+      assert.equal(await linuxMarker(box.appPath), 'new')
+      assert.equal(await linuxMarker(previousAppPath(box.appPath)), 'old')
+      assert.ok(((await stat(join(box.appPath, 'videorc'))).mode & 0o111) !== 0)
+      assert.deepEqual(requested, [
+        `${RELEASE_FEED_URL}latest-linux.yml`,
+        `${RELEASE_FEED_URL}${APPIMAGE_NAME}`
+      ])
+      // The only thing ever executed: the hash-checked AppImage, extracting into staging.
+      assert.equal(calls.length, 1)
+      assert.equal(basename(calls[0].command), APPIMAGE_NAME)
+      assert.ok(calls[0].command.startsWith(join(box.labDir, 'downloads')))
+      assert.deepEqual(calls[0].args, ['--appimage-extract'])
+      assert.equal(dirname(dirname(calls[0].cwd)), dirname(box.appPath))
+      assert.match(basename(dirname(calls[0].cwd)), /^\.videorc-install-/)
+      assert.deepEqual(record, {
+        schema: 1,
+        source: 'release',
+        version: LINUX_VERSION,
+        sha: null,
+        feedUrl: RELEASE_FEED_URL,
+        platform: 'linux',
+        verified: 'sha512',
+        appPath: box.appPath,
+        verifiedAt: '2026-10-12T12:00:00.000Z',
+        installedAt: '2026-10-12T12:00:00.000Z',
+        previous: { source: 'unknown', version: '0.9.140', sha: null }
+      })
+      assert.deepEqual(await readInstallRecord(box.labDir), record)
+      assert.equal((await stat(installRecordPath(box.labDir))).mode & 0o777, 0o600)
+      assert.deepEqual(await leftovers(box.appPath), [])
+      assert.deepEqual(await readdir(join(box.labDir, 'downloads')), [])
+      assert.ok(lines.some((line) => /sha512 verified/.test(line)))
+    } finally {
+      await box.cleanup()
+    }
   }
-})
+)
 
-test('Linux release refuses when the feed is not public, before downloading anything', async () => {
-  const box = await linuxSandbox()
-  try {
-    await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old' }))
-    for (const status of [404, 401, 403]) {
-      const { fetchImpl, requested } = linuxReleaseFetch(appImageBytes(linuxProfile()), {
-        feedStatus: status
+test(
+  'Linux release refuses when the feed is not public, before downloading anything',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old' }))
+      for (const status of [404, 401, 403]) {
+        const { fetchImpl, requested } = linuxReleaseFetch(appImageBytes(linuxProfile()), {
+          feedStatus: status
+        })
+        const { runner, calls } = fakeLinuxRunner()
+        await assert.rejects(linuxInstall(box, 'release', { runner, fetchImpl }), (error) => {
+          assert.equal(error.code, 'linux-feed-unavailable')
+          assert.match(error.message, /not public/)
+          assert.match(error.message, /--build file:<AppImage>/)
+          return true
+        })
+        assert.deepEqual(requested, [`${RELEASE_FEED_URL}latest-linux.yml`])
+        assert.deepEqual(calls, [])
+      }
+      assert.equal(await linuxMarker(box.appPath), 'old')
+      assert.equal(await readInstallRecord(box.labDir), null)
+    } finally {
+      await box.cleanup()
+    }
+  }
+)
+
+test(
+  'Linux release refuses an AppImage whose sha512 does not match the feed',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      const { fetchImpl } = linuxReleaseFetch(appImageBytes(linuxProfile()), {
+        feedSha512: createHash('sha512').update('other').digest('base64')
       })
       const { runner, calls } = fakeLinuxRunner()
-      await assert.rejects(linuxInstall(box, 'release', { runner, fetchImpl }), (error) => {
-        assert.equal(error.code, 'linux-feed-unavailable')
-        assert.match(error.message, /not public/)
-        assert.match(error.message, /--build file:<AppImage>/)
-        return true
-      })
-      assert.deepEqual(requested, [`${RELEASE_FEED_URL}latest-linux.yml`])
+      await assertRefused(linuxInstall(box, 'release', { runner, fetchImpl }), 'sha512-mismatch')
       assert.deepEqual(calls, [])
+    } finally {
+      await box.cleanup()
     }
-    assert.equal(await linuxMarker(box.appPath), 'old')
-    assert.equal(await readInstallRecord(box.labDir), null)
-  } finally {
-    await box.cleanup()
   }
-})
+)
 
-test('Linux release refuses an AppImage whose sha512 does not match the feed', async () => {
-  const box = await linuxSandbox()
-  try {
-    const { fetchImpl } = linuxReleaseFetch(appImageBytes(linuxProfile()), {
-      feedSha512: createHash('sha512').update('other').digest('base64')
-    })
-    const { runner, calls } = fakeLinuxRunner()
-    await assertRefused(linuxInstall(box, 'release', { runner, fetchImpl }), 'sha512-mismatch')
-    assert.deepEqual(calls, [])
-  } finally {
-    await box.cleanup()
+test(
+  'Linux file: verifies the sidecar sha256 while copying and leaves the download untouched',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      const { path } = await writeDownloadedAppImage(box, linuxProfile())
+      const { runner, calls } = fakeLinuxRunner()
+      const record = await linuxInstall(box, `file:${path}`, { runner })
+      assert.equal(await linuxMarker(box.appPath), 'new')
+      assert.equal(record.source, 'file')
+      assert.equal(record.version, LINUX_VERSION)
+      assert.equal(record.verified, 'sha256')
+      assert.equal(record.hashFrom, `${APPIMAGE_NAME}.sha256`)
+      assert.equal(record.file, APPIMAGE_NAME)
+      assert.equal(record.platform, 'linux')
+      assert.equal(record.previous, null)
+      assert.equal(calls.length, 1)
+      assert.notEqual(calls[0].command, path, 'runs the verified copy, never the original')
+      assert.equal((await stat(path)).mode & 0o777, 0o644)
+    } finally {
+      await box.cleanup()
+    }
   }
-})
+)
 
-test('Linux file: verifies the sidecar sha256 while copying and leaves the download untouched', async () => {
-  const box = await linuxSandbox()
-  try {
-    const { path } = await writeDownloadedAppImage(box, linuxProfile())
-    const { runner, calls } = fakeLinuxRunner()
-    const record = await linuxInstall(box, `file:${path}`, { runner })
-    assert.equal(await linuxMarker(box.appPath), 'new')
-    assert.equal(record.source, 'file')
-    assert.equal(record.version, LINUX_VERSION)
-    assert.equal(record.verified, 'sha256')
-    assert.equal(record.hashFrom, `${APPIMAGE_NAME}.sha256`)
-    assert.equal(record.file, APPIMAGE_NAME)
-    assert.equal(record.platform, 'linux')
-    assert.equal(record.previous, null)
-    assert.equal(calls.length, 1)
-    assert.notEqual(calls[0].command, path, 'runs the verified copy, never the original')
-    assert.equal((await stat(path)).mode & 0o777, 0o644)
-  } finally {
-    await box.cleanup()
-  }
-})
-
-test('Linux file: takes --sha256 first, then release.json (with its version and commit)', async () => {
-  const box = await linuxSandbox()
-  try {
-    const { path, bytes } = await writeDownloadedAppImage(box, linuxProfile(), { sidecar: 'none' })
-    const sha256 = createHash('sha256').update(bytes).digest('hex')
-    await writeFile(
-      join(box.downloads, 'release.json'),
-      JSON.stringify({
-        filename: APPIMAGE_NAME,
-        sha256,
-        sizeBytes: bytes.length,
-        bundleVersion: LINUX_VERSION,
-        releaseId: `${LINUX_VERSION}-alpha.1`,
-        sourceCommit: SOURCE_COMMIT
+test(
+  'Linux file: takes --sha256 first, then release.json (with its version and commit)',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      const { path, bytes } = await writeDownloadedAppImage(box, linuxProfile(), {
+        sidecar: 'none'
       })
-    )
-    const fromManifest = await linuxInstall(box, `file:${path}`, {
-      runner: fakeLinuxRunner().runner
-    })
-    assert.equal(fromManifest.hashFrom, 'release.json')
-    assert.equal(fromManifest.sha, SOURCE_COMMIT)
-    assert.equal(fromManifest.releaseId, `${LINUX_VERSION}-alpha.1`)
+      const sha256 = createHash('sha256').update(bytes).digest('hex')
+      await writeFile(
+        join(box.downloads, 'release.json'),
+        JSON.stringify({
+          filename: APPIMAGE_NAME,
+          sha256,
+          sizeBytes: bytes.length,
+          bundleVersion: LINUX_VERSION,
+          releaseId: `${LINUX_VERSION}-alpha.1`,
+          sourceCommit: SOURCE_COMMIT
+        })
+      )
+      const fromManifest = await linuxInstall(box, `file:${path}`, {
+        runner: fakeLinuxRunner().runner
+      })
+      assert.equal(fromManifest.hashFrom, 'release.json')
+      assert.equal(fromManifest.sha, SOURCE_COMMIT)
+      assert.equal(fromManifest.releaseId, `${LINUX_VERSION}-alpha.1`)
 
-    const fromFlag = await linuxInstall(box, `file:${path}`, {
-      runner: fakeLinuxRunner().runner,
-      sha256: sha256.toUpperCase()
-    })
-    assert.equal(fromFlag.hashFrom, '--sha256')
-    assert.equal(fromFlag.previous.version, LINUX_VERSION)
-    await assertRefused(
-      linuxInstall(box, `file:${path}`, { runner: fakeLinuxRunner().runner, sha256: 'abc' }),
-      'hash-invalid'
-    )
-  } finally {
-    await box.cleanup()
+      const fromFlag = await linuxInstall(box, `file:${path}`, {
+        runner: fakeLinuxRunner().runner,
+        sha256: sha256.toUpperCase()
+      })
+      assert.equal(fromFlag.hashFrom, '--sha256')
+      assert.equal(fromFlag.previous.version, LINUX_VERSION)
+      await assertRefused(
+        linuxInstall(box, `file:${path}`, { runner: fakeLinuxRunner().runner, sha256: 'abc' }),
+        'hash-invalid'
+      )
+    } finally {
+      await box.cleanup()
+    }
   }
-})
+)
 
-test('Linux file: a hash mismatch is refused before anything runs', async () => {
+test('Linux file: a hash mismatch is refused before anything runs', posixOnly, async () => {
   const box = await linuxSandbox()
   try {
     await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old' }))
@@ -976,7 +1007,7 @@ test('Linux file: a hash mismatch is refused before anything runs', async () => 
   }
 })
 
-test('Linux file: with no hash anywhere is refused', async () => {
+test('Linux file: with no hash anywhere is refused', posixOnly, async () => {
   const box = await linuxSandbox()
   try {
     const { path } = await writeDownloadedAppImage(box, linuxProfile(), { sidecar: 'none' })
@@ -1002,29 +1033,33 @@ test('Linux file: with no hash anywhere is refused', async () => {
   }
 })
 
-test('Linux: a file without the AppImage magic is refused before chmod or run', async () => {
-  const box = await linuxSandbox()
-  try {
-    const { path } = await writeDownloadedAppImage(box, linuxProfile(), { magic: false })
-    const { runner, calls } = fakeLinuxRunner()
-    await assertRefused(linuxInstall(box, `file:${path}`, { runner }), 'not-an-appimage')
-    assert.deepEqual(calls, [])
+test(
+  'Linux: a file without the AppImage magic is refused before chmod or run',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      const { path } = await writeDownloadedAppImage(box, linuxProfile(), { magic: false })
+      const { runner, calls } = fakeLinuxRunner()
+      await assertRefused(linuxInstall(box, `file:${path}`, { runner }), 'not-an-appimage')
+      assert.deepEqual(calls, [])
 
-    // Directly: the file keeps its mode, so nothing made it executable.
-    const staging = join(box.root, 'staging')
-    await mkdir(staging)
-    const copy = join(box.root, 'copy.AppImage')
-    await writeFile(copy, appImageBytes(linuxProfile(), { magic: false }), { mode: 0o600 })
-    await chmod(copy, 0o600)
-    await assertRefused(extractAppImage(runner, copy, staging), 'not-an-appimage')
-    assert.equal((await stat(copy)).mode & 0o777, 0o600)
-    assert.deepEqual(calls, [])
-  } finally {
-    await box.cleanup()
+      // Directly: the file keeps its mode, so nothing made it executable.
+      const staging = join(box.root, 'staging')
+      await mkdir(staging)
+      const copy = join(box.root, 'copy.AppImage')
+      await writeFile(copy, appImageBytes(linuxProfile(), { magic: false }), { mode: 0o600 })
+      await chmod(copy, 0o600)
+      await assertRefused(extractAppImage(runner, copy, staging), 'not-an-appimage')
+      assert.equal((await stat(copy)).mode & 0o777, 0o600)
+      assert.deepEqual(calls, [])
+    } finally {
+      await box.cleanup()
+    }
   }
-})
+)
 
-test('Linux: a build without resources/videorc-backend is refused', async () => {
+test('Linux: a build without resources/videorc-backend is refused', posixOnly, async () => {
   const box = await linuxSandbox()
   try {
     await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old' }))
@@ -1046,26 +1081,30 @@ test('Linux: a build without resources/videorc-backend is refused', async () => 
   }
 })
 
-test('Linux: an AppImage whose .desktop version differs from the feed is refused', async () => {
-  const box = await linuxSandbox()
-  try {
-    await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old' }))
-    const { fetchImpl } = linuxReleaseFetch(appImageBytes(linuxProfile({ version: '0.9.139' })))
-    await assert.rejects(
-      linuxInstall(box, 'release', { runner: fakeLinuxRunner().runner, fetchImpl }),
-      (error) => {
-        assert.equal(error.code, 'version-mismatch')
-        assert.match(error.message, /0\.9\.139.*expected 0\.9\.141/)
-        return true
-      }
-    )
-    assert.equal(await linuxMarker(box.appPath), 'old')
-  } finally {
-    await box.cleanup()
+test(
+  'Linux: an AppImage whose .desktop version differs from the feed is refused',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old' }))
+      const { fetchImpl } = linuxReleaseFetch(appImageBytes(linuxProfile({ version: '0.9.139' })))
+      await assert.rejects(
+        linuxInstall(box, 'release', { runner: fakeLinuxRunner().runner, fetchImpl }),
+        (error) => {
+          assert.equal(error.code, 'version-mismatch')
+          assert.match(error.message, /0\.9\.139.*expected 0\.9\.141/)
+          return true
+        }
+      )
+      assert.equal(await linuxMarker(box.appPath), 'old')
+    } finally {
+      await box.cleanup()
+    }
   }
-})
+)
 
-test('Linux local: copies an unpacked build and records it as local-build', async () => {
+test('Linux local: copies an unpacked build and records it as local-build', posixOnly, async () => {
   const box = await linuxSandbox()
   try {
     const unpacked = join(box.root, 'repo', 'apps', 'desktop', 'release', 'linux-unpacked')
@@ -1098,7 +1137,7 @@ test('Linux local: copies an unpacked build and records it as local-build', asyn
   }
 })
 
-test('Linux refuses candidate: (no Linux lab-candidate workflow)', async () => {
+test('Linux refuses candidate: (no Linux lab-candidate workflow)', posixOnly, async () => {
   const box = await linuxSandbox()
   try {
     const { runner, calls } = fakeLinuxRunner()
@@ -1113,89 +1152,97 @@ test('Linux refuses candidate: (no Linux lab-candidate workflow)', async () => {
   }
 })
 
-test('Linux refuses while Videorc runs from the install or previous dir (/proc, no signals)', async () => {
-  const box = await linuxSandbox()
-  try {
-    await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old' }))
-    const previous = previousAppPath(box.appPath)
-    const procs = {
-      1: '/usr/lib/systemd/systemd',
-      // A sibling dir sharing the prefix is not "inside" the install dir.
-      300: `${box.appPath}-other/videorc`,
-      4242: join(box.appPath, 'videorc'),
-      4243: `${join(previous, 'resources', 'videorc-backend')} (deleted)`,
-      77: Object.assign(new Error('EACCES'), { code: 'EACCES' })
+test(
+  'Linux refuses while Videorc runs from the install or previous dir (/proc, no signals)',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old' }))
+      const previous = previousAppPath(box.appPath)
+      const procs = {
+        1: '/usr/lib/systemd/systemd',
+        // A sibling dir sharing the prefix is not "inside" the install dir.
+        300: `${box.appPath}-other/videorc`,
+        4242: join(box.appPath, 'videorc'),
+        4243: `${join(previous, 'resources', 'videorc-backend')} (deleted)`,
+        77: Object.assign(new Error('EACCES'), { code: 'EACCES' })
+      }
+      assert.deepEqual(await linuxRunningPids(box.appPath, fakeProcfs(procs)), ['4242'])
+      assert.deepEqual(await linuxRunningPids(previous, fakeProcfs(procs)), ['4243'])
+
+      const { fetchImpl, requested } = linuxReleaseFetch(appImageBytes(linuxProfile()))
+      const { runner, calls } = fakeLinuxRunner()
+      await assert.rejects(
+        linuxInstall(box, 'release', { runner, fetchImpl, procfs: fakeProcfs(procs) }),
+        (error) => {
+          assert.equal(error.code, 'app-running')
+          assert.match(error.message, /pid 4242/)
+          return true
+        }
+      )
+      delete procs[4242]
+      await assert.rejects(
+        linuxInstall(box, 'release', { runner, fetchImpl, procfs: fakeProcfs(procs) }),
+        (error) => {
+          assert.equal(error.code, 'app-running')
+          assert.match(error.message, /pid 4243/)
+          return true
+        }
+      )
+      assert.deepEqual(requested, [])
+      assert.deepEqual(calls, [])
+      assert.equal(await linuxMarker(box.appPath), 'old')
+    } finally {
+      await box.cleanup()
     }
-    assert.deepEqual(await linuxRunningPids(box.appPath, fakeProcfs(procs)), ['4242'])
-    assert.deepEqual(await linuxRunningPids(previous, fakeProcfs(procs)), ['4243'])
-
-    const { fetchImpl, requested } = linuxReleaseFetch(appImageBytes(linuxProfile()))
-    const { runner, calls } = fakeLinuxRunner()
-    await assert.rejects(
-      linuxInstall(box, 'release', { runner, fetchImpl, procfs: fakeProcfs(procs) }),
-      (error) => {
-        assert.equal(error.code, 'app-running')
-        assert.match(error.message, /pid 4242/)
-        return true
-      }
-    )
-    delete procs[4242]
-    await assert.rejects(
-      linuxInstall(box, 'release', { runner, fetchImpl, procfs: fakeProcfs(procs) }),
-      (error) => {
-        assert.equal(error.code, 'app-running')
-        assert.match(error.message, /pid 4243/)
-        return true
-      }
-    )
-    assert.deepEqual(requested, [])
-    assert.deepEqual(calls, [])
-    assert.equal(await linuxMarker(box.appPath), 'old')
-  } finally {
-    await box.cleanup()
   }
-})
+)
 
-test('Linux rollback swaps the dirs back, re-verifies, and a second rollback returns', async () => {
-  const box = await linuxSandbox()
-  try {
-    await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old', version: '0.9.140' }))
-    const { fetchImpl } = linuxReleaseFetch(appImageBytes(linuxProfile()))
-    await linuxInstall(box, 'release', { runner: fakeLinuxRunner().runner, fetchImpl })
-    const rollback = () =>
-      rollbackInstall({
-        platform: LINUX,
-        appPath: box.appPath,
-        labDir: box.labDir,
-        procfs: quietProcs()
-      })
+test(
+  'Linux rollback swaps the dirs back, re-verifies, and a second rollback returns',
+  posixOnly,
+  async () => {
+    const box = await linuxSandbox()
+    try {
+      await writeLinuxApp(box.appPath, linuxProfile({ marker: 'old', version: '0.9.140' }))
+      const { fetchImpl } = linuxReleaseFetch(appImageBytes(linuxProfile()))
+      await linuxInstall(box, 'release', { runner: fakeLinuxRunner().runner, fetchImpl })
+      const rollback = () =>
+        rollbackInstall({
+          platform: LINUX,
+          appPath: box.appPath,
+          labDir: box.labDir,
+          procfs: quietProcs()
+        })
 
-    const back = await rollback()
-    assert.equal(await linuxMarker(box.appPath), 'old')
-    assert.equal(await linuxMarker(previousAppPath(box.appPath)), 'new')
-    assert.equal(back.version, '0.9.140')
-    assert.equal(back.platform, 'linux')
-    assert.equal(back.previous.version, LINUX_VERSION)
-    assert.equal(back.previous.source, 'release')
+      const back = await rollback()
+      assert.equal(await linuxMarker(box.appPath), 'old')
+      assert.equal(await linuxMarker(previousAppPath(box.appPath)), 'new')
+      assert.equal(back.version, '0.9.140')
+      assert.equal(back.platform, 'linux')
+      assert.equal(back.previous.version, LINUX_VERSION)
+      assert.equal(back.previous.source, 'release')
 
-    const forward = await rollback()
-    assert.equal(await linuxMarker(box.appPath), 'new')
-    assert.equal(forward.version, LINUX_VERSION)
-    assert.equal(forward.source, 'release')
-    assert.deepEqual(await leftovers(box.appPath), [])
+      const forward = await rollback()
+      assert.equal(await linuxMarker(box.appPath), 'new')
+      assert.equal(forward.version, LINUX_VERSION)
+      assert.equal(forward.source, 'release')
+      assert.deepEqual(await leftovers(box.appPath), [])
 
-    // A previous dir that lost a file is not swapped back in.
-    await rm(join(previousAppPath(box.appPath), 'resources', 'videorc-backend'))
-    await assertRefused(rollback(), 'app-incomplete')
-    assert.equal(await linuxMarker(box.appPath), 'new')
-    await rm(previousAppPath(box.appPath), { recursive: true })
-    await assertRefused(rollback(), 'no-previous')
-  } finally {
-    await box.cleanup()
+      // A previous dir that lost a file is not swapped back in.
+      await rm(join(previousAppPath(box.appPath), 'resources', 'videorc-backend'))
+      await assertRefused(rollback(), 'app-incomplete')
+      assert.equal(await linuxMarker(box.appPath), 'new')
+      await rm(previousAppPath(box.appPath), { recursive: true })
+      await assertRefused(rollback(), 'no-previous')
+    } finally {
+      await box.cleanup()
+    }
   }
-})
+)
 
-test('readAsarPackageVersion reads package.json from app.asar, else null', async () => {
+test('readAsarPackageVersion reads package.json from app.asar, else null', posixOnly, async () => {
   const box = await linuxSandbox()
   try {
     await mkdir(box.root, { recursive: true })

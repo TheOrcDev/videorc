@@ -9133,6 +9133,17 @@ fn blit_rgba_to_yuv420p(
     let uv_top = draw_top / 2;
     let uv_right = draw_right.div_ceil(2).min(uv_width);
     let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
+    let masked = options.mask != SceneMask::None;
+    // Per-column source x, once per blit (identical to map_source_pixel).
+    let luma_columns = (draw_left..draw_right.max(draw_left))
+        .map(|dest_x| map_source_column(dest_x as u32, source, &fit, options.mirror_x))
+        .collect::<Vec<_>>();
+    let chroma_columns = (uv_left..uv_right.max(uv_left))
+        .map(|uv_x| {
+            let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
+            map_source_column(dest_x as u32, source, &fit, options.mirror_x)
+        })
+        .collect::<Vec<_>>();
     let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
     let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
     rayon::join(
@@ -9142,19 +9153,20 @@ fn blit_rgba_to_yuv420p(
                 .enumerate()
                 .for_each(|(relative_y, row)| {
                     let dest_y = draw_top + relative_y;
-                    for (dest_x, output) in
-                        row.iter_mut().enumerate().take(draw_right).skip(draw_left)
+                    let Some(source_y) = map_source_row(dest_y as u32, source, &fit) else {
+                        return;
+                    };
+                    for (column, (dest_x, output)) in row
+                        .iter_mut()
+                        .enumerate()
+                        .take(draw_right)
+                        .skip(draw_left)
+                        .enumerate()
                     {
-                        if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                        if masked && !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
                             continue;
                         }
-                        let Some((source_x, source_y)) = map_source_pixel(
-                            dest_x as u32,
-                            dest_y as u32,
-                            source,
-                            &fit,
-                            options.mirror_x,
-                        ) else {
+                        let Some(source_x) = luma_columns[column] else {
                             continue;
                         };
                         let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
@@ -9180,19 +9192,16 @@ fn blit_rgba_to_yuv420p(
                 .enumerate()
                 .for_each(|(relative_y, (u_row, v_row))| {
                     let uv_y = uv_top + relative_y;
-                    for uv_x in uv_left..uv_right {
+                    let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
+                    let Some(source_y) = map_source_row(dest_y as u32, source, &fit) else {
+                        return;
+                    };
+                    for (column, uv_x) in (uv_left..uv_right).enumerate() {
                         let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
-                        let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
-                        if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                        if masked && !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
                             continue;
                         }
-                        let Some((source_x, source_y)) = map_source_pixel(
-                            dest_x as u32,
-                            dest_y as u32,
-                            source,
-                            &fit,
-                            options.mirror_x,
-                        ) else {
+                        let Some(source_x) = chroma_columns[column] else {
                             continue;
                         };
                         let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
@@ -9390,28 +9399,74 @@ fn map_source_pixel(
     fit: &SourceFit,
     mirror_x: bool,
 ) -> Option<(u32, u32)> {
-    if dest_x < fit.x || dest_y < fit.y || fit.width == 0 || fit.height == 0 {
+    let source_x = map_source_column(dest_x, source, fit, mirror_x)?;
+    let source_y = map_source_row(dest_y, source, fit)?;
+    Some((source_x, source_y))
+}
+
+/// One axis of [`map_source_pixel`]: the two axes are independent, so a blit
+/// computes each column once per frame and each row once per row instead of
+/// two divides, a floor and a clamp for every output pixel (Linux plan 0014:
+/// the 1080p CPU compositor rendered 8 fps at ~470 % on ogre).
+fn map_source_axis(
+    dest: u32,
+    fit_origin: u32,
+    fit_extent: u32,
+    source_origin: f64,
+    source_extent: f64,
+    source_len: u32,
+) -> Option<u32> {
+    if dest < fit_origin || fit_extent == 0 {
         return None;
     }
-    let local_x = f64::from(dest_x - fit.x) / f64::from(fit.width);
-    let local_y = f64::from(dest_y - fit.y) / f64::from(fit.height);
-    if !(0.0..=1.0).contains(&local_x) || !(0.0..=1.0).contains(&local_y) {
+    let local = f64::from(dest - fit_origin) / f64::from(fit_extent);
+    if !(0.0..=1.0).contains(&local) {
         return None;
     }
-    let source_x = fit.source_x + local_x * fit.source_width;
-    let source_y = fit.source_y + local_y * fit.source_height;
-    let source_x = source_x
-        .floor()
-        .clamp(0.0, f64::from(source.width.saturating_sub(1))) as u32;
-    let source_y = source_y
-        .floor()
-        .clamp(0.0, f64::from(source.height.saturating_sub(1))) as u32;
-    let source_x = if mirror_x {
+    let mapped = source_origin + local * source_extent;
+    Some(
+        mapped
+            .floor()
+            .clamp(0.0, f64::from(source_len.saturating_sub(1))) as u32,
+    )
+}
+
+fn map_source_column(
+    dest_x: u32,
+    source: &RgbaSource<'_>,
+    fit: &SourceFit,
+    mirror_x: bool,
+) -> Option<u32> {
+    if fit.height == 0 {
+        return None;
+    }
+    let source_x = map_source_axis(
+        dest_x,
+        fit.x,
+        fit.width,
+        fit.source_x,
+        fit.source_width,
+        source.width,
+    )?;
+    Some(if mirror_x {
         source.width.saturating_sub(1).saturating_sub(source_x)
     } else {
         source_x
-    };
-    Some((source_x, source_y))
+    })
+}
+
+fn map_source_row(dest_y: u32, source: &RgbaSource<'_>, fit: &SourceFit) -> Option<u32> {
+    if fit.width == 0 {
+        return None;
+    }
+    map_source_axis(
+        dest_y,
+        fit.y,
+        fit.height,
+        fit.source_y,
+        fit.source_height,
+        source.height,
+    )
 }
 
 fn source_mask_allows(mask: SceneMask, dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {

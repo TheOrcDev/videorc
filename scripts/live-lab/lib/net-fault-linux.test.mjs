@@ -24,6 +24,11 @@ import {
   residueIsClean
 } from './net-fault.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 // Plan 179: the Linux network fault backend. Same contract as the macOS
 // pf/dnctl tests in net-fault.test.mjs: only allowlisted sudo lines, the
 // watchdog before the fault, removal proven by a read-back, and the root
@@ -96,7 +101,7 @@ function fakeClock() {
   }
 }
 
-test('Linux sudoers example allows exactly the four helper verbs', async () => {
+test('Linux sudoers example allows exactly the four helper verbs', posixOnly, async () => {
   const text = await readFile(SUDOERS_EXAMPLE, 'utf8')
   const inSudoers = parseSudoersCommandLines(text)
   assert.deepEqual([...inSudoers].sort(), [...ALLOWED].sort())
@@ -113,7 +118,7 @@ test('Linux sudoers example allows exactly the four helper verbs', async () => {
   ])
 })
 
-test('Linux watchdog only waits and runs the allowed clear', () => {
+test('Linux watchdog only waits and runs the allowed clear', posixOnly, () => {
   assert.equal(
     linuxWatchdogScript(30_000),
     `sleep ${30 + WATCHDOG_GRACE_S}; sudo -n ${LINUX_NETFAULT_HELPER} clear; exit 0`
@@ -121,54 +126,62 @@ test('Linux watchdog only waits and runs the allowed clear', () => {
   assert.deepEqual(linuxCleanupCommandLines(), [`sudo -n ${LINUX_NETFAULT_HELPER} clear`])
 })
 
-test('status parsing: table, qdiscs with mode, ingest; unreadable output is residue', () => {
-  const parsed = parseLinuxNetFaultStatus(
-    'table=present\nqdisc=wlan0 mode=loss\nqdisc=eth0 mode=none\ningest=142.250.1.1\n'
-  )
-  assert.deepEqual(parsed, {
-    table: true,
-    qdiscs: [
-      { dev: 'wlan0', mode: 'loss' },
-      { dev: 'eth0', mode: 'none' }
-    ],
-    ingest: ['142.250.1.1']
-  })
-  assert.ok(residueIsClean(linuxNetFaultResidue('table=absent\n')))
-  assert.ok(!residueIsClean(linuxNetFaultResidue('table=absent\nqdisc=wlan0 mode=none\n')))
-  // Fail closed: no table line at all is not proof of a clean machine.
-  assert.ok(!residueIsClean(linuxNetFaultResidue('')))
-  assert.ok(!residueIsClean(linuxNetFaultResidue('sudo: something odd\n')))
-})
+test(
+  'status parsing: table, qdiscs with mode, ingest; unreadable output is residue',
+  posixOnly,
+  () => {
+    const parsed = parseLinuxNetFaultStatus(
+      'table=present\nqdisc=wlan0 mode=loss\nqdisc=eth0 mode=none\ningest=142.250.1.1\n'
+    )
+    assert.deepEqual(parsed, {
+      table: true,
+      qdiscs: [
+        { dev: 'wlan0', mode: 'loss' },
+        { dev: 'eth0', mode: 'none' }
+      ],
+      ingest: ['142.250.1.1']
+    })
+    assert.ok(residueIsClean(linuxNetFaultResidue('table=absent\n')))
+    assert.ok(!residueIsClean(linuxNetFaultResidue('table=absent\nqdisc=wlan0 mode=none\n')))
+    // Fail closed: no table line at all is not proof of a clean machine.
+    assert.ok(!residueIsClean(linuxNetFaultResidue('')))
+    assert.ok(!residueIsClean(linuxNetFaultResidue('sudo: something odd\n')))
+  }
+)
 
-test('Linux applyNetFault: clean slate, watchdog first, one verb, read-back, deadline', async () => {
-  const sys = fakeHelper()
-  const clock = fakeClock()
-  const registry = createNetFaultRegistry()
-  const watchdogs = []
-  const handle = await applyNetFault({
-    platform: LINUX,
-    kind: 'loss',
-    durationMs: 30_000,
-    runner: sys.runner,
-    registry,
-    onWatchdog: (entry) => watchdogs.push(entry),
-    ...clock
-  })
-  assert.deepEqual(sys.state.calls, ['clear', 'status', 'loss', 'status'])
-  assert.deepEqual(clock.spawned, [linuxWatchdogScript(30_000)])
-  assert.equal(watchdogs[0].pid, 4343)
-  assert.equal(clock.timers[0].ms, 30_000)
-  assert.equal(handle.deadlineAt, 1_030_000)
-  assert.deepEqual(handle.ingest.missing, [])
-  assert.equal(registry.active.kind, 'loss')
+test(
+  'Linux applyNetFault: clean slate, watchdog first, one verb, read-back, deadline',
+  posixOnly,
+  async () => {
+    const sys = fakeHelper()
+    const clock = fakeClock()
+    const registry = createNetFaultRegistry()
+    const watchdogs = []
+    const handle = await applyNetFault({
+      platform: LINUX,
+      kind: 'loss',
+      durationMs: 30_000,
+      runner: sys.runner,
+      registry,
+      onWatchdog: (entry) => watchdogs.push(entry),
+      ...clock
+    })
+    assert.deepEqual(sys.state.calls, ['clear', 'status', 'loss', 'status'])
+    assert.deepEqual(clock.spawned, [linuxWatchdogScript(30_000)])
+    assert.equal(watchdogs[0].pid, 4343)
+    assert.equal(clock.timers[0].ms, 30_000)
+    assert.equal(handle.deadlineAt, 1_030_000)
+    assert.deepEqual(handle.ingest.missing, [])
+    assert.equal(registry.active.kind, 'loss')
 
-  await handle.remove()
-  assert.deepEqual(sys.state.calls.slice(4), ['clear', 'status'])
-  assert.deepEqual(clock.killed, [{ pid: -4343, signal: 'SIGTERM' }])
-  assert.equal(registry.active, null)
-})
+    await handle.remove()
+    assert.deepEqual(sys.state.calls.slice(4), ['clear', 'status'])
+    assert.deepEqual(clock.killed, [{ pid: -4343, signal: 'SIGTERM' }])
+    assert.equal(registry.active, null)
+  }
+)
 
-test('Linux throttle runs the throttle verb and checks the reported mode', async () => {
+test('Linux throttle runs the throttle verb and checks the reported mode', posixOnly, async () => {
   const sys = fakeHelper()
   const clock = fakeClock()
   await applyNetFault({
@@ -195,7 +208,7 @@ test('Linux throttle runs the throttle verb and checks the reported mode', async
   )
 })
 
-test('Linux: sudo refused stops at the first command, nothing spawned', async () => {
+test('Linux: sudo refused stops at the first command, nothing spawned', posixOnly, async () => {
   const sys = fakeHelper({ refuse: true })
   const clock = fakeClock()
   await assert.rejects(
@@ -213,7 +226,7 @@ test('Linux: sudo refused stops at the first command, nothing spawned', async ()
   assert.deepEqual(clock.spawned, [])
 })
 
-test('Linux: a failed apply clears and kills the watchdog', async () => {
+test('Linux: a failed apply clears and kills the watchdog', posixOnly, async () => {
   const sys = fakeHelper({ failOn: 'loss' })
   const clock = fakeClock()
   const registry = createNetFaultRegistry()
@@ -234,24 +247,28 @@ test('Linux: a failed apply clears and kills the watchdog', async () => {
   assert.equal(registry.watchdogs.size, 0)
 })
 
-test('Linux removeNetFaults throws with the cleanup command when the read-back shows residue', async () => {
-  const sys = fakeHelper({ stuck: true })
-  sys.state.mode = 'loss'
-  await assert.rejects(
-    removeNetFaults({
-      platform: LINUX,
-      runner: sys.runner,
-      registry: createNetFaultRegistry(),
-      kill: () => {}
-    }),
-    (error) =>
-      error.code === 'NET_FAULT_RESIDUE' &&
-      error.message.includes(linuxCleanupCommandLines()[0]) &&
-      error.residue.pipes.length === 1
-  )
-})
+test(
+  'Linux removeNetFaults throws with the cleanup command when the read-back shows residue',
+  posixOnly,
+  async () => {
+    const sys = fakeHelper({ stuck: true })
+    sys.state.mode = 'loss'
+    await assert.rejects(
+      removeNetFaults({
+        platform: LINUX,
+        runner: sys.runner,
+        registry: createNetFaultRegistry(),
+        kill: () => {}
+      }),
+      (error) =>
+        error.code === 'NET_FAULT_RESIDUE' &&
+        error.message.includes(linuxCleanupCommandLines()[0]) &&
+        error.residue.pipes.length === 1
+    )
+  }
+)
 
-test('doctor: Linux network faults check', () => {
+test('doctor: Linux network faults check', posixOnly, () => {
   const clean = statusText({ table: false })
   assert.equal(evaluateLinuxNetFaultsClean(null, { networkFaults: false }).status, SKIP)
   assert.equal(evaluateLinuxNetFaultsClean(null, { networkFaults: true }).status, FAIL)
@@ -368,70 +385,78 @@ async function withHelper(fn) {
   }
 }
 
-test('helper script: loss marks only ingest traffic and shapes only band 3', async () => {
-  await withHelper(async ({ run, read }) => {
-    const applied = await run('loss')
-    assert.equal(applied.code, 0, applied.stderr)
-    const status = parseLinuxNetFaultStatus(applied.stdout)
-    assert.equal(status.table, true)
-    assert.deepEqual(status.qdiscs, [{ dev: 'wlan0', mode: 'loss' }])
-    assert.deepEqual(status.ingest.sort(), ['142.250.1.1', '142.250.1.2', '2a00:1450:4003::1'])
+test(
+  'helper script: loss marks only ingest traffic and shapes only band 3',
+  posixOnly,
+  async () => {
+    await withHelper(async ({ run, read }) => {
+      const applied = await run('loss')
+      assert.equal(applied.code, 0, applied.stderr)
+      const status = parseLinuxNetFaultStatus(applied.stdout)
+      assert.equal(status.table, true)
+      assert.deepEqual(status.qdiscs, [{ dev: 'wlan0', mode: 'loss' }])
+      assert.deepEqual(status.ingest.sort(), ['142.250.1.1', '142.250.1.2', '2a00:1450:4003::1'])
 
-    const table = await read('nft.table')
-    assert.match(table, /^table inet videorc_lab \{/)
-    assert.match(
-      table,
-      /set ingest4 \{ type ipv4_addr; elements = \{ 142\.250\.1\.1, 142\.250\.1\.2 \} \}/
-    )
-    // v4-mapped answers from ahostsv6 are dropped.
-    assert.match(table, /set ingest6 \{ type ipv6_addr; elements = \{ 2a00:1450:4003::1 \} \}/)
-    assert.ok(!table.includes('::ffff:'))
-    assert.match(table, /type filter hook output priority mangle; policy accept;/)
-    assert.match(
-      table,
-      /ip daddr @ingest4 tcp dport \{ 443, 1935 \} meta mark set meta mark \| 0x2178/
-    )
-    assert.ok(!/\bdrop\b|\breject\b/.test(table), 'nft only marks; tc does the damage')
+      const table = await read('nft.table')
+      assert.match(table, /^table inet videorc_lab \{/)
+      assert.match(
+        table,
+        /set ingest4 \{ type ipv4_addr; elements = \{ 142\.250\.1\.1, 142\.250\.1\.2 \} \}/
+      )
+      // v4-mapped answers from ahostsv6 are dropped.
+      assert.match(table, /set ingest6 \{ type ipv6_addr; elements = \{ 2a00:1450:4003::1 \} \}/)
+      assert.ok(!table.includes('::ffff:'))
+      assert.match(table, /type filter hook output priority mangle; policy accept;/)
+      assert.match(
+        table,
+        /ip daddr @ingest4 tcp dport \{ 443, 1935 \} meta mark set meta mark \| 0x2178/
+      )
+      assert.ok(!/\bdrop\b|\breject\b/.test(table), 'nft only marks; tc does the damage')
 
-    const calls = await read('calls.log')
-    assert.match(
-      calls,
-      /tc qdisc replace dev wlan0 root handle 2178: prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1/
-    )
-    assert.match(calls, /tc qdisc add dev wlan0 parent 2178:4 handle 2179: netem loss 100%/)
-    assert.match(
-      calls,
-      /tc filter add dev wlan0 parent 2178: protocol all prio 1 handle 0x2178\/0xffff fw flowid 2178:4/
-    )
-    // The priomap never names band 3, so unmarked traffic never meets netem.
-    const priomap = /priomap ((?:\d )+\d)/.exec(calls)[1].split(' ').map(Number)
-    assert.ok(priomap.every((band) => band <= 2))
-  })
-})
+      const calls = await read('calls.log')
+      assert.match(
+        calls,
+        /tc qdisc replace dev wlan0 root handle 2178: prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1/
+      )
+      assert.match(calls, /tc qdisc add dev wlan0 parent 2178:4 handle 2179: netem loss 100%/)
+      assert.match(
+        calls,
+        /tc filter add dev wlan0 parent 2178: protocol all prio 1 handle 0x2178\/0xffff fw flowid 2178:4/
+      )
+      // The priomap never names band 3, so unmarked traffic never meets netem.
+      const priomap = /priomap ((?:\d )+\d)/.exec(calls)[1].split(' ').map(Number)
+      assert.ok(priomap.every((band) => band <= 2))
+    })
+  }
+)
 
-test('helper script: throttle, then clear removes only the lab table and qdisc', async () => {
-  await withHelper(async ({ run, read }) => {
-    const applied = await run('throttle')
-    assert.equal(applied.code, 0, applied.stderr)
-    assert.deepEqual(parseLinuxNetFaultStatus(applied.stdout).qdiscs, [
-      { dev: 'wlan0', mode: 'throttle' }
-    ])
-    assert.match(await read('calls.log'), /netem rate 1000kbit/)
+test(
+  'helper script: throttle, then clear removes only the lab table and qdisc',
+  posixOnly,
+  async () => {
+    await withHelper(async ({ run, read }) => {
+      const applied = await run('throttle')
+      assert.equal(applied.code, 0, applied.stderr)
+      assert.deepEqual(parseLinuxNetFaultStatus(applied.stdout).qdiscs, [
+        { dev: 'wlan0', mode: 'throttle' }
+      ])
+      assert.match(await read('calls.log'), /netem rate 1000kbit/)
 
-    const cleared = await run('clear')
-    assert.equal(cleared.code, 0, cleared.stderr)
-    assert.ok(residueIsClean(linuxNetFaultResidue(cleared.stdout)))
-    assert.equal(await read('nft.table'), '')
-    const left = (await read('qdiscs')).trim().split('\n')
-    assert.deepEqual(left, FOREIGN_QDISCS)
+      const cleared = await run('clear')
+      assert.equal(cleared.code, 0, cleared.stderr)
+      assert.ok(residueIsClean(linuxNetFaultResidue(cleared.stdout)))
+      assert.equal(await read('nft.table'), '')
+      const left = (await read('qdiscs')).trim().split('\n')
+      assert.deepEqual(left, FOREIGN_QDISCS)
 
-    // Idempotent, and status on a clean machine is clean.
-    assert.equal((await run('clear')).code, 0)
-    assert.ok(residueIsClean(linuxNetFaultResidue((await run('status')).stdout)))
-  })
-})
+      // Idempotent, and status on a clean machine is clean.
+      assert.equal((await run('clear')).code, 0)
+      assert.ok(residueIsClean(linuxNetFaultResidue((await run('status')).stdout)))
+    })
+  }
+)
 
-test('helper script: refuses anything but one known verb', async () => {
+test('helper script: refuses anything but one known verb', posixOnly, async () => {
   await withHelper(async ({ run }) => {
     for (const verb of ['', 'flush', 'loss; id']) {
       const result = await run(verb)

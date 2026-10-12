@@ -25,6 +25,11 @@ import { writeState } from './schedule-state.mjs'
 import { formatStatus, gatherStatus } from './schedule-status.mjs'
 import { validateScheduleTable } from './schedule-table.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 const execFileAsync = promisify(execFile)
 
 async function freshDir(prefix = 'live-lab-agent-') {
@@ -41,44 +46,52 @@ function fakeRunner(results = {}) {
   return { calls, runner }
 }
 
-test('renderAgentPlist swaps in home, repo and node, and keeps the schedule shape', async () => {
-  const template = await readFile(TEMPLATE_PATH, 'utf8')
-  const rendered = renderAgentPlist(template, {
-    home: '/Users/tester',
-    repoRoot: '/opt/lab/videorc',
-    nodePath: '/usr/local/bin/node'
-  })
-  assert.ok(!rendered.includes('/Users/videorc-lab'))
-  assert.match(rendered, /<string>\/usr\/local\/bin\/node<\/string>/)
-  assert.match(
-    rendered,
-    /<string>\/opt\/lab\/videorc\/scripts\/live-lab\/schedule\.mjs<\/string>\s*<string>tick<\/string>/
-  )
-  assert.match(rendered, /<key>WorkingDirectory<\/key>\s*<string>\/opt\/lab\/videorc<\/string>/)
-  assert.match(rendered, /<key>HOME<\/key>\s*<string>\/Users\/tester<\/string>/)
-  assert.match(
-    rendered,
-    /<key>StandardOutPath<\/key>\s*<string>\/Users\/tester\/videorc-live-lab\/logs\/schedule\.log<\/string>/
-  )
-  assert.match(rendered, /<key>StartInterval<\/key>\s*<integer>300<\/integer>/)
-  assert.match(rendered, /<key>LimitLoadToSessionType<\/key>\s*<string>Aqua<\/string>/)
-  assert.match(rendered, /<key>RunAtLoad<\/key>\s*<true\/>/)
-  assert.match(rendered, /<key>ExitTimeOut<\/key>\s*<integer>90<\/integer>/)
-  assert.throws(
-    () => renderAgentPlist(template, { home: 'relative', nodePath: '/n' }),
-    /absolute home/
-  )
-  assert.throws(() => renderAgentPlist('<plist/>', { home: '/h', nodePath: '/n' }), /label/)
-  const escaped = renderAgentPlist(template, { home: '/Users/a&b', repoRoot: '/r', nodePath: '/n' })
-  assert.match(escaped, /\/Users\/a&amp;b\/videorc-live-lab/)
+test(
+  'renderAgentPlist swaps in home, repo and node, and keeps the schedule shape',
+  posixOnly,
+  async () => {
+    const template = await readFile(TEMPLATE_PATH, 'utf8')
+    const rendered = renderAgentPlist(template, {
+      home: '/Users/tester',
+      repoRoot: '/opt/lab/videorc',
+      nodePath: '/usr/local/bin/node'
+    })
+    assert.ok(!rendered.includes('/Users/videorc-lab'))
+    assert.match(rendered, /<string>\/usr\/local\/bin\/node<\/string>/)
+    assert.match(
+      rendered,
+      /<string>\/opt\/lab\/videorc\/scripts\/live-lab\/schedule\.mjs<\/string>\s*<string>tick<\/string>/
+    )
+    assert.match(rendered, /<key>WorkingDirectory<\/key>\s*<string>\/opt\/lab\/videorc<\/string>/)
+    assert.match(rendered, /<key>HOME<\/key>\s*<string>\/Users\/tester<\/string>/)
+    assert.match(
+      rendered,
+      /<key>StandardOutPath<\/key>\s*<string>\/Users\/tester\/videorc-live-lab\/logs\/schedule\.log<\/string>/
+    )
+    assert.match(rendered, /<key>StartInterval<\/key>\s*<integer>300<\/integer>/)
+    assert.match(rendered, /<key>LimitLoadToSessionType<\/key>\s*<string>Aqua<\/string>/)
+    assert.match(rendered, /<key>RunAtLoad<\/key>\s*<true\/>/)
+    assert.match(rendered, /<key>ExitTimeOut<\/key>\s*<integer>90<\/integer>/)
+    assert.throws(
+      () => renderAgentPlist(template, { home: 'relative', nodePath: '/n' }),
+      /absolute home/
+    )
+    assert.throws(() => renderAgentPlist('<plist/>', { home: '/h', nodePath: '/n' }), /label/)
+    const escaped = renderAgentPlist(template, {
+      home: '/Users/a&b',
+      repoRoot: '/r',
+      nodePath: '/n'
+    })
+    assert.match(escaped, /\/Users\/a&amp;b\/videorc-live-lab/)
 
-  if (process.platform === 'darwin') {
-    const dir = await freshDir()
-    const file = join(dir, 'agent.plist')
-    await writeFile(file, rendered)
-    await execFileAsync('/usr/bin/plutil', ['-lint', file])
+    if (process.platform === 'darwin') {
+      const dir = await freshDir()
+      const file = join(dir, 'agent.plist')
+      await writeFile(file, rendered)
+      await execFileAsync('/usr/bin/plutil', ['-lint', file])
+    }
   }
-})
+)
 
 test('install-agent refuses any user but the lab user unless --force-user', async () => {
   const home = await freshDir()
@@ -119,39 +132,45 @@ test('install-agent refuses while a run holds the lock unless --force', async ()
   assert.deepEqual(calls, [])
 })
 
-test('install-agent writes the plist and logs dir, lints, boots out the old one and bootstraps', async () => {
-  const home = await freshDir()
-  const { calls, runner } = fakeRunner({
-    'launchctl bootout': { code: 3, stdout: '', stderr: 'No such process' }
-  })
-  const result = await installAgent({
-    platform: 'darwin',
-    home,
-    uid: 501,
-    username: 'tester',
-    forceUser: true,
-    runner,
-    nodePath: '/opt/homebrew/bin/node'
-  })
-  const target = agentPlistPath(home)
-  assert.equal(result.path, target)
-  assert.equal(result.domain, 'gui/501')
-  assert.equal((await stat(target)).mode & 0o777, 0o644)
-  assert.ok((await readFile(target, 'utf8')).includes(`${home}/videorc-live-lab/logs/schedule.log`))
-  await access(agentLogsDir(home))
-  assert.deepEqual(
-    calls.map((call) =>
-      call.slice(0, 2).concat(call.slice(2).map((arg) => arg.replace(home, '~')))
-    ),
-    [
-      ['/usr/bin/plutil', '-lint', calls[0][2].replace(home, '~')],
-      ['/bin/launchctl', 'bootout', `gui/501/${AGENT_LABEL}`],
-      ['/bin/launchctl', 'bootstrap', 'gui/501', `~/Library/LaunchAgents/${AGENT_LABEL}.plist`]
-    ]
-  )
-})
+test(
+  'install-agent writes the plist and logs dir, lints, boots out the old one and bootstraps',
+  posixOnly,
+  async () => {
+    const home = await freshDir()
+    const { calls, runner } = fakeRunner({
+      'launchctl bootout': { code: 3, stdout: '', stderr: 'No such process' }
+    })
+    const result = await installAgent({
+      platform: 'darwin',
+      home,
+      uid: 501,
+      username: 'tester',
+      forceUser: true,
+      runner,
+      nodePath: '/opt/homebrew/bin/node'
+    })
+    const target = agentPlistPath(home)
+    assert.equal(result.path, target)
+    assert.equal(result.domain, 'gui/501')
+    assert.equal((await stat(target)).mode & 0o777, 0o644)
+    assert.ok(
+      (await readFile(target, 'utf8')).includes(`${home}/videorc-live-lab/logs/schedule.log`)
+    )
+    await access(agentLogsDir(home))
+    assert.deepEqual(
+      calls.map((call) =>
+        call.slice(0, 2).concat(call.slice(2).map((arg) => arg.replace(home, '~')))
+      ),
+      [
+        ['/usr/bin/plutil', '-lint', calls[0][2].replace(home, '~')],
+        ['/bin/launchctl', 'bootout', `gui/501/${AGENT_LABEL}`],
+        ['/bin/launchctl', 'bootstrap', 'gui/501', `~/Library/LaunchAgents/${AGENT_LABEL}.plist`]
+      ]
+    )
+  }
+)
 
-test('install-agent fails loudly when plutil or bootstrap fails', async () => {
+test('install-agent fails loudly when plutil or bootstrap fails', posixOnly, async () => {
   const home = await freshDir()
   const lint = fakeRunner({ 'plutil -lint': { code: 1, stdout: 'bad plist', stderr: '' } })
   await assert.rejects(
@@ -237,395 +256,444 @@ function settings(unit) {
   return unit.split('\n').filter((line) => line.trim() !== '' && !line.startsWith('#'))
 }
 
-test('renderSystemdUnit swaps home, repo and node into the service and puts node first in PATH', async () => {
-  const template = await readFile(SERVICE_TEMPLATE_PATH, 'utf8')
-  const service = renderSystemdUnit(template, {
-    home: '/home/tester',
-    repoRoot: '/srv/lab/videorc',
-    nodePath: '/opt/node/bin/node'
-  })
-  assert.ok(!service.includes('/home/videorc-lab'), 'nothing of the template home is left')
-  assert.ok(!service.includes('/usr/bin/node'))
-  assert.deepEqual(settings(service), [
-    '[Unit]',
-    'Description=Videorc live lab schedule tick (plan 179)',
-    '[Service]',
-    'Type=oneshot',
-    'ExecStart=/opt/node/bin/node /srv/lab/videorc/scripts/live-lab/schedule.mjs tick',
-    'WorkingDirectory=/srv/lab/videorc',
-    'Environment=PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-    'Environment=HOME=/home/tester',
-    'TimeoutStartSec=infinity',
-    'KillMode=mixed',
-    'TimeoutStopSec=90',
-    'StandardOutput=append:/home/tester/videorc-live-lab/logs/schedule.log',
-    'StandardError=append:/home/tester/videorc-live-lab/logs/schedule.log'
-  ])
-  for (const line of settings(service)) {
-    assert.doesNotMatch(line, /key|token|secret|password/i, `no secret in ${line}`)
-  }
+test(
+  'renderSystemdUnit swaps home, repo and node into the service and puts node first in PATH',
+  posixOnly,
+  async () => {
+    const template = await readFile(SERVICE_TEMPLATE_PATH, 'utf8')
+    const service = renderSystemdUnit(template, {
+      home: '/home/tester',
+      repoRoot: '/srv/lab/videorc',
+      nodePath: '/opt/node/bin/node'
+    })
+    assert.ok(!service.includes('/home/videorc-lab'), 'nothing of the template home is left')
+    assert.ok(!service.includes('/usr/bin/node'))
+    assert.deepEqual(settings(service), [
+      '[Unit]',
+      'Description=Videorc live lab schedule tick (plan 179)',
+      '[Service]',
+      'Type=oneshot',
+      'ExecStart=/opt/node/bin/node /srv/lab/videorc/scripts/live-lab/schedule.mjs tick',
+      'WorkingDirectory=/srv/lab/videorc',
+      'Environment=PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      'Environment=HOME=/home/tester',
+      'TimeoutStartSec=infinity',
+      'KillMode=mixed',
+      'TimeoutStopSec=90',
+      'StandardOutput=append:/home/tester/videorc-live-lab/logs/schedule.log',
+      'StandardError=append:/home/tester/videorc-live-lab/logs/schedule.log'
+    ])
+    for (const line of settings(service)) {
+      assert.doesNotMatch(line, /key|token|secret|password/i, `no secret in ${line}`)
+    }
 
-  // node already on PATH moves to the front instead of appearing twice.
-  const distro = renderSystemdUnit(template, {
-    home: '/home/tester',
-    repoRoot: '/home/tester/videorc',
-    nodePath: '/usr/bin/node'
-  })
-  assert.match(distro, /^Environment=PATH=\/usr\/bin:\/usr\/local\/bin:\/bin:\/usr\/sbin:\/sbin$/m)
-  assert.match(
-    distro,
-    /^ExecStart=\/usr\/bin\/node \/home\/tester\/videorc\/scripts\/live-lab\/schedule\.mjs tick$/m
-  )
-
-  // Rendering for the template's own lab user changes nothing but PATH: the
-  // work dir is never mistaken for the repo it starts with.
-  const identity = renderSystemdUnit(template, {
-    home: '/home/videorc-lab',
-    repoRoot: '/home/videorc-lab/videorc',
-    nodePath: '/usr/bin/node'
-  })
-  assert.equal(
-    identity,
-    template.replace(
-      'Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-      'Environment=PATH=/usr/bin:/usr/local/bin:/bin:/usr/sbin:/sbin'
+    // node already on PATH moves to the front instead of appearing twice.
+    const distro = renderSystemdUnit(template, {
+      home: '/home/tester',
+      repoRoot: '/home/tester/videorc',
+      nodePath: '/usr/bin/node'
+    })
+    assert.match(
+      distro,
+      /^Environment=PATH=\/usr\/bin:\/usr\/local\/bin:\/bin:\/usr\/sbin:\/sbin$/m
     )
-  )
-})
+    assert.match(
+      distro,
+      /^ExecStart=\/usr\/bin\/node \/home\/tester\/videorc\/scripts\/live-lab\/schedule\.mjs tick$/m
+    )
 
-test('renderSystemdUnit keeps the timer shape and refuses paths systemd would parse', async () => {
-  const template = await readFile(TIMER_TEMPLATE_PATH, 'utf8')
-  const timer = renderSystemdUnit(template, {
-    home: '/home/tester',
-    repoRoot: '/srv/lab/videorc',
-    nodePath: '/opt/node/bin/node'
-  })
-  assert.equal(timer, template, 'the timer holds no path')
-  assert.deepEqual(settings(timer), [
-    '[Unit]',
-    'Description=Videorc live lab schedule tick every 300 s (plan 179)',
-    '[Timer]',
-    'OnStartupSec=60',
-    'OnUnitActiveSec=300',
-    'AccuracySec=10s',
-    'Unit=videorc-live-lab.service',
-    '[Install]',
-    'WantedBy=timers.target'
-  ])
+    // Rendering for the template's own lab user changes nothing but PATH: the
+    // work dir is never mistaken for the repo it starts with.
+    const identity = renderSystemdUnit(template, {
+      home: '/home/videorc-lab',
+      repoRoot: '/home/videorc-lab/videorc',
+      nodePath: '/usr/bin/node'
+    })
+    assert.equal(
+      identity,
+      template.replace(
+        'Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+        'Environment=PATH=/usr/bin:/usr/local/bin:/bin:/usr/sbin:/sbin'
+      )
+    )
+  }
+)
 
-  const good = { home: '/home/tester', repoRoot: '/srv/lab/videorc', nodePath: '/usr/bin/node' }
-  for (const bad of [
-    '/home/a b',
-    '/home/a%h',
-    '/home/a\nb',
-    '/home/a"b',
-    "/home/a'b",
-    '/home/$USER',
-    '/home/a\\b',
-    '/home/a\tb'
-  ]) {
+test(
+  'renderSystemdUnit keeps the timer shape and refuses paths systemd would parse',
+  posixOnly,
+  async () => {
+    const template = await readFile(TIMER_TEMPLATE_PATH, 'utf8')
+    const timer = renderSystemdUnit(template, {
+      home: '/home/tester',
+      repoRoot: '/srv/lab/videorc',
+      nodePath: '/opt/node/bin/node'
+    })
+    assert.equal(timer, template, 'the timer holds no path')
+    assert.deepEqual(settings(timer), [
+      '[Unit]',
+      'Description=Videorc live lab schedule tick every 300 s (plan 179)',
+      '[Timer]',
+      'OnStartupSec=60',
+      'OnUnitActiveSec=300',
+      'AccuracySec=10s',
+      'Unit=videorc-live-lab.service',
+      '[Install]',
+      'WantedBy=timers.target'
+    ])
+
+    const good = { home: '/home/tester', repoRoot: '/srv/lab/videorc', nodePath: '/usr/bin/node' }
+    for (const bad of [
+      '/home/a b',
+      '/home/a%h',
+      '/home/a\nb',
+      '/home/a"b',
+      "/home/a'b",
+      '/home/$USER',
+      '/home/a\\b',
+      '/home/a\tb'
+    ]) {
+      assert.throws(
+        () => renderSystemdUnit(template, { ...good, home: bad }),
+        /renderSystemdUnit refuses home .*systemd reads whitespace, quotes, %, \$ and backslashes/,
+        JSON.stringify(bad)
+      )
+    }
     assert.throws(
-      () => renderSystemdUnit(template, { ...good, home: bad }),
-      /renderSystemdUnit refuses home .*systemd reads whitespace, quotes, %, \$ and backslashes/,
-      JSON.stringify(bad)
+      () => renderSystemdUnit(template, { ...good, repoRoot: '/srv/my lab' }),
+      /refuses repoRoot/
+    )
+    assert.throws(
+      () => renderSystemdUnit(template, { ...good, nodePath: '/opt/%n/node' }),
+      /refuses nodePath/
+    )
+    assert.throws(
+      () => renderSystemdUnit(template, { ...good, home: 'home/tester' }),
+      /absolute home/
+    )
+    assert.throws(() => renderSystemdUnit('<plist/>', good), /not a videorc-live-lab systemd unit/)
+    assert.throws(
+      () =>
+        renderSystemdUnit('[Unit]\nDescription=videorc-live-lab\nX=/home/videorc-lab2/x\n', good),
+      /left a template path behind/
     )
   }
-  assert.throws(
-    () => renderSystemdUnit(template, { ...good, repoRoot: '/srv/my lab' }),
-    /refuses repoRoot/
-  )
-  assert.throws(
-    () => renderSystemdUnit(template, { ...good, nodePath: '/opt/%n/node' }),
-    /refuses nodePath/
-  )
-  assert.throws(
-    () => renderSystemdUnit(template, { ...good, home: 'home/tester' }),
-    /absolute home/
-  )
-  assert.throws(() => renderSystemdUnit('<plist/>', good), /not a videorc-live-lab systemd unit/)
-  assert.throws(
-    () => renderSystemdUnit('[Unit]\nDescription=videorc-live-lab\nX=/home/videorc-lab2/x\n', good),
-    /left a template path behind/
-  )
-})
+)
 
-test('Linux install-agent stages, verifies, moves both units in, reloads and enables the timer', async () => {
-  const home = await freshDir()
-  const unitDir = systemdUserDir(home)
-  const staging = join(unitDir, `.videorc-live-lab.${process.pid}.tmp`)
-  const stagedAtVerify = []
-  const { calls, runner } = systemdRunner({
-    ...HEALTHY,
-    'systemd-analyze verify': async (args) => {
-      for (const file of args.slice(2)) {
-        stagedAtVerify.push([file, (await stat(file)).mode & 0o777])
+test(
+  'Linux install-agent stages, verifies, moves both units in, reloads and enables the timer',
+  posixOnly,
+  async () => {
+    const home = await freshDir()
+    const unitDir = systemdUserDir(home)
+    const staging = join(unitDir, `.videorc-live-lab.${process.pid}.tmp`)
+    const stagedAtVerify = []
+    const { calls, runner } = systemdRunner({
+      ...HEALTHY,
+      'systemd-analyze verify': async (args) => {
+        for (const file of args.slice(2)) {
+          stagedAtVerify.push([file, (await stat(file)).mode & 0o777])
+        }
+        return { code: 0, stdout: '', stderr: '' }
       }
-      return { code: 0, stdout: '', stderr: '' }
-    }
-  })
-  const lines = []
-  const result = await installAgent({
-    platform: 'linux',
-    home,
-    uid: 1001,
-    username: 'videorc-lab',
-    runner,
-    nodePath: '/usr/bin/node',
-    repoRoot: '/home/videorc-lab/videorc',
-    log: (line) => lines.push(line)
-  })
-  assert.deepEqual(calls, [
-    ['/usr/bin/systemd-analyze', '--user', 'verify', join(staging, SERVICE), join(staging, TIMER)],
-    [SYSTEMCTL, '--user', 'daemon-reload'],
-    [SYSTEMCTL, '--user', 'enable', '--now', TIMER],
-    [SYSTEMCTL, '--user', 'is-enabled', TIMER],
-    [SYSTEMCTL, '--user', 'is-active', TIMER],
-    ['/usr/bin/loginctl', 'show-user', 'videorc-lab', '-p', 'Linger']
-  ])
-  assert.deepEqual(stagedAtVerify, [
-    [join(staging, SERVICE), 0o644],
-    [join(staging, TIMER), 0o644]
-  ])
-  assert.deepEqual((await readdir(unitDir)).sort(), [SERVICE, TIMER], 'no staging copy is left')
-  for (const name of [SERVICE, TIMER]) {
-    assert.equal((await stat(join(unitDir, name))).mode & 0o777, 0o644)
-  }
-  const service = await readFile(join(unitDir, SERVICE), 'utf8')
-  assert.equal(service, result.rendered.service)
-  assert.ok(
-    settings(service).includes(`StandardOutput=append:${home}/videorc-live-lab/logs/schedule.log`)
-  )
-  assert.ok(settings(service).includes(`Environment=HOME=${home}`))
-  await access(agentLogsDir(home))
-  assert.deepEqual(result.paths, { service: join(unitDir, SERVICE), timer: join(unitDir, TIMER) })
-  assert.equal(result.enabled, 'enabled')
-  assert.equal(result.active, 'active')
-  assert.equal(result.linger, 'yes')
-  assert.ok(lines.some((line) => line.includes(`${TIMER}: is-enabled enabled, is-active active`)))
-  assert.ok(lines.some((line) => /Linger is on for videorc-lab/.test(line)))
-  assert.ok(!lines.some((line) => line.startsWith('WARNING')), lines.join('\n'))
-})
-
-test('Linux install-agent: a unit systemd-analyze rejects never lands, and the old units stay', async () => {
-  const fresh = await freshDir()
-  const rejected = {
-    'systemd-analyze verify': {
-      code: 1,
-      stdout: '',
-      stderr: 'videorc-live-lab.service:31: Unknown key name ExecStrat in section Service'
-    }
-  }
-  const first = systemdRunner(rejected)
-  await assert.rejects(
-    installAgent({
+    })
+    const lines = []
+    const result = await installAgent({
       platform: 'linux',
-      home: fresh,
+      home,
+      uid: 1001,
       username: 'videorc-lab',
-      runner: first.runner,
-      nodePath: '/usr/bin/node'
-    }),
-    /systemd-analyze --user verify of the rendered units failed: .*Unknown key name ExecStrat/
-  )
-  assert.deepEqual(await readdir(systemdUserDir(fresh)), [], 'no unit and no staging copy')
-  assert.equal(first.calls.length, 1, 'nothing is reloaded or enabled')
+      runner,
+      nodePath: '/usr/bin/node',
+      repoRoot: '/home/videorc-lab/videorc',
+      log: (line) => lines.push(line)
+    })
+    assert.deepEqual(calls, [
+      [
+        '/usr/bin/systemd-analyze',
+        '--user',
+        'verify',
+        join(staging, SERVICE),
+        join(staging, TIMER)
+      ],
+      [SYSTEMCTL, '--user', 'daemon-reload'],
+      [SYSTEMCTL, '--user', 'enable', '--now', TIMER],
+      [SYSTEMCTL, '--user', 'is-enabled', TIMER],
+      [SYSTEMCTL, '--user', 'is-active', TIMER],
+      ['/usr/bin/loginctl', 'show-user', 'videorc-lab', '-p', 'Linger']
+    ])
+    assert.deepEqual(stagedAtVerify, [
+      [join(staging, SERVICE), 0o644],
+      [join(staging, TIMER), 0o644]
+    ])
+    assert.deepEqual((await readdir(unitDir)).sort(), [SERVICE, TIMER], 'no staging copy is left')
+    for (const name of [SERVICE, TIMER]) {
+      assert.equal((await stat(join(unitDir, name))).mode & 0o777, 0o644)
+    }
+    const service = await readFile(join(unitDir, SERVICE), 'utf8')
+    assert.equal(service, result.rendered.service)
+    assert.ok(
+      settings(service).includes(`StandardOutput=append:${home}/videorc-live-lab/logs/schedule.log`)
+    )
+    assert.ok(settings(service).includes(`Environment=HOME=${home}`))
+    await access(agentLogsDir(home))
+    assert.deepEqual(result.paths, { service: join(unitDir, SERVICE), timer: join(unitDir, TIMER) })
+    assert.equal(result.enabled, 'enabled')
+    assert.equal(result.active, 'active')
+    assert.equal(result.linger, 'yes')
+    assert.ok(lines.some((line) => line.includes(`${TIMER}: is-enabled enabled, is-active active`)))
+    assert.ok(lines.some((line) => /Linger is on for videorc-lab/.test(line)))
+    assert.ok(!lines.some((line) => line.startsWith('WARNING')), lines.join('\n'))
+  }
+)
 
-  const reinstall = await freshDir()
-  const unitDir = systemdUserDir(reinstall)
-  await mkdir(unitDir, { recursive: true })
-  await writeFile(join(unitDir, SERVICE), 'old service')
-  await writeFile(join(unitDir, TIMER), 'old timer')
-  const second = systemdRunner(rejected)
-  await assert.rejects(
-    installAgent({
+test(
+  'Linux install-agent: a unit systemd-analyze rejects never lands, and the old units stay',
+  posixOnly,
+  async () => {
+    const fresh = await freshDir()
+    const rejected = {
+      'systemd-analyze verify': {
+        code: 1,
+        stdout: '',
+        stderr: 'videorc-live-lab.service:31: Unknown key name ExecStrat in section Service'
+      }
+    }
+    const first = systemdRunner(rejected)
+    await assert.rejects(
+      installAgent({
+        platform: 'linux',
+        home: fresh,
+        username: 'videorc-lab',
+        runner: first.runner,
+        nodePath: '/usr/bin/node'
+      }),
+      /systemd-analyze --user verify of the rendered units failed: .*Unknown key name ExecStrat/
+    )
+    assert.deepEqual(await readdir(systemdUserDir(fresh)), [], 'no unit and no staging copy')
+    assert.equal(first.calls.length, 1, 'nothing is reloaded or enabled')
+
+    const reinstall = await freshDir()
+    const unitDir = systemdUserDir(reinstall)
+    await mkdir(unitDir, { recursive: true })
+    await writeFile(join(unitDir, SERVICE), 'old service')
+    await writeFile(join(unitDir, TIMER), 'old timer')
+    const second = systemdRunner(rejected)
+    await assert.rejects(
+      installAgent({
+        platform: 'linux',
+        home: reinstall,
+        username: 'videorc-lab',
+        runner: second.runner,
+        nodePath: '/usr/bin/node'
+      }),
+      /rejected|failed/
+    )
+    assert.deepEqual((await readdir(unitDir)).sort(), [SERVICE, TIMER])
+    assert.equal(await readFile(join(unitDir, SERVICE), 'utf8'), 'old service')
+    assert.equal(await readFile(join(unitDir, TIMER), 'utf8'), 'old timer')
+  }
+)
+
+test(
+  'Linux install-agent refuses another user, naming the policy labUser, and a held run lock',
+  posixOnly,
+  async () => {
+    const home = await freshDir()
+    const { calls, runner } = systemdRunner()
+    const base = { platform: 'linux', home, runner, nodePath: '/usr/bin/node' }
+    await assert.rejects(
+      installAgent({ ...base, username: 'orcdev' }),
+      (error) =>
+        error instanceof AgentRefusal &&
+        /lab user videorc-lab only \(you are orcdev; labUser in the policy/.test(error.message)
+    )
+    await assert.rejects(
+      installAgent({ ...base, username: 'videorc-lab', labUser: 'ogre-lab' }),
+      (error) =>
+        error instanceof AgentRefusal &&
+        /lab user ogre-lab only \(you are videorc-lab;/.test(error.message)
+    )
+    await assert.rejects(uninstallAgent({ ...base, username: 'orcdev' }), AgentRefusal)
+    await assert.rejects(
+      installAgent({ ...base, username: 'videorc-lab', lockHolder: 'od-1, pid 7' }),
+      (error) => error instanceof AgentRefusal && /would kill it/.test(error.message)
+    )
+    await assert.rejects(
+      uninstallAgent({ ...base, username: 'videorc-lab', lockHolder: 'od-1, pid 7' }),
+      /would kill it/
+    )
+    assert.deepEqual(calls, [], 'a refusal runs nothing')
+    await assert.rejects(access(systemdUserDir(home)), { code: 'ENOENT' })
+    await assert.rejects(
+      installAgent({ ...base, platform: 'win32', username: 'videorc-lab' }),
+      /The schedule agent runs on macOS or Linux only \(this is win32\)/
+    )
+  }
+)
+
+test(
+  'Linux install-agent warns, without refusing, when linger is off or unreadable',
+  posixOnly,
+  async () => {
+    const home = await freshDir()
+    const off = systemdRunner({
+      ...HEALTHY,
+      'loginctl show-user': { code: 0, stdout: 'Linger=no\n', stderr: '' }
+    })
+    const lines = []
+    const result = await installAgent({
       platform: 'linux',
-      home: reinstall,
-      username: 'videorc-lab',
-      runner: second.runner,
-      nodePath: '/usr/bin/node'
-    }),
-    /rejected|failed/
-  )
-  assert.deepEqual((await readdir(unitDir)).sort(), [SERVICE, TIMER])
-  assert.equal(await readFile(join(unitDir, SERVICE), 'utf8'), 'old service')
-  assert.equal(await readFile(join(unitDir, TIMER), 'utf8'), 'old timer')
-})
+      labUser: 'ogre-lab',
+      home,
+      username: 'ogre-lab',
+      runner: off.runner,
+      nodePath: '/usr/bin/node',
+      log: (line) => lines.push(line)
+    })
+    assert.equal(result.linger, 'no')
+    assert.deepEqual(off.calls.at(-1), [
+      '/usr/bin/loginctl',
+      'show-user',
+      'ogre-lab',
+      '-p',
+      'Linger'
+    ])
+    const warning = lines.find((line) => line.startsWith('WARNING'))
+    assert.match(
+      warning,
+      /linger is off for ogre-lab, so videorc-live-lab\.timer runs only while ogre-lab is logged in/
+    )
+    assert.match(warning, /sudo loginctl enable-linger ogre-lab$/)
 
-test('Linux install-agent refuses another user, naming the policy labUser, and a held run lock', async () => {
-  const home = await freshDir()
-  const { calls, runner } = systemdRunner()
-  const base = { platform: 'linux', home, runner, nodePath: '/usr/bin/node' }
-  await assert.rejects(
-    installAgent({ ...base, username: 'orcdev' }),
-    (error) =>
-      error instanceof AgentRefusal &&
-      /lab user videorc-lab only \(you are orcdev; labUser in the policy/.test(error.message)
-  )
-  await assert.rejects(
-    installAgent({ ...base, username: 'videorc-lab', labUser: 'ogre-lab' }),
-    (error) =>
-      error instanceof AgentRefusal &&
-      /lab user ogre-lab only \(you are videorc-lab;/.test(error.message)
-  )
-  await assert.rejects(uninstallAgent({ ...base, username: 'orcdev' }), AgentRefusal)
-  await assert.rejects(
-    installAgent({ ...base, username: 'videorc-lab', lockHolder: 'od-1, pid 7' }),
-    (error) => error instanceof AgentRefusal && /would kill it/.test(error.message)
-  )
-  await assert.rejects(
-    uninstallAgent({ ...base, username: 'videorc-lab', lockHolder: 'od-1, pid 7' }),
-    /would kill it/
-  )
-  assert.deepEqual(calls, [], 'a refusal runs nothing')
-  await assert.rejects(access(systemdUserDir(home)), { code: 'ENOENT' })
-  await assert.rejects(
-    installAgent({ ...base, platform: 'win32', username: 'videorc-lab' }),
-    /The schedule agent runs on macOS or Linux only \(this is win32\)/
-  )
-})
-
-test('Linux install-agent warns, without refusing, when linger is off or unreadable', async () => {
-  const home = await freshDir()
-  const off = systemdRunner({
-    ...HEALTHY,
-    'loginctl show-user': { code: 0, stdout: 'Linger=no\n', stderr: '' }
-  })
-  const lines = []
-  const result = await installAgent({
-    platform: 'linux',
-    labUser: 'ogre-lab',
-    home,
-    username: 'ogre-lab',
-    runner: off.runner,
-    nodePath: '/usr/bin/node',
-    log: (line) => lines.push(line)
-  })
-  assert.equal(result.linger, 'no')
-  assert.deepEqual(off.calls.at(-1), ['/usr/bin/loginctl', 'show-user', 'ogre-lab', '-p', 'Linger'])
-  const warning = lines.find((line) => line.startsWith('WARNING'))
-  assert.match(
-    warning,
-    /linger is off for ogre-lab, so videorc-live-lab\.timer runs only while ogre-lab is logged in/
-  )
-  assert.match(warning, /sudo loginctl enable-linger ogre-lab$/)
-
-  const unknown = systemdRunner({
-    ...HEALTHY,
-    'loginctl show-user': {
-      code: 1,
-      stdout: '',
-      stderr: 'Failed to get user: User ID 1001 is not logged in or lingering'
-    }
-  })
-  const more = []
-  const unread = await installAgent({
-    platform: 'linux',
-    home,
-    username: 'videorc-lab',
-    runner: unknown.runner,
-    nodePath: '/usr/bin/node',
-    log: (line) => more.push(line)
-  })
-  assert.equal(unread.linger, null)
-  assert.match(
-    more.join('\n'),
-    /WARNING: could not read linger for videorc-lab \(Failed to get user/
-  )
-})
-
-test('Linux install-agent fails loudly when enabling fails, and says how to reach the user bus', async () => {
-  const home = await freshDir()
-  const enable = systemdRunner({
-    'systemctl enable': {
-      code: 1,
-      stdout: '',
-      stderr: 'Failed to enable unit: Unit file videorc-live-lab.timer is masked.'
-    }
-  })
-  await assert.rejects(
-    installAgent({
+    const unknown = systemdRunner({
+      ...HEALTHY,
+      'loginctl show-user': {
+        code: 1,
+        stdout: '',
+        stderr: 'Failed to get user: User ID 1001 is not logged in or lingering'
+      }
+    })
+    const more = []
+    const unread = await installAgent({
       platform: 'linux',
       home,
       username: 'videorc-lab',
-      runner: enable.runner,
-      nodePath: '/usr/bin/node'
-    }),
-    /systemctl --user enable --now videorc-live-lab\.timer failed: Failed to enable unit: .*masked\.$/
-  )
+      runner: unknown.runner,
+      nodePath: '/usr/bin/node',
+      log: (line) => more.push(line)
+    })
+    assert.equal(unread.linger, null)
+    assert.match(
+      more.join('\n'),
+      /WARNING: could not read linger for videorc-lab \(Failed to get user/
+    )
+  }
+)
 
-  const noBus = systemdRunner({
-    'systemctl daemon-reload': {
-      code: 1,
-      stdout: '',
-      stderr: 'Failed to connect to bus: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined'
-    }
-  })
-  await assert.rejects(
-    installAgent({
+test(
+  'Linux install-agent fails loudly when enabling fails, and says how to reach the user bus',
+  posixOnly,
+  async () => {
+    const home = await freshDir()
+    const enable = systemdRunner({
+      'systemctl enable': {
+        code: 1,
+        stdout: '',
+        stderr: 'Failed to enable unit: Unit file videorc-live-lab.timer is masked.'
+      }
+    })
+    await assert.rejects(
+      installAgent({
+        platform: 'linux',
+        home,
+        username: 'videorc-lab',
+        runner: enable.runner,
+        nodePath: '/usr/bin/node'
+      }),
+      /systemctl --user enable --now videorc-live-lab\.timer failed: Failed to enable unit: .*masked\.$/
+    )
+
+    const noBus = systemdRunner({
+      'systemctl daemon-reload': {
+        code: 1,
+        stdout: '',
+        stderr:
+          'Failed to connect to bus: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined'
+      }
+    })
+    await assert.rejects(
+      installAgent({
+        platform: 'linux',
+        home,
+        username: 'videorc-lab',
+        runner: noBus.runner,
+        nodePath: '/usr/bin/node'
+      }),
+      /daemon-reload failed: Failed to connect to bus.*SSH in as videorc-lab, or use `sudo machinectl shell videorc-lab@`/
+    )
+  }
+)
+
+test(
+  'Linux uninstall-agent disables the timer, stops the tick, removes both units and reloads',
+  posixOnly,
+  async () => {
+    const home = await freshDir()
+    const unitDir = systemdUserDir(home)
+    await mkdir(unitDir, { recursive: true })
+    await writeFile(join(unitDir, SERVICE), 'x')
+    await writeFile(join(unitDir, TIMER), 'x')
+    const { calls, options, runner } = systemdRunner()
+    const lines = []
+    const result = await uninstallAgent({
+      platform: 'linux',
+      home,
+      uid: 1001,
+      username: 'videorc-lab',
+      lockHolder: 'od-1, pid 7',
+      force: true,
+      runner,
+      log: (line) => lines.push(line)
+    })
+    assert.deepEqual(calls, [
+      [SYSTEMCTL, '--user', 'disable', '--now', TIMER],
+      [SYSTEMCTL, '--user', 'stop', SERVICE],
+      [SYSTEMCTL, '--user', 'daemon-reload']
+    ])
+    assert.equal(options[1].timeout, 120_000, 'stopping a tick mid-run may take its 90 s')
+    assert.equal(result.wasLoaded, true)
+    assert.deepEqual(await readdir(unitDir), [])
+    assert.match(lines.join('\n'), /Disabled and stopped videorc-live-lab\.timer/)
+
+    const gone = systemdRunner({
+      'systemctl disable': {
+        code: 1,
+        stdout: '',
+        stderr: 'Failed to disable unit: Unit file videorc-live-lab.timer does not exist.'
+      },
+      'systemctl stop': {
+        code: 5,
+        stdout: '',
+        stderr: 'Failed to stop videorc-live-lab.service: Unit videorc-live-lab.service not loaded.'
+      }
+    })
+    const quiet = []
+    const again = await uninstallAgent({
       platform: 'linux',
       home,
       username: 'videorc-lab',
-      runner: noBus.runner,
-      nodePath: '/usr/bin/node'
-    }),
-    /daemon-reload failed: Failed to connect to bus.*SSH in as videorc-lab, or use `sudo machinectl shell videorc-lab@`/
-  )
-})
-
-test('Linux uninstall-agent disables the timer, stops the tick, removes both units and reloads', async () => {
-  const home = await freshDir()
-  const unitDir = systemdUserDir(home)
-  await mkdir(unitDir, { recursive: true })
-  await writeFile(join(unitDir, SERVICE), 'x')
-  await writeFile(join(unitDir, TIMER), 'x')
-  const { calls, options, runner } = systemdRunner()
-  const lines = []
-  const result = await uninstallAgent({
-    platform: 'linux',
-    home,
-    uid: 1001,
-    username: 'videorc-lab',
-    lockHolder: 'od-1, pid 7',
-    force: true,
-    runner,
-    log: (line) => lines.push(line)
-  })
-  assert.deepEqual(calls, [
-    [SYSTEMCTL, '--user', 'disable', '--now', TIMER],
-    [SYSTEMCTL, '--user', 'stop', SERVICE],
-    [SYSTEMCTL, '--user', 'daemon-reload']
-  ])
-  assert.equal(options[1].timeout, 120_000, 'stopping a tick mid-run may take its 90 s')
-  assert.equal(result.wasLoaded, true)
-  assert.deepEqual(await readdir(unitDir), [])
-  assert.match(lines.join('\n'), /Disabled and stopped videorc-live-lab\.timer/)
-
-  const gone = systemdRunner({
-    'systemctl disable': {
-      code: 1,
-      stdout: '',
-      stderr: 'Failed to disable unit: Unit file videorc-live-lab.timer does not exist.'
-    },
-    'systemctl stop': {
-      code: 5,
-      stdout: '',
-      stderr: 'Failed to stop videorc-live-lab.service: Unit videorc-live-lab.service not loaded.'
-    }
-  })
-  const quiet = []
-  const again = await uninstallAgent({
-    platform: 'linux',
-    home,
-    username: 'videorc-lab',
-    runner: gone.runner,
-    log: (line) => quiet.push(line)
-  })
-  assert.equal(again.wasLoaded, false)
-  assert.equal(gone.calls.length, 3)
-  assert.match(
-    quiet.join('\n'),
-    /videorc-live-lab\.timer was not installed \(Failed to disable unit/
-  )
-})
+      runner: gone.runner,
+      log: (line) => quiet.push(line)
+    })
+    assert.equal(again.wasLoaded, false)
+    assert.equal(gone.calls.length, 3)
+    assert.match(
+      quiet.join('\n'),
+      /videorc-live-lab\.timer was not installed \(Failed to disable unit/
+    )
+  }
+)
 
 test('status shows slots, the last 7 runs with verdicts, quota, lock and kill switch', async () => {
   const work = await freshDir('live-lab-work-')

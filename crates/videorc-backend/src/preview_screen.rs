@@ -77,6 +77,28 @@ const SCREEN_PREVIEW_STARTING_MESSAGE: &str = if cfg!(target_os = "linux") {
 } else {
     "Starting native screen preview."
 };
+/// Status copy names the transport: Linux is portal capture shown through the
+/// proof surface, never a native preview (AGENTS.md, Linux plan 0010).
+const SCREEN_PREVIEW_IDLE_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture is not running."
+} else {
+    "Native screen preview is not running."
+};
+const SCREEN_PREVIEW_STOPPED_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture stopped."
+} else {
+    "Native screen preview stopped."
+};
+const SCREEN_PREVIEW_REUSED_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture source reused."
+} else {
+    "Native screen preview source reused."
+};
+const SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+} else {
+    "Native screen preview source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+};
 const SCREEN_PREVIEW_STARTUP_TIMEOUT_SUBJECT: &str = if cfg!(target_os = "linux") {
     "starting screen capture"
 } else {
@@ -926,7 +948,7 @@ fn log_screen_generation(
 
 pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
     PreviewScreenRuntime {
-        status: idle_status(Some("Native screen preview is not running.".to_string())),
+        status: idle_status(Some(SCREEN_PREVIEW_IDLE_MESSAGE.to_string())),
         surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
         source_key: None,
@@ -2831,7 +2853,7 @@ fn queue_public_screen_stop(
         let status = {
             let mut slot = supervisor_state.preview_screen.lock().await;
             if slot.status == admitted_status && slot.starting.is_none() {
-                let status = idle_status(Some("Native screen preview stopped.".to_string()));
+                let status = idle_status(Some(SCREEN_PREVIEW_STOPPED_MESSAGE.to_string()));
                 slot.status = status.clone();
                 status
             } else {
@@ -3954,10 +3976,9 @@ fn reuse_current_screen_source_locked(
     let mut status = slot.status.clone();
     status.updated_at = Utc::now().to_rfc3339();
     status.message = Some(if ids_changed {
-        "Native screen preview source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
-            .to_string()
+        SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE.to_string()
     } else {
-        "Native screen preview source reused.".to_string()
+        SCREEN_PREVIEW_REUSED_MESSAGE.to_string()
     });
     slot.status = status.clone();
     let (include_cursor, exclude_current_process_windows) = slot
@@ -8982,6 +9003,16 @@ mod tests {
                 assert!(!expired.contains("native"), "{expired}");
             }
         }
+        if cfg!(target_os = "linux") {
+            for copy in [
+                SCREEN_PREVIEW_IDLE_MESSAGE,
+                SCREEN_PREVIEW_STOPPED_MESSAGE,
+                SCREEN_PREVIEW_REUSED_MESSAGE,
+                SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE,
+            ] {
+                assert!(!copy.contains("ative"), "{copy}");
+            }
+        }
         assert_eq!(SHARE_DIALOG_WAIT, Duration::from_secs(600));
         assert!(matches!(
             ScreenStartupPhase::AwaitingConsent.expired(SHARE_DIALOG_WAIT),
@@ -9197,7 +9228,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Native screen preview source reused.".to_string()),
+            message: Some(SCREEN_PREVIEW_REUSED_MESSAGE.to_string()),
         };
         set_screen_status(&state, live.clone()).await;
 
@@ -9432,7 +9463,7 @@ mod tests {
         assert_eq!(slot.run_id.as_deref(), Some("run-1"));
         assert_eq!(
             status.message.as_deref(),
-            Some("Native screen preview source reused.")
+            Some(SCREEN_PREVIEW_REUSED_MESSAGE)
         );
     }
 

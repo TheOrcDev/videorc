@@ -320,11 +320,16 @@ impl SourceSwitchCoordinator {
     }
 
     pub fn microphone_unavailable(&mut self, reason: &str) {
+        self.kind_unavailable(SourceKind::Microphone, reason);
+    }
+
+    /// Why one kind cannot change during this session, in user words.
+    pub fn kind_unavailable(&mut self, kind: SourceKind, reason: &str) {
         if let Some(snapshot) = self.snapshot.as_mut()
             && let Some(capability) = snapshot
                 .capabilities
                 .iter_mut()
-                .find(|capability| capability.kind == SourceKind::Microphone)
+                .find(|capability| capability.kind == kind)
         {
             capability.supported = false;
             capability.reason = Some(reason.into());
@@ -985,6 +990,29 @@ mod tests {
             capability.reason = None;
         }
         coordinator
+    }
+
+    #[test]
+    fn a_refused_kind_carries_its_own_user_reason() {
+        // Linux plan 0024: the screen and camera say why they can't change
+        // mid-session instead of the internal adapter text.
+        let mut coordinator = coordinator();
+        coordinator.kind_unavailable(SourceKind::Capture, "Stop, change it, then start again.");
+        let capabilities = &coordinator.snapshot.as_ref().unwrap().capabilities;
+        let capture = capabilities
+            .iter()
+            .find(|capability| capability.kind == SourceKind::Capture)
+            .unwrap();
+        assert!(!capture.supported);
+        assert_eq!(
+            capture.reason.as_deref(),
+            Some("Stop, change it, then start again.")
+        );
+        let camera = capabilities
+            .iter()
+            .find(|capability| capability.kind == SourceKind::Camera)
+            .unwrap();
+        assert!(camera.supported, "other kinds keep their capability");
     }
 
     fn request(id: &str) -> SourceSwitchParams {

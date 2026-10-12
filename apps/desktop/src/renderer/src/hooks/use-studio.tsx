@@ -9856,12 +9856,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         height: (activeSourceStatus.height ?? previewSurfaceStatusRef.current.height) || undefined,
         message:
           screenStatus.state === 'live'
-            ? 'Native screen preview source is live.'
+            ? 'Screen source is live on the preview surface.'
             : cameraStatus.state === 'live'
-              ? 'Native camera preview source is live.'
+              ? 'Camera source is live on the preview surface.'
               : (screenStatus.message ??
                 cameraStatus.message ??
-                'Native preview surface proof mode is active.')
+                'Preview surface proof mode is active.')
       })
       return
     }
@@ -10052,7 +10052,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             message:
               surfaceStatus.transport === 'native-surface'
                 ? 'Native preview surface is active.'
-                : 'Native preview surface proof mode is active.'
+                : 'Preview surface proof mode is active.'
           })
           setPreviewUrl(null)
           setPreviewLoading(false)

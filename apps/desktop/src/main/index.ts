@@ -12755,11 +12755,15 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         if (before?.open === expectedOpen) {
           return before;
         }
+        // The platform's command key (isCommandKey): ⌘P on macOS, Ctrl+P on
+        // Linux and Windows, where ⌘P toggled nothing and the probe timed out
+        // (Linux plan 0020).
         document.dispatchEvent(
           new KeyboardEvent('keydown', {
             key: 'p',
             code: 'KeyP',
-            metaKey: true,
+            metaKey: ${JSON.stringify(process.platform === 'darwin')},
+            ctrlKey: ${JSON.stringify(process.platform !== 'darwin')},
             bubbles: true,
             cancelable: true
           })

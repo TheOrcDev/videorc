@@ -17,6 +17,11 @@ import {
 import { examplePolicy } from './policy.test.mjs'
 import { validatePolicy } from './policy.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 const T0 = Date.parse('2026-10-12T06:00:00.000Z')
 const MINUTE = 60_000
 
@@ -83,7 +88,7 @@ test('parseControl accepts exactly { enabled } and rejects everything else', () 
   assert.throws(() => parseControl('null'), /must be/)
 })
 
-test('stop file lives in the work dir as STOP', () => {
+test('stop file lives in the work dir as STOP', posixOnly, () => {
   assert.equal(STOP_FILE, 'STOP')
   assert.equal(
     stopFilePath('/Users/videorc-lab/videorc-live-lab'),

@@ -20,13 +20,18 @@ import {
   topLeftBounds
 } from './launch.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 const CONFIG = {
   client: { id: '123456-abcdef.apps.googleusercontent.com', secret: 'GOCSPX-super-secret-value' },
   streamKeys: { horizontal: { key: 'abcd-efgh-ijkl-mnop-qrst' } },
   labDisplay: { name: 'Lab Dummy' }
 }
 
-test('lab profiles live under the work dir; local-sink runs get their own', () => {
+test('lab profiles live under the work dir; local-sink runs get their own', posixOnly, () => {
   const youtube = labProfileDirs('/work', 'youtube')
   const local = labProfileDirs('/work', 'local-sink')
   assert.equal(youtube.root, '/work/profile')
@@ -89,32 +94,36 @@ test('the CDP endpoint is read from stderr or DevToolsActivePort', () => {
   assert.equal(parseDevToolsActivePort('nope'), null)
 })
 
-test('launchApp uses LaunchServices with the packaged executable and keeps the CDP url', async () => {
-  let options = null
-  const dirs = labProfileDirs('/work', 'local-sink')
-  const launched = await launchApp({
-    appPath: '/Applications/Videorc.app',
-    env: { VIDEORC_REMOTE_DEBUG_PORT: '0' },
-    dirs,
-    launcher: async (received) => {
-      options = received
-      received.onLine('DevTools listening on ws://127.0.0.1:9333/devtools/browser/x')
-      return {
-        connections: { 'backend-ready': { host: '127.0.0.1', port: 1, token: 't', pid: 77 } },
-        stop: async () => ({ state: 'terminated' }),
-        process: {}
+test(
+  'launchApp uses LaunchServices with the packaged executable and keeps the CDP url',
+  posixOnly,
+  async () => {
+    let options = null
+    const dirs = labProfileDirs('/work', 'local-sink')
+    const launched = await launchApp({
+      appPath: '/Applications/Videorc.app',
+      env: { VIDEORC_REMOTE_DEBUG_PORT: '0' },
+      dirs,
+      launcher: async (received) => {
+        options = received
+        received.onLine('DevTools listening on ws://127.0.0.1:9333/devtools/browser/x')
+        return {
+          connections: { 'backend-ready': { host: '127.0.0.1', port: 1, token: 't', pid: 77 } },
+          stop: async () => ({ state: 'terminated' }),
+          process: {}
+        }
       }
-    }
-  })
-  assert.equal(options.launchViaMacosLaunchServices, true)
-  assert.deepEqual(options.requiredMarkers, ['backend-ready'])
-  assert.deepEqual(options.spawnSpec, {
-    command: '/Applications/Videorc.app/Contents/MacOS/Videorc',
-    args: []
-  })
-  assert.equal(await launched.devtoolsUrl(), 'ws://127.0.0.1:9333/devtools/browser/x')
-  assert.equal(launched.backend.pid, 77)
-})
+    })
+    assert.equal(options.launchViaMacosLaunchServices, true)
+    assert.deepEqual(options.requiredMarkers, ['backend-ready'])
+    assert.deepEqual(options.spawnSpec, {
+      command: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+      args: []
+    })
+    assert.equal(await launched.devtoolsUrl(), 'ws://127.0.0.1:9333/devtools/browser/x')
+    assert.equal(launched.backend.pid, 77)
+  }
+)
 
 test('the published app PID is read from the ownership file for the census', async () => {
   const pid = await readPublishedAppPid('/state', {

@@ -23,6 +23,11 @@ import { STATE_FILE, TICK_LOCK_FILE, readState, writeState } from './schedule-st
 import { validateScheduleTable } from './schedule-table.mjs'
 import { parseLinuxBootTime, readBootTime, reportSince, runTick } from './schedule-tick.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 const MADRID = 'Europe/Madrid'
 const POLICY = Object.freeze({
   enabled: true,
@@ -138,39 +143,43 @@ test('policy problems, enabled false and schedule.enabled false end the tick qui
   }
 })
 
-test('a due run slot runs once, is recorded, logged and not run again on the next tick', async () => {
-  const dir = await freshDir()
-  await seed(dir, { days: { '2026-10-12': { 'update-check': { status: 'passed' } } } })
-  const { calls, actions } = fakeActions({
-    run: { status: 'passed', exitCode: 0, runDir: '/lab/runs/2026-10-12-churn-a1' }
-  })
-  const time = clock('2026-10-12T02:31:00Z') // 04:31 CEST
-  const tick = tickWith(dir, { actions, now: time.now })
-  const result = await tick.run()
-  assert.equal(result.outcome, 'acted')
-  assert.deepEqual(result.ran, [
-    { date: '2026-10-12', slotId: 'churn', status: 'passed', reason: null }
-  ])
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].args.slot.scenario, 'churn')
+test(
+  'a due run slot runs once, is recorded, logged and not run again on the next tick',
+  posixOnly,
+  async () => {
+    const dir = await freshDir()
+    await seed(dir, { days: { '2026-10-12': { 'update-check': { status: 'passed' } } } })
+    const { calls, actions } = fakeActions({
+      run: { status: 'passed', exitCode: 0, runDir: '/lab/runs/2026-10-12-churn-a1' }
+    })
+    const time = clock('2026-10-12T02:31:00Z') // 04:31 CEST
+    const tick = tickWith(dir, { actions, now: time.now })
+    const result = await tick.run()
+    assert.equal(result.outcome, 'acted')
+    assert.deepEqual(result.ran, [
+      { date: '2026-10-12', slotId: 'churn', status: 'passed', reason: null }
+    ])
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].args.slot.scenario, 'churn')
 
-  const state = await readState(dir)
-  const entry = state.days['2026-10-12'].churn
-  assert.equal(entry.status, 'passed')
-  assert.equal(entry.runDir, '/lab/runs/2026-10-12-churn-a1')
-  assert.equal(entry.slotAt, '2026-10-12T02:30:00.000Z')
-  assert.equal(state.history.at(-1).slotId, 'churn')
-  assert.equal((await stat(join(dir, STATE_FILE))).mode & 0o777, 0o600)
+    const state = await readState(dir)
+    const entry = state.days['2026-10-12'].churn
+    assert.equal(entry.status, 'passed')
+    assert.equal(entry.runDir, '/lab/runs/2026-10-12-churn-a1')
+    assert.equal(entry.slotAt, '2026-10-12T02:30:00.000Z')
+    assert.equal(state.history.at(-1).slotId, 'churn')
+    assert.equal((await stat(join(dir, STATE_FILE))).mode & 0o777, 0o600)
 
-  const log = await readFile(scheduleLogPath(dir, '2026-10-12'), 'utf8')
-  assert.match(log, /2026-10-12 churn: starting run churn/)
-  assert.match(log, /2026-10-12 churn: passed run \/lab\/runs\/2026-10-12-churn-a1/)
+    const log = await readFile(scheduleLogPath(dir, '2026-10-12'), 'utf8')
+    assert.match(log, /2026-10-12 churn: starting run churn/)
+    assert.match(log, /2026-10-12 churn: passed run \/lab\/runs\/2026-10-12-churn-a1/)
 
-  time.set('2026-10-12T02:36:00Z')
-  const again = await tick.run()
-  assert.equal(again.outcome, 'idle')
-  assert.equal(calls.length, 1, 'state persisted: no second run the same day')
-})
+    time.set('2026-10-12T02:36:00Z')
+    const again = await tick.run()
+    assert.equal(again.outcome, 'idle')
+    assert.equal(calls.length, 1, 'state persisted: no second run the same day')
+  }
+)
 
 test('a held run lock defers the slot to the next tick inside the window, then it is missed', async () => {
   const dir = await freshDir()
@@ -610,50 +619,54 @@ const PROC_STAT = [
   ''
 ].join('\n')
 
-test('plan 179: boot time comes from /proc/stat btime on Linux and kern.boottime on macOS', async () => {
-  assert.equal(parseLinuxBootTime(PROC_STAT), 1_760_239_860)
-  assert.equal(typeof parseLinuxBootTime(PROC_STAT), typeof parseBootTime('{ sec = 1 }'))
-  assert.equal(parseLinuxBootTime('cpu 1 2 3\nctxt 9\n'), null)
-  assert.equal(parseLinuxBootTime('xbtime 12\n'), null)
-  assert.equal(parseLinuxBootTime(''), null)
+test(
+  'plan 179: boot time comes from /proc/stat btime on Linux and kern.boottime on macOS',
+  posixOnly,
+  async () => {
+    assert.equal(parseLinuxBootTime(PROC_STAT), 1_760_239_860)
+    assert.equal(typeof parseLinuxBootTime(PROC_STAT), typeof parseBootTime('{ sec = 1 }'))
+    assert.equal(parseLinuxBootTime('cpu 1 2 3\nctxt 9\n'), null)
+    assert.equal(parseLinuxBootTime('xbtime 12\n'), null)
+    assert.equal(parseLinuxBootTime(''), null)
 
-  const noExec = async () => {
-    throw new Error('Linux never runs sysctl')
+    const noExec = async () => {
+      throw new Error('Linux never runs sysctl')
+    }
+    const reads = []
+    const linux = await readBootTime({
+      platform: 'linux',
+      exec: noExec,
+      readFile: async (path) => {
+        reads.push(path)
+        return PROC_STAT
+      }
+    })
+    assert.equal(linux, 1_760_239_860)
+    assert.deepEqual(reads, ['/proc/stat'])
+    const unreadable = await readBootTime({
+      platform: 'linux',
+      exec: noExec,
+      readFile: async () => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+      }
+    })
+    assert.equal(unreadable, null)
+
+    const execs = []
+    const mac = await readBootTime({
+      platform: 'darwin',
+      exec: async (command, args) => {
+        execs.push([command, ...args])
+        return { stdout: '{ sec = 1760000000, usec = 12345 } Mon Oct 12 03:31:00 2026\n' }
+      },
+      readFile: async () => {
+        throw new Error('macOS never reads /proc/stat')
+      }
+    })
+    assert.equal(mac, 1_760_000_000)
+    assert.deepEqual(execs, [['/usr/sbin/sysctl', '-n', 'kern.boottime']])
   }
-  const reads = []
-  const linux = await readBootTime({
-    platform: 'linux',
-    exec: noExec,
-    readFile: async (path) => {
-      reads.push(path)
-      return PROC_STAT
-    }
-  })
-  assert.equal(linux, 1_760_239_860)
-  assert.deepEqual(reads, ['/proc/stat'])
-  const unreadable = await readBootTime({
-    platform: 'linux',
-    exec: noExec,
-    readFile: async () => {
-      throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
-    }
-  })
-  assert.equal(unreadable, null)
-
-  const execs = []
-  const mac = await readBootTime({
-    platform: 'darwin',
-    exec: async (command, args) => {
-      execs.push([command, ...args])
-      return { stdout: '{ sec = 1760000000, usec = 12345 } Mon Oct 12 03:31:00 2026\n' }
-    },
-    readFile: async () => {
-      throw new Error('macOS never reads /proc/stat')
-    }
-  })
-  assert.equal(mac, 1_760_000_000)
-  assert.deepEqual(execs, [['/usr/sbin/sysctl', '-n', 'kern.boottime']])
-})
+)
 
 test('a corrupt state file stops the schedule loudly', async () => {
   const dir = await freshDir()

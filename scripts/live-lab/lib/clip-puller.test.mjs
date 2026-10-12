@@ -17,6 +17,11 @@ import {
   ytDlpUrlArgs
 } from './clip-puller.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const HLS =
   'https://manifest.googlevideo.com/api/manifest/hls_playlist/expire/1/sig/SECRETSIG/index.m3u8'
@@ -158,40 +163,44 @@ test('analyzeClip uses the recording analyzer + A/V sync and tolerates no flash 
   assert.equal(thrown.summary.avSyncError, 'ffmpeg missing')
 })
 
-test('clean clip: analysis JSON kept 0600, media deleted, signed URL never stored', async () => {
-  await withDir(async (dir) => {
-    const { runner, calls } = fakeRunner()
-    const checked = []
-    const result = await pullClip({
-      url: 'https://www.youtube.com/live/ownVideo123',
-      seconds: 120,
-      outDir: dir,
-      runner,
-      isOwnVideo: async (id) => {
-        checked.push(id)
-        return true
-      },
-      analyze: fakeAnalyze(CLEAN),
-      now: () => NOW
-    })
-    assert.equal(result.status, 'analyzed')
-    assert.deepEqual(checked, ['ownVideo123'])
-    assert.equal(result.kept, false)
-    assert.equal(result.clipPath, null)
-    assert.deepEqual(result.incidents, [])
-    assert.deepEqual(await readdir(dir), ['clip-ownVideo123-20261012T150000Z.analysis.json'])
-    assert.equal((await stat(result.analysisPath)).mode & 0o777, 0o600)
-    const saved = await readFile(result.analysisPath, 'utf8')
-    assert.ok(!saved.includes('SECRETSIG'))
-    assert.equal(JSON.parse(saved).summary.avOffsetMs, 40)
+test(
+  'clean clip: analysis JSON kept 0600, media deleted, signed URL never stored',
+  posixOnly,
+  async () => {
+    await withDir(async (dir) => {
+      const { runner, calls } = fakeRunner()
+      const checked = []
+      const result = await pullClip({
+        url: 'https://www.youtube.com/live/ownVideo123',
+        seconds: 120,
+        outDir: dir,
+        runner,
+        isOwnVideo: async (id) => {
+          checked.push(id)
+          return true
+        },
+        analyze: fakeAnalyze(CLEAN),
+        now: () => NOW
+      })
+      assert.equal(result.status, 'analyzed')
+      assert.deepEqual(checked, ['ownVideo123'])
+      assert.equal(result.kept, false)
+      assert.equal(result.clipPath, null)
+      assert.deepEqual(result.incidents, [])
+      assert.deepEqual(await readdir(dir), ['clip-ownVideo123-20261012T150000Z.analysis.json'])
+      assert.equal((await stat(result.analysisPath)).mode & 0o777, 0o600)
+      const saved = await readFile(result.analysisPath, 'utf8')
+      assert.ok(!saved.includes('SECRETSIG'))
+      assert.equal(JSON.parse(saved).summary.avOffsetMs, 40)
 
-    assert.equal(calls[0].command, 'yt-dlp')
-    assert.equal(calls[0].args.at(-1), 'https://www.youtube.com/watch?v=ownVideo123')
-    assert.equal(calls[1].command, 'ffmpeg')
-    assert.ok(calls[1].args.includes(HLS))
-    assert.equal(calls[1].options.timeoutMs, 120_000 + 90_000)
-  })
-})
+      assert.equal(calls[0].command, 'yt-dlp')
+      assert.equal(calls[0].args.at(-1), 'https://www.youtube.com/watch?v=ownVideo123')
+      assert.equal(calls[1].command, 'ffmpeg')
+      assert.ok(calls[1].args.includes(HLS))
+      assert.equal(calls[1].options.timeoutMs, 120_000 + 90_000)
+    })
+  }
+)
 
 test('incident clip keeps the media (unless keepOnIncident is off)', async () => {
   await withDir(async (dir) => {

@@ -9,6 +9,11 @@ import { createQuotaLedger } from './quota-ledger.mjs'
 import { createEventBus } from './step-engine.mjs'
 import { createYoutubeSide, isLiveJournalState } from './youtube-side.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 const NOW = new Date('2026-10-12T15:00:00Z')
 
 function fakeObserver({ snapshots, studioEndedAt = null }) {
@@ -153,38 +158,44 @@ test('clip pulls are skipped and recorded when the policy has clipPull off', asy
   }
 })
 
-test('with clipPull on, pulls go to the run folder and incidents are recorded', async () => {
-  const { side, runDir, pulls, cleanup } = await rig({
-    clipPull: true,
-    pull: async (options) => {
-      pulls.push(options)
-      return {
-        status: 'analyzed',
-        videoId: 'bc-live',
-        analysisPath: join(options.outDir, 'clip-bc-live.analysis.json'),
-        kept: true,
-        incidents: [{ type: 'clip:freeze', signature: 'clip:freeze', severity: 'P1', detail: 'f' }]
+test(
+  'with clipPull on, pulls go to the run folder and incidents are recorded',
+  posixOnly,
+  async () => {
+    const { side, runDir, pulls, cleanup } = await rig({
+      clipPull: true,
+      pull: async (options) => {
+        pulls.push(options)
+        return {
+          status: 'analyzed',
+          videoId: 'bc-live',
+          analysisPath: join(options.outDir, 'clip-bc-live.analysis.json'),
+          kept: true,
+          incidents: [
+            { type: 'clip:freeze', signature: 'clip:freeze', severity: 'P1', detail: 'f' }
+          ]
+        }
       }
+    })
+    try {
+      await side.start()
+      await side.observer.pullClip({ seconds: 30, reason: 'step' })
+      assert.equal(pulls.length, 1)
+      assert.equal(pulls[0].url, 'https://www.youtube.com/watch?v=bc-live')
+      assert.equal(pulls[0].seconds, 30)
+      assert.equal(pulls[0].outDir, join(runDir, 'clips'))
+      assert.equal(pulls[0].clipPull, true)
+      assert.equal(await pulls[0].isOwnVideo('bc-live'), true)
+      assert.deepEqual(
+        side.observer.incidents().map((incident) => incident.signature),
+        ['clip:freeze']
+      )
+      const record = side.observer.clipResults()[0]
+      assert.equal(record.analysis, 'clip-bc-live.analysis.json')
+      assert.equal(record.clipKept, true)
+      await side.stop()
+    } finally {
+      await cleanup()
     }
-  })
-  try {
-    await side.start()
-    await side.observer.pullClip({ seconds: 30, reason: 'step' })
-    assert.equal(pulls.length, 1)
-    assert.equal(pulls[0].url, 'https://www.youtube.com/watch?v=bc-live')
-    assert.equal(pulls[0].seconds, 30)
-    assert.equal(pulls[0].outDir, join(runDir, 'clips'))
-    assert.equal(pulls[0].clipPull, true)
-    assert.equal(await pulls[0].isOwnVideo('bc-live'), true)
-    assert.deepEqual(
-      side.observer.incidents().map((incident) => incident.signature),
-      ['clip:freeze']
-    )
-    const record = side.observer.clipResults()[0]
-    assert.equal(record.analysis, 'clip-bc-live.analysis.json')
-    assert.equal(record.clipKept, true)
-    await side.stop()
-  } finally {
-    await cleanup()
   }
-})
+)

@@ -25,6 +25,11 @@ import {
 } from './publish.mjs'
 import { QuotaRefused } from './quota-ledger.mjs'
 
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
+
 const RUN_ID = '2026-10-12-chat-a1b2c3'
 const POLICY = {
   killSwitchUrl:
@@ -203,90 +208,96 @@ async function exists(path) {
   }
 }
 
-test('a run publishes files, files issues (dedupe), pings Discord on P0, links the VOD and writes published.json 0600', async (t) => {
-  const work = await workDir(t)
-  const runDir = await writeRun(work)
-  const openIssues = [
-    {
-      number: 41,
-      url: 'https://github.com/TheOrcDev/videorc/issues/41',
-      title: 'x',
-      body: `${signatureMarker('leak:renderer')}\nolder`
-    }
-  ]
-  const github = fakeGh({ openIssues })
-  const { ctx, out, discord, youtube } = context({ gh: github.gh })
+test(
+  'a run publishes files, files issues (dedupe), pings Discord on P0, links the VOD and writes published.json 0600',
+  posixOnly,
+  async (t) => {
+    const work = await workDir(t)
+    const runDir = await writeRun(work)
+    const openIssues = [
+      {
+        number: 41,
+        url: 'https://github.com/TheOrcDev/videorc/issues/41',
+        title: 'x',
+        body: `${signatureMarker('leak:renderer')}\nolder`
+      }
+    ]
+    const github = fakeGh({ openIssues })
+    const { ctx, out, discord, youtube } = context({ gh: github.gh })
 
-  assert.equal(await publishAll(ctx, { workDir: work }), 0)
+    assert.equal(await publishAll(ctx, { workDir: work }), 0)
 
-  // Reports repo: only report.md, verdict.json and the PNG, base64 over stdin.
-  const puts = github.calls.filter((call) => call.args[2] === 'PUT')
-  assert.deepEqual(
-    puts.map((call) => call.args[3]),
-    ['report.md', 'verdict.json', 'charts/rss-renderer.png'].map(
-      (rel) => `repos/TheOrcDev/videorc-live-lab-reports/contents/runs/${RUN_ID}/${rel}`
+    // Reports repo: only report.md, verdict.json and the PNG, base64 over stdin.
+    const puts = github.calls.filter((call) => call.args[2] === 'PUT')
+    assert.deepEqual(
+      puts.map((call) => call.args[3]),
+      ['report.md', 'verdict.json', 'charts/rss-renderer.png'].map(
+        (rel) => `repos/TheOrcDev/videorc-live-lab-reports/contents/runs/${RUN_ID}/${rel}`
+      )
     )
-  )
-  const firstPut = JSON.parse(puts[0].input)
-  assert.equal(firstPut.branch, 'main')
-  assert.equal(firstPut.sha, undefined)
-  assert.equal(Buffer.from(firstPut.content, 'base64').toString(), '# Report\n\nOutcome: fail.\n')
-  assert.ok(!github.calls.some((call) => call.args.join(' ').includes('census.csv')))
+    const firstPut = JSON.parse(puts[0].input)
+    assert.equal(firstPut.branch, 'main')
+    assert.equal(firstPut.sha, undefined)
+    assert.equal(Buffer.from(firstPut.content, 'base64').toString(), '# Report\n\nOutcome: fail.\n')
+    assert.ok(!github.calls.some((call) => call.args.join(' ').includes('census.csv')))
 
-  // Issues: leak:renderer is open (#41) -> comment; the P0 is new -> create with label.
-  const comment = github.calls.find(
-    (call) => call.args[0] === 'issue' && call.args[1] === 'comment'
-  )
-  assert.deepEqual(comment.args.slice(0, 3), ['issue', 'comment', '41'])
-  assert.match(comment.input, /Seen again: `2026-10-12-chat-a1b2c3`/)
-  assert.match(comment.input, new RegExp(`runs/${RUN_ID}/report\\.md`))
-  const create = github.calls.find((call) => call.args[0] === 'issue' && call.args[1] === 'create')
-  assert.ok(create.args.includes('--label'))
-  assert.equal(
-    create.args[create.args.indexOf('--title') + 1],
-    '[live-lab] stream:noData-while-live: YouTube got no data while the app said On air'
-  )
-  assert.ok(create.input.startsWith(signatureMarker('stream:noData-while-live')))
-  assert.match(create.input, /`observer\.ndjson` \(lab run folder only\)/)
-  assert.ok(github.calls.some((call) => call.args[0] === 'label'))
+    // Issues: leak:renderer is open (#41) -> comment; the P0 is new -> create with label.
+    const comment = github.calls.find(
+      (call) => call.args[0] === 'issue' && call.args[1] === 'comment'
+    )
+    assert.deepEqual(comment.args.slice(0, 3), ['issue', 'comment', '41'])
+    assert.match(comment.input, /Seen again: `2026-10-12-chat-a1b2c3`/)
+    assert.match(comment.input, new RegExp(`runs/${RUN_ID}/report\\.md`))
+    const create = github.calls.find(
+      (call) => call.args[0] === 'issue' && call.args[1] === 'create'
+    )
+    assert.ok(create.args.includes('--label'))
+    assert.equal(
+      create.args[create.args.indexOf('--title') + 1],
+      '[live-lab] stream:noData-while-live: YouTube got no data while the app said On air'
+    )
+    assert.ok(create.input.startsWith(signatureMarker('stream:noData-while-live')))
+    assert.match(create.input, /`observer\.ndjson` \(lab run folder only\)/)
+    assert.ok(github.calls.some((call) => call.args[0] === 'label'))
 
-  // Discord once, for the P0, with the new issue link.
-  assert.equal(discord.length, 1)
-  assert.equal(discord[0].webhookUrl, WEBHOOK)
-  assert.match(discord[0].content, /stream:noData-while-live/)
-  assert.match(discord[0].content, /issues\/101/)
-  assert.doesNotMatch(discord[0].content, /leak:renderer/)
+    // Discord once, for the P0, with the new issue link.
+    assert.equal(discord.length, 1)
+    assert.equal(discord[0].webhookUrl, WEBHOOK)
+    assert.match(discord[0].content, /stream:noData-while-live/)
+    assert.match(discord[0].content, /issues\/101/)
+    assert.doesNotMatch(discord[0].content, /leak:renderer/)
 
-  // VOD: list (1) + update (50), report link appended, snippet kept.
-  assert.deepEqual(
-    youtube.calls.map((call) => call.method),
-    ['videos.list', 'videos.update']
-  )
-  const update = youtube.calls[1]
-  assert.equal(update.httpMethod, 'PUT')
-  assert.equal(
-    update.body.snippet.description,
-    `Lab stream.\n\nAutomated test report: ${reportFileUrl(TARGET, RUN_ID, 'report.md')}`
-  )
-  assert.deepEqual(update.body.snippet.tags, ['lab'])
+    // VOD: list (1) + update (50), report link appended, snippet kept.
+    assert.deepEqual(
+      youtube.calls.map((call) => call.method),
+      ['videos.list', 'videos.update']
+    )
+    const update = youtube.calls[1]
+    assert.equal(update.httpMethod, 'PUT')
+    assert.equal(
+      update.body.snippet.description,
+      `Lab stream.\n\nAutomated test report: ${reportFileUrl(TARGET, RUN_ID, 'report.md')}`
+    )
+    assert.deepEqual(update.body.snippet.tags, ['lab'])
 
-  const published = JSON.parse(await readFile(join(runDir, PUBLISHED_FILE), 'utf8'))
-  assert.equal(published.complete, true)
-  assert.equal(published.reportsRepo, 'TheOrcDev/videorc-live-lab-reports@main')
-  assert.equal(published.issues['leak:renderer'].action, 'commented')
-  assert.equal(published.issues['stream:noData-while-live'].action, 'created')
-  assert.equal(published.discord.sent, true)
-  assert.equal(published.vod.status, 'updated')
-  assert.equal((await stat(join(runDir, PUBLISHED_FILE))).mode & 0o777, 0o600)
-  assert.match(out.join('\n'), /published$/m)
+    const published = JSON.parse(await readFile(join(runDir, PUBLISHED_FILE), 'utf8'))
+    assert.equal(published.complete, true)
+    assert.equal(published.reportsRepo, 'TheOrcDev/videorc-live-lab-reports@main')
+    assert.equal(published.issues['leak:renderer'].action, 'commented')
+    assert.equal(published.issues['stream:noData-while-live'].action, 'created')
+    assert.equal(published.discord.sent, true)
+    assert.equal(published.vod.status, 'updated')
+    assert.equal((await stat(join(runDir, PUBLISHED_FILE))).mode & 0o777, 0o600)
+    assert.match(out.join('\n'), /published$/m)
 
-  // Idempotent: a second publish finds nothing to do and calls nothing.
-  const again = fakeGh({ openIssues })
-  const second = context({ gh: again.gh })
-  assert.equal(await publishAll(second.ctx, { workDir: work }), 0)
-  assert.deepEqual(again.calls, [])
-  assert.equal(second.discord.length, 0)
-})
+    // Idempotent: a second publish finds nothing to do and calls nothing.
+    const again = fakeGh({ openIssues })
+    const second = context({ gh: again.gh })
+    assert.equal(await publishAll(second.ctx, { workDir: work }), 0)
+    assert.deepEqual(again.calls, [])
+    assert.equal(second.discord.length, 0)
+  }
+)
 
 test('Discord is pinged only on a P0', async (t) => {
   const work = await workDir(t)
@@ -561,58 +572,66 @@ test('updateVodDescription skips on quota, another channel, or an existing link'
   )
 })
 
-test('boot doctor FAILs become doctor:<check> issues once, with home paths withheld', async (t) => {
-  const work = await workDir(t)
-  await mkdir(join(work, 'doctor'), { recursive: true })
-  const home = ['', 'Users', 'videorc-lab', '.videorc-live-lab', 'config.json'].join('/')
-  const text = [
-    'PASS  auto-login             videorc-lab logs in automatically.',
-    'FAIL  screen lock            Screen lock is on. Turn it off.',
-    `FAIL  config                 ${home} is missing. Run pnpm live:hookup.`,
-    'Lab NOT ready: 1 pass, 0 warn, 2 fail, 0 skip.'
-  ].join('\n')
-  const file = join(work, 'doctor', 'boot-2026-10-12T03-35-00-000Z.txt')
-  await writeFile(file, text)
-  await writeFile(
-    join(work, 'doctor', 'boot-2026-10-01T03-35-00-000Z.txt'),
-    'FAIL  old                    old\n'
-  )
-  const openIssues = [
-    { number: 5, url: 'u5', title: 't', body: signatureMarker('doctor:screen-lock') }
-  ]
-  const github = fakeGh({ openIssues })
-  const { ctx } = context({ gh: github.gh })
-  assert.equal(await publishAll(ctx, { workDir: work, since: '2026-10-12T00:00:00.000Z' }), 0)
-  const comment = github.calls.find(
-    (call) => call.args[0] === 'issue' && call.args[1] === 'comment'
-  )
-  assert.equal(comment.args[2], '5')
-  assert.match(comment.input, /Screen lock is on/)
-  const create = github.calls.find((call) => call.args[0] === 'issue' && call.args[1] === 'create')
-  assert.equal(
-    create.args[create.args.indexOf('--title') + 1],
-    '[live-lab] doctor:config: FAIL after boot'
-  )
-  assert.match(create.input, /detail withheld/)
-  assert.ok(!github.calls.some((call) => `${call.input}${call.args.join(' ')}`.includes('/Users/')))
-  assert.ok(!github.calls.some((call) => `${call.input}`.includes('old')))
-  const sidecar = JSON.parse(await readFile(file.replace(/\.txt$/, '.published.json'), 'utf8'))
-  assert.equal(sidecar.complete, true)
-  assert.equal((await stat(file.replace(/\.txt$/, '.published.json'))).mode & 0o777, 0o600)
+test(
+  'boot doctor FAILs become doctor:<check> issues once, with home paths withheld',
+  posixOnly,
+  async (t) => {
+    const work = await workDir(t)
+    await mkdir(join(work, 'doctor'), { recursive: true })
+    const home = ['', 'Users', 'videorc-lab', '.videorc-live-lab', 'config.json'].join('/')
+    const text = [
+      'PASS  auto-login             videorc-lab logs in automatically.',
+      'FAIL  screen lock            Screen lock is on. Turn it off.',
+      `FAIL  config                 ${home} is missing. Run pnpm live:hookup.`,
+      'Lab NOT ready: 1 pass, 0 warn, 2 fail, 0 skip.'
+    ].join('\n')
+    const file = join(work, 'doctor', 'boot-2026-10-12T03-35-00-000Z.txt')
+    await writeFile(file, text)
+    await writeFile(
+      join(work, 'doctor', 'boot-2026-10-01T03-35-00-000Z.txt'),
+      'FAIL  old                    old\n'
+    )
+    const openIssues = [
+      { number: 5, url: 'u5', title: 't', body: signatureMarker('doctor:screen-lock') }
+    ]
+    const github = fakeGh({ openIssues })
+    const { ctx } = context({ gh: github.gh })
+    assert.equal(await publishAll(ctx, { workDir: work, since: '2026-10-12T00:00:00.000Z' }), 0)
+    const comment = github.calls.find(
+      (call) => call.args[0] === 'issue' && call.args[1] === 'comment'
+    )
+    assert.equal(comment.args[2], '5')
+    assert.match(comment.input, /Screen lock is on/)
+    const create = github.calls.find(
+      (call) => call.args[0] === 'issue' && call.args[1] === 'create'
+    )
+    assert.equal(
+      create.args[create.args.indexOf('--title') + 1],
+      '[live-lab] doctor:config: FAIL after boot'
+    )
+    assert.match(create.input, /detail withheld/)
+    assert.ok(
+      !github.calls.some((call) => `${call.input}${call.args.join(' ')}`.includes('/Users/'))
+    )
+    assert.ok(!github.calls.some((call) => `${call.input}`.includes('old')))
+    const sidecar = JSON.parse(await readFile(file.replace(/\.txt$/, '.published.json'), 'utf8'))
+    assert.equal(sidecar.complete, true)
+    assert.equal((await stat(file.replace(/\.txt$/, '.published.json'))).mode & 0o777, 0o600)
 
-  const again = fakeGh({ openIssues })
-  const second = context({ gh: again.gh })
-  assert.equal(
-    await publishAll(second.ctx, { workDir: work, since: '2026-10-12T00:00:00.000Z' }),
-    0
-  )
-  assert.deepEqual(again.calls, [])
-  assert.equal(
-    doctorFileTime('boot-2026-10-12T03-35-00-000Z.txt'),
-    Date.parse('2026-10-12T03:35:00.000Z')
-  )
-  assert.equal(doctorFileTime('boot-x.txt'), null)
-})
+    const again = fakeGh({ openIssues })
+    const second = context({ gh: again.gh })
+    assert.equal(
+      await publishAll(second.ctx, { workDir: work, since: '2026-10-12T00:00:00.000Z' }),
+      0
+    )
+    assert.deepEqual(again.calls, [])
+    assert.equal(
+      doctorFileTime('boot-2026-10-12T03-35-00-000Z.txt'),
+      Date.parse('2026-10-12T03:35:00.000Z')
+    )
+    assert.equal(doctorFileTime('boot-x.txt'), null)
+  }
+)
 
 test('discord: webhook from config, else env; validated and never echoed', async () => {
   assert.equal(webhookUrlFrom({ discord: { webhookUrl: WEBHOOK } }, {}), WEBHOOK)
