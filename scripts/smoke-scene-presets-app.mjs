@@ -88,7 +88,16 @@ const refreshDevices = () =>
   // Scoped to the Sources page: Livestream → Upcoming has its own Refresh,
   // which stays mounted (and may be throttled) once that page was visited.
   const sourcesPage = () => document.querySelector('[data-videorc-sources-page]') ?? document;
-  const button = [...sourcesPage().querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+  const findRefresh = () =>
+    [...sourcesPage().querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+  // The Sources page is lazy and an earlier refresh may still be running
+  // (ogre, 2026-10-12): wait for an enabled button instead of failing at once.
+  const readyBy = Date.now() + ${timeoutMs};
+  let button = findRefresh();
+  while ((!button || button.disabled) && Date.now() < readyBy) {
+    await sleep(25);
+    button = findRefresh();
+  }
   if (!button || button.disabled) throw new Error('Device refresh unavailable.');
   button.click();
   await new Promise(requestAnimationFrame);
