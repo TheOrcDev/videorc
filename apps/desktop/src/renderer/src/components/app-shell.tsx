@@ -8,6 +8,7 @@ import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
+import { StatusBarReplayState } from '@/components/status-bar-replay'
 import { StatusBarSessionState } from '@/components/status-bar-session'
 import { GoLiveDialogGate } from '@/components/go-live-dialog-gate'
 import {
@@ -565,7 +566,14 @@ function AppShellContent(): ReactElement {
           </Pane>
           {/* State on the left, the shell's real shortcuts on the right:
                 keyboard-first, only quieter than the old footer bar. */}
-          <StatusBar leading={<StatusBarSessionState recording={recording} wsStatus={wsStatus} />}>
+          <StatusBar
+            leading={
+              <>
+                <StatusBarSessionState recording={recording} wsStatus={wsStatus} />
+                <StatusBarReplayState />
+              </>
+            }
+          >
             <StatusBarHint
               accelerator={shortcutAccelerator('search')}
               label="Search"

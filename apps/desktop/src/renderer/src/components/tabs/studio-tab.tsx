@@ -45,6 +45,11 @@ const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
     .StudioDashboardBottomRow
 }))
+// Plan 181: the replay buffer row is its own chunk; the eager Studio keeps
+// only the switch's state.
+const ReplayBufferRow = lazy(async () => ({
+  default: (await import('@/components/studio/replay-buffer-row')).ReplayBufferRow
+}))
 // The meter brings audiocn: its own chunk, so the inspector paints first.
 const MicrophoneSection = lazy(async () => ({
   default: (await import('@/components/studio/microphone-section')).MicrophoneSection
@@ -214,6 +219,10 @@ export function StudioTab(): ReactElement {
             onRecord={handleRecord}
             onStop={() => handleStop('button')}
           />
+          {/* Plan 181: the replay buffer's switch, right under the starts. */}
+          <Suspense fallback={null}>
+            <ReplayBufferRow />
+          </Suspense>
         </div>
 
         <aside aria-label="Session inspector" className={STUDIO_INSPECTOR}>

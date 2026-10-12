@@ -1532,8 +1532,6 @@ export type StudioContextValue = {
   /** Mark the current moment for a clip (plan 068 D6). The `clip.marked`
    * event, not the reply, carries the toast so every source reads the same. */
   markClip: () => Promise<ClipMarkedEvent | null>
-  /** The replay buffer (plan 181): the backend's state, the switch, Save replay. */
-  replayBuffer: ReplayBufferControls
   assessRecording: (path: string) => Promise<FileAssessment>
   repairRecording: (path: string) => Promise<GateStatus>
   restoreRecording: (path: string) => Promise<boolean>
@@ -1646,6 +1644,10 @@ const NO_SCREENS: StreamScreen[] = []
 
 const StudioContext = createContext<StudioCoreContextValue | null>(null)
 const StudioRecordingStateContext = createContext<StudioRecordingStateContextValue | null>(null)
+// Plan 181: the ring reports once a second while it is on. Its own context
+// keeps that tick away from the core value and the shell; only the Studio
+// row, the status bar chip and the palette item subscribe.
+const StudioReplayContext = createContext<ReplayBufferControls | null>(null)
 const StudioRecordingContext = createContext<StudioRecordingContextValue | null>(null)
 const StudioPreviewContext = createContext<StudioPreviewContextValue | null>(null)
 const StudioDiagnosticsContext = createContext<StudioDiagnosticsContextValue | null>(null)
@@ -2107,6 +2109,15 @@ export function useStudioRecordingState(): StudioRecordingStateContextValue {
   return value
 }
 
+/** The replay buffer (plan 181): the backend's state, the switch, Save replay. */
+export function useStudioReplay(): ReplayBufferControls {
+  const value = useContext(StudioReplayContext)
+  if (!value) {
+    throw new Error('useStudioReplay must be used within a StudioProvider')
+  }
+  return value
+}
+
 export function useStudioPreview(): StudioPreviewContextValue {
   const value = useContext(StudioPreviewContext)
   if (!value) {
@@ -2169,8 +2180,17 @@ type StudioContextProvidersProps = {
   diagnostics: StudioDiagnosticsContextValue
   chat: StudioChatContextValue
   audio: StudioAudioContextValue
+  /** Plan 181. Optional so a test that mounts the providers alone keeps a ring that is off. */
+  replay?: ReplayBufferControls
   children?: ReactNode
 }
+
+const REPLAY_BUFFER_OFF_CONTROLS: ReplayBufferControls = Object.freeze({
+  state: REPLAY_STATE_OFF,
+  armed: false,
+  setArmed: () => {},
+  save: async () => {}
+})
 
 /**
  * Keep volatile Studio domains behind their own providers. Besides making the
@@ -2186,6 +2206,7 @@ export function StudioContextProviders({
   diagnostics,
   chat,
   audio,
+  replay = REPLAY_BUFFER_OFF_CONTROLS,
   children
 }: StudioContextProvidersProps): ReactElement {
   return (
@@ -2195,7 +2216,11 @@ export function StudioContextProviders({
           <StudioPreviewContext.Provider value={preview}>
             <StudioDiagnosticsContext.Provider value={diagnostics}>
               <StudioChatContext.Provider value={chat}>
-                <StudioAudioContext.Provider value={audio}>{children}</StudioAudioContext.Provider>
+                <StudioAudioContext.Provider value={audio}>
+                  <StudioReplayContext.Provider value={replay}>
+                    {children}
+                  </StudioReplayContext.Provider>
+                </StudioAudioContext.Provider>
               </StudioChatContext.Provider>
             </StudioDiagnosticsContext.Provider>
           </StudioPreviewContext.Provider>
@@ -16399,7 +16424,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelNoiseCleanup,
       sessionStorageTotals,
       markClip,
-      replayBuffer: replayBufferControls,
       assessRecording,
       repairRecording,
       restoreRecording,
@@ -16634,7 +16658,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelNoiseCleanup,
       sessionStorageTotals,
       markClip,
-      replayBufferControls,
       assessRecording,
       repairRecording,
       restoreRecording,
@@ -16668,6 +16691,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         preview={previewValue}
         recording={recordingValue}
         recordingState={recordingStateValue}
+        replay={replayBufferControls}
       >
         {children}
       </StudioContextProviders>

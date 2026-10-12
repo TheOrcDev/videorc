@@ -5,8 +5,19 @@ import {
   recordingPresetOptions,
   type OutputNumberField
 } from '@/lib/output-quality'
-import { FolderIcon, VideoFileIcon, WarningIcon } from '@/components/icons'
-import { useEffect, useId, useState, type ReactElement } from 'react'
+import { FolderIcon, SaveIcon, VideoFileIcon, WarningIcon } from '@/components/icons'
+import { useEffect, useId, useState, useSyncExternalStore, type ReactElement } from 'react'
+
+import { findAcceleratorOwner } from '../../../../shared/accelerator'
+import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
+import { ShortcutRecorderField } from '@/components/shortcut-recorder'
+import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
+import {
+  REPLAY_BUFFER_LABEL,
+  estimatedReplayDiskBytes,
+  formatBytes,
+  replayLengthLabel
+} from '@/lib/replay-buffer'
 
 import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
@@ -23,19 +34,27 @@ import {
 } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { SegmentedControl } from '@/components/ui/segmented-control'
-import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { DirectoryFacts, VideoPreset, VideoSettings } from '@/lib/backend'
 import {
+  REPLAY_BUFFER_LENGTH_OPTIONS,
   layoutPresetOrientation,
   resolutionOptionsForOrientation,
   videoProfileCompatibility,
   type LayoutOrientation
 } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
+import { formatVideoQuality } from '@/lib/format-video'
 import { performanceCheckLine } from '@/lib/performance-check-line'
 import { unlockActionForGate } from '@/lib/lock-view'
 import { revealInFileManagerLabel } from '@/lib/platform'
@@ -57,8 +76,114 @@ export function RecordingTab(): ReactElement {
   return (
     <div className="flex flex-col">
       <LocalRecordingSection />
+      <ReplayBufferSection />
       <RecordingsFolderSection />
     </div>
+  )
+}
+
+/**
+ * The replay buffer's settings (plan 181 S5.2): its length, whether it arms
+ * at launch (D6), what it takes on disk at the current quality (D2), the
+ * Save replay key (D5) and where replays go (D7). The switch itself has
+ * one home, the Studio.
+ */
+function ReplayBufferSection(): ReactElement {
+  const { captureConfig, setCaptureConfig, settings, setSettings, runtimeInfo } = useStudioCore()
+  const { seconds, startOnLaunch } = captureConfig.replayBuffer
+  const estimate = formatBytes(estimatedReplayDiskBytes(seconds, captureConfig.video.bitrateKbps))
+  const shortcutRegistration = useSyncExternalStore(
+    globalShortcutRegistration.subscribe,
+    globalShortcutRegistration.getSnapshot
+  )
+  return (
+    <PanelSection
+      description="Keeps the last seconds of what you record or stream, so one key saves them as a replay. Turn it on in Studio."
+      icon={SaveIcon}
+      title={REPLAY_BUFFER_LABEL}
+    >
+      <FieldGroup variant="grouped">
+        <SettingsRow
+          data-testid="output-replay-length"
+          description="How much the buffer keeps. A replay runs this long, plus up to two seconds."
+          label="Length"
+        >
+          <Select
+            value={String(seconds)}
+            onValueChange={(value) =>
+              setCaptureConfig((current) => ({
+                ...current,
+                replayBuffer: { ...current.replayBuffer, seconds: Number(value) }
+              }))
+            }
+          >
+            <SelectTrigger className="w-32 shrink-0" id="replay-length">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {REPLAY_BUFFER_LENGTH_OPTIONS.map((option) => (
+                <SelectItem key={option} value={String(option)}>
+                  {replayLengthLabel(option)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        <SettingsRow
+          data-testid="output-replay-start-on-launch"
+          description="While it is on, your screen and microphone are being written to disk until you turn it off."
+          label="Turn on when Videorc opens"
+        >
+          <Switch
+            checked={startOnLaunch}
+            onCheckedChange={(checked) =>
+              setCaptureConfig((current) => ({
+                ...current,
+                replayBuffer: { ...current.replayBuffer, startOnLaunch: checked }
+              }))
+            }
+          />
+        </SettingsRow>
+        <SettingsRow
+          data-testid="output-replay-disk"
+          description={`At ${formatVideoQuality(captureConfig.video)}, however long the buffer runs. It is deleted when the buffer turns off.`}
+          label="Disk use"
+        >
+          <span className="text-sm tabular-nums text-muted-foreground">about {estimate}</span>
+        </SettingsRow>
+        <ShortcutRecorderField
+          id="global-shortcut-replay-save"
+          label={globalShortcutLabel('replay-save')}
+          platform={runtimeInfo?.platform}
+          registrationFailed={shortcutRegistration['replay-save'] === false}
+          validate={(accelerator) => {
+            const owner = findAcceleratorOwner(
+              settings.globalShortcuts ?? {},
+              accelerator,
+              'replay-save',
+              runtimeInfo?.platform
+            )
+            return owner ? `Already used by ${globalShortcutLabel(owner)}.` : null
+          }}
+          value={settings.globalShortcuts?.replaySave}
+          onChange={(accelerator) =>
+            setSettings((current) => ({
+              ...current,
+              globalShortcuts: withGlobalShortcut(
+                current.globalShortcuts,
+                'replay-save',
+                accelerator
+              )
+            }))
+          }
+        />
+        <SettingsRow
+          data-testid="output-replay-folder"
+          description="A Replays folder inside your recordings folder. Every replay is listed in Library."
+          label="Where replays go"
+        />
+      </FieldGroup>
+    </PanelSection>
   )
 }
 

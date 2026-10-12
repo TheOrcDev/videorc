@@ -10,6 +10,7 @@ import {
   NoteIcon,
   PreviewIcon,
   RecordIcon,
+  SaveIcon,
   SceneIcon,
   SettingsIcon,
   SpeakerOffIcon,
@@ -47,7 +48,7 @@ import {
   type WorkspaceTab,
   type WorkspaceTabGroup
 } from '@/components/workspace-nav'
-import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
+import { useStudioCore, useStudioRecordingState, useStudioReplay } from '@/hooks/use-studio'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // ⌘K (plan 174 S3.21, A-9, A-13): Session first (the transport's own
@@ -129,6 +130,7 @@ export function CommandPalette({
     toggleCaptionsWindow
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
+  const replayBuffer = useStudioReplay()
   const platform = runtimeInfo?.platform
   const { theme, setTheme } = useTheme()
   // cmdk's selected item; the footer names it.
@@ -240,6 +242,18 @@ export function CommandPalette({
               <ClipIcon className="size-4" />
               Mark clip
               {shortcut(settings.globalShortcuts?.clipMark)}
+            </CommandItem>
+          ) : null}
+          {/* Plan 181: the ring holds frames, so the last seconds can be saved. */}
+          {replayBuffer.state.state === 'on' ? (
+            <CommandItem
+              value="Save replay"
+              keywords={['replay', 'buffer', 'last', 'seconds', 'instant']}
+              onSelect={() => run(() => void replayBuffer.save())}
+            >
+              <SaveIcon className="size-4" />
+              Save replay
+              {shortcut(settings.globalShortcuts?.replaySave)}
             </CommandItem>
           ) : null}
         </CommandGroup>
