@@ -26,6 +26,7 @@ import {
   type ProviderStreamOutputPlanOptions
 } from './capture'
 import { formatVideoQuality } from './format-video'
+import { streamOutputCheckFailureMessage } from './stream-output-check-message'
 import { isUntrustedPerformanceCheckResult, outputLabel, outputVerdict } from './performance-check'
 
 // Everything a livestream start decides about its own output (plan 090):
@@ -319,11 +320,7 @@ export async function settleGoLiveSessionOutput(
         interrupted = true
         continue
       }
-      return blocked(
-        `Livestream output check failed: ${
-          error instanceof Error ? error.message : "the output path couldn't be verified."
-        }`
-      )
+      return blocked(`Livestream output check failed: ${streamOutputCheckFailureMessage(error)}`)
     }
     if (streamOutputTopologySplitRejected(result)) {
       deps.noteRejectedSplit(streamOutputTopologyProbeRequestKey(request.params))

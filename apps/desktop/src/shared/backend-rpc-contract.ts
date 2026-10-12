@@ -839,7 +839,8 @@ const streamOutputTopologyProbeResultFields = objectSchema(
     effectiveBridgeOutput: streamOutputBridgeSchema,
     effectiveEncodeBackend: encodeBackendSchema,
     probeState: streamOutputTopologyProbeStateSchema,
-    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 480 }))
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 480 })),
+    encoderSelectionReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 480 }))
   },
   { allowUnknown: false }
 )

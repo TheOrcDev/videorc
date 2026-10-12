@@ -4,6 +4,7 @@ import type { CommentsViewSnapshot } from '../../../shared/backend'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
 import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-loader'
 import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
+import { streamOutputCheckFailureMessage } from '@/lib/stream-output-check-message'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { clipMarkedToast } from '../../../shared/clip-marks'
@@ -10841,10 +10842,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             commitStreamOutputTopologyPreflight({
               state: 'failed',
               requestKey,
-              message:
-                error instanceof Error
-                  ? error.message
-                  : "The livestream output path couldn't be verified."
+              message: streamOutputCheckFailureMessage(error)
             })
           }
           throw error

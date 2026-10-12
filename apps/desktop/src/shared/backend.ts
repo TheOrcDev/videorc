@@ -1791,7 +1791,13 @@ export interface StreamOutputTopologyProbeResult {
   effectiveBridgeOutput: StreamOutputBridge
   effectiveEncodeBackend: EncodeBackend
   probeState: StreamOutputTopologyProbeState
+  /** Topology fallback only: a rejected/unsupported probe or a changed bridge. */
   fallbackReason?: string
+  /**
+   * Why the raw path uses this encoder (Linux OpenH264, VAAPI rejected, a
+   * failed Quick Sync check). Informational in every probe state (plan 0015).
+   */
+  encoderSelectionReason?: string
 }
 
 export type CompositorBackend = 'metal' | 'd3d11' | 'cpu' | 'cpu-fallback'

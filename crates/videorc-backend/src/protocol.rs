@@ -1732,8 +1732,15 @@ pub struct StreamOutputTopologyProbeResult {
     pub effective_bridge_output: StreamOutputBridge,
     pub effective_encode_backend: EncodeBackend,
     pub probe_state: StreamOutputTopologyProbeState,
+    /// Why the topology fell back: only for a rejected or unsupported probe,
+    /// or when the effective bridge differs from the requested one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    /// Why the raw path uses this encoder (OpenH264 chosen explicitly, VAAPI
+    /// rejected, Quick Sync check failed). Informational in every probe state;
+    /// it never makes a passed or not-required topology a fallback (plan 0015).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_selection_reason: Option<String>,
 }
 
 /// Outcome of the Linux VAAPI render-node policy for one `/dev/dri/renderD*`
@@ -7592,6 +7599,7 @@ mod tests {
             effective_encode_backend: EncodeBackend::SoftwareOpenH264,
             probe_state: StreamOutputTopologyProbeState::Rejected,
             fallback_reason: Some("hardware profile rejected".to_string()),
+            encoder_selection_reason: None,
         };
         let wire = serde_json::to_value(result).unwrap();
         assert_eq!(
