@@ -68,8 +68,13 @@ policy.mjs`) allows it against the owner's `policy.json`; then no per-run
 
 The lab Mac runs with auto-login, no personal data, and an owner-owned
 `/Library/Application Support/VideorcLab/policy.json` that the lab user
-cannot write (`docs/live-lab-machine.md`). The harness checks the policy,
-the run lock and the kill switches before every run and every step:
+cannot write (`docs/live-lab-machine.md`). A Linux lab box (plan 179,
+Hyprland) works the same way with `/etc/videorc-lab/policy.json`
+("Linux lab machine" in that doc); it has no candidate workflow, so a PR
+build there is one built on the box (`live:install --build local:...`), and
+`live:remote` runs whatever is installed when `--build` is left out. The
+harness checks the policy, the run lock and the kill switches before every
+run and every step:
 
 - `loadPolicy()` refuses a policy that is missing, invalid, or owned or
   writable by the current user.
