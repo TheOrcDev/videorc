@@ -1,19 +1,24 @@
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 import yaml from 'js-yaml'
 
 import { refuse } from './install-runner.mjs'
+import { isLinux } from './platform.mjs'
 
 // Plan 178 U5: where a lab build comes from.
 //   release            the public macOS feed the app's own updater reads
 //                      (electron-builder.yml publish.url, updater-mirror.ts)
 //   candidate:<run-id> an artifact of .github/workflows/lab-candidate-macos.yml
 //   candidate:<sha>    the newest lab-candidate-<sha7> artifact
+// Linux only (plan 179, sources in install-linux.mjs):
+//   file:<AppImage>    an AppImage the owner downloaded, with its sha256
+//   local:<dir>        an unpacked build from this machine (linux-unpacked)
 
 export const RELEASE_FEED_URL = 'https://www.videorc.com/api/updates/'
 export const MIRROR_FEED_URL = 'https://www.videorc.com/api/updates/mirror/'
@@ -22,18 +27,42 @@ export const CANDIDATE_WORKFLOW_FILE = 'lab-candidate-macos.yml'
 export const CANDIDATE_WORKFLOW_NAME = 'Lab candidate macOS'
 export const SIDECAR_FILE = 'lab-candidate.json'
 
-export function parseBuildSpec(value) {
+export function parseBuildSpec(value, { platform = process.platform } = {}) {
   const text = String(value ?? '').trim()
   if (text === 'release') return { kind: 'release' }
+  const pathSpec = /^(file|local):(.*)$/.exec(text)
+  if (pathSpec) {
+    if (!isLinux(platform)) {
+      throw new Error(
+        `--build ${pathSpec[1]}:<path> is for the Linux lab only; on macOS use "release" or "candidate:<run-id|sha>".`
+      )
+    }
+    const path = pathSpec[2].trim()
+    if (!path) throw new Error(`--build ${pathSpec[1]}: needs a path.`)
+    return { kind: pathSpec[1], path }
+  }
   const match = /^candidate:(.+)$/.exec(text)
   if (match) {
     const target = match[1].trim()
     if (/^[0-9]+$/.test(target)) return { kind: 'candidate', runId: target }
     if (/^[0-9a-f]{7,40}$/i.test(target)) return { kind: 'candidate', sha: target.toLowerCase() }
   }
+  if (isLinux(platform)) {
+    throw new Error(
+      `--build must be "release", "file:<AppImage>", "local:<dir>", "candidate:<run-id>" or "candidate:<sha (7-40 hex)>", got "${text}".`
+    )
+  }
   throw new Error(
     `--build must be "release", "candidate:<run-id>" or "candidate:<sha (7-40 hex)>", got "${text}".`
   )
+}
+
+// A file:/local: path as typed. The shell does not expand the ~ after
+// "file:", so this does.
+export function resolveBuildPath(path, { home = homedir(), cwd = process.cwd() } = {}) {
+  if (path === '~') return home
+  if (path.startsWith('~/')) return join(home, path.slice(2))
+  return resolve(cwd, path)
 }
 
 export function candidateArtifactName(sha) {
@@ -65,7 +94,7 @@ export function parseUpdateFeed(text) {
   }
 }
 
-function hashingStream(algorithm) {
+export function hashingStream(algorithm, encoding = 'base64') {
   const hash = createHash(algorithm)
   let bytes = 0
   const stream = new Transform({
@@ -75,10 +104,18 @@ function hashingStream(algorithm) {
       callback(null, chunk)
     }
   })
-  return { stream, digest: () => hash.digest('base64'), bytes: () => bytes }
+  return { stream, digest: () => hash.digest(encoding), bytes: () => bytes }
 }
 
-export async function downloadVerified({ fetchImpl, url, dest, sha512, size }) {
+export async function downloadVerified({
+  fetchImpl,
+  url,
+  dest,
+  sha512,
+  size,
+  feedName = 'latest-mac.yml',
+  what = 'zip'
+}) {
   const response = await fetchImpl(url)
   if (!response.ok || !response.body) {
     throw new Error(`Download failed: HTTP ${response.status} for ${url}`)
@@ -86,10 +123,10 @@ export async function downloadVerified({ fetchImpl, url, dest, sha512, size }) {
   const hasher = hashingStream('sha512')
   await pipeline(Readable.fromWeb(response.body), hasher.stream, createWriteStream(dest))
   if (size !== null && size !== undefined && hasher.bytes() !== size) {
-    refuse('size-mismatch', `Downloaded ${hasher.bytes()} bytes, latest-mac.yml says ${size}.`)
+    refuse('size-mismatch', `Downloaded ${hasher.bytes()} bytes, ${feedName} says ${size}.`)
   }
   if (hasher.digest() !== sha512) {
-    refuse('sha512-mismatch', 'The downloaded zip does not match the sha512 in latest-mac.yml.')
+    refuse('sha512-mismatch', `The downloaded ${what} does not match the sha512 in ${feedName}.`)
   }
 }
 
