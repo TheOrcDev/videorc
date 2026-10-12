@@ -544,7 +544,11 @@ import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
 import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
-import { replayBufferReconcileAction, replayStartRetryDelayMs } from '@/lib/replay-buffer-reconcile'
+import {
+  REPLAY_START_RETRY_LIMIT,
+  replayBufferReconcileAction,
+  replayStartRetryDelayMs
+} from '@/lib/replay-buffer-reconcile'
 import {
   confirmedSystemAudioMix,
   systemAudioIssueFromHealthEvent,
@@ -2323,6 +2327,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const replayStartInFlightRef = useRef(false)
   const replayFailedStartsRef = useRef(0)
   const replayReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const replayGaveUpToastedRef = useRef(false)
   const replayLaunchArmedRef = useRef(false)
   const setReplayArmedRef = useRef<(armed: boolean) => void>(() => {})
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
@@ -7127,6 +7132,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         // Plan 181: a session ended or began; the switch decides what the
         // ring does next (re-arm after a recording, stop after the switch).
+        // A session that ended cleanly is proof a start can work: the
+        // failed-start count begins again.
+        if (status.state === 'idle') replayFailedStartsRef.current = 0
         scheduleReplayReconcile()
       }),
       // Viewer rider V2: relay the latest concurrent-viewer sample to the
@@ -14958,11 +14966,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
-    const blocked = recordBlockedReason
-    if (blocked) {
-      replayArmedRef.current = false
-      setReplayArmedState(false)
-      void import('@/lib/replay-buffer').then((replay) => replay.showClipsCouldNotStart(blocked))
+    if (recordBlockedReason) {
+      // Not yet: a source or a permission is missing. The switch stays on
+      // and the ring starts once the reason clears (the effect below), so a
+      // launch before Sources settle never turns clips off.
       return
     }
     replayStartInFlightRef.current = true
@@ -15008,10 +15015,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       replayFailedStartsRef.current += 1
       console.warn('[replay-buffer] start failed', error)
-      if (replayFailedStartsRef.current >= 3) {
-        replayArmedRef.current = false
-        setReplayArmedState(false)
-        void import('@/lib/replay-buffer').then((replay) => replay.showClipsCouldNotStart(message))
+      if (replayFailedStartsRef.current >= REPLAY_START_RETRY_LIMIT) {
+        // Three failures in a row: stop trying for now (the switch stays
+        // on; a source change or the next session's end tries again) and
+        // say so once per launch.
+        if (!replayGaveUpToastedRef.current) {
+          replayGaveUpToastedRef.current = true
+          void import('@/lib/replay-buffer').then((replay) =>
+            replay.showClipsCouldNotStart(message)
+          )
+        }
       } else {
         scheduleReplayReconcile(replayStartRetryDelayMs(replayFailedStartsRef.current))
       }
@@ -15055,14 +15068,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     if (action === 'start') void startReplayBuffer()
     else if (action === 'stop') void stopReplayBuffer()
-    else if (action === 'give-up') {
-      replayArmedRef.current = false
-      setReplayArmedState(false)
-      replayFailedStartsRef.current = 0
-    }
+    // 'give-up': three failed starts in a row; nothing until a source
+    // change or a session's end resets the count (below).
   }, [startReplayBuffer, stopReplayBuffer])
   const reconcileReplayBufferRef = useRef(reconcileReplayBuffer)
   reconcileReplayBufferRef.current = reconcileReplayBuffer
+  // The ring waits for Sources (a blocked start keeps the switch on): once
+  // the record block clears, or a source changes, it tries again from a
+  // clean count.
+  useEffect(() => {
+    replayFailedStartsRef.current = 0
+    scheduleReplayReconcile()
+  }, [
+    recordBlockedReason,
+    captureConfig.sources.screenId,
+    captureConfig.sources.windowId,
+    captureConfig.sources.cameraId,
+    scheduleReplayReconcile
+  ])
 
   const setReplayArmed = useCallback(
     (armed: boolean): void => {

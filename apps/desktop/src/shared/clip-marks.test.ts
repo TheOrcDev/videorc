@@ -7,6 +7,7 @@ import {
   clipMarkKeptSomething,
   clipMarkSavedClip,
   clipMarkedToast,
+  clipSavingToast,
   formatClipMarkClock
 } from './clip-marks'
 
@@ -73,17 +74,17 @@ describe('clip marked toast', () => {
     expect(clipMarkSavedClip({ reason: undefined })).toBe(false)
     expect(clipMarkKeptSomething({ saved: true, reason: undefined })).toBe(true)
     expect(clipMarkKeptSomething({ saved: false, reason: 'recording-off' })).toBe(false)
-    expect(clipMarkedToast(ringOnly, { seconds: 30 })).toEqual({
+    expect(clipSavingToast(ringOnly, 30)).toEqual({
       kind: 'success',
       title: 'Saving the last 0:30 as a clip',
       description: "It's in Library in a moment."
     })
-    expect(clipMarkedToast({ ...ringOnly, saved: true }, { seconds: 120 })).toEqual({
+    expect(clipSavingToast({ saved: true }, 120)).toEqual({
       kind: 'success',
       title: 'Saving the last 2:00 as a clip',
       description: "It's in Library, and this moment is marked in your recording."
     })
-    expect(clipMarkedToast(ringOnly).title).toBe('Saving the last seconds as a clip')
+    expect(clipSavingToast(ringOnly, undefined).title).toBe('Saving the last seconds as a clip')
   })
 
   it('explains an unsaved mark instead of confirming it', () => {

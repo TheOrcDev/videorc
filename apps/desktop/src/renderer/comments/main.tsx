@@ -53,7 +53,12 @@ import {
   MarkerRemovedError
 } from '@/lib/marker-command'
 import type { CreateMarkerParams, MarkerContext } from '../../shared/session-markers'
-import { clipMarkedToast, type ClipMarkedToast } from '../../shared/clip-marks'
+import {
+  clipMarkSavedClip,
+  clipMarkedToast,
+  clipSavingToast,
+  type ClipMarkedToast
+} from '../../shared/clip-marks'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
@@ -124,7 +129,9 @@ function CommentsWindowApp(): ReactElement {
     return (
       window.videorc?.markClipFromCommentsWindow?.({ requestId: crypto.randomUUID() }) ??
       Promise.reject(new Error("The Stream Manager can't reach Videorc right now."))
-    ).then((event) => clipMarkedToast(event, { seconds }))
+    ).then((event) =>
+      clipMarkSavedClip(event) ? clipSavingToast(event, seconds) : clipMarkedToast(event)
+    )
   }
   const markerRetry = useRef<CreateMarkerParams | null>(null)
   const [markerRetrySessionId, setMarkerRetrySessionId] = useState<string | null>(null)

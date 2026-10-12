@@ -38,28 +38,34 @@ export function clipMarkKeptSomething(event: Pick<ClipMarkedEvent, 'saved' | 're
 }
 
 /**
- * The toast for a `clip.marked` event or a `clip.mark` reply: what the press
- * kept, or why nothing was. One copy for every window that shows it.
- * `streaming: false` is a recording that never went live: it has no stream
- * report, so the toast does not point at one. `seconds` is the ring's
- * length, for the clip's words.
+ * The Stream Manager's toast for a press the ring took (its own window never
+ * hears replay.saved, which is the main window's "Clip saved"). `seconds` is
+ * the ring's length, for the words; `saved` says a recording kept the mark.
+ */
+export function clipSavingToast(
+  event: Pick<ClipMarkedEvent, 'saved'>,
+  seconds: number | undefined
+): ClipMarkedToast {
+  const last = seconds ? `the last ${formatClipMarkClock(seconds)}` : 'the last seconds'
+  return {
+    kind: 'success',
+    title: `Saving ${last} as a clip`,
+    description: event.saved
+      ? `It's in Library, and this moment is marked in your recording.`
+      : "It's in Library in a moment."
+  }
+}
+
+/**
+ * The toast for a `clip.marked` event or a `clip.mark` reply the ring did
+ * not take: where the mark landed, or why nothing was kept. One copy for
+ * every window that shows it. `streaming: false` is a recording that never
+ * went live: it has no stream report, so the toast does not point at one.
  */
 export function clipMarkedToast(
   event: ClipMarkedEvent,
-  { streaming = true, seconds }: { streaming?: boolean; seconds?: number } = {}
+  { streaming = true }: { streaming?: boolean } = {}
 ): ClipMarkedToast {
-  if (clipMarkSavedClip(event)) {
-    // The main window hears replay.saved itself; this is what another
-    // window (the Stream Manager's Clip) shows for the same press.
-    const last = seconds ? `the last ${formatClipMarkClock(seconds)}` : 'the last seconds'
-    return {
-      kind: 'success',
-      title: `Saving ${last} as a clip`,
-      description: event.saved
-        ? `It's in Library, and this moment is marked in your recording.`
-        : "It's in Library in a moment."
-    }
-  }
   if (event.saved) {
     return {
       kind: 'success',

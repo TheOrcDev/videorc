@@ -91,11 +91,19 @@ export function RecordingTab(): ReactElement {
  * off and this section says why; the switch still turns it on.
  */
 function ClipsSection(): ReactElement {
-  const { captureConfig, setCaptureConfig, settings, setSettings, runtimeInfo } = useStudioCore()
+  const {
+    captureConfig,
+    setCaptureConfig,
+    settings,
+    setSettings,
+    runtimeInfo,
+    recordBlockedReason
+  } = useStudioCore()
   const clips = useStudioReplay()
   const { seconds, enabled } = captureConfig.replayBuffer
   const blocked = clips.blockedReason
   const on = enabled && !blocked
+  const running = clips.state.state === 'on' || clips.state.state === 'starting'
   const estimate = formatBytes(estimatedReplayDiskBytes(seconds, captureConfig.video.bitrateKbps))
   const shortcutRegistration = useSyncExternalStore(
     globalShortcutRegistration.subscribe,
@@ -113,9 +121,13 @@ function ClipsSection(): ReactElement {
           description={
             blocked
               ? `Off on this computer. ${blocked}`
-              : on
-                ? 'The newest seconds are on disk, ready to save, and deleted as they age. Nothing is kept for longer.'
-                : 'Off. A clip can only be marked while you record.'
+              : !on
+                ? 'Off. A clip can only be marked while you record.'
+                : running
+                  ? 'The newest seconds are on disk, ready to save, and deleted as they age. Nothing is kept for longer.'
+                  : recordBlockedReason
+                    ? `Starts once a source is ready. ${recordBlockedReason}`
+                    : 'Not running right now. It tries again after the next recording or source change.'
           }
           label={KEEP_LAST_SECONDS_LABEL}
         >
