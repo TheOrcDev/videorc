@@ -222,3 +222,35 @@ the card's click too. Each play is logged as
 `scripts/live-lab/phrases.json` holds the voice command phrases, copied
 from the parser tests in `cohost_command.rs` and `clip_marks.rs`
 (`phrases.test.mjs` fails if they drift), and plain caption phrases.
+
+## 10. On-demand runs and publishing (plan 178 U10)
+
+From any dev machine with SSH (key login, Tailscale) to the lab user:
+
+```sh
+pnpm live:remote --host <lab> --scenario chat --build candidate:<sha> [--privacy unlisted] [--params '{"cycles":3}']
+```
+
+It checks out the harness (`--ref`, default `origin/main`) in `~/videorc`,
+reinstalls dependencies only when the lockfile changed, installs the
+candidate under the run lock, runs `live:run --trigger on-demand`, puts the
+previous app back, and copies back only `verdict.json`, `report.md`,
+`charts/` and `frames/` after the publish guard passes, into
+`~/videorc-live-lab/remote-runs/<runId>`. SSH runs with `BatchMode=yes` and
+no agent forwarding; no secret is ever on the command line. Exit codes:
+run.mjs's 0 / 1 / 2 / 3, then 4 (copy-back failed or refused) and 5 (SSH or
+setup failed before a run). Ctrl-C detaches; the run keeps going under the
+lab's kill switches.
+
+On the lab machine, `pnpm live:publish [--run <runDir>] [--since <iso>]
+[--dry-run]` publishes every finished run without a complete
+`published.json`: the guard (U9 `redact.mjs` plus `lib/publish-guard.mjs`,
+fail closed), then the report, verdict, charts and frames to the reports
+repo behind `killSwitchUrl` (`runs/<runId>/`), one `live-lab` issue per
+incident signature in `TheOrcDev/videorc` (a repeat is a comment), a
+Discord ping on a P0, the report link in the VOD description (51 lab
+units, skipped when the ledger says no), and `published.json` (0600).
+Boot doctor FAILs become `doctor:<check>` issues. Store the Discord webhook
+with `pnpm live:hookup --discord-webhook` (from the clipboard; or set
+`VIDEORC_LIVE_LAB_DISCORD_WEBHOOK`). `gh` on the lab machine needs write
+access to the reports repo contents and to issues in `TheOrcDev/videorc`.
