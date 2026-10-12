@@ -3193,7 +3193,14 @@ async fn start_session_with_timeline(
     timeline.set_session_id(&session_id);
     wait_for_encoder_bridge_start_admission(&session_id, Duration::from_secs(2)).await?;
 
-    let capture_permit = state.ffmpeg_work.begin_capture_when_available().await;
+    // Plan 181: the default ring's capture is light to the FFmpeg work
+    // coordinator, so posters, quality checks and repairs run beside it and
+    // its re-arm after every Stop never cancels a maintenance job.
+    let capture_permit = if replay_only {
+        state.ffmpeg_work.begin_light_capture_when_available().await
+    } else {
+        state.ffmpeg_work.begin_capture_when_available().await
+    };
     validate_outputs(&params)?;
     if let Some(scene) = params.scene.as_ref()
         && let Err(message) = validate_scene_background(scene)

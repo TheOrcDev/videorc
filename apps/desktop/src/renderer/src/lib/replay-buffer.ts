@@ -5,7 +5,11 @@ import type {
   ReplayStateEvent
 } from '../../../shared/backend'
 import { formatTimecode } from '../../../shared/timecode'
+import type { BackendClient } from '@/backendClient'
+import type { RecordingStatus, Scene } from '@/lib/backend'
+import type { CaptureConfig, SettingsState } from '@/lib/capture'
 import { revealInFileManagerLabel } from '@/lib/platform'
+import { buildStartSessionParams } from '@/lib/session-params'
 import { toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -145,5 +149,42 @@ export function showClipsCouldNotStart(reason: string): void {
     id: TOAST_ID,
     duration: 10_000,
     description: reason
+  })
+}
+
+/**
+ * The buffer-only session's request (plan 181): the Record session's params
+ * with no file and no stream, the ring attached, built here so the eager
+ * provider keeps only the switch, the refs and the events.
+ */
+export async function startBufferOnlySession(input: {
+  client: BackendClient
+  captureConfig: CaptureConfig
+  scene: Scene | null
+  sceneEditMode: boolean
+  settings: SettingsState
+}): Promise<RecordingStatus> {
+  const outputDirectory = input.settings.outputDirectoryHandle
+    ? await window.videorc?.authorizeOutputDirectory?.(input.settings.outputDirectoryHandle)
+    : null
+  const params = buildStartSessionParams({
+    captureConfig: input.captureConfig,
+    scene: input.scene,
+    sceneEditMode: input.sceneEditMode,
+    settings: input.settings,
+    suppressCaptionsForSession: true,
+    replayArmed: true
+  })
+  return input.client.requestTyped('session.start', {
+    ...params,
+    output: {
+      ...params.output,
+      recordEnabled: false,
+      streamEnabled: false,
+      ...(outputDirectory ? { outputDirectoryCapability: outputDirectory.capabilityId } : {})
+    },
+    streaming: undefined,
+    captions: undefined,
+    simulcast: undefined
   })
 }

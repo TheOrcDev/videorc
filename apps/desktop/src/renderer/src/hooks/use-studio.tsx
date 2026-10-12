@@ -545,11 +545,6 @@ import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-asse
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
 import {
-  REPLAY_START_RETRY_LIMIT,
-  replayBufferReconcileAction,
-  replayStartRetryDelayMs
-} from '@/lib/replay-buffer-reconcile'
-import {
   confirmedSystemAudioMix,
   systemAudioIssueFromHealthEvent,
   type SystemAudioIssue
@@ -3931,15 +3926,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // a mark while a session runs; the window shows the button on either.
     const clipAvailable = replayState.state === 'on' || isActiveRecordingState(recording.state)
     const clipShortcut = settings.globalShortcuts?.clipMark
-    const clipReason = clipAvailable
+    const clipOff = clipAvailable
       ? undefined
       : replayBlockedReason
-        ? 'Clips are off on this computer. Turn them on on the Output page.'
-        : captureConfig.replayBuffer.enabled
-          ? replayState.state === 'starting'
-            ? 'Clips are still starting. Try again in a moment.'
-            : 'Nothing to clip yet. Start a recording, or go live.'
-          : 'Clips are off. Turn on Keep the last seconds on the Output page.'
+        ? ('blocked' as const)
+        : !captureConfig.replayBuffer.enabled
+          ? ('switch' as const)
+          : replayState.state === 'starting'
+            ? ('starting' as const)
+            : ('idle' as const)
     void window.videorc?.pushMarkerContext?.({
       sessionId: recording.sessionId,
       available,
@@ -3955,7 +3950,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ...(clipShortcut
           ? { shortcutLabel: acceleratorLabel(clipShortcut, runtimeInfo?.platform) }
           : {}),
-        ...(clipReason ? { reason: clipReason } : {})
+        ...(clipOff ? { off: clipOff } : {})
       }
     })
     return () => {
@@ -15021,29 +15016,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     replayStartInFlightRef.current = true
     try {
-      const settingsNow = settingsRef.current
-      const outputDirectory = settingsNow.outputDirectoryHandle
-        ? await window.videorc?.authorizeOutputDirectory?.(settingsNow.outputDirectoryHandle)
-        : null
-      const params = buildStartSessionParams({
+      const replay = await import('@/lib/replay-buffer')
+      const status = await replay.startBufferOnlySession({
+        client,
         captureConfig: captureConfigRef.current,
         scene: sceneWithBackground,
         sceneEditMode,
-        settings: settingsNow,
-        suppressCaptionsForSession: true,
-        replayArmed: true
-      })
-      const status = await client.requestTyped('session.start', {
-        ...params,
-        output: {
-          ...params.output,
-          recordEnabled: false,
-          streamEnabled: false,
-          ...(outputDirectory ? { outputDirectoryCapability: outputDirectory.capabilityId } : {})
-        },
-        streaming: undefined,
-        captions: undefined,
-        simulcast: undefined
+        settings: settingsRef.current
       })
       replayFailedStartsRef.current = 0
       replayBlockedReasonRef.current = null
@@ -15062,6 +15041,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       replayFailedStartsRef.current += 1
       console.warn('[replay-buffer] start failed', error)
+      const { REPLAY_START_RETRY_LIMIT, replayStartRetryDelayMs } =
+        await import('@/lib/replay-buffer-reconcile')
       if (replayFailedStartsRef.current >= REPLAY_START_RETRY_LIMIT) {
         // Three failures in a row: stop trying for now (the switch stays
         // on; a source change or the next session's end tries again) and
@@ -15101,23 +15082,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [applyRecordingStatus, client, reportError])
   stopReplayBufferRef.current = stopReplayBuffer
 
+  // The decision is a lazy chunk (the eager provider keeps the refs and the
+  // events); every input is a ref, read after the import resolves.
   const reconcileReplayBuffer = useCallback(() => {
-    const action = replayBufferReconcileAction({
-      armed: replayArmedRef.current,
-      replayState: replayStateRef.current.state,
-      replayOnlyBuffer: replayStateRef.current.replayOnly === true,
-      recordingState: recordingRef.current.state,
-      recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
-      startPending:
-        sessionStartInFlightRef.current !== null || sessionStartLifecycleActiveRef.current,
-      stopPending: stopSessionInFlightPromiseRef.current !== null,
-      replayStartInFlight: replayStartInFlightRef.current || replayReconcileHoldRef.current,
-      failedStarts: replayFailedStartsRef.current
+    void import('@/lib/replay-buffer-reconcile').then(({ replayBufferReconcileAction }) => {
+      const action = replayBufferReconcileAction({
+        armed: replayArmedRef.current,
+        replayState: replayStateRef.current.state,
+        replayOnlyBuffer: replayStateRef.current.replayOnly === true,
+        recordingState: recordingRef.current.state,
+        recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
+        startPending:
+          sessionStartInFlightRef.current !== null || sessionStartLifecycleActiveRef.current,
+        stopPending: stopSessionInFlightPromiseRef.current !== null,
+        replayStartInFlight: replayStartInFlightRef.current || replayReconcileHoldRef.current,
+        failedStarts: replayFailedStartsRef.current
+      })
+      if (action === 'start') void startReplayBuffer()
+      else if (action === 'stop') void stopReplayBuffer()
+      // 'give-up': three failed starts in a row; nothing until a source
+      // change or a session's end resets the count (below).
     })
-    if (action === 'start') void startReplayBuffer()
-    else if (action === 'stop') void stopReplayBuffer()
-    // 'give-up': three failed starts in a row; nothing until a source
-    // change or a session's end resets the count (below).
   }, [startReplayBuffer, stopReplayBuffer])
   const reconcileReplayBufferRef = useRef(reconcileReplayBuffer)
   reconcileReplayBufferRef.current = reconcileReplayBuffer

@@ -77,8 +77,10 @@ export interface ClipContext {
   seconds: number
   /** The Save clip key as it reads on this platform ("⌥⌘C"), when bound. */
   shortcutLabel?: string
-  /** Why a press would keep nothing. */
-  reason?: string
+  /** Why a press would keep nothing, when it would: the switch is off, the
+   * backend keeps the default off on this computer, or the ring is still
+   * starting. The window says it in words. */
+  off?: 'switch' | 'blocked' | 'starting' | 'idle'
 }
 export type MarkerRelayCommand = { requestId: string } & (
   | { action: 'create'; params: CreateMarkerParams }
@@ -196,7 +198,7 @@ export const markerContextSchema = nullableSchema(
             available: booleanSchema,
             seconds: numberSchema({ integer: true, min: 0, max: 3600 }),
             shortcutLabel: optionalSchema(stringSchema({ maxLength: 160 })),
-            reason: optionalSchema(stringSchema({ maxLength: 1000 }))
+            off: optionalSchema(enumSchema(['switch', 'blocked', 'starting', 'idle']))
           },
           strict
         )

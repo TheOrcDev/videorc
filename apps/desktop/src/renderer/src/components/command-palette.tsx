@@ -241,7 +241,7 @@ export function CommandPalette({
           {live || replayBuffer.state.state === 'on' ? (
             <CommandItem
               value="Save clip"
-              keywords={['clip', 'replay', 'last', 'seconds', 'highlight', 'marker', 'moment']}
+              keywords={['clip', 'replay', 'marker', 'moment']}
               onSelect={() => run(() => void markClip())}
             >
               <ClipIcon className="size-4" />

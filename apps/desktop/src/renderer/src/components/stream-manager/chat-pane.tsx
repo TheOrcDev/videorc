@@ -23,6 +23,20 @@ import { clipLengthWords } from '../../../../shared/clip-marks'
 function clipSeconds(clip: ClipContext | undefined): string {
   return clipLengthWords(clip?.seconds)
 }
+
+/** Why `/clip` keeps nothing right now, in the window's own words. */
+function clipOffNotice(clip: ClipContext | undefined): string {
+  switch (clip?.off) {
+    case 'blocked':
+      return 'Clips are off on this computer. Turn them on on the Output page.'
+    case 'starting':
+      return 'Clips are still starting. Try again in a moment.'
+    case 'idle':
+      return 'Nothing to clip yet. Start a recording, or go live.'
+    default:
+      return 'Clips are off. Turn on Keep the last seconds on the Output page.'
+  }
+}
 import { Command, CommandItem, CommandList } from '@/components/ui/command'
 import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platform-icon'
 import { CohostNudge } from '@/components/cohost-nudge'
@@ -855,7 +869,7 @@ export function Composer({
       // Plan 181 R4: the Clip button's action from the keyboard. The
       // streamer's own composer only; chat never triggers it.
       if (!clipContext?.available || !onClip) {
-        setNotice(clipContext?.reason ?? 'Clips are off. Turn them on on the Output page.')
+        setNotice(clipOffNotice(clipContext))
         return
       }
       const submitted = draft
