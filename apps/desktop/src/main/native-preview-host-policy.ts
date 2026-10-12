@@ -470,7 +470,7 @@ export function nativePreviewFramePollingSuppressionStatus(
     message: attachedNativeSurface
       ? status.message
       : suppressed
-        ? 'Electron proof preview surface frame polling is suppressed while recording.'
+        ? 'Electron proof preview surface frame polling is paused.'
         : 'Electron proof preview surface frame polling is enabled.'
   }
 }

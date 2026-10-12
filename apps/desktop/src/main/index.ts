@@ -5171,6 +5171,11 @@ function jsonForInlineScript(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c')
 }
 
+/** The proof readout is for smokes and debugging, never a user's preview. */
+function nativePreviewProofReadoutVisible(): boolean {
+  return smokeCommandServerEnabled || process.env.VIDEORC_PROOF_READOUT === '1'
+}
+
 function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null): string {
   const scriptNonce = randomBytes(24).toString('base64url')
   const contentSecurityPolicy = nativePreviewSurfaceDocumentCsp(scriptNonce)
@@ -5249,12 +5254,20 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         color: rgba(255, 255, 255, 0.82);
         text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
         pointer-events: none;
+        /* A harness label, not user copy (Linux plan 0012): Linux and Windows
+           users see this surface as their real preview. Smokes still read
+           its text; visibility keeps layout identical. */
+        visibility: hidden;
+      }
+
+      body.proof-readout #readout {
+        visibility: visible;
       }
     </style>
   </head>
-  <body>
+  <body${nativePreviewProofReadoutVisible() ? ' class="proof-readout"' : ''}>
     <div id="scene-root"></div>
-    <div id="readout">native scene surface</div>
+    <div id="readout">proof scene surface</div>
     <script nonce="${scriptNonce}">
       (() => {
         const root = document.getElementById('scene-root');
@@ -5383,14 +5396,14 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               ? compositorStatus.sources.filter((source) => source.state === 'live').map((source) => source.kind)
               : [];
             readout.textContent = liveSources.length
-              ? 'native compositor: ' + liveSources.join(' + ')
-              : 'native compositor surface';
+              ? 'proof compositor: ' + liveSources.join(' + ')
+              : 'proof compositor surface';
             return;
           }
           const liveLayers = [...layers.values()].filter(({ image }) => image?.dataset.live === '1');
           readout.textContent = liveLayers.length
-            ? (liveLayers.some(({ layer }) => layer.kind === 'screen-image') ? 'native scene + screen image' : 'native scene source')
-            : (scene?.sources?.some((layer) => layer.visible !== false) ? 'native scene waiting for source' : 'native synthetic surface');
+            ? (liveLayers.some(({ layer }) => layer.kind === 'screen-image') ? 'proof scene + screen image' : 'proof scene source')
+            : (scene?.sources?.some((layer) => layer.visible !== false) ? 'proof scene waiting for source' : 'proof synthetic surface');
         }
 
         function markLive(kind, sourceId) {
