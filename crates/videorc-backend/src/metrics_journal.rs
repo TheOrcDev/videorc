@@ -384,7 +384,10 @@ pub(crate) fn prune_dir(dir: &Path, cap_bytes: u64, keep: Option<&Path>, extensi
             if path.extension().and_then(|ext| ext.to_str()) != Some(extension) {
                 return None;
             }
-            let metadata = entry.metadata().ok()?;
+            // Not `entry.metadata()`: on Windows the directory listing can
+            // report a stale size (often 0) for a file still open for writing,
+            // so the cap would undercount the day being written.
+            let metadata = fs::metadata(&path).ok()?;
             metadata.is_file().then(|| {
                 (
                     metadata.modified().ok(),
