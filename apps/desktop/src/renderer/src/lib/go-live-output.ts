@@ -37,7 +37,7 @@ import { isUntrustedPerformanceCheckResult, outputLabel, outputVerdict } from '.
 /**
  * The one profile a record+stream session can share when the host cannot run
  * a separate encoded stream role: the recording takes the destinations'
- * profile. Null when the destinations disagree with each other (the backend
+ * profile, whether that is above or below its own. Null when the destinations disagree with each other (the backend
  * resolves each destination from its own settings, so a recording override
  * alone cannot make that session share one encode) or when simulcast owns the
  * auxiliary role.
@@ -63,7 +63,12 @@ export function sharedEncodeFallbackVideo(
     Math.min(first.width, first.height) < Math.min(recording.width, recording.height)
   )
     return null
-  const shared = resolveProviderStreamOutputPlan(recording, streaming, {
+  // The recording follows the destinations for this session, up or down
+  // (plan 0016): planning with the saved recording would keep it as a shared
+  // candidate, so a recording below the stream (Linux's default 720p record +
+  // 1080p stream, or only a lower bitrate) made every shared plan the
+  // recording's and Go Live was refused with no setting that could fix it.
+  const shared = resolveProviderStreamOutputPlan({ ...first }, streaming, {
     ...options,
     separateEncodedOutputRoleAvailable: false
   }).streamVideo

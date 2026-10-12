@@ -32,9 +32,11 @@ import {
   resolveProviderStreamOutputPlan,
   STREAM_OUTPUT_GOP_SECONDS,
   streamVideoProfileValidationReason,
+  type CaptureConfig,
   type ProviderStreamOutputPlan,
   videoProfileCompatibility
 } from '@/lib/capture'
+import { captureConfigForIntent, livestreamIntent } from '@/lib/session-start-intent'
 import {
   CAPTION_OUTPUT_RULE_LABELS,
   livestreamCaptionsBlockerFor,
@@ -98,11 +100,7 @@ export function GoLivePanel({
   const separateEncodedOutputRoleAvailable = isSessionActive
     ? diagnosticStats.encoderBridgeSeparateOutputEncodersActive
     : preflightProvesSeparateOutput
-  let providerPlan = resolveProviderStreamOutputPlan(
-    video,
-    captureConfig.streamEnabled ? streaming : undefined,
-    providerStreamOutputPlanOptions(captureConfig, separateEncodedOutputRoleAvailable)
-  )
+  let providerPlan = goLiveProviderPlan(captureConfig, video, separateEncodedOutputRoleAvailable)
   if (simulcastArmed(captureConfig)) {
     const verticalVideo = simulcastStreamVideo(video, streaming)
     providerPlan = {
@@ -186,6 +184,28 @@ export function GoLivePanel({
         streamTargets={streamTargets}
       />
     </div>
+  )
+}
+
+/**
+ * The plan the Ready panel describes: what Go Live will run. Go Live streams
+ * whatever the saved output mode says (plan 174 S3.1), so planning with the
+ * saved mode's "no stream" showed the recording's quality, upload and disk
+ * as the stream's (plan 0016).
+ */
+export function goLiveProviderPlan(
+  captureConfig: Pick<CaptureConfig, 'recordEnabled' | 'streamEnabled' | 'streaming' | 'layout'>,
+  video: VideoSettings,
+  separateEncodedOutputRoleAvailable: boolean
+): ProviderStreamOutputPlan {
+  const goLiveConfig = captureConfigForIntent(
+    captureConfig,
+    livestreamIntent(captureConfig.recordEnabled)
+  )
+  return resolveProviderStreamOutputPlan(
+    video,
+    goLiveConfig.streaming,
+    providerStreamOutputPlanOptions(goLiveConfig, separateEncodedOutputRoleAvailable)
   )
 }
 

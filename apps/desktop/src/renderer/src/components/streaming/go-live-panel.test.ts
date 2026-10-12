@@ -12,10 +12,11 @@ import type {
   StreamTargetSettings,
   VideoSettings
 } from '@/lib/backend'
-import { videoPresets, type ProviderStreamOutputPlan } from '@/lib/capture'
+import { defaultCaptureConfig, videoPresets, type ProviderStreamOutputPlan } from '@/lib/capture'
 
 import {
   encoderLabel,
+  goLiveProviderPlan,
   qualitySummary,
   ReadyToGoLive,
   TECHNICAL_DETAILS_STORAGE_KEY,
@@ -305,5 +306,32 @@ describe('Ready to go live: captions (plan 174 S3.4, D-9)', () => {
     )
     expect(markup).toContain('>Captions<')
     expect(markup).not.toContain('captions-not-ready')
+  })
+})
+
+describe('goLiveProviderPlan (plan 0016)', () => {
+  it('describes the stream Go Live will send, even when the saved mode is Record', () => {
+    const streaming = {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      defaultOutputPreset: stream1080.preset,
+      defaultBitrateKbps: stream1080.bitrateKbps,
+      targets: [target('custom', 'Custom RTMP')],
+      enabledTargetIds: ['custom-rtmp']
+    }
+    const recording = videoPresets['tutorial-720p30']
+    const config = { ...defaultCaptureConfig, recordEnabled: true, streamEnabled: false, streaming }
+    // A host that runs a separate stream encode: the stream keeps its own profile.
+    expect(goLiveProviderPlan(config, recording, true).streamVideo).toMatchObject({
+      width: 1920,
+      height: 1080,
+      bitrateKbps: 6000
+    })
+    // One shared encode: the panel is handed the shared-fallback profile (the
+    // recording follows the stream) and shows exactly that.
+    expect(goLiveProviderPlan(config, stream1080, false).streamVideo).toMatchObject({
+      width: 1920,
+      bitrateKbps: 6000
+    })
   })
 })
