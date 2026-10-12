@@ -5590,6 +5590,18 @@ async fn start_session_with_timeline(
         {
             sources.microphone_unavailable("Live microphone replacement is not available on Linux yet. This session keeps its initial microphone input.");
         }
+        // Linux plan 0024: no Linux adapter swaps a screen or camera mid-
+        // session yet; say so instead of the internal adapter text.
+        if cfg!(target_os = "linux") {
+            sources.kind_unavailable(
+                crate::live_source_switch::SourceKind::Capture,
+                "Changing the screen during a session isn't available on Linux yet. Stop, change it, then start again.",
+            );
+            sources.kind_unavailable(
+                crate::live_source_switch::SourceKind::Camera,
+                "Changing the camera during a session isn't available on Linux yet. Stop, change it, then start again.",
+            );
+        }
         sources
             .snapshot(&session_id)
             .expect("new session source snapshot")
