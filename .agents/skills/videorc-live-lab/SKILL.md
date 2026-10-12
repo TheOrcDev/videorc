@@ -84,12 +84,10 @@ the run lock and the kill switches before every run and every step:
 What this means for Claude:
 
 - **On demand, from any session.** "Test PR #N live" or "run suite C on
-  the lab" is enough: dispatch the candidate build (U5) if needed, then
-  `pnpm live:remote --host <lab> --scenario <name> [--build
-release|candidate:<id>] [--privacy unlisted]` (U10). It runs `live:run` on
-  the lab machine over SSH and copies back only the redacted `report.md`
-  and `verdict.json`. No per-run go is needed; the policy is the go. Relay
-  the report and the proposed issues (step 6).
+  the lab" is enough: follow "On-demand run" below. It runs `live:run` on
+  the lab machine over SSH and copies back only the guarded `report.md`,
+  `verdict.json`, `charts/` and `frames/`. No per-run go is needed; the
+  policy is the go. Relay the report and the proposed issues.
 - **A refusal is the answer.** When `live:remote` reports `refused:
 <reason>` (policy disabled, kill switch off, over quota, over the daily
   count, public not allowed, lock held, control unreachable, build not
@@ -107,6 +105,43 @@ release|candidate:<id>] [--privacy unlisted]` (U10). It runs `live:run` on
   `{"enabled": false}` or touches `~/videorc-live-lab/STOP` on the lab
   machine. Claude may touch the STOP file when the user asks to stop; it
   never flips `control.json` (that is the owner's switch).
+
+### On-demand run (plan 178 U10)
+
+1. **Pick the scenario** as in step 1 of the attended workflow (smallest
+   suite that answers the request). Know the lab's SSH host (the Tailscale
+   name in the owner's SSH config); ask once if it is not known, never guess.
+2. **Build the candidate** (skip for `--build release`):
+   - `gh pr view <N> --repo TheOrcDev/videorc --json headRefOid -q .headRefOid`
+     gives the PR head sha.
+   - `gh workflow run lab-candidate-macos.yml --repo TheOrcDev/videorc -f ref=<sha>`,
+     then `gh run list --workflow lab-candidate-macos.yml --repo TheOrcDev/videorc --limit 3`
+     for the new run id and `gh run watch <run-id> --repo TheOrcDev/videorc --exit-status`.
+   - Red build: report the failing step and stop. Never go live on an old
+     artifact instead.
+3. **Run it:**
+   `pnpm live:remote --host <lab> --scenario <name> --build candidate:<sha> [--privacy unlisted] [--params '<json>']`.
+   The harness itself comes from `origin/main` (`--ref` changes that; only
+   for testing harness changes). The lab checks the policy, the STOP file
+   and the run lock before installing the candidate, holds the lock while it
+   swaps the app, and puts the previous app back after the run. Params are
+   JSON (4 KB max) and must never hold a secret; the lab machine has them all.
+4. **Read the exit code:** 0 pass, 1 failures, 2 refused (`REFUSED
+(<reason>)`: report it and stop, see "A refusal is the answer"), 3 stopped
+   by a kill switch, 4 the run ended but the copy-back failed or the guard
+   refused the files (say so; never fetch the files another way), 5 SSH or
+   the lab setup failed before a run started (report; do not fix the lab
+   machine over SSH). Ctrl-C only detaches: the run keeps going under the
+   lab's kill switches. To stop it on the user's request, `ssh <lab> touch
+~/videorc-live-lab/STOP`.
+5. **Relay** from `REPORT_DIR` (`~/videorc-live-lab/remote-runs/<runId>`):
+   outcome, the pass / warn / fail signals with evidence, `needsEyes`
+   questions with their frames, and the incidents as proposed issues (one
+   per signature: `[live-lab] <signature>: <summary>`, a repeat becomes a
+   comment). The lab's daily report slot runs `live:publish`, which files
+   them, pushes the report to the reports repo and pings Discord on a P0;
+   `--publish` on `live:remote` does that right after the run. Say which
+   owed live acceptance (other plans) the run closes.
 
 Attended mode (below) is unchanged; it is what runs on the owner's Mac.
 

@@ -140,6 +140,7 @@ export function secretValues(config) {
   for (const role of Object.values(config.roles ?? {})) {
     values.push(role?.refreshToken)
   }
+  values.push(config.discord?.webhookUrl)
   return values.filter((value) => typeof value === 'string' && value.length >= 12)
 }
 
@@ -239,5 +240,6 @@ export function summarizeConfig(config) {
     lines.push(row(role, value))
   }
   lines.push(row('lab display', config.labDisplay?.name ?? '(auto-detect)'))
+  lines.push(row('discord', fingerprint(config.discord?.webhookUrl)))
   return lines
 }

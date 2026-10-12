@@ -536,7 +536,19 @@ it off the lab is observer-only, which is the plan's STOP fallback.
 message never arrives; highlight card missing from frames) give the
 expected verdicts.
 
-### U10 — Remote runner and publishing (plan 166 S8 step 3)
+### U10 — Remote runner and publishing (plan 166 S8 step 3) — BUILT
+
+**Built:** `live:remote` (SSH with BatchMode, no agent forwarding, validated
+scenario/ref/params, params via `VIDEORC_LIVE_LAB_SCENARIO_PARAMS`, copies
+back only guarded `verdict.json`/`report.md`/charts/frames to
+`~/videorc-live-lab/remote-runs/<runId>`), `live:publish` (U9
+`assertPublishable` plus its own `publish-guard`, fail closed; reports-repo
+PUT via `gh api`; issue dedupe by `<!-- live-lab-signature: … -->` marker
+with label `live-lab`; Discord only on P0; VOD description update charged to
+the ledger; boot-doctor FAILs as `doctor:<check>`; `published.json`
+idempotency; `--dry-run`), Discord webhook in the lab config, skill on-demand
+flow. **Owed:** a dry-run publish on the lab machine, then one real on-demand
+run from the owner's Mac publishing a redaction-clean report.
 
 **Files:** `scripts/live-lab/remote.mjs`, `scripts/live-lab/publish.mjs` +
 tests, `package.json` scripts `live:remote`, `live:publish`.

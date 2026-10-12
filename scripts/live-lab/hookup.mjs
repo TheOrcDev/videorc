@@ -26,6 +26,7 @@ import {
   validateClient,
   writeConfig
 } from './lib/config.mjs'
+import { validateWebhookUrl } from './lib/discord.mjs'
 import {
   buildAuthUrl,
   createPkcePair,
@@ -56,6 +57,8 @@ the broadcaster and the viewer. Needs a terminal for the hidden prompts.
   --role <broadcaster|viewer> Run Google consent for one role.
   --handle <@handle>          The lab channel (default @VideorcApp).
   --lab-display <name>        The virtual display Videorc captures, as macOS names it.
+  --discord-webhook           Store the P0 Discord webhook URL from the clipboard, then clear
+                              the clipboard (live:publish pings it on a P0 incident).
   --show                      Print what is stored (fingerprints only).
 `
 
@@ -76,6 +79,7 @@ async function main() {
       role: { type: 'string' },
       handle: { type: 'string' },
       'lab-display': { type: 'string' },
+      'discord-webhook': { type: 'boolean' },
       show: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' }
     },
@@ -105,6 +109,7 @@ async function main() {
     values.role ||
     values.handle ||
     values['lab-display'] ||
+    values['discord-webhook'] ||
     values.show
 
   if (values.handle) {
@@ -115,6 +120,18 @@ async function main() {
   if (values['lab-display']) {
     const name = values['lab-display'].trim()
     await save({ ...config, labDisplay: { name } }, `Lab display set to "${name}".`)
+  }
+
+  if (values['discord-webhook']) {
+    const value = await readClipboard()
+    if (!value) throw new Error('The clipboard is empty. Copy the Discord webhook URL first.')
+    const webhookUrl = validateWebhookUrl(value)
+    await save(
+      { ...config, discord: { webhookUrl, updatedAt: new Date().toISOString() } },
+      `Discord webhook stored ${fingerprint(webhookUrl)}.`
+    )
+    await clearClipboard()
+    console.log('Clipboard cleared.')
   }
 
   if (values['client-json']) {
