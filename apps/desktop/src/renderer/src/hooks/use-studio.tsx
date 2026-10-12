@@ -10898,12 +10898,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const streamReady =
     !captureConfig.streamEnabled || areEnabledStreamTargetsStartReady(captureConfig.streaming)
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
+  // Plan 181 (redesign R2): the ring runs by default, so a buffer-only
+  // session is never "a session" to the pages that lock while one runs
+  // (Scene positions, Output quality, orientation, Library, Clean cut, the
+  // updater): those lock for a recording or a livestream only, and a
+  // setting that shapes the ring restarts it instead (below).
   const isSessionActive =
-    isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
-  // Plan 181: a buffer-only session keeps Record and Go Live available; the
-  // backend hands over from it inside session.start.
-  const transportSessionActive =
     sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
+  const transportSessionActive = isSessionActive
   const mixingSessionActive =
     ['recording', 'streaming'].includes(recording.state) && Boolean(recording.sessionId)
   const systemAudioConfirmed = mixingSessionActive
@@ -15086,6 +15088,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.sources.cameraId,
     scheduleReplayReconcile
   ])
+  // Settings that shape the session restart a buffer-only ring: the Output
+  // quality, the canvas orientation and the ring's length. A recording or
+  // livestream keeps its shape (those pages lock meanwhile); the re-armed
+  // ring picks the new one up.
+  const replayShape = [
+    captureConfig.video.width,
+    captureConfig.video.height,
+    captureConfig.video.fps,
+    captureConfig.video.bitrateKbps,
+    layoutPresetOrientation(captureConfig.layout.layoutPreset),
+    captureConfig.replayBuffer.seconds
+  ].join('|')
+  const replayShapeRef = useRef(replayShape)
+  useEffect(() => {
+    if (replayShapeRef.current === replayShape) return
+    replayShapeRef.current = replayShape
+    if (sessionIsReplayOnly(recordingRef.current)) void stopReplayBuffer()
+  }, [replayShape, stopReplayBuffer])
 
   const setReplayArmed = useCallback(
     (armed: boolean): void => {
