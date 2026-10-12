@@ -272,6 +272,12 @@ pub struct RecordingStatus {
     pub duration_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The session exists only for the replay buffer (plan 181): it writes
+    /// no file and streams nowhere, so no surface may call it "Recording" or
+    /// "On air", and Record or Go Live hand over to a real session. Absent
+    /// on the wire for every other session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1099,10 +1105,107 @@ pub struct StartSessionParams {
     /// only: never load-bearing for the start itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_at_ms: Option<u64>,
+    /// The replay buffer (plan 181): keep the last `seconds` of this
+    /// session's program as a rolling segment ring beside its outputs. A
+    /// session with no file and no stream targets but `replay` is a
+    /// buffer-only session: it composes like a record-only session, creates
+    /// no Library row and reports `replayOnly` on its status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayParams>,
     /// In-process only: never read from or written to the wire, so a client
     /// cannot start a hidden session.
     #[serde(skip)]
     pub purpose: SessionPurpose,
+}
+
+impl StartSessionParams {
+    /// A session whose only output is the replay ring (plan 181).
+    pub fn replay_only(&self) -> bool {
+        self.replay.is_some() && !self.output.record_enabled && !self.output.stream_enabled
+    }
+}
+
+/// The replay buffer's request (plan 181): how many seconds the ring keeps.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayParams {
+    pub seconds: u32,
+}
+
+/// Where the replay buffer is, for `replay.state` and `replay.status`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplayBufferState {
+    Off,
+    Starting,
+    On,
+    Error,
+}
+
+/// `replay.state`: emitted on every change and once a second while the
+/// buffer is on, with how much it holds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayStateEvent {
+    pub state: ReplayBufferState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The ring's target length.
+    pub seconds: u32,
+    /// What the ring holds right now, capped at `seconds`.
+    pub buffered_seconds: f64,
+    /// True when the session exists only for the buffer (no file, no stream).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `replay.save` answers at once; the save runs on its own task and reports
+/// through `replay.saved` or `replay.saveFailed` (plan 181 S3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveAccepted {
+    pub save_id: String,
+    pub session_id: String,
+    /// A save was already running: this press waits behind it, and a third
+    /// press while one is queued is absorbed into the same queued save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queued: bool,
+}
+
+/// `replay.saved`: the MP4 is on disk, probed and in Library.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySavedEvent {
+    pub save_id: String,
+    pub session_id: String,
+    /// The Library row.
+    pub replay_session_id: String,
+    pub path: String,
+    /// The requested length.
+    pub seconds: u32,
+    /// What the file actually holds: shorter than `seconds` while the buffer
+    /// was still filling.
+    pub covered_seconds: f64,
+    /// False when the buffer held less than `seconds`.
+    pub complete: bool,
+    /// What `clip.mark` routed here (plan 181 S8), else `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ClipMarkSource>,
+}
+
+/// `replay.saveFailed`: why a save produced no file. `reason` is a stable
+/// code (`off`, `empty`, `probe`, `ffmpeg`, `disk`, `io`); `message` is
+/// what the toast says.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveFailedEvent {
+    pub save_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub reason: String,
+    pub message: String,
 }
 
 /// Why a session exists. `PerformanceCheck` sessions are benchmark runs owned
@@ -6636,6 +6739,50 @@ mod tests {
             vec![AudioTrackSource::Microphone, AudioTrackSource::SystemAudio]
         );
         assert_eq!(serde_json::to_value(status).unwrap(), mixed);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_replay_buffer_shapes() {
+        // Plan 181: the ring request, the buffer-only status mark, the state
+        // event in every state, and the save envelopes.
+        let params = shared_high_risk_contract_fixture_value("/replay/params");
+        let replay: ReplayParams = serde_json::from_value(params.clone()).unwrap();
+        assert_eq!(replay.seconds, 30);
+        assert_eq!(serde_json::to_value(replay).unwrap(), params);
+
+        let status_wire = shared_high_risk_contract_fixture_value("/replay/replayOnlyStatus");
+        let status: RecordingStatus = serde_json::from_value(status_wire.clone()).unwrap();
+        assert!(status.replay_only);
+        assert_eq!(serde_json::to_value(&status).unwrap(), status_wire);
+        // Every other session omits the mark on the wire.
+        let plain = shared_high_risk_contract_fixture_value("/recordingStatus/wire");
+        let plain_status: RecordingStatus = serde_json::from_value(plain).unwrap();
+        assert!(!plain_status.replay_only);
+        assert!(
+            serde_json::to_value(&plain_status)
+                .unwrap()
+                .get("replayOnly")
+                .is_none()
+        );
+
+        for pointer in ["/replay/stateOn", "/replay/stateOff", "/replay/stateError"] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let event: ReplayStateEvent = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(event).unwrap(), wire, "{pointer}");
+        }
+        for pointer in ["/replay/saveAccepted", "/replay/saveAcceptedMinimal"] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let accepted: ReplaySaveAccepted = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(accepted).unwrap(), wire, "{pointer}");
+        }
+        let saved_wire = shared_high_risk_contract_fixture_value("/replay/savedEvent");
+        let saved: ReplaySavedEvent = serde_json::from_value(saved_wire.clone()).unwrap();
+        assert_eq!(saved.source, Some(ClipMarkSource::Manual));
+        assert_eq!(serde_json::to_value(saved).unwrap(), saved_wire);
+        let failed_wire = shared_high_risk_contract_fixture_value("/replay/saveFailedEvent");
+        let failed: ReplaySaveFailedEvent = serde_json::from_value(failed_wire.clone()).unwrap();
+        assert_eq!(failed.reason, "probe");
+        assert_eq!(serde_json::to_value(failed).unwrap(), failed_wire);
     }
 
     #[test]

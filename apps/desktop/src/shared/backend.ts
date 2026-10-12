@@ -384,6 +384,12 @@ export interface RecordingStatus {
   pipeline?: RecordingPipelineStatus
   durationMs?: number
   message?: string
+  /**
+   * The session exists only for the replay buffer (plan 181): no file, no
+   * stream, no Library row. No surface calls it "Recording" or "On air", and
+   * Record or Go Live hand over to a real session. Absent otherwise.
+   */
+  replayOnly?: boolean
 }
 
 export type AutomaticSourceFallbackSourceKind = 'capture' | 'camera' | 'microphone'
@@ -1588,6 +1594,69 @@ export interface StartSessionParams {
   simulcast?: SimulcastParams
   /** Renderer click timestamp (epoch ms) for start-latency attribution. Telemetry only. */
   requestedAtMs?: number
+  /**
+   * The replay buffer (plan 181): keep the last `seconds` of this session's
+   * program as a rolling ring beside its outputs. With neither a file nor a
+   * stream the session is buffer-only: it composes like a recording, writes
+   * nothing permanent and reports `replayOnly` on its status.
+   */
+  replay?: ReplayParams
+}
+
+/** The replay buffer's request (plan 181): how many seconds the ring keeps. */
+export interface ReplayParams {
+  seconds: number
+}
+
+/** Where the replay buffer is (plan 181). `paused` never comes from the
+ * backend: the renderer derives it across a Record/Go Live handover. */
+export type ReplayBufferState = 'off' | 'starting' | 'on' | 'error'
+
+/** `replay.state` and the `replay.status` reply: emitted on every change and
+ * once a second while the buffer is on. */
+export interface ReplayStateEvent {
+  state: ReplayBufferState
+  sessionId?: string
+  /** The ring's target length. */
+  seconds: number
+  /** What the ring holds right now, capped at `seconds`. */
+  bufferedSeconds: number
+  /** The session exists only for the buffer (no file, no stream). */
+  replayOnly?: boolean
+  reason?: string
+}
+
+/** `replay.save` answers at once; `replay.saved` or `replay.saveFailed`
+ * follow (plan 181 S3). */
+export interface ReplaySaveAccepted {
+  saveId: string
+  sessionId: string
+  /** A save was already running; this press waits behind it. */
+  queued?: boolean
+}
+
+/** `replay.saved`: the MP4 is on disk, probed and in Library. */
+export interface ReplaySavedEvent {
+  saveId: string
+  sessionId: string
+  /** The Library row. */
+  replaySessionId: string
+  path: string
+  /** The requested length. */
+  seconds: number
+  /** What the file holds: shorter than `seconds` while the buffer was filling. */
+  coveredSeconds: number
+  complete: boolean
+  /** What `clip.mark` routed here (plan 181 S8), else absent. */
+  source?: ClipMarkSource
+}
+
+/** `replay.saveFailed`: a stable `reason` code and the sentence a toast says. */
+export interface ReplaySaveFailedEvent {
+  saveId: string
+  sessionId?: string
+  reason: string
+  message: string
 }
 
 /** The vertical leg of a dual-orientation session: a vertical scene preset on

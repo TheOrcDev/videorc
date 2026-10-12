@@ -99,8 +99,8 @@ mod remote_control;
 mod remote_lan;
 mod remote_lan_server;
 mod repair;
-mod replay_buffer;
 mod repair_service;
+mod replay_buffer;
 mod resource_authority;
 mod scene;
 mod scene_geometry;
@@ -558,6 +558,8 @@ async fn run_backend() -> Result<()> {
     }
     let mut state = AppState::new(token.clone(), port, events, database);
     state.oauth_callback_port = oauth_callback_port;
+    // Plan 181: a crash leaves replay rings behind; nothing can reuse them.
+    replay_buffer::clean_leftovers(&state);
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -5692,6 +5694,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cleanCut.list"
         | "cleanCut.transcript"
         | "clip.marks.list"
+        | "replay.status"
         | "session.markers.list"
         | "session.marker.get"
         | "preview.live.status"
@@ -12709,6 +12712,7 @@ async fn handle_text_message_with_role(
             Ok(event) => ServerResponse::ok(command.id, event),
             Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
         },
+        "replay.status" => ServerResponse::ok(command.id, replay_buffer::snapshot(state)),
         "clip.marks.list" => {
             match serde_json::from_value::<protocol::ClipMarksListParams>(command.params) {
                 Ok(params) => match clip_marks::list_marks(state, &params.session_id) {
@@ -13150,6 +13154,7 @@ async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus
             pipeline: None,
             duration_ms: None,
             message: Some("Finalizing recording output.".to_string()),
+            replay_only: false,
         };
     }
     idle_status()

@@ -334,9 +334,643 @@ pub fn split_video_filter_for_replay(filter: &str) -> Option<String> {
         return None;
     }
     let renamed = filter.replacen("[v_main]", "[v_replay_src]", 1);
-    Some(format!(
-        "{renamed};[v_replay_src]split=2[v_main][v_replay]"
-    ))
+    Some(format!("{renamed};[v_replay_src]split=2[v_main][v_replay]"))
+}
+
+// ---------------------------------------------------------------------------
+// Runtime: the slot on `AppState`, ring preparation, the prune task, events.
+// ---------------------------------------------------------------------------
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use chrono::Utc;
+use tokio::task::JoinHandle;
+
+use crate::protocol::{
+    LayoutSettings, OutputSettings, ReplayBufferState, ReplayStateEvent, SourceSelection,
+    StartSessionParams,
+};
+use crate::state::AppState;
+
+pub type ReplaySlot = Arc<StdMutex<ReplayRegistry>>;
+
+pub fn new_replay_slot() -> ReplaySlot {
+    Arc::new(StdMutex::new(ReplayRegistry::default()))
+}
+
+/// How many row-less session ids are remembered after they end, so a late
+/// log line for one of them still skips the `sessions` foreign key.
+const ROWLESS_SESSION_MEMORY: usize = 8;
+/// The prune task's cadence: trim the ring and report what it holds.
+const PRUNE_TICK: Duration = Duration::from_secs(1);
+
+/// What the backend knows about the ring of the session that owns it.
+#[derive(Debug)]
+pub struct ReplayRuntime {
+    pub session_id: String,
+    pub replay_only: bool,
+    pub seconds: u32,
+    pub dir: PathBuf,
+    /// The recordings folder the session started with; replays go under it.
+    pub recordings_dir: PathBuf,
+    pub ffmpeg_path: String,
+    pub sources: SourceSelection,
+    pub layout: LayoutSettings,
+    pub output: OutputSettings,
+    pub state: ReplayBufferState,
+    pub buffered_seconds: f64,
+    pub reason: Option<String>,
+    prune_task: Option<JoinHandle<()>>,
+    /// A save is running on its own task.
+    pub save_in_progress: bool,
+    /// One more save is waiting behind the running one (plan 181 S3).
+    pub save_queued: bool,
+}
+
+impl Drop for ReplayRuntime {
+    fn drop(&mut self) {
+        if let Some(task) = self.prune_task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ReplayRegistry {
+    pub active: Option<ReplayRuntime>,
+    rowless: VecDeque<String>,
+    /// The last published event, so `replay.status` and a fresh socket get
+    /// the same answer the renderer last saw.
+    last_event: Option<ReplayStateEvent>,
+}
+
+fn lock(state: &AppState) -> std::sync::MutexGuard<'_, ReplayRegistry> {
+    state
+        .replay
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The ring root: under the backend's managed app data, beside the
+/// database; a temp directory for the in-memory test database.
+pub fn ring_root(state: &AppState) -> PathBuf {
+    let database = state.database.path();
+    if database.to_string_lossy() == ":memory:" {
+        return std::env::temp_dir().join(format!("videorc-replay-buffer-{}", std::process::id()));
+    }
+    database
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("replay-buffer")
+}
+
+/// The ring directory of one session.
+pub fn ring_dir(state: &AppState, session_id: &str) -> PathBuf {
+    let safe = session_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .collect::<String>();
+    ring_root(state).join(safe)
+}
+
+/// Removes every ring left by a crash (plan 181 S2.4). Called once at
+/// startup and once more at the end of shutdown.
+pub fn clean_leftovers(state: &AppState) {
+    let root = ring_root(state);
+    if root.exists()
+        && let Err(error) = std::fs::remove_dir_all(&root)
+    {
+        tracing::warn!(
+            "Could not remove replay buffer leftovers at {}: {error}",
+            root.display()
+        );
+    }
+}
+
+/// A buffer-only session has no Library row; its logs and health events
+/// skip the `sessions` foreign key (plan 181 S2.3).
+pub fn register_rowless_session(state: &AppState, session_id: &str) {
+    let mut registry = lock(state);
+    registry.rowless.push_back(session_id.to_string());
+    while registry.rowless.len() > ROWLESS_SESSION_MEMORY {
+        registry.rowless.pop_front();
+    }
+}
+
+pub fn is_rowless_session(state: &AppState, session_id: &str) -> bool {
+    lock(state).rowless.iter().any(|id| id == session_id)
+}
+
+/// The buffer-only session that is running, if any: `session.start` hands
+/// over from it (plan 181 S7).
+pub fn active_replay_only_session_id(state: &AppState) -> Option<String> {
+    lock(state)
+        .active
+        .as_ref()
+        .filter(|runtime| runtime.replay_only)
+        .map(|runtime| runtime.session_id.clone())
+}
+
+/// Owns a freshly prepared ring until the session commits. Dropped unarmed
+/// (any failed start), it removes the directory and reports the buffer off.
+#[must_use]
+pub struct RingGuard {
+    state: AppState,
+    session_id: String,
+    pub dir: PathBuf,
+    pub seconds: u32,
+    armed: bool,
+}
+
+impl RingGuard {
+    fn disarm(&mut self) {
+        self.armed = true;
+    }
+}
+
+impl Drop for RingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+        let mut registry = lock(&self.state);
+        if registry
+            .active
+            .as_ref()
+            .is_some_and(|runtime| runtime.session_id == self.session_id)
+        {
+            registry.active = None;
+            let event = ReplayStateEvent {
+                state: ReplayBufferState::Off,
+                session_id: None,
+                seconds: self.seconds,
+                buffered_seconds: 0.0,
+                replay_only: false,
+                reason: Some("The session did not start.".to_string()),
+            };
+            registry.last_event = Some(event.clone());
+            drop(registry);
+            self.state.emit_event("replay.state", event);
+        }
+    }
+}
+
+/// Everything the ring needs from the session it rides.
+pub struct RingRequest<'a> {
+    pub session_id: &'a str,
+    pub params: &'a StartSessionParams,
+    pub replay_only: bool,
+    pub recordings_dir: &'a Path,
+    pub ffmpeg_path: &'a str,
+}
+
+/// Creates the ring directory (mode 0700) after the free-space check and
+/// publishes `starting`. The guard cleans up until [`attach`] arms it.
+pub fn prepare(state: &AppState, request: RingRequest<'_>) -> Result<RingGuard> {
+    let seconds = request
+        .params
+        .replay
+        .map(|replay| clamp_seconds(replay.seconds))
+        .context("The session has no replay buffer request")?;
+    let root = ring_root(state);
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("Could not create {}", root.display()))?;
+    let required = required_free_bytes(seconds, request.params.output.video.bitrate_kbps);
+    if let Some(available) = crate::noise_cleanup::available_space(&root)
+        && available < required
+    {
+        bail!(
+            "Not enough free space for the replay buffer: it needs about {} MB free and this disk has {} MB.",
+            required.div_ceil(1_000_000),
+            available / 1_000_000
+        );
+    }
+    let dir = ring_dir(state, request.session_id);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("Could not create {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let runtime = ReplayRuntime {
+        session_id: request.session_id.to_string(),
+        replay_only: request.replay_only,
+        seconds,
+        dir: dir.clone(),
+        recordings_dir: request.recordings_dir.to_path_buf(),
+        ffmpeg_path: request.ffmpeg_path.to_string(),
+        sources: request.params.sources.clone(),
+        layout: request.params.layout.clone(),
+        output: request.params.output.clone(),
+        state: ReplayBufferState::Starting,
+        buffered_seconds: 0.0,
+        reason: None,
+        prune_task: None,
+        save_in_progress: false,
+        save_queued: false,
+    };
+    {
+        let mut registry = lock(state);
+        registry.active = Some(runtime);
+    }
+    emit_state(state);
+    Ok(RingGuard {
+        state: state.clone(),
+        session_id: request.session_id.to_string(),
+        dir,
+        seconds,
+        armed: false,
+    })
+}
+
+/// The session committed: the ring is live. Starts the prune task and
+/// publishes `on`.
+pub fn attach(state: &AppState, mut guard: RingGuard) {
+    guard.disarm();
+    let session_id = guard.session_id.clone();
+    let task_state = state.clone();
+    let task_session_id = session_id.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(PRUNE_TICK).await;
+            let (dir, seconds) = {
+                let registry = lock(&task_state);
+                let Some(runtime) = registry
+                    .active
+                    .as_ref()
+                    .filter(|runtime| runtime.session_id == task_session_id)
+                else {
+                    return;
+                };
+                (runtime.dir.clone(), runtime.seconds)
+            };
+            let report = prune_tick(&dir, seconds);
+            {
+                let mut registry = lock(&task_state);
+                let Some(runtime) = registry
+                    .active
+                    .as_mut()
+                    .filter(|runtime| runtime.session_id == task_session_id)
+                else {
+                    return;
+                };
+                runtime.buffered_seconds = report.buffered_seconds;
+            }
+            emit_state(&task_state);
+        }
+    });
+    {
+        let mut registry = lock(state);
+        if let Some(runtime) = registry
+            .active
+            .as_mut()
+            .filter(|runtime| runtime.session_id == session_id)
+        {
+            runtime.state = ReplayBufferState::On;
+            runtime.prune_task = Some(task);
+        } else {
+            task.abort();
+        }
+    }
+    emit_state(state);
+}
+
+/// Why a ring went away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetireOutcome {
+    /// The user (or the handover, or shutdown) stopped the session.
+    Stopped,
+    /// The session ended on its own; the buffer is off and says why.
+    Failed(String),
+}
+
+/// The session's monitor retired its slot: stop pruning, delete the ring
+/// and publish `off` (or `error` with the reason).
+pub fn retire(state: &AppState, session_id: &str, outcome: RetireOutcome) {
+    let removed = {
+        let mut registry = lock(state);
+        if !registry
+            .active
+            .as_ref()
+            .is_some_and(|runtime| runtime.session_id == session_id)
+        {
+            return;
+        }
+        let runtime = registry.active.take();
+        let seconds = runtime
+            .as_ref()
+            .map_or(DEFAULT_SECONDS, |runtime| runtime.seconds);
+        let dir = runtime.as_ref().map(|runtime| runtime.dir.clone());
+        drop(runtime);
+        let (state_value, reason) = match outcome {
+            RetireOutcome::Stopped => (ReplayBufferState::Off, None),
+            RetireOutcome::Failed(reason) => (ReplayBufferState::Error, Some(reason)),
+        };
+        registry.last_event = Some(ReplayStateEvent {
+            state: state_value,
+            session_id: None,
+            seconds,
+            buffered_seconds: 0.0,
+            replay_only: false,
+            reason,
+        });
+        dir
+    };
+    if let Some(dir) = removed
+        && let Err(error) = std::fs::remove_dir_all(&dir)
+        && dir.exists()
+    {
+        tracing::warn!(
+            "Could not remove the replay ring at {}: {error}",
+            dir.display()
+        );
+    }
+    emit_state(state);
+}
+
+/// The current `replay.state` payload.
+pub fn snapshot(state: &AppState) -> ReplayStateEvent {
+    let registry = lock(state);
+    match registry.active.as_ref() {
+        Some(runtime) => ReplayStateEvent {
+            state: runtime.state,
+            session_id: Some(runtime.session_id.clone()),
+            seconds: runtime.seconds,
+            buffered_seconds: runtime.buffered_seconds,
+            replay_only: runtime.replay_only,
+            reason: runtime.reason.clone(),
+        },
+        None => registry.last_event.clone().unwrap_or(ReplayStateEvent {
+            state: ReplayBufferState::Off,
+            session_id: None,
+            seconds: DEFAULT_SECONDS,
+            buffered_seconds: 0.0,
+            replay_only: false,
+            reason: None,
+        }),
+    }
+}
+
+fn emit_state(state: &AppState) {
+    let event = snapshot(state);
+    {
+        let mut registry = lock(state);
+        if registry.active.is_none() {
+            registry.last_event = Some(event.clone());
+        }
+    }
+    state.emit_event("replay.state", event);
+}
+
+/// One prune pass over a ring directory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PruneReport {
+    /// What the complete segments hold, capped at the ring's length.
+    pub buffered_seconds: f64,
+    pub listed: usize,
+    pub deleted: Vec<String>,
+    /// Every `seg-*.ts` left in the directory after the pass.
+    pub segment_files: usize,
+}
+
+/// Reads `segments.csv`, deletes every segment older than the list and
+/// reports the ring's fill. Synchronous and small: the list holds at most a
+/// few hundred lines and the directory a few hundred files.
+pub fn prune_tick(dir: &Path, seconds: u32) -> PruneReport {
+    let listed = std::fs::read_to_string(dir.join(SEGMENT_LIST_FILE))
+        .map(|text| parse_segment_list(&text))
+        .unwrap_or_default();
+    let names = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| segment_index(name).is_some())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let doomed = segments_to_prune(&names, &listed);
+    let mut deleted = Vec::new();
+    for name in doomed {
+        if std::fs::remove_file(dir.join(&name)).is_ok() {
+            deleted.push(name);
+        }
+    }
+    let covered: f64 = listed.iter().map(Segment::duration_seconds).sum();
+    let segment_files = names.len().saturating_sub(deleted.len());
+    PruneReport {
+        buffered_seconds: covered.min(f64::from(clamp_seconds(seconds))),
+        listed: listed.len(),
+        deleted,
+        segment_files,
+    }
+}
+
+/// The wall-clock start of a replay that ends now and holds `covered`
+/// seconds, as RFC 3339 for the Library row.
+pub fn replay_started_at(covered_seconds: f64) -> String {
+    let millis = (covered_seconds.max(0.0) * 1000.0) as i64;
+    (Utc::now() - chrono::Duration::milliseconds(millis)).to_rfc3339()
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    fn test_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
+    fn write_ring(dir: &Path, indexes: std::ops::Range<u32>, listed: std::ops::Range<u32>) {
+        std::fs::create_dir_all(dir).unwrap();
+        for index in indexes {
+            std::fs::write(dir.join(format!("seg-{index:06}.ts")), b"ts").unwrap();
+        }
+        let list = listed
+            .map(|index| {
+                format!(
+                    "seg-{index:06}.ts,{:.6},{:.6}\n",
+                    f64::from(index) * 2.0,
+                    f64::from(index) * 2.0 + 2.0
+                )
+            })
+            .collect::<String>();
+        std::fs::write(dir.join(SEGMENT_LIST_FILE), list).unwrap();
+    }
+
+    #[test]
+    fn prune_tick_trims_to_the_list_and_reports_the_fill() {
+        let dir =
+            std::env::temp_dir().join(format!("videorc-replay-prune-{}", uuid::Uuid::new_v4()));
+        // 20 files on disk, the list holds 3..=19, 20 is being written.
+        write_ring(&dir, 0..21, 3..20);
+        let report = prune_tick(&dir, 30);
+        assert_eq!(report.listed, 17);
+        assert_eq!(
+            report.deleted,
+            vec!["seg-000000.ts", "seg-000001.ts", "seg-000002.ts"]
+        );
+        assert_eq!(report.segment_files, 18);
+        assert_eq!(report.buffered_seconds, 30.0);
+        assert!(!dir.join("seg-000000.ts").exists());
+        assert!(dir.join("seg-000003.ts").exists());
+        assert!(dir.join("seg-000020.ts").exists());
+        // A second pass is a no-op.
+        let again = prune_tick(&dir, 30);
+        assert!(again.deleted.is_empty());
+        assert_eq!(again.segment_files, 18);
+        // A filling ring reports what it holds.
+        write_ring(&dir, 0..3, 0..2);
+        let filling = prune_tick(&dir, 30);
+        assert_eq!(filling.buffered_seconds, 4.0);
+        assert!(filling.deleted.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn prune_tick_on_a_missing_ring_is_empty() {
+        let dir =
+            std::env::temp_dir().join(format!("videorc-replay-missing-{}", uuid::Uuid::new_v4()));
+        let report = prune_tick(&dir, 30);
+        assert_eq!(report.buffered_seconds, 0.0);
+        assert_eq!(report.listed, 0);
+        assert_eq!(report.segment_files, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_attach_and_retire_own_the_ring_directory_and_the_state() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let params: StartSessionParams = serde_json::from_value(serde_json::json!({
+            "sources": { "screenId": null, "windowId": null, "cameraId": null, "microphoneId": null, "testPattern": true },
+            "layout": { "cameraCorner": "bottom-right", "cameraSize": "medium", "cameraShape": "rectangle", "cameraMargin": 32 },
+            "output": {
+                "recordEnabled": false,
+                "streamEnabled": false,
+                "outputDirectory": null,
+                "ffmpegPath": null,
+                "video": { "preset": "tutorial-1080p30", "width": 1920, "height": 1080, "fps": 30, "bitrateKbps": 8000 },
+                "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+            },
+            "replay": { "seconds": 30 }
+        }))
+        .unwrap();
+        assert!(params.replay_only());
+        let recordings = std::env::temp_dir().join("videorc-replay-recordings-test");
+        let guard = prepare(
+            &state,
+            RingRequest {
+                session_id: "session-a",
+                params: &params,
+                replay_only: true,
+                recordings_dir: &recordings,
+                ffmpeg_path: "ffmpeg",
+            },
+        )
+        .unwrap();
+        assert!(guard.dir.is_dir());
+        assert_eq!(guard.seconds, 30);
+        let starting = events.recv().await.unwrap();
+        assert_eq!(starting.event, "replay.state");
+        assert_eq!(starting.payload["state"], "starting");
+        assert_eq!(starting.payload["replayOnly"], true);
+        assert_eq!(snapshot(&state).state, ReplayBufferState::Starting);
+        assert_eq!(
+            active_replay_only_session_id(&state).as_deref(),
+            Some("session-a")
+        );
+
+        let dir = guard.dir.clone();
+        attach(&state, guard);
+        let on = events.recv().await.unwrap();
+        assert_eq!(on.payload["state"], "on");
+        assert_eq!(on.payload["sessionId"], "session-a");
+        assert_eq!(on.payload["seconds"], 30);
+
+        retire(&state, "session-a", RetireOutcome::Stopped);
+        let off = events.recv().await.unwrap();
+        assert_eq!(off.payload["state"], "off");
+        assert!(off.payload.get("sessionId").is_none());
+        assert!(!dir.exists(), "the ring is deleted when the session ends");
+        assert_eq!(active_replay_only_session_id(&state), None);
+        assert_eq!(snapshot(&state).state, ReplayBufferState::Off);
+        // Retiring another session is a no-op.
+        retire(&state, "session-b", RetireOutcome::Stopped);
+
+        // A failed start drops the guard: the ring goes, the state says why.
+        let guard = prepare(
+            &state,
+            RingRequest {
+                session_id: "session-c",
+                params: &params,
+                replay_only: false,
+                recordings_dir: &recordings,
+                ffmpeg_path: "ffmpeg",
+            },
+        )
+        .unwrap();
+        let dir = guard.dir.clone();
+        let _ = events.recv().await.unwrap();
+        drop(guard);
+        assert!(!dir.exists());
+        let dropped = events.recv().await.unwrap();
+        assert_eq!(dropped.payload["state"], "off");
+        assert_eq!(dropped.payload["reason"], "The session did not start.");
+
+        // A failure retires with the reason.
+        let guard = prepare(
+            &state,
+            RingRequest {
+                session_id: "session-d",
+                params: &params,
+                replay_only: true,
+                recordings_dir: &recordings,
+                ffmpeg_path: "ffmpeg",
+            },
+        )
+        .unwrap();
+        let _ = events.recv().await.unwrap();
+        attach(&state, guard);
+        let _ = events.recv().await.unwrap();
+        retire(
+            &state,
+            "session-d",
+            RetireOutcome::Failed("FFmpeg exited.".to_string()),
+        );
+        let failed = events.recv().await.unwrap();
+        assert_eq!(failed.payload["state"], "error");
+        assert_eq!(failed.payload["reason"], "FFmpeg exited.");
+        clean_leftovers(&state);
+        assert!(!ring_root(&state).exists());
+    }
+
+    #[test]
+    fn rowless_sessions_are_remembered_briefly() {
+        let state = test_state();
+        for index in 0..ROWLESS_SESSION_MEMORY + 2 {
+            register_rowless_session(&state, &format!("s{index}"));
+        }
+        assert!(!is_rowless_session(&state, "s0"));
+        assert!(!is_rowless_session(&state, "s1"));
+        assert!(is_rowless_session(&state, "s2"));
+        assert!(is_rowless_session(
+            &state,
+            &format!("s{}", ROWLESS_SESSION_MEMORY + 1)
+        ));
+        assert!(!is_rowless_session(&state, "never"));
+    }
 }
 
 #[cfg(test)]
@@ -419,13 +1053,25 @@ mod pure_tests {
         assert!(selection.complete);
         assert_eq!(selection.segments.len(), 15);
         assert_eq!(selection.covered_seconds, 30.0);
-        assert_eq!(selection.segments.first().map(|segment| segment.index()), Some(Some(2)));
-        assert_eq!(selection.segments.last().map(|segment| segment.index()), Some(Some(16)));
+        assert_eq!(
+            selection.segments.first().map(|segment| segment.index()),
+            Some(Some(2))
+        );
+        assert_eq!(
+            selection.segments.last().map(|segment| segment.index()),
+            Some(Some(16))
+        );
 
         // Keyframe alignment: 2.017 s segments need 15 of them for 30 s and
         // the result runs long, never short.
         let uneven = (0..17)
-            .map(|index| segment(index, f64::from(index) * 2.017, f64::from(index) * 2.017 + 2.017))
+            .map(|index| {
+                segment(
+                    index,
+                    f64::from(index) * 2.017,
+                    f64::from(index) * 2.017 + 2.017,
+                )
+            })
             .collect::<Vec<_>>();
         let selection = select_segments(&uneven, 30);
         assert!(selection.complete);
@@ -436,7 +1082,11 @@ mod pure_tests {
 
     #[test]
     fn a_filling_buffer_reports_what_it_holds() {
-        let listed = vec![segment(0, 0.0, 2.0), segment(1, 2.0, 4.0), segment(2, 4.0, 6.0)];
+        let listed = vec![
+            segment(0, 0.0, 2.0),
+            segment(1, 2.0, 4.0),
+            segment(2, 4.0, 6.0),
+        ];
         let selection = select_segments(&listed, 30);
         assert!(!selection.complete);
         assert_eq!(selection.segments.len(), 3);
@@ -460,7 +1110,11 @@ mod pure_tests {
     fn segment_muxer_args_describe_a_live_csv_ring() {
         let args = segment_muxer_args(Path::new("/ring"), 30);
         let joined = args.join(" ");
-        assert!(joined.starts_with("-f segment -segment_format mpegts -segment_time 2 -reset_timestamps 0"));
+        assert!(
+            joined.starts_with(
+                "-f segment -segment_format mpegts -segment_time 2 -reset_timestamps 0"
+            )
+        );
         assert!(joined.contains("-segment_list /ring/segments.csv -segment_list_type csv -segment_list_size 17 -segment_list_flags +live"));
         assert_eq!(args.last().map(String::as_str), Some("/ring/seg-%06d.ts"));
     }
@@ -469,7 +1123,18 @@ mod pure_tests {
     fn replay_audio_is_aac_192k_with_the_session_filter() {
         assert_eq!(
             replay_audio_encoding_args(Some("volume=1.0"), 2),
-            vec!["-af", "volume=1.0", "-ar", "48000", "-ac", "2", "-c:a", "aac", "-b:a", "192k"]
+            vec![
+                "-af",
+                "volume=1.0",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k"
+            ]
         );
         assert_eq!(
             replay_audio_encoding_args(None, 0),
@@ -479,10 +1144,15 @@ mod pure_tests {
 
     #[test]
     fn save_args_stream_copy_into_a_faststart_mp4() {
-        let args = save_args(Path::new("/ring/list.txt"), Path::new("/out/Replay.mp4.partial"));
+        let args = save_args(
+            Path::new("/ring/list.txt"),
+            Path::new("/out/Replay.mp4.partial"),
+        );
         let joined = args.join(" ");
         assert!(joined.contains("-f concat -safe 0 -i /ring/list.txt"));
-        assert!(joined.contains("-map 0:v:0 -map 0:a? -c copy -movflags +faststart -f mp4 /out/Replay.mp4.partial"));
+        assert!(joined.contains(
+            "-map 0:v:0 -map 0:a? -c copy -movflags +faststart -f mp4 /out/Replay.mp4.partial"
+        ));
         assert!(joined.starts_with("-n -hide_banner"));
     }
 
@@ -493,9 +1163,14 @@ mod pure_tests {
             .with_ymd_and_hms(2026, 10, 12, 18, 30, 5)
             .unwrap();
         assert_eq!(replay_file_name(&at), "Replay 2026-10-12 18-30-05.mp4");
-        assert_eq!(replays_dir(Path::new("/Users/me/Movies")), PathBuf::from("/Users/me/Movies/Replays"));
         assert_eq!(
-            partial_path(Path::new("/Users/me/Movies/Replays/Replay 2026-10-12 18-30-05.mp4")),
+            replays_dir(Path::new("/Users/me/Movies")),
+            PathBuf::from("/Users/me/Movies/Replays")
+        );
+        assert_eq!(
+            partial_path(Path::new(
+                "/Users/me/Movies/Replays/Replay 2026-10-12 18-30-05.mp4"
+            )),
             PathBuf::from("/Users/me/Movies/Replays/Replay 2026-10-12 18-30-05.mp4.partial")
         );
         assert_eq!(replay_title(), "Replay");
@@ -517,7 +1192,9 @@ mod pure_tests {
     fn split_video_filter_feeds_both_outputs_from_one_encode_graph() {
         assert_eq!(
             split_video_filter_for_replay("[0:v]setpts=PTS-STARTPTS,fps=30[v_main]").as_deref(),
-            Some("[0:v]setpts=PTS-STARTPTS,fps=30[v_replay_src];[v_replay_src]split=2[v_main][v_replay]")
+            Some(
+                "[0:v]setpts=PTS-STARTPTS,fps=30[v_replay_src];[v_replay_src]split=2[v_main][v_replay]"
+            )
         );
         // The legacy graph keeps its preview branch after `[v_main]`.
         assert_eq!(

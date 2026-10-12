@@ -277,6 +277,9 @@ struct PublishedSessionStartTerminal {
     state: AppState,
     session_id: String,
     output_path: Option<PathBuf>,
+    /// Plan 181: the terminal replacement keeps the buffer-only mark, so the
+    /// renderer's session chrome never flashes a failed recording.
+    replay_only: bool,
     pipeline: RecordingPipeline,
     failed_stage: RecordingPipelineStage,
     message: String,
@@ -319,15 +322,14 @@ impl PublishedSessionStartTerminal {
     fn publish(mut self) {
         self.pipeline
             .mark_failed(self.failed_stage.clone(), &self.message);
-        self.state.emit_event(
-            "recording.status",
-            recording_start_rejected_status(
-                &self.session_id,
-                self.output_path.as_deref(),
-                &self.pipeline,
-                &self.message,
-            ),
+        let mut rejected = recording_start_rejected_status(
+            &self.session_id,
+            self.output_path.as_deref(),
+            &self.pipeline,
+            &self.message,
         );
+        rejected.replay_only = self.replay_only;
+        self.state.emit_event("recording.status", rejected);
         // Keep SessionStarting authoritative through the terminal event. A
         // replacement start cannot be admitted on another runtime worker and
         // then be overwritten by this old session's delayed Idle push.
@@ -351,6 +353,7 @@ impl PublishedSessionStartGuard {
         state: AppState,
         session_id: &str,
         output_path: Option<PathBuf>,
+        replay_only: bool,
         pipeline: &RecordingPipeline,
         session_start_admission: SessionStartAdmission,
     ) {
@@ -359,6 +362,7 @@ impl PublishedSessionStartGuard {
             state,
             session_id: session_id.to_string(),
             output_path,
+            replay_only,
             pipeline: pipeline.clone(),
             failed_stage: RecordingPipelineStage::Muxer,
             message: "Session start did not reach a running capture pipeline.".to_string(),
@@ -2063,6 +2067,9 @@ pub struct ActiveRecording {
     /// Benchmark session owned by the performance check: hidden row, no
     /// background export/poster/quality job, discarded by its owner.
     performance_check: bool,
+    /// Plan 181: the session exists only for the replay buffer. No file, no
+    /// stream, no Library row; `recording.status` says so.
+    pub replay_only: bool,
     /// True only when this session has a viewer-facing stream leg rendered by
     /// the compositor bridge. Legacy FFmpeg and record-only paths must reject
     /// comment highlights before touching the overlay slot.
@@ -2151,6 +2158,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         session_id: session_id.to_string(),
         pid: 0,
         stdin: None,
+        replay_only: false,
         output_path: None,
         stream_url: None,
         ffmpeg_path: "test-ffmpeg".to_string(),
@@ -2547,6 +2555,7 @@ impl ActiveRecording {
             pipeline: Some(self.pipeline.status()),
             duration_ms: None,
             message,
+            replay_only: self.replay_only,
         }
     }
 
@@ -2986,6 +2995,7 @@ pub fn idle_status() -> RecordingStatus {
         pipeline: None,
         duration_ms: None,
         message: Some("Ready to start a capture session.".to_string()),
+        replay_only: false,
     }
 }
 
@@ -3009,6 +3019,7 @@ fn recording_start_rejected_status(
         pipeline: Some(pipeline.status()),
         duration_ms: None,
         message: Some(message.to_string()),
+        replay_only: false,
     }
 }
 
@@ -3087,6 +3098,25 @@ async fn start_session_with_timeline(
     mut params: StartSessionParams,
     timeline: &mut RecordingStartTimeline,
 ) -> Result<RecordingStatus> {
+    // Plan 181: a buffer-only session composes exactly like a record-only
+    // session (same bridge, encoder posture, overlay plan) and writes no
+    // file; the replay ring is its only output. The request shape is kept in
+    // `replay_only`, `record_enabled` is raised for every pipeline decision
+    // below, and every file-only step checks `replay_only` instead.
+    let replay_only = params.replay_only();
+    if replay_only {
+        params.output.record_enabled = true;
+        params.captions = None;
+    }
+    if let Some(replay) = params.replay.as_mut() {
+        replay.seconds = crate::replay_buffer::clamp_seconds(replay.seconds);
+    }
+    // Plan 181 S7: Record or Go Live while a buffer-only session runs hands
+    // over here, so no caller meets "A capture session is already running"
+    // because of the buffer. The new session carries its own ring.
+    if !replay_only {
+        hand_over_replay_only_session(&state).await?;
+    }
     // Once armed at the Starting edge this guard owns the admission itself, so
     // every uncommitted return publishes the exact-session terminal replacement
     // before another start can be admitted.
@@ -3173,7 +3203,7 @@ async fn start_session_with_timeline(
     let recordable_video_notice: Option<String> = None;
     let output_dir = resolve_output_directory(params.output.output_directory.as_deref())?;
 
-    if params.output.record_enabled {
+    if params.output.record_enabled && !replay_only {
         fs::create_dir_all(&output_dir)
             .await
             .with_context(|| format!("Could not create {}", output_dir.display()))?;
@@ -3183,9 +3213,7 @@ async fn start_session_with_timeline(
     // FX8: the display title reads in the user's wall clock — it sat next to
     // Library's locally-rendered date column showing a different time. The
     // stored `started_at` (RFC3339 UTC) and the output filename stay UTC.
-    let output_path = params
-        .output
-        .record_enabled
+    let output_path = (params.output.record_enabled && !replay_only)
         .then(|| recording_output_path(&output_dir, &started_at, &session_id));
     let stream_resolution = if params.output.stream_enabled {
         match params
@@ -3221,7 +3249,11 @@ async fn start_session_with_timeline(
             .collect::<Vec<_>>()
             .join(", ")
     });
-    let mode = output_mode(params.output.record_enabled, params.output.stream_enabled);
+    let mode = if replay_only {
+        "replay"
+    } else {
+        output_mode(params.output.record_enabled, params.output.stream_enabled)
+    };
     let container =
         container_for_outputs(params.output.record_enabled, params.output.stream_enabled);
 
@@ -3230,29 +3262,35 @@ async fn start_session_with_timeline(
     // marks the row failed on ANY exit path that doesn't reach the pipeline.
     let mut session_row_guard = SessionStartRowGuard::new(state.database.clone(), &session_id);
 
-    state.database.create_session(&NewSession {
-        id: session_id.clone(),
-        title: session_title(&started_at, &chrono::Local),
-        started_at: started_at.to_rfc3339(),
-        mode: mode.to_string(),
-        output_path: output_path.as_ref().map(|path| path.display().to_string()),
-        container: Some(container_key(&container).to_string()),
-        stream_preset: params
-            .output
-            .stream_enabled
-            .then(|| format!("{:?}", params.output.rtmp.preset)),
-        sources: params.sources.clone(),
-        layout: params.layout.clone(),
-        output: params.output.clone(),
-    })?;
-    if params.purpose.is_performance_check() {
-        // Benchmark rows never reach the Library and must not replace the
-        // user's remembered capture; the performance check deletes them.
-        state.database.mark_session_performance_check(&session_id)?;
+    if replay_only {
+        // Plan 181: no Library row, no remembered capture. Its logs and
+        // health events skip the sessions foreign key from here on.
+        crate::replay_buffer::register_rowless_session(&state, &session_id);
     } else {
-        state
-            .database
-            .save_setting("last_capture_session", &params)?;
+        state.database.create_session(&NewSession {
+            id: session_id.clone(),
+            title: session_title(&started_at, &chrono::Local),
+            started_at: started_at.to_rfc3339(),
+            mode: mode.to_string(),
+            output_path: output_path.as_ref().map(|path| path.display().to_string()),
+            container: Some(container_key(&container).to_string()),
+            stream_preset: params
+                .output
+                .stream_enabled
+                .then(|| format!("{:?}", params.output.rtmp.preset)),
+            sources: params.sources.clone(),
+            layout: params.layout.clone(),
+            output: params.output.clone(),
+        })?;
+        if params.purpose.is_performance_check() {
+            // Benchmark rows never reach the Library and must not replace the
+            // user's remembered capture; the performance check deletes them.
+            state.database.mark_session_performance_check(&session_id)?;
+        } else {
+            state
+                .database
+                .save_setting("last_capture_session", &params)?;
+        }
     }
     if !stream_targets.is_empty() {
         // Label + composed leg per destination: a dual-orientation session
@@ -3300,7 +3338,7 @@ async fn start_session_with_timeline(
         None,
     );
 
-    if params.output.record_enabled {
+    if params.output.record_enabled && !replay_only {
         // Advisory only: `df` and the health-event write stay off the start path.
         let disk_state = state.clone();
         let disk_session_id = session_id.clone();
@@ -4634,24 +4672,69 @@ async fn start_session_with_timeline(
             // the bridge writer consumes only D3D11 tickets.
             (None, None)
         };
+    // Plan 181: the replay ring rides this session's FFmpeg child as one
+    // more output. A buffer-only session must have it; a recording or a
+    // stream goes on without it when it cannot be prepared (S4.4), and the
+    // renderer hears why through `replay.state`.
+    let mut replay_ring = if params.replay.is_some() {
+        match crate::replay_buffer::prepare(
+            &state,
+            crate::replay_buffer::RingRequest {
+                session_id: &session_id,
+                params: &params,
+                replay_only,
+                recordings_dir: &output_dir,
+                ffmpeg_path: &ffmpeg_path,
+            },
+        ) {
+            Ok(ring) => Some(ring),
+            Err(error) if replay_only => {
+                if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
+                    let _ = crate::fifo::cleanup(fifo_path);
+                }
+                if let Some(fifo_path) = encoder_bridge_stream_fifo.as_ref() {
+                    let _ = crate::fifo::cleanup(fifo_path);
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "replay-buffer-unavailable",
+                    &format!("The replay buffer is off for this session: {error:#}"),
+                );
+                params.replay = None;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let replay_output = replay_ring.as_ref().map(|ring| ReplayOutput {
+        dir: ring.dir.clone(),
+        seconds: ring.seconds,
+    });
     let args = if use_encoder_bridge {
         let fifo_path = encoder_bridge_fifo
             .as_deref()
             .context("Encoder bridge FIFO path was not prepared")?;
-        if params.output.record_enabled && !params.output.stream_enabled {
-            bridge_recording_ffmpeg_args_with_encoder(
+        if params.output.record_enabled && !params.output.stream_enabled && output_path.is_some() {
+            bridge_recording_ffmpeg_args_with_encoder_and_replay(
                 &capture,
                 &params,
                 output_path.as_deref(),
                 fifo_path,
                 encoder_bridge_video_output,
                 &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
+                replay_output.as_ref(),
             )?
         } else if let (Some(stream_output), Some(stream_fifo_path)) = (
             encoder_bridge_stream_output,
             encoder_bridge_stream_fifo.as_deref(),
         ) {
-            bridge_compositor_split_output_ffmpeg_args(
+            bridge_compositor_split_output_ffmpeg_args_with_replay(
                 &capture,
                 &params,
                 output_path.as_deref(),
@@ -4660,9 +4743,10 @@ async fn start_session_with_timeline(
                 stream_fifo_path,
                 encoder_bridge_video_output,
                 stream_output,
+                replay_output.as_ref(),
             )?
         } else {
-            bridge_compositor_ffmpeg_args_with_encoder(
+            bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &capture,
                 &params,
                 output_path.as_deref(),
@@ -4670,16 +4754,18 @@ async fn start_session_with_timeline(
                 fifo_path,
                 encoder_bridge_video_output,
                 &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
+                replay_output.as_ref(),
             )?
         }
     } else {
-        ffmpeg_args_with_encoder(
+        ffmpeg_args_with_encoder_and_replay(
             &capture,
             &params,
             output_path.as_deref(),
             &stream_targets,
             screen_overlay.as_ref(),
             &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
+            replay_output.as_ref(),
         )?
     };
     let ffmpeg_live_audio_filter_count = ffmpeg_live_microphone_filter_count(&args);
@@ -4734,6 +4820,7 @@ async fn start_session_with_timeline(
             pipeline: Some(pipeline.status()),
             duration_ms: None,
             message: Some(format!("Starting {mode} session.")),
+            replay_only,
         },
         &session_start_publication_permit,
     );
@@ -4741,6 +4828,7 @@ async fn start_session_with_timeline(
         state.clone(),
         &session_id,
         output_path.clone(),
+        replay_only,
         &pipeline,
         session_start_admission
             .take()
@@ -5481,6 +5569,7 @@ async fn start_session_with_timeline(
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
         performance_check: params.purpose.is_performance_check(),
+        replay_only,
         comment_highlight_available: comment_highlight_available(
             use_encoder_bridge,
             highlight_overlay_plan,
@@ -5628,6 +5717,9 @@ async fn start_session_with_timeline(
     timeline.mark(RecordingStartPhase::Running);
     state.emit_event("session.sources.changed", sources_snapshot);
     state.emit_event("recording.status", running_status.clone());
+    if let Some(ring) = replay_ring.take() {
+        crate::replay_buffer::attach(&state, ring);
+    }
     if let Some(receiver) = deferred_ffmpeg_output_startup.take() {
         spawn_ffmpeg_output_startup_watchdog(
             state.clone(),
@@ -6919,6 +7011,7 @@ pub async fn create_preview_snapshot(
         scene: None,
         captions: None,
         requested_at_ms: None,
+        replay: None,
         output: crate::protocol::OutputSettings {
             record_enabled: true,
             stream_enabled: false,
@@ -7511,6 +7604,7 @@ fn live_preview_session_params(
         scene: None,
         captions: None,
         requested_at_ms: None,
+        replay: None,
         output: crate::protocol::OutputSettings {
             record_enabled: true,
             stream_enabled: false,
@@ -8668,6 +8762,10 @@ fn persist_terminal_session_or_recovery(
     duration_ms: Option<i64>,
     diagnostics: &DiagnosticStats,
 ) -> std::result::Result<(), String> {
+    // Plan 181: a buffer-only session has no row to finalize.
+    if crate::replay_buffer::is_rowless_session(state, session_id) {
+        return Ok(());
+    }
     let finalization = SessionFinalization::new(
         session_id,
         status,
@@ -8699,6 +8797,10 @@ fn persist_finalization_or_recovery_with_fault(
     recovery_path: &mut Option<PathBuf>,
     fault: Mp4FinalizationFault,
 ) -> std::result::Result<(), String> {
+    // Plan 181: a buffer-only session has no row and no media to recover.
+    if crate::replay_buffer::is_rowless_session(state, &finalization.session_id) {
+        return Ok(());
+    }
     // A pre-existing record may still own a partial or published MP4 while the
     // live terminal path falls back to the MKV. In that case it remains the
     // single authority: replacing or clearing it with a staging-less fallback
@@ -8955,6 +9057,7 @@ async fn monitor_session(
                 performance_check: active.performance_check,
                 native_audio_stats,
                 records_file: active.output_path.is_some(),
+                replay_only: active.replay_only,
             }
         });
     let retired_active = monitored_recording
@@ -8982,6 +9085,19 @@ async fn monitor_session(
     let Some(mut monitored_recording) = monitored_recording else {
         return;
     };
+    // Plan 181: the ring dies with the session's FFmpeg child. A user stop
+    // (or the handover, or shutdown) reads `off`; anything else says why.
+    crate::replay_buffer::retire(
+        &state,
+        &session_id,
+        if monitored_recording.stop_intent_preceded_exit {
+            crate::replay_buffer::RetireOutcome::Stopped
+        } else {
+            crate::replay_buffer::RetireOutcome::Failed(
+                "The session ended before you stopped it, so the replay buffer is off.".to_string(),
+            )
+        },
+    );
     // Chat runtime belongs to the exact recording generation, not to the stop
     // RPC or to the much longer media-finalization tail. Retire it as soon as
     // this monitor has successfully removed its own recording slot. The
@@ -9426,6 +9542,7 @@ async fn monitor_session(
                             pipeline: Some(monitored_recording.pipeline.status()),
                             duration_ms,
                             message: Some(message),
+                            replay_only: monitored_recording.replay_only,
                         }
                     }
                     Ok(()) => {
@@ -9485,6 +9602,7 @@ async fn monitor_session(
                             message: Some(
                                 "Recording saved; exporting the MP4 in the background.".to_string(),
                             ),
+                            replay_only: monitored_recording.replay_only,
                         }
                     }
                 }
@@ -9691,6 +9809,7 @@ async fn monitor_session(
                         persistence_error
                             .unwrap_or_else(|| "Capture session finalized.".to_string()),
                     ),
+                    replay_only: monitored_recording.replay_only,
                 };
                 // Slice 8: check (and, if needed, repair in place) the finalized file off
                 // the hot path. The recording is already marked complete; the gate only ever
@@ -9770,6 +9889,7 @@ async fn monitor_session(
                 pipeline: Some(monitored_recording.pipeline.status()),
                 duration_ms,
                 message: Some(message),
+                replay_only: monitored_recording.replay_only,
             };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
@@ -9814,6 +9934,7 @@ async fn monitor_session(
                 pipeline: Some(monitored_recording.pipeline.status()),
                 duration_ms,
                 message: Some(message),
+                replay_only: monitored_recording.replay_only,
             };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
@@ -11355,6 +11476,8 @@ struct MonitoredRecording {
     native_audio_stats: Option<NativeAudioStats>,
     /// False for a stream-only session: there is no file to keep.
     records_file: bool,
+    /// Plan 181: a buffer-only session; its terminal status keeps the mark.
+    replay_only: bool,
 }
 
 fn should_finalize_recording_session(
@@ -17210,6 +17333,116 @@ fn bridge_recording_ffmpeg_args(
     )
 }
 
+/// Plan 181: the replay ring output a session's FFmpeg child adds beside
+/// its file and stream outputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplayOutput {
+    dir: PathBuf,
+    seconds: u32,
+}
+
+/// How the ring gets its video: a stream copy of the encoded bridge, or its
+/// own encode from the filter graph on the raw and legacy paths.
+enum ReplayVideoCodec {
+    Copy {
+        video_output: EncoderBridgeVideoOutput,
+    },
+    Encode {
+        /// `[v_main]` when the ring is the only output, `[v_replay]` when
+        /// it rides a `split` beside a primary output.
+        label: &'static str,
+        encoder_args: Vec<String>,
+    },
+}
+
+/// Appends the ring as one more output: the same audio mix the file gets,
+/// encoded to AAC, and a `-f segment` MPEG-TS ring (plan 181 S2).
+fn append_replay_segment_output(
+    args: &mut Vec<String>,
+    input_layout: &InputLayout,
+    audio: &AudioSettings,
+    video: ReplayVideoCodec,
+    replay: &ReplayOutput,
+) {
+    match video {
+        ReplayVideoCodec::Copy { video_output } => {
+            args.extend([
+                "-map".to_string(),
+                format!("{}:v", input_layout.video_input_index),
+            ]);
+            append_audio_output_args(args, input_layout);
+            args.extend(["-c:v".to_string(), "copy".to_string()]);
+            if matches!(
+                video_output,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+            ) {
+                append_media_foundation_h264_color_metadata_args(args);
+            }
+        }
+        ReplayVideoCodec::Encode {
+            label,
+            encoder_args,
+        } => {
+            args.extend(["-map".to_string(), label.to_string()]);
+            append_audio_output_args(args, input_layout);
+            args.extend(encoder_args);
+        }
+    }
+    let filter =
+        (!input_layout.audio_inputs.is_empty()).then(|| capture_audio_filter(input_layout, audio));
+    args.extend(crate::replay_buffer::replay_audio_encoding_args(
+        filter.as_deref(),
+        audio_output_channels(input_layout),
+    ));
+    // The ring ends with the video, like every bridge output.
+    args.push("-shortest".to_string());
+    args.extend(crate::replay_buffer::segment_muxer_args(
+        &replay.dir,
+        replay.seconds,
+    ));
+}
+
+/// Plan 181 S7: a buffer-only session yields to a real one. Stop it through
+/// the ordinary path (bounded, no finalization: it has no file), then wait
+/// for the pieces the admission checks below need, so the Record that
+/// follows is not refused for a microphone still closing.
+async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
+    let replay_only_session = state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .filter(|active| active.replay_only)
+        .map(|active| active.session_id.clone());
+    let Some(session_id) = replay_only_session else {
+        return Ok(());
+    };
+    tracing::info!("Replay buffer session {session_id} hands over to a new session.");
+    let status = stop_recording_with_intent(state.clone(), SessionStopParams::default())
+        .await
+        .context("Could not stop the replay buffer before starting the session")?;
+    if !matches!(status.state, RecordingState::Idle | RecordingState::Failed) {
+        bail!("The replay buffer is still stopping. Try again in a moment.");
+    }
+    let deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
+    loop {
+        let slot_free = state.recording.lock().await.is_none();
+        let audio_settled =
+            !crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count());
+        if slot_free && audio_settled {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("The replay buffer is still releasing the microphone. Try again in a moment.");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// How long the handover waits for the buffer session's microphone and slot
+/// to release before the real session is admitted.
+const REPLAY_HANDOVER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn bridge_recording_ffmpeg_args_with_encoder(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -17218,9 +17451,29 @@ fn bridge_recording_ffmpeg_args_with_encoder(
     video_output: EncoderBridgeVideoOutput,
     encoder: &ResolvedFfmpegH264Encoder,
 ) -> Result<Vec<String>> {
+    bridge_recording_ffmpeg_args_with_encoder_and_replay(
+        capture,
+        params,
+        output_path,
+        fifo_path,
+        video_output,
+        encoder,
+        None,
+    )
+}
+
+fn bridge_recording_ffmpeg_args_with_encoder_and_replay(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    fifo_path: &Path,
+    video_output: EncoderBridgeVideoOutput,
+    encoder: &ResolvedFfmpegH264Encoder,
+    replay: Option<&ReplayOutput>,
+) -> Result<Vec<String>> {
     let output_path =
         output_path.context("Encoder bridge recording requires a local output path")?;
-    bridge_compositor_ffmpeg_args_with_encoder(
+    bridge_compositor_ffmpeg_args_with_encoder_and_replay(
         capture,
         params,
         Some(output_path),
@@ -17228,6 +17481,7 @@ fn bridge_recording_ffmpeg_args_with_encoder(
         fifo_path,
         video_output,
         encoder,
+        replay,
     )
 }
 
@@ -17261,8 +17515,35 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
     video_output: EncoderBridgeVideoOutput,
     encoder: &ResolvedFfmpegH264Encoder,
 ) -> Result<Vec<String>> {
+    bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+        capture,
+        params,
+        output_path,
+        stream_targets,
+        fifo_path,
+        video_output,
+        encoder,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    stream_targets: &[StreamTarget],
+    fifo_path: &Path,
+    video_output: EncoderBridgeVideoOutput,
+    encoder: &ResolvedFfmpegH264Encoder,
+    replay: Option<&ReplayOutput>,
+) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
     let performance_check = params.purpose.is_performance_check();
+    // Plan 181: a buffer-only session has no primary output; the ring maps
+    // the video itself. With a primary output the ring copies the encoded
+    // stream, or rides a `split` of the raw graph.
+    let primary_output = output_path.is_some() || !stream_targets.is_empty();
     let session_params = ffmpeg_session_params(
         capture,
         params,
@@ -17297,26 +17578,36 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
     if !copy_stream_fanout {
         match video_output {
             EncoderBridgeVideoOutput::RawYuv420p => {
-                args.extend([
-                    "-filter_complex".to_string(),
-                    bridge_recording_video_filter_for_encoder(
-                        input_layout.video_input_index,
-                        &params.output.video,
-                        encoder,
-                    ),
-                    "-map".to_string(),
-                    "[v_main]".to_string(),
-                ]);
+                let filter = bridge_recording_video_filter_for_encoder(
+                    input_layout.video_input_index,
+                    &params.output.video,
+                    encoder,
+                );
+                let filter = match replay {
+                    Some(_) if primary_output => {
+                        crate::replay_buffer::split_video_filter_for_replay(&filter)
+                            .unwrap_or(filter)
+                    }
+                    _ => filter,
+                };
+                args.extend(["-filter_complex".to_string(), filter]);
+                if primary_output {
+                    args.extend(["-map".to_string(), "[v_main]".to_string()]);
+                }
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
             | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-                args.extend([
-                    "-map".to_string(),
-                    format!("{}:v", input_layout.video_input_index),
-                ]);
+                if primary_output {
+                    args.extend([
+                        "-map".to_string(),
+                        format!("{}:v", input_layout.video_input_index),
+                    ]);
+                }
             }
         }
+    }
+    if primary_output && !copy_stream_fanout {
         append_audio_output_args(&mut args, &input_layout);
         match video_output {
             EncoderBridgeVideoOutput::RawYuv420p => {
@@ -17409,7 +17700,39 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
         (None, targets) if !targets.is_empty() => {
             args.extend(tee_output_args(stream_legs.join("|")));
         }
+        // Plan 181: the replay ring is this session's only output.
+        (None, []) if replay.is_some() => {}
         (None, _) => bail!("At least one output target is required"),
+    }
+
+    if let Some(replay) = replay {
+        let video = match video_output {
+            EncoderBridgeVideoOutput::RawYuv420p => {
+                let mut encoder_args = Vec::new();
+                append_h264_encoding_args_for_platform_preserving_input_timestamps(
+                    &mut encoder_args,
+                    &params.output.video,
+                    encoder.platform,
+                    !stream_targets.is_empty(),
+                    encoder.vaapi_arg_profile,
+                    performance_check,
+                );
+                ReplayVideoCodec::Encode {
+                    label: if primary_output {
+                        "[v_replay]"
+                    } else {
+                        "[v_main]"
+                    },
+                    encoder_args,
+                }
+            }
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+                ReplayVideoCodec::Copy { video_output }
+            }
+        };
+        append_replay_segment_output(&mut args, &input_layout, &params.audio, video, replay);
     }
 
     Ok(args)
@@ -17425,6 +17748,31 @@ fn bridge_compositor_split_output_ffmpeg_args(
     stream_fifo_path: &Path,
     recording_video_output: EncoderBridgeVideoOutput,
     stream_output: CompositorAuxiliaryOutput,
+) -> Result<Vec<String>> {
+    bridge_compositor_split_output_ffmpeg_args_with_replay(
+        capture,
+        params,
+        output_path,
+        stream_targets,
+        recording_fifo_path,
+        stream_fifo_path,
+        recording_video_output,
+        stream_output,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bridge_compositor_split_output_ffmpeg_args_with_replay(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    stream_targets: &[StreamTarget],
+    recording_fifo_path: &Path,
+    stream_fifo_path: &Path,
+    recording_video_output: EncoderBridgeVideoOutput,
+    stream_output: CompositorAuxiliaryOutput,
+    replay: Option<&ReplayOutput>,
 ) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
     let session_params = ffmpeg_session_params(
@@ -17512,6 +17860,19 @@ fn bridge_compositor_split_output_ffmpeg_args(
         }
         append_audio_encoding_with_video_clock(&mut args, &input_layout, &params.audio, true, true);
         args.push(ffmpeg_file_path(output_path));
+    }
+    // Plan 181: the ring copies the recording leg's encode (the clean
+    // program, before any stream-only overlay).
+    if let Some(replay) = replay {
+        append_replay_segment_output(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            ReplayVideoCodec::Copy {
+                video_output: recording_video_output,
+            },
+            replay,
+        );
     }
 
     let stream_input_layout = InputLayout {
@@ -18000,7 +18361,29 @@ fn ffmpeg_args_with_encoder(
     screen_overlay: Option<&ScreenOverlayInput>,
     encoder: &ResolvedFfmpegH264Encoder,
 ) -> Result<Vec<String>> {
+    ffmpeg_args_with_encoder_and_replay(
+        capture,
+        params,
+        output_path,
+        stream_targets,
+        screen_overlay,
+        encoder,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ffmpeg_args_with_encoder_and_replay(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    stream_targets: &[StreamTarget],
+    screen_overlay: Option<&ScreenOverlayInput>,
+    encoder: &ResolvedFfmpegH264Encoder,
+    replay: Option<&ReplayOutput>,
+) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
+    let primary_output = output_path.is_some() || !stream_targets.is_empty();
     let session_params = ffmpeg_session_params(
         capture,
         params,
@@ -18027,29 +18410,35 @@ fn ffmpeg_args_with_encoder(
         screen_overlay,
     );
     let filter = recording_video_filter_for_encoder(capture, &input_layout, params, true, encoder);
+    // Plan 181: with a primary output the ring rides a `split` of the graph;
+    // buffer-only maps `[v_main]` itself.
+    let filter = match replay {
+        Some(_) if primary_output => {
+            crate::replay_buffer::split_video_filter_for_replay(&filter).unwrap_or(filter)
+        }
+        _ => filter,
+    };
 
-    args.extend([
-        "-filter_complex".to_string(),
-        filter,
-        "-map".to_string(),
-        "[v_main]".to_string(),
-    ]);
-    append_audio_output_args(&mut args, &input_layout);
-    append_h264_encoding_args_for_platform(
-        &mut args,
-        &params.output.video,
-        encoder.platform,
-        !stream_targets.is_empty(),
-        encoder.vaapi_arg_profile,
-        params.purpose.is_performance_check(),
-    );
-    append_audio_encoding_with_video_clock(
-        &mut args,
-        &input_layout,
-        &params.audio,
-        !stream_targets.is_empty(),
-        false,
-    );
+    args.extend(["-filter_complex".to_string(), filter]);
+    if primary_output {
+        args.extend(["-map".to_string(), "[v_main]".to_string()]);
+        append_audio_output_args(&mut args, &input_layout);
+        append_h264_encoding_args_for_platform(
+            &mut args,
+            &params.output.video,
+            encoder.platform,
+            !stream_targets.is_empty(),
+            encoder.vaapi_arg_profile,
+            params.purpose.is_performance_check(),
+        );
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            !stream_targets.is_empty(),
+            false,
+        );
+    }
 
     let stream_legs = stream_targets
         .iter()
@@ -18084,7 +18473,35 @@ fn ffmpeg_args_with_encoder(
         (None, targets) if !targets.is_empty() => {
             args.extend(tee_output_args(stream_legs.join("|")));
         }
+        // Plan 181: the replay ring is this session's only output.
+        (None, []) if replay.is_some() => {}
         (None, _) => bail!("At least one output target is required"),
+    }
+
+    if let Some(replay) = replay {
+        let mut encoder_args = Vec::new();
+        append_h264_encoding_args_for_platform(
+            &mut encoder_args,
+            &params.output.video,
+            encoder.platform,
+            !stream_targets.is_empty(),
+            encoder.vaapi_arg_profile,
+            params.purpose.is_performance_check(),
+        );
+        append_replay_segment_output(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            ReplayVideoCodec::Encode {
+                label: if primary_output {
+                    "[v_replay]"
+                } else {
+                    "[v_main]"
+                },
+                encoder_args,
+            },
+            replay,
+        );
     }
 
     args.extend(["-map".to_string(), "[preview]".to_string()]);
@@ -20086,7 +20503,7 @@ fn ready_stream_destination_counts_by_orientation(
 }
 
 fn validate_outputs(params: &StartSessionParams) -> Result<()> {
-    if !params.output.record_enabled && !params.output.stream_enabled {
+    if !params.output.record_enabled && !params.output.stream_enabled && params.replay.is_none() {
         bail!("Enable local recording, RTMP streaming, or both");
     }
 
@@ -22877,6 +23294,9 @@ pub fn emit_health_event(
     // `ffmpeg-warning` code carries raw FFmpeg lines that can quote an RTMP
     // URL, whose path is the stream key.
     let message = &crate::state::redact_stream_urls(message);
+    // Plan 181: a buffer-only session has no `sessions` row, so its events
+    // are stored without the session id instead of failing the foreign key.
+    let session_id = session_id.filter(|id| !crate::replay_buffer::is_rowless_session(state, id));
     let event = state
         .database
         .add_health_event(session_id, level, code, message)?;
@@ -22971,6 +23391,16 @@ fn emit_session_log(
     message: &str,
     source_id: Option<&str>,
 ) -> Result<()> {
+    if crate::replay_buffer::is_rowless_session(state, session_id) {
+        // Plan 181: no row to attach the line to; the backend log keeps it.
+        tracing::info!(
+            target: "videorc_backend::replay_buffer",
+            session_id,
+            code,
+            "{message}"
+        );
+        return Ok(());
+    }
     let entry = state
         .database
         .add_session_log(session_id, level, code, message, source_id)?;
@@ -23594,6 +24024,7 @@ mod tests {
             pipeline: None,
             duration_ms: None,
             message: Some("Starting stream session.".to_string()),
+            replay_only: false,
         }
     }
 
@@ -23755,6 +24186,7 @@ mod tests {
             state.clone(),
             &session_id,
             Some(output_path.clone()),
+            false,
             &pipeline,
             session_start_admission,
         );
@@ -26670,6 +27102,7 @@ mod tests {
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
         StartSessionParams {
             requested_at_ms: None,
+            replay: None,
             captions: None,
             sources: SourceSelection {
                 screen_id: Some("screen:avfoundation:3".to_string()),
@@ -27404,6 +27837,7 @@ mod tests {
             session_id: snapshot.session_id.clone(),
             pid: 0,
             stdin: None,
+            replay_only: false,
             output_path: None,
             stream_url: None,
             ffmpeg_path: "test-ffmpeg".to_string(),
@@ -30471,6 +30905,359 @@ mod tests {
             .collect()
     }
 
+    /// Plan 181: the replay ring output on every FFmpeg arg builder.
+    mod replay_ring_args {
+        use super::*;
+        use crate::protocol::ReplayParams;
+
+        fn capture() -> CaptureInputs {
+            CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: Some(MicrophoneInput::SessionPcm {
+                    fifo_path: PathBuf::from("/tmp/videorc-replay-test-audio.f32le"),
+                }),
+            }
+        }
+
+        fn ring() -> ReplayOutput {
+            ReplayOutput {
+                dir: PathBuf::from("/tmp/videorc-ring"),
+                seconds: 30,
+            }
+        }
+
+        fn encoder() -> ResolvedFfmpegH264Encoder {
+            ResolvedFfmpegH264Encoder::for_platform(current_ffmpeg_h264_platform().unwrap())
+        }
+
+        /// A buffer-only request after `start_session` raised `record_enabled`
+        /// for the pipeline decisions: the builder still gets no output path.
+        fn buffer_only_params() -> StartSessionParams {
+            let mut params = base_params(false, false);
+            params.replay = Some(ReplayParams { seconds: 30 });
+            assert!(params.replay_only());
+            params.output.record_enabled = true;
+            params
+        }
+
+        fn count(args: &[String], value: &str) -> usize {
+            args.iter().filter(|arg| *arg == value).count()
+        }
+
+        fn all_values<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {
+            args.windows(2)
+                .filter_map(|pair| (pair[0] == name).then_some(pair[1].as_str()))
+                .collect()
+        }
+
+        fn position(args: &[String], value: &str) -> usize {
+            args.iter()
+                .position(|arg| arg == value)
+                .unwrap_or_else(|| panic!("{value} is in the args: {args:?}"))
+        }
+
+        /// The ring tail every builder must end its replay output with.
+        fn assert_ring_output(args: &[String]) {
+            let segment = position(args, "segment");
+            assert_eq!(args[segment - 1], "-f");
+            // The ring ends with its file pattern; a preview or stream output
+            // may follow it on the legacy and split builders.
+            let pattern = position(args, "/tmp/videorc-ring/seg-%06d.ts");
+            assert!(pattern > segment, "{args:?}");
+            let tail = &args[segment..=pattern];
+            assert_eq!(arg_value(tail, "-segment_format"), Some("mpegts"));
+            assert_eq!(arg_value(tail, "-segment_time"), Some("2"));
+            assert_eq!(
+                arg_value(tail, "-segment_list"),
+                Some("/tmp/videorc-ring/segments.csv")
+            );
+            assert_eq!(arg_value(tail, "-segment_list_type"), Some("csv"));
+            assert_eq!(arg_value(tail, "-segment_list_size"), Some("17"));
+            assert_eq!(arg_value(tail, "-segment_list_flags"), Some("+live"));
+            // The ring's audio is AAC 192k with the session's mix.
+            let ring_start = args[..segment]
+                .iter()
+                .rposition(|arg| arg == "-map")
+                .unwrap();
+            let ring = &args[ring_start..segment];
+            assert!(
+                ring.contains(&"aac".to_string()),
+                "ring audio is AAC: {ring:?}"
+            );
+            assert_eq!(arg_value(ring, "-b:a"), Some("192k"));
+            assert_eq!(arg_value(ring, "-ar"), Some("48000"));
+            assert!(ring.contains(&"-shortest".to_string()));
+        }
+
+        #[test]
+        fn buffer_only_bridge_copy_is_the_only_output() {
+            let params = buffer_only_params();
+            let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &[],
+                Path::new("/tmp/videorc-ring-bridge.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            assert_eq!(all_values(&args, "-c:v"), vec!["copy"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac"]);
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == "pcm_s16le" || arg.ends_with(".mkv"))
+            );
+            assert_eq!(
+                count(&args, "-map"),
+                2,
+                "one video map, one audio map: {args:?}"
+            );
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn buffer_only_without_a_ring_is_still_refused() {
+            let mut params = buffer_only_params();
+            params.replay = None;
+            let error = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &[],
+                Path::new("/tmp/videorc-ring-bridge.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                &encoder(),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("At least one output target is required")
+            );
+        }
+
+        #[test]
+        fn record_only_bridge_keeps_pcm_and_adds_the_ring() {
+            let mut params = base_params(true, false);
+            params.replay = Some(ReplayParams { seconds: 30 });
+            let args = bridge_recording_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-record.mkv")),
+                Path::new("/tmp/videorc-ring-bridge.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            // The file output is untouched: PCM audio, then the MKV path.
+            assert_eq!(all_values(&args, "-c:v"), vec!["copy", "copy"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            let mkv = position(&args, "/tmp/videorc-replay-record.mkv");
+            assert!(
+                position(&args, "segment") > mkv,
+                "the ring comes after the file"
+            );
+            assert_ring_output(&args);
+            // Without a ring the args are byte-for-byte the pre-181 shape.
+            let without = bridge_recording_ffmpeg_args_with_encoder(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-record.mkv")),
+                Path::new("/tmp/videorc-ring-bridge.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                &encoder(),
+            )
+            .unwrap();
+            assert_eq!(&args[..mkv + 1], &without[..]);
+        }
+
+        #[test]
+        fn raw_bridge_buffer_only_maps_the_graph_into_the_ring() {
+            let params = buffer_only_params();
+            let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &[],
+                Path::new("/tmp/videorc-ring-raw.yuv"),
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(
+                filter.ends_with("[v_main]"),
+                "no split without a primary output: {filter}"
+            );
+            assert_eq!(
+                all_values(&args, "-map")
+                    .iter()
+                    .filter(|map| **map == "[v_main]")
+                    .count(),
+                1
+            );
+            assert_eq!(all_values(&args, "-c:v").len(), 1, "one encode: {args:?}");
+            assert_ne!(arg_value(&args, "-c:v"), Some("copy"));
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn raw_bridge_ride_along_splits_the_graph_and_encodes_twice() {
+            let mut params = base_params(true, false);
+            params.replay = Some(ReplayParams { seconds: 30 });
+            let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-raw.mkv")),
+                &[],
+                Path::new("/tmp/videorc-ring-raw.yuv"),
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(
+                filter.ends_with(";[v_replay_src]split=2[v_main][v_replay]"),
+                "{filter}"
+            );
+            let maps = all_values(&args, "-map");
+            assert!(
+                maps.contains(&"[v_main]") && maps.contains(&"[v_replay]"),
+                "{maps:?}"
+            );
+            assert_eq!(all_values(&args, "-c:v").len(), 2, "two encodes: {args:?}");
+            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn split_output_bridge_copies_the_recording_leg_into_the_ring() {
+            let mut params = base_params(true, true);
+            params.replay = Some(ReplayParams { seconds: 30 });
+            params.output.video = VideoSettings {
+                preset: VideoPreset::Record4k30,
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 30_000,
+            };
+            let mut streaming =
+                streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw")]);
+            streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+            streaming.default_bitrate_kbps = 6_000;
+            params.streaming = Some(streaming.clone());
+            let targets = stream_targets_from_streaming(&streaming).unwrap();
+            let stream_output = recording_compositor_stream_output(
+                &params,
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            )
+            .unwrap()
+            .expect("1080p companion stream output");
+            let args = bridge_compositor_split_output_ffmpeg_args_with_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-split.mkv")),
+                &targets,
+                Path::new("/tmp/videorc-ring-rec.h264"),
+                Path::new("/tmp/videorc-ring-stream.h264"),
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+                stream_output,
+                Some(&ring()),
+            )
+            .unwrap();
+            let recording_input = all_values(&args, "-i")
+                .iter()
+                .position(|input| *input == "/tmp/videorc-ring-rec.h264")
+                .unwrap();
+            let video_maps = all_values(&args, "-map")
+                .into_iter()
+                .filter(|map| map.ends_with(":v"))
+                .collect::<Vec<_>>();
+            // File, ring and the stream leg all map a video input; the ring
+            // maps the RECORDING leg, never the stream encode.
+            assert!(video_maps.len() >= 3, "{video_maps:?}");
+            let segment = position(&args, "segment");
+            let ring_video = args[..segment]
+                .windows(2)
+                .filter(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
+                .last()
+                .unwrap()[1]
+                .clone();
+            assert_eq!(ring_video, format!("{recording_input}:v"));
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn legacy_buffer_only_and_ride_along() {
+            let params = buffer_only_params();
+            let args = ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &[],
+                None,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(!filter.contains("[v_replay]"), "{filter}");
+            assert_eq!(
+                all_values(&args, "-c:v").len(),
+                2,
+                "the ring encode and the preview mjpeg: {args:?}"
+            );
+            assert_eq!(
+                all_values(&args, "-map")
+                    .iter()
+                    .filter(|map| **map == "[v_main]")
+                    .count(),
+                1
+            );
+            assert!(position(&args, "segment") < position(&args, "[preview]"));
+            assert_ring_output(&args);
+
+            let mut params = base_params(true, false);
+            params.replay = Some(ReplayParams { seconds: 30 });
+            let args = ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-legacy.mkv")),
+                &[],
+                None,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(filter.contains("split=2[v_main][v_replay]"), "{filter}");
+            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn validate_outputs_accepts_a_buffer_only_request() {
+            let mut params = base_params(false, false);
+            assert!(validate_outputs(&params).is_err());
+            params.replay = Some(ReplayParams { seconds: 30 });
+            validate_outputs(&params).unwrap();
+            assert!(params.replay_only());
+            params.output.record_enabled = true;
+            assert!(
+                !params.replay_only(),
+                "a recording with a ring is not buffer-only"
+            );
+        }
+    }
+
     fn arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         args.windows(2)
             .find_map(|pair| (pair[0] == name).then_some(pair[1].as_str()))
@@ -32928,6 +33715,7 @@ mod tests {
                 state.clone(),
                 session_id,
                 None,
+                false,
                 &RecordingPipeline::new(true, false, &[]),
                 state
                     .capture_interruption
@@ -33135,6 +33923,7 @@ mod tests {
             state.clone(),
             session_id,
             None,
+            false,
             &RecordingPipeline::new(true, true, &[]),
             state
                 .capture_interruption
@@ -33416,6 +34205,7 @@ mod tests {
                 state.clone(),
                 "guarded-start",
                 Some(PathBuf::from("/tmp/guarded-start.mkv")),
+                false,
                 &pipeline,
                 session_start_admission,
             );
@@ -33455,6 +34245,7 @@ mod tests {
                 state,
                 "running-start",
                 None,
+                false,
                 &pipeline,
                 session_start_admission,
             );
@@ -34196,6 +34987,7 @@ mod tests {
             session_id: "live-audio-lock-test".to_string(),
             pid: child.id().unwrap_or_default(),
             stdin: None,
+            replay_only: false,
             output_path: None,
             stream_url: None,
             ffmpeg_path: "test-ffmpeg".to_string(),
@@ -34726,6 +35518,7 @@ mod tests {
                     pipeline: None,
                     duration_ms: None,
                     message: Some("Stopping.".to_string()),
+                    replay_only: false,
                 },
             ))
             .unwrap();
@@ -34742,6 +35535,7 @@ mod tests {
                     pipeline: None,
                     duration_ms: None,
                     message: Some("Capture session finalized.".to_string()),
+                    replay_only: false,
                 },
             ))
             .unwrap();
