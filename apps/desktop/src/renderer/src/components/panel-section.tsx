@@ -1,9 +1,11 @@
-import type { ReactElement, ReactNode } from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import type { AppIcon } from '@/components/icons'
 import { cn } from '@/lib/utils'
 
-type PanelSectionProps = {
+// The rest of a <section>'s props pass through: `data-*` hooks for tests and
+// probes, and drag handlers for a section that takes dropped files.
+type PanelSectionProps = Omit<ComponentProps<'section'>, 'title'> & {
   /**
    * Optional: a titleless section is just padded content (no header row), for
    * when the surrounding layout already names it.
@@ -19,7 +21,6 @@ type PanelSectionProps = {
   contentClassName?: string
   /** The outline level of the title: 2 (the default) under the page, 3 when nested. */
   headingLevel?: 2 | 3
-  // `data-*` hooks for tests and probes.
 } & Record<`data-${string}`, string | undefined>
 
 /**
@@ -38,7 +39,7 @@ function PanelSection({
   className,
   contentClassName,
   headingLevel = 2,
-  ...data
+  ...sectionProps
 }: PanelSectionProps): ReactElement {
   const Heading = headingLevel === 3 ? 'h3' : 'h2'
   const hasHeader = Boolean(title || description || action)
@@ -50,7 +51,7 @@ function PanelSection({
         className
       )}
       data-slot="panel-section"
-      {...data}
+      {...sectionProps}
     >
       {hasHeader ? (
         <header

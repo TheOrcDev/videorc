@@ -61,7 +61,8 @@ export const IPC_INVOKE_ROLES = {
   'system:pick-file': MAIN_ONLY,
   'system:pick-directory': MAIN_ONLY,
   'system:check-directory': MAIN_ONLY,
-  'screens:pick-image': MAIN_ONLY,
+  'screens:pick-images': MAIN_ONLY,
+  'screens:authorize-dropped-images': MAIN_ONLY,
   // Assets → Banners → Import image… (plan 186): the Studio renderer only.
   'banners:pick-image': MAIN_ONLY,
   // Plan 225 D12: Community → Settings lives in the main window.
