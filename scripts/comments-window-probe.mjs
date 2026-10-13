@@ -943,15 +943,19 @@ async function layoutAt(width, options = {}) {
     (s) => s.bounds && Math.abs(s.bounds.width - width) <= 1,
     5000
   )
-  // One layout pass after the resize event, then measure.
-  await sleep(250)
-  const metrics = await smokeCommand('comments-window-layout-metrics', options)
-  assertProbe(
-    Math.abs(metrics.windowWidth - width) <= 1,
-    `narrow ${width}px: renderer laid out at the requested width`,
-    String(metrics.windowWidth)
+  // Bounds can settle a frame before the reader reports innerWidth (Xvfb
+  // measured 1282 at 1280 once, then the same size matched).
+  const laidOut = await waitFor(
+    () => smokeCommand('comments-window-layout-metrics', options),
+    (metrics) => Math.abs(metrics.windowWidth - width) <= 1,
+    5000
   )
-  return metrics
+  assertProbe(
+    laidOut.ok,
+    `narrow ${width}px: renderer laid out at the requested width`,
+    String(laidOut.last?.windowWidth)
+  )
+  return laidOut.last
 }
 
 function assertHeaderFits(metrics, tag) {
