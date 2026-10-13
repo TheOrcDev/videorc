@@ -14267,13 +14267,7 @@ async fn should_use_compositor_encoder_bridge(
         missing.push("camera");
     }
     let detail = if screen_preview_is_failed(&screen_status) {
-        format!(
-            " Screen preview reported: {}.",
-            screen_status
-                .message
-                .as_deref()
-                .unwrap_or("failed without a message")
-        )
+        screen_preview_failure_detail(screen_status.message.as_deref())
     } else {
         String::new()
     };
@@ -14293,6 +14287,16 @@ async fn should_use_compositor_encoder_bridge(
 /// dangling row as a usable screen let sessions start with nothing to composite.
 fn stream_screen_image_usable(active_screen: Option<&crate::protocol::StreamScreen>) -> bool {
     active_screen.is_some_and(|screen| std::path::Path::new(&screen.image_path).is_file())
+}
+
+/// " Screen preview reported: …." once, whatever the message ends with (ogre:
+/// "…while starting screen capture.. Re-select the source").
+fn screen_preview_failure_detail(message: Option<&str>) -> String {
+    let message = message
+        .map(|message| message.trim().trim_end_matches('.'))
+        .filter(|message| !message.is_empty())
+        .unwrap_or("failed without a message");
+    format!(" Screen preview reported: {message}.")
 }
 
 fn screen_preview_is_failed(status: &crate::protocol::PreviewScreenStatus) -> bool {
@@ -34433,6 +34437,28 @@ mod tests {
             assert!(path.iter().any(|c| c == "Movies"));
         }
         assert!(path.ends_with(PathBuf::from("Videorc").join("Recordings")));
+    }
+
+    #[test]
+    fn screen_preview_failure_detail_ends_with_one_full_stop() {
+        assert_eq!(
+            screen_preview_failure_detail(Some(
+                "Timed out after 59s while starting screen capture."
+            )),
+            " Screen preview reported: Timed out after 59s while starting screen capture."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(Some("Portal closed")),
+            " Screen preview reported: Portal closed."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(Some(" . ")),
+            " Screen preview reported: failed without a message."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(None),
+            " Screen preview reported: failed without a message."
+        );
     }
 
     #[test]
