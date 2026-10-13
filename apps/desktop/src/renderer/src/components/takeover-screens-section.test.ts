@@ -33,7 +33,8 @@ beforeEach(() => {
   mocked.core = {
     activeScreen: null,
     deleteScreen: vi.fn(async () => undefined),
-    importScreenImage: vi.fn(async () => undefined),
+    importDroppedScreenImages: vi.fn(async () => undefined),
+    importScreenImages: vi.fn(async () => undefined),
     isSessionActive: false,
     reorderScreen: vi.fn(async () => undefined),
     renameScreen: vi.fn(async () => undefined),
@@ -103,7 +104,7 @@ describe('TakeoverScreensSection tiles (plan 174 S3.10)', () => {
     expect(document.body.textContent).not.toContain('Ready')
     expect(document.body.textContent).not.toContain('/screens/intro.png')
     expect(document.querySelectorAll('[data-videorc-in-use]')).toHaveLength(1)
-    expect(document.body.textContent).toContain('Import image…')
+    expect(document.body.textContent).toContain('Import images…')
     expect(document.body.textContent).toContain(
       'Turning one on mutes your microphone until you turn it off.'
     )
@@ -121,5 +122,65 @@ describe('TakeoverScreensSection tiles (plan 174 S3.10)', () => {
     mocked.core = { ...mocked.core, wsStatus: 'connected', screensLoaded: true }
     await act(async () => root.render(createElement(TakeoverScreensSection)))
     expect(document.body.textContent).toContain('No takeovers yet')
+  })
+})
+
+function dragEvent(type: string, files: File[], types = files.length > 0 ? ['Files'] : []): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true })
+  Object.defineProperty(event, 'dataTransfer', {
+    value: { types, files, dropEffect: 'none' }
+  })
+  return event
+}
+
+const section = (): HTMLElement =>
+  document.querySelector<HTMLElement>('[data-slot="panel-section"]')!
+
+describe('TakeoverScreensSection file drop', () => {
+  const photo = new File(['png'], 'photo.png', { type: 'image/png' })
+  const slide = new File(['jpg'], 'slide.jpg', { type: 'image/jpeg' })
+
+  it('hands every file dropped from the file manager to the import', async () => {
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    await act(async () => section().dispatchEvent(dragEvent('dragenter', [photo, slide])))
+    expect(section().hasAttribute('data-videorc-file-drop-active')).toBe(true)
+    const over = dragEvent('dragover', [photo, slide])
+    await act(async () => section().dispatchEvent(over))
+    expect(over.defaultPrevented).toBe(true)
+    await act(async () => section().dispatchEvent(dragEvent('drop', [photo, slide])))
+    expect(mocked.core.importDroppedScreenImages).toHaveBeenCalledExactlyOnceWith([photo, slide])
+    expect(section().hasAttribute('data-videorc-file-drop-active')).toBe(false)
+  })
+
+  it('hands files dropped on a tile to the import, without reordering', async () => {
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    const tile = document.querySelector<HTMLElement>('[data-videorc-takeover-tile="screen-1"]')!
+    await act(async () => tile.dispatchEvent(dragEvent('drop', [photo])))
+    expect(mocked.core.importDroppedScreenImages).toHaveBeenCalledExactlyOnceWith([photo])
+    expect(mocked.core.reorderScreen).not.toHaveBeenCalled()
+  })
+
+  it('ignores tile reorder drags, which carry no files', async () => {
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    await act(async () => section().dispatchEvent(dragEvent('dragenter', [])))
+    expect(section().hasAttribute('data-videorc-file-drop-active')).toBe(false)
+    await act(async () => section().dispatchEvent(dragEvent('drop', [])))
+    expect(mocked.core.importDroppedScreenImages).not.toHaveBeenCalled()
+  })
+
+  it('refuses drops while a session runs', async () => {
+    mocked.core = { ...mocked.core, isSessionActive: true }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    await act(async () => section().dispatchEvent(dragEvent('dragenter', [photo])))
+    expect(section().hasAttribute('data-videorc-file-drop-active')).toBe(false)
+    const over = dragEvent('dragover', [photo])
+    await act(async () => section().dispatchEvent(over))
+    expect(over.defaultPrevented).toBe(false)
+    const tile = document.querySelector<HTMLElement>('[data-videorc-takeover-tile="screen-1"]')!
+    const overTile = dragEvent('dragover', [photo])
+    await act(async () => tile.dispatchEvent(overTile))
+    expect(overTile.defaultPrevented).toBe(false)
+    await act(async () => section().dispatchEvent(dragEvent('drop', [photo])))
+    expect(mocked.core.importDroppedScreenImages).not.toHaveBeenCalled()
   })
 })

@@ -221,6 +221,7 @@ import {
   type RecordLatencySample
 } from '@/lib/record-latency'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
+import { importEachSelection, screenImportAuthorizationError } from '@/lib/screen-import'
 import { showMp4ExportFailed, showMp4Finalizing, showMp4Ready } from '@/lib/finalization-toast'
 import {
   COHOST_STATUS_TOAST_ID,
@@ -380,6 +381,7 @@ import type {
   RemoteControlStatus,
   RemoteLanPairing,
   RemoteLanStatus,
+  ResourceSelection,
   RuntimeInfo,
   Scene,
   SceneCommitStatus,
@@ -419,6 +421,7 @@ import type {
   VideoSettings,
   VideorcAccountRefreshResult,
   VideorcAccountSnapshot,
+  VideorcApi,
   WarmMicrophoneStatus,
   XNativeLiveCapability,
   XEndResult,
@@ -1447,7 +1450,8 @@ export type StudioContextValue = {
   dismissSessionRuntimeNotice: () => void
   /** Re-run the exact start that failed (same streaming override). */
   retrySessionStart: () => void
-  importScreenImage: () => Promise<void>
+  importScreenImages: () => Promise<void>
+  importDroppedScreenImages: (files: File[]) => Promise<void>
   renameScreen: (screenId: string, name: string) => Promise<void>
   deleteScreen: (screenId: string) => Promise<void>
   reorderScreen: (screenId: string, targetIndex: number) => Promise<void>
@@ -3584,6 +3588,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [stopConfirmation, setStopConfirmation] = useState<SessionStopConfirmation | null>(null)
   const endLivestreamArmedAtRef = useRef<number | null>(null)
   const [screenImportPending, setScreenImportPending] = useState(false)
+  const screenImportInFlightRef = useRef(false)
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
   const [settings, setSettings] = useState<SettingsState>(() =>
@@ -10478,38 +10483,66 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => unsubscribe?.()
   }, [nativePreviewSurfaceEnabled, syncNativePreviewSurfaceCompositor])
 
-  const importScreenImage = useCallback(async () => {
-    if (!client || wsStatus !== 'connected') {
-      toastOffline()
-      return
-    }
-    if (!window.videorc?.pickScreenImage) {
-      console.warn('[takeovers] no image picker in this renderer')
-      return
-    }
-
-    try {
-      setLastError(null)
-      const selection = await window.videorc.pickScreenImage()
-      if (!selection) {
+  const importScreenSelections = useCallback(
+    async (authorize: (api: VideorcApi) => Promise<ResourceSelection[]>) => {
+      if (!client || wsStatus !== 'connected') {
+        toastOffline()
+        return
+      }
+      if (!window.videorc) {
+        console.warn('[takeovers] no image import in this renderer')
+        return
+      }
+      if (screenImportInFlightRef.current) {
         return
       }
 
-      setScreenImportPending(true)
-      const screen = await client.request<StreamScreen>('screens.importImage', {
-        sourceCapability: selection.capabilityId
-      })
-      setScreens((current) => {
-        const withoutExisting = (current ?? []).filter((item) => item.id !== screen.id)
-        return [...withoutExisting, screen].sort((a, b) => a.sortOrder - b.sortOrder)
-      })
-      await refreshScreensForClient(client)
-    } catch (error) {
-      reportError(error, { action: 'import', object: 'the image' })
-    } finally {
-      setScreenImportPending(false)
-    }
-  }, [client, refreshScreensForClient, reportError, wsStatus])
+      screenImportInFlightRef.current = true
+      try {
+        setLastError(null)
+        const selections = await authorize(window.videorc)
+        if (selections.length === 0) {
+          return
+        }
+
+        setScreenImportPending(true)
+        await importEachSelection(
+          selections,
+          async (selection) => {
+            const screen = await client.request<StreamScreen>('screens.importImage', {
+              sourceCapability: selection.capabilityId
+            })
+            setScreens((current) => {
+              const withoutExisting = (current ?? []).filter((item) => item.id !== screen.id)
+              return [...withoutExisting, screen].sort((a, b) => a.sortOrder - b.sortOrder)
+            })
+          },
+          (error, selection) =>
+            reportError(error, { action: 'import', object: selection.displayName })
+        )
+        await refreshScreensForClient(client)
+      } catch (error) {
+        reportError(screenImportAuthorizationError(error), {
+          action: 'import',
+          object: 'the images'
+        })
+      } finally {
+        screenImportInFlightRef.current = false
+        setScreenImportPending(false)
+      }
+    },
+    [client, refreshScreensForClient, reportError, wsStatus]
+  )
+
+  const importScreenImages = useCallback(
+    () => importScreenSelections((api) => api.pickScreenImages()),
+    [importScreenSelections]
+  )
+
+  const importDroppedScreenImages = useCallback(
+    (files: File[]) => importScreenSelections((api) => api.authorizeDroppedScreenImages(files)),
+    [importScreenSelections]
+  )
 
   const openSystemPermissionSettings = useCallback(
     async (pane: SystemPermissionPane) => {
@@ -16056,7 +16089,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionRuntimeNotice,
       dismissSessionRuntimeNotice,
       retrySessionStart,
-      importScreenImage,
+      importScreenImages,
+      importDroppedScreenImages,
       renameScreen,
       deleteScreen,
       reorderScreen,
@@ -16291,7 +16325,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionRuntimeNotice,
       dismissSessionRuntimeNotice,
       retrySessionStart,
-      importScreenImage,
+      importScreenImages,
+      importDroppedScreenImages,
       renameScreen,
       deleteScreen,
       reorderScreen,

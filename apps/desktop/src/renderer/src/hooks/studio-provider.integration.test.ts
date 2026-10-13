@@ -77,6 +77,7 @@ import type {
   SceneCommitStatus,
   SessionLogEntry,
   SessionSources,
+  ResourceSelection,
   SourceSwitchOperation,
   SourceSwitchParams,
   SourceSelection,
@@ -90,6 +91,7 @@ import type {
   VideorcApi
 } from '../../../shared/backend'
 import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
+import { SCREEN_IMAGE_REFUSALS } from '../../../shared/screen-image-files'
 import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
@@ -510,6 +512,7 @@ class StudioBackend {
     warnings: []
   }
   screens: StreamScreen[] = []
+  screenImportFailures = new Set<string>()
   activeScreen: StreamScreen | null = null
   audioMeterResult: AudioMeterResult = { status: 'ready', level: 0.4 }
   liveChatSnapshot: LiveChatSnapshot = {
@@ -1038,6 +1041,20 @@ class StudioBackend {
           scene: this.currentScene,
           compositorStatus: compositorFor(this.currentScene, this.currentLayout, this.revision)
         }
+      }
+      case 'screens.importImage': {
+        const capabilityId = String(params.sourceCapability)
+        if (this.screenImportFailures.has(capabilityId)) {
+          throw new Error('The test backend could not read this image.')
+        }
+        const screen: StreamScreen = {
+          ...takeoverScreen,
+          id: `screen-${capabilityId}`,
+          name: capabilityId,
+          sortOrder: this.screens.length
+        }
+        this.screens.push(screen)
+        return screen
       }
       case 'screens.list':
         return this.screens
@@ -1908,6 +1925,122 @@ describe('real StudioProvider lifecycle', () => {
     if (connected) await waitForObservation(() => observation?.core.scene != null)
     return { backend, latest: () => observation! }
   }
+
+  async function mountTakeoverImportProvider(
+    imports: Pick<VideorcApi, 'pickScreenImages' | 'authorizeDroppedScreenImages'>
+  ): Promise<{ backend: StudioBackend; latest: () => StudioObservation }> {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = Object.assign(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      }),
+      imports
+    )
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    await waitForObservation(() => observation?.core.screensLoaded === true)
+    return { backend, latest: () => observation! }
+  }
+
+  const pickedImage = (capabilityId: string): ResourceSelection => ({
+    capabilityId,
+    kind: 'input-file',
+    displayName: `${capabilityId}.png`
+  })
+
+  it('imports every picked takeover image, past a failed one, then refreshes the list', async () => {
+    const { backend, latest } = await mountTakeoverImportProvider({
+      pickScreenImages: async () => [pickedImage('a'), pickedImage('b'), pickedImage('c')],
+      authorizeDroppedScreenImages: vi.fn()
+    })
+    backend.screenImportFailures.add('b')
+    const listsBefore = backend.sentCommands.filter((c) => c.method === 'screens.list').length
+
+    await act(async () => latest().core.importScreenImages())
+
+    expect(
+      backend.sentCommands
+        .filter((command) => command.method === 'screens.importImage')
+        .map((command) => command.params)
+    ).toEqual([{ sourceCapability: 'a' }, { sourceCapability: 'b' }, { sourceCapability: 'c' }])
+    expect(latest().core.screens.map((screen) => screen.name)).toEqual(['a', 'c'])
+    expect(latest().core.lastError).toBe('The test backend could not read this image.')
+    expect(backend.sentCommands.filter((c) => c.method === 'screens.list').length).toBe(
+      listsBefore + 1
+    )
+    expect(latest().core.screenImportPending).toBe(false)
+  })
+
+  it('shows a refused drop as written, whether the refusal throws or rejects', async () => {
+    const refuse = vi
+      .fn<VideorcApi['authorizeDroppedScreenImages']>()
+      .mockImplementationOnce(() => {
+        throw new Error(SCREEN_IMAGE_REFUSALS.tooMany)
+      })
+      .mockRejectedValueOnce(
+        new Error(
+          `Error invoking remote method 'screens:authorize-dropped-images': Error: ${SCREEN_IMAGE_REFUSALS.notImages}`
+        )
+      )
+    const { latest } = await mountTakeoverImportProvider({
+      pickScreenImages: vi.fn(),
+      authorizeDroppedScreenImages: refuse
+    })
+
+    const lastToastDescription = (): unknown =>
+      (toastSpies.error.mock.lastCall?.[1] as { description?: unknown } | undefined)?.description
+
+    await act(async () => latest().core.importDroppedScreenImages([]))
+    await waitForObservation(() => lastToastDescription() === SCREEN_IMAGE_REFUSALS.tooMany)
+    await act(async () => latest().core.importDroppedScreenImages([]))
+    await waitForObservation(() => lastToastDescription() === SCREEN_IMAGE_REFUSALS.notImages)
+    expect(latest().core.screenImportPending).toBe(false)
+  })
+
+  it('refuses a second takeover import while the first is still choosing or importing', async () => {
+    let choose!: (selections: ResourceSelection[]) => void
+    const authorizeDroppedScreenImages = vi.fn(async () => [pickedImage('dropped')])
+    const { backend, latest } = await mountTakeoverImportProvider({
+      pickScreenImages: () =>
+        new Promise((resolve) => {
+          choose = resolve
+        }),
+      authorizeDroppedScreenImages
+    })
+    const releaseImport = backend.deferResponse('screens.importImage', {
+      ...takeoverScreen,
+      id: 'screen-picked'
+    })
+
+    let picking!: Promise<void>
+    act(() => {
+      picking = latest().core.importScreenImages()
+    })
+    await act(async () => latest().core.importDroppedScreenImages([new File([''], 'x.png')]))
+    expect(authorizeDroppedScreenImages).not.toHaveBeenCalled()
+
+    act(() => choose([pickedImage('picked')]))
+    await waitForObservation(() => latest().core.screenImportPending)
+    await act(async () => latest().core.importDroppedScreenImages([new File([''], 'x.png')]))
+    expect(authorizeDroppedScreenImages).not.toHaveBeenCalled()
+
+    await act(async () => {
+      releaseImport()
+      await picking
+    })
+    expect(latest().core.screenImportPending).toBe(false)
+    await act(async () => latest().core.importDroppedScreenImages([new File([''], 'x.png')]))
+    expect(authorizeDroppedScreenImages).toHaveBeenCalledOnce()
+  })
 
   function preciseTransformStatus(backend: StudioBackend): SceneCommitStatus {
     const scene: Scene = {

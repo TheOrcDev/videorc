@@ -7,7 +7,15 @@ import {
   ImageIcon,
   SaveIcon
 } from '@/components/icons'
-import { useEffect, useState, type DragEvent, type KeyboardEvent, type ReactElement } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type DragEvent,
+  type KeyboardEvent,
+  type ReactElement
+} from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { OfflineAlert, SessionLockAlert } from '@/components/lock-alert'
@@ -56,7 +64,8 @@ export function TakeoverScreensSection(): ReactElement {
   const {
     activeScreen,
     deleteScreen,
-    importScreenImage,
+    importDroppedScreenImages,
+    importScreenImages,
     isSessionActive,
     reorderScreen,
     renameScreen,
@@ -73,6 +82,10 @@ export function TakeoverScreensSection(): ReactElement {
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   // Plan 174 S0.3 (C-1): a delete removes the image file too, so it asks.
   const [deleting, setDeleting] = useState<StreamScreen | null>(null)
+  const fileDrop = useFileDrop({
+    disabled: importDisabled,
+    onDrop: (files) => void importDroppedScreenImages(files)
+  })
 
   return (
     <>
@@ -81,15 +94,18 @@ export function TakeoverScreensSection(): ReactElement {
           <Button
             disabled={importDisabled}
             variant="outline"
-            onClick={() => void importScreenImage()}
+            onClick={() => void importScreenImages()}
           >
             <ImageIcon data-icon="inline-start" />
-            {screenImportPending ? 'Importing…' : 'Import image…'}
+            {screenImportPending ? 'Importing…' : 'Import images…'}
           </Button>
         }
-        description="Full-frame images that cover the output, turned on from the Studio. Turning one on mutes your microphone until you turn it off."
+        className={cn('flex-1', fileDrop.active && 'bg-accent')}
+        data-videorc-file-drop-active={fileDrop.active ? '' : undefined}
+        description="Full-frame images that cover the output, turned on from the Studio. Turning one on mutes your microphone until you turn it off. Drop images here to import them."
         icon={FrameIcon}
         title="Takeovers"
+        {...fileDrop.handlers}
       >
         {isSessionActive ? <SessionLockAlert /> : offline ? <OfflineAlert /> : null}
         {screens.length > 0 ? (
@@ -147,7 +163,7 @@ export function TakeoverScreensSection(): ReactElement {
           <Empty className="py-12">
             <EmptyTitle>No takeovers yet</EmptyTitle>
             <EmptyDescription>
-              Import a PNG, JPEG or WebP image to make the first one.
+              Import or drop PNG, JPEG or WebP images to make the first ones.
             </EmptyDescription>
           </Empty>
         )}
@@ -166,6 +182,54 @@ export function TakeoverScreensSection(): ReactElement {
       />
     </>
   )
+}
+
+// Tile reorder drags carry no files, so only drags from Finder or Explorer
+// light up the section and reach onDrop.
+function useFileDrop({
+  disabled,
+  onDrop
+}: {
+  disabled: boolean
+  onDrop: (files: File[]) => void
+}): {
+  active: boolean
+  handlers: Pick<ComponentProps<'section'>, 'onDragEnter' | 'onDragLeave' | 'onDragOver' | 'onDrop'>
+} {
+  const depth = useRef(0)
+  const [active, setActive] = useState(false)
+  const carriesFiles = (event: DragEvent): boolean => event.dataTransfer.types.includes('Files')
+  const reset = (): void => {
+    depth.current = 0
+    setActive(false)
+  }
+
+  return {
+    active: active && !disabled,
+    handlers: {
+      onDragEnter: (event) => {
+        if (!carriesFiles(event)) return
+        depth.current += 1
+        setActive(true)
+      },
+      onDragLeave: (event) => {
+        if (!carriesFiles(event)) return
+        depth.current -= 1
+        if (depth.current <= 0) reset()
+      },
+      onDragOver: (event) => {
+        if (disabled || !carriesFiles(event)) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      },
+      onDrop: (event) => {
+        if (!carriesFiles(event)) return
+        event.preventDefault()
+        reset()
+        if (!disabled) onDrop([...event.dataTransfer.files])
+      }
+    }
+  }
 }
 
 function ScreenTile({
@@ -250,8 +314,8 @@ function ScreenTile({
       onDragEnd={onDragEnd}
       onDragEnter={onDragEnter}
       onDragOver={(event: DragEvent<HTMLDivElement>) => {
-        // Allow this tile to be a drop target.
-        event.preventDefault()
+        // File drags are the section's to accept or refuse.
+        if (!event.dataTransfer.types.includes('Files')) event.preventDefault()
       }}
       onDragStart={(event: DragEvent<HTMLDivElement>) => {
         event.dataTransfer.effectAllowed = 'move'

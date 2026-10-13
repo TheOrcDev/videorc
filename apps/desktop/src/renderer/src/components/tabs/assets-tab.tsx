@@ -187,7 +187,7 @@ export function AssetsTab(): ReactElement {
     : null
 
   return (
-    <PageStack>
+    <PageStack className="min-h-full">
       <PageHeader
         description="Backgrounds for your scenes and takeovers for the output. Click a background to apply it, then tune it with Adjust style on its tile."
         title="Assets"
