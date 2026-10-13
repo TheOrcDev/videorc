@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 
 import { BackendClient } from '@/backendClient'
 import { useStudioCore } from '@/hooks/use-studio'
+import { inlineUserError } from '@/lib/user-error'
 import type {
   AiCapabilities,
   CohostPetSaved,
@@ -77,7 +78,7 @@ function problemOf(error: unknown): BuddyPetCreatorProblem {
       : 'failed'
   return {
     code,
-    message: error instanceof Error ? error.message : 'Something went wrong. Try again.'
+    message: inlineUserError(error, { action: 'update', object: "Buddy's look" }, 'buddy-pet')
   }
 }
 

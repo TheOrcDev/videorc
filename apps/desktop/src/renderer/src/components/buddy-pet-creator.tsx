@@ -54,6 +54,7 @@ import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, BuddyPetCreation, BuddyPetReference } from '@/lib/backend'
 import { BUDDY_ALIVE_NONE_LEFT_GATE } from '@/lib/buddy-create-gate'
 import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import { BUDDY_LOOK_PICTURE_UNREADABLE } from '@/lib/buddy-look-view'
 import { BUDDY_LIBRARY_COPY } from '@/lib/buddy-onboarding-copy'
 import { requestBuddyOnboarding } from '@/lib/buddy-onboarding-store'
 import { useBuddyPetCreatorOptions } from '@/lib/buddy-pet-creator-nav'
@@ -874,11 +875,7 @@ function ReferenceStep({
                   const file = event.currentTarget.files?.[0]
                   event.currentTarget.value = ''
                   if (file) {
-                    void pick(file).catch((error: unknown) =>
-                      setUploadError(
-                        error instanceof Error ? error.message : "The picture couldn't be read."
-                      )
-                    )
+                    void pick(file).catch(() => setUploadError(BUDDY_LOOK_PICTURE_UNREADABLE))
                   }
                 }}
               />

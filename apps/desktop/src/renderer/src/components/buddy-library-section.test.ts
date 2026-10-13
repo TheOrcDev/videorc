@@ -11,7 +11,7 @@ import type {
   BuddyLibraryEntry,
   BuddyLibraryState
 } from '@/lib/backend'
-import { BUDDY_INVITATION_STORAGE_KEY } from '@/lib/buddy-library-view'
+import { BUDDY_INVITATION_STORAGE_KEY, BUDDY_LIBRARY_UNAVAILABLE } from '@/lib/buddy-library-view'
 import { BUDDY_LIBRARY_COPY } from '@/lib/buddy-onboarding-copy'
 import {
   clearBuddyOnboardingDraft,
@@ -318,6 +318,16 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
   it('an empty library says where your Buddies will show up', async () => {
     await render(fakeBackend(library({ mine: [] })).client)
     expect(byTestId('buddy-library-empty')?.textContent).toBe(BUDDY_LIBRARY_COPY.emptyMine)
+  })
+
+  it('a library the web has turned off says so, not that it is empty', async () => {
+    // Signed in, listed nothing, no failure: the backend stays quiet when
+    // the account's library is off (cohost_library.rs). The empty line
+    // ("Buddies you create show up here") used to appear here.
+    await render(fakeBackend(library({ mine: null })).client)
+    const mine = byTestId('buddy-library-mine')!
+    expect(mine.textContent).not.toContain(BUDDY_LIBRARY_COPY.emptyMine)
+    expect(byTestId('buddy-library-unavailable')?.textContent).toBe(BUDDY_LIBRARY_UNAVAILABLE)
   })
 
   it('offers the Buddy picked on videorc.com with Use', async () => {
