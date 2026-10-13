@@ -73,6 +73,7 @@ import type {
   PreviewSurfaceStatus,
   PreviewWindowState,
   RecordingStatus,
+  ResourceSelection,
   Scene,
   SceneCommitStatus,
   SessionLogEntry,
@@ -1961,6 +1962,73 @@ describe('real StudioProvider lifecycle', () => {
       expect(methods).not.toContain('audio.processing.update')
     }
   )
+
+  it('keeps the picker and import alive across session start and stop', async () => {
+    const { backend, latest } = await mountFreeformTransformProvider()
+    const screen: StreamScreen = {
+      id: 'session-boundary-import',
+      name: 'Session boundary',
+      imagePath: '/screens/boundary.png',
+      sortOrder: 0,
+      status: 'ready',
+      createdAt: now,
+      updatedAt: now
+    }
+    let choose!: (selection: ResourceSelection) => void
+    window.videorc.pickScreenImage = vi.fn(
+      () =>
+        new Promise<ResourceSelection>((resolve) => {
+          choose = resolve
+        })
+    )
+    const release = backend.deferResponse('screens.importImage', screen)
+    let pending!: Promise<void>
+    act(() => {
+      pending = latest().core.importScreenImage()
+    })
+    await waitForObservation(() => latest().core.screenImportPhase === 'choosing')
+    await act(async () => {
+      for (const socket of backend.sockets)
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'recording.status',
+            payload: {
+              state: 'recording',
+              sessionId: 'picker-session',
+              startedAt: now
+            }
+          })
+        })
+    })
+    expect(latest().core.screenImportPhase).toBe('choosing')
+    await act(async () =>
+      choose({
+        capabilityId: 'boundary-image',
+        kind: 'input-file',
+        displayName: 'boundary.png'
+      })
+    )
+    await waitForObservation(() => latest().core.screenImportPhase === 'importing')
+    await act(async () => {
+      for (const socket of backend.sockets)
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'recording.status',
+            payload: {
+              state: 'idle'
+            }
+          })
+        })
+    })
+    expect(latest().core.screenImportPhase).toBe('importing')
+    await act(async () => {
+      release()
+      await pending
+    })
+    expect(latest().core.screens).toContainEqual(screen)
+    expect(latest().core.activeScreen).toBeNull()
+    expect(latest().core.screenImportPhase).toBe('idle')
+  })
 
   it('a newer authoritative takeover list wins over the import reply', async () => {
     const { backend, latest } = await mountFreeformTransformProvider()

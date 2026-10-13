@@ -1,6 +1,6 @@
 # Plan 182: Import takeover images while recording or live
 
-Status: IMPLEMENTED, verification in progress (2026-10-13). Source baseline:
+Status: IMPLEMENTED; feature checks passed, broader gate blockers below (2026-10-13). Source baseline:
 `origin/main` `672b185c`. Branch: `feat/live-takeover-import`.
 
 Implementation includes the bounded import lane, live Assets import, picker
@@ -10,11 +10,74 @@ management publications; newer events also fence late management replies.
 The Windows source gate repeats the new concurrency test 25 times alongside
 its existing three full Rust suite passes.
 
-Verification so far: initial full desktop suite 4,850 passed / 1 skipped;
-focused provider/UI/import tests 190 passed; Node scripts 2,418 passed / 1
-skipped; typecheck, lint (one existing captureConfig dependency warning),
-format and desktop build passed. Native and Rust gates are still running.
-Final gate outcomes and any platform gaps will be recorded before handoff.
+PR: <https://github.com/TheOrcDev/videorc/pull/696> (draft because the full
+verification set is not green).
+
+Verification recorded on 2026-10-13:
+
+- Local full Rust suite: 3,549 passed, 15 ignored (backend, native helper
+  and wire integration tests). The new same/across-connection import
+  concurrency regression passed independently too.
+- Initial full desktop suite: 4,850 passed, one skipped. Focused import,
+  provider and UI checks passed, including session start during the picker
+  and Stop during processing. Subsequent interrupted/loaded runs timed out;
+  affected files passed on retry. JS CI passed the full suite independently.
+- Node scripts: 2,418 passed, one skipped. Typecheck, formatting, Rust fmt
+  and desktop build passed. Lint passed with the existing captureConfig
+  dependency warning.
+- Real-backend command-lane smoke passed, with Stop and live controls
+  replying in 2–3 ms before releasing blocked account maintenance.
+- Final `VIDEORC_SCREENS_SMOKE_UI=1 pnpm smoke:screens` passed recording,
+  local streaming and combined mode. All six recording/receiver artifacts
+  passed image-sequence, audio and strict A/V analyzer checks, including
+  horizontal and vertical destinations. Imports and corrupt-image failures
+  preserved the active takeover and session; live compositor samples stayed
+  within the 250 ms frame-age bound. Controlled PCM stayed audible before
+  activation, was digitally silent during takeover, and returned on clear.
+  New thumbnail images decoded successfully. Composited 960×660 light/dark
+  screenshots were inspected; Import stayed enabled and management locked.
+- `smoke:recording-studio` and its device-enabled superset were run. The
+  bundle stopped at the Comments clipboard assertion; all remaining steps
+  were then executed individually from the maintained gate definitions.
+  Passed: frontend/Node/backend suites, live audio and caption contracts,
+  caption/noise-cleanup artifacts, CPU/Metal scene-switch artifacts,
+  all-layout recordings, quit finalization, enforced Record/Stop latency,
+  output-stall microphone survival, takeovers, real launch, layout/source
+  liveness, live layout switching, highlight and Buddy artifacts, preview
+  scene commits/pump/focus/interaction, window placement, native surface
+  reattach, real ScreenCaptureKit recording, Notes invisibility, real-device
+  interaction/layout switching and source-complete native-preview recordings.
+- [Windows source gate](https://github.com/TheOrcDev/videorc/actions/runs/38351465217/job/115144598094):
+  new import concurrency filter passed all 25 repetitions; three full Rust
+  runs each passed 3,368 tests with 15 ignored. Clippy, desktop/Node tests,
+  TypeScript, lint and both formatting gates passed. Installer build passed.
+- [Linux gates](https://github.com/TheOrcDev/videorc/actions/runs/38351464881)
+  passed.
+- macOS Clippy is blocked by the existing unused `map_source_pixel` in
+  `compositor.rs:9395`, unchanged from the source baseline. macOS/Windows
+  CI dependency audits fail on existing `quinn-proto` advisories (the
+  lockfile is unchanged). Windows' separate startup incident diagnostics
+  fail A/V-tail checks, including its independent FFmpeg control cases.
+- Other unresolved gate failures: Comments' Copy link test observed no
+  clipboard text; system-audio cases `on`, `self` and `stream` detected extra
+  tone regions (and `self` exceeded its exclusion threshold). The 100-cycle
+  preview lifecycle probe lost the main window at cycle 77; a clean rerun
+  with no source edits reproduced it at cycle 40. These are recorded failures,
+  not waived passes; this change does not modify those production paths.
+
+CI results above refer to `7c259438`; subsequent changes fix the dev smoke
+and add verification evidence, without changing the production Rust code.
+The picker seam exercises the renderer and real resource capability but does
+not manually operate each OS's native file dialog. Native-picker checks on
+all three OSes, and Windows/Linux visual checks, remain outstanding.
+
+Final local media evidence: `/tmp/videorc-182-screens-final.log` and
+`$TMPDIR/videorc-screens-smoke-1791886078286/` (not committed). Broader logs:
+`/tmp/videorc-182-studio-devices.log`, `/tmp/videorc-182-studio-remainder.log`,
+`/tmp/videorc-182-lifecycle-final.log`. Use `VIDEORC_SCREENS_SMOKE_MODE` to run
+one of `recording`, `streaming`, or `both`; `VIDEORC_SCREENS_SMOKE_UI=1` adds
+minimum-window/theme captures to the combined case. macOS UI capture uses
+the composited app window so its native glass layer is represented.
 
 ## Outcome
 

@@ -12970,12 +12970,37 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         await openTab('assets');
         const button = await waitFor('[data-testid="takeover-import"]');
         if (button.disabled) throw new Error('Takeover import is disabled during the session.');
-        button.click();
-        await sleep(50);
-        const deadline = performance.now() + 45000;
-        while (button.disabled && performance.now() < deadline) await sleep(25);
-        if (button.disabled) throw new Error('Takeover import did not finish.');
-        return { ids: Array.from(document.querySelectorAll('[data-videorc-takeover-tile]')).map(el => el.getAttribute('data-videorc-takeover-tile')) };
+        // DisabledReason replaces its child when the pending reason appears.
+        // Observe the LIVE button through both edges, never a detached node or
+        // a fixed-delay guess that could return before the picker is consumed.
+        await new Promise((resolve, reject) => {
+          let sawPending = false;
+          const finish = (error) => {
+            observer.disconnect();
+            clearTimeout(timer);
+            if (error) reject(error); else resolve();
+          };
+          const check = () => {
+            const current = document.querySelector('[data-testid="takeover-import"]');
+            if (current?.disabled) sawPending = true;
+            else if (current && sawPending) finish();
+          };
+          const observer = new MutationObserver(check);
+          const timer = setTimeout(() => finish(new Error('Takeover import did not finish.')), 45000);
+          observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+          button.click();
+          check();
+        });
+        const tiles = () => Array.from(document.querySelectorAll('[data-videorc-takeover-tile]'));
+        const thumbnailDeadline = performance.now() + 5000;
+        while (tiles().some(tile => { const image = tile.querySelector('img'); return image && !image.complete; })) {
+          if (performance.now() > thumbnailDeadline) throw Error('Takeover thumbnails did not finish loading.');
+          await sleep(25);
+        }
+        return {
+          ids: tiles().map(el => el.getAttribute('data-videorc-takeover-tile')),
+          readyIds: tiles().filter(el => { const image = el.querySelector('img'); return image?.complete && image.naturalWidth > 0; }).map(el => el.getAttribute('data-videorc-takeover-tile'))
+        };
       }
       throw new Error('Unknown preview motion smoke command: ' + ${JSON.stringify(command)});
     })()
