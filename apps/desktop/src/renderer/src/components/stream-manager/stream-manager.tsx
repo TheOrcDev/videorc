@@ -860,7 +860,11 @@ export function StreamManager({
   const activeAlerts = activeCohostAlerts(shownCohostState, nowMs).length
 
   const buddyPane = cohostPresent ? (
-    <div className="flex min-h-0 flex-1 flex-col" data-slot="buddy-pane">
+    // overflow-y-auto: when the window is shorter than header, chat controls
+    // and the Say footer together (a tiling window manager ignores the
+    // window's minimum size), the pane scrolls instead of painting the Say
+    // box and the on-stream switch under the status bar.
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-slot="buddy-pane">
       {/* One pane header (plan 174 S3.14c, F-8, H-9): identity first, then the
           one Alpha tag, listening, the status, and the Buddy Live switch. */}
       <div
