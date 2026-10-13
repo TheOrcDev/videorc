@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { SCREEN_IMAGE_REFUSALS } from '../shared/screen-image-files'
-import { assertDroppedScreenImagePaths } from './screen-image-drop'
+import { assertDroppedScreenImagePaths, issueAllOrNone } from './screen-image-drop'
 
 const anyPathIsAFile = async (): Promise<boolean> => true
 
@@ -27,5 +27,43 @@ describe('assertDroppedScreenImagePaths', () => {
     await expect(
       assertDroppedScreenImagePaths(['/Users/me/a.png', '/Users/me/folder.png'], onlyAIsAFile)
     ).rejects.toThrow(SCREEN_IMAGE_REFUSALS.notImages)
+  })
+})
+
+describe('issueAllOrNone', () => {
+  const noRevoke = async (): Promise<void> => undefined
+
+  it('issues one capability at a time, in order', async () => {
+    const steps: string[] = []
+    const issued = await issueAllOrNone(
+      ['a', 'b'],
+      async (path) => {
+        steps.push(`start ${path}`)
+        await Promise.resolve()
+        steps.push(`end ${path}`)
+        return `capability-${path}`
+      },
+      noRevoke
+    )
+    expect(issued).toEqual(['capability-a', 'capability-b'])
+    expect(steps).toEqual(['start a', 'end a', 'start b', 'end b'])
+  })
+
+  it('revokes every capability it issued when a later one fails, then rethrows', async () => {
+    const failure = new Error('The backend is restarting.')
+    const revoke = vi.fn(async (capability: string) => {
+      if (capability === 'capability-a') throw new Error('Revoke failed too.')
+    })
+    await expect(
+      issueAllOrNone(
+        ['a', 'b', 'c'],
+        async (path) => {
+          if (path === 'c') throw failure
+          return `capability-${path}`
+        },
+        revoke
+      )
+    ).rejects.toBe(failure)
+    expect(revoke.mock.calls).toEqual([['capability-a'], ['capability-b']])
   })
 })

@@ -751,7 +751,7 @@ import {
   SCREEN_IMAGE_EXTENSIONS,
   SCREEN_IMAGE_REFUSALS
 } from '../shared/screen-image-files'
-import { assertDroppedScreenImagePaths } from './screen-image-drop'
+import { assertDroppedScreenImagePaths, issueAllOrNone } from './screen-image-drop'
 import type {
   AccountCallbackEnvelope,
   BackendConnection,
@@ -16618,11 +16618,17 @@ async function authorizeDroppedScreenImages(paths: string[]): Promise<ResourceSe
 }
 
 function authorizeScreenImagePaths(paths: string[]): Promise<ResourceSelection[]> {
-  return Promise.all(
-    paths.map((path) =>
-      issueResourceCapability(path, 'input-file', { ttlMs: SCREEN_IMAGE_CAPABILITY_TTL_MS })
-    )
+  return issueAllOrNone(
+    paths,
+    (path) =>
+      issueResourceCapability(path, 'input-file', { ttlMs: SCREEN_IMAGE_CAPABILITY_TTL_MS }),
+    revokeResourceCapability
   )
+}
+
+async function revokeResourceCapability({ capabilityId }: ResourceSelection): Promise<void> {
+  mainResourceCapabilities.revoke(capabilityId)
+  await requestBackendAdmin('resource.capability.revoke', { capabilityId })
 }
 
 // Assets → Banners → Import image… (plan 186): the same single-use input-file
