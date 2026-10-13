@@ -20,6 +20,7 @@ import { activityItems } from '@/lib/stream-activity'
 import { YOUTUBE_ARTBOARD, YOUTUBE_ICON_URL, YOUTUBE_MARK } from '@/lib/youtube-mark'
 import { X_LOGO_WHITE_URL, X_VERIFIED_URL } from '@/lib/x-mark'
 import { plural } from '@/lib/format'
+import { canvasToBase64Png } from '@/lib/canvas-png'
 import type { CaptionStyleId, LiveChatMessageFragment, OverlayRect } from '@/lib/backend'
 import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../../../shared/comments-command-timing'
 
@@ -406,18 +407,6 @@ function highlightCanvasMeasurer(): HighlightTextMeasurer | null {
     probeContext.font = canvasFont(fontPx, weight)
     return probeContext.measureText(text).width
   }
-}
-
-async function canvasToBase64Png(canvas: OffscreenCanvas): Promise<string> {
-  const blob = await canvas.convertToBlob({ type: 'image/png' })
-  const buffer = await blob.arrayBuffer()
-  let binary = ''
-  const view = new Uint8Array(buffer)
-  const chunkSize = 0x8000
-  for (let offset = 0; offset < view.length; offset += chunkSize) {
-    binary += String.fromCharCode(...view.subarray(offset, offset + chunkSize))
-  }
-  return btoa(binary)
 }
 
 /**
