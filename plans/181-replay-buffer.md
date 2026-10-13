@@ -709,6 +709,123 @@ replay_buffer`: 13 passed.
 | `pnpm smoke:recording-studio` | pass, in three runs on the same build: the head through `smoke:scene-switch-pixels` (unit, scripts, live-audio-controls, the live_layout / scene / recording / audio / noise_cleanup cargo suites, four pixel artifacts) in the bundle; `smoke:freeform-editor` failed once in that bundle on a timing budget (landscape resize 6 pointer-to-paint p95 34.80 ms against 33 ms, right after the pixel step) and passed alone on the quiet host (landscape 59.97 fps mean, portrait 59.94 fps, every pointer matrix and the final-artifact proof); the 24 steps after it (captions contract and live, noise cleanup, all-layout artifacts, quit during finalization, the record latency gate again, output stall, screens, real launch, layout/source loop, live layout switch, comment highlight stream, Buddy pet, Comments relay, preview scene commit / pump / click-focus / stress / lifecycle / window / surface reattach, real ScreenCaptureKit recording, Notes invisibility, system audio) pass in order. No A/B against base was run for the freeform timing: the branch passes the step alone, the editor is untouched by the branch, and with the buffer off the pipeline is byte-for-byte the pre-181 one. |
 | Light and dark, by screenshot (CDP, dev app, synthetic source) | both themes: the Studio row off ("Off"), on ("0:06 / 0:30", Save replay, Set shortcut), the "Replay saved" toast with Show in Finder, the "Couldn't start the replay buffer" toast, the Output section (Length, Turn on when Videorc opens, Disk use, the Save replay recorder, Where replays go), the Shortcuts tab, the status bar chip "Replay · 0:06" and ⌘K with "Save replay". Two findings, fixed in the by-eye commit: the on-state row overflowed the inspector (the ring's words painted over Save replay) and now wraps its actions under the switch line; ⌘K said "Stop recording" for the buffer-only session and now keeps the two starts. The owner's own pass on a real machine is still owed. |
 
+### Owner redesign as built (RS1-RS5, 2026-10-12)
+
+- **RS1 backend** (`19203a67`): `clip.mark` asks the ring to save whenever
+  it holds frames and stores the mark while a recording runs; the reply
+  says `reason: "clip-saved"` and `saved` (the mark), with no `clip.marked`
+  when the ring took the press. `ReplayParams.auto` marks a default start;
+  after the session's encoder decision and before anything is spawned, a
+  software encoder path (OpenH264, software Media Foundation, x264)
+  refuses it with the typed `replay-software-encoder`. Clips folder and
+  names, "Clip" rows, clip words in every backend message,
+  `RemoteIntent::ReplaySave` removed.
+- **RS2 + RS3 renderer** (`dcb0525c`): `captureConfig.replayBuffer
+  { seconds, enabled, explicit }` (on by default); the provider arms the
+  ring once per launch from `enabled`, re-arms after every session, keeps
+  the guard's reason (no retry, no toast, no ring on Record/Go Live) until
+  the switch is turned on explicitly. The Studio row and its chunk are
+  deleted; Output → Clips holds the switch, Length, Disk use, the Save a
+  clip recorder and where clips go; the status bar chip reads "Clip ·
+  0:30"; ⌘K offers "Save clip"; the Stream Manager's Clip button (with the
+  key in its hint) shows whenever the ring holds frames or a session runs,
+  and `/clip` sits beside `/marker` and `/help` in the streamer's composer;
+  the main window pushes the clip facts through the marker context.
+- **RS4 harness and docs** (`5b14bccd`): see the gates below;
+  `docs/replay-buffer.md`, `CONTEXT.md`, `docs/remote-control.md`.
+- **RS5** (`42961799`, `f797a094`, and the final gates commit): two real
+  bugs the default surfaced, both fixed in the app, and the harness
+  assumptions listed below.
+
+**When voice works.** "Clip that" (and "clip it", "clip this", "that's a
+clip", "make a clip", with or without "Buddy" in front) is matched on the
+transcript a session already produces: live captions or Buddy listening
+(`captions.rs` → `clip_marks::note_transcript_final`). So the spoken clip
+works while a recording or livestream runs with captions on or Buddy
+listening on, the same place it marked a clip before, and now saves the
+video too (plus the mark while recording). The idle ring starts no
+transcription of its own, so nothing paid runs because the buffer does;
+with Videorc open and no session the clip is the button, the key, ⌘K, a
+deck key or `/clip`.
+
+**Every smoke now launches with the ring running.** Each break, classed:
+
+| Smoke | What broke | Class | Fix |
+| --- | --- | --- | --- |
+| `pnpm smoke:replay-buffer` | The default ring never came up at launch: the first start met the record block (no source ready yet) and the provider turned the switch off for the whole launch | real bug (a user whose Sources settle after launch would have clips silently off) | a blocked start keeps the switch on; the ring starts once the block clears, a source changes or a session ends; three failed starts pause it with one toast per launch; the Output row says "Starts once a source is ready" meanwhile (`42961799`) |
+| `pnpm smoke:recording-matrix` | `1080p30:shared-transient-fifo-pressure` refused with "A capture session is starting": the combo's start landed while the ring's re-arm after the previous Stop was between admission and its running session | real bug (a Record pressed in the re-arm gap after Stop) | a buffer-only start marks itself in flight for its whole `session.start` and the handover waits for it, bounded, before stopping the running ring (`f797a094`) |
+| `pnpm smoke:recording-matrix` | the same combo then refused with "The previous microphone is still opening or closing": the harness starts sessions on the backend socket behind the renderer's back, so the renderer re-armed into the gap between the handover's stop and the next admission | harness assumption (a user's Record goes through the renderer, which never re-arms while its own start is in flight) | the matrix waits for the renderer's ring to settle (on and buffer-only, or off) before each combo, so each combo hands over from a running ring (`f797a094`) |
+| `pnpm smoke:recording-studio` (`smoke:freeform-editor`) | the Scene page's transform fields were disabled ("Missing editable height"): every page that locks while a session runs (Scene positions and orientation, Output quality, Library's capture protection, Clean cut's wait, the updater row, the shell's live chrome) read the ring as a session | real bug (with the default on, those pages would have been locked for the whole launch) | `isSessionActive` means a recording or a livestream (`sessionOwnsTransport`), never a buffer-only session; a setting that shapes the ring (quality, orientation, length) stops a buffer-only ring and the reconcile re-arms it with the new shape (`83416423`) |
+| `smoke:freeform-editor` | "Could not find layout preset vertical-screen-only": a preset or undo crossing the canvas orientation was refused with "Stop the recording or stream" because the ring's session held the canvas | real bug | a cross-orientation layout change stops a buffer-only ring, runs as idle, and the reconcile re-arms it in the new orientation once the layout lands (`7daad0e0`) |
+| `smoke:freeform-editor` | "A recording or stream is running. Stop the session before editing the scene live": scene editor drafts (the dragged ghost, the held selection) were refused outright while the ring ran, and would not have painted on the leased run anyway | real bug (no live scene editing with the default on) | a buffer-only lease lets drafts through and the render tick applies them whatever the frame consumer; a recording or stream still refuses them, and a real session's start ends any draft that landed in the handover gap, whichever compositor run it took (`7daad0e0`) |
+| `pnpm smoke:recording-studio` (`smoke:dev`) | the next layout's start met "The previous microphone is still opening or closing": the ring's teardown and the standby microphone's re-open were still in flight when the start landed | real bug (a quick Record after Stop could be refused) | an admitted start waits up to 2 s for that cleanup before refusing with the same words (`2b1d412d`) |
+| `smoke:dev` | a `sessions.poster` request hung 25 s and restarted the backend: poster extraction waits for the FFmpeg work coordinator's idle slot, and with the ring on the backend was never idle (posters, quality checks, repairs and exports would never have run, and the ring's re-arm would have cancelled a running maintenance job) | real bug | a buffer-only session takes a light capture permit: it waits only for an active finalization, never defers, cancels or waits for maintenance, and shutdown still joins it (`1e6c0f68`) |
+| `pnpm smoke:recording-studio` (`smoke:preview-interaction-stress`) | "docked main-window movement present FPS 29.9 was below 30.0": with the ring armed in place at the Output profile's 30 fps, the live preview presents at 30 fps (the idle preview ran at 60), and the smoke's fixed floor met a measurement at the edge | **product consequence of R2 the owner must know** (the preview runs at the recording's fps whenever Videorc is open, as it did during a recording) + harness assumption | the smoke's floor follows the compositor's own target fps (min(30, target × 0.95)), as it already did for its device recording phase; the preview's fps is the owner's call: the buffer-only session could compose at max(Output fps, 60) for a 60 fps preview and 60 fps clips at the cost of a faster encode (not done) |
+| `probe:comments-window` (in the bundle and alone) | "links: Copy link puts the link on the clipboard" fails (`copied: false`) | host, not this branch: the same check fails with the ring switched off on the same build; the chat link's Copy link path is untouched; it passed on 10-12 on this Mac and the owner has seen it fail when a SecurityAgent prompt held focus | none; an owner rerun on a quiet, focused host is owed (every other check in the probe passes, the Clip button included) |
+| `pnpm smoke:recording-studio` (`smoke:system-audio`) | the "off" case counted the ring's own diagnostics (a system-audio source the previous case left on) as the off session's, because its window was by wall time around the click and Record now hands over from the ring | harness assumption | the smoke attributes `diagnostics.stats` samples to their session id |
+| `smoke:system-audio` | twice, the "off" case timed out waiting for its own terminal status after `recordStop` (the idle with its session id never arrived within 120 s), then passed four runs in a row with session ids printed; every other case passed every time | **intermittent, cause not pinned**: it did not reproduce once instrumented; the stop's `stopping` → `idle` events were seen in the failing runs, so the question is whether that idle carried the session id | none yet; owed: a repeat on a quiet host, and if it returns, the backend's terminal publish around the ring's re-arm is the first suspect |
+| `pnpm smoke:remote-control` | `clipMark` with nothing recording was admitted (the ring saves a clip) instead of refused; then the second press landed inside the 150 ms intent debounce of the first | harness assumption | the smoke proves admission with the ring on, turns the switch off through the hook, lets the debounce pass, and proves the refusal with its new reason (`5b14bccd`, `f797a094`) |
+| `pnpm smoke:multistream` (ring mode) | after Stop the ring was expected off; the renderer re-arms it | harness assumption | the smoke waits for the ring to leave the stream session instead (`5b14bccd`) |
+| `pnpm smoke:record-latency:gate` | `--replay-buffer` was the opt-in | harness assumption | the ring is the default; `--no-replay-buffer` is the bare baseline (`5b14bccd`) |
+| `pnpm smoke:replay-buffer` | the Studio button and the `replaySave` intent are gone | harness | `clip.mark` alone (no recording) and with a mark (mid-recording), the remote `clipMark`, Clips/Clip names, "Clip" rows (`5b14bccd`) |
+
+### Gates with the ring on by default (2026-10-12/13, this Mac, dev build, bundled FFmpeg 8.1.1)
+
+| Gate | Result |
+| --- | --- |
+| `pnpm typecheck` / `pnpm lint` / `pnpm format:check` / `pnpm test:scripts` | pass (lint: the one pre-existing `exhaustive-deps` warning in `use-studio.tsx`) |
+| `pnpm --filter @videorc/desktop test` | pass: 471 files, 4,856 tests, 1 skipped |
+| `pnpm build` + `pnpm check:renderer-assets` | pass: eager JS 1,946,687 raw / 389,816 gzip against 2,000,000 / 390,000. **Only 184 B of local gzip headroom** (CI Linux gzip reads about 1.6 KB lower, so about 1.8 KB there); the redesign's eager growth is the provider's default-ring logic (arm at launch, the guard, page locks, orientation and shape restarts); the reconcile decision, the buffer-only start's request assembly, the Output section and every toast are lazy chunks. The ceilings were not moved. The next eager change must trim or lazy-load first. |
+| `cargo fmt --check --all` | pass |
+| `cargo clippy -p videorc-backend -- -D warnings` | **fails only on main's inherited `map_source_pixel` dead code** (`compositor.rs`, from #686); nothing else |
+| `cargo test -p videorc-backend -- replay clip_marks remote_control shared_high_risk_contract_fixture record_only split_output_bridge bridge_recording editor_draft` | pass: 118 (1 ignored real-FFmpeg save test) |
+| `pnpm smoke:replay-buffer` (N = 30) | pass (four runs on the way): the ring on by itself at launch at the seeded length, the switch off and on again, ring full at 31.3 s, disk bound 18 files over 90 samples, a clip from `clip.mark` (reply `clip-saved`, nothing marked) and from a remote `clipMark`, Record handing over in 131 ms with the ring riding, one `clip.mark` mid-recording that saved a clip AND kept a mark (`clip.marks.list` = 1), the recording 40.47 s analyzer-pass, the re-arm after Stop, the switch off → idle; every clip `Clips/Clip …`, 30.00 s, H.264 1080p + AAC, Library row "Clip" |
+| `pnpm smoke:remote-control` | pass: `clipMark` admitted with the ring on; refused with "Clips are off, and you're not recording or live." once the switch is off |
+| `pnpm smoke:multistream` off / on (`VIDEORC_SMOKE_REPLAY_SECONDS=15`) | pass / pass (a 16.00 s clip mid-stream, 3 legs and the recording unchanged, the ring leaves the stream session after Stop) |
+| `pnpm smoke:record-latency:gate` (ring on, the default) | pass in enforce mode: warm click→recording p50 127 ms, p95 136 ms (budget 350); stop click→idle p95 123 ms (budget 300); 5/5 armed in place; re-armed after every Stop |
+| `pnpm smoke:record-latency:gate --no-replay-buffer` (bare baseline) | pass: warm p50 66 ms, p95 69 ms; stop p95 93 ms; 5/5 armed in place |
+| `pnpm smoke:recording-matrix` | pass 18/18 (after the handover wait and the harness's settle; twice) |
+| `pnpm probe:preview-lifecycle` | pass 100/100 (twice) |
+| `pnpm smoke:freeform-editor` alone | pass (landscape and portrait matrices on the ring's 30 fps compositor, mask law, stale draft, the final-artifact proof with drafts refused while recording and accepted after Stop) |
+| `pnpm smoke:recording-studio` | pass as a whole over the final runs, in three pieces because two host-side checks interrupted the bundle: the bundle itself through the Buddy pet smoke (unit, scripts, live-audio-controls, the cargo suites, scene-switch pixels, freeform, captions contract and live, noise cleanup, all-layout artifacts with posters, quit during finalization, the latency gate, output stall, screens, real launch, layout/source loop, live layout switch, comment highlight, Buddy pet); `probe:comments-window` fails only its Copy link clipboard check on this host (with the ring off too); the steps after it (preview scene commit, pump diagnostics, click/focus, interaction stress with the fps-aware floor, lifecycle, window placement, surface reattach, real ScreenCaptureKit recording, Notes invisibility, system audio) pass in order |
+| Light and dark, by screenshot | both themes: the Studio with no row and the chip "Clip · 0:10"; Output → Clips on ("The newest seconds are on disk…"), off ("Off. A clip can only be marked while you record.", chip gone) and on again; Settings → Shortcuts; ⌘K "Save clip"; the Stream Manager's footer "Clip", its press ("Saving the last 0:30 as a clip · It's in Library in a moment."), `/cl` completing to "/clip · Save the last 30 seconds as a clip", `/clip` sent ("Saving the last 0:30 as a clip" in the composer's notice); the main window's "Clip saved" toast. The owner's own pass on a real machine is owed. |
+
+
+### Idle cost with the ring on (this Mac, DEV build: debug backend, vite renderer; `ps` CPU% and RSS, 30 samples over 60 s after a 45 s settle; GPU not sampled, `powermetrics` needs sudo)
+
+| Process group | ring off: CPU % mean (max) · RSS MB | ring on (default): CPU % mean (max) · RSS MB |
+| --- | --- | --- |
+| backend | 4 (5.9) · 64 | 6.5 (8) · 72 |
+| electron-gpu | 11 (13.4) · 103 | 0 (0) · 99 |
+| electron-helper | 0 (0.1) · 113 | 0.3 (0.4) · 113 |
+| electron-main | 8.8 (17.5) · 721 | 6.9 (15.6) · 743 |
+| electron-renderer | 24.7 (43.2) · 576 | 7.8 (33.2) · 522 |
+| ffmpeg | — | 0.9 (1.7) · 27 |
+| other | 0 (0) · 221 | 0 (0.1) · 219 |
+| **whole app** | **48.5 · 1798** | **22.4 · 1795** |
+
+The buffer-only session arms the live preview compositor in place at the
+Output profile's 30 fps, where the idle preview ran at 60 fps, so the
+renderer and GPU helper do less per second with the ring on while the
+backend and its FFmpeg child (muxing 2 s segments of a copy of the
+hardware encode) do a little more. These are dev-build numbers on an
+M-series Mac with the synthetic source; a packaged build on a weak PC is
+the owner's measurement, and the software-encoder guard keeps the default
+off where it would be a second encode.
+
+
+### For the owner, by eye
+
+- Output → Clips in light and dark: the switch on, off, and (on a software
+  encoder PC) the guard's reason; the chip "Clip · 0:30" in the status bar.
+- The Stream Manager's Clip button and its hint, `/clip`, "Saving the
+  last …" and the main window's "Clip saved" with Show in Finder.
+- A real game: the key while the game has focus, the clip's A/V sync by
+  ear, Record and Go Live with the ring riding, Clip mid-recording keeping
+  the mark in the report.
+- Voice: "clip that" during a recording with captions or Buddy listening.
+
+
 ### Deviations from the plan text
 
 - S2's "headless backend test ... arms for 40 s" and S3's "backend test
