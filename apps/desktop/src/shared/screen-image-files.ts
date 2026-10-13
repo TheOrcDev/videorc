@@ -1,7 +1,8 @@
 export const SCREEN_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp'] as const
 
-// Each import may take the backend's 20 s optimizer budget, so a full batch
-// finishes inside SCREEN_IMAGE_CAPABILITY_TTL_MS, the backend's longest TTL.
+// Main issues every capability up front, and each import can run up to the
+// backend's SCREEN_IMAGE_OPTIMIZER_TIMEOUT (20 s), so a full batch ends
+// inside SCREEN_IMAGE_CAPABILITY_TTL_MS, the backend's MAX_TTL.
 export const SCREEN_IMAGE_BATCH_MAX = 32
 export const SCREEN_IMAGE_CAPABILITY_TTL_MS = 15 * 60_000
 
