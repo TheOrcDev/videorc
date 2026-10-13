@@ -1426,6 +1426,55 @@ async fn buddy_library_sync_cancels_a_held_choice_when_the_account_reverts_or_cl
 }
 
 #[tokio::test]
+async fn buddy_library_dequeued_choice_cannot_replace_a_newer_held_choice() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    let newer_avatar = "7c9e6679-7425-40de-944b-e07fc1ee9a52";
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    web.add(FakeAvatar::new(
+        newer_avatar,
+        "Moss",
+        "2026-10-09T09:00:00.000Z",
+    ));
+    let state = library_state(&root, &web).await;
+    *state.recording.lock().await = Some(crate::recording::test_active_recording_stub("live-1"));
+    web.choose(Some(AVATAR));
+    run_sync(&state).await.unwrap();
+    // Model the watcher having already queued this job when another sync runs.
+    let dequeued = state.buddy_library.cache().pending_apply.take().unwrap();
+    web.choose(Some(newer_avatar));
+    run_sync(&state).await.unwrap();
+    let held = state.buddy_library.cache().pending_apply.clone().unwrap();
+    assert_eq!(held.avatar_id, newer_avatar);
+    assert!(
+        load_library_sync(&state.database)
+            .profile_updated_at
+            .is_none()
+    );
+
+    // A still-live session must not let the old job overwrite the held choice.
+    apply_pending(&state, dequeued.clone()).await.unwrap();
+    assert_eq!(state.buddy_library.cache().pending_apply, Some(held));
+    assert_eq!(persona(&state).await, CohostPersona::default());
+
+    // Nor may the old job apply when the session has just ended.
+    let _turn = state.buddy_library.jobs.lock().await;
+    *state.recording.lock().await = None;
+    apply_pending(&state, dequeued).await.unwrap();
+    assert_eq!(persona(&state).await, CohostPersona::default());
+    drop(_turn);
+    settle(&state, |library| {
+        library.active_avatar_id.as_deref() == Some(newer_avatar)
+    })
+    .await;
+    assert_eq!(persona(&state).await.name, "Moss");
+    assert_eq!(
+        load_library_sync(&state.database).profile_updated_at,
+        web.with(|fake| fake.profile_updated_at.clone())
+    );
+}
+
+#[tokio::test]
 async fn buddy_library_signed_out_changes_nothing_and_official_still_applies() {
     let root = temp_root();
     let web = spawn_fake_library().await;
