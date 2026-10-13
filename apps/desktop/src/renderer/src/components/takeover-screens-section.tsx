@@ -247,7 +247,8 @@ function useFileDrop({
     setActive(false)
   }
   // Tiles come and go under the pointer while an import runs, and a removed
-  // tile never reports the drag leaving it.
+  // tile never sends dragleave, so the drag count drifts. Start over when
+  // import turns on or off.
   useEffect(reset, [disabled])
 
   return {
