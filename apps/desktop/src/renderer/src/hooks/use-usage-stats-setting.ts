@@ -50,19 +50,29 @@ export function useUsageStatsSetting(): UsageStatsSettingState {
     }
   }, [])
 
+  // Only the latest flip may write state: an older answer (or its rollback)
+  // must not undo a newer optimistic choice.
+  const latestRequest = useRef(0)
   const setEnabled = useCallback((enabled: boolean) => {
     const active = client.current
     if (!active) return
+    const request = ++latestRequest.current
+    const isLatest = (): boolean => request === latestRequest.current
     setError(null)
     setState((current) => current && { ...current, enabled })
     active
       .request<UsageStatsState>('usageStats.set', { enabled })
-      .then(setState)
+      .then((next) => {
+        if (isLatest()) setState(next)
+      })
       .catch(() => {
+        if (!isLatest()) return
         setError("Couldn't save the privacy settings. Try again.")
         void active
           .request<UsageStatsState>('usageStats.get')
-          .then(setState)
+          .then((next) => {
+            if (isLatest()) setState(next)
+          })
           .catch(() => undefined)
       })
   }, [])

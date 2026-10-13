@@ -446,15 +446,21 @@ impl UsageStatsRuntime {
     }
 }
 
+/// Absent means on (the default). A saved choice that can't be read fails
+/// closed: it may be the user's "off".
 fn load_enabled_setting(state: &AppState) -> bool {
-    state
-        .database
-        .load_setting::<bool>(ENABLED_SETTING_KEY)
-        .unwrap_or_else(|error| {
-            tracing::warn!("Could not read the usage stats setting: {error}");
-            None
-        })
-        .unwrap_or(true)
+    enabled_from_setting(state.database.load_setting::<bool>(ENABLED_SETTING_KEY))
+}
+
+fn enabled_from_setting(setting: anyhow::Result<Option<bool>>) -> bool {
+    match setting {
+        Ok(Some(enabled)) => enabled,
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!("Could not read the usage stats setting, sharing stays off: {error}");
+            false
+        }
+    }
 }
 
 /// This install's id, made and saved the first time it is asked for.
@@ -631,6 +637,12 @@ fn save_queue(state: &AppState, queue: &[QueuedEvent]) {
 
 async fn enqueue(state: &AppState, payload: StreamEventPayload) {
     let _guard = state.usage_stats.queue_lock.lock().await;
+    // Checked again under the lock: `set_enabled(false)` stores the switch
+    // before it empties the queue under this lock, so an event can never be
+    // saved after the user turned sharing off.
+    if !state.usage_stats.sharing() {
+        return;
+    }
     let now = Utc::now();
     let mut queue = load_queue(state);
     queue.push(QueuedEvent {
@@ -1123,6 +1135,16 @@ mod tests {
             assert!(!env_disables(Some(other)), "{other}");
         }
         assert!(!env_disables(None));
+    }
+
+    #[test]
+    fn an_unreadable_setting_fails_closed_and_an_absent_one_is_on() {
+        assert!(enabled_from_setting(Ok(None)));
+        assert!(enabled_from_setting(Ok(Some(true))));
+        assert!(!enabled_from_setting(Ok(Some(false))));
+        assert!(!enabled_from_setting(Err(anyhow::anyhow!(
+            "database is locked"
+        ))));
     }
 
     #[test]

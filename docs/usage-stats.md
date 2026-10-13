@@ -46,6 +46,8 @@ path:
 - `usageStats.get` / `usageStats.set` back the Settings switch. Off is
   saved, stops new events and empties the queue before `set` answers. A
   session started while it was off is never shared, not even its stop.
+  An absent setting means on; a saved one that can't be read fails closed
+  (off for that launch).
 
 ## Turning it off for a run
 
