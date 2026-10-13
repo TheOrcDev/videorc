@@ -4332,7 +4332,13 @@ impl Database {
                 );
             }
             let layout: LayoutSettings = serde_json::from_str(&layout_json)?;
-            let scene_label = session_scene_label(&layout, stream_preset.as_deref(), &mode);
+            let recorded_sources = serde_json::from_str(&sources_json).ok();
+            let scene_label = session_scene_label(
+                &layout,
+                recorded_sources.as_ref(),
+                stream_preset.as_deref(),
+                &mode,
+            );
 
             sessions.push(SessionSummary {
                 file_size_bytes,
@@ -4400,7 +4406,7 @@ impl Database {
                     SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                            stream_preset, container, duration_ms, layout_json, file_size_bytes,
                            derived_from_session_id, source_title, processing_kind,
-                           finalization_state, finalization_error
+                           finalization_state, finalization_error, sources_json
                     FROM sessions
                     WHERE library_hidden = 0
                       AND (
@@ -4552,7 +4558,8 @@ impl Database {
                     COALESCE(artifact_summaries.count, 0), artifact_summaries.ready_kinds,
                     COALESCE(comment_counts.count, 0),
                     page_sessions.finalization_state, page_sessions.finalization_error,
-                    clean_cut_outputs.source_session_id, clean_cut_outputs.mode
+                    clean_cut_outputs.source_session_id, clean_cut_outputs.mode,
+                    page_sessions.sources_json
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -4600,7 +4607,14 @@ impl Database {
                     container: normalized_session_container(row.get(9)?),
                     duration_ms: row.get(10)?,
                     file_size_bytes: row.get(12)?,
-                    scene_label: session_scene_label(&layout, stream_preset.as_deref(), &mode),
+                    scene_label: session_scene_label(
+                        &layout,
+                        row.get::<_, Option<String>>(26)?
+                            .and_then(|json| serde_json::from_str(&json).ok())
+                            .as_ref(),
+                        stream_preset.as_deref(),
+                        &mode,
+                    ),
                     quality_status: quality_json
                         .as_deref()
                         .and_then(|value| serde_json::from_str(value).ok()),
@@ -8219,18 +8233,51 @@ fn latest_quality_status_for_path_locked(
 }
 
 /// Human label for a session's composition (Library rewrite L1): the layout
-/// preset name, or the stream preset for stream-only sessions. Pure + tested.
+/// preset name, or the stream preset for stream-only sessions. A two-source
+/// preset recorded with one of its sources off says what was recorded (ogre
+/// 2026-10-13: camera Off, every take read "Screen + Camera"). Pure + tested.
 pub fn session_scene_label(
     layout: &LayoutSettings,
+    sources: Option<&crate::protocol::SourceSelection>,
     stream_preset: Option<&str>,
     mode: &str,
 ) -> Option<String> {
+    use crate::protocol::LayoutPreset;
     if mode == "streaming"
         && let Some(preset) = stream_preset
             .map(str::trim)
             .filter(|value| !value.is_empty())
     {
         return Some(preset.to_string());
+    }
+    if let Some(sources) = sources {
+        let has_camera = sources.camera_id.is_some();
+        let has_screen =
+            sources.screen_id.is_some() || sources.window_id.is_some() || sources.test_pattern;
+        let vertical = matches!(
+            layout.layout_preset,
+            LayoutPreset::VerticalCameraTop
+                | LayoutPreset::VerticalCameraBottom
+                | LayoutPreset::VerticalSplit
+                | LayoutPreset::VerticalScreenCamera
+        );
+        let both = vertical
+            || matches!(
+                layout.layout_preset,
+                LayoutPreset::ScreenCamera | LayoutPreset::SideBySide
+            );
+        if both && has_screen != has_camera {
+            let one = if has_screen {
+                "Screen only"
+            } else {
+                "Camera only"
+            };
+            return Some(if vertical {
+                format!("Vertical · {one}")
+            } else {
+                one.to_string()
+            });
+        }
     }
     Some(
         match layout.layout_preset {
@@ -9177,23 +9224,69 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = crate::protocol::LayoutPreset::ScreenCamera;
         assert_eq!(
-            session_scene_label(&layout, None, "recording").as_deref(),
+            session_scene_label(&layout, None, None, "recording").as_deref(),
             Some("Screen + Camera")
         );
         layout.layout_preset = crate::protocol::LayoutPreset::SideBySide;
         assert_eq!(
-            session_scene_label(&layout, None, "recording").as_deref(),
+            session_scene_label(&layout, None, None, "recording").as_deref(),
             Some("Side by side")
         );
         // Stream-only sessions prefer the stream preset name.
         assert_eq!(
-            session_scene_label(&layout, Some("1080p60"), "streaming").as_deref(),
+            session_scene_label(&layout, None, Some("1080p60"), "streaming").as_deref(),
             Some("1080p60")
         );
         // Blank stream presets fall through to the layout label.
         assert_eq!(
-            session_scene_label(&layout, Some("  "), "streaming").as_deref(),
+            session_scene_label(&layout, None, Some("  "), "streaming").as_deref(),
             Some("Side by side")
+        );
+    }
+
+    #[test]
+    fn scene_labels_say_what_was_recorded_when_a_source_was_off() {
+        use crate::protocol::{LayoutPreset, SourceSelection};
+        let sources = |screen: bool, window: bool, camera: bool| SourceSelection {
+            screen_id: screen.then(|| "screen:portal:monitor".to_string()),
+            window_id: window.then(|| "window:portal:window".to_string()),
+            camera_id: camera.then(|| "camera:1".to_string()),
+            microphone_id: None,
+            test_pattern: false,
+        };
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::ScreenCamera;
+        let label = |layout: &LayoutSettings, recorded: &SourceSelection| {
+            session_scene_label(layout, Some(recorded), None, "recording")
+        };
+        // ogre: Window source, camera Off, "Screen + Camera" chosen.
+        assert_eq!(
+            label(&layout, &sources(false, true, false)).as_deref(),
+            Some("Screen only")
+        );
+        assert_eq!(
+            label(&layout, &sources(false, false, true)).as_deref(),
+            Some("Camera only")
+        );
+        assert_eq!(
+            label(&layout, &sources(true, false, true)).as_deref(),
+            Some("Screen + Camera")
+        );
+        layout.layout_preset = LayoutPreset::SideBySide;
+        assert_eq!(
+            label(&layout, &sources(true, false, false)).as_deref(),
+            Some("Screen only")
+        );
+        layout.layout_preset = LayoutPreset::VerticalScreenCamera;
+        assert_eq!(
+            label(&layout, &sources(true, false, false)).as_deref(),
+            Some("Vertical · Screen only")
+        );
+        // Nothing recorded either way: the chosen layout stands.
+        layout.layout_preset = LayoutPreset::ScreenCamera;
+        assert_eq!(
+            label(&layout, &sources(false, false, false)).as_deref(),
+            Some("Screen + Camera")
         );
     }
 
