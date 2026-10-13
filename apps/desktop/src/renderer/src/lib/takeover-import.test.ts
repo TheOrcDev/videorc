@@ -24,7 +24,8 @@ function harness() {
     onPhase: vi.fn(),
     onPending: vi.fn(),
     onImported: vi.fn(),
-    onError: vi.fn()
+    onPickError: vi.fn(),
+    onImportError: vi.fn()
   }
   return { importer: createTakeoverImporter(), selection, imported, options }
 }
@@ -54,7 +55,7 @@ describe('takeover import lifecycle', () => {
     selection.resolve([])
     await run
     expect(options.importImage).not.toHaveBeenCalled()
-    expect(options.onError).not.toHaveBeenCalled()
+    expect(options.onPickError).not.toHaveBeenCalled()
     expect(options.onPhase).toHaveBeenLastCalledWith('idle')
   })
   it('a refused pick reports once, without a file, and allows retry', async () => {
@@ -63,7 +64,7 @@ describe('takeover import lifecycle', () => {
     const run = importer.run(options)
     selection.reject(refusal)
     await run
-    expect(options.onError).toHaveBeenCalledExactlyOnceWith(refusal)
+    expect(options.onPickError).toHaveBeenCalledExactlyOnceWith(refusal)
     expect(options.onPhase).toHaveBeenLastCalledWith('idle')
     await importer.run({ ...options, pick: async () => ['retry'], importImage: async () => 'ok' })
     expect(options.onImported).toHaveBeenLastCalledWith('ok')
@@ -82,7 +83,7 @@ describe('takeover import lifecycle', () => {
       onPending: (selections: readonly string[]) => pending.push(selections)
     })
     expect(options.onImported.mock.calls).toEqual([['screen-a'], ['screen-c']])
-    expect(options.onError).toHaveBeenCalledExactlyOnceWith(failure, 'b')
+    expect(options.onImportError).toHaveBeenCalledExactlyOnceWith(failure, 'b')
     expect(pending).toEqual([['a', 'b', 'c'], ['b', 'c'], ['c'], [], []])
   })
   it('a retired connection cannot submit a picker result', async () => {
@@ -122,7 +123,7 @@ describe('takeover import lifecycle', () => {
       expect(options.onPhase).not.toHaveBeenCalled()
       expect(options.onPending).not.toHaveBeenCalled()
       expect(options.onImported).not.toHaveBeenCalled()
-      expect(options.onError).not.toHaveBeenCalled()
+      expect(options.onImportError).not.toHaveBeenCalled()
       await importer.run(next.options)
       expect(next.options.pick).toHaveBeenCalledTimes(1)
       next.selection.resolve([])

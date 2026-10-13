@@ -12981,13 +12981,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             )
           )
         },
-        onError: (error, selection) =>
-          selection
-            ? reportError(error, { action: 'import', object: selection.displayName })
-            : reportError(screenImportAuthorizationError(error), {
-                action: 'import',
-                object: 'the images'
-              })
+        onPickError: (error) =>
+          reportError(screenImportAuthorizationError(error), {
+            action: 'import',
+            object: 'the images'
+          }),
+        onImportError: (error, selection) =>
+          reportError(error, { action: 'import', object: selection.displayName })
       })
     },
     [client, reportError, wsStatus]
