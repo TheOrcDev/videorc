@@ -64,4 +64,11 @@ describe('platformCopy', () => {
       expect(copy.osName).not.toBe('macOS')
     }
   })
+
+  it('sends Linux recordings to the Videos folder the backend uses (Linux plan 0019 item 4)', () => {
+    const copy = platformCopy('linux')
+    expect(copy.defaultRecordingsPath).toMatch(/^Videorc\/Recordings in your Videos folder/)
+    // A box that already recorded into ~/Movies keeps it, and the copy says so.
+    expect(copy.defaultRecordingsPath).toContain('~/Movies if you recorded there before')
+  })
 })

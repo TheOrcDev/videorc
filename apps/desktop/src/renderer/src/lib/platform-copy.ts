@@ -46,8 +46,9 @@ export interface PlatformCopy {
   osName: 'macOS' | 'Windows' | 'Linux'
   /**
    * Where recordings go when no folder is chosen. Mirrors the backend's
-   * `default_recordings_dir` (Movies on macOS and Linux, Videos on Windows);
-   * the backend does not report the path yet.
+   * `default_recordings_dir` (Movies on macOS, Videos on Windows, the XDG
+   * videos folder on Linux unless ~/Movies already holds Videorc takes); the
+   * backend does not report the path yet.
    */
   defaultRecordingsPath: string
 }
@@ -88,7 +89,8 @@ export function platformCopy(platform: string | undefined): PlatformCopy {
         deviceNoun: 'computer',
         osSettingsName: osSettingsName(platform),
         osName: 'Linux',
-        defaultRecordingsPath: '~/Movies/Videorc/Recordings'
+        defaultRecordingsPath:
+          'Videorc/Recordings in your Videos folder (~/Movies if you recorded there before)'
       }
   }
 }
