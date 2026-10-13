@@ -379,7 +379,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     await click(save)
     expect(byTestId('buddy-library-edit-dialog')).not.toBeNull()
     expect(byTestId('buddy-library-edit-error')?.textContent).toBe(
-      'Videorc is reconnecting. Try again in a moment.'
+      "Couldn't update your Buddy library. Videorc is reconnecting. Try again in a moment."
     )
     expect((document.getElementById('buddy-library-name') as HTMLInputElement).value).toBe(
       ' Rocky '
