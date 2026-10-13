@@ -2048,6 +2048,24 @@ describe('real StudioProvider lifecycle', () => {
     expect(pendingNames()).toEqual([])
   })
 
+  it('clears the pending images and says so when the connection drops mid-batch', async () => {
+    const { backend, latest } = await mountTakeoverImportProvider({
+      pickScreenImages: async () => [pickedImage('a'), pickedImage('b')],
+      authorizeDroppedScreenImages: vi.fn()
+    })
+    backend.deferResponse('screens.importImage', takeoverScreen)
+    act(() => {
+      void latest().core.importScreenImages()
+    })
+    await waitForObservation(() => latest().core.pendingScreenImports.length === 2)
+
+    act(() => backend.sockets[0]?.close())
+
+    await waitForObservation(() => latest().core.pendingScreenImports.length === 0)
+    expect(latest().core.screenImportPhase).toBe('idle')
+    expect(latest().core.lastError).toContain('before the last 2 images were imported')
+  })
+
   it('shows a refused drop as written, whether the refusal throws or rejects', async () => {
     const refuse = vi
       .fn<VideorcApi['authorizeDroppedScreenImages']>()

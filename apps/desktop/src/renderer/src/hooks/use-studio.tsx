@@ -3596,6 +3596,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [screenImportPhase, setScreenImportPhase] = useState<TakeoverImportPhase>('idle')
   const screenImportPending = screenImportPhase !== 'idle'
   const [pendingScreenImports, setPendingScreenImports] = useState<readonly ResourceSelection[]>([])
+  const pendingScreenImportsRef = useRef(pendingScreenImports)
+  pendingScreenImportsRef.current = pendingScreenImports
   const screenImporter = useRef(createTakeoverImporter())
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
@@ -4152,6 +4154,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       runtime.showBackendError(error, status, context)
     )
   }, [])
+
+  useEffect(() => {
+    const stopped = pendingScreenImportsRef.current.length
+    if (stopped === 0) return
+    reportError(
+      new UserFacingError(
+        stopped === 1
+          ? 'The connection dropped before the last image was imported. Add it again if it is missing.'
+          : `The connection dropped before the last ${stopped} images were imported. Add any missing ones again.`
+      ),
+      { action: 'import', object: 'the images' }
+    )
+  }, [client, reportError, wsStatus])
 
   const retryCaptureRecovery = useCallback(async (): Promise<void> => {
     const activeClient = clientRef.current
