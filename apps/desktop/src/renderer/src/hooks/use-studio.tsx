@@ -10500,16 +10500,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
-      const revision = screenListEventRevision.current
+      let revision = screenListEventRevision.current
       await screenImporter.current.run({
         pick: () => {
           setLastError(null)
           return authorize(window.videorc)
         },
-        importImage: (selection) =>
-          client.request<StreamScreen>('screens.importImage', {
+        importImage: (selection) => {
+          revision = screenListEventRevision.current
+          return client.request<StreamScreen>('screens.importImage', {
             sourceCapability: selection.capabilityId
-          }),
+          })
+        },
         isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
         onPhase: setScreenImportPhase,
         onPending: setPendingScreenImports,

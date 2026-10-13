@@ -1977,6 +1977,29 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().core.pendingScreenImports).toEqual([])
   })
 
+  it('keeps a later image whose reply comes without a list event, after an earlier one had one', async () => {
+    const { backend, latest } = await mountTakeoverImportProvider({
+      pickScreenImages: async () => [pickedImage('a'), pickedImage('b')],
+      authorizeDroppedScreenImages: vi.fn()
+    })
+    const releaseB = backend.deferResponse(
+      'screens.importImage',
+      { ...takeoverScreen, id: 'screen-b', name: 'b' },
+      (command) => (command.params as Record<string, unknown> | undefined)?.sourceCapability === 'b'
+    )
+
+    let importing!: Promise<void>
+    act(() => {
+      importing = latest().core.importScreenImages()
+    })
+    await waitForObservation(() => latest().core.screens.some((screen) => screen.name === 'a'))
+    await act(async () => {
+      releaseB()
+      await importing
+    })
+    expect(latest().core.screens.map((screen) => screen.name)).toEqual(['a', 'b'])
+  })
+
   it('holds each picked image as pending until its own import settles', async () => {
     const { backend, latest } = await mountTakeoverImportProvider({
       pickScreenImages: async () => [pickedImage('a'), pickedImage('b'), pickedImage('c')],
