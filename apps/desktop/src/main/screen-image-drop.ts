@@ -17,3 +17,18 @@ function hasScreenImageExtension(path: string): boolean {
   const extension = extname(path).slice(1).toLowerCase()
   return (SCREEN_IMAGE_EXTENSIONS as readonly string[]).includes(extension)
 }
+
+export async function issueAllOrNone<Capability>(
+  paths: readonly string[],
+  issue: (path: string) => Promise<Capability>,
+  revoke: (capability: Capability) => Promise<unknown>
+): Promise<Capability[]> {
+  const issued: Capability[] = []
+  try {
+    for (const path of paths) issued.push(await issue(path))
+    return issued
+  } catch (error) {
+    await Promise.allSettled(issued.map((capability) => revoke(capability)))
+    throw error
+  }
+}
