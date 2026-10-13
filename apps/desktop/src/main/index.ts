@@ -505,7 +505,11 @@ import {
   SCREEN_IMAGE_EXTENSIONS,
   SCREEN_IMAGE_REFUSALS
 } from '../shared/screen-image-files'
-import { assertDroppedScreenImagePaths, issueAllOrNone } from './screen-image-drop'
+import {
+  assertDroppedScreenImagePaths,
+  issueAllOrNone,
+  missingAsNotAFile
+} from './screen-image-drop'
 import type {
   AccountCallbackEnvelope,
   BackendConnection,
@@ -13627,7 +13631,7 @@ async function pickScreenImages(): Promise<ResourceSelection[]> {
 async function authorizeDroppedScreenImages(paths: string[]): Promise<ResourceSelection[]> {
   await assertDroppedScreenImagePaths(
     paths,
-    async (path) => (await fsPromises.stat(path).catch(() => null))?.isFile() ?? false
+    async (path) => (await fsPromises.stat(path).catch(missingAsNotAFile))?.isFile() ?? false
   )
   return authorizeScreenImagePaths(paths)
 }

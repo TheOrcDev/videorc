@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { SCREEN_IMAGE_REFUSALS } from '../shared/screen-image-files'
-import { assertDroppedScreenImagePaths, issueAllOrNone } from './screen-image-drop'
+import {
+  assertDroppedScreenImagePaths,
+  issueAllOrNone,
+  missingAsNotAFile
+} from './screen-image-drop'
 
 const anyPathIsAFile = async (): Promise<boolean> => true
 
@@ -50,6 +54,7 @@ describe('issueAllOrNone', () => {
   })
 
   it('revokes every capability it issued when a later one fails, then rethrows', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const failure = new Error('The backend is restarting.')
     const revoke = vi.fn(async (capability: string) => {
       if (capability === 'capability-a') throw new Error('Revoke failed too.')
@@ -65,5 +70,20 @@ describe('issueAllOrNone', () => {
       )
     ).rejects.toBe(failure)
     expect(revoke.mock.calls).toEqual([['capability-a'], ['capability-b']])
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      '[takeovers] could not revoke a capability',
+      new Error('Revoke failed too.')
+    )
+  })
+})
+
+describe('missingAsNotAFile', () => {
+  it.each(['ENOENT', 'ENOTDIR'])('treats %s as not a file', (code) => {
+    expect(missingAsNotAFile(Object.assign(new Error(code), { code }))).toBe(null)
+  })
+
+  it('lets other stat errors through, so the toast does not blame the file type', () => {
+    const denied = Object.assign(new Error('EACCES'), { code: 'EACCES' })
+    expect(() => missingAsNotAFile(denied)).toThrow(denied)
   })
 })
