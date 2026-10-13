@@ -318,6 +318,29 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(patchCohostSettings).not.toHaveBeenCalled()
   })
 
+  it('clears a refused import once the next pack is worn or the view changes', async () => {
+    const importFolder = vi.fn(async () => {
+      throw new Error('Choose a page-pet folder: it has no manifest.json.')
+    })
+    const importError = (): Element | null =>
+      document.querySelector('[data-testid="buddy-import-error"]')
+    await render({
+      cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
+      list: pets([PACK_A, PACK_B]),
+      importFolder: importFolder as never
+    })
+    await act(async () => button('buddy-pack-import').click())
+    expect(importError()?.textContent).toContain('no manifest.json')
+    const rows = document.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-pack-row"]')
+    await act(async () => rows[1]!.click())
+    expect(lastPersona().avatar).toEqual({ kind: 'alive', packId: PACK_B.packId })
+    expect(importError()).toBeNull()
+    await act(async () => button('buddy-pack-import').click())
+    expect(importError()).not.toBeNull()
+    await act(async () => kindButton('Still').click())
+    expect(importError()).toBeNull()
+  })
+
   it('imports on I while the Alive panel has focus', async () => {
     const importFolder = vi.fn(async () => null)
     await render({ list: pets([]), importFolder: importFolder as never })
