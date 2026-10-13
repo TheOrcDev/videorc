@@ -442,7 +442,34 @@ try {
   assert.equal(hiddenRestart.visual.sources.cameraId, selectedCameraId)
   assert.equal(hiddenRestart.visual.sources.cameraOff, false)
 
+  // Preview smoke mode (VIDEORC_SMOKE_PREVIEW_MOTION, needed for the command
+  // server) makes the renderer stop the preview camera whenever its camera
+  // effect runs, which an apply triggers. On Linux a recording needs live
+  // camera preview frames to start, so the stop ~0.8 s after an apply
+  // refused the take ("the camera preview source(s) produced no frames";
+  // ogre 2026-10-13). Let the apply settle, then make sure the camera is live
+  // with fresh frames before starting.
+  const ensureCameraPreviewLive = async (visual) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const deadline = Date.now() + timeoutMs
+    let status = null
+    while (Date.now() < deadline) {
+      status = await request(ws, timeoutMs, 'preview.camera.status')
+      if (status.state === 'live' && status.framesCaptured > 0 && (status.frameAgeMs ?? 0) < 1000)
+        return status
+      if (status.state !== 'starting') {
+        await request(ws, timeoutMs, 'preview.camera.start', {
+          sources: visual.sources,
+          layout: visual.layout,
+          video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 }
+        })
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    throw new Error(`Camera preview never went live before recording: ${JSON.stringify(status)}`)
+  }
   const recordCameraVisibility = async (visual, liveTargetId) => {
+    await ensureCameraPreviewLive(visual)
     const recordingDirectory = await requestSmokeCommand(
       smoke,
       'authorize-smoke-resource',
