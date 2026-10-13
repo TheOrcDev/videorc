@@ -2743,6 +2743,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const commitOverlayLayout = useCallback((next: OverlayLayout) => {
     setOverlayLayoutState((current) => (overlayLayoutsEqual(current, next) ? current : next))
   }, [])
+  // Whether this connection has the backend's layout yet. Until then the
+  // state holds the shipped defaults, and nothing may write a layout built
+  // from them (the captions seed below once saved the defaults over the
+  // streamer's layout at every launch, turning Buddy off the stream).
+  const [overlayLayoutLoaded, setOverlayLayoutLoaded] = useState(false)
   // The layout itself: loaded on connect, pushed on change (`overlays.layout`).
   useEffect(() => {
     if (!client || wsStatus !== 'connected') return
@@ -2755,9 +2760,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // An older backend has no such method (or answers off-contract); the
       // shipped defaults stand.
       .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setOverlayLayoutLoaded(true)
+      })
     const off = client.on('overlays.layout', commitOverlayLayout)
     return () => {
       cancelled = true
+      setOverlayLayoutLoaded(false)
       off()
     }
   }, [client, commitOverlayLayout, wsStatus])
@@ -2777,7 +2786,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const captionsBurnTargetRef = useRef(captureConfig.captions.burnTarget)
   captionsBurnTargetRef.current = captureConfig.captions.burnTarget
   useEffect(() => {
-    if (!client || wsStatus !== 'connected') return
+    if (!client || wsStatus !== 'connected' || !overlayLayoutLoaded) return
     const savedTarget = captionsBurnTargetRef.current
     const seeded =
       captionsSeedRef.current === null
@@ -2798,7 +2807,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // The layout's switches are the one home; the key keeps this effect on
     // switch changes (and a saved target arriving) only, never on a rect drag.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, wsStatus, captionsSwitchesKey, captureConfig.captions.burnTarget, setOverlayLayout])
+  }, [
+    client,
+    wsStatus,
+    overlayLayoutLoaded,
+    captionsSwitchesKey,
+    captureConfig.captions.burnTarget,
+    setOverlayLayout
+  ])
   // The streamer's corner pick lives in main (it must survive the Chat window
   // being closed). A ref, not state, feeds the highlight RPC so a pick applies
   // to the very next highlight without re-creating the relay listeners.
