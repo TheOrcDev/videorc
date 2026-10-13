@@ -190,6 +190,9 @@ export function smokeAppEnv(env = {}, options = {}) {
     VIDEORC_SMOKE_PRINT_BACKEND_READY:
       smokeEnvValue(env, 'VIDEORC_SMOKE_PRINT_BACKEND_READY') ?? '1',
     VIDEORC_DISABLE_BACKEND_REAP: smokeEnvValue(env, 'VIDEORC_DISABLE_BACKEND_REAP') ?? '0',
+    // Every isolated profile is a new install: a smoke that records or goes
+    // live must not reach the anonymous usage stats unless a run asks to.
+    VIDEORC_USAGE_STATS: smokeEnvValue(env, 'VIDEORC_USAGE_STATS') ?? '0',
     VIDEORC_APP_DATA_DIR: appDataDir,
     VIDEORC_USER_DATA_DIR: userDataDir,
     // Isolating Electron userData is NOT enough: the backend resolves its own

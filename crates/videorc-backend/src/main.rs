@@ -132,6 +132,7 @@ mod system_audio_session;
 mod transcript;
 mod twitch;
 mod twitch_chat;
+mod usage_stats;
 #[cfg(target_os = "macos")]
 mod video_toolbox_encoder;
 mod videorc_api;
@@ -649,6 +650,9 @@ async fn run_backend() -> Result<()> {
     // Plan 094 (S7): remote service flags at startup and every 30 minutes;
     // fails open to compiled defaults.
     tokio::spawn(service_flags::run_service_flags_refresher(state.clone()));
+    // Anonymous usage stats: one event per session start and stop, off the
+    // recording path; on unless Settings → General → Privacy turned it off.
+    usage_stats::spawn(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
@@ -5599,7 +5603,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "performance.check.run"
         | "performance.check.cancel"
         | "encoder.preference.set"
-        | "diagnostics.metricsJournal.set" => Some(DEFAULT_MUTATION_POLICY),
+        | "diagnostics.metricsJournal.set"
+        | "usageStats.set" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -5675,6 +5680,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.moderationOperations.list"
         | "liveChat.xCommentsReadiness"
         | "liveChat.emotes.get"
+        | "usageStats.get"
         | "streamTargets.metadata.get"
         | "streamTargets.metadata.validate"
         | "streamTargets.manualKey.inspect"
@@ -11456,6 +11462,21 @@ async fn handle_text_message_with_role(
         }
         "liveChat.diagnostics" => {
             ServerResponse::ok(command.id, live_chat::current_diagnostics(state).await)
+        }
+        // Settings → General → Privacy → "Share anonymous usage stats".
+        "usageStats.get" => ServerResponse::ok(command.id, usage_stats::current_state(state)),
+        "usageStats.set" => {
+            match serde_json::from_value::<usage_stats::UsageStatsSetParams>(command.params) {
+                Ok(params) => match usage_stats::set_enabled(state, params.enabled).await {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "settings-unavailable", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "liveChat.send" => {
             match serde_json::from_value::<live_chat::CommentsSendParams>(command.params) {

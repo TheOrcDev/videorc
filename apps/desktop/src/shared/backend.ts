@@ -1765,6 +1765,22 @@ export interface MetricsJournalSetParams {
   enabled: boolean
 }
 
+/**
+ * `usageStats.get` / `.set`: Settings → General → Privacy → "Share anonymous
+ * usage stats" (on by default). One event per recording or livestream start
+ * and stop to videorc.com; no stream keys, titles, chat or content.
+ */
+export interface UsageStatsState {
+  /** Events are being shared right now. */
+  enabled: boolean
+  /** `VIDEORC_USAGE_STATS=0` turned sharing off for this run. */
+  envDisabled: boolean
+}
+
+export interface UsageStatsSetParams {
+  enabled: boolean
+}
+
 /** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
 export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'
 

@@ -113,6 +113,8 @@ import type {
   EncoderPreferenceState,
   MetricsJournalSetParams,
   MetricsJournalState,
+  UsageStatsSetParams,
+  UsageStatsState,
   PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
@@ -326,6 +328,8 @@ export interface BackendRpcMethodMap {
     MetricsJournalSetParams,
     MetricsJournalState
   >
+  'usageStats.get': BackendRpcDefinition<undefined, UsageStatsState>
+  'usageStats.set': BackendRpcDefinition<UsageStatsSetParams, UsageStatsState>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
@@ -773,6 +777,14 @@ const metricsJournalSetParamsSchema = objectSchema(
   { enabled: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<MetricsJournalSetParams>
+const usageStatsStateSchema = objectSchema(
+  { enabled: booleanSchema, envDisabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<UsageStatsState>
+const usageStatsSetParamsSchema = objectSchema(
+  { enabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<UsageStatsSetParams>
 const streamOutputTopologyProbeStateSchema = enumSchema([
   'not-required',
   'passed',
@@ -4043,6 +4055,8 @@ const runtimeContracts = {
     params: metricsJournalSetParamsSchema,
     result: metricsJournalStateSchema
   },
+  'usageStats.get': { params: undefinedSchema, result: usageStatsStateSchema },
+  'usageStats.set': { params: usageStatsSetParamsSchema, result: usageStatsStateSchema },
   'stream.targets.snapshot': {
     params: undefinedSchema,
     result: streamTargetsSnapshotSchema
