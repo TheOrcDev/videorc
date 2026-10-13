@@ -1376,6 +1376,56 @@ async fn buddy_library_sync_holds_a_choice_while_live_and_applies_it_after() {
 }
 
 #[tokio::test]
+async fn buddy_library_sync_cancels_a_held_choice_when_the_account_reverts_or_clears_it() {
+    for latest in [Some("official:golem"), None] {
+        let root = temp_root();
+        let web = spawn_fake_library().await;
+        web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+        let state = library_state(&root, &web).await;
+        let original = CohostPersona {
+            library_avatar_id: Some("official:golem".to_string()),
+            ..CohostPersona::default()
+        };
+        save_persona(&state, original.clone()).await;
+        web.choose(Some("official:golem"));
+        run_sync(&state).await.unwrap();
+
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("live-1"));
+        web.choose(Some(AVATAR));
+        run_sync(&state).await.unwrap();
+        let held = state.buddy_library.cache().pending_apply.clone().unwrap();
+
+        web.choose(latest);
+        run_sync(&state).await.unwrap();
+        assert!(state.buddy_library.cache().pending_apply.is_none());
+        let latest_clock = web.with(|fake| fake.profile_updated_at.clone());
+        assert_eq!(
+            load_library_sync(&state.database).profile_updated_at,
+            latest_clock
+        );
+
+        *state.recording.lock().await = None;
+        // The watcher may have put the old choice into the job queue before
+        // the newer sync completed. That job must also be harmless.
+        apply_pending(&state, held).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.buddy_library.watcher_running.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the live watcher should retire the cancelled choice");
+        settle(&state, |_| true).await;
+        assert_eq!(persona(&state).await, original);
+        assert_eq!(
+            load_library_sync(&state.database).profile_updated_at,
+            latest_clock
+        );
+    }
+}
+
+#[tokio::test]
 async fn buddy_library_signed_out_changes_nothing_and_official_still_applies() {
     let root = temp_root();
     let web = spawn_fake_library().await;
