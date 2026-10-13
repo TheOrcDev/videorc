@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { BuddyLibraryState } from '@/lib/backend'
+import { UNKNOWN_REASON } from '@/lib/user-error'
 
 import { createBuddyLibraryController, type BuddyLibraryClient } from './use-buddy-library'
 
@@ -113,12 +114,17 @@ describe('createBuddyLibraryController (plan 170 D12, D13)', () => {
     expect(controller.getState().pending).toBe('sync')
     expect(await controller.use('official:orc')).toBe(false)
     await first
-    fake.refuseWith(new Refused('cohost-library-not-implemented', 'Not available yet.'))
+    const raw = 'database error: private storage path /Users/streamer/Buddy'
+    fake.refuseWith(new Refused('cohost-library-not-implemented', raw))
     expect(await controller.use('official:orc')).toBe(false)
     expect(controller.getState()).toMatchObject({
       pending: null,
-      problem: { code: 'cohost-library-not-implemented', message: 'Not available yet.' }
+      problem: {
+        code: 'cohost-library-not-implemented',
+        message: `Couldn't update your Buddy library. ${UNKNOWN_REASON}`
+      }
     })
+    expect(controller.getState().problem?.message).not.toContain(raw)
     controller.dispose()
   })
 })
