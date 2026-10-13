@@ -94,3 +94,14 @@ export function platformCopy(platform: string | undefined): PlatformCopy {
       }
   }
 }
+
+/**
+ * The Sources page's intro line. On Linux a session locks the screen, camera
+ * and microphone pickers (plan 0024), so "Changes apply live." was untrue
+ * there.
+ */
+export function sourcesPageDescription(platform: string | undefined): string {
+  return platform === 'linux'
+    ? 'What gets recorded and streamed. On Linux, change them while nothing is recording or live.'
+    : 'What gets recorded and streamed. Changes apply live.'
+}

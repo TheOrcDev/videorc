@@ -8,6 +8,7 @@ import { VideoSources } from '@/components/sources/video-sources'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
+import { sourcesPageDescription } from '@/lib/platform-copy'
 
 // The single home for every capture device (UI rewrite plan V1/V2,
 // 2026-06-10). Plan 173 rebuilt it as the Config-grid page `page.tsx` names:
@@ -17,7 +18,7 @@ import { useStudioCore } from '@/hooks/use-studio'
 // blocks a source leads the page: one alert per missing permission (plan 174
 // S3.8).
 export function SourcesTab(): ReactElement {
-  const { refreshDevices } = useStudioCore()
+  const { refreshDevices, runtimeInfo } = useStudioCore()
   const [refreshing, setRefreshing] = useState(false)
 
   return (
@@ -52,7 +53,7 @@ export function SourcesTab(): ReactElement {
           </Tooltip>
         }
         className="border-b border-border py-2"
-        description="What gets recorded and streamed. Changes apply live."
+        description={sourcesPageDescription(runtimeInfo?.platform)}
         title="Sources"
       />
       <SourcePermissionAlerts />

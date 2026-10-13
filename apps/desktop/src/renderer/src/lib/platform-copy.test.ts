@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import type { StreamPlatform } from '@/lib/backend'
 
-import { destinationLabel, platformCopy, platformLabel } from './platform-copy'
+import {
+  destinationLabel,
+  platformCopy,
+  platformLabel,
+  sourcesPageDescription
+} from './platform-copy'
 
 // Plan 174 S1.4 (D-36, I-9, C-30).
 
@@ -70,5 +75,14 @@ describe('platformCopy', () => {
     expect(copy.defaultRecordingsPath).toMatch(/^Videorc\/Recordings in your Videos folder/)
     // A box that already recorded into ~/Movies keeps it, and the copy says so.
     expect(copy.defaultRecordingsPath).toContain('~/Movies if you recorded there before')
+  })
+})
+
+describe('sourcesPageDescription', () => {
+  it('never promises live changes on Linux, where a session locks the pickers', () => {
+    expect(sourcesPageDescription('linux')).not.toContain('apply live')
+    expect(sourcesPageDescription('linux')).toContain('while nothing is recording or live')
+    expect(sourcesPageDescription('darwin')).toContain('Changes apply live.')
+    expect(sourcesPageDescription('win32')).toContain('Changes apply live.')
   })
 })
