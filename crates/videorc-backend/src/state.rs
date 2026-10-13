@@ -1058,6 +1058,10 @@ pub struct AppState {
     /// Defines one process-wide intake order while global fence/order metadata
     /// is attached to a command before it enters a per-socket queue.
     pub websocket_command_admission: Arc<StdMutex<()>>,
+    /// One import across all renderer connections, including queued work.
+    pub screen_import_capacity: Arc<tokio::sync::Semaphore>,
+    /// Serialize list snapshots with their events, never image preparation.
+    pub screen_list_publication: Arc<StdMutex<()>>,
     /// Completion truth for layout/live-control mutations across reconnects.
     pub operator_command_fence: Arc<CommandCompletionFence>,
     /// Physical camera/screen transition completion, independent from the
@@ -1334,6 +1338,8 @@ impl AppState {
             capture_recovery_smoke_fault: new_capture_recovery_smoke_fault_slot(),
             websocket_transport_metrics: Arc::new(WebSocketTransportMetrics::default()),
             websocket_command_admission: Arc::new(StdMutex::new(())),
+            screen_import_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
+            screen_list_publication: Arc::new(StdMutex::new(())),
             operator_command_fence: Arc::new(CommandCompletionFence::default()),
             source_transition_fence: Arc::new(CommandCompletionFence::default()),
             live_control_command_order: Arc::new(CommandCompletionFence::default()),

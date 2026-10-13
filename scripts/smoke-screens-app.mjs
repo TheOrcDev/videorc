@@ -1,5 +1,8 @@
-import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
+import assert from 'node:assert/strict'
+import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
+import { analyzeRecording } from './lib/recording-analyzer.mjs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -21,6 +24,7 @@ const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 mkdirSync(outputDirectory, { recursive: true })
 
 let stopApp = async () => {}
+const listeners = []
 
 try {
   const redPath = join(outputDirectory, 'screen-red.png')
@@ -54,66 +58,184 @@ try {
     }
   })
 
-  let redScreen
-  let greenScreen
   try {
-    const health = await request(ws, timeoutMs, 'health.ping', { ffmpegPath })
-    if (!health?.ffmpeg?.available) {
-      throw new Error(health?.ffmpeg?.message ?? 'FFmpeg is unavailable for Screens smoke.')
-    }
-    console.log(`Screens smoke using FFmpeg: ${ffmpegPath}`)
-
-    const redSource = await authorizeSmokeResource(smoke, redPath, 'input-file')
-    const greenSource = await authorizeSmokeResource(smoke, greenPath, 'input-file')
     const recordingDirectory = await authorizeSmokeResource(
       smoke,
       outputDirectory,
       'output-directory'
     )
-
-    await request(ws, timeoutMs, 'screens.clear')
-    redScreen = await request(ws, timeoutMs, 'screens.importImage', {
-      sourceCapability: redSource.capabilityId
-    })
-    greenScreen = await request(ws, timeoutMs, 'screens.importImage', {
-      sourceCapability: greenSource.capabilityId
-    })
-
-    await request(ws, timeoutMs, 'screens.activate', { screenId: redScreen.id })
-    const started = await request(
-      ws,
-      timeoutMs,
-      'session.start',
-      sessionParams(recordingDirectory.capabilityId)
-    )
-    if (!['recording', 'streaming'].includes(started.state)) {
-      throw new Error(`Expected recording state after start, got ${started.state}.`)
+    const corruptPath = join(outputDirectory, 'corrupt.png')
+    writeFileSync(corruptPath, 'not an image')
+    const modes = process.env.VIDEORC_SCREENS_SMOKE_MODE
+      ? [process.env.VIDEORC_SCREENS_SMOKE_MODE]
+      : ['recording', 'streaming', 'both']
+    for (const mode of modes) {
+      assert(['recording', 'streaming', 'both'].includes(mode), 'unknown screens smoke mode')
+      statuses.length = 0
+      await request(ws, timeoutMs, 'screens.clear')
+      for (const old of await request(ws, timeoutMs, 'screens.list')) {
+        await request(ws, timeoutMs, 'screens.delete', { screenId: old.id })
+      }
+      const targets =
+        mode === 'recording'
+          ? []
+          : (process.platform === 'linux' ? [false] : [false, true]).map((vertical, i) => {
+              const port = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 12935) + i
+              return {
+                id: `screen-${i}`,
+                platform: 'custom',
+                label: `Takeover ${i}`,
+                enabled: true,
+                serverUrl: `rtmp://127.0.0.1:${port}/live`,
+                streamKey: 'takeover',
+                urlMode: 'server-and-key',
+                streamKeyPresent: true,
+                authMode: 'manual-rtmp',
+                outputOrientation: vertical ? 'vertical' : 'horizontal',
+                createdAt: '2026-01-01T00:00:00Z',
+                updatedAt: '2026-01-01T00:00:00Z',
+                port,
+                recvPath: join(outputDirectory, `${mode}-${i}.flv`)
+              }
+            })
+      const receivers = []
+      for (const target of targets) {
+        const receiver = startReceiver(target)
+        receivers.push(receiver)
+        listeners.push(receiver)
+        await waitForOwnedTcpListener({
+          child: receiver.child,
+          port: target.port,
+          timeoutMs: 8000,
+          diagnostics: () => receiver.log
+        })
+      }
+      const params = sessionParams(recordingDirectory.capabilityId)
+      params.output.recordEnabled = mode !== 'streaming'
+      params.output.streamEnabled = mode !== 'recording'
+      if (targets.length) {
+        params.output.video = {
+          preset: 'tutorial-1080p30',
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          bitrateKbps: 6000
+        }
+        params.output.rtmp = {
+          preset: 'custom',
+          serverUrl: targets[0].serverUrl,
+          streamKey: targets[0].streamKey
+        }
+        params.streaming = {
+          enabled: true,
+          mode: 'multi',
+          targets: targets.map(({ port, recvPath, ...target }) => target),
+          enabledTargetIds: targets.map((t) => t.id),
+          defaultOutputPreset: 'tutorial-1080p30',
+          defaultBitrateKbps: 6000
+        }
+        if (targets.some((target) => target.outputOrientation === 'vertical'))
+          params.simulcast = {
+            layout: {
+              ...params.layout,
+              layoutPreset: 'vertical-camera-bottom',
+              verticalScreenFraming: 'fit'
+            },
+            video: { preset: 'custom', width: 360, height: 640, fps: 30, bitrateKbps: 2000 }
+          }
+      }
+      const started = await request(ws, timeoutMs, 'session.start', params)
+      const sessionId = started.sessionId
+      assert(
+        sessionId && ['recording', 'streaming'].includes(started.state),
+        'session must run before importing'
+      )
+      await sleep(1200) // Deliberate artifact coverage, not a readiness handshake.
+      const redScreen = await importFromAssets(redPath)
+      assert.equal(
+        await request(ws, timeoutMs, 'screens.active'),
+        null,
+        'first import must not activate'
+      )
+      await assertSameRunningSession(ws, sessionId)
+      await request(ws, timeoutMs, 'screens.activate', { screenId: redScreen.id })
+      await sleep(1200)
+      const before = await request(ws, timeoutMs, 'compositor.status')
+      const greenScreen = await importFromAssets(greenPath)
+      assert.equal(
+        (await request(ws, timeoutMs, 'screens.active'))?.id,
+        redScreen.id,
+        'import must preserve on-air takeover'
+      )
+      await assertSameRunningSession(ws, sessionId)
+      const after = await request(ws, timeoutMs, 'compositor.status')
+      assert(
+        after.framesRendered > before.framesRendered,
+        `Compositor stalled during ${mode} import`
+      )
+      const listBeforeFailure = await request(ws, timeoutMs, 'screens.list')
+      await requestSmokeCommand(
+        smoke,
+        'import-takeover-image',
+        { path: corruptPath },
+        { timeoutMs }
+      )
+      assert.deepEqual(
+        await request(ws, timeoutMs, 'screens.list'),
+        listBeforeFailure,
+        'failed import cannot publish a row'
+      )
+      assert.equal(
+        (await request(ws, timeoutMs, 'screens.active'))?.id,
+        redScreen.id,
+        'failed import cannot clear on-air image'
+      )
+      await sleep(1200)
+      await request(ws, timeoutMs, 'screens.activate', { screenId: greenScreen.id })
+      await sleep(1200)
+      await request(ws, timeoutMs, 'screens.clear')
+      await assertSameRunningSession(ws, sessionId)
+      await sleep(1200)
+      const stopped = await request(ws, timeoutMs, 'session.stop')
+      const paths = []
+      if (mode !== 'streaming')
+        paths.push(await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 }))
+      for (const receiver of receivers) {
+        await waitForExit(receiver, 15000)
+        paths.push(receiver.path)
+      }
+      for (const path of paths) {
+        verifyOutput(path, statuses, sessionId)
+        const quality = await analyzeRecording(path, {
+          ffmpegPath,
+          ffprobePath: process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
+          intendedFps: 30,
+          expectAudio: true,
+          gates: { requireMotion: false }
+        })
+        assert(quality.verdict.pass, `${path}: ${quality.verdict.failures.join('; ')}`)
+      }
+      console.log(`Live takeover import PASS: ${mode}`)
     }
-    const sessionId = started.sessionId
-
-    await sleep(1200)
-    await request(ws, timeoutMs, 'screens.activate', { screenId: greenScreen.id })
-    await assertSameRunningSession(ws, sessionId)
-
-    await sleep(1200)
-    await request(ws, timeoutMs, 'screens.clear')
-    await assertSameRunningSession(ws, sessionId)
-
-    await sleep(1200)
-    const stopped = await request(ws, timeoutMs, 'session.stop')
-    const outputPath = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
-    verifyOutput(outputPath, statuses, sessionId)
+    async function importFromAssets(path) {
+      const oldIds = new Set((await request(ws, timeoutMs, 'screens.list')).map((s) => s.id))
+      const rendered = await requestSmokeCommand(
+        smoke,
+        'import-takeover-image',
+        { path },
+        { timeoutMs }
+      )
+      const added = (await request(ws, timeoutMs, 'screens.list')).filter((s) => !oldIds.has(s.id))
+      assert.equal(added.length, 1, 'renderer import must publish exactly one takeover')
+      assert(rendered.ids.includes(added[0].id), 'new takeover must render in Assets')
+      return added[0]
+    }
   } finally {
-    if (redScreen?.id) {
-      await request(ws, timeoutMs, 'screens.delete', { screenId: redScreen.id }).catch(() => {})
-    }
-    if (greenScreen?.id) {
-      await request(ws, timeoutMs, 'screens.delete', { screenId: greenScreen.id }).catch(() => {})
-    }
-    await request(ws, timeoutMs, 'screens.clear').catch(() => {})
+    await request(ws, timeoutMs, 'session.stop').catch(() => {})
     ws.close()
   }
 } finally {
+  for (const receiver of listeners) await stopReceiver(receiver)
   await stopApp()
 }
 
@@ -171,7 +293,14 @@ function sampleRgb(outputPath, seconds) {
 
 function sampleTimeline(outputPath) {
   const samples = []
-  for (let seconds = 0.5; seconds <= 6; seconds += 0.25) {
+  const probe = spawnSync(
+    process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
+    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', outputPath],
+    { encoding: 'utf8' }
+  )
+  const duration = Number(probe.stdout.trim())
+  assert(probe.status === 0 && duration > 0, 'artifact duration must be readable')
+  for (let seconds = 0.5; seconds < duration - 0.15; seconds += 0.25) {
     try {
       samples.push({ seconds, rgb: sampleRgb(outputPath, seconds) })
     } catch {
@@ -271,4 +400,59 @@ function authorizeSmokeResource(smoke, path, kind) {
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
+}
+
+function startReceiver(target) {
+  const child = spawn(
+    ffmpegPath,
+    [
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-listen',
+      '1',
+      '-i',
+      `${target.serverUrl}/${target.streamKey}`,
+      '-c',
+      'copy',
+      '-f',
+      'flv',
+      target.recvPath
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'] }
+  )
+  const receiver = { child, path: target.recvPath, log: '', exited: null }
+  receiver.exited = new Promise((resolve) => {
+    child.once('exit', (code, signal) => resolve({ code, signal }))
+    child.once('error', (error) => resolve({ error }))
+  })
+  child.stderr.on('data', (text) => {
+    receiver.log = (receiver.log + text).slice(-8000)
+  })
+  return receiver
+}
+async function waitForExit(receiver, ms) {
+  let timer
+  try {
+    const result = await Promise.race([
+      receiver.exited,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Receiver did not finish: ${receiver.log}`)), ms)
+      })
+    ])
+    if (result.error) throw result.error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+async function stopReceiver(receiver) {
+  if (receiver.child.exitCode !== null || receiver.child.signalCode !== null) return
+  receiver.child.kill('SIGTERM')
+  try {
+    await waitForExit(receiver, 2000)
+  } catch {
+    receiver.child.kill('SIGKILL')
+    await waitForExit(receiver, 2000)
+  }
 }

@@ -1909,6 +1909,91 @@ describe('real StudioProvider lifecycle', () => {
     return { backend, latest: () => observation! }
   }
 
+  it.each(['recording', 'streaming'] as const)(
+    'imports a takeover while %s without applying it or refreshing active state',
+    async (state) => {
+      const { backend, latest } = await mountFreeformTransformProvider()
+      const screen: StreamScreen = {
+        id: 'live-import',
+        name: 'Live import',
+        imagePath: '/screens/live.png',
+        sortOrder: 0,
+        status: 'ready',
+        createdAt: now,
+        updatedAt: now
+      }
+      window.videorc.pickScreenImage = vi.fn(async () => ({
+        capabilityId: 'chosen-image',
+        kind: 'input-file' as const,
+        displayName: 'live.png'
+      }))
+      await act(async () => {
+        for (const socket of backend.sockets)
+          socket.onmessage?.({
+            data: JSON.stringify({
+              event: 'recording.status',
+              payload: { state, sessionId: 'live-import-session', startedAt: now }
+            })
+          })
+      })
+      const release = backend.deferResponse('screens.importImage', screen)
+      backend.commands.length = 0
+      let pending!: Promise<void>
+      act(() => {
+        pending = latest().core.importScreenImage()
+      })
+      await waitForObservation(() => latest().core.screenImportPhase === 'importing')
+      await act(async () => latest().core.importScreenImage())
+      expect(window.videorc.pickScreenImage).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        release()
+        await pending
+      })
+      expect(latest().core.screens).toContainEqual(screen)
+      expect(latest().core.activeScreen).toBeNull()
+      expect(latest().core.screenImportPending).toBe(false)
+      const methods = backend.commands.map((command) => command.method)
+      expect(methods.filter((method) => method === 'screens.importImage')).toHaveLength(1)
+      expect(methods).not.toContain('screens.active')
+      expect(methods).not.toContain('screens.activate')
+      expect(methods).not.toContain('screens.clear')
+      expect(methods).not.toContain('session.stop')
+      expect(methods).not.toContain('audio.processing.update')
+    }
+  )
+
+  it('a newer authoritative takeover list wins over the import reply', async () => {
+    const { backend, latest } = await mountFreeformTransformProvider()
+    const screen: StreamScreen = {
+      id: 'retired-import',
+      name: 'Removed elsewhere',
+      imagePath: '/screens/removed.png',
+      sortOrder: 0,
+      status: 'ready',
+      createdAt: now,
+      updatedAt: now
+    }
+    window.videorc.pickScreenImage = vi.fn(async () => ({
+      capabilityId: 'chosen-image',
+      kind: 'input-file' as const,
+      displayName: 'image.png'
+    }))
+    const release = backend.deferResponse('screens.importImage', screen)
+    let pending!: Promise<void>
+    act(() => {
+      pending = latest().core.importScreenImage()
+    })
+    await waitForObservation(() => latest().core.screenImportPhase === 'importing')
+    await act(async () => {
+      for (const socket of backend.sockets)
+        socket.onmessage?.({ data: JSON.stringify({ event: 'screens.changed', payload: [] }) })
+      release()
+      await pending
+    })
+    expect(latest().core.screens).toEqual([])
+    expect(latest().core.screenImportPending).toBe(false)
+  })
+
   function preciseTransformStatus(backend: StudioBackend): SceneCommitStatus {
     const scene: Scene = {
       ...backend.currentScene,

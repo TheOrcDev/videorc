@@ -10137,6 +10137,30 @@ async function runSmokePreviewMotionCommand(
     return issueResourceCapability(authorization.path, authorization.kind)
   }
 
+  if (command === 'import-takeover-image') {
+    if (
+      app.isPackaged ||
+      !smokeCommandServerEnabled ||
+      !mainWindow ||
+      smokeScreenImageSelection !== undefined
+    ) {
+      throw new Error('Takeover smoke import unavailable.')
+    }
+    const authorization = validateSmokeResourceAuthorization(
+      { kind: 'input-file', path: params.path },
+      process.env.VIDEORC_SMOKE_STATE_DIR
+    )
+    smokeScreenImageSelection = await issueResourceCapability(
+      authorization.path,
+      authorization.kind
+    )
+    try {
+      return await mainWindow.webContents.executeJavaScript(smokeRendererScript(command, params))
+    } finally {
+      smokeScreenImageSelection = undefined
+    }
+  }
+
   if (command === 'import-smoke-scheduled-thumbnail') {
     if (app.isPackaged || !smokeCommandServerEnabled || Object.keys(params).length !== 1)
       throw new Error('Thumbnail smoke import unavailable.')
@@ -12942,6 +12966,17 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         };
       }
 
+      if (${JSON.stringify(command)} === 'import-takeover-image') {
+        await openTab('assets');
+        const button = await waitFor('[data-testid="takeover-import"]');
+        if (button.disabled) throw new Error('Takeover import is disabled during the session.');
+        button.click();
+        await sleep(50);
+        const deadline = performance.now() + 45000;
+        while (button.disabled && performance.now() < deadline) await sleep(25);
+        if (button.disabled) throw new Error('Takeover import did not finish.');
+        return { ids: Array.from(document.querySelectorAll('[data-videorc-takeover-tile]')).map(el => el.getAttribute('data-videorc-takeover-tile')) };
+      }
       throw new Error('Unknown preview motion smoke command: ' + ${JSON.stringify(command)});
     })()
   `
@@ -13530,7 +13565,15 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
   return { deleted: completion.deleted, failedCount: failedPaths.length }
 }
 
+// A single-use picker result, only installed by the authenticated dev smoke server.
+let smokeScreenImageSelection: ResourceSelection | null | undefined
+
 async function pickScreenImage(): Promise<ResourceSelection | null> {
+  if (!app.isPackaged && smokeCommandServerEnabled && smokeScreenImageSelection !== undefined) {
+    const selection = smokeScreenImageSelection
+    smokeScreenImageSelection = undefined
+    return selection
+  }
   const options: Electron.OpenDialogOptions = {
     title: 'Choose Screen image',
     properties: ['openFile'],

@@ -297,6 +297,13 @@ describe('smoke command security', () => {
   it('restricts an authenticated packaged harness to the preview gate command subset', async () => {
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('app-quit')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('authorize-smoke-resource')).toBe(false)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-takeover-image')).toBe(false)
+    expect(
+      validateSmokeCommandPayload({
+        command: 'import-takeover-image',
+        params: { path: '/tmp/fixture.png' }
+      })
+    ).not.toBeNull()
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-background')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-scheduled-thumbnail')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('set-page-zoom')).toBe(false)

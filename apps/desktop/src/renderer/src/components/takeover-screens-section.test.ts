@@ -123,3 +123,43 @@ describe('TakeoverScreensSection tiles (plan 174 S3.10)', () => {
     expect(document.body.textContent).toContain('No takeovers yet')
   })
 })
+
+describe('takeover import during a session', () => {
+  it('allows importing during a session but keeps management locked', async () => {
+    mocked.core = { ...mocked.core, isSessionActive: true, screenImportPhase: 'idle' }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    const button = byTestId('takeover-import') as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    await act(async () => button.click())
+    expect(mocked.core.importScreenImage).toHaveBeenCalledTimes(1)
+    expect(document.body.textContent).toContain('You can import images now.')
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Takeover name"]')?.disabled).toBe(
+      true
+    )
+    expect(
+      document.querySelector<HTMLButtonElement>('[aria-label="Delete takeover"]')?.disabled
+    ).toBe(true)
+    expect(document.querySelector('[data-videorc-takeover-tile]')?.getAttribute('draggable')).toBe(
+      'false'
+    )
+  })
+  it.each(['choosing', 'importing'])('prevents another import while %s', async (phase) => {
+    mocked.core = {
+      ...mocked.core,
+      isSessionActive: true,
+      screenImportPending: true,
+      screenImportPhase: phase
+    }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    expect((byTestId('takeover-import') as HTMLButtonElement).disabled).toBe(true)
+    expect(byTestId('takeover-import')?.textContent).toBe(
+      phase === 'choosing' ? 'Choosing image…' : 'Importing…'
+    )
+  })
+  it('disables import while reconnecting and prioritizes the offline explanation', async () => {
+    mocked.core = { ...mocked.core, isSessionActive: true, wsStatus: 'failed' }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    expect((byTestId('takeover-import') as HTMLButtonElement).disabled).toBe(true)
+    expect(document.body.textContent).not.toContain('You can import images now.')
+  })
+})
