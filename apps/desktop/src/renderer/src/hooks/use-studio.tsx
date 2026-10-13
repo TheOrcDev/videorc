@@ -466,6 +466,7 @@ import {
   decideGoLiveCaptionsReadiness,
   type GoLiveCaptionsReadiness
 } from '@/lib/captions-preflight'
+import { sceneVisibilityIdentity } from '@/lib/scene-visibility-identity'
 import { streamingWithoutTargets, updateGoLiveExclusions } from '@/lib/go-live-exclusions'
 import type { GoLivePhase } from '@/lib/go-live-dialog-view'
 import {
@@ -8615,14 +8616,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // The request's own scene.changed echo may arrive before its ACK. Only
       // that source's visibility is allowed to differ; other scene edits retire it.
       const visibilityIdentity = (candidate: Scene | null): string =>
-        JSON.stringify(
-          candidate && {
-            ...candidate,
-            sources: candidate.sources.map((source) =>
-              source.id === sourceId ? { ...source, visible: undefined } : source
-            )
-          }
-        )
+        sceneVisibilityIdentity(candidate, sourceId)
       const identity = visibilityIdentity(requestedScene)
       const layoutIntent = transformLayoutIntent({ ...captureConfigRef.current.layout })
       setSceneVisibilityPending(true)
