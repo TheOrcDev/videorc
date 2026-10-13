@@ -9392,6 +9392,10 @@ fn source_fit(
     }
 }
 
+// Only the Windows camera-overlay blit still maps one pixel at a time; every
+// other blit precomputes columns and rows (Linux plan 0014), so elsewhere it
+// is dead code that macOS clippy refuses.
+#[cfg(target_os = "windows")]
 fn map_source_pixel(
     dest_x: u32,
     dest_y: u32,
@@ -9404,7 +9408,7 @@ fn map_source_pixel(
     Some((source_x, source_y))
 }
 
-/// One axis of [`map_source_pixel`]: the two axes are independent, so a blit
+/// One axis of `map_source_pixel`: the two axes are independent, so a blit
 /// computes each column once per frame and each row once per row instead of
 /// two divides, a floor and a clamp for every output pixel (Linux plan 0014:
 /// the 1080p CPU compositor rendered 8 fps at ~470 % on ogre).
