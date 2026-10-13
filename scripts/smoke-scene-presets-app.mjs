@@ -100,7 +100,10 @@ const refreshDevices = () =>
   }
   if (!button || button.disabled) throw new Error('Device refresh unavailable.');
   button.click();
-  await new Promise(requestAnimationFrame);
+  // A frame, or 100 ms when none comes: a window that isn't painting (screen
+  // off, hidden) never runs requestAnimationFrame, and this whole eval hung
+  // for its 120 s timeout (ogre, DPMS off, 2026-10-13).
+  await new Promise((resolve) => { requestAnimationFrame(() => resolve()); setTimeout(resolve, 100); });
   const deadline = Date.now() + ${timeoutMs};
   while (Date.now() < deadline) {
     const refreshed = [...sourcesPage().querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
@@ -196,7 +199,7 @@ try {
     )
     for (let pass = 0; pass < 2; pass++) {
       const theme = await evaluate(
-        `await waitFor('button[aria-label="Actions for Smoke A"]'); const card = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.includes('Smoke A')); card?.scrollIntoView({block: 'center'}); await new Promise(requestAnimationFrame); return document.documentElement.classList.contains('dark') ? 'dark' : 'light'`
+        `await waitFor('button[aria-label="Actions for Smoke A"]'); const card = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.includes('Smoke A')); card?.scrollIntoView({block: 'center'}); await new Promise((resolve) => { requestAnimationFrame(() => resolve()); setTimeout(resolve, 100); }); return document.documentElement.classList.contains('dark') ? 'dark' : 'light'`
       )
       const capture = await requestSmokeCommand(
         smoke,
