@@ -67,6 +67,20 @@ export interface MarkerContext {
     message?: string
     remainingSeconds?: number
   }
+  /** The Clip action (plan 181 R4), for the window's button and `/clip`. */
+  clip?: ClipContext
+}
+export interface ClipContext {
+  /** The ring holds frames or a recording runs: a press keeps something. */
+  available: boolean
+  /** The ring's length, for the words ("the last 0:30"). */
+  seconds: number
+  /** The Save clip key as it reads on this platform ("⌥⌘C"), when bound. */
+  shortcutLabel?: string
+  /** Why a press would keep nothing, when it would: the switch is off, the
+   * backend keeps the default off on this computer, or the ring is still
+   * starting. The window says it in words. */
+  off?: 'switch' | 'blocked' | 'starting' | 'idle'
 }
 export type MarkerRelayCommand = { requestId: string } & (
   | { action: 'create'; params: CreateMarkerParams }
@@ -177,6 +191,17 @@ export const markerContextSchema = nullableSchema(
           },
           strict
         )
+      ),
+      clip: optionalSchema(
+        objectSchema(
+          {
+            available: booleanSchema,
+            seconds: numberSchema({ integer: true, min: 0, max: 3600 }),
+            shortcutLabel: optionalSchema(stringSchema({ maxLength: 160 })),
+            off: optionalSchema(enumSchema(['switch', 'blocked', 'starting', 'idle']))
+          },
+          strict
+        )
       )
     },
     strict
@@ -209,6 +234,8 @@ export const markerRelayResolutionSchema = unionSchema([
 export type ComposerCommand =
   | { kind: 'chat'; text: string }
   | { kind: 'marker'; label?: string }
+  /** Plan 181 R4: save the last seconds as a clip (the Clip button's action). */
+  | { kind: 'clip' }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 /** Leading slash commands never reach a provider. Double slash escapes once. */
@@ -217,6 +244,7 @@ export function classifyComposerDraft(raw: string): ComposerCommand {
   if (!text.startsWith('/')) return { kind: 'chat', text }
   if (text.startsWith('//')) return { kind: 'chat', text: text.slice(1) }
   if (/^\/help\s*$/i.test(text)) return { kind: 'help' }
+  if (/^\/clip\s*$/i.test(text)) return { kind: 'clip' }
   const match = /^\/marker(?: +([\s\S]*))?$/i.exec(text)
   if (match) {
     try {
@@ -228,7 +256,7 @@ export function classifyComposerDraft(raw: string): ComposerCommand {
   return {
     kind: 'error',
     message:
-      'Unknown command. Use /marker [title] or /help. To send a literal slash, start with //.'
+      'Unknown command. Use /marker [title], /clip or /help. To send a literal slash, start with //.'
   }
 }
 /** A marker's place in the recording as the one timecode: "2:05", "1:02:05" (plan 174 S1.4). */

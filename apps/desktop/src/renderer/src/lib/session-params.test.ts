@@ -19,6 +19,35 @@ function captureConfig(patch: Partial<CaptureConfig> = {}): CaptureConfig {
 }
 
 describe('buildStartSessionParams', () => {
+  it('carries the replay ring only while the switch is on (plan 181)', () => {
+    const base = {
+      captureConfig: {
+        ...defaultCaptureConfig,
+        replayBuffer: { seconds: 60, enabled: true, explicit: false }
+      },
+      scene: null,
+      settings: { outputDirectory: '', keepOriginalRecording: false }
+    }
+    expect(buildStartSessionParams(base)).not.toHaveProperty('replay')
+    expect(buildStartSessionParams({ ...base, replayArmed: false })).not.toHaveProperty('replay')
+    // A default ring says `auto`, so the backend keeps it off a software
+    // encoder path (redesign R2); a chosen one runs anywhere.
+    expect(buildStartSessionParams({ ...base, replayArmed: true }).replay).toEqual({
+      seconds: 60,
+      auto: true
+    })
+    const chosen = {
+      ...base,
+      captureConfig: {
+        ...base.captureConfig,
+        replayBuffer: { seconds: 60, enabled: true, explicit: true }
+      }
+    }
+    expect(buildStartSessionParams({ ...chosen, replayArmed: true }).replay).toEqual({
+      seconds: 60
+    })
+  })
+
   it('never forwards renderer-owned filesystem or executable paths', () => {
     const params = buildStartSessionParams({
       captureConfig: captureConfig(),

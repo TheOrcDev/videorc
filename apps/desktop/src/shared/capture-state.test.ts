@@ -8,6 +8,8 @@ import {
   livestreamOnAirFromPayload,
   recordingStateFromPayload,
   sessionActivity,
+  sessionIsReplayOnly,
+  sessionOwnsTransport,
   type MainCaptureState
 } from './capture-state'
 
@@ -91,6 +93,18 @@ describe('recordingStateFromPayload', () => {
     expect(recordingStateFromPayload({ state: 'idle', extra: true })).toBe('idle')
     expect(recordingStateFromPayload({ state: 'paused' })).toBeNull()
     expect(recordingStateFromPayload(null)).toBeNull()
+  })
+
+  it('reads a buffer-only session as idle, so it blocks no quit or update (plan 181)', () => {
+    expect(recordingStateFromPayload({ state: 'recording', replayOnly: true })).toBe('idle')
+    expect(recordingStateFromPayload({ state: 'starting', replayOnly: true })).toBe('idle')
+    expect(recordingStateFromPayload({ state: 'recording', replayOnly: false })).toBe('recording')
+    expect(captureStateAfterStatusPayload({ state: 'stopping', replayOnly: true })).toBe('idle')
+    expect(sessionIsReplayOnly({ replayOnly: true })).toBe(true)
+    expect(sessionIsReplayOnly({})).toBe(false)
+    expect(sessionOwnsTransport({ state: 'recording', replayOnly: true })).toBe(false)
+    expect(sessionOwnsTransport({ state: 'recording' })).toBe(true)
+    expect(sessionOwnsTransport({ state: 'idle' })).toBe(false)
   })
 
   it('fails closed after malformed status or transport loss', () => {

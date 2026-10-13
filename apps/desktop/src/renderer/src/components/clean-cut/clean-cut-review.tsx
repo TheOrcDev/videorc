@@ -103,10 +103,10 @@ import {
   type CleanCutJobDetailWithKeeps,
   type CleanCutTranscript as CleanCutTranscriptData
 } from '@/lib/clean-cut-view'
-import { isActiveRecordingState, plural } from '@/lib/format'
+import { plural } from '@/lib/format'
 import { isCommandKey } from '@/lib/platform'
 import { cn } from '@/lib/utils'
-import { sessionIsLive } from '../../../../shared/capture-state'
+import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'
 
 const SessionPlayer = lazy(async () => ({
   default: (await import('@/components/media/session-player')).SessionPlayer
@@ -374,7 +374,8 @@ export function CleanCutReview({
   const title = source?.title.trim() || UNTITLED
   const playable =
     !source || (source.status === 'completed' && source.finalizationState !== 'finalizing')
-  const captureActive = isActiveRecordingState(recording.state)
+  // Plan 181: the default ring is not a capture that Clean cut must wait for.
+  const captureActive = sessionOwnsTransport(recording)
   const job = data?.job ?? (load.kind === 'waiting' ? load.job : null)
   const status = cleanCutStatusView(job, { captureActive, streaming: sessionIsLive(recording) })
   const editable = data ? cleanCutJobEditable(data.job) : false

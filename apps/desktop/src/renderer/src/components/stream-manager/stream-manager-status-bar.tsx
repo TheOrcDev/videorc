@@ -27,7 +27,13 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/h
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { STAT_NAMES } from '@/components/stream-manager/stats-bar'
-import type { AudienceSnapshot, CommentHighlightAnchor, LiveChatProviderState } from '@/lib/backend'
+import type {
+  AudienceSnapshot,
+  ClipContext,
+  CommentHighlightAnchor,
+  LiveChatProviderState
+} from '@/lib/backend'
+import { clipLengthWords } from '../../../../shared/clip-marks'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { chatStateLabel } from '@/lib/state-labels'
@@ -115,6 +121,12 @@ export function providerCapabilityTitle(
   return lines.filter(Boolean).join('\n')
 }
 
+/** The Clip button's hint: what it saves, its key, and the spoken way. */
+function clipHint(clip: ClipContext | undefined): string {
+  const key = clip?.shortcutLabel ? ` (${clip.shortcutLabel})` : ''
+  return `Save the last ${clipLengthWords(clip?.seconds)} as a clip${key}, or say “clip that”`
+}
+
 export function StreamManagerStatusBar({
   providers,
   audience,
@@ -124,6 +136,7 @@ export function StreamManagerStatusBar({
   onHighlightAnchorChange,
   onClear,
   onMarkClip,
+  clip,
   onOpenPreview,
   onSearchChat,
   onFocusComposer,
@@ -138,9 +151,12 @@ export function StreamManagerStatusBar({
   onToggleAlwaysOnTop?: () => void
   onHighlightAnchorChange?: (anchor: CommentHighlightAnchor) => void
   onClear?: () => void
-  /** Plan 068 D6: present only while on air. Word and icon: mid-stream there
-   * is no time to hover. */
+  /** The one Clip action (plan 068 D6; plan 181 R4): present whenever the
+   * ring holds frames or a session runs. Word and icon: mid-stream there is
+   * no time to hover. */
   onMarkClip?: () => void
+  /** The ring's length and the Save clip key, for the button's hint. */
+  clip?: ClipContext
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
    * is still clickable; below 800 px only the key shows, below 640 px they
@@ -301,10 +317,10 @@ export function StreamManagerStatusBar({
           ) : null}
           {onMarkClip ? (
             <StatusBarAction
-              hint="Mark this moment for a clip (or say “clip that”)"
+              hint={clipHint(clip)}
               icon={<ClipIcon aria-hidden />}
-              label="Mark clip"
-              text="Mark clip"
+              label="Clip"
+              text="Clip"
               onClick={onMarkClip}
             />
           ) : null}
@@ -382,7 +398,10 @@ export function StreamManagerStatusBar({
               {onMarkClip ? (
                 <DropdownMenuItem onSelect={onMarkClip}>
                   <ClipIcon />
-                  Mark clip
+                  Clip
+                  {clip?.shortcutLabel ? (
+                    <DropdownMenuShortcut>{clip.shortcutLabel}</DropdownMenuShortcut>
+                  ) : null}
                 </DropdownMenuItem>
               ) : null}
               {onOpenPreview ? (

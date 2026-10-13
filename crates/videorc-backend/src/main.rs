@@ -100,6 +100,7 @@ mod remote_lan;
 mod remote_lan_server;
 mod repair;
 mod repair_service;
+mod replay_buffer;
 mod resource_authority;
 mod scene;
 mod scene_geometry;
@@ -557,6 +558,8 @@ async fn run_backend() -> Result<()> {
     }
     let mut state = AppState::new(token.clone(), port, events, database);
     state.oauth_callback_port = oauth_callback_port;
+    // Plan 181: a crash leaves replay rings behind; nothing can reuse them.
+    replay_buffer::clean_leftovers(&state);
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -5440,6 +5443,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.utterance.dismiss"
         | "cohost.utterance.say"
         | "clip.mark"
+        // Plan 181 S3: answers at once; the save runs on its own task and
+        // reports through replay.saved / replay.saveFailed.
+        | "replay.save"
         | "session.marker.voice.configure"
         | "session.marker.create"
         | "session.marker.rename"
@@ -5691,6 +5697,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cleanCut.list"
         | "cleanCut.transcript"
         | "clip.marks.list"
+        | "replay.status"
         | "session.markers.list"
         | "session.marker.get"
         | "preview.live.status"
@@ -10879,11 +10886,21 @@ async fn handle_text_message_with_role(
                             }
                             ServerResponse::ok(command.id, status)
                         }
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "session-start-failed",
-                            error.to_string(),
-                        ),
+                        Err(error) => {
+                            // Plan 181 (owner redesign, guard): an automatic
+                            // buffer-only start on a software encoder is a
+                            // typed refusal, so the renderer keeps the switch
+                            // off and says why instead of retrying.
+                            let code = if error
+                                .downcast_ref::<replay_buffer::AutoStartRefused>()
+                                .is_some()
+                            {
+                                replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE
+                            } else {
+                                "session-start-failed"
+                            };
+                            ServerResponse::error(command.id, code, error.to_string())
+                        }
                     }
                 }
                 Err(error) => {
@@ -12708,6 +12725,11 @@ async fn handle_text_message_with_role(
             Ok(event) => ServerResponse::ok(command.id, event),
             Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
         },
+        "replay.status" => ServerResponse::ok(command.id, replay_buffer::snapshot(state)),
+        "replay.save" => match replay_buffer::request_save(state, None) {
+            Ok(accepted) => ServerResponse::ok(command.id, accepted),
+            Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
+        },
         "clip.marks.list" => {
             match serde_json::from_value::<protocol::ClipMarksListParams>(command.params) {
                 Ok(params) => match clip_marks::list_marks(state, &params.session_id) {
@@ -13149,6 +13171,7 @@ async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus
             pipeline: None,
             duration_ms: None,
             message: Some("Finalizing recording output.".to_string()),
+            replay_only: false,
         };
     }
     idle_status()

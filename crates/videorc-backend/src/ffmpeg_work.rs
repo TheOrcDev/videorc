@@ -29,6 +29,11 @@ impl MaintenanceDeferral {
 struct FfmpegWorkState {
     capture_waiting: usize,
     capture_active: bool,
+    /// Buffer-only sessions' captures (plan 181): the ring runs by default
+    /// whenever Videorc is open, muxing a copy of the hardware encode, so it
+    /// never defers, cancels or waits for maintenance; shutdown still joins
+    /// it. A count: the re-arm can overlap the previous ring's teardown.
+    light_captures: usize,
     finalizing_active: bool,
     /// Background MP4 exports (post-terminal finalization). They block
     /// maintenance and the shutdown lifecycle join but never a new capture.
@@ -64,6 +69,7 @@ impl FfmpegWorkCoordinator {
                     state.capture_active = true;
                     return CapturePermit {
                         coordinator: self.clone(),
+                        light: false,
                     };
                 }
                 if !waiting_registered {
@@ -75,6 +81,27 @@ impl FfmpegWorkCoordinator {
                         state.maintenance_cancel_generation.saturating_add(1);
                     state.maintenance_cancel_requested = true;
                     self.notify.notify_waiters();
+                }
+                self.notify.notified()
+            };
+            notified.await;
+        }
+    }
+
+    /// A buffer-only session's permit (plan 181, redesign R2): waits only for
+    /// an active finalization (the previous take's MP4 work), never for or
+    /// against maintenance, so posters, quality checks and repairs keep
+    /// running while the ring is on.
+    pub async fn begin_light_capture_when_available(self: &Arc<Self>) -> CapturePermit {
+        loop {
+            let notified = {
+                let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+                if !state.finalizing_active {
+                    state.light_captures = state.light_captures.saturating_add(1);
+                    return CapturePermit {
+                        coordinator: self.clone(),
+                        light: true,
+                    };
                 }
                 self.notify.notified()
             };
@@ -239,6 +266,7 @@ impl FfmpegWorkCoordinator {
         FfmpegWorkSnapshot {
             capture_waiting: state.capture_waiting,
             capture_active: state.capture_active,
+            light_capture_active: state.light_captures > 0,
             finalizing_active: state.finalizing_active,
             export_active: state.export_active,
             maintenance_running: state.maintenance_running,
@@ -260,7 +288,10 @@ impl FfmpegWorkCoordinator {
             let _ = notified.as_mut().enable();
             let idle = {
                 let state = self.state.lock().expect("ffmpeg work state poisoned");
-                !state.capture_active && !state.finalizing_active && state.export_active == 0
+                !state.capture_active
+                    && state.light_captures == 0
+                    && !state.finalizing_active
+                    && state.export_active == 0
             };
             if idle {
                 return;
@@ -274,10 +305,14 @@ impl FfmpegWorkCoordinator {
         state.maintenance_cancel_generation > generation
     }
 
-    fn end_capture(&self) {
+    fn end_capture(&self, light: bool) {
         {
             let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-            state.capture_active = false;
+            if light {
+                state.light_captures = state.light_captures.saturating_sub(1);
+            } else {
+                state.capture_active = false;
+            }
         }
         self.notify.notify_waiters();
     }
@@ -399,6 +434,8 @@ impl Drop for RecordingFileMutationWaiter {
 pub struct FfmpegWorkSnapshot {
     pub capture_waiting: usize,
     pub capture_active: bool,
+    /// A buffer-only session's capture (plan 181): never a deferral.
+    pub light_capture_active: bool,
     pub finalizing_active: bool,
     pub export_active: usize,
     pub maintenance_running: bool,
@@ -422,11 +459,12 @@ impl FfmpegWorkSnapshot {
 #[derive(Debug)]
 pub struct CapturePermit {
     coordinator: Arc<FfmpegWorkCoordinator>,
+    light: bool,
 }
 
 impl Drop for CapturePermit {
     fn drop(&mut self) {
-        self.coordinator.end_capture();
+        self.coordinator.end_capture(self.light);
     }
 }
 
@@ -596,6 +634,42 @@ mod tests {
         drop(capture);
         drop(export);
         assert_eq!(coordinator.snapshot().export_active, 0);
+    }
+
+    /// Plan 181 (redesign R2): the default ring's capture is light. Posters
+    /// and other maintenance run beside it, a waiting maintenance job is not
+    /// cancelled by it, and shutdown still joins it.
+    #[tokio::test]
+    async fn light_capture_never_defers_maintenance_but_shutdown_joins_it() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let ring = coordinator.begin_light_capture_when_available().await;
+        assert!(coordinator.snapshot().light_capture_active);
+        assert!(!coordinator.snapshot().capture_active);
+        let maintenance = coordinator
+            .try_begin_maintenance()
+            .expect("maintenance runs beside a light capture");
+        assert!(!coordinator.snapshot().maintenance_cancel_requested);
+        // A second light capture (the re-arm) starts beside running maintenance.
+        let next = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            coordinator.begin_light_capture_when_available(),
+        )
+        .await
+        .expect("a light capture never waits for maintenance");
+        assert!(!coordinator.snapshot().maintenance_cancel_requested);
+        drop(maintenance);
+        drop(next);
+        let join = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_for_capture_and_finalization_idle().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!join.is_finished(), "shutdown join must wait for the ring");
+        drop(ring);
+        tokio::time::timeout(std::time::Duration::from_secs(1), join)
+            .await
+            .expect("shutdown join must resolve once the ring's permit drops")
+            .unwrap();
     }
 
     #[tokio::test]

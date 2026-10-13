@@ -86,10 +86,30 @@ describe('Linux FFmpeg capability policy', () => {
     ' ... format           V->V       Convert the input video to one of the specified pixel formats.',
     ' ... hwupload         V->V       Upload a normal frame to a hardware frame'
   ].join('\n')
+  const muxersOutput = [
+    'File formats:',
+    ' D. = Demuxing supported',
+    ' .E = Muxing supported',
+    ' --',
+    '  E  mp4             MP4 (MPEG-4 Part 14)',
+    '  E  mpegts          MPEG-TS (MPEG-2 Transport Stream)',
+    '  E  segment         segment',
+    '  E  stream_segment,ssegment streaming segment muxer'
+  ].join('\n')
+  const demuxersOutput = [
+    'File formats:',
+    ' D   concat          Virtual concatenation script',
+    ' D   mpegts          MPEG-TS (MPEG-2 Transport Stream)',
+    ' D   mpegtsraw       raw MPEG-TS (MPEG-2 Transport Stream)'
+  ].join('\n')
+  const bitstreamFiltersOutput = ['Bitstream filters:', 'aac_adtstoasc', 'h264_mp4toannexb'].join(
+    '\n'
+  )
+  const ring = { muxersOutput, demuxersOutput, bitstreamFiltersOutput }
 
   it('accepts exactly the LGPL VAAPI plus OpenH264 contract with the Clean cut filters', () => {
     assert.deepEqual(
-      assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, filtersOutput }),
+      assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, filtersOutput, ...ring }),
       {
         ok: true,
         problems: []
@@ -113,7 +133,8 @@ describe('Linux FFmpeg capability policy', () => {
     const assessment = assessLinuxFfmpegCapabilities({
       versionOutput: versionOutput.replace('--disable-gpl', '--enable-gpl'),
       encodersOutput: ' V..... h264_vaapi VAAPI H.264 encoder',
-      filtersOutput
+      filtersOutput,
+      ...ring
     })
     assert.match(assessment.problems.join('\n'), /forbidden configure flag --enable-gpl/)
     assert.match(assessment.problems.join('\n'), /missing H.264 encoder libopenh264/)
@@ -121,7 +142,8 @@ describe('Linux FFmpeg capability policy', () => {
       assessLinuxFfmpegCapabilities({
         versionOutput: 'ffmpeg version 8.1.2',
         encodersOutput,
-        filtersOutput
+        filtersOutput,
+        ...ring
       }).problems.join('\n'),
       /configuration line/
     )
@@ -134,10 +156,54 @@ describe('Linux FFmpeg capability policy', () => {
       filtersOutput: filtersOutput
         .split('\n')
         .filter((line) => !/ hwupload /.test(line))
-        .join('\n')
+        .join('\n'),
+      ...ring
     })
     assert.deepEqual(withoutUpload.problems, ['missing filter hwupload'])
-    const unlisted = assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput })
+    const unlisted = assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, ...ring })
     assert.deepEqual(unlisted.problems, ['ffmpeg -filters output was not provided'])
+  })
+
+  it('fails closed without the replay ring components or their listings (plan 181)', () => {
+    const withoutRing = assessLinuxFfmpegCapabilities({
+      versionOutput,
+      encodersOutput,
+      filtersOutput,
+      muxersOutput: muxersOutput
+        .split('\n')
+        .filter((line) => !/ segment /.test(line))
+        .join('\n'),
+      demuxersOutput: demuxersOutput
+        .split('\n')
+        .filter((line) => !/ concat /.test(line))
+        .join('\n'),
+      bitstreamFiltersOutput: 'Bitstream filters:\nh264_mp4toannexb'
+    })
+    assert.deepEqual(withoutRing.problems, [
+      'missing muxer segment',
+      'missing demuxer concat',
+      'missing bitstream filter aac_adtstoasc'
+    ])
+    // `stream_segment,ssegment` is not `segment`; `mpegtsraw` is not `mpegts`.
+    const lookalikes = assessLinuxFfmpegCapabilities({
+      versionOutput,
+      encodersOutput,
+      filtersOutput,
+      muxersOutput: '  E  stream_segment,ssegment streaming segment muxer\n  E  mp4  MP4',
+      demuxersOutput:
+        ' D   mpegtsraw       raw MPEG-TS\n D   concat          Virtual concatenation',
+      bitstreamFiltersOutput
+    })
+    assert.deepEqual(lookalikes.problems, [
+      'missing muxer segment',
+      'missing muxer mpegts',
+      'missing demuxer mpegts'
+    ])
+    const unlisted = assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, filtersOutput })
+    assert.deepEqual(unlisted.problems, [
+      'ffmpeg -muxers output was not provided',
+      'ffmpeg -demuxers output was not provided',
+      'ffmpeg -bsfs output was not provided'
+    ])
   })
 })

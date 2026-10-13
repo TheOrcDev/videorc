@@ -654,6 +654,7 @@ fn benchmark_session_params(video: &VideoSettings, directory: &Path) -> StartSes
         captions: None,
         simulcast: None,
         requested_at_ms: None,
+        replay: None,
         purpose: SessionPurpose::PerformanceCheck,
     }
 }

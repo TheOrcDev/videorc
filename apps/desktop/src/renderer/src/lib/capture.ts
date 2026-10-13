@@ -132,6 +132,39 @@ export type CaptureConfig = {
   streamKey: string
   streaming: StreamingSettings
   captions: CaptionsCaptureSettings
+  /** The replay buffer's settings (plan 181 S5.6). Arming is runtime state. */
+  replayBuffer: ReplayBufferSettings
+}
+
+/**
+ * Clips (plan 181, the owner's redesign R2): the ring keeps the last
+ * `seconds` whenever Videorc is open. `enabled` is the one switch on the
+ * Output page, on by default; `explicit` says the user set it, so a default
+ * that the backend refuses (a software encoder path) stays off and says
+ * why, while a choice runs anywhere.
+ */
+export type ReplayBufferSettings = {
+  seconds: number
+  enabled: boolean
+  explicit: boolean
+}
+
+export const REPLAY_BUFFER_DEFAULT_SECONDS = 30
+/** The lengths the Output page offers, in seconds (plan 181). */
+export const REPLAY_BUFFER_LENGTH_OPTIONS = [15, 30, 60, 120, 300] as const
+
+export function normalizeReplayBufferSettings(value: unknown): ReplayBufferSettings {
+  const loaded = (value ?? {}) as Partial<ReplayBufferSettings>
+  const seconds =
+    typeof loaded.seconds === 'number' &&
+    (REPLAY_BUFFER_LENGTH_OPTIONS as readonly number[]).includes(loaded.seconds)
+      ? loaded.seconds
+      : REPLAY_BUFFER_DEFAULT_SECONDS
+  return {
+    seconds,
+    enabled: typeof loaded.enabled === 'boolean' ? loaded.enabled : true,
+    explicit: typeof loaded.explicit === 'boolean' ? loaded.explicit : false
+  }
 }
 
 /** The vertical simulcast leg's user-facing settings. */
@@ -1302,7 +1335,8 @@ export const defaultCaptureConfig: CaptureConfig = {
   rtmpServerUrl: rtmpDefaults.youtube,
   streamKey: '',
   streaming: defaultStreamingSettings(),
-  captions: defaultCaptionsCaptureSettings()
+  captions: defaultCaptionsCaptureSettings(),
+  replayBuffer: { seconds: REPLAY_BUFFER_DEFAULT_SECONDS, enabled: true, explicit: false }
 }
 
 export function defaultCaptionsCaptureSettings(): CaptionsCaptureSettings {
@@ -1423,7 +1457,8 @@ export function loadCaptureConfig(): CaptureConfig {
     rtmpServerUrl: loaded.rtmpServerUrl ?? defaultCaptureConfig.rtmpServerUrl,
     streamKey: loaded.streamKey ?? defaultCaptureConfig.streamKey,
     streaming: migrateStreamingSettings(loaded),
-    captions: normalizeCaptionsCaptureSettings(loaded.captions)
+    captions: normalizeCaptionsCaptureSettings(loaded.captions),
+    replayBuffer: normalizeReplayBufferSettings(loaded.replayBuffer)
   }
 }
 

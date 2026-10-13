@@ -24,6 +24,7 @@ describe('global layout shortcuts', () => {
       stopSession: vi.fn(),
       toggleMicrophoneMute: vi.fn(),
       markClip: vi.fn(),
+      saveReplay: vi.fn(),
       switchLayout: vi.fn()
     }
     for (const action of GLOBAL_SHORTCUT_ACTIONS.filter((action) => action.startsWith('layout')))
@@ -33,6 +34,10 @@ describe('global layout shortcuts', () => {
     executeGlobalShortcut('clip-mark', context)
     expect(context.markClip).toHaveBeenCalledOnce()
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
+    // Plan 181 (redesign R4): one clip action; a replay-save key never registers.
+    executeGlobalShortcut('replay-save' as GlobalShortcutAction, context)
+    expect(context.markClip).toHaveBeenCalledOnce()
+    expect(globalShortcutEntries({}).some(([id]) => (id as string) === 'replay-save')).toBe(false)
     executeGlobalShortcut('invalid' as GlobalShortcutAction, context)
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
     expect(context.switchLayout).toHaveBeenCalledTimes(12)
@@ -73,7 +78,7 @@ describe('global layout shortcuts', () => {
   })
   it('keeps stable IDs, unassigned defaults and validates unknown actions', () => {
     expect(globalShortcutEntries({})).toHaveLength(17)
-    // Plan 068 D6: Mark clip ships unbound.
+    // Plan 068 D6 / plan 181 R4: Save a clip ships unbound.
     expect(globalShortcutEntries({}).find(([id]) => id === 'clip-mark')?.[1]).toBeUndefined()
     expect(withGlobalShortcut({}, 'clip-mark', 'Cmd+Shift+K').clipMark).toBe('Cmd+Shift+K')
     // Plan 069 S6: System audio ships unbound too.

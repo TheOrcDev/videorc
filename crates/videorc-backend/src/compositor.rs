@@ -562,6 +562,8 @@ pub struct CompositorLoopConfig {
 struct CompositorCaptureLease {
     session_id: String,
     run_id: String,
+    /// A buffer-only session's lease (plan 181): drafts keep following the run.
+    replay_only: bool,
     /// The preview run's writable dimensions, parked here so bounds updates
     /// cannot resize the canvas underneath the encoder.
     render_dimensions: Arc<AtomicU64>,
@@ -576,6 +578,10 @@ pub struct CompositorArmParams {
     pub width: u32,
     pub height: u32,
     pub frame_consumer: CompositorFrameConsumer,
+    /// The lease belongs to a buffer-only session (plan 181): scene editor
+    /// drafts stay allowed and follow the run, since the ring is a buffer and
+    /// never a recording or a stream.
+    pub replay_only: bool,
     pub caption_overlay_on_primary: bool,
     pub caption_overlay_on_aux: bool,
     pub highlight_overlay_on_primary: bool,
@@ -829,9 +835,13 @@ struct CompositorRenderCache {
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
     transition: Option<SceneTransition>,
-    /// The editor draft as of the last refresh; `None` while a capture leases
-    /// the run. The tick re-checks TTL and release revision before use.
+    /// The editor draft as of the last refresh; `None` while a recording or a
+    /// stream leases the run. The tick re-checks TTL and release revision
+    /// before use.
     editor_draft: Option<EditorDraft>,
+    /// The run is leased by a buffer-only session (plan 181): drafts apply
+    /// to it whatever its frame consumer, the ring being a buffer only.
+    drafts_follow_capture: bool,
     active_image_source: Option<CompositorImageSource>,
     background_image_source: Option<CompositorImageSource>,
 }
@@ -873,10 +883,16 @@ impl CompositorRenderCache {
             snapshot: compositor.scene.clone(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
             transition: compositor.scene_transition.clone(),
-            editor_draft: compositor
-                .editor_draft
-                .clone()
-                .filter(|_| compositor.capture_lease.is_none()),
+            editor_draft: compositor.editor_draft.clone().filter(|_| {
+                compositor
+                    .capture_lease
+                    .as_ref()
+                    .is_none_or(|lease| lease.replay_only)
+            }),
+            drafts_follow_capture: compositor
+                .capture_lease
+                .as_ref()
+                .is_some_and(|lease| lease.replay_only),
             active_image_source,
             background_image_source,
         }
@@ -1676,12 +1692,24 @@ pub async fn set_editor_draft(
 ) -> Result<SceneEditorDraftAck, &'static str> {
     // Read the session flag as a temporary so the recording guard never nests
     // inside the compositor lock (commit paths take them one after the other).
-    let session_active = state.recording.lock().await.is_some();
+    // A buffer-only session (plan 181) is no session here: the ring is a
+    // buffer, never a recording or a stream a draft could reach.
+    let session_active = state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active| !active.replay_only);
     if let Some(reason) = editor_draft_refusal(session_active) {
         return Err(reason);
     }
     let mut compositor = state.compositor.lock().await;
-    if let Some(reason) = editor_draft_refusal(compositor.capture_lease.is_some()) {
+    if let Some(reason) = editor_draft_refusal(
+        compositor
+            .capture_lease
+            .as_ref()
+            .is_some_and(|lease| !lease.replay_only),
+    ) {
         return Err(reason);
     }
     Ok(compositor.set_editor_draft(params, Instant::now()))
@@ -2150,6 +2178,7 @@ mod editor_draft_tests {
         runtime.capture_lease = Some(CompositorCaptureLease {
             session_id: "session".to_string(),
             run_id: "run".to_string(),
+            replay_only: false,
             render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(1280, 720))),
             preview_config: CompositorLoopConfig {
                 target_fps: 30,
@@ -3081,9 +3110,18 @@ pub async fn arm_compositor_for_capture(
         compositor.capture_lease = Some(CompositorCaptureLease {
             session_id: session_id.to_string(),
             run_id: run_id.clone(),
+            replay_only: params.replay_only,
             render_dimensions,
             preview_config,
         });
+        if !params.replay_only {
+            // Decision 4 (plan 058): a draft never reaches a recording or a
+            // stream. With the ring on by default (plan 181) a draft may be
+            // live on the run this session takes over, so it ends here; the
+            // editor's next sample is refused for the session's length.
+            compositor.editor_draft = None;
+            compositor.status.editor_draft = None;
+        }
         compositor.status.width = params.width.max(1);
         compositor.status.height = params.height.max(1);
         compositor.status.target_fps = next.target_fps;
@@ -7558,7 +7596,8 @@ async fn publish_compositor_frame(
     // the preview run only. Re-checked here every tick because the cache may
     // be stale when the runtime lock was contended.
     let editor_draft = render_cache.editor_draft.as_ref().filter(|draft| {
-        editor_draft_applies(frame_consumer, stream_output.is_some())
+        (editor_draft_applies(frame_consumer, stream_output.is_some())
+            || (render_cache.drafts_follow_capture && stream_output.is_none()))
             && draft.is_live(
                 Instant::now(),
                 snapshot.as_ref().map(|snapshot| snapshot.revision),
@@ -13850,6 +13889,7 @@ mod tests {
             width,
             height,
             frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            replay_only: false,
             caption_overlay_on_primary: true,
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,

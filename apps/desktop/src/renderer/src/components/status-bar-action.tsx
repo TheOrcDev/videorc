@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils'
  * One action in a status bar (plan 174 S1.6b, H-PAT): an icon, a word, or
  * both, and optionally its shortcut. `label` is the action's name: what a screen
  * reader says, and the tooltip of an icon alone. `text` is the visible
- * word when there is room for one ("Mark clip", "Clear"); `hint` says more
+ * word when there is room for one ("Clip", "Clear"); `hint` says more
  * than the name, in the tooltip and as the button's description. Never a
  * native `title` (plan 174 S1.10). `pressed` marks a toggle that is on.
  * Props spread onto the button, so it can be a menu trigger.

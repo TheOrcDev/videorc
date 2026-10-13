@@ -131,9 +131,12 @@ export interface RemoteIntentContext {
    * must not flash the card off. Resolves the user-facing refusal reason. */
   showCommentHighlight: (messageId: string) => Promise<RemoteIntentOutcome>
   clearCommentHighlight: () => Promise<RemoteIntentOutcome>
-  /** Plan 068 D6: mark the current moment for a clip. The backend stamps the
+  /** Save a clip (plan 068 D6; plan 181 R4): the last seconds whenever the
+   * ring holds frames, and a mark while recording. The backend stamps the
    * capture clock; `ok: false` carries why nothing was kept. */
   markClip: () => Promise<RemoteIntentOutcome>
+  /** Plan 181: the ring holds frames right now. */
+  replayOn: boolean
 }
 
 export interface RemoteIntentOutcome {
@@ -261,6 +264,7 @@ export const REMOTE_INTENT_COPY = {
   takeoverHide: "Couldn't hide the takeover.",
   windowMissing: "That window isn't available.",
   messageMissing: 'Choose a message to put on stream.',
+  clipsOff: "Clips are off, and you're not recording or live.",
   unsupported: "This version of Videorc can't do that. Update Videorc.",
   failed: 'Something went wrong. Check Studio on your computer.'
 } as const
@@ -404,7 +408,9 @@ export async function executeRemoteIntent(
         return void (await ack(outcome.ok, outcome.message))
       }
       case 'clipMark': {
-        if (!context.sessionActive) return void (await ack(false, REMOTE_INTENT_COPY.notRunning))
+        // Plan 181 R4: the ring holding frames is enough for a clip.
+        if (!context.sessionActive && !context.replayOn)
+          return void (await ack(false, REMOTE_INTENT_COPY.clipsOff))
         const outcome = await context.markClip()
         return void (await ack(outcome.ok, outcome.message))
       }

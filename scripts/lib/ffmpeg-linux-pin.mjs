@@ -68,7 +68,31 @@ function configurationLine(versionOutput) {
     .find((line) => line.startsWith('configuration:'))
 }
 
-export function assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, filtersOutput }) {
+/** The replay buffer (plan 181): a rolling ring of MPEG-TS segments from the
+ * `segment` muxer, stream-copied into an MP4 through the `concat` demuxer;
+ * the MP4 muxer inserts `aac_adtstoasc` itself. Required from `-muxers`,
+ * `-demuxers` and `-bsfs`; a missing listing fails closed like `-filters`. */
+export const REQUIRED_LINUX_FFMPEG_MUXERS = ['segment', 'mpegts', 'mp4']
+export const REQUIRED_LINUX_FFMPEG_DEMUXERS = ['concat', 'mpegts']
+export const REQUIRED_LINUX_FFMPEG_BITSTREAM_FILTERS = ['aac_adtstoasc']
+
+function listedNames(output) {
+  // `-muxers` / `-demuxers` print one component per line, flags first; a
+  // comma-joined alias list (`stream_segment,ssegment`) is one component.
+  return String(output ?? '')
+    .split(/\r?\n/)
+    .flatMap((line) => line.trim().split(/\s+/).slice(0, 2))
+    .flatMap((token) => token.split(','))
+}
+
+export function assessLinuxFfmpegCapabilities({
+  versionOutput,
+  encodersOutput,
+  filtersOutput,
+  muxersOutput,
+  demuxersOutput,
+  bitstreamFiltersOutput
+}) {
   const problems = []
   const configuration = configurationLine(versionOutput)
   if (!configuration) {
@@ -94,6 +118,21 @@ export function assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, f
     const filters = filtersOutput.split(/\s+/)
     for (const filter of REQUIRED_LINUX_FFMPEG_FILTERS) {
       if (!filters.includes(filter)) problems.push(`missing filter ${filter}`)
+    }
+  }
+
+  for (const [flag, output, required, noun] of [
+    ['-muxers', muxersOutput, REQUIRED_LINUX_FFMPEG_MUXERS, 'muxer'],
+    ['-demuxers', demuxersOutput, REQUIRED_LINUX_FFMPEG_DEMUXERS, 'demuxer'],
+    ['-bsfs', bitstreamFiltersOutput, REQUIRED_LINUX_FFMPEG_BITSTREAM_FILTERS, 'bitstream filter']
+  ]) {
+    if (typeof output !== 'string') {
+      problems.push(`ffmpeg ${flag} output was not provided`)
+      continue
+    }
+    const names = listedNames(output)
+    for (const name of required) {
+      if (!names.includes(name)) problems.push(`missing ${noun} ${name}`)
     }
   }
 

@@ -17,12 +17,19 @@ import { CommandPalette } from './command-palette'
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
   recording: { state: 'idle' } as Record<string, unknown>,
+  replay: {
+    state: { state: 'off', seconds: 30, bufferedSeconds: 0 },
+    armed: false,
+    setArmed: vi.fn(),
+    save: vi.fn(async () => undefined)
+  } as Record<string, unknown>,
   theme: 'dark' as string | undefined,
   setTheme: vi.fn()
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
-  useStudioRecordingState: () => ({ recording: mocked.recording })
+  useStudioRecordingState: () => ({ recording: mocked.recording }),
+  useStudioReplay: () => mocked.replay
 }))
 vi.mock('next-themes', () => ({
   useTheme: () => ({ theme: mocked.theme, setTheme: mocked.setTheme })
@@ -195,13 +202,28 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
     expect(values()).not.toContain('Mute microphone')
   })
 
-  it('offers Mark clip only while recording or live', async () => {
+  it('offers Save clip while recording or live (plan 181 R4: one clip action)', async () => {
     await render()
-    expect(values()).not.toContain('Mark clip')
+    expect(values()).not.toContain('Save clip')
     mocked.recording = { state: 'recording', sessionId: 'rec' }
     await render()
-    await act(async () => item('Mark clip').click())
+    await act(async () => item('Save clip').click())
     expect(mocked.core.markClip).toHaveBeenCalledOnce()
+  })
+
+  it('offers Save clip while the ring holds frames with nothing recording (plan 181)', async () => {
+    await render()
+    expect(values()).not.toContain('Save clip')
+    expect(values()).not.toContain('Save replay')
+    mocked.replay = {
+      ...mocked.replay,
+      state: { state: 'on', seconds: 30, bufferedSeconds: 12, sessionId: 'ring' }
+    }
+    await render()
+    await act(async () => item('Save clip').click())
+    expect(mocked.core.markClip).toHaveBeenCalledOnce()
+    expect(values()).not.toContain('Save replay')
+    mocked.replay = { ...mocked.replay, state: { state: 'off', seconds: 30, bufferedSeconds: 0 } }
   })
 })
 

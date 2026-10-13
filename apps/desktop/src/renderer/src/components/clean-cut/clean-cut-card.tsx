@@ -53,11 +53,11 @@ import {
   type CleanCutStatusView
 } from '@/lib/clean-cut-view'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
-import { dayLabel, isActiveRecordingState, plural } from '@/lib/format'
+import { dayLabel, plural } from '@/lib/format'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
-import { sessionIsLive } from '../../../../shared/capture-state'
+import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'
 
 export type { CleanCutReviewTarget } from '@/lib/clean-cut-drafts'
 
@@ -137,7 +137,8 @@ export function CleanCutCard({
   const gate = cloudAiUploadGate(entitlements)
   const unlock = cleanCutUnlock({ signedIn, gate, capabilities: client.capabilities })
   const accountLocked = !signedIn || !gate.allowed
-  const captureActive = isActiveRecordingState(recording.state)
+  // Plan 181: the default ring is not a capture that Clean cut must wait for.
+  const captureActive = sessionOwnsTransport(recording)
   const autoStatus = cleanCutAutoStatus({ on: auto, unlock, consented: aiConsent, captureActive })
   const minutesLeft = signedIn ? cleanCutMinutesLeftLabel(client.capabilities) : null
 
