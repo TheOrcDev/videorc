@@ -35,6 +35,7 @@ import {
   buddyPetBodyTravel,
   buddyPetBox,
   buddyPetMedianBox,
+  buddyPetRecordingVideo,
   buddyPetRuns,
   buddyPetTalkAlternates,
   readBuddyPetFrame,
@@ -51,7 +52,6 @@ const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const rtmpPort = Number(process.env.VIDEORC_BUDDY_PET_RTMP_PORT ?? 19781)
 const listenerBindMs = 1500
 
-const VIDEO = Object.freeze({ width: 1280, height: 720, fps: 30, bitrateKbps: 4000 })
 /** The Buddy on the right, big enough that its tag is ~87 px. */
 const BUDDY_RECT = Object.freeze({ x: 0.7, y: 0.3, w: 0.2, h: 0.62 })
 /** The card on the left, so a look at it is a look to the viewer's left. */
@@ -78,7 +78,8 @@ const launched = await launchDevApp({
     VIDEORC_APP_DATA_DIR: join(stateDirectory, 'app-data'),
     VIDEORC_USER_DATA_DIR: userDataDirectory,
     VIDEORC_SMOKE_COMMAND_SERVER: '1',
-    VIDEORC_DISABLE_AUTO_PREVIEW: '1'
+    VIDEORC_DISABLE_AUTO_PREVIEW: '1',
+    ...(process.platform === 'linux' ? { VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1' } : {})
   }
 })
 
@@ -267,7 +268,7 @@ async function runLively(ws, smoke, { settings, packId, frames }) {
     await stopRtmpListener(listener)
     const recordingPath = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
     assertArtifactFile(label, recordingPath)
-    const timeline = await readRecording(recordingPath, { frames })
+    const timeline = await readRecording(recordingPath, { frames, video: started.video })
     writeFileSync(join(directory, 'buddy-pet-timeline.json'), JSON.stringify({ marks, timeline }))
 
     const runs = buddyPetRuns(timeline)
@@ -352,7 +353,7 @@ async function runStill(ws, smoke, { settings, packId, frames }) {
     sessionActive = false
     const recordingPath = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
     assertArtifactFile(label, recordingPath)
-    const timeline = await readRecording(recordingPath, { frames })
+    const timeline = await readRecording(recordingPath, { frames, video: started.video })
     writeFileSync(
       join(directory, 'buddy-pet-timeline.json'),
       JSON.stringify({ reactedAt, timeline })
@@ -401,6 +402,7 @@ async function runStill(ws, smoke, { settings, packId, frames }) {
 
 async function startSession(ws, smoke, directory, { stream }) {
   await ensureOverlayLayout(ws)
+  const video = buddyPetRecordingVideo({ stream: Boolean(stream) })
   const outputAuthorization = await smokeCommand(smoke, 'authorize-smoke-resource', {
     kind: 'output-directory',
     path: directory
@@ -409,15 +411,19 @@ async function startSession(ws, smoke, directory, { stream }) {
     ws,
     timeoutMs,
     'session.start',
-    sessionParams({ outputDirectoryCapability: outputAuthorization.capabilityId, stream })
+    sessionParams({
+      outputDirectoryCapability: outputAuthorization.capabilityId,
+      stream,
+      video
+    })
   )
   if (!['recording', 'streaming'].includes(started.state) || !started.sessionId) {
     throw new Error(`Expected an active session, got ${JSON.stringify(started)}`)
   }
-  return started
+  return { ...started, video }
 }
 
-function sessionParams({ outputDirectoryCapability, stream }) {
+function sessionParams({ outputDirectoryCapability, stream, video }) {
   const timestamp = '2026-01-01T00:00:00.000Z'
   return {
     sources: { testPattern: true },
@@ -443,7 +449,7 @@ function sessionParams({ outputDirectoryCapability, stream }) {
       recordEnabled: true,
       streamEnabled: Boolean(stream),
       outputDirectoryCapability,
-      video: { preset: 'custom', ...VIDEO },
+      video: { preset: 'custom', ...video },
       rtmp: {
         preset: 'custom',
         serverUrl: stream?.serverUrl ?? '',
@@ -485,11 +491,11 @@ function sessionParams({ outputDirectoryCapability, stream }) {
 }
 
 /** Decode the recording around the pet, frame by frame, and read each one. */
-async function readRecording(path, { frames }) {
+async function readRecording(path, { frames, video }) {
   const size = probeVideoSize(path)
-  if (size?.width !== VIDEO.width || size?.height !== VIDEO.height) {
+  if (size?.width !== video.width || size?.height !== video.height) {
     throw new Error(
-      `The recording is ${JSON.stringify(size)}, expected ${VIDEO.width}x${VIDEO.height}`
+      `The recording is ${JSON.stringify(size)}, expected ${video.width}x${video.height}`
     )
   }
   const box = buddyPetBox(BUDDY_RECT, size.width, size.height)
@@ -511,7 +517,7 @@ async function readRecording(path, { frames }) {
     path,
     '-an',
     '-vf',
-    `fps=${VIDEO.fps},crop=${crop.width}:${crop.height}:${crop.x}:${crop.y},format=rgb24`,
+    `fps=${video.fps},crop=${crop.width}:${crop.height}:${crop.x}:${crop.y},format=rgb24`,
     '-f',
     'rawvideo',
     'pipe:1'
@@ -530,7 +536,7 @@ async function readRecording(path, { frames }) {
           origin: [crop.x, crop.y],
           frames
         })
-        timeline.push({ t: timeline.length / VIDEO.fps, ...read })
+        timeline.push({ t: timeline.length / video.fps, ...read })
       }
     })
     child.stderr.setEncoding('utf8')
