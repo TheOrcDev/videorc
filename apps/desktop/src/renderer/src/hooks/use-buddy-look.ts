@@ -11,7 +11,7 @@ import {
 
 import { BackendClient } from '@/backendClient'
 import { useStudioCore } from '@/hooks/use-studio'
-import { userErrorMessage } from '@/lib/user-error'
+import { inlineUserError } from '@/lib/user-error'
 import type {
   AiCapabilities,
   CohostAvatarCreateParams,
@@ -77,15 +77,13 @@ const KEEP_TIMEOUT_MS = 35_000
 const RUN_WATCHDOG_MS = 200_000
 
 function problemOf(error: unknown): BuddyLookProblem {
-  const copy = userErrorMessage(error, { action: 'update', object: "Buddy's look" })
-  console.warn(`[buddy-look] ${copy.title}:`, copy.raw || error)
   const code =
     typeof error === 'object' && error !== null && 'code' in error
       ? String((error as { code: unknown }).code)
       : 'failed'
   return {
     code,
-    message: copy.text
+    message: inlineUserError(error, { action: 'update', object: "Buddy's look" }, 'buddy-look')
   }
 }
 

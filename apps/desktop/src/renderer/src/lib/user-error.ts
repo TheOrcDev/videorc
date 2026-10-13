@@ -167,6 +167,23 @@ export function toastUserError(
   return copy
 }
 
+/**
+ * The same copy as a toast, for an inline FieldError or Alert: one line,
+ * raw text only in the console. A cancel still returns its sentence so a
+ * caller that already caught it can show it.
+ */
+export function inlineUserError(
+  error: unknown,
+  context?: UserErrorContext,
+  tag = 'user-error'
+): string {
+  const copy = userErrorMessage(error, context)
+  if (copy.kind !== 'canceled') {
+    console.warn(`[${tag}] ${copy.title}:`, copy.raw || error)
+  }
+  return copy.text
+}
+
 /** One toast id for "Videorc is reconnecting", so it never stacks. */
 export const OFFLINE_TOAST_ID = 'videorc-offline'
 

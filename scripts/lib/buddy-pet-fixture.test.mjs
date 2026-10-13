@@ -20,6 +20,7 @@ import {
   buddyPetMedianBox,
   buddyPetRuns,
   buddyPetTalkAlternates,
+  buddyPetRecordingVideo,
   readBuddyPetFrame,
   writeBuddyPetFixturePack
 } from './buddy-pet-fixture.mjs'
@@ -182,5 +183,32 @@ describe('buddy pet smoke fixture', () => {
       ]),
       [10, 10, 50, 90]
     )
+  })
+
+  it('records at the stream profile on Linux so one encode is not refused', () => {
+    assert.deepEqual(buddyPetRecordingVideo({ platform: 'linux', stream: true }), {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrateKbps: 6000
+    })
+    assert.deepEqual(buddyPetRecordingVideo({ platform: 'linux', stream: false }), {
+      width: 1280,
+      height: 720,
+      fps: 30,
+      bitrateKbps: 4000
+    })
+    assert.deepEqual(buddyPetRecordingVideo({ platform: 'darwin', stream: true }), {
+      width: 1280,
+      height: 720,
+      fps: 30,
+      bitrateKbps: 4000
+    })
+    assert.deepEqual(buddyPetRecordingVideo({ platform: 'win32', stream: true }), {
+      width: 1280,
+      height: 720,
+      fps: 30,
+      bitrateKbps: 4000
+    })
   })
 })

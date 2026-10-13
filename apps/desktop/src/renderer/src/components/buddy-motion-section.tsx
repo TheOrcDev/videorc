@@ -15,6 +15,7 @@ import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import type { CohostPersona } from '@/lib/backend'
 import { BUDDY_MOTION_TICKS, buddySleepChoices, buddySleepLabel } from '@/lib/buddy-pet-view'
+import { inlineUserError } from '@/lib/user-error'
 import type { BuddyMotionSettings } from '../../../shared/buddy-pet'
 
 export interface BuddyMotionSectionProps {
@@ -43,7 +44,7 @@ export function BuddyMotionSection({
   const save = (next: BuddyMotionSettings): void => {
     setError(null)
     onSave({ ...persona, motion: next }).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : "Couldn't save the motion.")
+      setError(inlineUserError(failure, { action: 'save', object: 'the motion' }, 'buddy-motion'))
     )
   }
   const commitIntensity = (value: number): void => {

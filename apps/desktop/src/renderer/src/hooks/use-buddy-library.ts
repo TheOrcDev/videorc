@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 
 import type { BackendClient } from '@/backendClient'
-import { userErrorMessage } from '@/lib/user-error'
+import { inlineUserError } from '@/lib/user-error'
 import type {
   CohostLibraryUpdateParams,
   BuddyLibraryId,
@@ -43,15 +43,17 @@ const INITIAL: BuddyLibraryViewState = {
 const ACCEPT_TIMEOUT_MS = 15_000
 
 function problemOf(error: unknown): BuddyLibraryProblem {
-  const copy = userErrorMessage(error, { action: 'update', object: 'your Buddy library' })
-  console.warn(`[buddy-library] ${copy.title}:`, copy.raw || error)
   const code =
     typeof error === 'object' && error !== null && 'code' in error
       ? String((error as { code: unknown }).code)
       : 'failed'
   return {
     code,
-    message: copy.text
+    message: inlineUserError(
+      error,
+      { action: 'update', object: 'your Buddy library' },
+      'buddy-library'
+    )
   }
 }
 
