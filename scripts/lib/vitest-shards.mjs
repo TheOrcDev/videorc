@@ -7,6 +7,7 @@
 /** The desktop suite's test files, relative to apps/desktop. vitest.config.ts uses this. */
 export const DESKTOP_VITEST_INCLUDE = Object.freeze([
   'src/main/**/*.test.ts',
+  'src/preload/**/*.test.ts',
   'src/renderer/src/**/*.test.ts',
   'src/shared/**/*.test.ts'
 ])
