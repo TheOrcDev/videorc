@@ -1963,6 +1963,50 @@ describe('real StudioProvider lifecycle', () => {
     }
   )
 
+  it("never saves the shipped overlay defaults over the backend's layout at launch", async () => {
+    // ogre 2026-10-13: with captions burned on the stream (the default), every
+    // launch seeded the caption switches into the DEFAULT layout before
+    // `overlays.layout.get` answered and saved it: Buddy left the stream and
+    // the recording, and every overlay placement reset.
+    const backend = new StudioBackend()
+    const stored: OverlayLayout = {
+      ...DEFAULT_OVERLAY_LAYOUT,
+      buddy: { ...DEFAULT_OVERLAY_LAYOUT.buddy, showOnStream: true, showInRecording: true },
+      captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, showOnStream: true }
+    }
+    backend.overlayLayout = stored
+    const release = backend.deferResponse('overlays.layout.get', stored)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        captions: { ...defaultCaptureConfig.captions, burnTarget: 'stream' }
+      })
+    )
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    // Connected and bootstrapped while the layout is still on its way.
+    await waitForObservation(() => observation?.core.scene != null)
+    expect(backend.commands.map((command) => command.method)).not.toContain('overlays.layout.set')
+    await act(async () => release())
+    await waitForObservation(() => observation?.core.overlayLayout.buddy.showOnStream === true)
+    expect(backend.overlayLayout).toEqual(stored)
+    expect(backend.commands.map((command) => command.method)).not.toContain('overlays.layout.set')
+  })
+
   it('keeps the picker and import alive across session start and stop', async () => {
     const { backend, latest } = await mountFreeformTransformProvider()
     const screen: StreamScreen = {
