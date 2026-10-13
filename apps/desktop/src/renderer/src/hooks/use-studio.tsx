@@ -1,3 +1,4 @@
+import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
@@ -1313,6 +1314,7 @@ export type StudioContextValue = {
   startRequestPending: boolean
   stopRequestPending: boolean
   screenImportPending: boolean
+  screenImportPhase: TakeoverImportPhase
   streamMetadataSavePending: boolean
   supportBundleExportPending: boolean
   // remote control (Stream Deck et al) — status is pushed by the backend
@@ -3583,7 +3585,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // hotkey was last armed for its second press.
   const [stopConfirmation, setStopConfirmation] = useState<SessionStopConfirmation | null>(null)
   const endLivestreamArmedAtRef = useRef<number | null>(null)
-  const [screenImportPending, setScreenImportPending] = useState(false)
+  const [screenImportPhase, setScreenImportPhase] = useState<TakeoverImportPhase>('idle')
+  const screenImportPending = screenImportPhase !== 'idle'
+  const screenImporter = useRef(createTakeoverImporter())
+  const screenListEventRevision = useRef(0)
+  const activeScreenEventRevision = useRef(0)
+  useEffect(() => {
+    screenImporter.current.reset()
+    setScreenImportPhase('idle')
+    const importer = screenImporter.current
+    return () => importer.reset()
+  }, [client, wsStatus])
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
   const [settings, setSettings] = useState<SettingsState>(() =>
@@ -5905,22 +5917,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setNoiseCleanupJobs(nextJobs)
   }, [])
 
-  const refreshScreensForClient = useCallback(
-    async (activeClient: BackendClient | null) => {
-      if (!activeClient) {
-        return
-      }
-
-      const [nextScreens, nextActiveScreen] = await Promise.all([
-        activeClient.request<StreamScreen[]>('screens.list'),
-        activeClient.request<StreamScreen | null>('screens.active')
-      ])
-      setScreens(nextScreens)
-      commitActiveScreen(nextActiveScreen)
-    },
-    [commitActiveScreen]
-  )
-
   const refreshPlatformAccountsForClient = useCallback(
     async (activeClient: BackendClient | null) => {
       if (!activeClient) {
@@ -7255,10 +7251,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyScene(payload as Scene)
       }),
       nextClient.on('screens.changed', (payload) => {
+        screenListEventRevision.current += 1
         bootstrapGuard.mark('screenList')
         setScreens(payload as StreamScreen[])
       }),
       nextClient.on('screens.active.changed', (payload) => {
+        activeScreenEventRevision.current += 1
         bootstrapGuard.mark('activeScreen')
         commitActiveScreen(payload as StreamScreen | null)
       }),
@@ -8137,6 +8135,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           setSessionsLoadingMore(false)
           let accountFailure: { error: unknown } | null = null
           const deviceRead = ++deviceListReadsRef.current.issued
+          const screenListRevision = screenListEventRevision.current
+          const activeScreenRevision = activeScreenEventRevision.current
           try {
             setLastError(null)
             const [
@@ -8214,8 +8214,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               setSessionStorageTotals(nextSessionStorage)
             }
             setDiagnosticStats(nextDiagnostics)
-            setScreens(nextScreens)
-            commitActiveScreen(nextActiveScreen)
+            if (screenListEventRevision.current === screenListRevision) setScreens(nextScreens)
+            if (activeScreenEventRevision.current === activeScreenRevision)
+              commitActiveScreen(nextActiveScreen)
             setPlatformAccounts(nextPlatformAccounts)
             setOauthProviderCredentials(nextOauthProviderCredentials)
             setPlatformAccountValidations(nextPlatformAccountValidations)
@@ -10488,28 +10489,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
 
-    try {
-      setLastError(null)
-      const selection = await window.videorc.pickScreenImage()
-      if (!selection) {
-        return
-      }
-
-      setScreenImportPending(true)
-      const screen = await client.request<StreamScreen>('screens.importImage', {
-        sourceCapability: selection.capabilityId
-      })
-      setScreens((current) => {
-        const withoutExisting = (current ?? []).filter((item) => item.id !== screen.id)
-        return [...withoutExisting, screen].sort((a, b) => a.sortOrder - b.sortOrder)
-      })
-      await refreshScreensForClient(client)
-    } catch (error) {
-      reportError(error, { action: 'import', object: 'the image' })
-    } finally {
-      setScreenImportPending(false)
-    }
-  }, [client, refreshScreensForClient, reportError, wsStatus])
+    const revision = screenListEventRevision.current
+    await screenImporter.current.run({
+      pick: () => window.videorc.pickScreenImage(),
+      importImage: (selection) => {
+        setLastError(null)
+        return client.request<StreamScreen>('screens.importImage', {
+          sourceCapability: selection.capabilityId
+        })
+      },
+      isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
+      onPhase: setScreenImportPhase,
+      onImported: (screen) => {
+        // The reliable list event wins over a late reply (including deletion
+        // from another window). Never refresh/reapply the active takeover.
+        if (screenListEventRevision.current !== revision) return
+        setScreens((current) =>
+          [...(current ?? []).filter((item) => item.id !== screen.id), screen].sort(
+            (a, b) => a.sortOrder - b.sortOrder
+          )
+        )
+      },
+      onError: (error) => reportError(error, { action: 'import', object: 'the image' })
+    })
+  }, [client, reportError, wsStatus])
 
   const openSystemPermissionSettings = useCallback(
     async (pane: SystemPermissionPane) => {
@@ -11604,9 +11607,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
+      const revision = screenListEventRevision.current
       try {
         setLastError(null)
         const screen = await client.request<StreamScreen>('screens.rename', { screenId, name })
+        if (clientRef.current !== client || screenListEventRevision.current !== revision) return
         setScreens((current) =>
           (current ?? []).map((item) => (item.id === screen.id ? screen : item))
         )
@@ -11624,11 +11629,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
+      const revision = screenListEventRevision.current
       try {
         setLastError(null)
         const name = screens.find((screen) => screen.id === screenId)?.name ?? 'takeover'
         const nextScreens = await client.request<StreamScreen[]>('screens.delete', { screenId })
-        setScreens(nextScreens)
+        if (clientRef.current === client && screenListEventRevision.current === revision)
+          setScreens(nextScreens)
         // A confirmed delete may say so, and names what went (plan 174 C-1).
         toast.success(`Deleted “${name}”`)
       } catch (error) {
@@ -11658,10 +11665,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       screenIds.splice(nextIndex, 0, moved)
 
+      const revision = screenListEventRevision.current
       try {
         setLastError(null)
         const nextScreens = await client.request<StreamScreen[]>('screens.reorder', { screenIds })
-        setScreens(nextScreens)
+        if (clientRef.current === client && screenListEventRevision.current === revision)
+          setScreens(nextScreens)
       } catch (error) {
         reportError(error, { action: 'move', object: 'the takeover' })
       }
@@ -16010,6 +16019,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startRequestPending,
       stopRequestPending,
       screenImportPending,
+      screenImportPhase,
       streamMetadataSavePending,
       supportBundleExportPending,
       remoteControl,
@@ -16245,6 +16255,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startRequestPending,
       stopRequestPending,
       screenImportPending,
+      screenImportPhase,
       streamMetadataSavePending,
       supportBundleExportPending,
       remoteControl,

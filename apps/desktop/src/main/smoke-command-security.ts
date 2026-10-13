@@ -28,6 +28,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'app-quit',
   'apply-native-preview-host-commands',
   'authorize-smoke-resource',
+  'import-takeover-image',
   'backend-debug-rpc',
   'blank-main-window',
   'capture-page',

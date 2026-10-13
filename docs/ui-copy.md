@@ -138,7 +138,7 @@ source change: the stage is the confirmation.
     "Streaming to {X} stopped" stays until "{X} is back" replaces it.
 - One id per kind of toast, so a newer one replaces the older and the same
   news never stacks twice.
-- Never a refusal as an error. "Takeovers are locked while you're recording
+- Never a refusal as an error. "Renaming takeovers is locked while you're recording
   or live" is a warning.
 
 ## Errors
@@ -165,6 +165,9 @@ source change: the stage is the confirmation.
   Changes apply the next time you record or go live." (the lock Alert of
   plan 174 S1.5; "session" stays out of copy).
 - Locked by the plan: the Premium sentence and "View Premium".
+
+Takeover imports remain available while recording or live. Only rename,
+reorder and delete use the session lock; explain that scope beside them.
 
 ## Numbers, time and missing values
 
