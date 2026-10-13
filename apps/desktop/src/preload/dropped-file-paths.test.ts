@@ -11,6 +11,10 @@ describe('droppedFilePaths', () => {
     expect(droppedFilePaths(files, pathForFile)).toEqual(['/dropped/a.png', '/dropped/b.webp'])
   })
 
+  it('refuses a drop with no files, like a promised file from Mail', () => {
+    expect(() => droppedFilePaths([], pathForFile)).toThrow(SCREEN_IMAGE_REFUSALS.notImages)
+  })
+
   it('never lets a forged array-like object supply its own paths', () => {
     const forged = { length: 1, map: () => ['/Users/me/secret.png'] }
     const spy = vi.fn(pathForFile)

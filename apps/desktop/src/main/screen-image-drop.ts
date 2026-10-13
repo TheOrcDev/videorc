@@ -28,7 +28,17 @@ export async function issueAllOrNone<Capability>(
     for (const path of paths) issued.push(await issue(path))
     return issued
   } catch (error) {
-    await Promise.allSettled(issued.map((capability) => revoke(capability)))
+    const revoked = await Promise.allSettled(issued.map((capability) => revoke(capability)))
+    for (const result of revoked) {
+      if (result.status === 'rejected') {
+        console.warn('[takeovers] could not revoke a capability', result.reason)
+      }
+    }
     throw error
   }
+}
+
+export function missingAsNotAFile(error: NodeJS.ErrnoException): null {
+  if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null
+  throw error
 }
