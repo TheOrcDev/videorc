@@ -161,6 +161,8 @@ export function BuddyAvatarSection({
 
   const wear = (pack: BuddyPetSummary): void => {
     if (pack.packId === wornPackId) return
+    // A refused import is about that attempt: the next action clears it.
+    setImportError(null)
     setActionError(null)
     onWear(pack.packId).catch((failure: unknown) =>
       setActionError(failure instanceof Error ? failure.message : `Couldn't wear ${pack.name}.`)
@@ -169,6 +171,7 @@ export function BuddyAvatarSection({
 
   const remove = async (pack: BuddyPetSummary): Promise<void> => {
     setRemoveOpen(false)
+    setImportError(null)
     setActionError(null)
     try {
       if (pack.packId === wornPackId) await onUnwear()
@@ -181,6 +184,7 @@ export function BuddyAvatarSection({
   }
 
   const changeView = (next: BuddyAvatarView): void => {
+    setImportError(null)
     setActionError(null)
     onViewChange(next).catch((failure: unknown) =>
       setActionError(failure instanceof Error ? failure.message : "Couldn't switch the avatar.")

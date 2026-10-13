@@ -24,6 +24,7 @@ import { buddyLookDraftImages } from '@/lib/buddy-look-view'
 import { BUDDY_ONBOARDING_STEP4 } from '@/lib/buddy-onboarding-copy'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
+import { userErrorMessage } from '@/lib/user-error'
 
 /** The draft's living preview: big enough to read the pose, small beside the actions. */
 const DRAFT_PREVIEW_PX = 112
@@ -84,9 +85,11 @@ export function BuddyLookSection({
     const settings = await controller.keep()
     if (!settings) return
     // The provider's copy of the persona follows the backend's.
-    await patchCohostSettings({ persona: settings.persona }).catch((error: unknown) =>
-      setSaveError(error instanceof Error ? error.message : "Couldn't save the look.")
-    )
+    await patchCohostSettings({ persona: settings.persona }).catch((error: unknown) => {
+      const copy = userErrorMessage(error, { action: 'save', object: "Buddy's look" })
+      console.warn(`[buddy-look] ${copy.title}:`, copy.raw || error)
+      setSaveError(copy.text)
+    })
   }
   const keepAllowed = Boolean(controller) && view === 'draft' && !busy
 

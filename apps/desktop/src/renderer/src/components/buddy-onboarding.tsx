@@ -94,7 +94,6 @@ import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
 import {
   BUDDY_ONBOARDING_BUTTONS,
-  BUDDY_ONBOARDING_GATES,
   BUDDY_ONBOARDING_STEP1,
   BUDDY_ONBOARDING_STEP2,
   BUDDY_ONBOARDING_STEP3,
@@ -107,6 +106,7 @@ import {
   buddyOnboardingProgress
 } from '@/lib/buddy-onboarding-copy'
 import { cn } from '@/lib/utils'
+import { userErrorMessage } from '@/lib/user-error'
 import {
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
   BUDDY_LIBRARY_DESCRIPTION_MAX_CHARS,
@@ -281,7 +281,9 @@ export function BuddyOnboarding({
       // The provider's copy of the persona follows the backend's.
       await patchCohostSettings({ persona: settings.persona })
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : BUDDY_ONBOARDING_GATES.failed)
+      const copy = userErrorMessage(error, { action: 'save', object: 'your Buddy' })
+      console.warn(`[buddy-onboarding] ${copy.title}:`, copy.raw || error)
+      setActionError(copy.text)
       return
     }
     void libraryController?.refresh()

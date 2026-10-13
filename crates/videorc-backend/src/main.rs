@@ -5722,6 +5722,7 @@ fn websocket_command_mutation_max_execution_age(text: &str) -> Option<Duration> 
 enum WebSocketIsolatedCommandLaneKind {
     Observation,
     AccountMaintenance,
+    AssetImport,
     DurableChat,
     LiveControl,
     Stop,
@@ -5730,6 +5731,7 @@ enum WebSocketIsolatedCommandLaneKind {
 fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
     let command = serde_json::from_str::<ClientCommand>(text).ok()?;
     match command.method.as_str() {
+        "screens.importImage" => Some(WebSocketIsolatedCommandLaneKind::AssetImport),
         "account.refresh"
         | "account.windows_pilot_update_token"
         | "entitlements.refresh"
@@ -5797,6 +5799,11 @@ impl WebSocketIsolatedCommandLane {
 
     fn full_error(&self, command_id: String) -> ServerResponse {
         match self.kind {
+            WebSocketIsolatedCommandLaneKind::AssetImport => ServerResponse::error(
+                command_id,
+                "screen-import-busy",
+                "An image is already being imported. Wait for it to finish, then try again.",
+            ),
             WebSocketIsolatedCommandLaneKind::Observation => ServerResponse::error(
                 command_id,
                 "observation-lane-full",
@@ -5886,7 +5893,9 @@ fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAccepted
             Some(WebSocketIsolatedCommandLaneKind::Observation) => {
                 WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE
             }
-            None => WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
+            Some(WebSocketIsolatedCommandLaneKind::AssetImport) | None => {
+                WEBSOCKET_ORDERED_MAX_QUEUE_AGE
+            }
         }
     };
     // One short process-global critical section establishes receipt order and
@@ -5950,6 +5959,7 @@ struct WebSocketOrderedCommand {
 struct WebSocketIsolatedCommandLanes {
     observation: WebSocketIsolatedCommandLane,
     account: WebSocketIsolatedCommandLane,
+    asset_import: WebSocketIsolatedCommandLane,
     durable_chat: WebSocketIsolatedCommandLane,
     live_control: WebSocketIsolatedCommandLane,
     stop: WebSocketIsolatedCommandLane,
@@ -5958,13 +5968,24 @@ struct WebSocketIsolatedCommandLanes {
 struct WebSocketIsolatedCommandLaneReceivers {
     observation: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     account: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    asset_import: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     durable_chat: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     live_control: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     stop: mpsc::Receiver<WebSocketQueuedLaneCommand>,
 }
 
 impl WebSocketIsolatedCommandLanes {
-    fn new(transport: &WebSocketTransportMetrics) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
+    fn new(
+        transport: &WebSocketTransportMetrics,
+        import_capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
+        let (mut asset_import, asset_import_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::AssetImport,
+            1,
+            WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
+            transport.register_command_lane("assetImport"),
+        );
+        asset_import.capacity = import_capacity;
         let (observation, observation_rx) = WebSocketIsolatedCommandLane::new(
             WebSocketIsolatedCommandLaneKind::Observation,
             WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY,
@@ -5999,6 +6020,7 @@ impl WebSocketIsolatedCommandLanes {
             Self {
                 observation,
                 account,
+                asset_import,
                 durable_chat,
                 live_control,
                 stop,
@@ -6006,6 +6028,7 @@ impl WebSocketIsolatedCommandLanes {
             WebSocketIsolatedCommandLaneReceivers {
                 observation: observation_rx,
                 account: account_rx,
+                asset_import: asset_import_rx,
                 durable_chat: durable_chat_rx,
                 live_control: live_control_rx,
                 stop: stop_rx,
@@ -6017,6 +6040,7 @@ impl WebSocketIsolatedCommandLanes {
         match kind {
             WebSocketIsolatedCommandLaneKind::Observation => self.observation.clone(),
             WebSocketIsolatedCommandLaneKind::AccountMaintenance => self.account.clone(),
+            WebSocketIsolatedCommandLaneKind::AssetImport => self.asset_import.clone(),
             WebSocketIsolatedCommandLaneKind::DurableChat => self.durable_chat.clone(),
             WebSocketIsolatedCommandLaneKind::LiveControl => self.live_control.clone(),
             WebSocketIsolatedCommandLaneKind::Stop => self.stop.clone(),
@@ -6875,8 +6899,10 @@ async fn run_websocket_command_dispatcher(
         command_handler.clone(),
         running_stateful.clone(),
     ));
-    let (lanes, lane_receivers) =
-        WebSocketIsolatedCommandLanes::new(&state.websocket_transport_metrics);
+    let (lanes, lane_receivers) = WebSocketIsolatedCommandLanes::new(
+        &state.websocket_transport_metrics,
+        state.screen_import_capacity.clone(),
+    );
     let mut lane_workers = tokio::task::JoinSet::new();
     let lane_worker_context = WebSocketCommandLaneWorkerContext {
         state: state.clone(),
@@ -6918,6 +6944,14 @@ async fn run_websocket_command_dispatcher(
         lane_receivers.stop,
         1,
         lanes.stop.metrics.clone(),
+        &lane_worker_context,
+    );
+
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.asset_import,
+        1,
+        lanes.asset_import.metrics.clone(),
         &lane_worker_context,
     );
 
@@ -8501,6 +8535,19 @@ fn resolve_renderer_managed_backgrounds(
 
 fn rpc_params_are_empty(params: &serde_json::Value) -> bool {
     params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+// Imports and idle management can now finish on different lanes. Keep each
+// authoritative list read and publication together so an older snapshot cannot
+// be emitted after a newer one. No optimizer or native transition holds this lock.
+fn publish_stream_screen_list(state: &AppState) -> anyhow::Result<Vec<protocol::StreamScreen>> {
+    let _publication = state
+        .screen_list_publication
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let screens = state.database.list_stream_screens()?;
+    state.emit_event("screens.changed", screens.clone());
+    Ok(screens)
 }
 
 // Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
@@ -12235,14 +12282,20 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::ImportScreenImageParams>(params_value) {
                 Ok(params) => {
                     let ffmpeg_path = resolve_ffmpeg_path_ref(params.ffmpeg_path.as_deref());
-                    match state
-                        .database
-                        .import_screen_image(&params.path, &ffmpeg_path)
-                    {
+                    let database = state.database.clone();
+                    // Keep image decoding/FFmpeg waits off async mutation workers.
+                    // The watched handler retains lane admission until this owned
+                    // blocking job completes, even if its caller disconnects.
+                    let result = tokio::task::spawn_blocking(move || {
+                        database.import_screen_image(&params.path, &ffmpeg_path)
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!("Image import worker failed: {error}"))
+                    });
+                    match result {
                         Ok(screen) => {
-                            if let Ok(screens) = state.database.list_stream_screens() {
-                                state.emit_event("screens.changed", screens);
-                            }
+                            let _ = publish_stream_screen_list(state);
                             ServerResponse::ok(command.id, screen)
                         }
                         Err(error) => ServerResponse::error(
@@ -12264,9 +12317,7 @@ async fn handle_text_message_with_role(
                     .rename_stream_screen(&params.screen_id, &params.name)
                 {
                     Ok(screen) => {
-                        if let Ok(screens) = state.database.list_stream_screens() {
-                            state.emit_event("screens.changed", screens);
-                        }
+                        let _ = publish_stream_screen_list(state);
                         if let Ok(active) = state.database.active_stream_screen()
                             && active.as_ref().map(|active| &active.id) == Some(&screen.id)
                         {
@@ -12289,9 +12340,8 @@ async fn handle_text_message_with_role(
                     let delete_result =
                         delete_stream_screen_transition(state, &params.screen_id).await;
                     match delete_result {
-                        Ok(()) => match state.database.list_stream_screens() {
+                        Ok(()) => match publish_stream_screen_list(state) {
                             Ok(screens) => {
-                                state.emit_event("screens.changed", screens.clone());
                                 if let Ok(active) = state.database.active_stream_screen() {
                                     state.emit_event("screens.active.changed", active);
                                 }
@@ -12319,7 +12369,7 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::ReorderScreensParams>(command.params) {
                 Ok(params) => match state.database.reorder_stream_screens(&params.screen_ids) {
                     Ok(screens) => {
-                        state.emit_event("screens.changed", screens.clone());
+                        let _ = publish_stream_screen_list(state);
                         ServerResponse::ok(command.id, screens)
                     }
                     Err(error) => ServerResponse::error(
@@ -16206,6 +16256,116 @@ mod tests {
         release_account.add_permits(1);
         drop(command_tx);
         dispatcher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_asset_import_is_single_flight_without_blocking_live_commands() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let entered = entered.clone();
+            let release = release.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let entered = entered.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "screens.importImage" {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let mut clients = Vec::new();
+        let mut dispatchers = Vec::new();
+        for _ in 0..2 {
+            let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+            let connection = transport.register_connection();
+            let (tx, rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+            let (out_tx, out_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+            let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+            dispatchers.push(tokio::spawn(run_websocket_command_dispatcher(
+                state.clone(),
+                rx,
+                connection.incoming_command_queue.clone(),
+                out_tx,
+                connection.reliable_response_queue.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler.clone(),
+            )));
+            clients.push((tx, out_rx, connection));
+        }
+        send_test_websocket_command(
+            &state,
+            &clients[0].0,
+            &clients[0].2.incoming_command_queue,
+            json!({"id":"import", "method":"screens.importImage", "params":{}}).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(2), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        // Every request below must reply BEFORE the optimizer is released.
+        // Includes the same socket's ordered controls and another socket.
+        let result = async {
+            for (tx, rx, metrics) in &mut clients {
+                for method in [
+                    "screens.importImage",
+                    "health.ping",
+                    "screens.activate",
+                    "screens.clear",
+                    "audio.processing.update",
+                    "scene.layout.apply_live",
+                    "session.start",
+                    "session.stop",
+                ] {
+                    send_test_websocket_command(
+                        &state,
+                        tx,
+                        &metrics.incoming_command_queue,
+                        json!({"id":method, "method":method, "params":{}}).to_string(),
+                    )
+                    .await;
+                    let Message::Text(text) = timeout(Duration::from_secs(2), rx.recv())
+                        .await
+                        .map_err(|_| format!("{method} waited for import"))?
+                        .unwrap()
+                    else {
+                        panic!("response")
+                    };
+                    metrics.reliable_response_queue.record_dequeue_oldest();
+                    let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(response["id"], method);
+                    if method == "screens.importImage" {
+                        assert_eq!(response["error"]["code"], "screen-import-busy");
+                    } else {
+                        assert_eq!(response["ok"], true, "{response}");
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        release.add_permits(1);
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        result.unwrap();
+        assert_eq!(
+            entered.available_permits(),
+            0,
+            "duplicate import never entered handler"
+        );
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
     }
 
     #[tokio::test]

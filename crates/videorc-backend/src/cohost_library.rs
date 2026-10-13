@@ -829,6 +829,8 @@ struct LibraryCache {
     error: Option<CohostAvatarErrorDetail>,
     limit: Option<u32>,
     last_sync: Option<Instant>,
+    /// Latest observed account clock, including choices held during a session.
+    observed_profile_updated_at: Option<String>,
     pending_apply: Option<PendingApply>,
     pending_patch: Option<(String, BuddyLibraryWebPatch)>,
 }
@@ -1287,8 +1289,24 @@ async fn decide(
     // reads as none.
     let server_active = server_active
         .filter(|id| official_slug_from_id(id).is_some() || (user_avatar_id_ok(id) && listed(id)));
+    {
+        let mut cache = shared.cache();
+        if is_newer(
+            cache.observed_profile_updated_at.as_deref(),
+            profile_updated_at.as_deref(),
+        ) {
+            return Ok(());
+        }
+        cache.observed_profile_updated_at = profile_updated_at.clone();
+    }
     let stored = load_library_sync(&state.database).profile_updated_at;
     let newer = is_newer(profile_updated_at.as_deref(), stored.as_deref());
+    if newer {
+        // A newer account choice supersedes the one held during a live
+        // session, including a return to this Buddy or clearing the choice.
+        // If it still needs applying, the live branch queues it below.
+        shared.cache().pending_apply = None;
+    }
     let mut persona = current_persona(state).await;
     // The linked avatar left the library (deleted elsewhere): the Buddy
     // stays as it is, now only on this computer.
@@ -1373,6 +1391,22 @@ async fn apply_pending(
     state: &AppState,
     pending: PendingApply,
 ) -> Result<(), CohostAvatarErrorDetail> {
+    // The watcher may already have dequeued this choice when a newer sync
+    // cancels it. Do not apply it or move the account clock backwards.
+    if is_newer(
+        state
+            .buddy_library
+            .cache()
+            .observed_profile_updated_at
+            .as_deref(),
+        pending.profile_updated_at.as_deref(),
+    ) {
+        return Ok(());
+    }
+    let stored = load_library_sync(&state.database).profile_updated_at;
+    if !is_newer(pending.profile_updated_at.as_deref(), stored.as_deref()) {
+        return Ok(());
+    }
     let persona = current_persona(state).await;
     if persona.library_avatar_id.as_deref() == Some(pending.avatar_id.as_str()) {
         store_clock(state, pending.profile_updated_at);
