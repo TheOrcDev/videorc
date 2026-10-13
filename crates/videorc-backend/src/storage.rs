@@ -8426,6 +8426,14 @@ fn optimize_screen_image(
         .arg("-loglevel")
         .arg("error")
         .arg("-y")
+        .args([
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
+        ])
         .arg("-i")
         .arg(source_path)
         .arg("-filter_complex")
@@ -8434,6 +8442,7 @@ fn optimize_screen_image(
         .arg("[out]")
         .arg("-frames:v")
         .arg("1")
+        .args(["-threads", "1"])
         .arg(destination_path);
     let output = output_owned_std_with_timeout(&mut command, SCREEN_IMAGE_OPTIMIZER_TIMEOUT)
         .with_context(|| {

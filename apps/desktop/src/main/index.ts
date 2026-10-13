@@ -10144,6 +10144,30 @@ async function runSmokePreviewMotionCommand(
     return issueResourceCapability(authorization.path, authorization.kind)
   }
 
+  if (command === 'import-takeover-image') {
+    if (
+      app.isPackaged ||
+      !smokeCommandServerEnabled ||
+      !mainWindow ||
+      smokeScreenImageSelection !== undefined
+    ) {
+      throw new Error('Takeover smoke import unavailable.')
+    }
+    const authorization = validateSmokeResourceAuthorization(
+      { kind: 'input-file', path: params.path },
+      process.env.VIDEORC_SMOKE_STATE_DIR
+    )
+    smokeScreenImageSelection = await issueResourceCapability(
+      authorization.path,
+      authorization.kind
+    )
+    try {
+      return await mainWindow.webContents.executeJavaScript(smokeRendererScript(command, params))
+    } finally {
+      smokeScreenImageSelection = undefined
+    }
+  }
+
   if (command === 'import-smoke-scheduled-thumbnail') {
     if (app.isPackaged || !smokeCommandServerEnabled || Object.keys(params).length !== 1)
       throw new Error('Thumbnail smoke import unavailable.')
@@ -12949,6 +12973,42 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         };
       }
 
+      if (${JSON.stringify(command)} === 'import-takeover-image') {
+        await openTab('assets');
+        const button = await waitFor('[data-testid="takeover-import"]');
+        if (button.disabled) throw new Error('Takeover import is disabled during the session.');
+        // DisabledReason replaces its child when the pending reason appears.
+        // Observe the LIVE button through both edges, never a detached node or
+        // a fixed-delay guess that could return before the picker is consumed.
+        await new Promise((resolve, reject) => {
+          let sawPending = false;
+          const finish = (error) => {
+            observer.disconnect();
+            clearTimeout(timer);
+            if (error) reject(error); else resolve();
+          };
+          const check = () => {
+            const current = document.querySelector('[data-testid="takeover-import"]');
+            if (current?.disabled) sawPending = true;
+            else if (current && sawPending) finish();
+          };
+          const observer = new MutationObserver(check);
+          const timer = setTimeout(() => finish(new Error('Takeover import did not finish.')), 45000);
+          observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+          button.click();
+          check();
+        });
+        const tiles = () => Array.from(document.querySelectorAll('[data-videorc-takeover-tile]'));
+        const thumbnailDeadline = performance.now() + 5000;
+        while (tiles().some(tile => { const image = tile.querySelector('img'); return image && !image.complete; })) {
+          if (performance.now() > thumbnailDeadline) throw Error('Takeover thumbnails did not finish loading.');
+          await sleep(25);
+        }
+        return {
+          ids: tiles().map(el => el.getAttribute('data-videorc-takeover-tile')),
+          readyIds: tiles().filter(el => { const image = el.querySelector('img'); return image?.complete && image.naturalWidth > 0; }).map(el => el.getAttribute('data-videorc-takeover-tile'))
+        };
+      }
       throw new Error('Unknown preview motion smoke command: ' + ${JSON.stringify(command)});
     })()
   `
@@ -13537,7 +13597,15 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
   return { deleted: completion.deleted, failedCount: failedPaths.length }
 }
 
+// A single-use picker result, only installed by the authenticated dev smoke server.
+let smokeScreenImageSelection: ResourceSelection | null | undefined
+
 async function pickScreenImages(): Promise<ResourceSelection[]> {
+  if (!app.isPackaged && smokeCommandServerEnabled && smokeScreenImageSelection !== undefined) {
+    const selection = smokeScreenImageSelection
+    smokeScreenImageSelection = undefined
+    return selection ? [selection] : []
+  }
   const options: Electron.OpenDialogOptions = {
     title: 'Choose takeover images',
     properties: ['openFile', 'multiSelections'],

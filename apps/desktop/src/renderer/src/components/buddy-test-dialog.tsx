@@ -150,8 +150,10 @@ export function BuddyTestDialog({
           </DialogDescription>
         </DialogHeader>
 
+        {/* shrink-0: in a short window the dialog scrolls; a squeezed stage
+            cut off the Buddy's head and hid the bubble above it. */}
         <div
-          className="relative flex h-[420px] items-end justify-center overflow-hidden rounded-row border border-border bg-inset pb-6"
+          className="relative flex h-[420px] shrink-0 items-end justify-center overflow-hidden rounded-row border border-border bg-inset pb-6"
           data-buddy-state={selection.state}
           data-testid="buddy-test-stage"
         >

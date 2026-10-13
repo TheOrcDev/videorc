@@ -39,6 +39,8 @@ beforeEach(() => {
     reorderScreen: vi.fn(async () => undefined),
     pendingScreenImports: [],
     renameScreen: vi.fn(async () => undefined),
+    screenImportPending: false,
+    screenImportPhase: 'idle',
     runtimeInfo: { platform: 'darwin' },
     screens: [screen],
     screensLoaded: true,
@@ -168,8 +170,18 @@ describe('TakeoverScreensSection file drop', () => {
     expect(mocked.core.importDroppedScreenImages).not.toHaveBeenCalled()
   })
 
-  it('refuses drops while a session runs', async () => {
+  it('takes drops during a session, as the import button does', async () => {
     mocked.core = { ...mocked.core, isSessionActive: true }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    await act(async () => section().dispatchEvent(dragEvent('drop', [photo])))
+    expect(mocked.core.importDroppedScreenImages).toHaveBeenCalledExactlyOnceWith([photo])
+  })
+
+  it.each([
+    ['while reconnecting', { wsStatus: 'failed' }],
+    ['while an import runs', { screenImportPending: true, screenImportPhase: 'importing' }]
+  ])('refuses drops %s', async (_when, state) => {
+    mocked.core = { ...mocked.core, ...state }
     await act(async () => root.render(createElement(TakeoverScreensSection)))
     await act(async () => section().dispatchEvent(dragEvent('dragenter', [photo])))
     expect(section().hasAttribute('data-videorc-file-drop-active')).toBe(false)
@@ -205,7 +217,6 @@ describe('TakeoverScreensSection pending imports', () => {
     }
     await act(async () => root.render(createElement(TakeoverScreensSection)))
     expect(tileNames()).toEqual(['screen-1', 'photo.png', 'slide.jpg'])
-    expect(document.body.textContent).toContain('Importing…')
   })
 
   it('shows the placeholders, not the empty state, while the first takeovers import', async () => {
@@ -213,5 +224,45 @@ describe('TakeoverScreensSection pending imports', () => {
     await act(async () => root.render(createElement(TakeoverScreensSection)))
     expect(tileNames()).toEqual(['photo.png'])
     expect(document.body.textContent).not.toContain('No takeovers yet')
+  })
+})
+
+describe('takeover import during a session', () => {
+  it('allows importing during a session but keeps management locked', async () => {
+    mocked.core = { ...mocked.core, isSessionActive: true, screenImportPhase: 'idle' }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    const button = byTestId('takeover-import') as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    await act(async () => button.click())
+    expect(mocked.core.importScreenImages).toHaveBeenCalledTimes(1)
+    expect(document.body.textContent).toContain('You can import images now.')
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Takeover name"]')?.disabled).toBe(
+      true
+    )
+    expect(
+      document.querySelector<HTMLButtonElement>('[aria-label="Delete takeover"]')?.disabled
+    ).toBe(true)
+    expect(document.querySelector('[data-videorc-takeover-tile]')?.getAttribute('draggable')).toBe(
+      'false'
+    )
+  })
+  it.each(['choosing', 'importing'])('prevents another import while %s', async (phase) => {
+    mocked.core = {
+      ...mocked.core,
+      isSessionActive: true,
+      screenImportPending: true,
+      screenImportPhase: phase
+    }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    expect((byTestId('takeover-import') as HTMLButtonElement).disabled).toBe(true)
+    expect(byTestId('takeover-import')?.textContent).toBe(
+      phase === 'choosing' ? 'Choosing images…' : 'Importing…'
+    )
+  })
+  it('disables import while reconnecting and prioritizes the offline explanation', async () => {
+    mocked.core = { ...mocked.core, isSessionActive: true, wsStatus: 'failed' }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    expect((byTestId('takeover-import') as HTMLButtonElement).disabled).toBe(true)
+    expect(document.body.textContent).not.toContain('You can import images now.')
   })
 })

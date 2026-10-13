@@ -166,6 +166,14 @@ describe('StreamManager Remove messages reconnect (plan 140, S5)', () => {
       })
     )
 
+  it('scrolls the Buddy pane as a whole, so a short window never hides the Say box', () => {
+    // Hyprland tiled the window at 320x331 (under its 360 px minimum): the
+    // fixed header, chat controls and Say footer overflowed under the status
+    // bar, which then took every click meant for the Say box.
+    const pane = renderWith({}).match(/<div class="([^"]*)" data-slot="buddy-pane"/)
+    expect(pane?.[1].split(' ')).toEqual(expect.arrayContaining(['min-h-0', 'overflow-y-auto']))
+  })
+
   it('puts one quiet row in the Buddy pane for each platform missing the permission', () => {
     const markup = renderWith({})
     const buddy = markup.slice(markup.indexOf('data-slot="buddy-pane"'))

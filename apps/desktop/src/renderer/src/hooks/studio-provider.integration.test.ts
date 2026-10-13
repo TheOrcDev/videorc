@@ -73,11 +73,11 @@ import type {
   PreviewSurfaceStatus,
   PreviewWindowState,
   RecordingStatus,
+  ResourceSelection,
   Scene,
   SceneCommitStatus,
   SessionLogEntry,
   SessionSources,
-  ResourceSelection,
   SourceSwitchOperation,
   SourceSwitchParams,
   SourceSelection,
@@ -1602,13 +1602,14 @@ class TestWebSocket {
         if (deferredResponse?.error) {
           throw deferredResponse.error
         }
-        this.onmessage?.({
-          data: JSON.stringify({
-            id: command.id,
-            ok: true,
-            payload: deferredResponse ? payloadOverride : this.backend.response(command)
+        const payload = deferredResponse ? payloadOverride : this.backend.response(command)
+        if (command.method === 'screens.importImage' && !deferredResponse) {
+          // Like the real backend, the new list goes out before the import reply.
+          this.onmessage?.({
+            data: JSON.stringify({ event: 'screens.changed', payload: this.backend.screens })
           })
-        })
+        }
+        this.onmessage?.({ data: JSON.stringify({ id: command.id, ok: true, payload }) })
       } catch (error) {
         this.onmessage?.({
           data: JSON.stringify({
@@ -1957,13 +1958,12 @@ describe('real StudioProvider lifecycle', () => {
     displayName: `${capabilityId}.png`
   })
 
-  it('imports every picked takeover image, past a failed one, then refreshes the list', async () => {
+  it('imports every picked takeover image, past a failed one', async () => {
     const { backend, latest } = await mountTakeoverImportProvider({
       pickScreenImages: async () => [pickedImage('a'), pickedImage('b'), pickedImage('c')],
       authorizeDroppedScreenImages: vi.fn()
     })
     backend.screenImportFailures.add('b')
-    const listsBefore = backend.sentCommands.filter((c) => c.method === 'screens.list').length
 
     await act(async () => latest().core.importScreenImages())
 
@@ -1974,9 +1974,6 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual([{ sourceCapability: 'a' }, { sourceCapability: 'b' }, { sourceCapability: 'c' }])
     expect(latest().core.screens.map((screen) => screen.name)).toEqual(['a', 'c'])
     expect(latest().core.lastError).toBe('The test backend could not read this image.')
-    expect(backend.sentCommands.filter((c) => c.method === 'screens.list').length).toBe(
-      listsBefore + 1
-    )
     expect(latest().core.pendingScreenImports).toEqual([])
   })
 
@@ -2088,6 +2085,164 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().core.pendingScreenImports).toEqual([])
     await act(async () => latest().core.importDroppedScreenImages([new File([''], 'x.png')]))
     expect(authorizeDroppedScreenImages).toHaveBeenCalledOnce()
+  })
+
+  it.each(['recording', 'streaming'] as const)(
+    'imports a takeover while %s without applying it or refreshing active state',
+    async (state) => {
+      const { backend, latest } = await mountFreeformTransformProvider()
+      const screen: StreamScreen = {
+        id: 'live-import',
+        name: 'Live import',
+        imagePath: '/screens/live.png',
+        sortOrder: 0,
+        status: 'ready',
+        createdAt: now,
+        updatedAt: now
+      }
+      window.videorc.pickScreenImages = vi.fn(async () => [
+        {
+          capabilityId: 'chosen-image',
+          kind: 'input-file' as const,
+          displayName: 'live.png'
+        }
+      ])
+      await act(async () => {
+        for (const socket of backend.sockets)
+          socket.onmessage?.({
+            data: JSON.stringify({
+              event: 'recording.status',
+              payload: { state, sessionId: 'live-import-session', startedAt: now }
+            })
+          })
+      })
+      const release = backend.deferResponse('screens.importImage', screen)
+      backend.commands.length = 0
+      let pending!: Promise<void>
+      act(() => {
+        pending = latest().core.importScreenImages()
+      })
+      await waitForObservation(() => latest().core.screenImportPhase === 'importing')
+      await act(async () => latest().core.importScreenImages())
+      expect(window.videorc.pickScreenImages).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        release()
+        await pending
+      })
+      expect(latest().core.screens).toContainEqual(screen)
+      expect(latest().core.activeScreen).toBeNull()
+      expect(latest().core.screenImportPending).toBe(false)
+      const methods = backend.commands.map((command) => command.method)
+      expect(methods.filter((method) => method === 'screens.importImage')).toHaveLength(1)
+      expect(methods).not.toContain('screens.active')
+      expect(methods).not.toContain('screens.activate')
+      expect(methods).not.toContain('screens.clear')
+      expect(methods).not.toContain('session.stop')
+      expect(methods).not.toContain('audio.processing.update')
+    }
+  )
+
+  it('keeps the picker and import alive across session start and stop', async () => {
+    const { backend, latest } = await mountFreeformTransformProvider()
+    const screen: StreamScreen = {
+      id: 'session-boundary-import',
+      name: 'Session boundary',
+      imagePath: '/screens/boundary.png',
+      sortOrder: 0,
+      status: 'ready',
+      createdAt: now,
+      updatedAt: now
+    }
+    let choose!: (selections: ResourceSelection[]) => void
+    window.videorc.pickScreenImages = vi.fn(
+      () =>
+        new Promise<ResourceSelection[]>((resolve) => {
+          choose = resolve
+        })
+    )
+    const release = backend.deferResponse('screens.importImage', screen)
+    let pending!: Promise<void>
+    act(() => {
+      pending = latest().core.importScreenImages()
+    })
+    await waitForObservation(() => latest().core.screenImportPhase === 'choosing')
+    await act(async () => {
+      for (const socket of backend.sockets)
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'recording.status',
+            payload: {
+              state: 'recording',
+              sessionId: 'picker-session',
+              startedAt: now
+            }
+          })
+        })
+    })
+    expect(latest().core.screenImportPhase).toBe('choosing')
+    await act(async () =>
+      choose([
+        {
+          capabilityId: 'boundary-image',
+          kind: 'input-file',
+          displayName: 'boundary.png'
+        }
+      ])
+    )
+    await waitForObservation(() => latest().core.screenImportPhase === 'importing')
+    await act(async () => {
+      for (const socket of backend.sockets)
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'recording.status',
+            payload: {
+              state: 'idle'
+            }
+          })
+        })
+    })
+    expect(latest().core.screenImportPhase).toBe('importing')
+    await act(async () => {
+      release()
+      await pending
+    })
+    expect(latest().core.screens).toContainEqual(screen)
+    expect(latest().core.activeScreen).toBeNull()
+    expect(latest().core.screenImportPhase).toBe('idle')
+  })
+
+  it('a newer authoritative takeover list wins over the import reply', async () => {
+    const { backend, latest } = await mountFreeformTransformProvider()
+    const screen: StreamScreen = {
+      id: 'retired-import',
+      name: 'Removed elsewhere',
+      imagePath: '/screens/removed.png',
+      sortOrder: 0,
+      status: 'ready',
+      createdAt: now,
+      updatedAt: now
+    }
+    window.videorc.pickScreenImages = vi.fn(async () => [
+      {
+        capabilityId: 'chosen-image',
+        kind: 'input-file' as const,
+        displayName: 'image.png'
+      }
+    ])
+    const release = backend.deferResponse('screens.importImage', screen)
+    let pending!: Promise<void>
+    act(() => {
+      pending = latest().core.importScreenImages()
+    })
+    await waitForObservation(() => latest().core.screenImportPhase === 'importing')
+    await act(async () => {
+      for (const socket of backend.sockets)
+        socket.onmessage?.({ data: JSON.stringify({ event: 'screens.changed', payload: [] }) })
+      release()
+      await pending
+    })
+    expect(latest().core.screens).toEqual([])
+    expect(latest().core.screenImportPending).toBe(false)
   })
 
   function preciseTransformStatus(backend: StudioBackend): SceneCommitStatus {

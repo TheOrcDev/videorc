@@ -240,13 +240,15 @@ describe('createBuddyLookController (plan 169 D9)', () => {
     const controller = createBuddyLookController(fake.client)
     await controller.refresh()
     fake.requestTyped.mockImplementationOnce(async () => {
-      throw Object.assign(new Error('Your Buddy’s look is already being made.'), {
+      throw Object.assign(new Error('private provider failure at /Users/streamer/Buddy'), {
         code: 'cohost-avatar-busy'
       })
     })
     await controller.redo('talk')
     const state = controller.getState()
     expect(state.problem?.code).toBe('cohost-avatar-busy')
+    expect(state.problem?.message).toContain('export a support bundle from Health')
+    expect(state.problem?.message).not.toContain('/Users/streamer')
     expect(state.running).toBeNull()
     expect(state.pending).toBeNull()
     controller.dispose()

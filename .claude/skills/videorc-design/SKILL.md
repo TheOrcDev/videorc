@@ -692,8 +692,8 @@ confirming a routine interaction the user just watched succeed. The copy
   clicks, and source device switches.
 - **Type by meaning**, and the type colours the icon only (owner call):
   - error: it failed and needs you;
-  - warning: it can't happen now, or it is degraded. A refusal ("Takeovers
-    are locked while you're recording or live") is a warning, never an
+  - warning: it can't happen now, or it is degraded. A refusal ("Renaming takeovers
+    is locked while you're recording or live") is a warning, never an
     error;
   - info: neutral news, or a step to take in the browser;
   - success: async work that finishes out of view (recording saved, import

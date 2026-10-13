@@ -540,7 +540,14 @@ export function TakeoverSection(): ReactElement {
   const disconnected = disconnectedReason !== null
 
   return (
-    <PanelSection title="Takeover">
+    <PanelSection
+      title="Takeover"
+      action={
+        <Button variant="ghost" onClick={() => setActive('assets')}>
+          Open Assets
+        </Button>
+      }
+    >
       {ready.length === 0 ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <ImageIcon className="size-3.5 shrink-0" weight="duotone" />

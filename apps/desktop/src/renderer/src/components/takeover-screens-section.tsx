@@ -1,3 +1,6 @@
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Spinner } from '@/components/ui/spinner'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -18,7 +21,7 @@ import {
 } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
-import { OfflineAlert, SessionLockAlert } from '@/components/lock-alert'
+import { OfflineAlert } from '@/components/lock-alert'
 import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
@@ -71,6 +74,8 @@ export function TakeoverScreensSection(): ReactElement {
     reorderScreen,
     renameScreen,
     runtimeInfo,
+    screenImportPending,
+    screenImportPhase,
     pendingScreenImports,
     screens,
     screensLoaded,
@@ -78,8 +83,12 @@ export function TakeoverScreensSection(): ReactElement {
   } = useStudioCore()
   const offline = wsStatus !== 'connected'
   const managementDisabled = isSessionActive || offline
-  const importing = pendingScreenImports.length > 0
-  const importDisabled = managementDisabled || importing
+  const importDisabled = offline || screenImportPending
+  const managementReason = offline
+    ? 'Videorc is reconnecting. Try again in a moment.'
+    : isSessionActive
+      ? 'Stop recording or end the livestream to rename, reorder or delete takeovers.'
+      : null
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   // Plan 174 S0.3 (C-1): a delete removes the image file too, so it asks.
@@ -93,14 +102,33 @@ export function TakeoverScreensSection(): ReactElement {
     <>
       <PanelSection
         action={
-          <Button
-            disabled={importDisabled}
-            variant="outline"
-            onClick={() => void importScreenImages()}
+          <DisabledReason
+            reason={
+              offline
+                ? managementReason
+                : screenImportPending
+                  ? 'Wait for this import to finish.'
+                  : null
+            }
           >
-            <ImageIcon data-icon="inline-start" />
-            {importing ? 'Importing…' : 'Import images…'}
-          </Button>
+            <Button
+              data-testid="takeover-import"
+              disabled={importDisabled}
+              variant="outline"
+              onClick={() => void importScreenImages()}
+            >
+              {screenImportPending ? (
+                <Spinner aria-hidden data-icon="inline-start" />
+              ) : (
+                <ImageIcon data-icon="inline-start" />
+              )}
+              {screenImportPhase === 'choosing'
+                ? 'Choosing images…'
+                : screenImportPending
+                  ? 'Importing…'
+                  : 'Import images…'}
+            </Button>
+          </DisabledReason>
         }
         className={cn('flex-1', fileDrop.active && 'bg-accent')}
         data-videorc-file-drop-active={fileDrop.active ? '' : undefined}
@@ -109,8 +137,17 @@ export function TakeoverScreensSection(): ReactElement {
         title="Takeovers"
         {...fileDrop.handlers}
       >
-        {isSessionActive ? <SessionLockAlert /> : offline ? <OfflineAlert /> : null}
-        {screens.length > 0 || importing ? (
+        {offline ? (
+          <OfflineAlert />
+        ) : isSessionActive ? (
+          <Alert variant="quiet">
+            <AlertDescription>
+              You can import images now. Stop recording or end the livestream to rename, reorder or
+              delete takeovers.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {screens.length > 0 || pendingScreenImports.length > 0 ? (
           // Bounded section: the grid scrolls inside the Assets page stack.
           // The padding keeps the in-use rim inside the scroll area's clip.
           <ScrollArea className="max-h-[28rem] overflow-y-auto pr-3">
@@ -121,6 +158,7 @@ export function TakeoverScreensSection(): ReactElement {
                   canMoveEarlier={takeoverMoveTarget(index, -1, screens.length) !== null}
                   canMoveLater={takeoverMoveTarget(index, 1, screens.length) !== null}
                   disabled={managementDisabled}
+                  disabledReason={managementReason}
                   dragging={draggingId === screen.id}
                   dropTarget={dropIndex === index && draggingId !== screen.id}
                   key={screen.id}
@@ -243,6 +281,7 @@ function ScreenTile({
   canMoveEarlier,
   canMoveLater,
   disabled,
+  disabledReason,
   dragging,
   dropTarget,
   platform,
@@ -259,6 +298,7 @@ function ScreenTile({
   canMoveEarlier: boolean
   canMoveLater: boolean
   disabled: boolean
+  disabledReason: string | null
   dragging: boolean
   dropTarget: boolean
   platform?: string
@@ -356,82 +396,100 @@ function ScreenTile({
         {active ? <InUseChip className="absolute top-2 left-2" /> : null}
       </div>
       <form
+        aria-describedby={disabledReason ? `takeover-management-${screen.id}` : undefined}
         className="flex min-w-0 flex-col gap-2 p-3"
         onSubmit={(event) => {
           event.preventDefault()
           saveName()
         }}
       >
+        {disabledReason ? (
+          <span id={`takeover-management-${screen.id}`} className="sr-only">
+            {disabledReason}
+          </span>
+        ) : null}
         <div className="flex min-w-0 gap-2">
-          <Input
-            aria-label="Takeover name"
-            disabled={disabled}
-            value={nameDraft}
-            onChange={(event) => setNameDraft(event.target.value)}
-          />
-          <ShortcutTooltip label="Save takeover name" platform={platform}>
-            <Button
-              aria-label="Save takeover name"
-              disabled={disabled || !nameChanged || !nameDraft.trim()}
-              size="icon"
-              type="submit"
-              variant="outline"
-            >
-              <SaveIcon />
-            </Button>
-          </ShortcutTooltip>
+          <DisabledReason reason={disabledReason} className="min-w-0 flex-1">
+            <Input
+              aria-label="Takeover name"
+              aria-describedby={disabledReason ? `takeover-management-${screen.id}` : undefined}
+              disabled={disabled}
+              value={nameDraft}
+              onChange={(event) => setNameDraft(event.target.value)}
+            />
+          </DisabledReason>
+          <DisabledReason reason={disabledReason}>
+            <ShortcutTooltip label="Save takeover name" platform={platform}>
+              <Button
+                aria-label="Save takeover name"
+                disabled={disabled || !nameChanged || !nameDraft.trim()}
+                size="icon"
+                type="submit"
+                variant="outline"
+              >
+                <SaveIcon />
+              </Button>
+            </ShortcutTooltip>
+          </DisabledReason>
         </div>
         {/* Activation lives in the Studio session panel (one home per control);
             tiles are management only. The order moves by drag, by these
             buttons, or by Alt+arrow while the tile holds focus. */}
         <div className="flex min-w-0 items-center gap-1">
-          <ShortcutTooltip
-            accelerator={MOVE_EARLIER_ACCELERATOR}
-            label="Move earlier"
-            platform={platform}
-          >
-            <Button
-              aria-keyshortcuts={shortcutAriaKeys(MOVE_EARLIER_ACCELERATOR, platform)}
-              aria-label="Move earlier"
-              disabled={disabled || !canMoveEarlier}
-              size="icon"
-              type="button"
-              variant="ghost"
-              onClick={() => onMove(-1)}
+          <DisabledReason reason={disabledReason}>
+            <ShortcutTooltip
+              accelerator={MOVE_EARLIER_ACCELERATOR}
+              label="Move earlier"
+              platform={platform}
             >
-              <ArrowLeftIcon />
-            </Button>
-          </ShortcutTooltip>
-          <ShortcutTooltip
-            accelerator={MOVE_LATER_ACCELERATOR}
-            label="Move later"
-            platform={platform}
-          >
-            <Button
-              aria-keyshortcuts={shortcutAriaKeys(MOVE_LATER_ACCELERATOR, platform)}
-              aria-label="Move later"
-              disabled={disabled || !canMoveLater}
-              size="icon"
-              type="button"
-              variant="ghost"
-              onClick={() => onMove(1)}
+              <Button
+                aria-keyshortcuts={shortcutAriaKeys(MOVE_EARLIER_ACCELERATOR, platform)}
+                aria-label="Move earlier"
+                disabled={disabled || !canMoveEarlier}
+                size="icon"
+                type="button"
+                variant="ghost"
+                onClick={() => onMove(-1)}
+              >
+                <ArrowLeftIcon />
+              </Button>
+            </ShortcutTooltip>
+          </DisabledReason>
+          <DisabledReason reason={disabledReason}>
+            <ShortcutTooltip
+              accelerator={MOVE_LATER_ACCELERATOR}
+              label="Move later"
+              platform={platform}
             >
-              <ArrowRightIcon />
-            </Button>
-          </ShortcutTooltip>
-          <ShortcutTooltip label="Delete takeover" platform={platform}>
-            <Button
-              aria-label="Delete takeover"
-              className="ml-auto"
-              disabled={disabled}
-              size="icon"
-              type="button"
-              variant="destructive"
-              onClick={onDelete}
-            >
-              <DeleteIcon />
-            </Button>
-          </ShortcutTooltip>
+              <Button
+                aria-keyshortcuts={shortcutAriaKeys(MOVE_LATER_ACCELERATOR, platform)}
+                aria-label="Move later"
+                disabled={disabled || !canMoveLater}
+                size="icon"
+                type="button"
+                variant="ghost"
+                onClick={() => onMove(1)}
+              >
+                <ArrowRightIcon />
+              </Button>
+            </ShortcutTooltip>
+          </DisabledReason>
+          <DisabledReason reason={disabledReason}>
+            <ShortcutTooltip label="Delete takeover" platform={platform}>
+              <Button
+                aria-label="Delete takeover"
+                className="ml-auto"
+                aria-describedby={disabledReason ? `takeover-management-${screen.id}` : undefined}
+                disabled={disabled}
+                size="icon"
+                type="button"
+                variant="destructive"
+                onClick={onDelete}
+              >
+                <DeleteIcon />
+              </Button>
+            </ShortcutTooltip>
+          </DisabledReason>
         </div>
       </form>
     </MediaCard>

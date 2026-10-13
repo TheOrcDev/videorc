@@ -54,6 +54,8 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
     "Videorc didn't hear back in time. Check whether it worked before you try again.",
   'command-expired-before-dispatch': BUSY_REASON,
   'command-lane-full': BUSY_REASON,
+  'screen-import-busy':
+    'An image is already being imported. Wait for it to finish, then try again.',
   'command-not-applied': BUSY_REASON,
   'clean-cut-mutation-blocked':
     'Clean cut is still working on this recording. Try again when it finishes.',
@@ -65,6 +67,7 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
 const WARNING_CODES = new Set([
   'command-expired-before-dispatch',
   'command-lane-full',
+  'screen-import-busy',
   'command-not-applied',
   'clean-cut-mutation-blocked',
   'noise-cleanup-mutation-blocked'
