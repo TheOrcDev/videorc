@@ -1105,6 +1105,9 @@ pub struct AppState {
     /// Library, the quit path and the updater gate.
     pub recording_finalization: Arc<crate::recording_finalization::RecordingFinalizationRegistry>,
     pub performance_check: Arc<crate::performance_check::PerformanceCheckRuntime>,
+    /// Anonymous usage stats (Settings → General → Privacy): the switch and
+    /// the delivery queue's lock. Off until boot reads the setting.
+    pub usage_stats: Arc<crate::usage_stats::UsageStatsRuntime>,
     /// Microphone kept open while Studio is visible (instant-record P5);
     /// `session.start` takes it instead of opening the device.
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
@@ -1371,6 +1374,7 @@ impl AppState {
                 crate::recording_finalization::RecordingFinalizationRegistry::default(),
             ),
             performance_check: Arc::default(),
+            usage_stats: Arc::default(),
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),

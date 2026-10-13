@@ -16,6 +16,7 @@ import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { ChatEmoteSettingsFields } from '@/components/settings/seventv-emotes-field'
+import { PrivacySettingsSection } from '@/components/settings/usage-stats-field'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { FieldGroup, SettingsRow } from '@/components/ui/field'
@@ -38,9 +39,10 @@ const THEME_OPTIONS = [
 
 /**
  * Settings → General (plan 174 S3.17, I-27): how Videorc looks, the Stream
- * Manager, bringing a setup across, and where every other setting lives.
- * Four sections in two columns: Appearance over Stream Manager, Import over
- * Elsewhere, so they stack in that order on a narrow window.
+ * Manager, bringing a setup across, what Videorc shares, and where every
+ * other setting lives. Five sections in two columns: Appearance over Stream
+ * Manager, Import over Privacy over Elsewhere, so they stack in that order on
+ * a narrow window.
  */
 export function GeneralSettings(): ReactElement {
   const { settings, setSettings, runtimeInfo, scheduleHardwareAccelerationRetry } = useStudioCore()
@@ -145,6 +147,8 @@ export function GeneralSettings(): ReactElement {
           </FieldGroup>
           <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
         </PanelSection>
+
+        <PrivacySettingsSection />
 
         <PanelSection description="Settings that live with the page they change." title="Elsewhere">
           <ElsewhereList />

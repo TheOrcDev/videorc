@@ -19,6 +19,13 @@ vi.mock('@/hooks/use-chat-emote-settings', () => ({
     setTwitchGifs: () => undefined
   })
 }))
+vi.mock('@/hooks/use-usage-stats-setting', () => ({
+  useUsageStatsSetting: () => ({
+    state: { enabled: true, envDisabled: false },
+    error: null,
+    setEnabled: () => undefined
+  })
+}))
 vi.mock('@/components/obs-import-dialog', () => ({ ObsImportDialog: () => null }))
 
 let root: Root
@@ -49,9 +56,9 @@ const headings = (): string[] =>
   [...container.querySelectorAll('h2')].map((heading) => heading.textContent ?? '')
 
 describe('GeneralSettings', () => {
-  it('splits into Appearance, Stream Manager, Import and Elsewhere', async () => {
+  it('splits into Appearance, Stream Manager, Import, Privacy and Elsewhere', async () => {
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual(['Appearance', 'Stream Manager', 'Import', 'Elsewhere'])
+    expect(headings()).toEqual(['Appearance', 'Stream Manager', 'Import', 'Privacy', 'Elsewhere'])
     expect(container.textContent).toContain('Open Stream Manager when you go live')
   })
 
@@ -61,7 +68,7 @@ describe('GeneralSettings', () => {
       runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false }
     }
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual(['Appearance', 'Import', 'Elsewhere'])
+    expect(headings()).toEqual(['Appearance', 'Import', 'Privacy', 'Elsewhere'])
   })
 
   it('opens the page that owns each setting', async () => {

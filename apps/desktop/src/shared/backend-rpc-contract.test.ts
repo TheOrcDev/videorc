@@ -2225,6 +2225,26 @@ describe('backend RPC contract', () => {
     expectTypeOf<BackendRpcParams<'cohost.start'>['sessionId']>().toEqualTypeOf<string>()
   })
 
+  it('validates the anonymous usage stats switch', () => {
+    const on = { enabled: true, envDisabled: false }
+    expect(validateBackendRpcResult('usageStats.get', on)).toEqual(on)
+    const forcedOff = { enabled: false, envDisabled: true }
+    expect(validateBackendRpcResult('usageStats.set', forcedOff)).toEqual(forcedOff)
+    expect(validateBackendRpcParams('usageStats.set', { enabled: false })).toEqual({
+      enabled: false
+    })
+    expect(() => validateBackendRpcParams('usageStats.set', {})).toThrow('usageStats.set')
+    expect(() => validateBackendRpcParams('usageStats.set', { enabled: 'no' })).toThrow(
+      'usageStats.set'
+    )
+    expect(() =>
+      validateBackendRpcParams('usageStats.set', { enabled: true, installId: 'x' })
+    ).toThrow('usageStats.set')
+    expect(() => validateBackendRpcResult('usageStats.get', { enabled: true })).toThrow(
+      'usageStats.get'
+    )
+  })
+
   it('validates the 7TV emote switch, its status and its event (plan 089)', () => {
     const linked = {
       sevenTv: true,
