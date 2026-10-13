@@ -27,6 +27,7 @@ import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { StreamScreen } from '@/lib/backend'
 import { MediaCard } from '@/components/media-card'
@@ -70,14 +71,15 @@ export function TakeoverScreensSection(): ReactElement {
     reorderScreen,
     renameScreen,
     runtimeInfo,
-    screenImportPending,
+    pendingScreenImports,
     screens,
     screensLoaded,
     wsStatus
   } = useStudioCore()
   const offline = wsStatus !== 'connected'
   const managementDisabled = isSessionActive || offline
-  const importDisabled = managementDisabled || screenImportPending
+  const importing = pendingScreenImports.length > 0
+  const importDisabled = managementDisabled || importing
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   // Plan 174 S0.3 (C-1): a delete removes the image file too, so it asks.
@@ -97,7 +99,7 @@ export function TakeoverScreensSection(): ReactElement {
             onClick={() => void importScreenImages()}
           >
             <ImageIcon data-icon="inline-start" />
-            {screenImportPending ? 'Importing…' : 'Import images…'}
+            {importing ? 'Importing…' : 'Import images…'}
           </Button>
         }
         className={cn('flex-1', fileDrop.active && 'bg-accent')}
@@ -108,7 +110,7 @@ export function TakeoverScreensSection(): ReactElement {
         {...fileDrop.handlers}
       >
         {isSessionActive ? <SessionLockAlert /> : offline ? <OfflineAlert /> : null}
-        {screens.length > 0 ? (
+        {screens.length > 0 || importing ? (
           // Bounded section: the grid scrolls inside the Assets page stack.
           // The padding keeps the in-use rim inside the scroll area's clip.
           <ScrollArea className="max-h-[28rem] overflow-y-auto pr-3">
@@ -148,6 +150,9 @@ export function TakeoverScreensSection(): ReactElement {
                   }}
                   onRename={(name) => void renameScreen(screen.id, name)}
                 />
+              ))}
+              {pendingScreenImports.map((selection) => (
+                <ImportingTile key={selection.capabilityId} name={selection.displayName} />
               ))}
             </Gallery>
           </ScrollArea>
@@ -440,4 +445,18 @@ function managedScreenAssetUrl(path: string): string {
   const normalized = path.replace(/\\/g, '/')
   const basename = normalized.slice(normalized.lastIndexOf('/') + 1)
   return `videorc-asset://screen/${encodeURIComponent(basename)}`
+}
+
+function ImportingTile({ name }: { name: string }): ReactElement {
+  return (
+    <MediaCard className="overflow-hidden" data-videorc-takeover-importing="">
+      <Skeleton className="aspect-video rounded-none" />
+      <div className="flex flex-col gap-2 p-3">
+        <div className="flex h-control min-w-0 items-center">
+          <p className="truncate text-meta text-muted-foreground">{name}</p>
+        </div>
+        <Skeleton className="h-control" />
+      </div>
+    </MediaCard>
+  )
 }

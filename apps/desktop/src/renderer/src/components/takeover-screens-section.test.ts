@@ -3,7 +3,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { StreamScreen } from '@/lib/backend'
+import type { ResourceSelection, StreamScreen } from '@/lib/backend'
 
 import { TakeoverScreensSection } from './takeover-screens-section'
 
@@ -37,8 +37,8 @@ beforeEach(() => {
     importScreenImages: vi.fn(async () => undefined),
     isSessionActive: false,
     reorderScreen: vi.fn(async () => undefined),
+    pendingScreenImports: [],
     renameScreen: vi.fn(async () => undefined),
-    screenImportPending: false,
     runtimeInfo: { platform: 'darwin' },
     screens: [screen],
     screensLoaded: true,
@@ -182,5 +182,36 @@ describe('TakeoverScreensSection file drop', () => {
     expect(overTile.defaultPrevented).toBe(false)
     await act(async () => section().dispatchEvent(dragEvent('drop', [photo])))
     expect(mocked.core.importDroppedScreenImages).not.toHaveBeenCalled()
+  })
+})
+
+describe('TakeoverScreensSection pending imports', () => {
+  const importing = (displayName: string): ResourceSelection => ({
+    capabilityId: `capability-${displayName}`,
+    kind: 'input-file',
+    displayName
+  })
+  const tileNames = (): (string | null)[] =>
+    [
+      ...document.querySelectorAll(
+        '[data-videorc-takeover-tile], [data-videorc-takeover-importing]'
+      )
+    ].map((tile) => tile.getAttribute('data-videorc-takeover-tile') ?? tile.textContent)
+
+  it('holds a placeholder after the takeovers for each image still importing', async () => {
+    mocked.core = {
+      ...mocked.core,
+      pendingScreenImports: [importing('photo.png'), importing('slide.jpg')]
+    }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    expect(tileNames()).toEqual(['screen-1', 'photo.png', 'slide.jpg'])
+    expect(document.body.textContent).toContain('Importing…')
+  })
+
+  it('shows the placeholders, not the empty state, while the first takeovers import', async () => {
+    mocked.core = { ...mocked.core, screens: [], pendingScreenImports: [importing('photo.png')] }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    expect(tileNames()).toEqual(['photo.png'])
+    expect(document.body.textContent).not.toContain('No takeovers yet')
   })
 })

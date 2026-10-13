@@ -1315,7 +1315,7 @@ export type StudioContextValue = {
   setAiConsent: (consent: boolean) => void
   startRequestPending: boolean
   stopRequestPending: boolean
-  screenImportPending: boolean
+  pendingScreenImports: readonly ResourceSelection[]
   streamMetadataSavePending: boolean
   supportBundleExportPending: boolean
   // remote control (Stream Deck et al) — status is pushed by the backend
@@ -3587,7 +3587,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // hotkey was last armed for its second press.
   const [stopConfirmation, setStopConfirmation] = useState<SessionStopConfirmation | null>(null)
   const endLivestreamArmedAtRef = useRef<number | null>(null)
-  const [screenImportPending, setScreenImportPending] = useState(false)
+  const [pendingScreenImports, setPendingScreenImports] = useState<readonly ResourceSelection[]>([])
   const screenImportInFlightRef = useRef(false)
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
@@ -10505,17 +10505,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
 
-        setScreenImportPending(true)
+        setPendingScreenImports(selections)
         await importEachSelection(
           selections,
           async (selection) => {
-            const screen = await client.request<StreamScreen>('screens.importImage', {
-              sourceCapability: selection.capabilityId
-            })
-            setScreens((current) => {
-              const withoutExisting = (current ?? []).filter((item) => item.id !== screen.id)
-              return [...withoutExisting, screen].sort((a, b) => a.sortOrder - b.sortOrder)
-            })
+            try {
+              const screen = await client.request<StreamScreen>('screens.importImage', {
+                sourceCapability: selection.capabilityId
+              })
+              setScreens((current) => {
+                const withoutExisting = (current ?? []).filter((item) => item.id !== screen.id)
+                return [...withoutExisting, screen].sort((a, b) => a.sortOrder - b.sortOrder)
+              })
+            } finally {
+              setPendingScreenImports((pending) => pending.filter((item) => item !== selection))
+            }
           },
           (error, selection) =>
             reportError(error, { action: 'import', object: selection.displayName })
@@ -10528,7 +10532,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
       } finally {
         screenImportInFlightRef.current = false
-        setScreenImportPending(false)
+        setPendingScreenImports([])
       }
     },
     [client, refreshScreensForClient, reportError, wsStatus]
@@ -16042,7 +16046,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setAiConsent,
       startRequestPending,
       stopRequestPending,
-      screenImportPending,
+      pendingScreenImports,
       streamMetadataSavePending,
       supportBundleExportPending,
       remoteControl,
@@ -16278,7 +16282,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setAiConsent,
       startRequestPending,
       stopRequestPending,
-      screenImportPending,
+      pendingScreenImports,
       streamMetadataSavePending,
       supportBundleExportPending,
       remoteControl,

@@ -1977,7 +1977,55 @@ describe('real StudioProvider lifecycle', () => {
     expect(backend.sentCommands.filter((c) => c.method === 'screens.list').length).toBe(
       listsBefore + 1
     )
-    expect(latest().core.screenImportPending).toBe(false)
+    expect(latest().core.pendingScreenImports).toEqual([])
+  })
+
+  it('holds each picked image as pending until its own import settles', async () => {
+    const { backend, latest } = await mountTakeoverImportProvider({
+      pickScreenImages: async () => [pickedImage('a'), pickedImage('b'), pickedImage('c')],
+      authorizeDroppedScreenImages: vi.fn()
+    })
+    const importOf = (capabilityId: string) => (command: BackendCommand) =>
+      (command.params as Record<string, unknown> | undefined)?.sourceCapability === capabilityId
+    const releaseA = backend.deferResponse(
+      'screens.importImage',
+      { ...takeoverScreen, id: 'screen-a', name: 'a' },
+      importOf('a')
+    )
+    const releaseB = backend.deferFailure(
+      'screens.importImage',
+      new Error('The test backend could not read this image.'),
+      importOf('b')
+    )
+    const releaseC = backend.deferResponse(
+      'screens.importImage',
+      { ...takeoverScreen, id: 'screen-c', name: 'c' },
+      importOf('c')
+    )
+    const pendingNames = (): string[] =>
+      latest().core.pendingScreenImports.map((selection) => selection.displayName)
+
+    let importing!: Promise<void>
+    act(() => {
+      importing = latest().core.importScreenImages()
+    })
+    await waitForObservation(() => pendingNames().length === 3)
+    expect(pendingNames()).toEqual(['a.png', 'b.png', 'c.png'])
+
+    act(() => releaseA())
+    await waitForObservation(() => pendingNames().length === 2)
+    expect(pendingNames()).toEqual(['b.png', 'c.png'])
+    expect(latest().core.screens.map((screen) => screen.name)).toContain('a')
+
+    act(() => releaseB())
+    await waitForObservation(() => pendingNames().length === 1)
+    expect(pendingNames()).toEqual(['c.png'])
+
+    await act(async () => {
+      releaseC()
+      await importing
+    })
+    expect(pendingNames()).toEqual([])
   })
 
   it('shows a refused drop as written, whether the refusal throws or rejects', async () => {
@@ -2003,7 +2051,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => lastToastDescription() === SCREEN_IMAGE_REFUSALS.tooMany)
     await act(async () => latest().core.importDroppedScreenImages([]))
     await waitForObservation(() => lastToastDescription() === SCREEN_IMAGE_REFUSALS.notImages)
-    expect(latest().core.screenImportPending).toBe(false)
+    expect(latest().core.pendingScreenImports).toEqual([])
   })
 
   it('refuses a second takeover import while the first is still choosing or importing', async () => {
@@ -2029,7 +2077,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(authorizeDroppedScreenImages).not.toHaveBeenCalled()
 
     act(() => choose([pickedImage('picked')]))
-    await waitForObservation(() => latest().core.screenImportPending)
+    await waitForObservation(() => latest().core.pendingScreenImports.length > 0)
     await act(async () => latest().core.importDroppedScreenImages([new File([''], 'x.png')]))
     expect(authorizeDroppedScreenImages).not.toHaveBeenCalled()
 
@@ -2037,7 +2085,7 @@ describe('real StudioProvider lifecycle', () => {
       releaseImport()
       await picking
     })
-    expect(latest().core.screenImportPending).toBe(false)
+    expect(latest().core.pendingScreenImports).toEqual([])
     await act(async () => latest().core.importDroppedScreenImages([new File([''], 'x.png')]))
     expect(authorizeDroppedScreenImages).toHaveBeenCalledOnce()
   })
