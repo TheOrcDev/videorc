@@ -2880,19 +2880,81 @@ pub fn default_recordings_dir() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    // macOS keeps captures under ~/Movies; Windows uses ~/Videos (the
-    // platform's Known Folder for the same content).
     #[cfg(target_os = "windows")]
-    let (home_var, media_dir) = ("USERPROFILE", "Videos");
+    let home_var = "USERPROFILE";
     #[cfg(not(target_os = "windows"))]
-    let (home_var, media_dir) = ("HOME", "Movies");
-
-    std::env::var_os(home_var)
+    let home_var = "HOME";
+    let home = std::env::var_os(home_var)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(media_dir)
-        .join("Videorc")
-        .join("Recordings")
+        .unwrap_or_else(|| PathBuf::from("."));
+    platform_recordings_dir(&home)
+}
+
+/// macOS keeps captures under ~/Movies; Windows uses ~/Videos (the
+/// platform's Known Folder for the same content).
+#[cfg(not(target_os = "linux"))]
+fn platform_recordings_dir(home: &Path) -> PathBuf {
+    let media_dir = if cfg!(target_os = "windows") {
+        "Videos"
+    } else {
+        "Movies"
+    };
+    home.join(media_dir).join("Videorc").join("Recordings")
+}
+
+/// Linux: the XDG videos folder, see [`linux_default_recordings_dir`].
+#[cfg(target_os = "linux")]
+fn platform_recordings_dir(home: &Path) -> PathBuf {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
+    let legacy = home.join("Movies").join("Videorc").join("Recordings");
+    let legacy_has_recordings = std::fs::read_dir(&legacy)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    linux_default_recordings_dir(
+        home,
+        std::env::var_os("XDG_VIDEOS_DIR").map(PathBuf::from),
+        user_dirs.as_deref(),
+        legacy_has_recordings,
+    )
+}
+
+/// Linux plan 0019 item 4: recordings go to the XDG videos folder
+/// (`XDG_VIDEOS_DIR`, else `user-dirs.dirs`, else `~/Videos`), not a macOS
+/// `~/Movies` the app had to create. Someone who already recorded into
+/// `~/Movies/Videorc/Recordings` keeps that folder, so a take never lands
+/// somewhere new without being asked.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_default_recordings_dir(
+    home: &Path,
+    env_videos: Option<PathBuf>,
+    user_dirs: Option<&str>,
+    legacy_has_recordings: bool,
+) -> PathBuf {
+    if legacy_has_recordings {
+        return home.join("Movies").join("Videorc").join("Recordings");
+    }
+    let from_user_dirs = || {
+        user_dirs?.lines().find_map(|line| {
+            let value = line.trim().strip_prefix("XDG_VIDEOS_DIR=")?;
+            let value = value.trim().trim_matches('"');
+            let path = match value.strip_prefix("$HOME") {
+                Some(rest) => home.join(rest.trim_start_matches('/')),
+                None => PathBuf::from(value),
+            };
+            Some(path)
+        })
+    };
+    // A videos folder set to home itself means "disabled" in xdg-user-dirs.
+    let videos = env_videos
+        .filter(|dir| dir.is_absolute())
+        .or_else(from_user_dirs)
+        .filter(|dir| dir.is_absolute() && dir.as_path() != home)
+        .unwrap_or_else(|| home.join("Videos"));
+    videos.join("Videorc").join("Recordings")
 }
 
 /// FX8: Library titles read in the user's wall clock. Generic over the zone so
@@ -34365,14 +34427,54 @@ mod tests {
     #[test]
     fn default_recordings_dir_uses_videorc_media_folder() {
         let path = default_recordings_dir();
-        let media_component = if cfg!(target_os = "windows") {
-            "Videos"
-        } else {
-            "Movies"
-        };
-
-        assert!(path.iter().any(|c| c == media_component));
+        if cfg!(target_os = "windows") {
+            assert!(path.iter().any(|c| c == "Videos"));
+        } else if cfg!(target_os = "macos") {
+            assert!(path.iter().any(|c| c == "Movies"));
+        }
         assert!(path.ends_with(PathBuf::from("Videorc").join("Recordings")));
+    }
+
+    #[test]
+    fn linux_recordings_go_to_the_xdg_videos_folder_unless_movies_already_has_takes() {
+        let home = Path::new("/home/streamer");
+        let recordings = |dir: &str| PathBuf::from(dir).join("Videorc").join("Recordings");
+        // Nothing configured: ~/Videos, never a macOS ~/Movies.
+        assert_eq!(
+            linux_default_recordings_dir(home, None, None, false),
+            recordings("/home/streamer/Videos")
+        );
+        // user-dirs.dirs, with $HOME and a localized name.
+        let user_dirs = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_VIDEOS_DIR=\"$HOME/Vidéos\"\n";
+        assert_eq!(
+            linux_default_recordings_dir(home, None, Some(user_dirs), false),
+            recordings("/home/streamer/Vidéos")
+        );
+        // The environment wins over the file.
+        assert_eq!(
+            linux_default_recordings_dir(
+                home,
+                Some(PathBuf::from("/data/clips")),
+                Some(user_dirs),
+                false
+            ),
+            recordings("/data/clips")
+        );
+        // A videos folder set to home (disabled) or relative falls back.
+        assert_eq!(
+            linux_default_recordings_dir(
+                home,
+                Some(PathBuf::from("clips")),
+                Some("XDG_VIDEOS_DIR=\"$HOME/\""),
+                false
+            ),
+            recordings("/home/streamer/Videos")
+        );
+        // Earlier takes in ~/Movies/Videorc/Recordings keep that folder.
+        assert_eq!(
+            linux_default_recordings_dir(home, None, Some(user_dirs), true),
+            recordings("/home/streamer/Movies")
+        );
     }
 
     // Regression (2026-07-06): a Settings value of "~/Movies/…" was used as a
