@@ -42,6 +42,7 @@ import {
   buddyPetSourceLabel,
   isBuddyShippedPack
 } from '@/lib/buddy-pet-view'
+import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { inlineUserError } from '@/lib/user-error'
 import type { BuddyMotionSettings } from '../../../shared/buddy-pet'
 
@@ -153,9 +154,9 @@ export function BuddyAvatarSection({
       await pets.refresh()
       await onWear(imported.pack.packId)
     } catch (failure: unknown) {
-      setImportError(
-        inlineUserError(failure, { action: 'import', object: 'the moves' }, 'buddy-avatar')
-      )
+      // The backend already writes the refusal (plan 168 / #701). Strip the
+      // IPC wrapper and keep those words — the generic mapper would hide them.
+      setImportError(ipcErrorMessage(failure))
     } finally {
       setImporting(false)
     }
