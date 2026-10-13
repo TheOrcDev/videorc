@@ -461,6 +461,7 @@ import {
 } from '@/lib/captions-ui'
 import {
   captionRuntimeStartBlocked,
+  captionsPlatformUnavailableReason,
   captionSessionOutputReadiness,
   decideGoLiveCaptionsReadiness,
   type GoLiveCaptionsReadiness
@@ -3473,7 +3474,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
-  const [suppressCaptionsForSession, setSuppressCaptionsForSession] = useState(false)
+  const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
+  const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
+  // Linux can't caption at all (no native microphone path): every session
+  // skips captions there, as if "Continue without captions" were chosen.
+  const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
+  const suppressCaptionsForSession = suppressCaptionsChoice || captionsPlatformUnavailable !== null
   // "Go live without …" for this attempt only (plan 174 S3.4, B-8).
   const [goLiveExcludedTargetIds, setGoLiveExcludedTargetIds] = useState<readonly string[]>([])
   const goLiveExcludedTargetIdsRef = useRef<readonly string[]>([])
@@ -3524,13 +3530,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         persistedEnabled: captureConfig.captions.enabled,
         suppressForSession: suppressCaptionsForSession,
         capabilities: aiCapabilities,
-        outputReadiness: goLiveCaptionOutputReadiness
+        outputReadiness: goLiveCaptionOutputReadiness,
+        platformUnavailable: captionsPlatformUnavailable
       }),
     [
       aiCapabilities,
       goLiveCaptionOutputReadiness,
       captureConfig.captions.enabled,
-      suppressCaptionsForSession
+      suppressCaptionsForSession,
+      captionsPlatformUnavailable
     ]
   )
   const continueGoLiveWithoutCaptions = useCallback(() => setSuppressCaptionsForSession(true), [])
@@ -3840,7 +3848,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [lastError, setLastError] = useState<string | null>(null)
   const lastErrorRef = useRef(lastError)
   lastErrorRef.current = lastError
-  const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const previewSurfaceStatusRef = useRef<PreviewSurfaceStatus>(idlePreviewSurfaceStatus())
