@@ -10500,7 +10500,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
-      let revision = screenListEventRevision.current
+      let revision = 0
       await screenImporter.current.run({
         pick: () => {
           setLastError(null)
