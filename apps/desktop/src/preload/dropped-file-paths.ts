@@ -7,7 +7,7 @@ import { SCREEN_IMAGE_BATCH_MAX, SCREEN_IMAGE_REFUSALS } from '../shared/screen-
  * browser) is refused here, before IPC.
  */
 export function droppedFilePaths(files: unknown, pathForFile: (file: File) => string): string[] {
-  if (!Array.isArray(files)) {
+  if (!Array.isArray(files) || files.length === 0) {
     throw new Error(SCREEN_IMAGE_REFUSALS.notImages)
   }
   if (files.length > SCREEN_IMAGE_BATCH_MAX) {
