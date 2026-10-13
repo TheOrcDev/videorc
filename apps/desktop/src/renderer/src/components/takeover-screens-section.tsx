@@ -246,6 +246,9 @@ function useFileDrop({
     depth.current = 0
     setActive(false)
   }
+  // Tiles come and go under the pointer while an import runs, and a removed
+  // tile never reports the drag leaving it.
+  useEffect(reset, [disabled])
 
   return {
     active: active && !disabled,

@@ -177,6 +177,19 @@ describe('TakeoverScreensSection file drop', () => {
     expect(mocked.core.importDroppedScreenImages).toHaveBeenCalledExactlyOnceWith([photo])
   })
 
+  it('forgets drag enters counted before an import, whose leaves may never come', async () => {
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    await act(async () => section().dispatchEvent(dragEvent('dragenter', [photo])))
+    const tile = document.querySelector<HTMLElement>('[data-videorc-takeover-tile]')!
+    await act(async () => tile.dispatchEvent(dragEvent('dragenter', [photo])))
+    mocked.core = { ...mocked.core, screenImportPending: true, screenImportPhase: 'importing' }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    mocked.core = { ...mocked.core, screenImportPending: false, screenImportPhase: 'idle' }
+    await act(async () => root.render(createElement(TakeoverScreensSection)))
+    await act(async () => section().dispatchEvent(dragEvent('dragleave', [photo])))
+    expect(section().hasAttribute('data-videorc-file-drop-active')).toBe(false)
+  })
+
   it.each([
     ['while reconnecting', { wsStatus: 'failed' }],
     ['while an import runs', { screenImportPending: true, screenImportPhase: 'importing' }]
