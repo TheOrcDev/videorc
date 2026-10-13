@@ -19,8 +19,8 @@ export function createTakeoverImporter() {
       onPhase: (phase: TakeoverImportPhase) => void
       onPending: (selections: readonly Selection[]) => void
       onImported: (screen: Screen) => void
-      /** Without a selection, the pick itself failed. */
-      onError: (error: unknown, selection?: Selection) => void
+      onPickError: (error: unknown) => void
+      onImportError: (error: unknown, selection: Selection) => void
     }): Promise<void> {
       if (operation) return
       const token = {}
@@ -39,12 +39,12 @@ export function createTakeoverImporter() {
             options.onImported(screen)
           } catch (error) {
             if (!current()) return
-            options.onError(error, selection)
+            options.onImportError(error, selection)
           }
           options.onPending(selections.slice(index + 1))
         }
       } catch (error) {
-        if (current()) options.onError(error)
+        if (current()) options.onPickError(error)
       } finally {
         if (operation === token) {
           operation = null
