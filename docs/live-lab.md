@@ -7,7 +7,8 @@ skill `videorc-live-lab` uses it; it runs only when a live test is asked for.
 For the dedicated lab machine that runs unattended (plan 178), do this
 hookup there as the lab user, then follow `docs/live-lab-machine.md` for the
 accounts, auto-login, sleep, Focus, tools, the owner's policy file and the
-doctor's machine section.
+doctor's machine section. A Linux lab box (plan 179, Hyprland) has its own
+section there, "Linux lab machine"; the hookup below is the same on both.
 
 **Never paste a key, token, secret or password into the chat.** Everything
 secret goes in through `pnpm live:hookup` and lands only in
@@ -83,6 +84,12 @@ Testing-mode refresh tokens expire after 7 days: `live:doctor` warns on day
 - Grant the Videorc build under test Screen Recording, Microphone and System
   Audio once. Turn on a Focus mode during runs.
 
+On a Linux box the same three things are a Hyprland headless output
+(`pnpm live:hookup --lab-display videorc-lab`), the lab share picker for the
+ScreenCast portal, and a PipeWire null sink plus remap source as the lab mic;
+`docs/live-lab-machine.md` section L4 has the commands, and the doctor names
+the missing piece.
+
 ## 6. Check it
 
 ```sh
@@ -105,7 +112,10 @@ SKIP. Owner install, once, from the admin account: the root-owned rules file
 (`config/live-lab/pf.anchor.example`, header has the commands), the two
 `/etc/pf.conf` anchor lines, then `config/live-lab/sudoers.live-lab.example`
 (`visudo -cf` first). The harness never writes pf rules and never runs a
-command that is not in that file.
+command that is not in that file. On Linux the same check reads the
+root-owned helper's `status` (nft table `inet videorc_lab`, tc qdisc
+`2178:`), with `config/live-lab/linux/sudoers.live-lab.example` allowing its
+four verbs only (`docs/live-lab-machine.md` section L8).
 
 `pnpm live:hookup --show` prints what is stored, fingerprints only.
 
@@ -166,6 +176,33 @@ pnpm live:install --rollback                      # swap back to the app it repl
 
 Exit codes: 0 installed, 2 refused (the reason code is printed), 1 failed.
 
+On Linux (plan 179) the build under test is an extracted AppImage directory,
+by default `~/.local/share/videorc-lab/Videorc` (previous one at
+`Videorc.previous`):
+
+```sh
+pnpm live:install --build file:~/Downloads/Videorc-<version>-linux-x64.AppImage [--sha256 <hex>]
+pnpm live:install --build local:apps/desktop/release/linux-unpacked   # built on the box
+pnpm live:install --rollback
+```
+
+- **file:** an AppImage downloaded while signed in. Its SHA-256 comes from
+  `--sha256`, else the `.sha256` file next to it, else `release.json`; no
+  hash is a refusal (`no-hash`). The AppImage magic is checked before the
+  file is ever made executable; `--appimage-extract` runs only after the hash
+  matches; the extracted app must hold `videorc`, `resources/videorc-backend`
+  and `resources/ffmpeg/bin/ffmpeg`, with the version from its desktop file.
+- **local:** an unpacked build of this checkout (`pnpm package:desktop:linux`),
+  recorded as `local-build`, unverified, and said so in the log.
+- **release** reads `latest-linux.yml` and is refused
+  (`linux-feed-unavailable`) while the Linux Alpha feed is not public (it
+  answers 404 today). **candidate:** is refused: there is no Linux
+  lab-candidate workflow yet.
+- Linux builds are unsigned, so `file` and `local-build` both count as
+  `candidate` for the policy's `allowedBuilds`.
+- Install and rollback refuse while a process runs from either directory
+  (read from `/proc/<pid>/exe`; nothing is ever signalled).
+
 ## 9. Test card and scripted speech (plan 178 U7)
 
 The lab streams a test card, not a desktop. `lib/card-server.mjs` serves
@@ -222,6 +259,16 @@ the card's click too. Each play is logged as
 `scripts/live-lab/phrases.json` holds the voice command phrases, copied
 from the parser tests in `cohost_command.rs` and `clip_marks.rs`
 (`phrases.test.mjs` fails if they drift), and plain caption phrases.
+
+On Linux (plan 179) `espeak-ng -w` renders each phrase to WAV and ffmpeg's
+PulseAudio output (`-f pulse -device videorc_lab_speech`) plays it into the
+lab speech sink, whose remap source `videorc_lab_mic` is the microphone
+Videorc records. Linux Videorc has no system-audio capture yet, so the
+card's Chrome plays its sync click into the same sink (`PULSE_SINK`): the
+click and the speech both arrive on the mic, nothing reaches the speakers,
+and speech still never plays within 1 s of a pulse. The card opens
+fullscreen on the lab output (the harness focuses that output while Chrome
+maps, checks the window landed there with `hyprctl`, then gives focus back).
 
 ## 10. On-demand runs and publishing (plan 178 U10)
 

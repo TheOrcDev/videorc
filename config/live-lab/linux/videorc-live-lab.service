@@ -1,0 +1,54 @@
+# Plan 179: the live lab schedule tick on Linux, the twin of
+# config/live-lab/com.videorc.live-lab.plist. Template; the lab user installs
+# it, with videorc-live-lab.timer, by running
+#
+#   pnpm live:schedule install-agent
+#
+# which renders both into ~/.config/systemd/user/ with this checkout's paths,
+# creates ~/videorc-live-lab/logs (systemd opens the append: files below
+# itself and does not create their folder), checks both with
+# `systemd-analyze --user verify`, then runs `systemctl --user daemon-reload`
+# and `systemctl --user enable --now videorc-live-lab.timer`.
+#
+# The timer starts this oneshot every 300 s and once after boot. The tick
+# decides what is due from the policy, the lock and
+# config/live-lab/schedule.json; a missed slot is skipped, never piled up.
+# Nothing here holds a secret: the stream keys and tokens stay in
+# ~/.videorc-live-lab/config.json (0600) and the policy stays root-owned in
+# /etc/videorc-lab/policy.json.
+#
+# Paths assume the lab user `videorc-lab` with the repo at ~/videorc and the
+# distribution's node in /usr/bin; install-agent swaps in the real ones and
+# puts the folder of the node it runs under first in PATH. systemd reads %
+# (specifiers), $ (variables), quotes, backslashes and whitespace in these
+# values as syntax, so install-agent refuses a path that holds any of them.
+
+[Unit]
+Description=Videorc live lab schedule tick (plan 179)
+
+[Service]
+# One tick per start; the timer never starts a second one while it runs.
+Type=oneshot
+ExecStart=/usr/bin/node /home/videorc-lab/videorc/scripts/live-lab/schedule.mjs tick
+WorkingDirectory=/home/videorc-lab/videorc
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Environment=HOME=/home/videorc-lab
+
+# A tick runs each due slot to completion, so a marathon keeps this oneshot
+# in its start phase for hours. Never time it out (oneshot already defaults
+# to this; spelled out so nobody adds a limit that kills a marathon).
+TimeoutStartSec=infinity
+
+# On stop (uninstall-agent --force, a logout without linger, shutdown, the
+# weekly reboot) SIGTERM goes to the tick only. The tick forwards it to the
+# run, which ends the stream and tears down (the kill switch budget is 60 s).
+# Anything still in the unit 90 s later gets SIGKILL. The default
+# control-group mode would SIGTERM the app and its helpers at the same moment
+# as the run, so the run could not end the stream in order.
+KillMode=mixed
+TimeoutStopSec=90
+
+# The tick's own lines. Each slot's run output goes to
+# logs/schedule-<date>.log next to it (30 days kept).
+StandardOutput=append:/home/videorc-lab/videorc-live-lab/logs/schedule.log
+StandardError=append:/home/videorc-lab/videorc-live-lab/logs/schedule.log

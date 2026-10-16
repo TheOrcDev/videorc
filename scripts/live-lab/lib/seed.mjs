@@ -1,4 +1,6 @@
 import { isLoopbackRtmp } from './launch.mjs'
+import { LAB_MIC_SOURCE } from './linux-desktop.mjs'
+import { isLinux } from './platform.mjs'
 
 // Plan 178 U6 (plan 176 L2 step 1). Seeds the lab profile before every run,
 // through the app's own surfaces so nothing depends on private file formats:
@@ -25,6 +27,11 @@ export const ONBOARDING_DISMISSED_VALUE = 'permissions-v1'
 export const YOUTUBE_RTMPS_URL = 'rtmps://a.rtmps.youtube.com:443/live2'
 export const LAB_SCENE = 'screen-only'
 const MIC_NAME = /blackhole/i
+// Plan 179: Linux lists exactly one screen row, the ScreenCast portal (the
+// output it captures is the lab share picker's answer, see session.mjs), and
+// names microphones by Pulse description with the source name in `detail`.
+export const LINUX_PORTAL_SCREEN_ID = 'screen:portal:monitor'
+const LINUX_LAB_MIC_DETAIL = new RegExp(`^PulseAudio/PipeWire source ${LAB_MIC_SOURCE}(?:\\s|$)`)
 
 export const TARGET_SLOTS = Object.freeze({
   horizontal: { id: 'youtube', platform: 'youtube', defaultLabel: 'Videorc lab' },
@@ -76,6 +83,49 @@ export function pickLabDevices(deviceList, labDisplayName) {
     throw new SeedRefused(
       'blackhole-unavailable',
       `BlackHole is ${microphone.status} in Videorc (Microphone grant?).`
+    )
+  }
+  return {
+    screen: { id: screen.id, name: screen.name },
+    microphone: { id: microphone.id, name: microphone.name }
+  }
+}
+
+/**
+ * Plan 179: the Linux twin of pickLabDevices (pure). The screen is the
+ * portal source; the mic is the lab's remap source (videorc_lab_mic), never
+ * a room mic.
+ */
+export function pickLinuxLabDevices(deviceList) {
+  const devices = Array.isArray(deviceList?.devices) ? deviceList.devices : []
+  const screens = devices.filter((device) => device.kind === 'screen')
+  const screen = screens.find((device) => device.id === LINUX_PORTAL_SCREEN_ID)
+  if (!screen) {
+    throw new SeedRefused(
+      'lab-display-missing',
+      `Videorc lists no ScreenCast portal source (it lists ${screens.length} screen(s)).`
+    )
+  }
+  if (screen.status !== 'available') {
+    throw new SeedRefused(
+      'lab-display-unavailable',
+      `The portal screen source is ${screen.status} in Videorc${screen.detail ? `: ${screen.detail}` : ''}.`
+    )
+  }
+  const microphone = devices.find(
+    (device) =>
+      device.kind === 'microphone' && LINUX_LAB_MIC_DETAIL.test(String(device.detail ?? ''))
+  )
+  if (!microphone) {
+    throw new SeedRefused(
+      'lab-mic-missing',
+      `${LAB_MIC_SOURCE} is not listed as a microphone; the lab never streams a room mic.`
+    )
+  }
+  if (microphone.status !== 'available') {
+    throw new SeedRefused(
+      'lab-mic-unavailable',
+      `${LAB_MIC_SOURCE} is ${microphone.status} in Videorc.`
     )
   }
   return {
@@ -210,7 +260,7 @@ export function verifySeededConfig(saved, { targets, devices, scenario }) {
   if (saved.sources?.screenId !== devices.screen.id)
     problems.push('screen source is not the lab display')
   if (saved.sources?.microphoneId !== devices.microphone.id)
-    problems.push('microphone is not BlackHole')
+    problems.push(`microphone is not the lab mic (${devices.microphone.name})`)
   if (saved.sources?.cameraId) problems.push('a camera is selected')
   if (saved.streamEnabled !== true) problems.push('streaming is off')
   const enabled = (saved.streaming?.targets ?? []).filter((target) => target?.enabled)
@@ -243,9 +293,13 @@ export async function seedProfile({
   config,
   sink,
   titlePrefix,
+  platform = process.platform,
   log = () => {}
 }) {
-  const devices = pickLabDevices(await rpc('devices.list'), config?.labDisplay?.name)
+  const listed = await rpc('devices.list')
+  const devices = isLinux(platform)
+    ? pickLinuxLabDevices(listed)
+    : pickLabDevices(listed, config?.labDisplay?.name)
   const targets = plannedTargets({ scenario, config, sink, titlePrefix })
   const stored = {}
   for (const target of targets) {
@@ -288,7 +342,9 @@ export async function seedProfile({
       `The lab profile seed did not take: ${problems.join('; ')}.`
     )
   }
-  log(`Seed: lab display, BlackHole and ${targets.map((target) => target.id).join(', ')} are set.`)
+  log(
+    `Seed: lab display, ${devices.microphone.name} and ${targets.map((target) => target.id).join(', ')} are set.`
+  )
   return {
     devices: { screen: devices.screen.name, microphone: devices.microphone.name },
     targetIds: targets.map((target) => target.id),

@@ -37,6 +37,10 @@ const SUDOERS_EXAMPLE = join(
 )
 const PF_ANCHOR_EXAMPLE = join(HERE, '..', '..', '..', 'config', 'live-lab', 'pf.anchor.example')
 
+// The pf/dnctl tests pin macOS: CI runs this file on Linux, where the
+// default platform would pick the plan 179 backend.
+const MAC = 'darwin'
+
 const ALLOWED_LINES = new Set(allowedCommandLines())
 
 function lineOf({ command, args }) {
@@ -177,6 +181,7 @@ test('applyNetFault: clean slate, watchdog first, pipe then anchor, deadline tim
   const watchdogs = []
   const logs = []
   const handle = await applyNetFault({
+    platform: MAC,
     kind: 'loss',
     durationMs: 30_000,
     runner: sys.runner,
@@ -236,6 +241,7 @@ test('applyNetFault throttle uses the one allowed bandwidth', async () => {
   const clock = fakeClock()
   const registry = createNetFaultRegistry()
   await applyNetFault({
+    platform: MAC,
     kind: 'throttle',
     durationMs: 30_000,
     kbps: 1000,
@@ -247,6 +253,7 @@ test('applyNetFault throttle uses the one allowed bandwidth', async () => {
   assert.ok(!sys.state.calls.includes(lineOf(ALLOWED_COMMANDS.dnPipeLoss)))
   await assert.rejects(
     applyNetFault({
+      platform: MAC,
       kind: 'throttle',
       durationMs: 1_000,
       kbps: 500,
@@ -269,6 +276,7 @@ test('applyNetFault refuses bad requests before running anything', async () => {
   ]) {
     await assert.rejects(
       applyNetFault({
+        platform: MAC,
         ...request,
         runner: sys.runner,
         registry: createNetFaultRegistry(),
@@ -285,9 +293,23 @@ test('applyNetFault refuses a second fault while one is active', async () => {
   const sys = fakeSystem()
   const clock = fakeClock()
   const registry = createNetFaultRegistry()
-  await applyNetFault({ kind: 'loss', durationMs: 5_000, runner: sys.runner, registry, ...clock })
+  await applyNetFault({
+    platform: MAC,
+    kind: 'loss',
+    durationMs: 5_000,
+    runner: sys.runner,
+    registry,
+    ...clock
+  })
   await assert.rejects(
-    applyNetFault({ kind: 'loss', durationMs: 5_000, runner: sys.runner, registry, ...clock }),
+    applyNetFault({
+      platform: MAC,
+      kind: 'loss',
+      durationMs: 5_000,
+      runner: sys.runner,
+      registry,
+      ...clock
+    }),
     /already installed/
   )
 })
@@ -297,6 +319,7 @@ test('applyNetFault: sudo refused stops at the first command, nothing spawned', 
   const clock = fakeClock()
   await assert.rejects(
     applyNetFault({
+      platform: MAC,
       kind: 'loss',
       durationMs: 5_000,
       runner: sys.runner,
@@ -315,7 +338,14 @@ test('applyNetFault: a failed anchor load removes the pipe and kills the watchdo
   const clock = fakeClock()
   const registry = createNetFaultRegistry()
   await assert.rejects(
-    applyNetFault({ kind: 'loss', durationMs: 5_000, runner: sys.runner, registry, ...clock }),
+    applyNetFault({
+      platform: MAC,
+      kind: 'loss',
+      durationMs: 5_000,
+      runner: sys.runner,
+      registry,
+      ...clock
+    }),
     /anchor load exit 1: pfctl: boom/
   )
   assert.equal(sys.state.pipe, '')
@@ -331,6 +361,7 @@ test('removeNetFaults is idempotent and tolerates a watchdog that already exited
   const clock = fakeClock()
   const registry = createNetFaultRegistry()
   const handle = await applyNetFault({
+    platform: MAC,
     kind: 'loss',
     durationMs: 5_000,
     runner: sys.runner,
@@ -341,6 +372,7 @@ test('removeNetFaults is idempotent and tolerates a watchdog that already exited
   assert.deepEqual(first.killedWatchdogs, [4242])
   assert.ok(clock.timers[0].cleared)
   const second = await removeNetFaults({
+    platform: MAC,
     runner: sys.runner,
     registry,
     kill: clock.kill,
@@ -353,6 +385,7 @@ test('removeNetFaults is idempotent and tolerates a watchdog that already exited
   // A watchdog gone by the time we kill it (ESRCH) is not an error.
   registry.watchdogs.set(777, { kind: 'loss', deadlineAt: 0 })
   const gone = await removeNetFaults({
+    platform: MAC,
     runner: sys.runner,
     registry,
     kill: () => {
@@ -382,7 +415,12 @@ test('removeNetFaults throws when the read-back still shows the lab rule or pipe
     return { code: 0, stdout: '', stderr: '' }
   }
   await assert.rejects(
-    removeNetFaults({ runner: stuck, registry: createNetFaultRegistry(), kill: () => {} }),
+    removeNetFaults({
+      platform: MAC,
+      runner: stuck,
+      registry: createNetFaultRegistry(),
+      kill: () => {}
+    }),
     (error) =>
       error.code === 'NET_FAULT_RESIDUE' &&
       error.residue.rules.length === 1 &&
