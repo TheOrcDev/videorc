@@ -34461,6 +34461,10 @@ mod tests {
         );
     }
 
+    // POSIX paths only: on Windows "/home/streamer" is not absolute and joins
+    // with `\`, so the XDG rules cannot be expressed there (they never run
+    // there either).
+    #[cfg(not(windows))]
     #[test]
     fn linux_recordings_go_to_the_xdg_videos_folder_unless_movies_already_has_takes() {
         let home = Path::new("/home/streamer");
