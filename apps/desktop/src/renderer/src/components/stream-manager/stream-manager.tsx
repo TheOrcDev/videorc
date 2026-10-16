@@ -116,6 +116,7 @@ import {
   type CommandAnswer
 } from '@/components/stream-manager/command-cards'
 import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
+import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import {
   removalPaneView,
   removeFromChatAvailable,
@@ -911,6 +912,7 @@ export function StreamManager({
         <BuddyChatControls
           autoChat={cohostAutoChat}
           name={buddyName}
+          picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
           onModeChange={(mode) => onCohostAutoChatChange({ mode })}
           onOpenChatSettings={onCohostOpenChatSettings}
         />
