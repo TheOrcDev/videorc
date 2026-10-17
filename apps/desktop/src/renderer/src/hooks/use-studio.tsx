@@ -74,6 +74,7 @@ import {
   trashName
 } from '@/lib/platform'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
+import { CLOUD_TOAST_ID, cloudFallbackToast, cloudLostToast } from '@/lib/cloud-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
 
@@ -303,6 +304,8 @@ import type {
   CohostSettingsPatch,
   CohostState,
   CohostWindowState,
+  CloudSettingsPatch,
+  CloudStatus,
   BuddyOverlaySnapshot,
   CommentHighlightAnchor,
   CommentHighlightCanvases,
@@ -1634,6 +1637,29 @@ const StudioDiagnosticsContext = createContext<StudioDiagnosticsContextValue | n
 const StudioChatContext = createContext<StudioChatContextValue | null>(null)
 const StudioAudioContext = createContext<StudioAudioContextValue | null>(null)
 
+/**
+ * Videorc Cloud (plan 184): the backend's whole `CloudStatus`, plus the three
+ * things the renderer can ask of it. Its own context because the status
+ * changes every couple of seconds during a cloud show, and nothing else
+ * should re-render for it.
+ */
+export interface StudioCloudContextValue {
+  /** Null until the backend answers (an older backend never does). */
+  cloudStatus: CloudStatus | null
+  setCloudSettings: (patch: CloudSettingsPatch) => Promise<void>
+  refreshCloudAllowance: () => Promise<void>
+  endCloudShow: () => Promise<void>
+}
+
+const NO_CLOUD: StudioCloudContextValue = {
+  cloudStatus: null,
+  setCloudSettings: async () => {},
+  refreshCloudAllowance: async () => {},
+  endCloudShow: async () => {}
+}
+
+const StudioCloudContext = createContext<StudioCloudContextValue | null>(null)
+
 interface StudioShellContextValue {
   wsStatus: WsStatus
   backendConnected: boolean
@@ -2081,6 +2107,11 @@ export function useStudioDiagnostics(): StudioDiagnosticsContextValue {
   return value
 }
 
+/** Outside a provider (tests, isolated renders) the cloud simply isn't there. */
+export function useStudioCloud(): StudioCloudContextValue {
+  return useContext(StudioCloudContext) ?? NO_CLOUD
+}
+
 export function useStudioRecordingState(): StudioRecordingStateContextValue {
   const value = useContext(StudioRecordingStateContext)
   if (!value) {
@@ -2151,6 +2182,7 @@ type StudioContextProvidersProps = {
   diagnostics: StudioDiagnosticsContextValue
   chat: StudioChatContextValue
   audio: StudioAudioContextValue
+  cloud?: StudioCloudContextValue
   children?: ReactNode
 }
 
@@ -2168,6 +2200,7 @@ export function StudioContextProviders({
   diagnostics,
   chat,
   audio,
+  cloud,
   children
 }: StudioContextProvidersProps): ReactElement {
   return (
@@ -2177,7 +2210,11 @@ export function StudioContextProviders({
           <StudioPreviewContext.Provider value={preview}>
             <StudioDiagnosticsContext.Provider value={diagnostics}>
               <StudioChatContext.Provider value={chat}>
-                <StudioAudioContext.Provider value={audio}>{children}</StudioAudioContext.Provider>
+                <StudioAudioContext.Provider value={audio}>
+                  <StudioCloudContext.Provider value={cloud ?? null}>
+                    {children}
+                  </StudioCloudContext.Provider>
+                </StudioAudioContext.Provider>
               </StudioChatContext.Provider>
             </StudioDiagnosticsContext.Provider>
           </StudioPreviewContext.Provider>
@@ -4352,6 +4389,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [replaceSessionRuntimeNotice]
   )
 
+  // --- Videorc Cloud (plan 184) ----------------------------------------------
+  // The BACKEND owns the show (cloud_show.rs); the renderer renders
+  // `cloud.state` and asks for three things. Toast discipline: a Go Live that
+  // streamed directly says why once (the fallback names its session), and a
+  // show the cloud lost while this computer fed it warns once. Nothing else
+  // here is news: the Livestream page and the Stream health stat show the rest.
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
+  const cloudStatusRef = useRef<CloudStatus | null>(null)
+  const commitCloudStatus = useCallback((next: CloudStatus): void => {
+    const previous = cloudStatusRef.current
+    cloudStatusRef.current = next
+    setCloudStatus(next)
+    const fallback = cloudFallbackToast(previous, next)
+    if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
+    const lost = cloudLostToast(previous, next)
+    if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
+  }, [])
+
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
   // The BACKEND owns the engine: the tick scheduler, the open-question set,
   // flags and every failure reason. The renderer renders `cohost.state`, fires
@@ -4435,6 +4490,62 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelled = true
     }
   }, [client, commitCohostState, wsStatus])
+
+  // The cloud status once per connection; `cloud.state` keeps it current. An
+  // older backend has no cloud, and the Livestream section simply stays away.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    let cancelled = false
+    void client
+      .requestTyped('cloud.status')
+      .then((next) => {
+        if (!cancelled) commitCloudStatus(next)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [client, commitCloudStatus, wsStatus])
+
+  const setCloudSettings = useCallback(
+    async (patch: CloudSettingsPatch): Promise<void> => {
+      if (!client) return
+      try {
+        commitCloudStatus(await client.requestTyped('cloud.settings.set', patch))
+      } catch (error) {
+        toastUserError(
+          error,
+          { action: 'save', object: 'the Videorc Cloud setting' },
+          { id: CLOUD_TOAST_ID }
+        )
+      }
+    },
+    [client, commitCloudStatus]
+  )
+  const refreshCloudAllowance = useCallback(async (): Promise<void> => {
+    if (!client) return
+    try {
+      commitCloudStatus(await client.requestTyped('cloud.allowance.refresh'))
+    } catch {
+      // The section keeps the hours it last had; signed out says so itself.
+    }
+  }, [client, commitCloudStatus])
+  const endCloudShow = useCallback(async (): Promise<void> => {
+    if (!client) return
+    try {
+      commitCloudStatus(await client.requestTyped('cloud.show.end'))
+    } catch (error) {
+      toastUserError(
+        error,
+        { action: 'end', object: 'the stream on Videorc Cloud' },
+        { id: CLOUD_TOAST_ID }
+      )
+    }
+  }, [client, commitCloudStatus])
+  const cloudValue = useMemo<StudioCloudContextValue>(
+    () => ({ cloudStatus, endCloudShow, refreshCloudAllowance, setCloudSettings }),
+    [cloudStatus, endCloudShow, refreshCloudAllowance, setCloudSettings]
+  )
 
   useEffect(() => {
     if (
@@ -7374,6 +7485,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('cohost.state', (payload) => {
         commitCohostState(payload as CohostState)
       }),
+      nextClient.on('cloud.state', (payload) => {
+        commitCloudStatus(payload)
+      }),
       nextClient.on('cohost.buddy.state', (payload) => {
         setBuddyOverlay(payload as BuddyOverlaySnapshot)
       }),
@@ -8014,6 +8128,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     clearLiveChatForTerminalSession,
     publishLiveCommentsSnapshot,
     commitActiveScreen,
+    commitCloudStatus,
     commitCohostState,
     commitCaptureRecoveryStatus,
     commitDiagnosticStatsThrottled,
@@ -16408,6 +16523,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       <StudioContextProviders
         audio={audioValue}
         chat={chatValue}
+        cloud={cloudValue}
         core={value}
         diagnostics={diagnosticsValue}
         preview={previewValue}

@@ -2271,6 +2271,44 @@ mod tests {
         assert_eq!(value, json!({ "holdMaxSeconds": 1800 }));
     }
 
+    fn high_risk_fixture(pointer: &str) -> Value {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/high-risk-contracts.json"
+        ))
+        .expect("the shared protocol fixture is valid JSON");
+        fixture
+            .pointer(pointer)
+            .unwrap_or_else(|| panic!("the shared protocol fixture is missing {pointer}"))
+            .clone()
+    }
+
+    // The `cloud.state` event and every `cloud.*` answer: the TypeScript
+    // strict schema validates the same JSON (protocol-contract-fixtures.test.ts),
+    // so a renamed field or a `null` where the schema says absent fails here
+    // first (the serde-null trap).
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_the_cloud_status() {
+        for pointer in [
+            "/cloud/statusHold",
+            "/cloud/statusOff",
+            "/cloud/statusFallback",
+        ] {
+            let wire = high_risk_fixture(pointer);
+            let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(status).unwrap(), wire, "{pointer}");
+        }
+        let patch: CloudSettingsPatch =
+            serde_json::from_value(high_risk_fixture("/cloud/settingsPatch")).unwrap();
+        assert_eq!(patch.enabled, Some(false));
+        assert_eq!(patch.hold_max_seconds, Some(900));
+        assert_eq!(patch.hold_image_screen_id, Some(None));
+        // What the runtime emits for an untouched slot is the statusOff shape.
+        assert_eq!(
+            serde_json::to_value(CloudShowRuntime::default().status()).unwrap(),
+            high_risk_fixture("/cloud/statusOff")
+        );
+    }
+
     #[test]
     fn go_live_decision_follows_the_switch_the_entitlement_and_the_hours() {
         let mut runtime = CloudShowRuntime::default();

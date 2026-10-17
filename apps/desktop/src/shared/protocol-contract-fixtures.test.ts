@@ -7,6 +7,8 @@ import type {
   AccountCallbackEnvelope,
   AiCapabilities,
   AiCapabilitiesCloud,
+  CloudSettingsPatch,
+  CloudStatus,
   EntitlementsSnapshot,
   CleanCutEdl,
   CleanCutGetResult,
@@ -255,6 +257,12 @@ interface HighRiskContractFixtures {
     hiddenOperation: ModerationOperation
     removedMessage: LiveChatMessage
   }
+  cloud: {
+    statusHold: CloudStatus
+    statusOff: CloudStatus
+    statusFallback: CloudStatus
+    settingsPatch: CloudSettingsPatch
+  }
 }
 
 const fixtures = JSON.parse(
@@ -445,6 +453,37 @@ describe('shared high-risk protocol fixture', () => {
     ).toThrow()
     expect(() =>
       validateBackendEventPayload('entitlements.updated', { ...max, tier: 'max' })
+    ).toThrow()
+  })
+
+  // Plan 184: the whole cloud status rides `cloud.state` and every `cloud.*`
+  // answer. Rust round-trips the same JSON (cloud_show.rs), so a renamed field
+  // or a `null` the schema calls absent fails on one side or the other.
+  it('keeps the Videorc Cloud status identical across languages (plan 184)', () => {
+    const { statusHold, statusOff, statusFallback, settingsPatch } = fixtures.cloud
+    for (const status of [statusHold, statusOff, statusFallback]) {
+      expect(jsonShape(validateBackendEventPayload('cloud.state', status))).toEqual(status)
+      expect(jsonShape(validateBackendRpcResult('cloud.status', status))).toEqual(status)
+      expect(jsonShape(validateBackendRpcResult('cloud.show.end', status))).toEqual(status)
+    }
+    expect(jsonShape(validateBackendRpcParams('cloud.settings.set', settingsPatch))).toEqual(
+      settingsPatch
+    )
+    // Secret-free: no field of the status could carry a url, token or key.
+    expect(JSON.stringify(statusHold)).not.toMatch(/rtmps?:|token|vcs1\.|streamKey/)
+    // A phase or reason the schema does not know is refused, and so is a null
+    // where the wire omits the field.
+    expect(() =>
+      validateBackendEventPayload('cloud.state', { ...statusHold, phase: 'paused' })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cloud.state', { ...statusHold, sessionId: null })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusFallback,
+        fallback: { ...statusFallback.fallback, reason: 'cloud-sleepy' }
+      })
     ).toThrow()
   })
 

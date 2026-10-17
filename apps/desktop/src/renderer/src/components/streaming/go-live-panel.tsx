@@ -1,3 +1,4 @@
+import { CloudSection } from './cloud-section'
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
@@ -153,6 +154,7 @@ export function GoLivePanel({
           }}
         />
       </PanelSection>
+      <CloudSection />
       <ReadyToGoLive
         accountByPlatform={accountByPlatform}
         captions={

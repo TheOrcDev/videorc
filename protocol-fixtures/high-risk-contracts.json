@@ -2098,5 +2098,79 @@
     },
     "deleteParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
     "accepted": { "accepted": true }
+  },
+  "cloud": {
+    "statusHold": {
+      "phase": "hold",
+      "entitled": true,
+      "plan": "max",
+      "settings": {
+        "enabled": true,
+        "holdMaxSeconds": 1800,
+        "holdMaxChoices": [300, 900, 1800, 3600],
+        "holdImageScreenId": "screen-1"
+      },
+      "allowance": {
+        "enabled": true,
+        "secondsPerMonth": 360000,
+        "secondsUsed": 133200,
+        "overageSeconds": 0,
+        "resetAt": "2026-11-01T00:00:00.000Z",
+        "talkShows": true,
+        "guestsOnStage": 5,
+        "roomSize": 10,
+        "recordingRetentionDays": 30
+      },
+      "show": {
+        "id": "sh_0123456789abcdefghijkl",
+        "nodeId": "eu-hel-1",
+        "createdAt": "2026-10-16T12:00:00.000Z",
+        "expiresAt": "2026-10-17T00:30:00.000Z",
+        "resumable": false
+      },
+      "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
+      "connected": true,
+      "hold": {
+        "active": true,
+        "since": "2026-10-16T12:40:00.000Z",
+        "reason": "feed-lost",
+        "remainingSeconds": 1650
+      },
+      "feeds": [{ "orientation": "horizontal", "connected": false, "kbps": 0 }],
+      "legs": [
+        { "targetId": "youtube", "platform": "youtube", "label": "YouTube", "state": "live" },
+        {
+          "targetId": "twitch",
+          "platform": "twitch",
+          "label": "Twitch",
+          "state": "reconnecting",
+          "message": "ingest closed the connection"
+        }
+      ],
+      "liveSeconds": 2400,
+      "directFallbackAvailable": false
+    },
+    "statusOff": {
+      "phase": "off",
+      "entitled": false,
+      "settings": { "enabled": true, "holdMaxSeconds": 1800, "holdMaxChoices": [300, 900, 1800, 3600] },
+      "connected": false,
+      "directFallbackAvailable": false
+    },
+    "statusFallback": {
+      "phase": "off",
+      "entitled": true,
+      "plan": "premium",
+      "settings": { "enabled": true, "holdMaxSeconds": 1800, "holdMaxChoices": [300, 900, 1800, 3600] },
+      "connected": false,
+      "fallback": {
+        "reason": "cloud-full",
+        "at": "2026-10-16T12:00:00.000Z",
+        "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
+        "message": "Videorc Cloud is full right now."
+      },
+      "directFallbackAvailable": false
+    },
+    "settingsPatch": { "enabled": false, "holdMaxSeconds": 900, "holdImageScreenId": null }
   }
 }
