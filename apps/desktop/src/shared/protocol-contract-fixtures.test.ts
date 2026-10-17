@@ -1,10 +1,13 @@
 import { readFileSync } from 'node:fs'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import { normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
   AccountCallbackEnvelope,
+  AiCapabilities,
+  AiCapabilitiesCloud,
+  EntitlementsSnapshot,
   CleanCutEdl,
   CleanCutGetResult,
   CleanCutJob,
@@ -93,6 +96,12 @@ import { normalizePreviewSurfaceBounds } from './native-preview-bounds'
 
 interface HighRiskContractFixtures {
   schemaVersion: 2
+  accountPlans: {
+    capabilitiesMax: AiCapabilities
+    cloudPremium: AiCapabilitiesCloud
+    entitlementsMax: EntitlementsSnapshot
+    entitlementsBasic: EntitlementsSnapshot
+  }
   sessionChatTotals: {
     params: { sessionId: string }
     available: SessionChatTotals
@@ -390,6 +399,53 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendRpcResult('scene.get', fixtures.scene.wire))).toEqual(
       fixtures.scene.wire
     )
+  })
+
+  // Plan 185 T4: Max is Premium plus a plan. The capabilities answer gains
+  // optional `plan` and `cloud` blocks; the desktop's own snapshot gains an
+  // optional `plan` beside the tier, and the strict schema admits only the
+  // two plan ids, never a new tier value.
+  it('keeps the plan and cloud blocks optional and the entitlement plan strict (plan 185)', () => {
+    const capabilities = fixtures.accountPlans.capabilitiesMax
+    expect(capabilities.entitlement.tier).toBe('premium')
+    expect(capabilities.plan).toEqual({ id: 'max', name: 'Max' })
+    expect(capabilities.cloud).toEqual({
+      enabled: true,
+      secondsPerMonth: 360000,
+      secondsUsed: 133200,
+      overageSeconds: 0,
+      resetAt: '2026-11-01T00:00:00Z',
+      talkShows: true,
+      guestsOnStage: 5,
+      roomSize: 10,
+      recordingRetentionDays: 30
+    })
+    expectTypeOf(capabilities.plan).toEqualTypeOf<AiCapabilities['plan']>()
+    expectTypeOf(fixtures.accountPlans.cloudPremium).toEqualTypeOf<AiCapabilitiesCloud>()
+    expect(fixtures.accountPlans.cloudPremium.talkShows).toBe(false)
+    expect(fixtures.accountPlans.cloudPremium).not.toHaveProperty('guestsOnStage')
+
+    const max = fixtures.accountPlans.entitlementsMax
+    expect(jsonShape(validateBackendEventPayload('entitlements.updated', max))).toEqual(max)
+    expect(jsonShape(validateBackendRpcResult('entitlements.get', max))).toEqual(max)
+    expect(max.tier).toBe('premium')
+    expect(max.plan).toBe('max')
+
+    const basic = fixtures.accountPlans.entitlementsBasic
+    expect(jsonShape(validateBackendEventPayload('entitlements.updated', basic))).toEqual(basic)
+    expect(basic).not.toHaveProperty('plan')
+
+    // A plan the schema does not know, a null plan, or a plan posing as a
+    // tier are all refused: the renderer never guesses at a tier.
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', { ...max, plan: 'enterprise' })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', { ...max, plan: null })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', { ...max, tier: 'max' })
+    ).toThrow()
   })
 
   it('validates full and defaulted recording status shapes', () => {

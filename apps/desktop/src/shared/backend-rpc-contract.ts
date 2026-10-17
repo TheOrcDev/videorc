@@ -641,6 +641,8 @@ const entitlementsSchema = objectSchema(
   {
     schemaVersion: nonNegativeInteger,
     tier: enumSchema(['basic', 'premium', 'developer']),
+    // Plan 185 D2: the plan is a field beside the tier, never a tier value.
+    plan: optionalSchema(enumSchema(['premium', 'max'])),
     source: enumSchema([
       'local-default',
       'env-override',

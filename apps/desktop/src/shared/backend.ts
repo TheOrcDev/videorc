@@ -80,6 +80,12 @@ export type FeatureId =
   | 'live-cohost'
 export type EntitlementState = 'enabled' | 'disabled' | 'developer-override'
 export type EntitlementTier = 'basic' | 'premium' | 'developer'
+/**
+ * The paid plan behind the Premium tier (plan 185 D2). Max keeps
+ * `tier: 'premium'` everywhere and says `plan: 'max'` beside it, so an older
+ * app or a rollback keeps every Max user at least Premium. Never a tier value.
+ */
+export type EntitlementPlan = 'premium' | 'max'
 export type EntitlementSource =
   | 'local-default'
   | 'env-override'
@@ -118,6 +124,8 @@ export interface EntitlementLimits {
 export interface EntitlementsSnapshot {
   schemaVersion: number
   tier: EntitlementTier
+  /** Plan 185 D2: `premium` or `max` while the account is Premium; absent otherwise. */
+  plan?: EntitlementPlan
   source: EntitlementSource
   capabilities: EntitlementCapability[]
   limits: EntitlementLimits
@@ -3331,6 +3339,19 @@ export interface ScopeReconnectCommand {
   platform: ScopeReconnectPlatform
 }
 
+/** `cloud` from `/api/ai/capabilities` and `GET /api/cloud/allowance` (plan 185). */
+export interface AiCapabilitiesCloud {
+  enabled: boolean
+  secondsPerMonth: number
+  secondsUsed: number
+  overageSeconds: number
+  resetAt?: string
+  talkShows: boolean
+  guestsOnStage?: number
+  roomSize?: number
+  recordingRetentionDays?: number
+}
+
 export interface AiCapabilities {
   /** Optional during rolling web deployments. Missing must fail closed when captions are enabled. */
   captions?: {
@@ -3411,6 +3432,17 @@ export interface AiCapabilities {
     subscriptionStatus: string
     tier: string
   }
+  /** The paid plan (plan 185 D2): `{ id: 'max', name: 'Max' }`. Absent for
+   * Basic and on older web deploys. `id` is open: an unknown plan is still
+   * Premium. */
+  plan?: {
+    id: string
+    name: string
+  }
+  /** Cloud hours and talk-show limits (plan 185 wire shape, plan 184).
+   * Absent for Basic and on older web deploys, which means no cloud. The
+   * same block is the whole answer of `GET /api/cloud/allowance`. */
+  cloud?: AiCapabilitiesCloud
   features: {
     /** Clean cut kill switch off and its provider configured; older servers omit it. */
     cleanCutEnabled?: boolean
