@@ -60,6 +60,7 @@ import {
   BUDDY_PET_SKIPPED_FILES_MAX
 } from './buddy-assets'
 import { openableChatLink } from './chat-link'
+import { SCREEN_IMAGE_BATCH_MAX } from './screen-image-files'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
 import {
@@ -97,7 +98,8 @@ export const electronInvokeApiMethods = {
   'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
   'app:exit': 'exitApp',
-  'screens:pick-image': 'pickScreenImage',
+  'screens:pick-images': 'pickScreenImages',
+  'screens:authorize-dropped-images': 'authorizeDroppedScreenImages',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
   'buddy-assets:remove': 'removeBuddyPersona',
@@ -227,10 +229,26 @@ export const electronInvokeApiMethods = {
 } as const satisfies Record<string, keyof VideorcApi>
 
 export type ElectronInvokeChannel = keyof typeof electronInvokeApiMethods
+/**
+ * Channels whose preload method converts its arguments before they cross IPC.
+ * Dropped images reach preload as Files and leave it as their paths, so page
+ * script can never name a path itself.
+ */
+type PreloadConvertedInvokeArgs = {
+  'screens:authorize-dropped-images': [paths: string[]]
+}
+
+type ApiInvokeDefinition<TChannel extends ElectronInvokeChannel> = InvokeDefinition<
+  NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>
+>
+
 export type ElectronIpcInvokeMap = {
-  [TChannel in ElectronInvokeChannel]: InvokeDefinition<
-    NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>
-  >
+  [TChannel in ElectronInvokeChannel]: TChannel extends keyof PreloadConvertedInvokeArgs
+    ? {
+        args: PreloadConvertedInvokeArgs[TChannel]
+        result: ApiInvokeDefinition<TChannel>['result']
+      }
+    : ApiInvokeDefinition<TChannel>
 }
 export type ElectronInvokeArgs<TChannel extends ElectronInvokeChannel> =
   ElectronIpcInvokeMap[TChannel]['args']
@@ -1411,6 +1429,9 @@ const specificRuntimeInvokeContracts = {
   'resource:trash-session-deletion': invokeContract(tupleSchema([boundedIdentifier])),
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
+  'screens:authorize-dropped-images': invokeContract(
+    tupleSchema([arraySchema(pathSchema, { maxLength: SCREEN_IMAGE_BATCH_MAX })])
+  ),
   'buddy-assets:remove': invokeContract(
     tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),
     undefinedSchema
@@ -1489,7 +1510,7 @@ export const boundedPassthroughElectronInvokeChannels = [
   'app:get-runtime-info',
   'app:retry-hardware-acceleration',
   'app:set-native-theme',
-  'screens:pick-image',
+  'screens:pick-images',
   'backgrounds:import-image',
   'scheduled-streams:import-thumbnail',
   'backgrounds:bundled-assets',

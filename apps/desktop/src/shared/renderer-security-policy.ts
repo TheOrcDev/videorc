@@ -43,7 +43,8 @@ export const IPC_INVOKE_ROLES = {
   'system:pick-file': MAIN_ONLY,
   'system:pick-directory': MAIN_ONLY,
   'system:check-directory': MAIN_ONLY,
-  'screens:pick-image': MAIN_ONLY,
+  'screens:pick-images': MAIN_ONLY,
+  'screens:authorize-dropped-images': MAIN_ONLY,
   'backgrounds:import-image': MAIN_ONLY,
   'scheduled-streams:import-thumbnail': MAIN_ONLY,
   // The Buddy's avatar images (plan 164 S-A3): the Studio renderer only.

@@ -4365,7 +4365,10 @@ export interface VideorcApi {
    * 174 S3.1, D2): main lets this one quit or window close through.
    */
   exitApp: (kind: AppExitKind) => Promise<void>
-  pickScreenImage: () => Promise<ResourceSelection | null>
+  /** Empty when the person cancels the picker. */
+  pickScreenImages: () => Promise<ResourceSelection[]>
+  /** Files dropped from Finder or Explorer: one non-image refuses the whole drop. */
+  authorizeDroppedScreenImages: (files: File[]) => Promise<ResourceSelection[]>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
   checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>

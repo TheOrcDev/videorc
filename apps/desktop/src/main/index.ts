@@ -499,6 +499,17 @@ import {
   managedBackgroundFileName,
   type BackgroundImportResult
 } from '../shared/background-import'
+import {
+  SCREEN_IMAGE_BATCH_MAX,
+  SCREEN_IMAGE_CAPABILITY_TTL_MS,
+  SCREEN_IMAGE_EXTENSIONS,
+  SCREEN_IMAGE_REFUSALS
+} from '../shared/screen-image-files'
+import {
+  assertDroppedScreenImagePaths,
+  issueAllOrNone,
+  missingAsNotAFile
+} from './screen-image-drop'
 import type {
   AccountCallbackEnvelope,
   BackendConnection,
@@ -13593,32 +13604,50 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
 // A single-use picker result, only installed by the authenticated dev smoke server.
 let smokeScreenImageSelection: ResourceSelection | null | undefined
 
-async function pickScreenImage(): Promise<ResourceSelection | null> {
+async function pickScreenImages(): Promise<ResourceSelection[]> {
   if (!app.isPackaged && smokeCommandServerEnabled && smokeScreenImageSelection !== undefined) {
     const selection = smokeScreenImageSelection
     smokeScreenImageSelection = undefined
-    return selection
+    return selection ? [selection] : []
   }
   const options: Electron.OpenDialogOptions = {
-    title: 'Choose Screen image',
-    properties: ['openFile'],
-    filters: [
-      {
-        name: 'Images',
-        extensions: ['png', 'jpg', 'jpeg', 'webp']
-      }
-    ]
+    title: 'Choose takeover images',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Images', extensions: [...SCREEN_IMAGE_EXTENSIONS] }]
   }
   const result = mainWindow
     ? await dialog.showOpenDialog(mainWindow, options)
     : await dialog.showOpenDialog(options)
 
   if (result.canceled) {
-    return null
+    return []
   }
+  if (result.filePaths.length > SCREEN_IMAGE_BATCH_MAX) {
+    throw new Error(SCREEN_IMAGE_REFUSALS.tooMany)
+  }
+  return authorizeScreenImagePaths(result.filePaths)
+}
 
-  const path = result.filePaths[0]
-  return path ? issueResourceCapability(path, 'input-file') : null
+async function authorizeDroppedScreenImages(paths: string[]): Promise<ResourceSelection[]> {
+  await assertDroppedScreenImagePaths(
+    paths,
+    async (path) => (await fsPromises.stat(path).catch(missingAsNotAFile))?.isFile() ?? false
+  )
+  return authorizeScreenImagePaths(paths)
+}
+
+function authorizeScreenImagePaths(paths: string[]): Promise<ResourceSelection[]> {
+  return issueAllOrNone(
+    paths,
+    (path) =>
+      issueResourceCapability(path, 'input-file', { ttlMs: SCREEN_IMAGE_CAPABILITY_TTL_MS }),
+    revokeResourceCapability
+  )
+}
+
+async function revokeResourceCapability({ capabilityId }: ResourceSelection): Promise<void> {
+  mainResourceCapabilities.revoke(capabilityId)
+  await requestBackendAdmin('resource.capability.revoke', { capabilityId })
 }
 
 // Native directory picker + directory facts for the Settings output-directory
@@ -14768,7 +14797,10 @@ app.whenReady().then(async () => {
   secureIpcHandle('resource:trash-session-deletion', (_event, operationId: unknown) =>
     trashSessionDeletion(operationId)
   )
-  secureIpcHandle('screens:pick-image', () => pickScreenImage())
+  secureIpcHandle('screens:pick-images', () => pickScreenImages())
+  secureIpcHandle('screens:authorize-dropped-images', (_event, paths: string[]) =>
+    authorizeDroppedScreenImages(paths)
+  )
   secureIpcHandle('system:pick-file', () => pickFilePath())
   secureIpcHandle('system:pick-directory', () => pickDirectoryPath())
   secureIpcHandle('system:check-directory', (_event, capabilityId: unknown) =>

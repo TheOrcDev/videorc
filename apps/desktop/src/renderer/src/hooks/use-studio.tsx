@@ -1,4 +1,8 @@
-import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
+import {
+  createTakeoverImporter,
+  screenImportAuthorizationError,
+  type TakeoverImportPhase
+} from '@/lib/takeover-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
@@ -381,6 +385,7 @@ import type {
   RemoteControlStatus,
   RemoteLanPairing,
   RemoteLanStatus,
+  ResourceSelection,
   RuntimeInfo,
   Scene,
   SceneCommitStatus,
@@ -420,6 +425,7 @@ import type {
   VideoSettings,
   VideorcAccountRefreshResult,
   VideorcAccountSnapshot,
+  VideorcApi,
   WarmMicrophoneStatus,
   XNativeLiveCapability,
   XEndResult,
@@ -1317,6 +1323,7 @@ export type StudioContextValue = {
   stopRequestPending: boolean
   screenImportPending: boolean
   screenImportPhase: TakeoverImportPhase
+  pendingScreenImports: readonly ResourceSelection[]
   streamMetadataSavePending: boolean
   supportBundleExportPending: boolean
   // remote control (Stream Deck et al) — status is pushed by the backend
@@ -1451,7 +1458,8 @@ export type StudioContextValue = {
   dismissSessionRuntimeNotice: () => void
   /** Re-run the exact start that failed (same streaming override). */
   retrySessionStart: () => void
-  importScreenImage: () => Promise<void>
+  importScreenImages: () => Promise<void>
+  importDroppedScreenImages: (files: File[]) => Promise<void>
   renameScreen: (screenId: string, name: string) => Promise<void>
   deleteScreen: (screenId: string) => Promise<void>
   reorderScreen: (screenId: string, targetIndex: number) => Promise<void>
@@ -3612,12 +3620,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const endLivestreamArmedAtRef = useRef<number | null>(null)
   const [screenImportPhase, setScreenImportPhase] = useState<TakeoverImportPhase>('idle')
   const screenImportPending = screenImportPhase !== 'idle'
+  const [pendingScreenImports, setPendingScreenImports] = useState<readonly ResourceSelection[]>([])
+  const pendingScreenImportsRef = useRef(pendingScreenImports)
+  pendingScreenImportsRef.current = pendingScreenImports
   const screenImporter = useRef(createTakeoverImporter())
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
   useEffect(() => {
     screenImporter.current.reset()
     setScreenImportPhase('idle')
+    setPendingScreenImports([])
     const importer = screenImporter.current
     return () => importer.reset()
   }, [client, wsStatus])
@@ -4166,6 +4178,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       runtime.showBackendError(error, status, context)
     )
   }, [])
+
+  useEffect(() => {
+    const stopped = pendingScreenImportsRef.current.length
+    if (stopped === 0) return
+    reportError(
+      new UserFacingError(
+        stopped === 1
+          ? 'The connection dropped before the last image was imported. Add it again if it is missing.'
+          : `The connection dropped before the last ${stopped} images were imported. Add any missing ones again.`
+      ),
+      { action: 'import', object: 'the images' }
+    )
+  }, [client, reportError, wsStatus])
 
   const retryCaptureRecovery = useCallback(async (): Promise<void> => {
     const activeClient = clientRef.current
@@ -10496,40 +10521,63 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => unsubscribe?.()
   }, [nativePreviewSurfaceEnabled, syncNativePreviewSurfaceCompositor])
 
-  const importScreenImage = useCallback(async () => {
-    if (!client || wsStatus !== 'connected') {
-      toastOffline()
-      return
-    }
-    if (!window.videorc?.pickScreenImage) {
-      console.warn('[takeovers] no image picker in this renderer')
-      return
-    }
+  const importScreenSelections = useCallback(
+    async (authorize: (api: VideorcApi) => Promise<ResourceSelection[]>) => {
+      if (!client || wsStatus !== 'connected') {
+        toastOffline()
+        return
+      }
+      if (!window.videorc) {
+        console.warn('[takeovers] no image import in this renderer')
+        return
+      }
 
-    const revision = screenListEventRevision.current
-    await screenImporter.current.run({
-      pick: () => window.videorc.pickScreenImage(),
-      importImage: (selection) => {
-        setLastError(null)
-        return client.request<StreamScreen>('screens.importImage', {
-          sourceCapability: selection.capabilityId
-        })
-      },
-      isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
-      onPhase: setScreenImportPhase,
-      onImported: (screen) => {
-        // The reliable list event wins over a late reply (including deletion
-        // from another window). Never refresh/reapply the active takeover.
-        if (screenListEventRevision.current !== revision) return
-        setScreens((current) =>
-          [...(current ?? []).filter((item) => item.id !== screen.id), screen].sort(
-            (a, b) => a.sortOrder - b.sortOrder
+      let revision = 0
+      await screenImporter.current.run({
+        pick: () => {
+          setLastError(null)
+          return authorize(window.videorc)
+        },
+        importImage: (selection) => {
+          revision = screenListEventRevision.current
+          return client.request<StreamScreen>('screens.importImage', {
+            sourceCapability: selection.capabilityId
+          })
+        },
+        isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
+        onPhase: setScreenImportPhase,
+        onPending: setPendingScreenImports,
+        onImported: (screen) => {
+          // The reliable list event wins over a late reply (including deletion
+          // from another window). Never refresh/reapply the active takeover.
+          if (screenListEventRevision.current !== revision) return
+          setScreens((current) =>
+            [...(current ?? []).filter((item) => item.id !== screen.id), screen].sort(
+              (a, b) => a.sortOrder - b.sortOrder
+            )
           )
-        )
-      },
-      onError: (error) => reportError(error, { action: 'import', object: 'the image' })
-    })
-  }, [client, reportError, wsStatus])
+        },
+        onPickError: (error) =>
+          reportError(screenImportAuthorizationError(error), {
+            action: 'import',
+            object: 'the images'
+          }),
+        onImportError: (error, selection) =>
+          reportError(error, { action: 'import', object: selection.displayName })
+      })
+    },
+    [client, reportError, wsStatus]
+  )
+
+  const importScreenImages = useCallback(
+    () => importScreenSelections((api) => api.pickScreenImages()),
+    [importScreenSelections]
+  )
+
+  const importDroppedScreenImages = useCallback(
+    (files: File[]) => importScreenSelections((api) => api.authorizeDroppedScreenImages(files)),
+    [importScreenSelections]
+  )
 
   const openSystemPermissionSettings = useCallback(
     async (pane: SystemPermissionPane) => {
@@ -16037,6 +16085,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       stopRequestPending,
       screenImportPending,
       screenImportPhase,
+      pendingScreenImports,
       streamMetadataSavePending,
       supportBundleExportPending,
       remoteControl,
@@ -16083,7 +16132,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionRuntimeNotice,
       dismissSessionRuntimeNotice,
       retrySessionStart,
-      importScreenImage,
+      importScreenImages,
+      importDroppedScreenImages,
       renameScreen,
       deleteScreen,
       reorderScreen,
@@ -16273,6 +16323,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       stopRequestPending,
       screenImportPending,
       screenImportPhase,
+      pendingScreenImports,
       streamMetadataSavePending,
       supportBundleExportPending,
       remoteControl,
@@ -16319,7 +16370,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionRuntimeNotice,
       dismissSessionRuntimeNotice,
       retrySessionStart,
-      importScreenImage,
+      importScreenImages,
+      importDroppedScreenImages,
       renameScreen,
       deleteScreen,
       reorderScreen,
