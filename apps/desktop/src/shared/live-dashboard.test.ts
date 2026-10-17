@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { StreamTargetRuntime, ViewerSample } from './backend'
+import type { CloudStatus, StreamTargetRuntime, ViewerSample } from './backend'
 import {
   BITRATE_HISTORY_POINTS,
   VIEWER_HISTORY_POINTS,
@@ -9,6 +9,7 @@ import {
   mergeDashboardViewerHistory,
   normalizeLiveDashboardState,
   reduceDashboardAudience,
+  reduceDashboardCloud,
   reduceDashboardHealth,
   reduceDashboardRecording,
   reduceDashboardTargets,
@@ -196,6 +197,37 @@ describe('live dashboard state', () => {
     )
     expect(state.audience?.platforms[0].total).toBe(12)
   })
+
+  it('carries the Videorc Cloud show for its own session only (plan 184 C7)', () => {
+    const status = (overrides: Partial<CloudStatus>): CloudStatus => ({
+      phase: 'hold',
+      entitled: true,
+      sessionId: 's1',
+      settings: { enabled: true, holdMaxSeconds: 1800, holdMaxChoices: [300, 900, 1800, 3600] },
+      hold: { active: true, remainingSeconds: 1_650 },
+      connected: true,
+      directFallbackAvailable: false,
+      ...overrides
+    })
+    const holding = reduceDashboardCloud(live(), status({}), at(4))
+    expect(holding.cloud).toEqual({ phase: 'hold', holdRemainingSeconds: 1_650 })
+    // The same status changes nothing.
+    expect(reduceDashboardCloud(holding, status({}), at(5))).toBe(holding)
+    // Another session's show, a show with no session, or the cloud off clears it.
+    expect(reduceDashboardCloud(holding, status({ sessionId: 's2' }), at(6)).cloud).toBeNull()
+    expect(reduceDashboardCloud(holding, status({ sessionId: undefined }), at(6)).cloud).toBeNull()
+    expect(reduceDashboardCloud(holding, status({ phase: 'off' }), at(6)).cloud).toBeNull()
+    expect(
+      reduceDashboardCloud(holding, status({ phase: 'live', hold: undefined }), at(7)).cloud
+    ).toEqual({ phase: 'live' })
+    // A new session drops the last one's show.
+    const next = reduceDashboardRecording(
+      holding,
+      { state: 'streaming', sessionId: 's2', startedAt: at(8) },
+      at(8)
+    )
+    expect(next.cloud ?? null).toBeNull()
+  })
 })
 
 describe('dashboard push validation', () => {
@@ -206,6 +238,12 @@ describe('dashboard push validation', () => {
     expect(normalizeLiveDashboardState({ ...state, session: { state: 'hacked' } })).toBeNull()
     expect(normalizeLiveDashboardState({ ...state, targets: undefined })).toBeNull()
     expect(normalizeLiveDashboardState({ ...state, sessionId: 42 })).toBeNull()
+    const cloud = { ...state, cloud: { phase: 'hold', holdRemainingSeconds: 60 } }
+    expect(normalizeLiveDashboardState(cloud)).toBe(cloud)
+    expect(normalizeLiveDashboardState({ ...state, cloud: { phase: 'off' } })).toBeNull()
+    expect(
+      normalizeLiveDashboardState({ ...state, cloud: { phase: 'hold', holdRemainingSeconds: '1' } })
+    ).toBeNull()
   })
 })
 

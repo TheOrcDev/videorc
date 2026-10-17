@@ -7487,6 +7487,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('cloud.state', (payload) => {
         commitCloudStatus(payload)
+        feedDashboard('cloud.state', payload)
       }),
       nextClient.on('cohost.buddy.state', (payload) => {
         setBuddyOverlay(payload as BuddyOverlaySnapshot)

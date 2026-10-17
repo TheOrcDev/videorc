@@ -1,5 +1,6 @@
 import type {
   AudienceSnapshot,
+  CloudStatus,
   RecordingStatus,
   StreamHealth,
   StreamTargetsSnapshot,
@@ -14,6 +15,7 @@ import {
   emptyLiveDashboardState,
   mergeDashboardViewerHistory,
   reduceDashboardAudience,
+  reduceDashboardCloud,
   reduceDashboardHealth,
   reduceDashboardRecording,
   reduceDashboardTargets,
@@ -31,6 +33,7 @@ export type DashboardEvent =
   | 'stream.health'
   | 'stream.targets'
   | 'liveChat.totals'
+  | 'cloud.state'
   | 'events.lagged'
 
 export interface LiveDashboardRelay {
@@ -40,6 +43,8 @@ export interface LiveDashboardRelay {
   health: (health: StreamHealth) => void
   targets: (snapshot: StreamTargetsSnapshot) => void
   chatTotals: (totals: SessionChatTotals) => void
+  /** The Videorc Cloud show carrying the session, if any (plan 184 C7). */
+  cloud: (status: CloudStatus) => void
   /** Adopts main's cached state after a renderer reload mid-session. */
   seed: (state: LiveDashboardState | null) => void
   backfillViewers: (sessionId: string, samples: ViewerSample[]) => void
@@ -111,6 +116,7 @@ export function createLiveDashboardRelay(
       }
       apply(reduceDashboardChatTotals(state, totals, now()))
     },
+    cloud: (status) => apply(reduceDashboardCloud(state, status, now())),
     seed: (seeded) => {
       if (!seeded || state.sessionId !== null || !normalizeLiveDashboardState(seeded)) return
       state = seeded
@@ -206,6 +212,9 @@ export async function startLiveDashboardRelay({
         return
       case 'liveChat.totals':
         relay.chatTotals(payload as SessionChatTotals)
+        return
+      case 'cloud.state':
+        relay.cloud(payload as CloudStatus)
         return
       case 'events.lagged': {
         const sessionId = relay.current().sessionId
