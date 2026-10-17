@@ -56,7 +56,10 @@ pub const MIN_SECONDS_LEFT_TO_START: u64 = 300;
 /// The desktop pings every 5 s; three missed pings mark it gone (wire shape).
 pub const PING_INTERVAL: Duration = Duration::from_secs(5);
 const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
-const WELCOME_TIMEOUT: Duration = Duration::from_secs(5);
+/// A runner the create just spawned opens its socket only after its engine
+/// starts, and the node agent waits up to 15 s for it behind the hello, so
+/// the first `welcome` can take that long (the runner's wire notes).
+const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const END_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Reconnect backoff after the socket drops: the runner keeps the show, so
@@ -1434,6 +1437,13 @@ pub enum PrepareOutcome {
     Cloud(SessionHandover),
 }
 
+/// A resume either feeds the show again or finds it over: the web no longer
+/// lists it, or its node no longer has it. Go Live then starts a new show.
+enum ResumeOutcome {
+    Resumed(PrepareOutcome),
+    ShowGone(String),
+}
+
 impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     fn record_fallback(
         &self,
@@ -1508,16 +1518,21 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
 
         // A show that is live without a feed is what Go Live resumes (C5).
+        // One that ended while this computer was away starts a new show.
         if let Some(show_id) = resumable {
-            return self
+            match self
                 .resume_into_session(
                     session_id,
                     &bearer,
                     &show_id,
-                    destinations,
-                    hold_image_png_base64,
+                    destinations.clone(),
+                    hold_image_png_base64.clone(),
                 )
-                .await;
+                .await?
+            {
+                ResumeOutcome::Resumed(outcome) => return Ok(outcome),
+                ResumeOutcome::ShowGone(_) => {}
+            }
         }
 
         let request = CreateShowRequest {
@@ -1529,51 +1544,30 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let created = match self.web.create_show(&bearer, &request).await {
             Ok(created) => created,
             Err(CloudApiError::ShowLive(live)) => {
-                // The web knows a live show this computer forgot (a crash
-                // before launch detection ran): adopt and resume it.
-                let current = self.web.current_show(&bearer).await;
-                return match current {
-                    Ok(CurrentShowResponse {
-                        show: Some(show),
-                        control: Some(control),
-                        ingest,
-                    }) if live.as_ref().is_none_or(|live| live.id == show.id) => {
-                        let show_id = show.id.clone();
-                        {
-                            let mut runtime = lock(&self.slot);
-                            runtime.show = Some(ActiveShow {
-                                record: show,
-                                control,
-                                ingest,
-                                session_id: None,
-                                destinations: Vec::new(),
-                                resuming: false,
-                            });
-                            runtime.bump_generation();
+                match self
+                    .adopt_live_show(
+                        session_id,
+                        &bearer,
+                        live,
+                        destinations.clone(),
+                        hold_image_png_base64.clone(),
+                    )
+                    .await?
+                {
+                    ResumeOutcome::Resumed(outcome) => return Ok(outcome),
+                    // The web still lists a show its node already ended (the
+                    // node's next heartbeat would close it): close it here
+                    // and start a new show, once.
+                    ResumeOutcome::ShowGone(stale) => {
+                        let _ = self.web.end_show(&bearer, &stale).await;
+                        match self.web.create_show(&bearer, &request).await {
+                            Ok(created) => created,
+                            Err(error) => return self.create_failed(session_id, error),
                         }
-                        self.resume_into_session(
-                            session_id,
-                            &bearer,
-                            &show_id,
-                            destinations,
-                            hold_image_png_base64,
-                        )
-                        .await
                     }
-                    _ => bail!(
-                        "You're still live through Videorc Cloud, but the show could not be picked up. End it from videorc.com/live or try again."
-                    ),
-                };
+                }
             }
-            Err(error) => {
-                return match error.fallback_reason() {
-                    Some(reason) => {
-                        self.record_fallback(session_id, reason, Some(error.to_string()));
-                        Ok(PrepareOutcome::Direct)
-                    }
-                    None => Err(anyhow::Error::new(error)),
-                };
-            }
+            Err(error) => return self.create_failed(session_id, error),
         };
         if let Some(allowance) = created.allowance.clone() {
             let mut runtime = lock(&self.slot);
@@ -1631,6 +1625,62 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         self.hand_over(&tx, &bearer, &show_id, &destinations, hold_image_png_base64)
             .await?;
         Ok(PrepareOutcome::Cloud(SessionHandover { show_id, ingest }))
+    }
+
+    /// A create the web refused: stream directly with the reason when it has
+    /// one (D11), or fail the start.
+    fn create_failed(&self, session_id: &str, error: CloudApiError) -> Result<PrepareOutcome> {
+        match error.fallback_reason() {
+            Some(reason) => {
+                self.record_fallback(session_id, reason, Some(error.to_string()));
+                Ok(PrepareOutcome::Direct)
+            }
+            None => Err(anyhow::Error::new(error)),
+        }
+    }
+
+    /// The web knows a live show this computer forgot (a crash before launch
+    /// detection ran): adopt it and resume it.
+    async fn adopt_live_show(
+        &self,
+        session_id: &str,
+        bearer: &str,
+        live: Option<ShowRecord>,
+        destinations: Vec<HandoverDestination>,
+        hold_image_png_base64: Option<String>,
+    ) -> Result<ResumeOutcome> {
+        match self.web.current_show(bearer).await {
+            Ok(CurrentShowResponse {
+                show: Some(show),
+                control: Some(control),
+                ingest,
+            }) if live.as_ref().is_none_or(|live| live.id == show.id) => {
+                let show_id = show.id.clone();
+                {
+                    let mut runtime = lock(&self.slot);
+                    runtime.show = Some(ActiveShow {
+                        record: show,
+                        control,
+                        ingest,
+                        session_id: None,
+                        destinations: Vec::new(),
+                        resuming: false,
+                    });
+                    runtime.bump_generation();
+                }
+                self.resume_into_session(
+                    session_id,
+                    bearer,
+                    &show_id,
+                    destinations,
+                    hold_image_png_base64,
+                )
+                .await
+            }
+            _ => bail!(
+                "You're still live through Videorc Cloud, but the show could not be picked up. End it from videorc.com/live or try again."
+            ),
+        }
     }
 
     /// Send the destinations (and the hold image) and wait for the ack. A
@@ -1691,7 +1741,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         show_id: &str,
         destinations: Vec<HandoverDestination>,
         hold_image_png_base64: Option<String>,
-    ) -> Result<PrepareOutcome> {
+    ) -> Result<ResumeOutcome> {
         // A fresh token and, when the web hands it back, the ingest.
         let current = self.web.current_show(bearer).await;
         let (record, control, ingest) = {
@@ -1718,9 +1768,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                         runtime.clear_show(Some("show-gone".to_string()));
                         drop(runtime);
                         self.hooks.emit_from(&self.slot);
-                        bail!(
-                            "The Videorc Cloud show has ended; go live again to start a new one."
-                        );
+                        return Ok(ResumeOutcome::ShowGone(show_id.to_string()));
                     }
                 }
             }
@@ -1736,7 +1784,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 Err(HelloFailure::NoSuchShow) => {
                     lock(&self.slot).clear_show(Some("show-gone".to_string()));
                     self.hooks.emit_from(&self.slot);
-                    bail!("The Videorc Cloud show has ended; go live again to start a new one.");
+                    return Ok(ResumeOutcome::ShowGone(show_id.to_string()));
                 }
                 Err(HelloFailure::BadToken) => {
                     bail!("Videorc Cloud refused the show token; try again.")
@@ -1783,10 +1831,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         self.hooks.emit_from(&self.slot);
         self.hand_over(&tx, bearer, show_id, &destinations, hold_image_png_base64)
             .await?;
-        Ok(PrepareOutcome::Cloud(SessionHandover {
-            show_id: show_id.to_string(),
-            ingest,
-        }))
+        Ok(ResumeOutcome::Resumed(PrepareOutcome::Cloud(
+            SessionHandover {
+                show_id: show_id.to_string(),
+                ingest,
+            },
+        )))
     }
 
     /// The desktop's Stop (C4): end the show this session fed. The YouTube
@@ -2000,6 +2050,8 @@ mod tests {
     #[derive(Default)]
     struct FakeWeb {
         create: StdMutex<Option<std::result::Result<CreateShowResponse, CloudApiError>>>,
+        /// Answers for the next creates, before `create` (which repeats).
+        create_queue: StdMutex<VecDeque<std::result::Result<CreateShowResponse, CloudApiError>>>,
         current: StdMutex<VecDeque<std::result::Result<CurrentShowResponse, CloudApiError>>>,
         create_calls: AtomicUsize,
         end_calls: StdMutex<Vec<String>>,
@@ -2013,6 +2065,9 @@ mod tests {
             _request: &CreateShowRequest,
         ) -> std::result::Result<CreateShowResponse, CloudApiError> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(answer) = self.create_queue.lock().unwrap().pop_front() {
+                return answer;
+            }
             self.create
                 .lock()
                 .unwrap()
@@ -2890,6 +2945,117 @@ mod tests {
         assert_eq!(frame["kind"], "show.end");
         server.send(ack(&frame["id"]));
         assert_eq!(end.await.unwrap().unwrap().phase, CloudPhase::Off);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_go_live_that_meets_a_show_its_node_already_ended_closes_it_and_starts_anew() {
+        let harness = harness(true);
+        let created = created();
+        let stale = ShowRecord {
+            id: "sh_old".to_string(),
+            status: "live".to_string(),
+            ..created.show.clone()
+        };
+        let stale_control = ShowControl {
+            url: "wss://eu-hel-1.live.videorc.com:9443/v1/shows/sh_old/control".to_string(),
+            token: TOKEN.to_string(),
+        };
+        let web = &harness.context.web;
+        web.create_queue
+            .lock()
+            .unwrap()
+            .push_back(Err(CloudApiError::ShowLive(Some(stale.clone()))));
+        *web.create.lock().unwrap() = Some(Ok(created.clone()));
+        for _ in 0..2 {
+            web.current
+                .lock()
+                .unwrap()
+                .push_back(Ok(CurrentShowResponse {
+                    show: Some(stale.clone()),
+                    control: Some(stale_control.clone()),
+                    ingest: None,
+                }));
+        }
+        // The web still lists the show; its node already ended it.
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .push_back(Some(CLOSE_CODE_NO_SUCH_SHOW));
+        let context = harness.context.clone();
+        let prepare = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-9",
+                    Some("bearer".to_string()),
+                    Vec::new(),
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        let _refused = harness.context.connector.accept().await;
+        let mut server = harness.context.connector.accept().await;
+        let hello = server.next_frame().await;
+        assert_eq!(hello["t"], "hello");
+        server.send(welcome("starting"));
+        let set = server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        server.send(ack(&set["id"]));
+        let PrepareOutcome::Cloud(handover) = prepare.await.unwrap().unwrap() else {
+            panic!("Go Live goes through a new show");
+        };
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_old".to_string()]);
+        assert_eq!(
+            web.create_calls.load(Ordering::SeqCst),
+            2,
+            "one retry, no more"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resumable_show_that_ended_while_away_makes_go_live_start_a_new_one() {
+        let harness = harness(true);
+        relaunched_with_a_resumable_show(&harness).await;
+        // By the click, the web no longer lists the show.
+        harness.context.web.current.lock().unwrap().clear();
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse {
+                show: None,
+                control: None,
+                ingest: None,
+            }));
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        let context = harness.context.clone();
+        let prepare = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-10",
+                    Some("bearer".to_string()),
+                    Vec::new(),
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("starting"));
+        let set = server.next_frame().await;
+        server.send(ack(&set["id"]));
+        let PrepareOutcome::Cloud(handover) = prepare.await.unwrap().unwrap() else {
+            panic!("Go Live goes through a new show");
+        };
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 1);
     }
 
     /// A relaunched desktop whose web hands back no ingest (the web never

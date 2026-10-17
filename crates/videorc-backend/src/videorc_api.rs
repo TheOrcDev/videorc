@@ -17,9 +17,11 @@ pub(crate) const CAPTION_CHUNK_UPLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
 pub(crate) const AI_CAPABILITIES_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
-/// Videorc Cloud control-plane calls (plan 184): creating a show places it on
-/// a node, so it may take a moment; everything else is a row read.
+/// Videorc Cloud control-plane calls (plan 184) are row reads, except
+/// creating a show, which places it on a node: the web waits up to 8 s for
+/// the node, so the create gets more room than the rest.
 pub(crate) const CLOUD_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const CLOUD_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Co-host ticks are synchronous and small, but the server fans one tick out
 /// across a model ladder: a slow-but-alive gateway needs headroom beyond the
@@ -1649,10 +1651,11 @@ impl VideorcApiClient {
         &self,
         request: reqwest::RequestBuilder,
         path: &str,
+        timeout: std::time::Duration,
     ) -> std::result::Result<T, crate::cloud_show::CloudApiError> {
         use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
         let response = request
-            .timeout(CLOUD_REQUEST_TIMEOUT)
+            .timeout(timeout)
             .send()
             .await
             .map_err(|error| CloudApiError::Transport(format!("{path}: {error}")))?;
@@ -2945,6 +2948,7 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
                 .bearer_auth(bearer)
                 .json(request),
             path,
+            CLOUD_CREATE_TIMEOUT,
         )
         .await
     }
@@ -2955,8 +2959,12 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
     ) -> std::result::Result<crate::cloud_show::CurrentShowResponse, crate::cloud_show::CloudApiError>
     {
         let path = "/api/cloud/shows/current";
-        self.cloud_json(self.http.get(self.endpoint(path)).bearer_auth(bearer), path)
-            .await
+        self.cloud_json(
+            self.http.get(self.endpoint(path)).bearer_auth(bearer),
+            path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     async fn end_show(
@@ -2968,6 +2976,7 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         self.cloud_json::<serde_json::Value>(
             self.http.post(self.endpoint(&path)).bearer_auth(bearer),
             &path,
+            CLOUD_REQUEST_TIMEOUT,
         )
         .await
         .map(|_| ())
@@ -2979,8 +2988,12 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
     ) -> std::result::Result<crate::protocol::AiCapabilitiesCloud, crate::cloud_show::CloudApiError>
     {
         let path = "/api/cloud/allowance";
-        self.cloud_json(self.http.get(self.endpoint(path)).bearer_auth(bearer), path)
-            .await
+        self.cloud_json(
+            self.http.get(self.endpoint(path)).bearer_auth(bearer),
+            path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
     }
 }
 
