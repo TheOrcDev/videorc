@@ -6614,7 +6614,10 @@ mod tests {
     fn shared_high_risk_contract_fixture_parses_the_plan_and_cloud_blocks() {
         let wire = shared_high_risk_contract_fixture_value("/accountPlans/capabilitiesMax");
         let capabilities: AiCapabilities = serde_json::from_value(wire).unwrap();
-        assert_eq!(capabilities.entitlement.tier, "premium", "Max stays tier premium (D2)");
+        assert_eq!(
+            capabilities.entitlement.tier, "premium",
+            "Max stays tier premium (D2)"
+        );
         let plan = capabilities.plan.expect("plan block");
         assert_eq!(plan.id, "max");
         assert_eq!(plan.name, "Max");
@@ -6650,7 +6653,10 @@ mod tests {
         future["plan"]["id"] = serde_json::Value::String("enterprise".to_string());
         future["cloud"]["newField"] = serde_json::Value::Bool(true);
         let parsed: AiCapabilities = serde_json::from_value(future).unwrap();
-        assert_eq!(parsed.plan.as_ref().map(|plan| plan.id.as_str()), Some("enterprise"));
+        assert_eq!(
+            parsed.plan.as_ref().map(|plan| plan.id.as_str()),
+            Some("enterprise")
+        );
         assert!(parsed.cloud.is_some());
     }
 
@@ -6666,7 +6672,10 @@ mod tests {
         let snapshot: EntitlementsSnapshot = serde_json::from_value(basic.clone()).unwrap();
         assert_eq!(snapshot.plan, None);
         let value = serde_json::to_value(&snapshot).unwrap();
-        assert!(value.get("plan").is_none(), "no plan must mean no key, never null");
+        assert!(
+            value.get("plan").is_none(),
+            "no plan must mean no key, never null"
+        );
         assert_eq!(value, basic);
     }
 

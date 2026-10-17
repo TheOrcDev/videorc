@@ -117,10 +117,10 @@ So every ⚑ takes its recommended answer:
 | I1 nodes, I3 deploys, I4 watching, I5 DNS and TLS | **Blocked**: needs Hetzner and DNS from the owner | |
 | I2 node agent | In progress | `videorc-cloud` |
 | R1 to R6 runner | In progress | `videorc-cloud` |
-| W1 to W6 control plane | In progress | `videorc-web` |
+| W1 to W6 control plane | **Done** 2026-10-17 (`796aab43`). Shows, nodes, signed node calls, placement, the reaper cron and `/live`. 32 new tests; the full web suite is green (1123). | `videorc-web` |
 | W7 docs and privacy | Docs in progress. The privacy page changes only at launch. | `videorc-web` |
-| C1 to C3 desktop backend | In progress | this PR |
-| C4 to C7 desktop UI | Next, after the backend RPCs land | this PR |
+| C1 to C3 desktop backend | **Done** 2026-10-17. Plan 185 T4 parsing; `cloud_show.rs` (web client, control socket, state machine, RPCs `cloud.status`, `cloud.settings.set`, `cloud.allowance.refresh`, `cloud.show.resume`, `cloud.show.end`, event `cloud.state`); the `recording.rs` seam (RTMPS feed per orientation, platform rows in the leg state, `apply_cloud_leg_states`); resume through `ingest.get`. A Go Live that never expected the cloud says nothing (Basic, rollout switch off). | this PR |
+| C4 to C7 desktop UI | Next: the Go Live `cloud` phase, the Resume banner, the Livestream page section and the Stream health chip | this PR |
 | C8 smokes | After the runner and the desktop meet | this PR |
 | C1b SRT | After S0c | |
 | Phases 2, 3 and 4 | Not started | |
@@ -883,6 +883,13 @@ answers 201:
     Without one, the runner draws a default card.
   - `{ "t": "intent", "id", "kind": "hold.start" }`, and the same with
     `hold.stop` and `show.end`.
+  - `{ "t": "intent", "id", "kind": "ingest.get" }`. The ack carries
+    `"result": { "ingest": [{ "orientation", "serverUrl", "streamKey" }] }`,
+    the same pairs the create response had (added 2026-10-17).
+    - Resume after a relaunch needs it. The web never stores ingest keys
+      (W2), and the desktop never persists them, so only the node, which
+      already holds the show's ingest key, can hand it back.
+    - It answers only on a socket whose `hello` carried a valid show token.
   - `{ "t": "ping" }` every 5 s. Three missed pings mark the desktop as gone.
     That changes the state only, not the feed logic.
 - **Runner → client:**
@@ -892,7 +899,8 @@ answers 201:
     "connected", "kbps" }], "legs": [{ "id", "platform", "label",
     "orientation", "state": "connecting|live|reconnecting|failed|ended",
     "since", "error"? }] } }`. Sent on every change, and at least every 2 s.
-  - `{ "t": "ack", "id", "ok", "error"? }` and `{ "t": "pong" }`.
+  - `{ "t": "ack", "id", "ok", "error"?, "result"? }` and `{ "t": "pong" }`.
+    Only `ingest.get` acks carry a `result`.
 - **Runner phases:**
   - `starting`: waiting for the first feed. After 60 s without one, the show
     ends with `no-feed`.

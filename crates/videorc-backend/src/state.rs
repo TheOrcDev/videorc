@@ -1088,6 +1088,10 @@ pub struct AppState {
     /// listener's shutdown handle, and the client count that gates chat
     /// projection in `emit_event`.
     pub remote_lan: crate::remote_lan::RemoteLanSlot,
+    /// Videorc Cloud (plan 184): the settings, the account's `cloud` block,
+    /// and the show this computer feeds or may resume. Key material lives
+    /// only inside it, never in anything it serializes.
+    pub cloud_show: crate::cloud_show::CloudShowSlot,
     pub resource_authority: ResourceAuthority,
     pub oauth: Arc<OAuthSessions>,
     /// Pending 3-legged OAuth 1.0a authorizations for X Live (keyed by
@@ -1356,6 +1360,9 @@ impl AppState {
             audience: Arc::default(),
             youtube_quota: crate::youtube_quota::new_youtube_quota_slot(),
             platform_token_refresh: Arc::default(),
+            cloud_show: crate::cloud_show::new_cloud_show_slot(crate::cloud_show::load_settings(
+                &database,
+            )),
             database,
             remote_control: std::sync::Arc::new(StdMutex::new(
                 crate::remote_control::RemoteControlRuntime::load_from_secrets(),

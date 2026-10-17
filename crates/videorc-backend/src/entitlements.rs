@@ -704,12 +704,16 @@ mod tests {
     fn account_hydration_carries_the_plan_beside_premium() {
         let slot: std::sync::Mutex<Option<AccountEntitlementHydration>> =
             std::sync::Mutex::new(None);
-        let hydration = |premium: bool, plan: Option<EntitlementPlan>| AccountEntitlementHydration {
-            is_premium: premium,
-            plan,
-            valid_until: std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
-        };
-        assert!(set_hydration(&slot, Some(hydration(true, Some(EntitlementPlan::Premium)))));
+        let hydration =
+            |premium: bool, plan: Option<EntitlementPlan>| AccountEntitlementHydration {
+                is_premium: premium,
+                plan,
+                valid_until: std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+            };
+        assert!(set_hydration(
+            &slot,
+            Some(hydration(true, Some(EntitlementPlan::Premium)))
+        ));
         assert!(
             set_hydration(&slot, Some(hydration(true, Some(EntitlementPlan::Max)))),
             "Premium -> Max is a change"
@@ -733,7 +737,10 @@ mod tests {
         assert_eq!(premium_entitlements(EntitlementSource::Creem).plan, None);
         assert_eq!(developer_test_entitlements().plan, None);
         let value = serde_json::to_value(premium_entitlements(EntitlementSource::Creem)).unwrap();
-        assert!(value.get("plan").is_none(), "an absent plan is no key, never null");
+        assert!(
+            value.get("plan").is_none(),
+            "an absent plan is no key, never null"
+        );
     }
 
     #[test]
@@ -762,7 +769,10 @@ mod tests {
         assert_eq!(payload.plan, None);
         // An unknown plan id verifies and reads as no plan.
         assert_eq!(EntitlementPlan::parse("enterprise"), None);
-        assert_eq!(EntitlementPlan::parse(" premium "), Some(EntitlementPlan::Premium));
+        assert_eq!(
+            EntitlementPlan::parse(" premium "),
+            Some(EntitlementPlan::Premium)
+        );
     }
 
     #[test]

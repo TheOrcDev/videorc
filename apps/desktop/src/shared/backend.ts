@@ -4283,6 +4283,97 @@ export type AccountCallbackEnvelope = {
   expiresAtMs: number
 }
 
+// --- Videorc Cloud (plan 184) ----------------------------------------------
+
+/** The desktop's view of its cloud show (crates/videorc-backend/src/cloud_show.rs). */
+export type CloudPhase = 'off' | 'connecting' | 'live' | 'hold' | 'resuming' | 'ending' | 'failed'
+
+/** Why a Go Live streamed directly (D11): the ONE reason the renderer toasts. */
+export type CloudFallbackReason =
+  | 'cloud-disabled'
+  | 'cloud-full'
+  | 'cloud-hours-used-up'
+  | 'cloud-node-unreachable'
+  | 'not-entitled'
+
+export interface CloudFallback {
+  reason: CloudFallbackReason
+  at: string
+  /** The session that went direct, so one toast per Go Live. */
+  sessionId: string
+  message?: string
+}
+
+export interface CloudShowSummary {
+  id: string
+  nodeId: string
+  createdAt?: string
+  expiresAt?: string
+  /** Live on the runner with no local feed: Resume or End (C5). */
+  resumable: boolean
+}
+
+export interface CloudHoldStatus {
+  active: boolean
+  since?: string
+  /** `feed-lost` or `manual`. */
+  reason?: string
+  remainingSeconds?: number
+}
+
+export interface CloudFeedStatus {
+  orientation: string
+  connected: boolean
+  kbps?: number
+}
+
+/** The Livestream page's section: the switch resolved, the choices beside the value. */
+export interface CloudSettingsView {
+  enabled: boolean
+  holdMaxSeconds: number
+  holdMaxChoices: number[]
+  holdImageScreenId?: string
+}
+
+/**
+ * The whole cloud state: the `cloud.state` event and every `cloud.*` answer.
+ * Secret-free by construction (no url, token or key reaches it).
+ */
+export interface CloudStatus {
+  phase: CloudPhase
+  /** The account's `cloud` block says on. */
+  entitled: boolean
+  plan?: EntitlementPlan
+  settings: CloudSettingsView
+  allowance?: AiCapabilitiesCloud
+  show?: CloudShowSummary
+  /** The local session feeding the show, when there is one. */
+  sessionId?: string
+  /** The control socket is up. */
+  connected: boolean
+  hold?: CloudHoldStatus
+  feeds?: CloudFeedStatus[]
+  /** The runner's platform legs in the desktop's leg model, keyed by target id (C2). */
+  legs?: StreamTargetRuntime[]
+  liveSeconds?: number
+  /** The last Go Live that streamed directly, and why. */
+  fallback?: CloudFallback
+  endReason?: string
+  message?: string
+  /**
+   * The web confirmed the show gone while this computer was feeding it (C2):
+   * direct legs may reopen (stop, then go live directly). Never before.
+   */
+  directFallbackAvailable: boolean
+}
+
+/** `cloud.settings.set`: a partial patch; `holdImageScreenId: null` clears the image. */
+export interface CloudSettingsPatch {
+  enabled?: boolean
+  holdMaxSeconds?: number
+  holdImageScreenId?: string | null
+}
+
 export type OAuthCallbackEnvelope = {
   id: string
   url: string

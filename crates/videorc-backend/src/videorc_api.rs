@@ -17,6 +17,9 @@ pub(crate) const CAPTION_CHUNK_UPLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
 pub(crate) const AI_CAPABILITIES_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
+/// Videorc Cloud control-plane calls (plan 184): creating a show places it on
+/// a node, so it may take a moment; everything else is a row read.
+pub(crate) const CLOUD_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Co-host ticks are synchronous and small, but the server fans one tick out
 /// across a model ladder: a slow-but-alive gateway needs headroom beyond the
@@ -1637,6 +1640,53 @@ impl VideorcApiClient {
             .with_context(|| format!("Could not read Videorc API response for {path}."))
     }
 
+    // --- Videorc Cloud (plan 184, Wire shape: Desktop -> web) -----------------
+    // Bearer, `private, no-store`, the `{ error: { code, message } }` envelope.
+    // A 409 body carries the live show and a 429 body its `resetAt`; both are
+    // read leniently from the top level or from inside `error`.
+
+    async fn cloud_json<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+    ) -> std::result::Result<T, crate::cloud_show::CloudApiError> {
+        use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
+        let response = request
+            .timeout(CLOUD_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CloudApiError::Transport(format!("{path}: {error}")))?;
+        let status = response.status();
+        if status.is_success() {
+            return response.json().await.map_err(|error| CloudApiError::Other {
+                status: status.as_u16(),
+                code: "malformed-response".to_string(),
+                message: format!("Could not read {path}: {error}"),
+            });
+        }
+        let text = response.text().await.unwrap_or_default();
+        let (code, message) = parse_error_envelope(&text);
+        let body: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        let live_show = body
+            .get("show")
+            .or_else(|| body.pointer("/error/show"))
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ShowRecord>(value).ok());
+        let reset_at = body
+            .get("resetAt")
+            .or_else(|| body.pointer("/error/resetAt"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        Err(classify_cloud_failure(
+            status.as_u16(),
+            &code,
+            message,
+            live_show,
+            reset_at,
+        ))
+    }
+
     /// One synchronous Live Co-host tick. Every failure class is mapped to a
     /// `CohostApiError` so the engine can pause/back off with an honest reason.
     pub async fn post_cohost_tick(
@@ -2878,6 +2928,59 @@ fn classify_caption_failure(status: u16, code: String, message: String) -> Capti
             code: Some(code),
             message: format!("caption chunk failed ({status}): {message}"),
         }
+    }
+}
+
+impl crate::cloud_show::CloudWebApi for VideorcApiClient {
+    async fn create_show(
+        &self,
+        bearer: &str,
+        request: &crate::cloud_show::CreateShowRequest,
+    ) -> std::result::Result<crate::cloud_show::CreateShowResponse, crate::cloud_show::CloudApiError>
+    {
+        let path = "/api/cloud/shows";
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(path))
+                .bearer_auth(bearer)
+                .json(request),
+            path,
+        )
+        .await
+    }
+
+    async fn current_show(
+        &self,
+        bearer: &str,
+    ) -> std::result::Result<crate::cloud_show::CurrentShowResponse, crate::cloud_show::CloudApiError>
+    {
+        let path = "/api/cloud/shows/current";
+        self.cloud_json(self.http.get(self.endpoint(path)).bearer_auth(bearer), path)
+            .await
+    }
+
+    async fn end_show(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<(), crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/end");
+        self.cloud_json::<serde_json::Value>(
+            self.http.post(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn allowance(
+        &self,
+        bearer: &str,
+    ) -> std::result::Result<crate::protocol::AiCapabilitiesCloud, crate::cloud_show::CloudApiError>
+    {
+        let path = "/api/cloud/allowance";
+        self.cloud_json(self.http.get(self.endpoint(path)).bearer_auth(bearer), path)
+            .await
     }
 }
 
