@@ -208,6 +208,7 @@ function AppShellContent(): ReactElement {
     recordingState,
     runtimeInfo,
     entitlementTier,
+    entitlementPlan,
     previewWindowOpen,
     togglePreviewWindow,
     notesWindowOpen,
@@ -495,6 +496,7 @@ function AppShellContent(): ReactElement {
         <Sidebar
           active={active}
           activeStudioPanel={isStudioPanel(active) ? active : null}
+          accountPlan={entitlementPlan}
           accountTier={entitlementTier}
           // A click on a row keeps the focus on the row; every other way to
           // a page moves it to the page title.

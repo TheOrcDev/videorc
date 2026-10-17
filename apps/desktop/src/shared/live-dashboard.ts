@@ -1,5 +1,7 @@
 import type {
   AudienceSnapshot,
+  CloudPhase,
+  CloudStatus,
   RecordingStatus,
   StreamHealth,
   StreamPlatform,
@@ -31,7 +33,18 @@ export interface LiveDashboardState {
   /** Destination failures and recoveries this session, oldest first (S5). */
   destinationEvents: DestinationEvent[]
   chatTotals?: SessionChatTotals | null
+  /** The Videorc Cloud show carrying this session (plan 184 C7). */
+  cloud?: LiveDashboardCloud | null
   updatedAt: string
+}
+
+/** A cloud show's phase while it carries a session: never `off`. */
+export type LiveDashboardCloudPhase = Exclude<CloudPhase, 'off'>
+
+export interface LiveDashboardCloud {
+  phase: LiveDashboardCloudPhase
+  /** While viewers see Be right back: seconds before the stream ends (D12). */
+  holdRemainingSeconds?: number
 }
 
 export type LiveDashboardSessionState = 'off-air' | 'recording' | 'live'
@@ -98,6 +111,7 @@ export function emptyLiveDashboardState(updatedAt: string): LiveDashboardState {
     targets: [],
     destinationEvents: [],
     chatTotals: null,
+    cloud: null,
     updatedAt
   }
 }
@@ -258,6 +272,45 @@ export function reduceDashboardChatTotals(
   return { ...state, chatTotals: totals, updatedAt: now }
 }
 
+const CLOUD_PHASES: ReadonlySet<string> = new Set<LiveDashboardCloudPhase>([
+  'connecting',
+  'live',
+  'hold',
+  'resuming',
+  'ending',
+  'failed'
+])
+
+/**
+ * `cloud.state` (plan 184 C7): the show while it carries this session. A
+ * status for another session, or none, clears it; the session never comes
+ * from here.
+ */
+export function reduceDashboardCloud(
+  state: LiveDashboardState,
+  status: CloudStatus,
+  now: string
+): LiveDashboardState {
+  const carries =
+    status.sessionId !== undefined &&
+    status.sessionId === state.sessionId &&
+    CLOUD_PHASES.has(status.phase)
+  const remaining = status.hold?.active ? status.hold.remainingSeconds : undefined
+  const cloud: LiveDashboardCloud | null = carries
+    ? {
+        phase: status.phase as LiveDashboardCloudPhase,
+        ...(typeof remaining === 'number' ? { holdRemainingSeconds: remaining } : {})
+      }
+    : null
+  const previous = state.cloud ?? null
+  if (
+    previous?.phase === cloud?.phase &&
+    previous?.holdRemainingSeconds === cloud?.holdRemainingSeconds
+  )
+    return state
+  return { ...state, cloud, updatedAt: now }
+}
+
 export function reduceDashboardHealth(
   state: LiveDashboardState,
   health: StreamHealth,
@@ -376,6 +429,17 @@ export function normalizeLiveDashboardState(value: unknown): LiveDashboardState 
     } catch {
       return null
     }
+  }
+  if (state.cloud !== undefined && state.cloud !== null) {
+    const cloud = state.cloud
+    if (
+      typeof cloud !== 'object' ||
+      !CLOUD_PHASES.has(cloud.phase) ||
+      (cloud.holdRemainingSeconds !== undefined &&
+        (typeof cloud.holdRemainingSeconds !== 'number' ||
+          !Number.isFinite(cloud.holdRemainingSeconds)))
+    )
+      return null
   }
   return state as LiveDashboardState
 }

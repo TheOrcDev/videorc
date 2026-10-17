@@ -15,12 +15,14 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
+  useStudioCloud,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
   useStudioRecordingState
 } from '@/hooks/use-studio'
 import { areEnabledStreamTargetsStartReady } from '@/lib/capture'
+import { cloudResumeNotice } from '@/lib/cloud-view'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
@@ -48,6 +50,10 @@ const StudioDashboardBottomRow = lazy(async () => ({
 // The meter brings audiocn: its own chunk, so the inspector paints first.
 const MicrophoneSection = lazy(async () => ({
   default: (await import('@/components/studio/microphone-section')).MicrophoneSection
+}))
+// Rare (a cloud show this computer stopped feeding): its own chunk.
+const CloudResumeNotice = lazy(async () => ({
+  default: (await import('@/components/studio/cloud-resume-notice')).CloudResumeNotice
 }))
 
 export function StudioTab(): ReactElement {
@@ -217,6 +223,12 @@ export function StudioTab(): ReactElement {
         </div>
 
         <aside aria-label="Session inspector" className={STUDIO_INSPECTOR}>
+          <CloudResumeSlot
+            active={active}
+            blockedReason={liveStreamBlockedReason}
+            pending={startsBusy}
+            onResume={handleLiveStream}
+          />
           <SessionPanel
             active={active}
             live={sessionIsLive(recording)}
@@ -240,6 +252,36 @@ export function StudioTab(): ReactElement {
         </aside>
       </div>
     </div>
+  )
+}
+
+/**
+ * Plan 184 C5: "You're still live through Videorc Cloud." above Session. Its
+ * own component, so the cloud's status ticks during a show re-render only it.
+ */
+function CloudResumeSlot({
+  active,
+  blockedReason,
+  pending,
+  onResume
+}: {
+  active: boolean
+  blockedReason: string | null
+  pending: boolean
+  onResume: () => void
+}): ReactElement | null {
+  const { cloudStatus } = useStudioCloud()
+  const notice = cloudResumeNotice(cloudStatus, active)
+  if (!notice) return null
+  return (
+    <Suspense fallback={null}>
+      <CloudResumeNotice
+        blockedReason={blockedReason}
+        notice={notice}
+        pending={pending}
+        onResume={onResume}
+      />
+    </Suspense>
   )
 }
 

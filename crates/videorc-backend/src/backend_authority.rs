@@ -149,9 +149,13 @@ fn renderer_smoke_method(method: &str) -> bool {
 }
 
 fn remote_allowed_method(method: &str) -> bool {
+    // Plan 184: a remote role may read the cloud show's state and nothing
+    // else of it. Leak argument: `CloudStatus` carries phases, timers, the
+    // show id (not a credential) and legs with redacted urls only; no token,
+    // ingest or platform key type is reachable from it.
     matches!(
         method,
-        "remote.describe" | "remote.intent" | "remote.chat.snapshot"
+        "remote.describe" | "remote.intent" | "remote.chat.snapshot" | "cloud.status"
     )
 }
 

@@ -1,7 +1,8 @@
 import type { ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
+import { goesThroughCloud } from '@/lib/cloud-view'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { platformConnectOptions } from '../../../shared/platform-scopes'
 
@@ -32,6 +33,7 @@ export function GoLiveDialogHost(): ReactElement {
     recheckGoLive,
     resolveGoLiveBlocker
   } = useStudioCore()
+  const { cloudStatus } = useStudioCloud()
 
   return (
     <GoLiveConfirmationDialog
@@ -48,6 +50,7 @@ export function GoLiveDialogHost(): ReactElement {
       platform={runtimeInfo?.platform}
       preflight={goLivePreflight}
       partialSetup={goLivePartialSetup}
+      throughCloud={goesThroughCloud(cloudStatus)}
       onCancel={cancelGoLiveConfirmation}
       onConfirm={() => void confirmGoLive()}
       onContinuePartial={() => void continueGoLiveWithReadyDestinations()}

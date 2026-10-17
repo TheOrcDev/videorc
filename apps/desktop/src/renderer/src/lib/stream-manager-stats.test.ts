@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type {
+  CloudStatus,
   LiveChatMessage,
   LiveChatProviderState,
   StreamPlatform,
@@ -12,6 +13,7 @@ import type {
 import {
   emptyLiveDashboardState,
   reduceDashboardAudience,
+  reduceDashboardCloud,
   reduceDashboardHealth,
   reduceDashboardRecording,
   reduceDashboardTargets,
@@ -295,6 +297,79 @@ describe('stats bar items (plan 057)', () => {
       { label: 'Twitch', value: 'On air', platform: 'twitch', dot: 'good' },
       { label: 'X', value: 'On air', platform: 'x', dot: 'good' }
     ])
+  })
+
+  it('says Cloud through Videorc Cloud, and Be right back with the time left (plan 184 C7)', () => {
+    const reading = (dashboard: LiveDashboardState) =>
+      find(
+        statItems({
+          dashboard,
+          viewerSample: null,
+          messages: [],
+          providers: [],
+          nowMs: T0 + 40_000
+        }),
+        'health'
+      )
+    const cloudStatus = (overrides: Partial<CloudStatus>): CloudStatus => ({
+      phase: 'live',
+      entitled: true,
+      sessionId: 's',
+      settings: { enabled: true, holdMaxSeconds: 1800, holdMaxChoices: [300, 900, 1800, 3600] },
+      connected: true,
+      directFallbackAvailable: false,
+      ...overrides
+    })
+    const throughCloud = withTargets(healthy(), [
+      {
+        targetId: 'videorc-cloud-horizontal',
+        platform: 'custom',
+        label: 'Videorc Cloud',
+        state: 'live'
+      },
+      { targetId: 'twitch', platform: 'twitch', label: 'Twitch', state: 'live' }
+    ])
+    const onAir = reduceDashboardCloud(throughCloud, cloudStatus({}), at(31))
+    expect(reading(onAir)).toMatchObject({
+      value: 'Cloud · 6 Mbps',
+      tone: 'good',
+      description: 'Stream health: through Videorc Cloud, 6 Mbps, 60 fps, no dropped frames'
+    })
+    // The upload folds into one row with the show's state.
+    expect(reading(onAir)?.details.slice(3)).toEqual([
+      { label: 'Videorc Cloud', value: 'On air', dot: 'good' },
+      { label: 'Twitch', value: 'On air', platform: 'twitch', dot: 'good' }
+    ])
+
+    const holding = reduceDashboardCloud(
+      withTargets(onAir, [
+        {
+          targetId: 'videorc-cloud-horizontal',
+          platform: 'custom',
+          label: 'Videorc Cloud',
+          state: 'reconnecting'
+        },
+        { targetId: 'twitch', platform: 'twitch', label: 'Twitch', state: 'live' }
+      ]),
+      cloudStatus({ phase: 'hold', hold: { active: true, remainingSeconds: 1_650 } }),
+      at(40)
+    )
+    expect(reading(holding)).toMatchObject({
+      value: 'Be right back · 28 min left',
+      tone: 'warning',
+      description: 'Stream health: Be right back · 28 min left'
+    })
+    expect(reading(holding)?.details[3]).toEqual({
+      label: 'Videorc Cloud',
+      value: 'Be right back',
+      dot: 'warn',
+      note: 'Ends the stream in 28 min'
+    })
+    expect(
+      reading(reduceDashboardCloud(holding, cloudStatus({ phase: 'resuming' }), at(41)))
+    ).toMatchObject({ value: 'Cloud resuming', tone: 'warning' })
+    // A direct session reads exactly as before.
+    expect(reading(healthy())).toMatchObject({ value: '6 Mbps' })
   })
 
   it('names the most urgent problem instead of the bitrate', () => {

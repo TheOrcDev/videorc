@@ -3274,8 +3274,14 @@ async fn start_session_with_timeline(
     } else {
         StreamTargetResolution::default()
     };
-    let stream_targets = stream_resolution.ready;
     let skipped_targets = stream_resolution.skipped;
+    // Plan 184 C3: in cloud mode the platform legs become one RTMPS feed per
+    // orientation to the show's runner; the resolved platform targets (keys
+    // plain) go to the runner and are kept only to list the platforms in this
+    // session's leg state. A failed hand-over fails the start: the runner may
+    // hold the keys, so streaming directly here would push them twice.
+    let (stream_targets, cloud_platform_targets) =
+        prepare_cloud_stream_targets(&state, &session_id, &params, stream_resolution.ready).await?;
     let stream_url = (!stream_targets.is_empty()).then(|| {
         stream_targets
             .iter()
@@ -4960,11 +4966,15 @@ async fn start_session_with_timeline(
     }
     let stream_tee_has_recording_leg =
         output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
-    let (stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
+    let (mut stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
         &stream_targets,
         &skipped_targets,
         stream_tee_has_recording_leg,
     );
+    // Plan 184 C3/C7: appended AFTER the feed and skipped entries, so the
+    // FFmpeg leg positions above stay exact; the runner's leg states land
+    // here through `apply_cloud_leg_states`.
+    append_cloud_platform_runtime(&mut stream_runtime, &cloud_platform_targets);
     let stream_targets_snapshot = Arc::new(StdMutex::new(StreamTargetsSnapshot {
         session_id: session_id.clone(),
         targets: stream_runtime,
@@ -21627,6 +21637,502 @@ fn build_stream_url(settings: &RtmpSettings) -> Result<StreamTarget> {
         // Legacy single-RTMP sessions are the horizontal leg by definition.
         output_orientation: crate::streaming::StreamOutputOrientation::default(),
     })
+}
+
+// --- Videorc Cloud seam (plan 184 C3, C7) ------------------------------------
+
+/// Target ids of the feed legs to the runner; never a platform destination's.
+const CLOUD_FEED_TARGET_PREFIX: &str = "videorc-cloud-";
+/// Every stream leg's AAC rate (`-b:a 160k` in the stream args).
+const CLOUD_FEED_AUDIO_KBPS: u32 = 160;
+
+fn is_cloud_feed_target(target_id: &str) -> bool {
+    target_id.starts_with(CLOUD_FEED_TARGET_PREFIX)
+}
+
+fn cloud_orientation_id(orientation: crate::streaming::StreamOutputOrientation) -> &'static str {
+    match orientation {
+        crate::streaming::StreamOutputOrientation::Horizontal => "horizontal",
+        crate::streaming::StreamOutputOrientation::Vertical => "vertical",
+    }
+}
+
+/// Asks the cloud to carry this session (C4). Direct: the targets stay as
+/// they are. Cloud: the feed legs replace them, and the platform targets come
+/// back second, only to list the platforms in the session's leg state.
+async fn prepare_cloud_stream_targets(
+    state: &AppState,
+    session_id: &str,
+    params: &StartSessionParams,
+    targets: Vec<StreamTarget>,
+) -> Result<(Vec<StreamTarget>, Vec<StreamTarget>)> {
+    if targets.is_empty() {
+        return Ok((targets, Vec::new()));
+    }
+    let Some(context) = crate::cloud_context(state) else {
+        return Ok((targets, Vec::new()));
+    };
+    let outputs = cloud_output_specs(&params.output.video, &targets);
+    let destinations = cloud_handover_destinations(&targets);
+    let outcome = context
+        .prepare_session(
+            session_id,
+            crate::account::stored_session_token(),
+            outputs,
+            destinations,
+            cloud_hold_image(state),
+        )
+        .await?;
+    match outcome {
+        crate::cloud_show::PrepareOutcome::Direct => Ok((targets, Vec::new())),
+        crate::cloud_show::PrepareOutcome::Cloud(handover) => {
+            match cloud_feed_targets(&handover.ingest, &targets) {
+                Ok(feeds) => {
+                    tracing::info!(
+                        "Session {session_id} streams through Videorc Cloud show {} ({} platform targets handed over)",
+                        handover.show_id,
+                        targets.len()
+                    );
+                    Ok((feeds, targets))
+                }
+                Err(error) => {
+                    // The runner already holds the platforms: end the show
+                    // rather than leave it holding for nobody.
+                    let _ = context
+                        .end_current_show(crate::account::stored_session_token())
+                        .await;
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+/// The takeover screen picked as the hold image, PNG base64, or `None` for
+/// the runner's default card. Best effort: a missing file never blocks Go Live.
+fn cloud_hold_image(state: &AppState) -> Option<String> {
+    let screen_id = state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .settings
+        .hold_image_screen_id
+        .clone()?;
+    let screens = match state.database.list_stream_screens() {
+        Ok(screens) => screens,
+        Err(error) => {
+            tracing::warn!("Could not list takeover screens for the cloud hold image: {error:#}");
+            return None;
+        }
+    };
+    let screen = screens.into_iter().find(|screen| screen.id == screen_id)?;
+    match crate::cloud_show::hold_image_png_base64(&screen.image_path) {
+        Ok(png) => Some(png),
+        Err(error) => {
+            tracing::warn!("The cloud hold image could not be prepared: {error:#}");
+            None
+        }
+    }
+}
+
+/// The destinations the runner takes over, keys plain: built here and sent
+/// on the control socket only (`HandoverDestination`'s `Debug` redacts).
+fn cloud_handover_destinations(
+    targets: &[StreamTarget],
+) -> Vec<crate::cloud_show::HandoverDestination> {
+    targets
+        .iter()
+        .map(|target| crate::cloud_show::HandoverDestination {
+            id: target.target_id.clone(),
+            platform: crate::streaming::stream_platform_id(target.platform).to_string(),
+            label: target.label.clone(),
+            orientation: cloud_orientation_id(target.output_orientation).to_string(),
+            url: target.url.clone(),
+        })
+        .collect()
+}
+
+/// One output per orientation the platforms use, at the settings the feed is
+/// encoded with: the targets' own video (the provider plan sets it on every
+/// ready target), the lowest bitrate when they differ, else the session's.
+fn cloud_output_specs(
+    session_video: &VideoSettings,
+    targets: &[StreamTarget],
+) -> Vec<crate::cloud_show::ShowOutputSpec> {
+    use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
+    [Horizontal, Vertical]
+        .into_iter()
+        .filter_map(|orientation| {
+            let videos: Vec<&VideoSettings> = targets
+                .iter()
+                .filter(|target| target.output_orientation == orientation)
+                .map(|target| target.output_video.as_ref().unwrap_or(session_video))
+                .collect();
+            let first = videos.first()?;
+            Some(crate::cloud_show::ShowOutputSpec {
+                orientation,
+                width: first.width,
+                height: first.height,
+                fps: first.fps,
+                video_kbps: videos
+                    .iter()
+                    .map(|video| video.bitrate_kbps)
+                    .min()
+                    .unwrap_or(first.bitrate_kbps),
+                audio_kbps: CLOUD_FEED_AUDIO_KBPS,
+            })
+        })
+        .collect()
+}
+
+/// The feed legs that replace the platform targets: `{serverUrl}/{streamKey}`
+/// per orientation the platforms use, encoded like the targets they stand for.
+fn cloud_feed_targets(
+    ingest: &[crate::cloud_show::ShowIngest],
+    platform_targets: &[StreamTarget],
+) -> Result<Vec<StreamTarget>> {
+    use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
+    let mut feeds = Vec::new();
+    for orientation in [Horizontal, Vertical] {
+        let Some(template) = platform_targets
+            .iter()
+            .find(|target| target.output_orientation == orientation)
+        else {
+            continue;
+        };
+        let Some(entry) = ingest.iter().find(|entry| entry.orientation == orientation) else {
+            bail!(
+                "Videorc Cloud gave no {} ingest for this session.",
+                cloud_orientation_id(orientation)
+            );
+        };
+        let url = format!(
+            "{}/{}",
+            entry.server_url.trim_end_matches('/'),
+            entry.stream_key
+        );
+        validate_stream_publish_url(&url)
+            .context("Videorc Cloud gave an ingest address this computer can't stream to.")?;
+        feeds.push(StreamTarget {
+            redacted_url: redact_stream_url(&url),
+            url,
+            target_id: format!(
+                "{CLOUD_FEED_TARGET_PREFIX}{}",
+                cloud_orientation_id(orientation)
+            ),
+            platform: StreamPlatform::Custom,
+            label: crate::cloud_show::CLOUD_TARGET_LABEL.to_string(),
+            output_video: template.output_video.clone(),
+            output_orientation: orientation,
+        });
+    }
+    Ok(feeds)
+}
+
+/// The platforms a cloud session streams to, as rows after the feed and
+/// skipped entries (so FFmpeg leg positions stay exact). They start as
+/// Connecting; the runner's leg states move them.
+fn append_cloud_platform_runtime(
+    runtime: &mut Vec<StreamTargetRuntime>,
+    platform_targets: &[StreamTarget],
+) {
+    runtime.extend(platform_targets.iter().map(|target| StreamTargetRuntime {
+        target_id: target.target_id.clone(),
+        platform: target.platform,
+        label: target.label.clone(),
+        state: StreamTargetState::Connecting,
+        message: None,
+        redacted_url: Some(target.redacted_url.clone()),
+    }));
+}
+
+/// The runner's legs into a session's leg state. Feed entries are this
+/// computer's own FFmpeg legs and never change here; a leg the session does
+/// not list is ignored. True when anything changed.
+fn merge_cloud_leg_states(
+    snapshot: &mut StreamTargetsSnapshot,
+    legs: &[StreamTargetRuntime],
+) -> bool {
+    let mut changed = false;
+    for leg in legs
+        .iter()
+        .filter(|leg| !is_cloud_feed_target(&leg.target_id))
+    {
+        let Some(entry) = snapshot.targets.iter_mut().find(|entry| {
+            entry.target_id == leg.target_id && !is_cloud_feed_target(&entry.target_id)
+        }) else {
+            continue;
+        };
+        if entry.state != leg.state || entry.message != leg.message {
+            entry.state = leg.state;
+            entry.message = leg.message.clone();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// C7: the runner's per-platform state into the active session's snapshot.
+/// Returns the replacement snapshot to emit as `stream.targets`, only when
+/// it changed and only for the session that is still active.
+pub async fn apply_cloud_leg_states(
+    state: &AppState,
+    session_id: &str,
+    legs: &[StreamTargetRuntime],
+) -> Option<StreamTargetsSnapshot> {
+    let recording = state.recording.lock().await;
+    let active = recording
+        .as_ref()
+        .filter(|active| active.session_id == session_id)?;
+    let mut snapshot = active
+        .stream_targets_snapshot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    merge_cloud_leg_states(&mut snapshot, legs).then(|| snapshot.clone())
+}
+
+#[cfg(test)]
+mod cloud_seam_tests {
+    use super::*;
+    use crate::cloud_show::ShowIngest;
+    use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
+
+    const YOUTUBE_KEY: &str = "yt-SECRET-key";
+    const INGEST_KEY: &str = "sh_abc-h.ingestSECRET";
+
+    fn video(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> VideoSettings {
+        VideoSettings {
+            preset: VideoPreset::Tutorial1440p30,
+            width,
+            height,
+            fps,
+            bitrate_kbps,
+        }
+    }
+
+    fn target(
+        id: &str,
+        platform: StreamPlatform,
+        url: &str,
+        orientation: crate::streaming::StreamOutputOrientation,
+        output_video: VideoSettings,
+    ) -> StreamTarget {
+        StreamTarget {
+            url: url.to_string(),
+            redacted_url: redact_stream_url(url),
+            target_id: id.to_string(),
+            platform,
+            label: id.to_string(),
+            output_video: Some(output_video),
+            output_orientation: orientation,
+        }
+    }
+
+    fn platforms() -> Vec<StreamTarget> {
+        vec![
+            target(
+                "youtube",
+                StreamPlatform::Youtube,
+                &format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}"),
+                Horizontal,
+                video(1920, 1080, 60, 6000),
+            ),
+            target(
+                "twitch",
+                StreamPlatform::Twitch,
+                "rtmp://live.twitch.tv/app/live_SECRET",
+                Horizontal,
+                video(1920, 1080, 60, 4500),
+            ),
+            target(
+                "tiktok",
+                StreamPlatform::Tiktok,
+                "rtmps://push.tiktok.example/live/tt_SECRET",
+                Vertical,
+                video(1080, 1920, 30, 4000),
+            ),
+        ]
+    }
+
+    fn ingest(orientation: crate::streaming::StreamOutputOrientation, key: &str) -> ShowIngest {
+        ShowIngest {
+            orientation,
+            server_url: "rtmps://eu-hel-1.live.videorc.com:1936/live/".to_string(),
+            stream_key: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn feed_targets_point_at_the_runner_and_keep_each_orientations_encode() {
+        let feeds = cloud_feed_targets(
+            &[
+                ingest(Horizontal, INGEST_KEY),
+                ingest(Vertical, "sh_abc-v.otherSECRET"),
+            ],
+            &platforms(),
+        )
+        .expect("both orientations have an ingest");
+        assert_eq!(feeds.len(), 2);
+        let horizontal = &feeds[0];
+        assert_eq!(horizontal.target_id, "videorc-cloud-horizontal");
+        assert_eq!(
+            horizontal.url,
+            format!("rtmps://eu-hel-1.live.videorc.com:1936/live/{INGEST_KEY}")
+        );
+        assert!(!horizontal.redacted_url.contains("SECRET"));
+        assert_eq!(horizontal.platform, StreamPlatform::Custom);
+        assert_eq!(horizontal.label, "Videorc Cloud");
+        assert_eq!(horizontal.output_video, Some(video(1920, 1080, 60, 6000)));
+        assert_eq!(feeds[1].target_id, "videorc-cloud-vertical");
+        assert_eq!(feeds[1].output_orientation, Vertical);
+        assert_eq!(feeds[1].output_video, Some(video(1080, 1920, 30, 4000)));
+        assert!(
+            feeds
+                .iter()
+                .all(|feed| is_cloud_feed_target(&feed.target_id))
+        );
+    }
+
+    #[test]
+    fn a_missing_orientation_or_a_bad_ingest_fails_the_start() {
+        let missing = cloud_feed_targets(&[ingest(Horizontal, INGEST_KEY)], &platforms());
+        assert!(
+            missing.is_err(),
+            "the vertical platforms would have no feed"
+        );
+
+        let mut bad = ingest(Horizontal, INGEST_KEY);
+        bad.server_url = "file:///tmp/forged".to_string();
+        let horizontal_only: Vec<StreamTarget> = platforms()
+            .into_iter()
+            .filter(|target| target.output_orientation == Horizontal)
+            .collect();
+        assert!(cloud_feed_targets(&[bad], &horizontal_only).is_err());
+    }
+
+    #[test]
+    fn handover_carries_plain_keys_that_debug_never_shows() {
+        let destinations = cloud_handover_destinations(&platforms());
+        assert_eq!(destinations.len(), 3);
+        assert_eq!(destinations[0].platform, "youtube");
+        assert_eq!(destinations[0].orientation, "horizontal");
+        assert!(destinations[0].url.ends_with(YOUTUBE_KEY));
+        assert_eq!(destinations[2].orientation, "vertical");
+        let debug = format!("{destinations:?}");
+        assert!(!debug.contains("SECRET"), "{debug}");
+    }
+
+    #[test]
+    fn output_specs_are_one_per_orientation_at_the_lowest_bitrate() {
+        let specs = cloud_output_specs(&default_video_settings(), &platforms());
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].orientation, Horizontal);
+        assert_eq!(
+            (specs[0].width, specs[0].height, specs[0].fps),
+            (1920, 1080, 60)
+        );
+        assert_eq!(
+            specs[0].video_kbps, 4500,
+            "Twitch's cap holds for the shared feed"
+        );
+        assert_eq!(specs[0].audio_kbps, 160);
+        assert_eq!(specs[1].orientation, Vertical);
+        assert_eq!((specs[1].width, specs[1].height), (1080, 1920));
+    }
+
+    #[test]
+    fn platform_rows_follow_the_feed_rows_and_take_the_runners_states() {
+        let feeds = cloud_feed_targets(
+            &[
+                ingest(Horizontal, INGEST_KEY),
+                ingest(Vertical, "sh_abc-v.x"),
+            ],
+            &platforms(),
+        )
+        .unwrap();
+        let (mut runtime, _, _) = build_stream_runtime(&feeds, &[], false);
+        append_cloud_platform_runtime(&mut runtime, &platforms());
+        assert_eq!(
+            runtime
+                .iter()
+                .map(|row| row.target_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "videorc-cloud-horizontal",
+                "videorc-cloud-vertical",
+                "youtube",
+                "twitch",
+                "tiktok"
+            ]
+        );
+        assert!(
+            runtime[2..]
+                .iter()
+                .all(|row| row.state == StreamTargetState::Connecting)
+        );
+
+        let mut snapshot = StreamTargetsSnapshot {
+            session_id: "session-1".to_string(),
+            targets: runtime,
+        };
+        let legs = vec![
+            StreamTargetRuntime {
+                target_id: "youtube".to_string(),
+                platform: StreamPlatform::Youtube,
+                label: "YouTube".to_string(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: None,
+            },
+            StreamTargetRuntime {
+                target_id: "twitch".to_string(),
+                platform: StreamPlatform::Twitch,
+                label: "Twitch".to_string(),
+                state: StreamTargetState::Reconnecting,
+                message: Some("ingest closed the connection".to_string()),
+                redacted_url: None,
+            },
+            // A runner never names the feed, and a stray id changes nothing.
+            StreamTargetRuntime {
+                target_id: "videorc-cloud-horizontal".to_string(),
+                platform: StreamPlatform::Custom,
+                label: "Videorc Cloud".to_string(),
+                state: StreamTargetState::Failed,
+                message: None,
+                redacted_url: None,
+            },
+            StreamTargetRuntime {
+                target_id: "kick".to_string(),
+                platform: StreamPlatform::Kick,
+                label: "Kick".to_string(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: None,
+            },
+        ];
+        assert!(merge_cloud_leg_states(&mut snapshot, &legs));
+        assert_eq!(
+            snapshot.targets[0].state,
+            StreamTargetState::Live,
+            "feed untouched"
+        );
+        assert_eq!(snapshot.targets[2].state, StreamTargetState::Live);
+        assert!(
+            snapshot.targets[2].redacted_url.is_some(),
+            "the row keeps its url"
+        );
+        assert_eq!(snapshot.targets[3].state, StreamTargetState::Reconnecting);
+        assert_eq!(
+            snapshot.targets[3].message.as_deref(),
+            Some("ingest closed the connection")
+        );
+        assert_eq!(snapshot.targets[4].state, StreamTargetState::Connecting);
+        assert_eq!(snapshot.targets.len(), 5, "an unknown leg adds no row");
+        assert!(
+            !merge_cloud_leg_states(&mut snapshot, &legs),
+            "the same states again change nothing"
+        );
+    }
 }
 
 fn redact_stream_url(url: &str) -> String {

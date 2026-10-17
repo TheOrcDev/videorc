@@ -27,7 +27,7 @@ import {
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
-import type { EntitlementTier } from '@/lib/backend'
+import type { EntitlementPlan, EntitlementTier } from '@/lib/backend'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { cn } from '@/lib/utils'
 
@@ -189,6 +189,7 @@ function SidebarUpdateChip({
 export function Sidebar({
   active,
   activeStudioPanel,
+  accountPlan = null,
   accountTier,
   onSelect,
   onSelectStudioPanel,
@@ -203,6 +204,8 @@ export function Sidebar({
 }: {
   active: WorkspaceTab
   activeStudioPanel: StudioPanel | null
+  /** `max` labels the account Max (plan 185 T4). */
+  accountPlan?: EntitlementPlan | null
   accountTier: EntitlementTier | null
   onSelect: (tab: WorkspaceTab) => void
   onSelectStudioPanel: (panel: StudioPanel) => void
@@ -338,6 +341,7 @@ export function Sidebar({
         {/* Videorc product-account control. Backend status is secondary (a small
             dot on the trigger + the Health row); Health stays reachable here. */}
         <AccountMenu
+          plan={accountPlan}
           tier={accountTier}
           statusTone={statusTone}
           statusLabel={statusLabel}

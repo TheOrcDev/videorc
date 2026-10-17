@@ -381,7 +381,7 @@ function sharedAccountLabel(
 }
 
 /** What the session lock covers on Setup, named in its one notice (D-15). */
-const LIVESTREAM_SETUP_LOCKS = 'Destinations, stream quality and stream details'
+const LIVESTREAM_SETUP_LOCKS = 'Destinations, stream quality, Videorc Cloud and stream details'
 
 /** The one cap notice; a switch held off by the cap points at it (D-14). */
 const DESTINATION_CAP_NOTICE_ID = 'livestream-destination-cap'

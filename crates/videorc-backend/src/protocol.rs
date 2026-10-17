@@ -116,6 +116,30 @@ pub enum EntitlementTier {
     Developer,
 }
 
+/// The paid plan behind the Premium tier (plan 185 D2). Max keeps
+/// `tier = premium` everywhere and says `plan = max` beside it, so a rollback
+/// or an older app keeps every Max user at least Premium. Absent for Basic,
+/// for the Developer tier, and for a Premium account on an older web deploy.
+/// Never a new `EntitlementTier` value.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntitlementPlan {
+    Premium,
+    Max,
+}
+
+impl EntitlementPlan {
+    /// The web's open `plan.id`. An unknown id reads as "no plan" so a plan
+    /// the shipped app has never heard of cannot break the capabilities load.
+    pub fn parse(id: &str) -> Option<Self> {
+        match id.trim() {
+            "premium" => Some(Self::Premium),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum EntitlementSource {
@@ -169,6 +193,11 @@ pub struct EntitlementCapability {
 pub struct EntitlementsSnapshot {
     pub schema_version: u32,
     pub tier: EntitlementTier,
+    /// Plan 185 D2: `premium` or `max` while the account is Premium. Optional
+    /// on the wire and never a tier value ([[videorc-serde-null-contract-trap]]:
+    /// a `null` here would fail the strict renderer schema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<EntitlementPlan>,
     pub source: EntitlementSource,
     pub capabilities: Vec<EntitlementCapability>,
     pub limits: EntitlementLimits,
@@ -5402,6 +5431,15 @@ pub struct AiCapabilities {
     /// whether avatar generation is on. Older servers omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cohost: Option<AiCapabilitiesCohost>,
+    /// The paid plan (plan 185 D2): `{ id: "max", name: "Max" }`. Absent for
+    /// Basic and on older web deploys. `id` is an open string; the desktop
+    /// maps the ids it knows with `EntitlementPlan::parse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AiCapabilitiesPlan>,
+    /// Cloud hours and talk-show limits (plan 185 wire shape, plan 184).
+    /// Absent for Basic and on older web deploys, which means no cloud.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<AiCapabilitiesCloud>,
     pub generated_at: String,
     pub limits: AiCapabilitiesLimits,
     pub models: AiCapabilitiesModels,
@@ -5409,6 +5447,53 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `plan` from `GET /api/ai/capabilities` (plan 185 D2). Every field defaults
+/// so a partial block never breaks the load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesPlan {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `cloud` from `GET /api/ai/capabilities` and the whole answer of
+/// `GET /api/cloud/allowance` (plan 185 wire shape). Every field defaults and
+/// every `Option` skips `null`, so a partial block never breaks the load and
+/// the desktop's own copy never writes a `null` the strict renderer schema
+/// would refuse ([[videorc-serde-null-contract-trap]]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCloud {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub seconds_per_month: u64,
+    #[serde(default)]
+    pub seconds_used: u64,
+    #[serde(default)]
+    pub overage_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+    #[serde(default)]
+    pub talk_shows: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests_on_stage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_retention_days: Option<u32>,
+}
+
+impl AiCapabilitiesCloud {
+    /// Seconds left this month before the allowance is used up (never below
+    /// zero: overage is recorded, not subtracted; plan 185 D6, plan 184 D18).
+    pub fn seconds_remaining(&self) -> u64 {
+        self.seconds_per_month.saturating_sub(self.seconds_used)
+    }
 }
 
 /// `cohost` from `GET /api/ai/capabilities` (plan 164): every field
@@ -6520,6 +6605,78 @@ mod tests {
             .pointer(pointer)
             .unwrap_or_else(|| panic!("shared protocol fixture is missing {pointer}"))
             .clone()
+    }
+
+    // Plan 185 T4: the `plan` and `cloud` blocks ride the capabilities answer
+    // as optional blocks. The shared fixture is the authoritative Max example;
+    // the TypeScript side validates the same JSON.
+    #[test]
+    fn shared_high_risk_contract_fixture_parses_the_plan_and_cloud_blocks() {
+        let wire = shared_high_risk_contract_fixture_value("/accountPlans/capabilitiesMax");
+        let capabilities: AiCapabilities = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            capabilities.entitlement.tier, "premium",
+            "Max stays tier premium (D2)"
+        );
+        let plan = capabilities.plan.expect("plan block");
+        assert_eq!(plan.id, "max");
+        assert_eq!(plan.name, "Max");
+        assert_eq!(EntitlementPlan::parse(&plan.id), Some(EntitlementPlan::Max));
+        let cloud = capabilities.cloud.expect("cloud block");
+        assert!(cloud.enabled && cloud.talk_shows);
+        assert_eq!(cloud.seconds_per_month, 360_000);
+        assert_eq!(cloud.seconds_used, 133_200);
+        assert_eq!(cloud.seconds_remaining(), 226_800);
+        assert_eq!(cloud.reset_at.as_deref(), Some("2026-11-01T00:00:00Z"));
+        assert_eq!(cloud.guests_on_stage, Some(5));
+        assert_eq!(cloud.room_size, Some(10));
+        assert_eq!(cloud.recording_retention_days, Some(30));
+
+        // The Premium block (and `GET /api/cloud/allowance`) is the same shape
+        // with the talk-show limits absent.
+        let premium: AiCapabilitiesCloud = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/accountPlans/cloudPremium"),
+        )
+        .unwrap();
+        assert!(premium.enabled && !premium.talk_shows);
+        assert_eq!(premium.seconds_remaining(), 34_800);
+        assert_eq!(premium.guests_on_stage, None);
+        // Absent options never serialize as `null` (the serde-null trap).
+        let value = serde_json::to_value(&premium).unwrap();
+        assert!(value.get("guestsOnStage").is_none());
+        assert!(value.get("roomSize").is_none());
+        assert!(value.get("recordingRetentionDays").is_none());
+
+        // Unknown plan ids read as "no plan" instead of failing the load.
+        assert_eq!(EntitlementPlan::parse("enterprise"), None);
+        let mut future = shared_high_risk_contract_fixture_value("/accountPlans/capabilitiesMax");
+        future["plan"]["id"] = serde_json::Value::String("enterprise".to_string());
+        future["cloud"]["newField"] = serde_json::Value::Bool(true);
+        let parsed: AiCapabilities = serde_json::from_value(future).unwrap();
+        assert_eq!(
+            parsed.plan.as_ref().map(|plan| plan.id.as_str()),
+            Some("enterprise")
+        );
+        assert!(parsed.cloud.is_some());
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_keeps_the_entitlement_plan_optional() {
+        let max = shared_high_risk_contract_fixture_value("/accountPlans/entitlementsMax");
+        let snapshot: EntitlementsSnapshot = serde_json::from_value(max.clone()).unwrap();
+        assert_eq!(snapshot.tier, EntitlementTier::Premium);
+        assert_eq!(snapshot.plan, Some(EntitlementPlan::Max));
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), max);
+
+        let basic = shared_high_risk_contract_fixture_value("/accountPlans/entitlementsBasic");
+        let snapshot: EntitlementsSnapshot = serde_json::from_value(basic.clone()).unwrap();
+        assert_eq!(snapshot.plan, None);
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert!(
+            value.get("plan").is_none(),
+            "no plan must mean no key, never null"
+        );
+        assert_eq!(value, basic);
     }
 
     #[test]

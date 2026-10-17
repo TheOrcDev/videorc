@@ -10,6 +10,7 @@ import type {
   ViewerSample,
   SessionChatTotals
 } from '@/lib/backend'
+import { formatCloudCountdown } from '@/lib/cloud-view'
 import { NO_VALUE, plural } from '@/lib/format'
 import { formatTimecode } from '@/lib/format-time'
 import { formatBitrate } from '@/lib/format-video'
@@ -17,9 +18,13 @@ import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { chatActivity, type ActivityTotals } from '@/lib/stream-activity'
 import { formatViewerCount, viewerSampleStale } from '@/lib/viewer-count-view'
 import { destinationLabel } from '@/lib/platform-copy'
-import { destinationStateLabel } from '@/lib/state-labels'
+import { cloudPhaseLabel, destinationStateLabel } from '@/lib/state-labels'
 
-import type { LiveDashboardState } from '../../../shared/live-dashboard'
+import type {
+  LiveDashboardCloud,
+  LiveDashboardCloudPhase,
+  LiveDashboardState
+} from '../../../shared/live-dashboard'
 
 // The Stream Manager's stats bar (plan 057, D1), as pure item models. A stat
 // exists only when its source exists for this session, and a value is never
@@ -250,19 +255,47 @@ const TARGET_DOTS: Partial<Record<StreamTargetState, StatDot>> = {
   failed: 'error'
 }
 
+const CLOUD_DOTS: Record<LiveDashboardCloudPhase, StatDot> = {
+  connecting: 'warn',
+  live: 'good',
+  hold: 'warn',
+  resuming: 'warn',
+  ending: 'neutral',
+  failed: 'error'
+}
+
+/** The upload to Videorc Cloud: recording.rs `CLOUD_FEED_TARGET_PREFIX`. */
+function isCloudFeed(target: StreamTargetRuntime): boolean {
+  return target.targetId.startsWith('videorc-cloud-')
+}
+
 /**
- * The one health reading the bar shows, most urgent first: a failed
- * destination, one reconnecting, one its platform says isn't receiving the
- * stream (plan 161: viewers there see nothing, so these outrank dropped
- * frames), dropped frames, a sagging bitrate, a destination still
- * connecting. Healthy is just the bitrate.
+ * The one health reading the bar shows, most urgent first: Be right back
+ * while Videorc Cloud holds the show (plan 184 C7; it outranks the upload's
+ * own reconnecting row), a failed destination, one reconnecting, one its
+ * platform says isn't receiving the stream (plan 161: viewers there see
+ * nothing, so these outrank dropped frames), dropped frames, a sagging
+ * bitrate, a destination still connecting. Healthy is just the bitrate,
+ * after "Cloud" when the show goes through it.
  */
 function healthReading(
   targets: readonly StreamTargetRuntime[],
   droppedLastMinute: number,
   sagging: boolean,
-  bitrate: string
-): { value: string; tone: StatTone } {
+  bitrate: string,
+  cloud: LiveDashboardCloud | null
+): { value: string; tone: StatTone; healthy?: true } {
+  if (cloud?.phase === 'hold') {
+    const left = cloud.holdRemainingSeconds
+    return {
+      value:
+        typeof left === 'number'
+          ? `Be right back · ${formatCloudCountdown(left)} left`
+          : 'Be right back',
+      tone: 'warning'
+    }
+  }
+  if (cloud?.phase === 'resuming') return { value: 'Cloud resuming', tone: 'warning' }
   const failed = targets.filter((target) => target.state === 'failed')
   if (failed.length === 1) {
     return { value: `${destinationLabel(failed[0].label)} failed`, tone: 'error' }
@@ -284,7 +317,26 @@ function healthReading(
   if (targets.some((target) => target.state === 'connecting')) {
     return { value: 'Connecting', tone: 'warning' }
   }
-  return { value: bitrate, tone: bitrate === NO_VALUE ? 'neutral' : 'good' }
+  const tone = bitrate === NO_VALUE ? 'neutral' : 'good'
+  if (cloud)
+    return { value: bitrate === NO_VALUE ? 'Cloud' : `Cloud · ${bitrate}`, tone, healthy: true }
+  return { value: bitrate, tone, healthy: true }
+}
+
+/** The upload rows fold into one Videorc Cloud row with the show's state. */
+function cloudDetail(
+  cloud: LiveDashboardCloud,
+  feed: StreamTargetRuntime | undefined
+): StatDetailRow {
+  const left = cloud.phase === 'hold' ? cloud.holdRemainingSeconds : undefined
+  const note =
+    typeof left === 'number' ? `Ends the stream in ${formatCloudCountdown(left)}` : feed?.message
+  return {
+    label: 'Videorc Cloud',
+    value: cloudPhaseLabel(cloud.phase),
+    dot: CLOUD_DOTS[cloud.phase],
+    ...(note ? { note } : {})
+  }
 }
 
 function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatItemModel | null {
@@ -306,9 +358,14 @@ function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatIt
   // One bitrate spelling (plan 174 S1.4), and a placeholder that says why (H-10).
   const bitrate = formatBitrate(kbps) || NO_VALUE
   const bitrateReason = bitrate === NO_VALUE ? 'Not reported yet' : undefined
-  const reading = healthReading(dashboard.targets, droppedLastMinute, sagging, bitrate)
+  const cloud = dashboard.cloud ?? null
+  const reading = healthReading(dashboard.targets, droppedLastMinute, sagging, bitrate, cloud)
   const fps = typeof latest?.fps === 'number' ? `${Math.round(latest.fps)} fps` : null
   const dropped = droppedLastMinute > 0 ? `${droppedLastMinute} in the last minute` : 'None'
+  const destinations = cloud
+    ? dashboard.targets.filter((target) => !isCloudFeed(target))
+    : dashboard.targets
+  const through = cloud ? 'through Videorc Cloud, ' : ''
   return {
     id: 'health',
     label: 'Stream health',
@@ -319,7 +376,8 @@ function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatIt
       { label: 'Bitrate', value: bitrate, ...(bitrateReason ? { note: bitrateReason } : {}) },
       ...(fps ? [{ label: 'Frame rate', value: fps }] : []),
       { label: 'Dropped frames', value: dropped },
-      ...dashboard.targets.map((target) => ({
+      ...(cloud ? [cloudDetail(cloud, dashboard.targets.find(isCloudFeed))] : []),
+      ...destinations.map((target) => ({
         label: destinationLabel(target.label),
         value: destinationStateLabel(target.state),
         platform: target.platform,
@@ -327,12 +385,11 @@ function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatIt
         ...(target.message ? { note: target.message } : {})
       }))
     ],
-    description:
-      reading.value === bitrate
-        ? bitrateReason
-          ? `Stream health: bitrate ${bitrateReason.toLowerCase()}`
-          : `Stream health: ${[bitrate, fps, droppedLastMinute > 0 ? `${dropped} dropped` : 'no dropped frames'].filter(Boolean).join(', ')}`
-        : `Stream health: ${reading.value}`
+    description: reading.healthy
+      ? bitrateReason
+        ? `Stream health: ${through}bitrate ${bitrateReason.toLowerCase()}`
+        : `Stream health: ${through}${[bitrate, fps, droppedLastMinute > 0 ? `${dropped} dropped` : 'no dropped frames'].filter(Boolean).join(', ')}`
+      : `Stream health: ${reading.value}`
   }
 }
 
