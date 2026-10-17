@@ -110,17 +110,19 @@ So every ⚑ takes its recommended answer:
 | Slice | State | Where |
 | --- | --- | --- |
 | S0e code ownership | **Done** 2026-10-16. `scene_geometry.rs`, `overlay_layout.rs`, `buddy_animator.rs` and `buddy_overlay.rs` have only the owner as author. `compositor.rs` and `recording.rs` have five outside authors, so never copy them into the private runner. | this plan |
-| S0a runner spike | In progress, on macOS with MediaMTX and local receivers. Server numbers wait for a Hetzner box. | `videorc-cloud` |
+| S0a runner spike | **Done on macOS** 2026-10-17 (Apple M4, MediaMTX, 2 local receivers): viewers see Be right back 1.5 s after the feed drops, and the picture is back about 1 s after the feed's first frame (4.6 s end to end, most of it the publisher's own start). The receivers never disconnected; the largest gap was one frame. 1080p60 x264 at 12 to 6 Mbps used 87% of a core on average (VideoToolbox 32%). x264 vs NVENC per box waits for a Hetzner box. `docs/spike-runner-2026-10.md` | `videorc-cloud` #1 |
 | S0b host app in a room | Not started (before Phase 2) | |
 | S0c SRT in FFmpeg | Not started (before C1b) | |
 | S0d costs measured | **Blocked**: needs a Hetzner box and a LiveKit project from the owner | |
 | I1 nodes, I3 deploys, I4 watching, I5 DNS and TLS | **Blocked**: needs Hetzner and DNS from the owner | |
-| I2 node agent | In progress | `videorc-cloud` |
-| R1 to R6 runner | In progress | `videorc-cloud` |
+| I2 node agent | **Done** 2026-10-17 (`6ff8d76`): signed show routes, the control proxy, the MediaMTX publish hook, runner supervision with crash restart and adoption, heartbeat, usage and drain. Dev-tested only; TLS with a real cert is untested. | `videorc-cloud` #1 |
+| R1 to R6 runner | **Done** 2026-10-17: decoder, output clock, switcher (12 virtual-time tests), encoder and per-destination fan-out, control socket with `ingest.get`, usage, crash state. 82 tests plus the hold continuity test. The runner's `docs/wire-notes.md` pins 19 details this plan left open. | `videorc-cloud` #1 |
 | W1 to W6 control plane | **Done** 2026-10-17 (`796aab43`). Shows, nodes, signed node calls, placement, the reaper cron and `/live`. 32 new tests; the full web suite is green (1123). | `videorc-web` |
-| W7 docs and privacy | Docs in progress. The privacy page changes only at launch. | `videorc-web` |
+| W7 docs and privacy | Docs **done** 2026-10-17 (`docs/cloud.md`, `docs/billing.md` in web #85). The privacy page changes only at launch. | `videorc-web` |
 | C1 to C3 desktop backend | **Done** 2026-10-17. Plan 185 T4 parsing; `cloud_show.rs` (web client, control socket, state machine, RPCs `cloud.status`, `cloud.settings.set`, `cloud.allowance.refresh`, `cloud.show.resume`, `cloud.show.end`, event `cloud.state`); the `recording.rs` seam (RTMPS feed per orientation, platform rows in the leg state, `apply_cloud_leg_states`); resume through `ingest.get`. A Go Live that never expected the cloud says nothing (Basic, rollout switch off). | this PR |
-| C4 to C7 desktop UI | Next: the Go Live `cloud` phase, the Resume banner, the Livestream page section and the Stream health chip | this PR |
+| C4 to C7 desktop UI | **Done** 2026-10-17 (`7441cbd8`, `914df505`). C4: the Go Live primary reads "Connecting to Videorc Cloud…" while a cloud start runs; the cloud step runs inside the backend's start, so it shows on the `starting` phase rather than a phase of its own. C5: "You're still live through Videorc Cloud." above Session, with the hold countdown, Resume (Go Live, bound to the live show by the backend) and End livestream (asks first). C6: Livestream → Setup's Videorc Cloud section: the switch, the month's hours, the Be right back image (the card or a takeover) and the hold limit; locked with one reason for Basic (the Premium sentence) and for a paid account not on yet. C7: Stream health reads "Cloud · 6 Mbps", "Be right back · 28 min left" or "Cloud resuming", with one Videorc Cloud row on hover. Contracts round-trip a shared fixture in both languages. Owner by-eye in both themes owed. | this PR |
+| C5b resume without platform prep | Known gap. Resume is Go Live, so platform prep runs again: a YouTube sign-in destination can create a new broadcast. Fix: skip prep on a resume and reuse the show's destinations. Until then the runner must treat a `destinations.set` with identical destinations as a no-op, so a resume never restarts a platform leg. | this PR |
+| C6b Test cloud | Not started: a 10-second private test against a runner, with no platforms. Needs a runner to test against. | this PR |
 | C8 smokes | After the runner and the desktop meet | this PR |
 | C1b SRT | After S0c | |
 | Phases 2, 3 and 4 | Not started | |
