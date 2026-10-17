@@ -19,10 +19,11 @@ import {
   captureDecayCandidateIdentityFromFiles,
   captureDecayRunnerIdentity
 } from './capture-decay-release-acceptance.mjs'
+import { SYMLINK_TEST_SKIP } from './symlink-test-support.mjs'
 
 const run = promisify(execFile)
 
-describe('capture-decay app bundle identity', () => {
+describe('capture-decay app bundle identity', { skip: SYMLINK_TEST_SKIP }, () => {
   it('deterministically binds paths, significant modes, file contents, and symlink targets', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'videorc-app-bundle-test-'))
     try {
