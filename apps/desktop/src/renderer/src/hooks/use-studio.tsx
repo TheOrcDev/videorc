@@ -1666,6 +1666,8 @@ interface StudioShellContextValue {
   recordingState: RecordingStatus['state']
   runtimeInfo: RuntimeInfo | null
   entitlementTier: EntitlementsSnapshot['tier'] | null
+  /** Plan 185 T4: `max` names the account Max; absent for every other plan. */
+  entitlementPlan: EntitlementsSnapshot['plan'] | null
   previewWindowOpen: boolean
   togglePreviewWindow: () => Promise<void>
   notesWindowOpen: boolean
@@ -15870,6 +15872,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recordingState: recording.state,
       runtimeInfo,
       entitlementTier: entitlements?.tier ?? null,
+      entitlementPlan: entitlements?.plan ?? null,
       previewWindowOpen: previewWindow.open,
       togglePreviewWindow,
       notesWindowOpen: notesWindow.open,
@@ -15898,6 +15901,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commentsWindow.open,
       confirmStopSession,
       connection,
+      entitlements?.plan,
       entitlements?.tier,
       notesWindow.open,
       openCommentsWindow,
