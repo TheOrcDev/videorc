@@ -36,14 +36,10 @@ export const BUDDY_REPORT_UNTITLED = 'Untitled stream'
 export const BUDDY_REPORT_EMPTY_TITLE = 'No stream reports yet'
 
 /**
- * The backend names an unnamed session after its start, "Session 2026-10-02
- * 14:55" (`session_title` in recording.rs). The report's picker already names
- * the stream by that time, so the heading repeats it only for a real title
- * (plan 150, D10).
+ * The report's picker already names the stream by its start, so the heading
+ * repeats the title only for a real one (plan 150, D10).
  */
-export function isAutoSessionTitle(title: string): boolean {
-  return /^Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(title.trim())
-}
+export { isAutoSessionTitle } from './format'
 
 /** Rows a list shows before "Show all". */
 export const BUDDY_REPORT_LIST_CAP = 5

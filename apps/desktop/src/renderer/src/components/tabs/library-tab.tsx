@@ -38,6 +38,7 @@ import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { OfflineAlert } from '@/components/lock-alert'
 import { PageHeader } from '@/components/page'
 import { PANE_OWNS_SCROLL, PaneStrip } from '@/components/pane'
+import { SessionPoster } from '@/components/session-poster'
 import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -123,7 +124,6 @@ import {
   pruneLibrarySelection,
   revealsFinishedCleanup,
   sessionFormatLabel,
-  sessionPosterUrl,
   sortLibrarySessions,
   toggleAllLibrarySelection,
   toggleLibrarySelection,
@@ -1058,54 +1058,6 @@ function LiveSessionDuration(): ReactElement {
   return (
     <span className="text-meta text-muted-foreground tabular-nums">
       {durationMsLabel(elapsedMs)}
-    </span>
-  )
-}
-
-/** Poster with one lazy backfill attempt: older sessions have no poster yet;
- * a 404 triggers a single sessions.poster round-trip (idle-aware backend).
- * Running sessions never request the poster — extraction waits for capture
- * idle, so the request is guaranteed to 404. */
-export function SessionPoster({
-  session
-}: {
-  session: Pick<SessionSummary, 'id' | 'durationMs' | 'status' | 'finalizationState'>
-}): ReactElement {
-  const { connection, ensureSessionPoster } = useStudioCore()
-  const { recording } = useStudioRecordingState()
-  const [attempt, setAttempt] = useState(0)
-  const [failed, setFailed] = useState(false)
-  // Posters are extracted after finalization; while the MP4 is still exporting
-  // the request would 404, so treat a finalizing row like a running one.
-  const running = session.status === 'running' || isFinalizingSession(session)
-  const url = running ? null : sessionPosterUrl(connection, session)
-  const source = url && attempt > 0 ? `${url}&attempt=${attempt}` : url
-  return (
-    <span className="grid h-10 w-[4.5rem] shrink-0 place-items-center overflow-hidden rounded-row border bg-muted/30">
-      {isLiveSession(session, recording) ? (
-        <StatusDot pulse={sessionStatusPulses(recording)} tone={sessionStatusTone(recording)} />
-      ) : source && !failed ? (
-        <img
-          alt=""
-          className="size-full object-cover"
-          src={source}
-          onError={() => {
-            if (attempt === 0) {
-              void ensureSessionPoster(session.id).then((available) => {
-                if (available) {
-                  setAttempt(1)
-                } else {
-                  setFailed(true)
-                }
-              })
-            } else {
-              setFailed(true)
-            }
-          }}
-        />
-      ) : (
-        <VideoFileIcon className="size-4 text-muted-foreground" weight="duotone" />
-      )}
     </span>
   )
 }

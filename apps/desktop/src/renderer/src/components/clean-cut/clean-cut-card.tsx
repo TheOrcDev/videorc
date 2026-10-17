@@ -1,4 +1,12 @@
-import { ClipIcon, FolderIcon, LibraryIcon, ResetIcon, SuccessIcon } from '@/components/icons'
+import {
+  AlertIcon,
+  ClipIcon,
+  FolderIcon,
+  LibraryIcon,
+  ResetIcon,
+  SearchIcon,
+  SuccessIcon
+} from '@/components/icons'
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import {
@@ -9,18 +17,12 @@ import { GroupedList, ListRow } from '@/components/list-row'
 import { LockAlert } from '@/components/lock-alert'
 import { ConfigGrid, CONFIG_GRID_PAIR } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
+import { SessionPoster } from '@/components/session-poster'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
+import { Input } from '@/components/ui/input'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
@@ -33,6 +35,7 @@ import type { CleanCutOrigin } from '@/lib/clean-cut-events'
 import {
   CLEAN_CUT_AUTO_LABEL,
   CLEAN_CUT_DESCRIPTION,
+  CLEAN_CUT_LIST_CAP,
   CLEAN_CUT_NO_RECORDINGS,
   CLEAN_CUT_TITLE,
   CONDENSED_DEFAULT_TARGET_MINUTES,
@@ -40,20 +43,24 @@ import {
   cleanCutAutoStatus,
   cleanCutErrorReason,
   cleanCutMinutesLeftLabel,
+  cleanCutRecordingFacts,
+  cleanCutRowChip,
   cleanCutStatusView,
   cleanCutUnlock,
   condensedEligibility,
   condensedTargetSeconds,
-  formatCutClock,
   latestCleanCutJob,
+  latestCleanCutJobAnyMode,
+  matchCleanCutRecordings,
   recentCleanCutRecordings,
   type CleanCutAutoStatus,
+  type CleanCutCaptureContext,
   type CleanCutSession,
   type CleanCutStatusKind,
   type CleanCutStatusView
 } from '@/lib/clean-cut-view'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
-import { dayLabel, isActiveRecordingState, plural } from '@/lib/format'
+import { isActiveRecordingState, plural } from '@/lib/format'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
@@ -83,10 +90,11 @@ const UNTITLED = 'Untitled recording'
 /**
  * The Buddy tab's Clean cut tab (plan 119 S14, S19; plan 150 S7), in Settings'
  * two columns: Clean cut (the "every recording" switch, the monthly allowance
- * and, when it can't run, the one reason why) beside Recordings (the chosen
- * recording's cut with what to do next). Locked means disabled with one
- * reason: the switch and "Make a clean cut" are off while the reason shows;
- * the picker stays, because cuts already made stay reviewable. Starting needs the same sign-in, Premium and Cloud
+ * and, when it can't run, the one reason why) beside Recordings (every
+ * recording it can cut, drawn as the Library draws them, the chosen one open
+ * with its cut and what to do next). Locked means disabled with one reason:
+ * the switch and "Make a clean cut" are off while the reason shows; the list
+ * stays, because cuts already made stay reviewable. Starting needs the same sign-in, Premium and Cloud
  * AI consent as Buddy Live; consent is asked here, in a dialog that names
  * the audio upload.
  */
@@ -106,7 +114,8 @@ export function CleanCutCard({
   const auto = useCleanCutAuto()
   const sectionRef = useRef<HTMLDivElement>(null)
   const rows = sessions as readonly CleanCutSession[]
-  const recordings = useMemo(() => recentCleanCutRecordings(rows), [rows])
+  // Every recording it can cut: the list caps and searches them itself.
+  const recordings = useMemo(() => recentCleanCutRecordings(rows, Number.POSITIVE_INFINITY), [rows])
 
   // null follows the newest recording, so the next one that ends takes its place.
   const [picked, setPicked] = useState<string | null>(null)
@@ -123,10 +132,6 @@ export function CleanCutCard({
 
   const selected =
     (picked ? rows.find((session) => session.id === picked) : undefined) ?? recordings[0] ?? null
-  const options =
-    selected && !recordings.some((session) => session.id === selected.id)
-      ? [...recordings, selected]
-      : recordings
 
   const [mode, setMode] = useState<CleanCutMode>('clean')
   const [targetMinutes, setTargetMinutes] = useState<number>(CONDENSED_DEFAULT_TARGET_MINUTES)
@@ -141,8 +146,9 @@ export function CleanCutCard({
   const autoStatus = cleanCutAutoStatus({ on: auto, unlock, consented: aiConsent, captureActive })
   const minutesLeft = signedIn ? cleanCutMinutesLeftLabel(client.capabilities) : null
 
+  const capture: CleanCutCaptureContext = { captureActive, streaming: sessionIsLive(recording) }
   const job = selected ? latestCleanCutJob(client.jobs, selected.id, mode) : null
-  const status = cleanCutStatusView(job, { captureActive, streaming: sessionIsLive(recording) })
+  const status = cleanCutStatusView(job, capture)
   const condensed = selected ? condensedEligibility(selected) : null
   const condensedBlocked = mode === 'condensed' && condensed !== null && !condensed.eligible
   // Until the jobs are listed, a recording that already has its cut would
@@ -308,15 +314,16 @@ export function CleanCutCard({
             ref={sectionRef}
           >
             {selected ? (
-              <div className="flex min-w-0 flex-col gap-2" data-slot="clean-cut-recording">
+              <RecordingList
+                capture={capture}
+                jobs={client.jobs}
+                recordings={recordings}
+                selected={selected}
+                onSelect={(sessionId) =>
+                  setPicked(sessionId === recordings[0]?.id ? null : sessionId)
+                }
+              >
                 <div className="flex flex-wrap items-center gap-2">
-                  <RecordingPicker
-                    options={options}
-                    selected={selected}
-                    onSelect={(sessionId) =>
-                      setPicked(sessionId === recordings[0]?.id ? null : sessionId)
-                    }
-                  />
                   <SegmentedControl
                     aria-label="Kind of cut"
                     options={CLEAN_CUT_MODE_OPTIONS}
@@ -349,15 +356,14 @@ export function CleanCutCard({
                 </div>
 
                 {condensedBlocked && condensed && !condensed.eligible ? (
-                  <GroupedList>
-                    <ListRow
-                      data-testid="clean-cut-status"
-                      data-status="unavailable"
-                      icon={<ClipIcon aria-hidden className="text-muted-foreground" />}
-                      title="Not for this recording"
-                      context={<span title={condensed.reason}>{condensed.reason}</span>}
-                    />
-                  </GroupedList>
+                  <ListRow
+                    className="px-0"
+                    data-testid="clean-cut-status"
+                    data-status="unavailable"
+                    icon={<ClipIcon aria-hidden className="text-muted-foreground" />}
+                    title="Not for this recording"
+                    context={<span title={condensed.reason}>{condensed.reason}</span>}
+                  />
                 ) : status.kind === 'failed' && job ? (
                   <Alert data-testid="clean-cut-status" data-status="failed" variant="destructive">
                     <AlertTitle>
@@ -383,39 +389,35 @@ export function CleanCutCard({
                     </AlertAction>
                   </Alert>
                 ) : (
-                  <GroupedList>
-                    <ListRow
-                      className="[&_[data-slot=list-row-title]]:shrink-0"
-                      context={
-                        unsaved > 0 ? (
-                          <span data-slot="clean-cut-unsaved">
-                            {plural(unsaved, 'unsaved change')} in its review
-                          </span>
-                        ) : status.detail ? (
-                          <span title={status.detail}>{status.detail}</span>
-                        ) : (
-                          selectedFacts(selected)
-                        )
-                      }
-                      data-testid="clean-cut-status"
-                      data-status={status.kind}
-                      icon={<StatusGlyph kind={status.kind} />}
-                      title={status.label}
-                    >
-                      <StatusActions
-                        cannotStart={cannotStart}
-                        job={job}
-                        makeLabel={makeLabel}
-                        status={status}
-                        onCancel={cancel}
-                        onMake={make}
-                        onOpenLibrary={(outputSessionId) => onOpenLibrarySession(outputSessionId)}
-                        onReview={review}
-                      />
-                    </ListRow>
-                  </GroupedList>
+                  <ListRow
+                    className="px-0 [&_[data-slot=list-row-title]]:shrink-0"
+                    context={
+                      unsaved > 0 ? (
+                        <span data-slot="clean-cut-unsaved">
+                          {plural(unsaved, 'unsaved change')} in its review
+                        </span>
+                      ) : status.detail ? (
+                        <span title={status.detail}>{status.detail}</span>
+                      ) : null
+                    }
+                    data-testid="clean-cut-status"
+                    data-status={status.kind}
+                    icon={<StatusGlyph kind={status.kind} />}
+                    title={status.label}
+                  >
+                    <StatusActions
+                      cannotStart={cannotStart}
+                      job={job}
+                      makeLabel={makeLabel}
+                      status={status}
+                      onCancel={cancel}
+                      onMake={make}
+                      onOpenLibrary={(outputSessionId) => onOpenLibrarySession(outputSessionId)}
+                      onReview={review}
+                    />
+                  </ListRow>
                 )}
-              </div>
+              </RecordingList>
             ) : (
               <p className="text-xs text-muted-foreground" data-slot="clean-cut-empty">
                 {CLEAN_CUT_NO_RECORDINGS}
@@ -429,44 +431,127 @@ export function CleanCutCard({
   )
 }
 
-function selectedFacts(session: CleanCutSession): ReactNode {
-  const facts = [
-    typeof session.durationMs === 'number' ? formatCutClock(session.durationMs) : null,
-    dayLabel(session.startedAt)
-  ].filter(Boolean)
-  return <span className="tabular-nums">{facts.join(' · ')}</span>
-}
-
-/** Recent recordings, newest first, named by title and when they ran. */
-function RecordingPicker({
-  options,
+/**
+ * The recordings Clean cut can cut, drawn as the Library draws them: the
+ * poster, the title, its length and when it ran, and the chip of its newest
+ * cut. The chosen one opens in place with its cut (`children`). Six rows,
+ * then "Show all"; a search once there are more than that.
+ */
+function RecordingList({
+  recordings,
   selected,
-  onSelect
+  jobs,
+  capture,
+  onSelect,
+  children
 }: {
-  options: readonly CleanCutSession[]
+  recordings: readonly CleanCutSession[]
   selected: CleanCutSession
+  jobs: readonly CleanCutJob[]
+  capture: CleanCutCaptureContext
   onSelect: (sessionId: string) => void
+  children: ReactNode
 }): ReactElement {
+  const [query, setQuery] = useState('')
+  const [showAll, setShowAll] = useState(false)
+  const matches = useMemo(() => matchCleanCutRecordings(recordings, query), [recordings, query])
+  const searching = query.trim() !== ''
+  const shown = searching || showAll ? matches : matches.slice(0, CLEAN_CUT_LIST_CAP)
+  // The chosen recording stays in view past the cap (a Library ask can pick
+  // an older one); a search shows only what it matched.
+  const rows =
+    searching || shown.some((session) => session.id === selected.id) ? shown : [...shown, selected]
+  const canExpand = !searching && matches.length > CLEAN_CUT_LIST_CAP
+
   return (
-    <Select value={selected.id} onValueChange={onSelect}>
-      <SelectTrigger aria-label="Recording" className="max-w-72 min-w-0" size="xs">
-        <SelectValue>
-          <span className="truncate">{selected.title.trim() || UNTITLED}</span>
-        </SelectValue>
-      </SelectTrigger>
-      <SelectContent align="start" position="popper">
-        <SelectGroup>
-          {options.map((option) => (
-            <SelectItem key={option.id} value={option.id}>
-              <span className="max-w-64 truncate">{option.title.trim() || UNTITLED}</span>
-              <span className="text-xs text-muted-foreground tabular-nums">
-                {dayLabel(option.startedAt)}
-              </span>
-            </SelectItem>
-          ))}
-        </SelectGroup>
-      </SelectContent>
-    </Select>
+    <div className="flex min-w-0 flex-col gap-2" data-slot="clean-cut-recordings">
+      {recordings.length > CLEAN_CUT_LIST_CAP ? (
+        <div className="relative">
+          <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            aria-label="Search recordings"
+            className="pl-8"
+            placeholder="Search recordings…"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
+      ) : null}
+      {rows.length > 0 ? (
+        <GroupedList aria-label="Recordings">
+          {rows.map((session) => {
+            const chosen = session.id === selected.id
+            const title = session.title.trim() || UNTITLED
+            const chip = cleanCutRowChip(latestCleanCutJobAnyMode(jobs, session.id), capture)
+            return (
+              <div
+                key={session.id}
+                className={cn('flex min-w-0 flex-col', chosen && 'bg-accent')}
+                data-selected={chosen || undefined}
+                data-session-id={session.id}
+                data-slot="clean-cut-recording-row"
+              >
+                <ListRow
+                  aria-current={chosen || undefined}
+                  as="button"
+                  className="h-auto gap-3 py-1.5"
+                  context={<span className="tabular-nums">{cleanCutRecordingFacts(session)}</span>}
+                  icon={<SessionPoster className="h-9 w-16" session={session} />}
+                  title={title}
+                  onClick={() => onSelect(session.id)}
+                >
+                  {chip ? (
+                    <Badge data-testid="clean-cut-row-chip" data-tone={chip.tone} variant="outline">
+                      {chip.tone === 'working' ? (
+                        <Spinner aria-hidden data-icon="inline-start" />
+                      ) : chip.tone === 'ready' ? (
+                        <SuccessIcon
+                          aria-hidden
+                          className="text-success"
+                          data-icon="inline-start"
+                          weight="fill"
+                        />
+                      ) : (
+                        <AlertIcon
+                          aria-hidden
+                          className="text-destructive"
+                          data-icon="inline-start"
+                          weight="fill"
+                        />
+                      )}
+                      {chip.label}
+                    </Badge>
+                  ) : null}
+                </ListRow>
+                {chosen ? (
+                  <div
+                    className="flex min-w-0 flex-col gap-2 px-3 pb-3"
+                    data-slot="clean-cut-recording"
+                  >
+                    {children}
+                  </div>
+                ) : null}
+              </div>
+            )
+          })}
+        </GroupedList>
+      ) : (
+        <p className="text-xs text-muted-foreground" data-slot="clean-cut-no-match">
+          No recordings match “{query.trim()}”.
+        </p>
+      )}
+      {canExpand ? (
+        <Button
+          className="self-start"
+          size="xs"
+          type="button"
+          variant="ghost"
+          onClick={() => setShowAll(!showAll)}
+        >
+          {showAll ? 'Show fewer' : `Show all (${matches.length})`}
+        </Button>
+      ) : null}
+    </div>
   )
 }
 
