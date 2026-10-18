@@ -12,6 +12,7 @@ import {
 import { connect as netConnect, createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { createServer as createTlsServer } from 'node:tls'
 
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
 import {
@@ -61,14 +62,21 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //      forwards again, and the content comes back.
 //   3. The computer dies: SIGKILL to the whole dev-app process group. The
 //      runner holds for nobody; a relaunch with the same state finds the
-//      show resumable (C5), Resume is Go Live bound to that show, the node
-//      hands the ingest back (`ingest.get`), and the content comes back on
-//      the same receiver connections.
+//      show resumable (C5), Resume (`cloud.show.resume`, C5b) binds a new
+//      session to that show, the node hands the ingest back (`ingest.get`),
+//      the runner keeps its legs (no `destinations.set` after the click),
+//      and the content comes back on the same receiver connections.
 //   4. Stop ends the show on the web and the node, the runner exits and the
 //      receivers' connections close; the local recording finalizes.
 //   5. ffprobe and ffmpeg check every receiver file: streams, duration, the
 //      largest packet gap, the hold card during each drop and motion after
 //      each resume.
+//   6. The feed checks the node's certificate (C1c). The node announces
+//      itself as `localhost` (a DNS name, so the name is checked too), the
+//      desktop trusts the run's self-signed cert through the dev-only
+//      VIDEORC_CLOUD_FEED_CA_FILE, and three direct FFmpeg publishes prove
+//      the check: the right roots pass the handshake, a wrong CA fails it,
+//      and a certificate for another name fails it.
 //
 // Why a proxy and not a killed process: the plan says "kill the stream
 // encoder", but on macOS the stream legs are fifo outputs of the one FFmpeg
@@ -122,6 +130,7 @@ const report = {
   node: null,
   stop: null,
   platformRowsLive: null,
+  tls: null,
   secretLeaks: []
 }
 let web = null
@@ -179,7 +188,9 @@ try {
       VIDEORC_NODE_SECRET: encodeNodeSecret(nodeSecret),
       VIDEORC_CLOUD_SHOW_PUBLIC_KEY: signing.publicKeyBase64Url,
       VIDEORC_NODE_LISTEN: `127.0.0.1:${ports.agent}`,
-      VIDEORC_NODE_PUBLIC_HOST: '127.0.0.1',
+      // A DNS name, not an IP: FFmpeg binds the certificate's name only for
+      // one (C1c), and the dev cert's SAN names localhost.
+      VIDEORC_NODE_PUBLIC_HOST: 'localhost',
       VIDEORC_NODE_INGEST_SCHEME: 'rtmps',
       // The desktop publishes through the feed proxy; MediaMTX listens behind it.
       VIDEORC_NODE_RTMPS_PORT: String(ports.proxy),
@@ -248,8 +259,11 @@ try {
         '-y',
         '-nostdin',
         '-hide_banner',
+        // Evidence when a receiver never sees the publisher's EOF: the
+        // connection lines live at info; the per-second stats stay out.
+        '-nostats',
         '-loglevel',
-        'warning',
+        'level+info',
         '-listen',
         '1',
         '-i',
@@ -285,12 +299,30 @@ try {
   // 7. The feed proxy between the desktop and MediaMTX's RTMPS port.
   proxy = await startFeedProxy({ listenPort: ports.proxy, targetPort: ports.rtmps })
 
+  // 7b. The feed's certificate check (C1c), with FFmpeg itself and the same
+  //     fifo output shape the app uses: against MediaMTX behind the proxy
+  //     with the right roots (the handshake passes; the publish then fails
+  //     on the key, which is not what is measured), with a CA that did not
+  //     sign the cert, and against a cert for another name.
+  const serverCert = join(certDir, 'server.crt')
+  report.tls = await feedCertificateChecks({
+    certDir,
+    rightCa: serverCert,
+    url: `rtmps://localhost:${ports.proxy}/live/sh_probe-h.not-a-key`
+  })
+  log(
+    `[tls] right roots: ${report.tls.rightRoots.outcome}; wrong CA: ${report.tls.wrongCa.outcome}; other name: ${report.tls.otherName.outcome}`
+  )
+
   // 8. The signed-in desktop, pointed at the fake web.
   const secretsPath = join(appDataDir, 'videorc-secrets.json')
   writeFileSync(secretsPath, JSON.stringify({ 'account:videorc:session': sessionToken }, null, 2))
   chmodSync(secretsPath, 0o600)
   const appEnv = {
     VIDEORC_API_BASE_URL: web.httpOrigin,
+    // Dev builds trust this one extra CA for the cloud feed (C1c): the
+    // run's self-signed MediaMTX cert, so the check stays on.
+    VIDEORC_CLOUD_FEED_CA_FILE: serverCert,
     VIDEORC_DISABLE_AUTO_PREVIEW: '1',
     VIDEORC_SMOKE_COMMAND_SERVER: '1',
     VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
@@ -336,7 +368,8 @@ try {
   sessionActive = true
   const firstSessionId = started.sessionId
   log(`session ${firstSessionId} started; stream legs: ${started.streamUrl ?? 'n/a'}`)
-  if (!/videorc-cloud|rtmps:\/\/127\.0\.0\.1:/.test(String(started.streamUrl ?? ''))) {
+  // The node announces itself as localhost (C1c); older runs said 127.0.0.1.
+  if (!/videorc-cloud|rtmps:\/\/(localhost|127\.0\.0\.1):/.test(String(started.streamUrl ?? ''))) {
     throw new Error(`The session did not stream through the cloud feed: ${started.streamUrl}`)
   }
   const createCall = web.state.calls.find(
@@ -1444,6 +1477,173 @@ function freePort() {
       server.close(() => resolvePort(port))
     })
   })
+}
+
+// --- The feed's certificate check (C1c) ----------------------------------------------
+
+/**
+ * Three direct FFmpeg publishes with the app's fifo output shape and the
+ * app's TLS options (`tls_verify=1:ca_file=…` as the fifo's format_opts):
+ * - `rightRoots`: the run's cert as the roots, against MediaMTX behind the
+ *   proxy. The TLS handshake passes; the publish then fails on the key,
+ *   which is not what is measured.
+ * - `wrongCa`: a CA that did not sign MediaMTX's cert: the handshake fails.
+ * - `otherName`: a tiny TLS server with a cert for `other.test`, trusted as
+ *   its own CA, reached as `localhost`: the chain is fine and the name is
+ *   not, so the handshake fails. That is the host-name check.
+ * Each is one `recovery` attempt of about a second.
+ */
+async function feedCertificateChecks({ certDir, rightCa, url }) {
+  const wrongCa = join(certDir, 'wrong-ca.crt')
+  runChecked(
+    'openssl',
+    [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-nodes',
+      '-sha256',
+      '-days',
+      '2',
+      '-keyout',
+      join(certDir, 'wrong-ca.key'),
+      '-out',
+      wrongCa,
+      '-subj',
+      '/CN=not the node/O=Videorc cloud solo smoke'
+    ],
+    'a CA that did not sign the node'
+  )
+  const otherCert = join(certDir, 'other-name.crt')
+  const otherKey = join(certDir, 'other-name.key')
+  runChecked(
+    'openssl',
+    [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-nodes',
+      '-sha256',
+      '-days',
+      '2',
+      '-keyout',
+      otherKey,
+      '-out',
+      otherCert,
+      '-subj',
+      '/CN=other.test/O=Videorc cloud solo smoke',
+      '-addext',
+      'subjectAltName=DNS:other.test'
+    ],
+    'a certificate for another name'
+  )
+  const otherPort = await freePort()
+  const other = await startTlsEcho({ cert: otherCert, key: otherKey, port: otherPort })
+  try {
+    return {
+      rightRoots: await ffmpegFeedHandshake(url, rightCa),
+      wrongCa: await ffmpegFeedHandshake(url, wrongCa),
+      otherName: await ffmpegFeedHandshake(
+        `rtmps://localhost:${otherPort}/live/sh_probe-h.not-a-key`,
+        otherCert
+      )
+    }
+  } finally {
+    await other.close()
+  }
+}
+
+/** A TLS server that completes handshakes and speaks nothing. */
+function startTlsEcho({ cert, key, port }) {
+  const server = createTlsServer({ cert: readFileSync(cert), key: readFileSync(key) }, (socket) => {
+    socket.on('error', () => {})
+    socket.on('data', () => socket.end())
+  })
+  server.on('tlsClientError', () => {})
+  return new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen)
+    server.listen(port, '127.0.0.1', () => {
+      server.off('error', rejectListen)
+      resolveListen({
+        close: () => new Promise((resolveClose) => server.close(() => resolveClose()))
+      })
+    })
+  })
+}
+
+/**
+ * One FFmpeg publish of a second of silence to `url` through the fifo muxer
+ * with the app's TLS options, one recovery attempt. `handshake-passed` when
+ * FFmpeg got past TLS (RTMP then fails: EOF or a refused key),
+ * `certificate-rejected` when OpenSSL refused the certificate (chain or
+ * name), else the first error line.
+ */
+async function ffmpegFeedHandshake(url, caFile) {
+  const args = [
+    '-hide_banner',
+    '-nostdin',
+    '-loglevel',
+    'level+info',
+    '-f',
+    'lavfi',
+    '-i',
+    'anullsrc=r=48000:cl=stereo',
+    '-t',
+    '1',
+    '-map',
+    '0:a',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '64k',
+    '-f',
+    'fifo',
+    '-fifo_format',
+    'flv',
+    '-queue_size',
+    '64',
+    '-drop_pkts_on_overflow',
+    '1',
+    '-attempt_recovery',
+    '1',
+    '-recover_any_error',
+    '1',
+    '-max_recovery_attempts',
+    '1',
+    '-recovery_wait_time',
+    '1',
+    '-format_opts',
+    `tls_verify=1:ca_file=${caFile}`,
+    url
+  ]
+  const lines = await new Promise((resolveRun, rejectRun) => {
+    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    const stderr = []
+    child.stderr.on('data', (chunk) => stderr.push(chunk))
+    child.on('error', rejectRun)
+    const timer = setTimeout(() => child.kill('SIGKILL'), 20_000)
+    child.on('exit', () => {
+      clearTimeout(timer)
+      resolveRun(Buffer.concat(stderr).toString('utf8').split('\n'))
+    })
+  })
+  const errors = lines.filter((line) => line.includes('[error]'))
+  const rejected = errors.some((line) => line.includes('certificate verify failed'))
+  const rtmp = errors.some(
+    (line) =>
+      line.includes('RTMP handshake') ||
+      line.includes('Server error') ||
+      line.includes('End of file') ||
+      line.includes('Connection reset')
+  )
+  return {
+    url: url.replace(/\/[^/]*$/, '/••••'),
+    caFile,
+    outcome: rejected ? 'certificate-rejected' : rtmp ? 'handshake-passed' : 'unknown',
+    firstError: errors[0]?.trim() ?? null
+  }
 }
 
 /** `count` consecutive free loopback ports for the agent's runner range. */

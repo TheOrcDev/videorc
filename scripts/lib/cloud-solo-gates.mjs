@@ -294,6 +294,24 @@ export function evaluateCloudSoloReport(report) {
   if (report.platformRowsLive === false) {
     failures.push("the runner's platform leg states never reached the desktop as live")
   }
+  // C1c: FFmpeg itself must prove the feed checks the node's certificate.
+  if (report.tls) {
+    if (report.tls.rightRoots?.outcome !== 'handshake-passed') {
+      failures.push(
+        `the feed with the right roots did not pass the TLS handshake (${report.tls.rightRoots?.outcome ?? 'not run'})`
+      )
+    }
+    if (report.tls.wrongCa?.outcome !== 'certificate-rejected') {
+      failures.push(
+        `the feed accepted a certificate its roots did not sign (${report.tls.wrongCa?.outcome ?? 'not run'})`
+      )
+    }
+    if (report.tls.otherName?.outcome !== 'certificate-rejected') {
+      failures.push(
+        `the feed accepted a certificate for another name (${report.tls.otherName?.outcome ?? 'not run'})`
+      )
+    }
+  }
   if (Array.isArray(report.secretLeaks) && report.secretLeaks.length > 0) {
     failures.push(`a secret reached the renderer events: ${report.secretLeaks.join(', ')}`)
   }

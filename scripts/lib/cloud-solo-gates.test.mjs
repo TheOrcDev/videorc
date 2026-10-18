@@ -241,6 +241,11 @@ describe('cloud solo gates: the run verdict', () => {
       recordingFinalized: true
     },
     platformRowsLive: true,
+    tls: {
+      rightRoots: { outcome: 'handshake-passed' },
+      wrongCa: { outcome: 'certificate-rejected' },
+      otherName: { outcome: 'certificate-rejected' }
+    },
     secretLeaks: []
   })
 
@@ -264,6 +269,8 @@ describe('cloud solo gates: the run verdict', () => {
     }
     report.stop.recordingFinalized = false
     report.platformRowsLive = false
+    report.tls.wrongCa = { outcome: 'handshake-passed' }
+    report.tls.otherName = { outcome: 'handshake-passed' }
     report.secretLeaks = ['ingest key']
     const failures = evaluateCloudSoloReport(report)
     assert.deepEqual(failures, [
@@ -277,6 +284,8 @@ describe('cloud solo gates: the run verdict', () => {
       'receiver-2 feed-cut: the frame inside the hold is not the hold card (dark 0.1, bright 0.3)',
       'the local recording did not finalize',
       "the runner's platform leg states never reached the desktop as live",
+      'the feed accepted a certificate its roots did not sign (handshake-passed)',
+      'the feed accepted a certificate for another name (handshake-passed)',
       'a secret reached the renderer events: ingest key'
     ])
     assert.ok(evaluateCloudSoloReport({}).includes('no drop was measured'))

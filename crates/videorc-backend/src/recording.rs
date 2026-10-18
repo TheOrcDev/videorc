@@ -11546,6 +11546,49 @@ struct StreamTarget {
     /// Which composed leg this destination consumes (explicit binding — never
     /// inferred from resolution equality).
     output_orientation: crate::streaming::StreamOutputOrientation,
+    /// Plan 184 C1c: the cloud feed checks the node's certificate. A platform
+    /// leg keeps FFmpeg's default (no check) and is unchanged.
+    tls_verification: Option<FeedTlsVerification>,
+}
+
+/// How a leg's RTMPS connection checks the server (plan 184 C1c). FFmpeg's
+/// `tls_verify` defaults to 0, so a leg without this accepts any certificate:
+/// whoever answers for the node's name gets the ingest key. With it, FFmpeg
+/// 8.1's OpenSSL backend (the macOS and Linux builds) verifies the chain
+/// against `ca_file` and binds the URL's host name (`SSL_set1_host`), and the
+/// Schannel backend (the Windows build) verifies both against the Windows
+/// store and ignores `ca_file`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FeedTlsVerification {
+    /// The PEM bundle to trust. OpenSSL's compiled-in default paths point
+    /// nowhere on a user's machine, so a build that links it always gets one;
+    /// `None` on Windows.
+    ca_file: Option<PathBuf>,
+}
+
+/// The check as the `fifo` muxer's `format_opts` dictionary and a `tee`
+/// slave's bracketed options take it. `ff_format_output_open` hands these to
+/// the rtmps protocol, which passes them on to the tls URLContext it opens;
+/// nothing is left over for the flv muxer. `cloud_feed_tls_verification`
+/// refuses a path with a character this dictionary would read as syntax.
+fn tls_verification_dict(tls: &FeedTlsVerification) -> String {
+    let mut dict = "tls_verify=1".to_string();
+    if let Some(ca_file) = &tls.ca_file {
+        dict.push_str(":ca_file=");
+        dict.push_str(&ffmpeg_file_path(ca_file));
+    }
+    dict
+}
+
+/// The same check for a plain `-f flv` output, where the CLI routes protocol
+/// options through the format options to `avio_open2`.
+fn tls_verification_cli_args(tls: &FeedTlsVerification) -> Vec<String> {
+    let mut args = vec!["-tls_verify".to_string(), "1".to_string()];
+    if let Some(ca_file) = &tls.ca_file {
+        args.push("-ca_file".to_string());
+        args.push(ffmpeg_file_path(ca_file));
+    }
+    args
 }
 
 /// An enabled stream destination that was skipped this session because its
@@ -17443,10 +17486,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
         );
     }
 
-    let stream_legs = stream_targets
-        .iter()
-        .map(|target| rtmp_tee_leg(&target.url))
-        .collect::<Vec<_>>();
+    let stream_legs = stream_targets.iter().map(rtmp_tee_leg).collect::<Vec<_>>();
 
     match (output_path, stream_targets) {
         (Some(path), []) => args.push(ffmpeg_file_path(path)),
@@ -17490,15 +17530,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                 );
             }
         }
-        (None, [single]) => {
-            args.extend([
-                "-flvflags".to_string(),
-                "no_duration_filesize".to_string(),
-                "-f".to_string(),
-                "flv".to_string(),
-                single.url.clone(),
-            ]);
-        }
+        (None, [single]) => args.extend(plain_flv_output_args(single)),
         (None, targets) if !targets.is_empty() => {
             args.extend(tee_output_args(stream_legs.join("|")));
         }
@@ -17938,7 +17970,14 @@ fn append_bridge_copy_flv_output(
     // failed attempt logs `[fifo @ …] Error opening <url>`, which attributes
     // the leg; `restart_with_keyframe` (honoured only with
     // `drop_pkts_on_overflow`) resumes on a clean picture.
-    args.extend([
+    args.extend(fifo_flv_output_args(target));
+}
+
+/// The `fifo`-wrapped FLV output of one leg, URL last. A cloud feed carries
+/// its TLS check as the fifo's `format_opts` (plan 184 C1c): the fifo copies
+/// them into every `ff_format_output_open`, so a reconnect checks again.
+fn fifo_flv_output_args(target: &StreamTarget) -> Vec<String> {
+    let mut args = vec![
         "-f".to_string(),
         "fifo".to_string(),
         "-fifo_format".to_string(),
@@ -17955,8 +17994,30 @@ fn append_bridge_copy_flv_output(
         "1".to_string(),
         "-recovery_wait_time".to_string(),
         "2".to_string(),
+    ];
+    if let Some(tls) = &target.tls_verification {
+        args.extend(["-format_opts".to_string(), tls_verification_dict(tls)]);
+    }
+    args.push(target.url.clone());
+    args
+}
+
+/// A lone stream with no recording: a plain FLV output (the proven path). A
+/// cloud feed's TLS check goes first, as CLI protocol options (C1c).
+fn plain_flv_output_args(target: &StreamTarget) -> Vec<String> {
+    let mut args = target
+        .tls_verification
+        .as_ref()
+        .map(tls_verification_cli_args)
+        .unwrap_or_default();
+    args.extend([
+        "-flvflags".to_string(),
+        "no_duration_filesize".to_string(),
+        "-f".to_string(),
+        "flv".to_string(),
         target.url.clone(),
     ]);
+    args
 }
 
 fn append_bridge_copy_output_args(
@@ -18030,10 +18091,18 @@ fn append_bridge_audio_input_args(
 /// Twitch endpoint used to wedge the whole stop path until Force stop
 /// (owner report, 2026-08-19). Steady-state overflow is already handled by
 /// the fifo wrapper's drop_pkts_on_overflow; this bounds the CLOSE.
-fn rtmp_tee_leg(url: &str) -> String {
+/// A cloud feed adds its TLS check to the slave's options (plan 184 C1c); the
+/// tee hands them to the slave's protocol open, through the fifo when it
+/// wraps one.
+fn rtmp_tee_leg(target: &StreamTarget) -> String {
+    let tls = target
+        .tls_verification
+        .as_ref()
+        .map(|tls| format!(":{}", tls_verification_dict(tls)))
+        .unwrap_or_default();
     format!(
-        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}]{}",
-        escape_tee_target(url)
+        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}{tls}]{}",
+        escape_tee_target(&target.url)
     )
 }
 const RTMP_LEG_RW_TIMEOUT_US: u64 = 8_000_000;
@@ -18144,10 +18213,7 @@ fn ffmpeg_args_with_encoder(
         false,
     );
 
-    let stream_legs = stream_targets
-        .iter()
-        .map(|target| rtmp_tee_leg(&target.url))
-        .collect::<Vec<_>>();
+    let stream_legs = stream_targets.iter().map(rtmp_tee_leg).collect::<Vec<_>>();
 
     match (output_path, stream_targets) {
         // Local recording only.
@@ -18164,15 +18230,7 @@ fn ffmpeg_args_with_encoder(
             args.extend(tee_output_args(legs.join("|")));
         }
         // A single stream uses a plain FLV output (the proven path).
-        (None, [single]) => {
-            args.extend([
-                "-flvflags".to_string(),
-                "no_duration_filesize".to_string(),
-                "-f".to_string(),
-                "flv".to_string(),
-                single.url.clone(),
-            ]);
-        }
+        (None, [single]) => args.extend(plain_flv_output_args(single)),
         // Multiple streams without local recording: tee of FLV legs only.
         (None, targets) if !targets.is_empty() => {
             args.extend(tee_output_args(stream_legs.join("|")));
@@ -21675,6 +21733,7 @@ fn build_stream_url(settings: &RtmpSettings) -> Result<StreamTarget> {
         output_video: None,
         // Legacy single-RTMP sessions are the horizontal leg by definition.
         output_orientation: crate::streaming::StreamOutputOrientation::default(),
+        tls_verification: None,
     })
 }
 
@@ -21735,6 +21794,9 @@ async fn prepare_cloud_stream_targets(
     let Some(context) = crate::cloud_context(state) else {
         return Ok(CloudSeam::direct(resolution));
     };
+    // Before anything reaches the web: a feed that cannot check the node is
+    // refused here, never created and then dropped.
+    let tls = cloud_feed_tls_verification(state)?;
     let targets = resolution.ready;
     let outputs = cloud_output_specs(&params.output.video, &targets);
     let destinations = cloud_handover_destinations(&targets);
@@ -21754,7 +21816,7 @@ async fn prepare_cloud_stream_targets(
             platform_rows: Vec::new(),
         }),
         crate::cloud_show::PrepareOutcome::Cloud(handover) => {
-            match cloud_feed_targets(&handover.ingest, &targets) {
+            match cloud_feed_targets(&handover.ingest, &targets, &tls) {
                 Ok(feeds) => {
                     tracing::info!(
                         "Session {session_id} streams through Videorc Cloud show {} ({} platform targets handed over)",
@@ -21794,6 +21856,7 @@ async fn resume_cloud_stream_targets(
     let Some(context) = crate::cloud_context(state) else {
         bail!("There's no Videorc Cloud show to resume.");
     };
+    let tls = cloud_feed_tls_verification(state)?;
     let handover = context
         .resume_session(
             session_id,
@@ -21805,6 +21868,7 @@ async fn resume_cloud_stream_targets(
         &handover.ingest,
         &resolution.ready,
         params.simulcast.as_ref().map(|simulcast| &simulcast.video),
+        &tls,
     )?;
     tracing::info!(
         "Session {session_id} resumes Videorc Cloud show {} ({} feeds, {} platform rows, no destinations handed over)",
@@ -21927,6 +21991,7 @@ fn cloud_output_specs(
 fn cloud_feed_targets(
     ingest: &[crate::cloud_show::ShowIngest],
     platform_targets: &[StreamTarget],
+    tls: &FeedTlsVerification,
 ) -> Result<Vec<StreamTarget>> {
     use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
     let mut feeds = Vec::new();
@@ -21943,27 +22008,180 @@ fn cloud_feed_targets(
                 cloud_orientation_id(orientation)
             );
         };
-        let url = format!(
-            "{}/{}",
-            entry.server_url.trim_end_matches('/'),
-            entry.stream_key
-        );
-        validate_stream_publish_url(&url)
-            .context("Videorc Cloud gave an ingest address this computer can't stream to.")?;
-        feeds.push(StreamTarget {
-            redacted_url: redact_stream_url(&url),
-            url,
-            target_id: format!(
-                "{CLOUD_FEED_TARGET_PREFIX}{}",
-                cloud_orientation_id(orientation)
-            ),
-            platform: StreamPlatform::Custom,
-            label: crate::cloud_show::CLOUD_TARGET_LABEL.to_string(),
-            output_video: template.output_video.clone(),
-            output_orientation: orientation,
-        });
+        feeds.push(cloud_feed_target(
+            entry,
+            template.output_video.clone(),
+            tls,
+        )?);
     }
     Ok(feeds)
+}
+
+/// One feed leg to the runner, checked like any publish URL (C3) and checking
+/// the node's certificate (C1c). FFmpeg's OpenSSL backend binds the host name
+/// only for a DNS name: an IP literal is `numerichost` and skips that check,
+/// so the chain alone would not prove the node. A release build refuses an
+/// ingest by IP; a dev build allows one, for a local MediaMTX, and says so.
+fn cloud_feed_target(
+    entry: &crate::cloud_show::ShowIngest,
+    output_video: Option<VideoSettings>,
+    tls: &FeedTlsVerification,
+) -> Result<StreamTarget> {
+    let url = format!(
+        "{}/{}",
+        entry.server_url.trim_end_matches('/'),
+        entry.stream_key
+    );
+    validate_stream_publish_url(&url)
+        .context("Videorc Cloud gave an ingest address this computer can't stream to.")?;
+    if cloud_feed_host_is_ip_literal(&url) {
+        if cfg!(debug_assertions) {
+            tracing::warn!(
+                "The cloud feed's host is an IP address: FFmpeg checks its certificate chain but not its name (dev build)."
+            );
+        } else {
+            bail!(
+                "Videorc Cloud gave an ingest address by IP, whose certificate this computer can't check by name."
+            );
+        }
+    }
+    Ok(StreamTarget {
+        redacted_url: redact_stream_url(&url),
+        url,
+        target_id: format!(
+            "{CLOUD_FEED_TARGET_PREFIX}{}",
+            cloud_orientation_id(entry.orientation)
+        ),
+        platform: StreamPlatform::Custom,
+        label: crate::cloud_show::CLOUD_TARGET_LABEL.to_string(),
+        output_video,
+        output_orientation: entry.orientation,
+        tls_verification: Some(tls.clone()),
+    })
+}
+
+fn cloud_feed_host_is_ip_literal(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .is_some_and(|host| {
+            host.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok()
+        })
+}
+
+/// Dev builds may trust one extra CA, so `smoke:cloud-solo` publishes to its
+/// own MediaMTX with checking on. Packaged builds never read it, like
+/// `VIDEORC_API_BASE_URL`.
+const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
+const CLOUD_FEED_ROOTS_FILE_NAME: &str = "cloud-feed-roots.pem";
+const PEM_CERTIFICATE_BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
+/// Characters FFmpeg's option dictionary, a tee slave's brackets or
+/// `av_get_token` read as syntax. A roots path with one is refused, not
+/// escaped: the path is ours (beside the database) or the developer's.
+const CA_FILE_PATH_FORBIDDEN: [char; 7] = [':', '\'', '"', '\\', '[', ']', '|'];
+
+/// The roots the feed trusts, as one PEM file: Mozilla's store, the same store
+/// the control socket and the API client trust through webpki-roots, plus the
+/// dev override's CA when a dev build names one.
+fn cloud_feed_roots_pem(extra_ca_pem: Option<&[u8]>) -> Vec<u8> {
+    use base64::Engine as _;
+    let mut pem = Vec::new();
+    for certificate in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+        pem.extend_from_slice(PEM_CERTIFICATE_BEGIN);
+        pem.push(b'\n');
+        let encoded = base64::engine::general_purpose::STANDARD.encode(certificate.as_ref());
+        for line in encoded.as_bytes().chunks(64) {
+            pem.extend_from_slice(line);
+            pem.push(b'\n');
+        }
+        pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
+    }
+    if let Some(extra) = extra_ca_pem {
+        pem.extend_from_slice(extra);
+        if !extra.ends_with(b"\n") {
+            pem.push(b'\n');
+        }
+    }
+    pem
+}
+
+/// The dev override's CA, read in dev builds only; `None` when unset.
+fn cloud_feed_extra_ca_pem(dev_build: bool, env_value: Option<&str>) -> Result<Option<Vec<u8>>> {
+    if !dev_build {
+        return Ok(None);
+    }
+    let Some(path) = env_value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let pem = std::fs::read(path).with_context(|| {
+        format!("{CLOUD_FEED_CA_FILE_ENV} names {path}, which could not be read.")
+    })?;
+    if !pem
+        .windows(PEM_CERTIFICATE_BEGIN.len())
+        .any(|window| window == PEM_CERTIFICATE_BEGIN)
+    {
+        bail!("{CLOUD_FEED_CA_FILE_ENV} names {path}, which holds no PEM certificate.");
+    }
+    Ok(Some(pem))
+}
+
+/// Writes the bundle into `directory` when it is missing or differs, through a
+/// temp file and a rename so a feed never reads half of it. Returns its path.
+fn write_cloud_feed_roots(directory: &Path, pem: &[u8]) -> Result<PathBuf> {
+    let path = directory.join(CLOUD_FEED_ROOTS_FILE_NAME);
+    if std::fs::read(&path).is_ok_and(|current| current == pem) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(directory)?;
+    let temp = directory.join(format!(
+        "{CLOUD_FEED_ROOTS_FILE_NAME}.{}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&temp, pem)?;
+    std::fs::rename(&temp, &path)?;
+    Ok(path)
+}
+
+fn ca_file_path_is_plain(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    !text.is_empty()
+        && !text
+            .chars()
+            .any(|character| CA_FILE_PATH_FORBIDDEN.contains(&character) || character.is_control())
+}
+
+/// How this session's cloud feed checks the node (C1c). Windows: Schannel
+/// verifies chain and name against the Windows store by itself. Elsewhere:
+/// the Mozilla bundle (plus the dev CA) written beside the database. A bundle
+/// that cannot be written fails the start loudly; an unchecked feed is never
+/// the fallback.
+fn cloud_feed_tls_verification(state: &AppState) -> Result<FeedTlsVerification> {
+    if cfg!(target_os = "windows") {
+        return Ok(FeedTlsVerification { ca_file: None });
+    }
+    let extra = cloud_feed_extra_ca_pem(
+        cfg!(debug_assertions),
+        std::env::var(CLOUD_FEED_CA_FILE_ENV).ok().as_deref(),
+    )?;
+    let directory = state
+        .database
+        .path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let path = write_cloud_feed_roots(&directory, &cloud_feed_roots_pem(extra.as_deref()))
+        .context("Videorc Cloud couldn't write the certificate roots the feed checks against.")?;
+    if !ca_file_path_is_plain(&path) {
+        bail!(
+            "The certificate roots path {} has a character FFmpeg's options can't carry.",
+            path.display()
+        );
+    }
+    Ok(FeedTlsVerification {
+        ca_file: Some(path),
+    })
 }
 
 /// The feed legs of a resume (C5b): one per orientation the show has that
@@ -21975,6 +22193,7 @@ fn cloud_resume_feed_targets(
     ingest: &[crate::cloud_show::ShowIngest],
     ready_targets: &[StreamTarget],
     simulcast_video: Option<&VideoSettings>,
+    tls: &FeedTlsVerification,
 ) -> Result<Vec<StreamTarget>> {
     use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
     if !ingest.iter().any(|entry| entry.orientation == Horizontal) {
@@ -21992,25 +22211,7 @@ fn cloud_resume_feed_targets(
                 None => continue,
             },
         };
-        let url = format!(
-            "{}/{}",
-            entry.server_url.trim_end_matches('/'),
-            entry.stream_key
-        );
-        validate_stream_publish_url(&url)
-            .context("Videorc Cloud gave an ingest address this computer can't stream to.")?;
-        feeds.push(StreamTarget {
-            redacted_url: redact_stream_url(&url),
-            url,
-            target_id: format!(
-                "{CLOUD_FEED_TARGET_PREFIX}{}",
-                cloud_orientation_id(entry.orientation)
-            ),
-            platform: StreamPlatform::Custom,
-            label: crate::cloud_show::CLOUD_TARGET_LABEL.to_string(),
-            output_video,
-            output_orientation: entry.orientation,
-        });
+        feeds.push(cloud_feed_target(entry, output_video, tls)?);
     }
     Ok(feeds)
 }
@@ -22123,6 +22324,16 @@ mod cloud_seam_tests {
             label: id.to_string(),
             output_video: Some(output_video),
             output_orientation: orientation,
+            tls_verification: None,
+        }
+    }
+
+    /// The roots bundle beside the database, as the feed carries it (C1c).
+    fn roots() -> FeedTlsVerification {
+        FeedTlsVerification {
+            ca_file: Some(PathBuf::from(
+                "/Users/me/Library/Application Support/Videorc/cloud-feed-roots.pem",
+            )),
         }
     }
 
@@ -22168,11 +22379,17 @@ mod cloud_seam_tests {
                 ingest(Vertical, "sh_abc-v.otherSECRET"),
             ],
             &platforms(),
+            &roots(),
         )
         .expect("both orientations have an ingest");
         assert_eq!(feeds.len(), 2);
         let horizontal = &feeds[0];
         assert_eq!(horizontal.target_id, "videorc-cloud-horizontal");
+        assert_eq!(
+            horizontal.tls_verification,
+            Some(roots()),
+            "every feed checks the node's certificate"
+        );
         assert_eq!(
             horizontal.url,
             format!("rtmps://eu-hel-1.live.videorc.com:1936/live/{INGEST_KEY}")
@@ -22193,7 +22410,7 @@ mod cloud_seam_tests {
 
     #[test]
     fn a_missing_orientation_or_a_bad_ingest_fails_the_start() {
-        let missing = cloud_feed_targets(&[ingest(Horizontal, INGEST_KEY)], &platforms());
+        let missing = cloud_feed_targets(&[ingest(Horizontal, INGEST_KEY)], &platforms(), &roots());
         assert!(
             missing.is_err(),
             "the vertical platforms would have no feed"
@@ -22205,7 +22422,7 @@ mod cloud_seam_tests {
             .into_iter()
             .filter(|target| target.output_orientation == Horizontal)
             .collect();
-        assert!(cloud_feed_targets(&[bad], &horizontal_only).is_err());
+        assert!(cloud_feed_targets(&[bad], &horizontal_only, &roots()).is_err());
     }
 
     #[test]
@@ -22246,6 +22463,7 @@ mod cloud_seam_tests {
                 ingest(Vertical, "sh_abc-v.x"),
             ],
             &platforms(),
+            &roots(),
         )
         .unwrap();
         let (mut runtime, _, _) = build_stream_runtime(&feeds, &[], false);
@@ -22343,7 +22561,12 @@ mod cloud_seam_tests {
         let portrait = video(1080, 1920, 30, 4000);
         // A vertical scene is armed: both feeds, the vertical one at the
         // simulcast profile, the horizontal one like the ready destination.
-        let both = cloud_resume_feed_targets(&ingest, &platforms(), Some(&portrait)).unwrap();
+        let both =
+            cloud_resume_feed_targets(&ingest, &platforms(), Some(&portrait), &roots()).unwrap();
+        assert!(
+            both.iter()
+                .all(|feed| feed.tls_verification == Some(roots()))
+        );
         assert_eq!(
             both.iter()
                 .map(|feed| feed.target_id.as_str())
@@ -22362,14 +22585,20 @@ mod cloud_seam_tests {
         // No vertical scene armed and no ready destination (every one of
         // them a sign-in without a key): the horizontal feed alone, encoded
         // like the session.
-        let horizontal_only = cloud_resume_feed_targets(&ingest, &[], None).unwrap();
+        let horizontal_only = cloud_resume_feed_targets(&ingest, &[], None, &roots()).unwrap();
         assert_eq!(horizontal_only.len(), 1);
         assert_eq!(horizontal_only[0].output_orientation, Horizontal);
         assert_eq!(horizontal_only[0].output_video, None);
 
         // The show must have a primary leg to feed.
         assert!(
-            cloud_resume_feed_targets(&[ingest[1].clone()], &platforms(), Some(&portrait)).is_err()
+            cloud_resume_feed_targets(
+                &[ingest[1].clone()],
+                &platforms(),
+                Some(&portrait),
+                &roots()
+            )
+            .is_err()
         );
     }
 
@@ -22395,6 +22624,204 @@ mod cloud_seam_tests {
         );
         assert_eq!(rows[2].redacted_url, None);
         assert!(rows[0].redacted_url.is_some());
+    }
+
+    // C1c: the feed checks the node's certificate in every output shape the
+    // legs take, and a platform leg's arguments do not change.
+    #[test]
+    fn the_cloud_feed_checks_the_certificate_in_every_output_shape() {
+        let feed = cloud_feed_target(&ingest(Horizontal, INGEST_KEY), None, &roots()).unwrap();
+        let dict = "tls_verify=1:ca_file=/Users/me/Library/Application Support/Videorc/cloud-feed-roots.pem";
+
+        // The bridge's per-leg fifo: the check rides format_opts, before the URL.
+        let fifo = fifo_flv_output_args(&feed);
+        let at = fifo
+            .iter()
+            .position(|arg| arg == "-format_opts")
+            .expect("a format_opts for the fifo");
+        assert_eq!(fifo[at + 1], dict);
+        assert_eq!(fifo[at + 2], feed.url, "the URL stays last");
+        assert_eq!(&fifo[at - 2..at], ["-recovery_wait_time", "2"]);
+
+        // A tee slave: inside its brackets, after rw_timeout.
+        let tee = rtmp_tee_leg(&feed);
+        assert!(
+            tee.contains(&format!(":rw_timeout=8000000:{dict}]")),
+            "{tee}"
+        );
+        assert!(tee.ends_with(&feed.url));
+
+        // A lone plain FLV output: CLI protocol options first.
+        let plain = plain_flv_output_args(&feed);
+        assert_eq!(
+            &plain[..4],
+            [
+                "-tls_verify",
+                "1",
+                "-ca_file",
+                "/Users/me/Library/Application Support/Videorc/cloud-feed-roots.pem"
+            ]
+        );
+        assert_eq!(
+            &plain[4..],
+            ["-flvflags", "no_duration_filesize", "-f", "flv", &feed.url]
+        );
+
+        // Windows: Schannel checks against the Windows store, no ca_file.
+        let windows = FeedTlsVerification { ca_file: None };
+        assert_eq!(tls_verification_dict(&windows), "tls_verify=1");
+        assert_eq!(tls_verification_cli_args(&windows), ["-tls_verify", "1"]);
+
+        // A platform leg is exactly what it was.
+        let youtube = &platforms()[0];
+        let fifo = fifo_flv_output_args(youtube);
+        assert!(
+            !fifo
+                .iter()
+                .any(|arg| arg == "-format_opts" || arg.contains("tls_verify"))
+        );
+        assert_eq!(fifo.last(), Some(&youtube.url));
+        assert!(!rtmp_tee_leg(youtube).contains("tls_verify"));
+        assert_eq!(
+            plain_flv_output_args(youtube),
+            [
+                "-flvflags",
+                "no_duration_filesize",
+                "-f",
+                "flv",
+                &youtube.url
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ip_ingest_cannot_be_checked_by_name_and_a_roots_path_must_be_plain() {
+        assert!(cloud_feed_host_is_ip_literal(
+            "rtmps://127.0.0.1:1936/live/sh_x-h.k"
+        ));
+        assert!(cloud_feed_host_is_ip_literal(
+            "rtmps://[::1]:1936/live/sh_x-h.k"
+        ));
+        assert!(!cloud_feed_host_is_ip_literal(
+            "rtmps://localhost:1936/live/sh_x-h.k"
+        ));
+        assert!(!cloud_feed_host_is_ip_literal(
+            "rtmps://eu-hel-1.live.videorc.com:1936/live/sh_x-h.k"
+        ));
+        // A dev build warns and allows an IP; a release build refuses it. Both
+        // paths build the same target otherwise.
+        let mut by_ip = ingest(Horizontal, INGEST_KEY);
+        by_ip.server_url = "rtmps://127.0.0.1:1936/live".to_string();
+        let built = cloud_feed_target(&by_ip, None, &roots());
+        assert_eq!(built.is_ok(), cfg!(debug_assertions));
+
+        assert!(ca_file_path_is_plain(Path::new(
+            "/Users/me/Library/Application Support/Videorc/cloud-feed-roots.pem"
+        )));
+        for bad in [
+            "/tmp/a:b.pem",
+            "/tmp/it's.pem",
+            "/tmp/a[b].pem",
+            "/tmp/a|b.pem",
+            "/tmp/back\\slash.pem",
+            "",
+        ] {
+            assert!(!ca_file_path_is_plain(Path::new(bad)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_roots_bundle_is_mozillas_store_plus_the_dev_ca() {
+        let begin = |pem: &[u8]| {
+            pem.windows(PEM_CERTIFICATE_BEGIN.len())
+                .filter(|window| *window == PEM_CERTIFICATE_BEGIN)
+                .count()
+        };
+        let roots = cloud_feed_roots_pem(None);
+        assert_eq!(
+            begin(&roots),
+            webpki_root_certs::TLS_SERVER_ROOT_CERTS.len()
+        );
+        assert!(
+            begin(&roots) > 100,
+            "Mozilla's store has well over 100 roots"
+        );
+        assert!(roots.starts_with(PEM_CERTIFICATE_BEGIN));
+        assert!(roots.ends_with(b"-----END CERTIFICATE-----\n"));
+        assert!(
+            std::str::from_utf8(&roots)
+                .unwrap()
+                .lines()
+                .all(|line| line.len() <= 64 || line.starts_with("-----")),
+            "PEM lines are 64 columns"
+        );
+        let extra = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+        let with_extra = cloud_feed_roots_pem(Some(extra));
+        assert_eq!(begin(&with_extra), begin(&roots) + 1);
+        assert!(with_extra.ends_with(b"-----END CERTIFICATE-----\n"));
+        assert!(with_extra.starts_with(&roots));
+    }
+
+    #[test]
+    fn the_dev_ca_override_is_read_in_dev_builds_only_and_written_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "videorc-cloud-roots-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = dir.join("dev-ca.crt");
+        std::fs::write(
+            &ca,
+            b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let ca_path = ca.to_string_lossy().to_string();
+        // A packaged build never reads the override.
+        assert_eq!(
+            cloud_feed_extra_ca_pem(false, Some(&ca_path)).unwrap(),
+            None
+        );
+        assert_eq!(cloud_feed_extra_ca_pem(true, None).unwrap(), None);
+        assert_eq!(cloud_feed_extra_ca_pem(true, Some("  ")).unwrap(), None);
+        assert!(
+            cloud_feed_extra_ca_pem(true, Some(&ca_path))
+                .unwrap()
+                .is_some()
+        );
+        let missing = dir.join("missing.crt").to_string_lossy().to_string();
+        assert!(cloud_feed_extra_ca_pem(true, Some(&missing)).is_err());
+        let not_pem = dir.join("not.pem");
+        std::fs::write(&not_pem, b"hello").unwrap();
+        assert!(cloud_feed_extra_ca_pem(true, Some(&not_pem.to_string_lossy())).is_err());
+
+        // The bundle lands beside the database and is rewritten only when it
+        // changes.
+        let pem = cloud_feed_roots_pem(None);
+        let first = write_cloud_feed_roots(&dir, &pem).unwrap();
+        assert_eq!(first.file_name().unwrap(), "cloud-feed-roots.pem");
+        let written_at = std::fs::metadata(&first).unwrap().modified().unwrap();
+        let again = write_cloud_feed_roots(&dir, &pem).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(
+            std::fs::metadata(&again).unwrap().modified().unwrap(),
+            written_at,
+            "the same bytes are not rewritten"
+        );
+        let changed = write_cloud_feed_roots(&dir, &cloud_feed_roots_pem(Some(b"x"))).unwrap();
+        assert_eq!(
+            std::fs::read(&changed).unwrap(),
+            cloud_feed_roots_pem(Some(b"x"))
+        );
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")),
+            "no temp file is left behind"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -22456,6 +22883,7 @@ fn resolve_stream_target(
             label: target.label.clone(),
             output_video,
             output_orientation: target.effective_output_orientation(),
+            tls_verification: None,
         });
     }
     let stream_key = target.stream_key.trim().trim_start_matches('/');
@@ -22473,6 +22901,7 @@ fn resolve_stream_target(
         label: target.label.clone(),
         output_video,
         output_orientation: target.effective_output_orientation(),
+        tls_verification: None,
     })
 }
 
@@ -29587,6 +30016,7 @@ mod tests {
             label: "Forged".to_string(),
             output_video: None,
             output_orientation: crate::streaming::StreamOutputOrientation::Horizontal,
+            tls_verification: None,
         };
         let error = ffmpeg_args(
             &CaptureInputs {
@@ -33124,7 +33554,17 @@ mod tests {
     fn rtmp_tee_legs_carry_a_socket_deadline() {
         // Without rw_timeout a stalled ingest blocks the tee muxer teardown
         // forever and the stop path hangs until Force stop.
-        let leg = rtmp_tee_leg("rtmp://live.twitch.tv/app/streamkey");
+        let target = StreamTarget {
+            url: "rtmp://live.twitch.tv/app/streamkey".to_string(),
+            redacted_url: "rtmp://live.twitch.tv/app/••••".to_string(),
+            target_id: "twitch".to_string(),
+            platform: StreamPlatform::Twitch,
+            label: "Twitch".to_string(),
+            output_video: None,
+            output_orientation: crate::streaming::StreamOutputOrientation::Horizontal,
+            tls_verification: None,
+        };
+        let leg = rtmp_tee_leg(&target);
         assert!(leg.starts_with("[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout="));
         assert!(leg.contains(":rw_timeout=8000000]"));
         assert!(leg.ends_with("rtmp://live.twitch.tv/app/streamkey"));
@@ -38635,6 +39075,7 @@ mod tests {
             label: "Test".to_string(),
             output_video: None,
             output_orientation: crate::streaming::StreamOutputOrientation::Horizontal,
+            tls_verification: None,
         };
         let args = bridge_compositor_split_output_ffmpeg_args(
             &CaptureInputs {
