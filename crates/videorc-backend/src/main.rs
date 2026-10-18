@@ -16027,6 +16027,9 @@ mod tests {
         assert_eq!(
             lifecycle_exemptions,
             [
+                // Plan 184 C5: Resume is the same atomic Start, bound to the
+                // live cloud show.
+                "cloud.show.resume",
                 "recording.start_test",
                 "recording.stop",
                 "session.start",
