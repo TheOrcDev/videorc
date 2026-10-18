@@ -1105,7 +1105,12 @@ function newestMtime(directory) {
     if (entry.isDirectory()) {
       if (entry.name === 'target') continue
       newest = Math.max(newest, newestMtime(path))
-    } else if (entry.name.endsWith('.rs') || entry.name === 'Cargo.toml') {
+    } else if (
+      entry.name.endsWith('.rs') ||
+      // The runner embeds its default hold card's PNGs (include_bytes!).
+      entry.name.endsWith('.png') ||
+      entry.name === 'Cargo.toml'
+    ) {
       newest = Math.max(newest, statSync(path).mtimeMs)
     }
   }
