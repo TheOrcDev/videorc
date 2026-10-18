@@ -21,9 +21,19 @@ export const SESSION_START_FAILED_TOAST_ID = 'session-start-failed'
  * the neutral one; the rejection that follows names which (plan 174 S2.4). */
 export const SESSION_START_FAILED_TOAST_TITLE = "Couldn't start"
 
-/** "Couldn't start recording" or "Couldn't go live". */
-export function sessionStartFailedTitle(goLive: boolean): string {
-  return goLive ? "Couldn't go live" : "Couldn't start recording"
+/** Which start failed: Record, Go Live, or the cloud Resume (plan 184 C5b). */
+export type SessionStartFailureKind = 'record' | 'live' | 'resume'
+
+/** "Couldn't start recording", "Couldn't go live" or "Couldn't resume the stream". */
+export function sessionStartFailedTitle(kind: SessionStartFailureKind): string {
+  switch (kind) {
+    case 'record':
+      return "Couldn't start recording"
+    case 'live':
+      return "Couldn't go live"
+    case 'resume':
+      return "Couldn't resume the stream"
+  }
 }
 
 export interface SessionStartFailure {

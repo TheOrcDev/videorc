@@ -1141,11 +1141,19 @@ pub enum SessionPurpose {
     #[default]
     Capture,
     PerformanceCheck,
+    /// A capture that feeds the show already live on Videorc Cloud again
+    /// (plan 184 C5b). The runner keeps the platform legs it holds, so the
+    /// start needs no stream key and sets nothing up on a platform.
+    CloudResume,
 }
 
 impl SessionPurpose {
     pub fn is_performance_check(self) -> bool {
         self == Self::PerformanceCheck
+    }
+
+    pub fn resumes_cloud_show(self) -> bool {
+        self == Self::CloudResume
     }
 }
 

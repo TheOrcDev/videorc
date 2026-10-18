@@ -530,7 +530,8 @@ import {
   sessionStartFailedTitle,
   sessionStartFailureMessage,
   sessionStartFailureToastOptions,
-  type SessionStartFailure
+  type SessionStartFailure,
+  type SessionStartFailureKind
 } from '@/lib/session-start-failure'
 import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
@@ -1649,14 +1650,24 @@ export interface StudioCloudContextValue {
   setCloudSettings: (patch: CloudSettingsPatch) => Promise<void>
   refreshCloudAllowance: () => Promise<void>
   endCloudShow: () => Promise<void>
+  /**
+   * The Resume notice (plan 184 C5b): feed the show that is live again. No
+   * dialog, no preflight, no metadata update and nothing set up on a
+   * platform; the runner keeps the legs it holds. Resolves like a start.
+   */
+  resumeCloudShow: () => Promise<boolean>
 }
 
 const NO_CLOUD: StudioCloudContextValue = {
   cloudStatus: null,
   setCloudSettings: async () => {},
   refreshCloudAllowance: async () => {},
-  endCloudShow: async () => {}
+  endCloudShow: async () => {},
+  resumeCloudShow: async () => false
 }
+
+/** Which start RPC a session start sends (plan 184 C5b). */
+type SessionStartRpc = 'session.start' | 'cloud.show.resume'
 
 const StudioCloudContext = createContext<StudioCloudContextValue | null>(null)
 
@@ -3923,6 +3934,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     streamingOverride?: StreamingSettings
     suppressCaptionsForSession: boolean
     intent: SessionStartIntent
+    rpc: SessionStartRpc
     promise: Promise<boolean>
   } | null>(null)
   const confirmGoLiveInFlightPromiseRef = useRef<Promise<void> | null>(null)
@@ -4293,7 +4305,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     toast.dismiss(SESSION_START_FAILED_TOAST_ID)
   }, [clearSessionRuntimeState])
   const reportSessionStartFailure = useCallback(
-    (error: unknown, retry: () => void, goLive: boolean) => {
+    (error: unknown, retry: () => void, kind: SessionStartFailureKind) => {
       const message = sessionStartFailureMessage(error)
       setLastError(message)
       sessionStartRetryRef.current = retry
@@ -4307,7 +4319,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       toast.error(
-        sessionStartFailedTitle(goLive),
+        sessionStartFailedTitle(kind),
         sessionStartFailureToastOptions(message, retrySessionStart, () => {
           // The user closed the toast: the Session-panel line goes with it.
           sessionStartRetryRef.current = null
@@ -4544,10 +4556,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
     }
   }, [client, commitCloudStatus])
-  const cloudValue = useMemo<StudioCloudContextValue>(
-    () => ({ cloudStatus, endCloudShow, refreshCloudAllowance, setCloudSettings }),
-    [cloudStatus, endCloudShow, refreshCloudAllowance, setCloudSettings]
-  )
+  // `cloudValue` is built after the starts below: Resume is one of them.
 
   useEffect(() => {
     if (
@@ -13314,7 +13323,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     | ((
         streamingOverride?: StreamingSettings,
         preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
-        intent?: SessionStartIntent
+        intent?: SessionStartIntent,
+        rpc?: SessionStartRpc
       ) => Promise<boolean>)
     | null
   >(null)
@@ -13324,8 +13334,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
       // Plan 174 S3.1: what this start asks for; the saved mode only for the
       // smokes' hook, never for a transport button.
-      intent: SessionStartIntent = savedModeIntent(captureConfig)
+      intent: SessionStartIntent = savedModeIntent(captureConfig),
+      // Plan 184 C5b: a cloud resume is the same start bound to the live show.
+      // Its destinations are the runner's, so no account is checked and no
+      // broadcast is activated here.
+      rpc: SessionStartRpc = 'session.start'
     ) => {
+      const resumingCloudShow = rpc === 'cloud.show.resume'
       recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
         captureConfig,
@@ -13334,7 +13349,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         settings,
         streamingOverride,
         suppressCaptionsForSession,
-        intent
+        intent,
+        rpc
       }
       const pendingStart = sessionStartInFlightRef.current
       if (pendingStart) {
@@ -13345,6 +13361,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           pendingStart.settings === requestSnapshot.settings &&
           pendingStart.streamingOverride === requestSnapshot.streamingOverride &&
           pendingStart.suppressCaptionsForSession === requestSnapshot.suppressCaptionsForSession &&
+          pendingStart.rpc === requestSnapshot.rpc &&
           sameSessionStartIntent(pendingStart.intent, requestSnapshot.intent)
         if (sameRequest) {
           return pendingStart.promise
@@ -13408,10 +13425,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           setStartRequestPending(true)
           const lifecycleRunId = platformLifecycleRun.current + 1
           platformLifecycleRun.current = lifecycleRunId
-          const enabledOauthTargets =
-            streamingForStart?.targets.filter(
-              (target) => target.enabled && target.authMode === 'oauth'
-            ) ?? []
+          const enabledOauthTargets = resumingCloudShow
+            ? []
+            : (streamingForStart?.targets.filter(
+                (target) => target.enabled && target.authMode === 'oauth'
+              ) ?? [])
           if (enabledOauthTargets.length) {
             const validations = await validatePlatformAccountsForClient(client)
             let unhealthy: StreamTargetSettings | null = null
@@ -13507,7 +13525,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sessionStartLifecycleActiveRef.current = true
           let status: RecordingStatus
           try {
-            status = await client.requestTyped('session.start', {
+            status = await client.requestTyped(rpc, {
               ...nextSessionParams,
               requestedAtMs: takeRecordClickEpochMs('start')
             })
@@ -13600,7 +13618,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (await settleTerminalStart(startResolution)) {
             return false
           }
-          if (streamingForStart) {
+          if (streamingForStart && !resumingCloudShow) {
             startResolution = reconcileLatestStartStatus()
             if (await settleTerminalStart(startResolution)) {
               return false
@@ -13660,9 +13678,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           reportSessionStartFailure(
             error,
             () => {
-              void runStartSessionRef.current?.(streamingOverride, preparedOutput, intent)
+              void runStartSessionRef.current?.(streamingOverride, preparedOutput, intent, rpc)
             },
-            Boolean(streamingOverride)
+            resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
           )
           if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
             applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
@@ -14140,7 +14158,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             () => {
               void openGoLiveConfirmationRef.current?.(intent)
             },
-            true
+            'live'
           )
         } finally {
           setGoLiveConfirmationPending(false)
@@ -14226,6 +14244,52 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const startLivestream = useCallback(
     () => startWithIntent(livestreamIntent(captureConfig.recordEnabled)),
     [captureConfig.recordEnabled, startWithIntent]
+  )
+  // Plan 184 C5b: the Resume notice. The show is live on Videorc Cloud and the
+  // runner holds every platform leg, so nothing is set up again: no dialog,
+  // no preflight, no metadata update, no broadcast (a new YouTube broadcast
+  // here split the live one and its VOD). The saved destinations go along as
+  // rows only; the backend binds the start to the show (`cloud.show.resume`)
+  // and feeds its ingest. Same guards as Go Live: busy, or blocked for a reason.
+  const resumeCloudShow = useCallback(async (): Promise<boolean> => {
+    if (
+      goLiveConfirmationOpen ||
+      shouldIgnoreGoLiveAction({
+        goLiveConfirmationPending:
+          goLiveConfirmationPending ||
+          openGoLiveConfirmationInFlightRef.current !== null ||
+          confirmGoLiveInFlightPromiseRef.current !== null,
+        startRequestPending: startRequestPending || sessionStartInFlightRef.current !== null
+      })
+    ) {
+      return false
+    }
+    const intent = livestreamIntent(captureConfig.recordEnabled)
+    const blockedReason = startBlockedReasonFor(intent)
+    if (blockedReason) {
+      refuseStart(blockedReason, intent)
+      return false
+    }
+    return runStartSession(captureConfig.streaming, undefined, intent, 'cloud.show.resume')
+  }, [
+    captureConfig.recordEnabled,
+    captureConfig.streaming,
+    goLiveConfirmationOpen,
+    goLiveConfirmationPending,
+    refuseStart,
+    runStartSession,
+    startBlockedReasonFor,
+    startRequestPending
+  ])
+  const cloudValue = useMemo<StudioCloudContextValue>(
+    () => ({
+      cloudStatus,
+      endCloudShow,
+      refreshCloudAllowance,
+      resumeCloudShow,
+      setCloudSettings
+    }),
+    [cloudStatus, endCloudShow, refreshCloudAllowance, resumeCloudShow, setCloudSettings]
   )
 
   const cancelGoLiveConfirmation = useCallback(() => {
@@ -14368,7 +14432,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           () => {
             void confirmGoLiveRef.current?.()
           },
-          true
+          'live'
         )
       } finally {
         setGoLiveConfirmationPending(false)

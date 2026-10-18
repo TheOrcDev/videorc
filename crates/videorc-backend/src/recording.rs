@@ -3115,6 +3115,17 @@ async fn commit_recording_startup_scene_at_time(
     }
 }
 
+/// Plan 184 C5b: the Resume notice. The same start as `start_session`, bound
+/// to the show that is live on Videorc Cloud: the feeds come from the show's
+/// ingest, the runner keeps the legs it holds, and no destination needs a key.
+pub async fn start_cloud_resume_session(
+    state: AppState,
+    mut params: StartSessionParams,
+) -> Result<RecordingStatus> {
+    params.purpose = crate::protocol::SessionPurpose::CloudResume;
+    start_session(state, params).await
+}
+
 pub async fn start_session(state: AppState, params: StartSessionParams) -> Result<RecordingStatus> {
     if !params.purpose.is_performance_check() {
         // The user's Record always wins over a background benchmark.
@@ -3128,6 +3139,9 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
         .swap(true, std::sync::atomic::Ordering::AcqRel);
     let mut timeline = RecordingStartTimeline::start(params.requested_at_ms, cold);
     let result = start_session_with_timeline(state.clone(), params, &mut timeline).await;
+    if result.is_err() {
+        release_cloud_show_after_failed_start(&state).await;
+    }
     let outcome = if result.is_ok() { "running" } else { "refused" };
     let snapshot = timeline.snapshot(outcome);
     let summary = timeline.summary_line(outcome);
@@ -3259,8 +3273,9 @@ async fn start_session_with_timeline(
                 let mut resolution = resolve_stream_targets(streaming);
                 // validate_outputs() already guaranteed a ready target; re-check
                 // defensively so an empty set surfaces the actionable error rather
-                // than silently starting with no stream legs.
-                if resolution.ready.is_empty() {
+                // than silently starting with no stream legs. A cloud resume
+                // needs none: its feeds come from the show's ingest (C5b).
+                if resolution.ready.is_empty() && !params.purpose.resumes_cloud_show() {
                     stream_targets_from_streaming(streaming)?;
                 }
                 apply_provider_output_plan_to_ready_targets(&params, &mut resolution.ready)?;
@@ -3274,14 +3289,16 @@ async fn start_session_with_timeline(
     } else {
         StreamTargetResolution::default()
     };
-    let skipped_targets = stream_resolution.skipped;
     // Plan 184 C3: in cloud mode the platform legs become one RTMPS feed per
     // orientation to the show's runner; the resolved platform targets (keys
     // plain) go to the runner and are kept only to list the platforms in this
     // session's leg state. A failed hand-over fails the start: the runner may
     // hold the keys, so streaming directly here would push them twice.
-    let (stream_targets, cloud_platform_targets) =
-        prepare_cloud_stream_targets(&state, &session_id, &params, stream_resolution.ready).await?;
+    let CloudSeam {
+        stream_targets,
+        skipped: skipped_targets,
+        platform_rows: cloud_platform_rows,
+    } = prepare_cloud_stream_targets(&state, &session_id, &params, stream_resolution).await?;
     let stream_url = (!stream_targets.is_empty()).then(|| {
         stream_targets
             .iter()
@@ -4974,7 +4991,7 @@ async fn start_session_with_timeline(
     // Plan 184 C3/C7: appended AFTER the feed and skipped entries, so the
     // FFmpeg leg positions above stay exact; the runner's leg states land
     // here through `apply_cloud_leg_states`.
-    append_cloud_platform_runtime(&mut stream_runtime, &cloud_platform_targets);
+    stream_runtime.extend(cloud_platform_rows);
     let stream_targets_snapshot = Arc::new(StdMutex::new(StreamTargetsSnapshot {
         session_id: session_id.clone(),
         targets: stream_runtime,
@@ -20148,8 +20165,24 @@ fn ready_stream_destination_counts_by_orientation(
     };
     let mut horizontal = 0u32;
     let mut vertical = 0u32;
-    for target in stream_targets_from_streaming(streaming)? {
-        match target.output_orientation {
+    // A cloud resume counts every enabled destination: the runner holds its
+    // leg whether or not this computer has its key (C5b).
+    let orientations: Vec<crate::streaming::StreamOutputOrientation> =
+        if params.purpose.resumes_cloud_show() {
+            streaming
+                .targets
+                .iter()
+                .filter(|target| target.enabled)
+                .map(|target| target.effective_output_orientation())
+                .collect()
+        } else {
+            stream_targets_from_streaming(streaming)?
+                .into_iter()
+                .map(|target| target.output_orientation)
+                .collect()
+        };
+    for orientation in orientations {
+        match orientation {
             crate::streaming::StreamOutputOrientation::Horizontal => {
                 horizontal = horizontal.saturating_add(1);
             }
@@ -20172,6 +20205,9 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
             .as_ref()
             .filter(|streaming| streaming.enabled)
         {
+            // A cloud resume feeds the show's ingest; its destinations are
+            // rows, ready or not (C5b).
+            Some(_) if params.purpose.resumes_cloud_show() => {}
             Some(streaming) => {
                 stream_targets_from_streaming(streaming)?;
             }
@@ -20907,7 +20943,10 @@ fn resolve_provider_stream_output_plan_with_separate_roles(
     for target in streaming.targets.iter().filter(|target| target.enabled) {
         // Incomplete destinations are surfaced as skipped at session start and
         // do not constrain the encode that the ready destinations actually use.
-        if resolve_stream_target(streaming, target).is_err() {
+        // A cloud resume has no incomplete destination: the runner holds every
+        // leg, so each one shapes the feed it will be fed from (C5b).
+        if !params.purpose.resumes_cloud_show() && resolve_stream_target(streaming, target).is_err()
+        {
             continue;
         }
         // Vertical-bound destinations consume the simulcast leg's portrait
@@ -21657,21 +21696,46 @@ fn cloud_orientation_id(orientation: crate::streaming::StreamOutputOrientation) 
     }
 }
 
-/// Asks the cloud to carry this session (C4). Direct: the targets stay as
-/// they are. Cloud: the feed legs replace them, and the platform targets come
-/// back second, only to list the platforms in the session's leg state.
+/// What the cloud seam hands the session: the legs FFmpeg opens, the
+/// destinations skipped for this session, and the platform rows a cloud
+/// session lists after them (C7), moved by the runner's leg states.
+struct CloudSeam {
+    stream_targets: Vec<StreamTarget>,
+    skipped: Vec<SkippedStreamTarget>,
+    platform_rows: Vec<StreamTargetRuntime>,
+}
+
+impl CloudSeam {
+    /// Direct: the targets stay as they are.
+    fn direct(resolution: StreamTargetResolution) -> Self {
+        Self {
+            stream_targets: resolution.ready,
+            skipped: resolution.skipped,
+            platform_rows: Vec::new(),
+        }
+    }
+}
+
+/// Asks the cloud to carry this session (C4), or to feed the show that is
+/// live again (C5b). Direct: the targets stay as they are. Cloud: the feed
+/// legs replace them, and the platform targets come back as rows, only to
+/// list the platforms in the session's leg state.
 async fn prepare_cloud_stream_targets(
     state: &AppState,
     session_id: &str,
     params: &StartSessionParams,
-    targets: Vec<StreamTarget>,
-) -> Result<(Vec<StreamTarget>, Vec<StreamTarget>)> {
-    if targets.is_empty() {
-        return Ok((targets, Vec::new()));
+    resolution: StreamTargetResolution,
+) -> Result<CloudSeam> {
+    if params.purpose.resumes_cloud_show() {
+        return resume_cloud_stream_targets(state, session_id, params, resolution).await;
+    }
+    if resolution.ready.is_empty() {
+        return Ok(CloudSeam::direct(resolution));
     }
     let Some(context) = crate::cloud_context(state) else {
-        return Ok((targets, Vec::new()));
+        return Ok(CloudSeam::direct(resolution));
     };
+    let targets = resolution.ready;
     let outputs = cloud_output_specs(&params.output.video, &targets);
     let destinations = cloud_handover_destinations(&targets);
     let outcome = context
@@ -21684,7 +21748,11 @@ async fn prepare_cloud_stream_targets(
         )
         .await?;
     match outcome {
-        crate::cloud_show::PrepareOutcome::Direct => Ok((targets, Vec::new())),
+        crate::cloud_show::PrepareOutcome::Direct => Ok(CloudSeam {
+            stream_targets: targets,
+            skipped: resolution.skipped,
+            platform_rows: Vec::new(),
+        }),
         crate::cloud_show::PrepareOutcome::Cloud(handover) => {
             match cloud_feed_targets(&handover.ingest, &targets) {
                 Ok(feeds) => {
@@ -21693,7 +21761,11 @@ async fn prepare_cloud_stream_targets(
                         handover.show_id,
                         targets.len()
                     );
-                    Ok((feeds, targets))
+                    Ok(CloudSeam {
+                        stream_targets: feeds,
+                        skipped: resolution.skipped,
+                        platform_rows: cloud_platform_rows(&targets, &[]),
+                    })
                 }
                 Err(error) => {
                     // The runner already holds the platforms: end the show
@@ -21705,6 +21777,71 @@ async fn prepare_cloud_stream_targets(
                 }
             }
         }
+    }
+}
+
+/// The Resume notice (C5b). No platform is set up and no key is needed: the
+/// runner keeps the legs it holds, the feeds are the show's ingest, and every
+/// enabled destination, ready or skipped, is a row the runner's state moves.
+/// A resume that cannot proceed fails the start; it never streams directly
+/// (the runner holds the platforms) and never ends the show.
+async fn resume_cloud_stream_targets(
+    state: &AppState,
+    session_id: &str,
+    params: &StartSessionParams,
+    resolution: StreamTargetResolution,
+) -> Result<CloudSeam> {
+    let Some(context) = crate::cloud_context(state) else {
+        bail!("There's no Videorc Cloud show to resume.");
+    };
+    let handover = context
+        .resume_session(
+            session_id,
+            crate::account::stored_session_token(),
+            cloud_hold_image(state),
+        )
+        .await?;
+    let feeds = cloud_resume_feed_targets(
+        &handover.ingest,
+        &resolution.ready,
+        params.simulcast.as_ref().map(|simulcast| &simulcast.video),
+    )?;
+    tracing::info!(
+        "Session {session_id} resumes Videorc Cloud show {} ({} feeds, {} platform rows, no destinations handed over)",
+        handover.show_id,
+        feeds.len(),
+        resolution.ready.len() + resolution.skipped.len()
+    );
+    Ok(CloudSeam {
+        stream_targets: feeds,
+        platform_rows: cloud_platform_rows(&resolution.ready, &resolution.skipped),
+        skipped: Vec::new(),
+    })
+}
+
+/// A start that failed after the cloud seam bound the show to this session
+/// (FFmpeg, capture, any later refusal) leaves the show live on the runner
+/// with no feed. Make it resumable again, so the Resume notice comes back
+/// instead of a show bound to a session that never ran.
+async fn release_cloud_show_after_failed_start(state: &AppState) {
+    let active = state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .map(|active| active.session_id.clone());
+    let released = state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .release_unfed_session(active.as_deref());
+    if released {
+        let status = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status();
+        state.emit_event(crate::cloud_show::CLOUD_STATE_EVENT, &status);
     }
 }
 
@@ -21829,21 +21966,82 @@ fn cloud_feed_targets(
     Ok(feeds)
 }
 
+/// The feed legs of a resume (C5b): one per orientation the show has that
+/// this session composes. The horizontal feed is the primary leg, encoded
+/// like a ready horizontal destination when there is one, else like the
+/// session; the vertical feed is the simulcast leg, so it exists only when
+/// one is armed. The show must have a horizontal ingest.
+fn cloud_resume_feed_targets(
+    ingest: &[crate::cloud_show::ShowIngest],
+    ready_targets: &[StreamTarget],
+    simulcast_video: Option<&VideoSettings>,
+) -> Result<Vec<StreamTarget>> {
+    use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
+    if !ingest.iter().any(|entry| entry.orientation == Horizontal) {
+        bail!("Videorc Cloud gave no horizontal ingest for this show.");
+    }
+    let mut feeds = Vec::new();
+    for entry in ingest {
+        let output_video = match entry.orientation {
+            Horizontal => ready_targets
+                .iter()
+                .find(|target| target.output_orientation == Horizontal)
+                .and_then(|target| target.output_video.clone()),
+            Vertical => match simulcast_video {
+                Some(video) => Some(video.clone()),
+                None => continue,
+            },
+        };
+        let url = format!(
+            "{}/{}",
+            entry.server_url.trim_end_matches('/'),
+            entry.stream_key
+        );
+        validate_stream_publish_url(&url)
+            .context("Videorc Cloud gave an ingest address this computer can't stream to.")?;
+        feeds.push(StreamTarget {
+            redacted_url: redact_stream_url(&url),
+            url,
+            target_id: format!(
+                "{CLOUD_FEED_TARGET_PREFIX}{}",
+                cloud_orientation_id(entry.orientation)
+            ),
+            platform: StreamPlatform::Custom,
+            label: crate::cloud_show::CLOUD_TARGET_LABEL.to_string(),
+            output_video,
+            output_orientation: entry.orientation,
+        });
+    }
+    Ok(feeds)
+}
+
 /// The platforms a cloud session streams to, as rows after the feed and
 /// skipped entries (so FFmpeg leg positions stay exact). They start as
-/// Connecting; the runner's leg states move them.
-fn append_cloud_platform_runtime(
-    runtime: &mut Vec<StreamTargetRuntime>,
+/// Connecting; the runner's leg states move them. A resume lists its
+/// keyless destinations too (C5b): the runner holds their legs.
+fn cloud_platform_rows(
     platform_targets: &[StreamTarget],
-) {
-    runtime.extend(platform_targets.iter().map(|target| StreamTargetRuntime {
-        target_id: target.target_id.clone(),
-        platform: target.platform,
-        label: target.label.clone(),
-        state: StreamTargetState::Connecting,
-        message: None,
-        redacted_url: Some(target.redacted_url.clone()),
-    }));
+    skipped: &[SkippedStreamTarget],
+) -> Vec<StreamTargetRuntime> {
+    platform_targets
+        .iter()
+        .map(|target| StreamTargetRuntime {
+            target_id: target.target_id.clone(),
+            platform: target.platform,
+            label: target.label.clone(),
+            state: StreamTargetState::Connecting,
+            message: None,
+            redacted_url: Some(target.redacted_url.clone()),
+        })
+        .chain(skipped.iter().map(|skip| StreamTargetRuntime {
+            target_id: skip.target_id.clone(),
+            platform: skip.platform,
+            label: skip.label.clone(),
+            state: StreamTargetState::Connecting,
+            message: None,
+            redacted_url: None,
+        }))
+        .collect()
 }
 
 /// The runner's legs into a session's leg state. Feed entries are this
@@ -22051,7 +22249,7 @@ mod cloud_seam_tests {
         )
         .unwrap();
         let (mut runtime, _, _) = build_stream_runtime(&feeds, &[], false);
-        append_cloud_platform_runtime(&mut runtime, &platforms());
+        runtime.extend(cloud_platform_rows(&platforms(), &[]));
         assert_eq!(
             runtime
                 .iter()
@@ -22132,6 +22330,71 @@ mod cloud_seam_tests {
             !merge_cloud_leg_states(&mut snapshot, &legs),
             "the same states again change nothing"
         );
+    }
+
+    // C5b: a resume's feeds come from the show's ingest, one per orientation
+    // the session composes, and need no ready destination at all.
+    #[test]
+    fn resume_feeds_follow_the_ingest_per_orientation_the_session_composes() {
+        let ingest = [
+            ingest(Horizontal, INGEST_KEY),
+            ingest(Vertical, "sh_abc-v.ingestSECRET"),
+        ];
+        let portrait = video(1080, 1920, 30, 4000);
+        // A vertical scene is armed: both feeds, the vertical one at the
+        // simulcast profile, the horizontal one like the ready destination.
+        let both = cloud_resume_feed_targets(&ingest, &platforms(), Some(&portrait)).unwrap();
+        assert_eq!(
+            both.iter()
+                .map(|feed| feed.target_id.as_str())
+                .collect::<Vec<_>>(),
+            ["videorc-cloud-horizontal", "videorc-cloud-vertical"]
+        );
+        assert_eq!(
+            both[0].url,
+            format!("rtmps://eu-hel-1.live.videorc.com:1936/live/{INGEST_KEY}")
+        );
+        assert_eq!(both[0].output_video, platforms()[0].output_video);
+        assert_eq!(both[1].output_video.as_ref(), Some(&portrait));
+        assert_eq!(both[1].label, "Videorc Cloud");
+        assert!(!both[1].redacted_url.contains("ingestSECRET"));
+
+        // No vertical scene armed and no ready destination (every one of
+        // them a sign-in without a key): the horizontal feed alone, encoded
+        // like the session.
+        let horizontal_only = cloud_resume_feed_targets(&ingest, &[], None).unwrap();
+        assert_eq!(horizontal_only.len(), 1);
+        assert_eq!(horizontal_only[0].output_orientation, Horizontal);
+        assert_eq!(horizontal_only[0].output_video, None);
+
+        // The show must have a primary leg to feed.
+        assert!(
+            cloud_resume_feed_targets(&[ingest[1].clone()], &platforms(), Some(&portrait)).is_err()
+        );
+    }
+
+    #[test]
+    fn resume_rows_list_the_keyless_destinations_the_runner_holds() {
+        let skipped = vec![SkippedStreamTarget {
+            target_id: "youtube-signin".to_string(),
+            platform: StreamPlatform::Youtube,
+            label: "YouTube".to_string(),
+            reason: "YouTube stream key is missing".to_string(),
+        }];
+        let rows = cloud_platform_rows(&platforms()[1..], &skipped);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.target_id.as_str())
+                .collect::<Vec<_>>(),
+            ["twitch", "tiktok", "youtube-signin"]
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.state == StreamTargetState::Connecting && row.message.is_none()),
+            "the runner's state moves every row; a missing key is no longer a reason"
+        );
+        assert_eq!(rows[2].redacted_url, None);
+        assert!(rows[0].redacted_url.is_some());
     }
 }
 

@@ -17,6 +17,11 @@
 //! - Every YouTube API call stays on this computer (D13): the desktop still
 //!   prepares broadcasts and moves them to `complete`; the runner only pushes
 //!   video into YouTube's ingest.
+//! - Resume never redoes platform setup (C5b). The Resume notice starts a
+//!   session bound to the show through `cloud.show.resume`: the feeds come
+//!   from the show's ingest, no `destinations.set` is sent, and the runner
+//!   keeps the legs it holds, the live YouTube broadcast and its key among
+//!   them. Only Go Live hands destinations over.
 //! - Go Live never grows a switch (D11): the setting lives on the Livestream
 //!   page, on by default when entitled, and a Go Live that cannot use the
 //!   cloud streams directly and says why once (`fallback`).
@@ -937,6 +942,24 @@ impl CloudShowRuntime {
             .map(|show| show.record.id.clone())
     }
 
+    /// A session start that bound this show and then failed before it ran
+    /// (FFmpeg, capture, an unrelated refusal) leaves the show without a
+    /// feed: make it resumable again rather than bound to a dead session.
+    /// True when anything changed.
+    pub fn release_unfed_session(&mut self, active_session_id: Option<&str>) -> bool {
+        let Some(show) = self.show.as_mut() else {
+            return false;
+        };
+        match show.session_id.as_deref() {
+            Some(bound) if Some(bound) != active_session_id => {
+                show.session_id = None;
+                show.resuming = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn bump_generation(&mut self) -> u64 {
         self.generation += 1;
         self.control_tx = None;
@@ -1380,6 +1403,22 @@ async fn send_intent(
     }
 }
 
+/// `hold.image.set`, best effort: the runner draws its default card without
+/// one, so a refusal is a warning, never a failed start.
+async fn send_hold_image(
+    tx: &mpsc::UnboundedSender<ControlRequest>,
+    hold_image_png_base64: Option<String>,
+) {
+    let Some(png) = hold_image_png_base64 else {
+        return;
+    };
+    let id = new_intent_id();
+    let frame = json!({ "t": "intent", "id": id, "kind": "hold.image.set", "pngBase64": png });
+    if let Err(problem) = send_intent(tx, frame, id, ACK_TIMEOUT).await {
+        tracing::warn!("Videorc Cloud did not take the hold image: {problem}");
+    }
+}
+
 /// Wire shape: `ingest.get` on a connected, authenticated socket answers with
 /// the show's ingest in the ack's `result` (`{ "ingest": [...] }`). Frames
 /// that arrive first are state; the newest one replaces `latest`.
@@ -1517,15 +1556,17 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             bail!("Videorc Cloud needs at least one destination to hand over.");
         }
 
-        // A show that is live without a feed is what Go Live resumes (C5).
-        // One that ended while this computer was away starts a new show.
+        // A show that is live without a feed is what Go Live resumes (C5),
+        // with the destinations it just prepared: Go Live is a new broadcast
+        // by choice. One that ended while this computer was away starts a new
+        // show. The Resume notice takes `resume_session` instead (C5b).
         if let Some(show_id) = resumable {
             match self
                 .resume_into_session(
                     session_id,
                     &bearer,
                     &show_id,
-                    destinations.clone(),
+                    Some(destinations.clone()),
                     hold_image_png_base64.clone(),
                 )
                 .await?
@@ -1672,7 +1713,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     session_id,
                     bearer,
                     &show_id,
-                    destinations,
+                    Some(destinations),
                     hold_image_png_base64,
                 )
                 .await
@@ -1680,6 +1721,44 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             _ => bail!(
                 "You're still live through Videorc Cloud, but the show could not be picked up. End it from videorc.com/live or try again."
             ),
+        }
+    }
+
+    /// The Resume notice (C5b): feed the show that is live again, with the
+    /// legs the runner already holds. Nothing is prepared on a platform and
+    /// no `destinations.set` is sent, so a YouTube broadcast keeps its key and
+    /// its VOD stays one piece. The hold image goes only if the user picked
+    /// one. A show that is gone is an error here, never a new show: Go Live
+    /// is the one that starts one.
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+        bearer: Option<String>,
+        hold_image_png_base64: Option<String>,
+    ) -> Result<SessionHandover> {
+        let Some(bearer) = bearer else {
+            bail!("Sign in to Videorc to resume the stream.");
+        };
+        let show_id = {
+            let mut runtime = lock(&self.slot);
+            runtime.failed = None;
+            runtime.fallback = None;
+            runtime.resumable_show_id()
+        };
+        let Some(show_id) = show_id else {
+            bail!("There's no Videorc Cloud show to resume.");
+        };
+        match self
+            .resume_into_session(session_id, &bearer, &show_id, None, hold_image_png_base64)
+            .await?
+        {
+            ResumeOutcome::Resumed(PrepareOutcome::Cloud(handover)) => Ok(handover),
+            ResumeOutcome::Resumed(PrepareOutcome::Direct) => {
+                bail!("Videorc Cloud did not take the resume.")
+            }
+            ResumeOutcome::ShowGone(_) => {
+                bail!("The stream already ended on Videorc Cloud. Go live to start a new one.")
+            }
         }
     }
 
@@ -1723,23 +1802,19 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             bail!("Videorc Cloud did not take the destinations: {problem}.");
         }
-        if let Some(png) = hold_image_png_base64 {
-            let id = new_intent_id();
-            let frame =
-                json!({ "t": "intent", "id": id, "kind": "hold.image.set", "pngBase64": png });
-            if let Err(problem) = send_intent(tx, frame, id, ACK_TIMEOUT).await {
-                tracing::warn!("Videorc Cloud did not take the hold image: {problem}");
-            }
-        }
+        send_hold_image(tx, hold_image_png_base64).await;
         Ok(())
     }
 
+    /// Feed the show again. `destinations` is `Some` for a Go Live, which
+    /// hands its freshly prepared destinations over, and `None` for the
+    /// Resume notice (C5b), which keeps the runner's legs as they are.
     async fn resume_into_session(
         &self,
         session_id: &str,
         bearer: &str,
         show_id: &str,
-        destinations: Vec<HandoverDestination>,
+        destinations: Option<Vec<HandoverDestination>>,
         hold_image_png_base64: Option<String>,
     ) -> Result<ResumeOutcome> {
         // A fresh token and, when the web hands it back, the ingest.
@@ -1812,7 +1887,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let mut runtime = lock(&self.slot);
             if let Some(show) = runtime.show.as_mut() {
                 show.session_id = Some(session_id.to_string());
-                show.destinations = destinations.clone();
+                if let Some(destinations) = &destinations {
+                    show.destinations = destinations.clone();
+                }
                 show.resuming = true;
                 show.record = record;
                 show.ingest = Some(ingest.clone());
@@ -1829,8 +1906,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             welcome,
         );
         self.hooks.emit_from(&self.slot);
-        self.hand_over(&tx, bearer, show_id, &destinations, hold_image_png_base64)
-            .await?;
+        match destinations {
+            Some(destinations) => {
+                self.hand_over(&tx, bearer, show_id, &destinations, hold_image_png_base64)
+                    .await?;
+            }
+            // No destinations.set: the runner keeps every leg (and key) it
+            // holds, so the platforms never see a restart.
+            None => send_hold_image(&tx, hold_image_png_base64).await,
+        }
         Ok(ResumeOutcome::Resumed(PrepareOutcome::Cloud(
             SessionHandover {
                 show_id: show_id.to_string(),
@@ -3177,6 +3261,203 @@ mod tests {
                 .iter()
                 .all(|frame| frame["kind"] != "destinations.set")
         );
+    }
+
+    // C5b: the Resume notice feeds the show again with the legs the runner
+    // holds. No destinations.set (a YouTube broadcast keeps its key), the
+    // ingest comes back from the node, and the hold image goes only when the
+    // user picked one.
+    #[tokio::test(start_paused = true)]
+    async fn the_resume_notice_keeps_the_runners_legs_and_sends_no_destinations() {
+        let harness = harness(true);
+        relaunched_with_a_resumable_show(&harness).await;
+        let context = harness.context.clone();
+        let resume = tokio::spawn(async move {
+            context
+                .resume_session(
+                    "session-12",
+                    Some("bearer".to_string()),
+                    Some("cG5n".to_string()),
+                )
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        let hello = server.next_frame().await;
+        assert_eq!(hello["t"], "hello");
+        server.send(welcome("hold"));
+        let ask = server.next_frame().await;
+        assert_eq!(ask["kind"], "ingest.get");
+        server.send(json!({
+            "t": "ack",
+            "id": ask["id"],
+            "ok": true,
+            "result": { "ingest": [
+                { "orientation": "horizontal", "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live", "streamKey": INGEST_KEY },
+                { "orientation": "vertical", "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live", "streamKey": "sh_abc-v.ingestSECRET" },
+            ] },
+        }));
+        // The picked hold image, and nothing about destinations.
+        let hold = server.next_frame().await;
+        assert_eq!(hold["kind"], "hold.image.set");
+        assert_eq!(hold["pngBase64"], "cG5n");
+        server.send(ack(&hold["id"]));
+        let handover = resume.await.unwrap().unwrap();
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(
+            handover
+                .ingest
+                .iter()
+                .map(|entry| entry.orientation)
+                .collect::<Vec<_>>(),
+            vec![
+                StreamOutputOrientation::Horizontal,
+                StreamOutputOrientation::Vertical
+            ],
+            "every orientation the show has"
+        );
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            harness
+                .context
+                .connector
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|frame| frame["kind"] != "destinations.set"),
+            "a resume never hands destinations over"
+        );
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Resuming);
+        assert_eq!(status.session_id.as_deref(), Some("session-12"));
+        assert!(!status.show.unwrap().resumable);
+        server.send(json!({ "t": "state", "state": { "phase": "live", "liveSeconds": 900 } }));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_without_a_hold_image_asks_only_for_the_ingest() {
+        let harness = harness(true);
+        relaunched_with_a_resumable_show(&harness).await;
+        let context = harness.context.clone();
+        let resume = tokio::spawn(async move {
+            context
+                .resume_session("session-13", Some("bearer".to_string()), None)
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("hold"));
+        let ask = server.next_frame().await;
+        assert_eq!(ask["kind"], "ingest.get");
+        server.send(json!({
+            "t": "ack",
+            "id": ask["id"],
+            "ok": true,
+            "result": { "ingest": [{
+                "orientation": "horizontal",
+                "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live",
+                "streamKey": INGEST_KEY,
+            }] },
+        }));
+        let handover = resume.await.unwrap().unwrap();
+        assert_eq!(handover.ingest[0].stream_key, INGEST_KEY);
+        let kinds: Vec<String> = harness
+            .context
+            .connector
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|frame| frame["t"] == "intent")
+            .map(|frame| frame["kind"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(kinds, vec!["ingest.get".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_of_a_show_that_ended_says_so_and_starts_nothing() {
+        let harness = harness(true);
+        relaunched_with_a_resumable_show(&harness).await;
+        // By the click, the web no longer lists the show.
+        harness.context.web.current.lock().unwrap().clear();
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse::default()));
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        let error = harness
+            .context
+            .resume_session("session-14", Some("bearer".to_string()), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already ended"), "{error}");
+        assert_eq!(
+            harness.context.web.create_calls.load(Ordering::SeqCst),
+            0,
+            "Resume never creates a show"
+        );
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_needs_a_signed_in_account_and_a_show_to_resume() {
+        let harness = harness(true);
+        let signed_out = harness
+            .context
+            .resume_session("session-15", None, None)
+            .await
+            .unwrap_err();
+        assert!(signed_out.to_string().contains("Sign in"), "{signed_out}");
+        let nothing = harness
+            .context
+            .resume_session("session-15", Some("bearer".to_string()), None)
+            .await
+            .unwrap_err();
+        assert!(
+            nothing.to_string().contains("no Videorc Cloud show"),
+            "{nothing}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_start_that_fails_after_binding_the_show_makes_it_resumable_again() {
+        let harness = harness(true);
+        relaunched_with_a_resumable_show(&harness).await;
+        let context = harness.context.clone();
+        let resume = tokio::spawn(async move {
+            context
+                .resume_session("session-16", Some("bearer".to_string()), None)
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("hold"));
+        let ask = server.next_frame().await;
+        server.send(json!({
+            "t": "ack",
+            "id": ask["id"],
+            "ok": true,
+            "result": { "ingest": [{
+                "orientation": "horizontal",
+                "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live",
+                "streamKey": INGEST_KEY,
+            }] },
+        }));
+        resume.await.unwrap().unwrap();
+        assert!(lock(&harness.context.slot).resumable_show_id().is_none());
+        // The session feeding it is still the bound one: nothing changes.
+        assert!(!lock(&harness.context.slot).release_unfed_session(Some("session-16")));
+        // The start died before FFmpeg ran: the show is live on the runner
+        // with no feed, so the Resume notice must come back.
+        assert!(lock(&harness.context.slot).release_unfed_session(None));
+        let status = lock(&harness.context.slot).status();
+        assert!(status.show.unwrap().resumable);
+        assert_eq!(status.session_id, None);
+        assert_eq!(status.phase, CloudPhase::Hold);
     }
 
     // The `smoke:streaming-secrets` rule for the cloud (D15): the platform

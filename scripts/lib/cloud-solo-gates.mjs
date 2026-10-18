@@ -243,6 +243,12 @@ export function evaluateCloudSoloReport(report) {
     if (drop.desktopSawHold === false) failures.push(`${label}: the desktop never showed Hold`)
     if (drop.desktopSawLive === false)
       failures.push(`${label}: the desktop never showed Live again`)
+    // C5b: a Resume never hands destinations over; the runner keeps its legs.
+    if (Number.isFinite(drop.destinationsSetAfterResume) && drop.destinationsSetAfterResume > 0) {
+      failures.push(
+        `${label}: the runner applied destinations.set ${drop.destinationsSetAfterResume} time(s) after the Resume click`
+      )
+    }
   }
   const receivers = report.receivers ?? []
   if (receivers.length < 2) failures.push(`expected 2 receivers, found ${receivers.length}`)

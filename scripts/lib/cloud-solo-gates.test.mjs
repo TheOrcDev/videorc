@@ -229,7 +229,8 @@ describe('cloud solo gates: the run verdict', () => {
         kind: 'computer-died',
         timeToHoldSeconds: 1.9,
         timeToResumeSeconds: 7.2,
-        maxResumeSeconds: 30
+        maxResumeSeconds: 30,
+        destinationsSetAfterResume: 0
       }
     ],
     receivers: [receiver('receiver-1'), receiver('receiver-2')],
@@ -251,6 +252,7 @@ describe('cloud solo gates: the run verdict', () => {
     const report = passing()
     report.drops[0].timeToHoldSeconds = 9
     report.drops[1].timeToResumeSeconds = null
+    report.drops[1].destinationsSetAfterResume = 1
     report.receivers[0].gaps.maxGapSeconds = 2.5
     report.receivers[1].audio = {}
     report.receivers[1].stayedConnected = false
@@ -267,6 +269,7 @@ describe('cloud solo gates: the run verdict', () => {
     assert.deepEqual(failures, [
       'feed-cut: hold took 9 s (limit 6 s)',
       'computer-died: the show never came back live after the resume',
+      'computer-died: the runner applied destinations.set 1 time(s) after the Resume click',
       'receiver-1: largest packet gap 2.5 s (limit 2 s)',
       'receiver-2: no audio stream',
       'receiver-2: its connection dropped during a drop',

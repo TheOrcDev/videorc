@@ -13103,7 +13103,9 @@ async fn cloud_show_detect_at_launch(state: &AppState) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionStartKind {
     GoLive,
-    /// Plan 184 C5: the same start, bound to the show that is live.
+    /// Plan 184 C5: the same params as `session.start`, bound to the show
+    /// that is live. C5b: nothing is set up on a platform and no key is
+    /// needed; the runner keeps the legs it holds.
     CloudResume,
 }
 
@@ -13139,7 +13141,13 @@ async fn start_session_command(
         Ok(params) => {
             let streaming = params.streaming.clone();
             let attach_live_chat = session_attaches_live_chat(&params);
-            match start_session(state.clone(), params).await {
+            let started = match kind {
+                SessionStartKind::GoLive => start_session(state.clone(), params).await,
+                SessionStartKind::CloudResume => {
+                    recording::start_cloud_resume_session(state.clone(), params).await
+                }
+            };
+            match started {
                 Ok(status) => {
                     if attach_live_chat
                         && let Some(streaming) = streaming.as_ref()

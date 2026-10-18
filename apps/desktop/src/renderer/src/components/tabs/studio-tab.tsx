@@ -227,7 +227,7 @@ export function StudioTab(): ReactElement {
             active={active}
             blockedReason={liveStreamBlockedReason}
             pending={startsBusy}
-            onResume={handleLiveStream}
+            onResumeClick={() => noteRecordClick('start')}
           />
           <SessionPanel
             active={active}
@@ -258,19 +258,22 @@ export function StudioTab(): ReactElement {
 /**
  * Plan 184 C5: "You're still live through Videorc Cloud." above Session. Its
  * own component, so the cloud's status ticks during a show re-render only it.
+ * Resume is the provider's own start (C5b): bound to the live show, with no
+ * dialog and nothing set up on a platform. Never Go Live.
  */
 function CloudResumeSlot({
   active,
   blockedReason,
   pending,
-  onResume
+  onResumeClick
 }: {
   active: boolean
   blockedReason: string | null
   pending: boolean
-  onResume: () => void
+  /** Arms the latency clock, like the Record and Go Live clicks. */
+  onResumeClick: () => void
 }): ReactElement | null {
-  const { cloudStatus } = useStudioCloud()
+  const { cloudStatus, resumeCloudShow } = useStudioCloud()
   const notice = cloudResumeNotice(cloudStatus, active)
   if (!notice) return null
   return (
@@ -279,7 +282,11 @@ function CloudResumeSlot({
         blockedReason={blockedReason}
         notice={notice}
         pending={pending}
-        onResume={onResume}
+        onResume={() => {
+          if (pending || blockedReason) return
+          onResumeClick()
+          void resumeCloudShow()
+        }}
       />
     </Suspense>
   )

@@ -545,11 +545,17 @@ try {
       // The node hands the ingest back only to the show's owner; the agent
       // logs the intent name (never the key) when it answers.
       ingestGetAnswered: agentLogAnsweredIngestGet(agent.logPath),
+      // C5b: Resume keeps the runner's legs. The runner logs every intent it
+      // applies (the agent forwards its lines): destinations.set ran once,
+      // at Go Live, and never after the Resume click.
+      destinationsSetAfterResume: destinationsSetIntentTimes(agent.logPath).filter(
+        (atMs) => atMs >= resumeRequestedAtMs
+      ).length,
       legsKept: receivers.every((receiver) => receiver.child.process.exitCode === null)
     }
     report.drops.push(drop2)
     log(
-      `[drop 2] hold ${drop2.timeToHoldSeconds} s after the death, back live ${drop2.timeToResumeSeconds} s after Resume; shows created on the web: ${drop2.showsCreated}`
+      `[drop 2] hold ${drop2.timeToHoldSeconds} s after the death, back live ${drop2.timeToResumeSeconds} s after Resume; shows created on the web: ${drop2.showsCreated}; destinations.set after the Resume: ${drop2.destinationsSetAfterResume}`
     )
     await sleep(afterResumeMs)
     assertReceiversConnected(receivers, 'after the resume')
@@ -1107,6 +1113,27 @@ function agentLogAnsweredIngestGet(logPath) {
       )
   } catch {
     return false
+  }
+}
+
+/**
+ * When the runner applied a `destinations.set` (its `intent ok` line, forwarded
+ * by the agent), as wall-clock ms from the agent's own timestamp at the start
+ * of the line. The runner's timestamp inside the line is ignored.
+ */
+function destinationsSetIntentTimes(logPath) {
+  try {
+    return readFileSync(logPath, 'utf8')
+      .split('\n')
+      .filter((line) => line.includes('intent="destinations.set"') && line.includes('intent ok'))
+      .map((line) => {
+        const stamp = line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z/)
+        if (!stamp) return Number.NaN
+        return Date.parse(`${stamp[1]}.${(stamp[2] ?? '0').slice(0, 3).padEnd(3, '0')}Z`)
+      })
+      .filter((atMs) => Number.isFinite(atMs))
+  } catch {
+    return []
   }
 }
 
