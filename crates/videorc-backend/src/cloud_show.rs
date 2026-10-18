@@ -351,10 +351,17 @@ pub struct ClientInfo {
     pub version: String,
 }
 
+/// `client` in `POST /api/cloud/shows` and in `hello`. The version is the
+/// app's release (Electron's `VIDEORC_APP_VERSION`), never the backend crate's
+/// 0.9.0: the web and the node read it.
 pub fn client_info() -> ClientInfo {
+    client_info_with_version(crate::performance_check::desktop_app_version())
+}
+
+fn client_info_with_version(version: String) -> ClientInfo {
     ClientInfo {
         app: "desktop".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version,
     }
 }
 
@@ -3458,6 +3465,34 @@ mod tests {
         assert!(status.show.unwrap().resumable);
         assert_eq!(status.session_id, None);
         assert_eq!(status.phase, CloudPhase::Hold);
+    }
+
+    #[test]
+    fn client_info_carries_the_apps_version_not_the_crates() {
+        let info = client_info_with_version("0.9.143".to_string());
+        assert_eq!(info.app, "desktop");
+        assert_eq!(info.version, "0.9.143");
+        let wire = serde_json::to_value(&CreateShowRequest {
+            kind: "solo".to_string(),
+            outputs: Vec::new(),
+            hold_max_seconds: 1800,
+            client: info,
+        })
+        .unwrap();
+        assert_eq!(wire["client"]["version"], "0.9.143");
+        // `hello` carries the same client block.
+        let hello = hello_frame("vcs1.x.y");
+        assert_eq!(hello["client"]["app"], "desktop");
+        assert!(
+            hello["client"]["version"]
+                .as_str()
+                .is_some_and(|v| !v.is_empty())
+        );
+        // The real one reads what Electron set, or falls back to the crate.
+        assert_eq!(
+            client_info().version,
+            crate::performance_check::desktop_app_version()
+        );
     }
 
     // The `smoke:streaming-secrets` rule for the cloud (D15): the platform
