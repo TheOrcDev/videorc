@@ -39,6 +39,8 @@ const PHASE_MS = 1500
 // grey: proof of a real blend, not an alpha threshold.
 const STRIP = [255, 0, 255]
 const TAKEOVER = [255, 0, 0]
+/** A spot no banner covers: the takeover check reads it. */
+const OPEN_AREA = { x: 0.45, y: 0.45, w: 0.1, h: 0.1 }
 
 mkdirSync(outputDirectory, { recursive: true })
 
@@ -388,9 +390,6 @@ function verifyArtifact({ path, output }, mode, banners) {
   )
   console.log(`Banners artifact OK (${output}): ${path}`)
 }
-
-/** A spot no banner covers: the takeover check reads it. */
-const OPEN_AREA = { x: 0.45, y: 0.45, w: 0.1, h: 0.1 }
 
 function near(rgb, target, tolerance = 70) {
   return rgb.every((value, index) => Math.abs(value - target[index]) <= tolerance)
