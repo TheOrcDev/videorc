@@ -15,12 +15,18 @@ import type { ReactElement, ReactNode } from 'react'
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
+import { BannerInspector, SceneBannersSection } from '@/components/scene/banner-inspector'
 import { CameraResetButton } from '@/components/scene/camera-reset-button'
 import {
+  BannerEdits,
   OverlayEdits,
+  bannerStageId,
+  bannerStageItems,
   overlayEditsBlockedReason,
+  overlayStageId,
   overlayStageItems,
-  withOverlayRect
+  withOverlayRect,
+  type StageItemDraft
 } from '@/components/scene/overlay-stage'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
@@ -36,7 +42,8 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Toggle } from '@/components/ui/toggle'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioBanners, useStudioCore } from '@/hooks/use-studio'
+import { BANNER_MAX_SHOWN } from '@/lib/backend'
 import type {
   CameraAspect,
   CameraCorner,
@@ -61,6 +68,9 @@ import {
   studioModeTogglePreset,
   type LayoutOrientation
 } from '@/lib/capture'
+import { bannerSnapRect } from '@/lib/banner-place'
+import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
+import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
 import { freeformEntryOverrides, peekLayoutUndo, rememberedFreeform } from '@/lib/freeform-memory'
 import { isLayoutUndoShortcut, layoutUndoShortcutBlocked } from '@/lib/layout-undo-shortcut'
@@ -255,6 +265,29 @@ export function LayoutTab(): ReactElement {
     overlayEditsRef.current = new OverlayEdits(setOverlayLayout, redrawOverlays, reportError)
   const overlayEdits = overlayEditsRef.current
   overlayEdits.configure(setOverlayLayout, reportError)
+  // Banners (plan 186): the one set, placed here like the overlay items. The
+  // selection lives in the Studio, so Assets → Place on Scene arrives with
+  // its banner selected on the stage.
+  const {
+    banners,
+    bannersLoaded,
+    bannersOffline,
+    selectedBannerId,
+    selectBanner,
+    updateBanner,
+    reorderBanners,
+    showBanner,
+    hideBanner
+  } = useStudioBanners()
+  const selectedBanner = banners.find((banner) => banner.id === selectedBannerId) ?? null
+  const bannerEditsRef = useRef<BannerEdits | null>(null)
+  if (!bannerEditsRef.current)
+    bannerEditsRef.current = new BannerEdits(updateBanner, redrawOverlays)
+  const bannerEdits = bannerEditsRef.current
+  bannerEdits.configure(updateBanner)
+  useLayoutEffect(() => {
+    bannerEdits.observe(banners)
+  }, [bannerEdits, banners])
   // Plan 174, C-6: overlay changes need the backend; without it the controls
   // are off with one reason, and every failed change is reported.
   const overlayBlockedReason = overlayEditsBlockedReason(wsStatus)
@@ -276,6 +309,15 @@ export function LayoutTab(): ReactElement {
   useEffect(() => {
     if (!verticalLegArmed) setOrientationChoice('horizontal')
   }, [verticalLegArmed])
+  // The stage canvas's shape (width / height): the Output, or the vertical
+  // stream's 9:16 while the stage shows it. A banner's rect converts its
+  // image's aspect into these canvas units.
+  const stageAspect =
+    verticalView && verticalLeg?.video
+      ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
+      : verticalView
+        ? 9 / 16
+        : captureConfig.video.width / Math.max(1, captureConfig.video.height)
   const handleStagePhaseChange = useCallback(
     (phase: StagePhase) => {
       setStagePhase(phase)
@@ -309,16 +351,58 @@ export function LayoutTab(): ReactElement {
   }
   const layout = captureConfig.layout
   const orientation = layoutPresetOrientation(layout.layoutPreset)
-  const selectedSource = scene?.sources.find((source) => source.id === selectedSceneSourceId)
+  // One selection on the stage: a banner wins over a source left selected
+  // from before (Assets → Place on Scene selects only the banner).
+  const selectedSource = selectedBanner
+    ? undefined
+    : scene?.sources.find((source) => source.id === selectedSceneSourceId)
   // SC2: the inspector follows the stage selection; default to the camera
   // (the thing people usually frame) so the panel is never empty.
   useEffect(() => {
-    if (selectedSceneSourceId || selectedOverlayItem || !scene?.sources.length) {
+    if (
+      selectedSceneSourceId ||
+      selectedOverlayItem ||
+      selectedBannerId ||
+      !scene?.sources.length
+    ) {
       return
     }
     const camera = scene.sources.find((source) => source.kind === 'camera')
     setSelectedSceneSourceId((camera ?? scene.sources[0]).id)
-  }, [scene, selectedOverlayItem, selectedSceneSourceId, setSelectedSceneSourceId])
+  }, [
+    scene,
+    selectedBannerId,
+    selectedOverlayItem,
+    selectedSceneSourceId,
+    setSelectedSceneSourceId
+  ])
+  // A banner selected from elsewhere (Assets → Place on Scene) takes the
+  // stage's one selection.
+  useEffect(() => {
+    if (!selectedBannerId) return
+    setSelectedOverlayItem(null)
+    setSelectedSceneSourceId(null)
+  }, [selectedBannerId, setSelectedSceneSourceId])
+  const selectStageBanner = (id: string): void => {
+    selectBanner(id)
+    setSelectedOverlayItem(null)
+    setSelectedSceneSourceId(null)
+  }
+  const shownBannerCount = banners.filter((banner) => banner.shown).length
+  const bannerShowLimitReason =
+    shownBannerCount >= BANNER_MAX_SHOWN ? BANNER_SHOWN_LIMIT_REASON : null
+  const setBannerShown = (id: string, shown: boolean): void => {
+    void (shown ? showBanner(id) : hideBanner(id))
+  }
+  const moveSelectedBanner = (targetIndex: number): void => {
+    if (!selectedBanner) return
+    const ids = bannerOrderAfterMove(banners, selectedBanner.id, targetIndex)
+    if (ids) void reorderBanners(ids)
+  }
+  const stageDrafts = [
+    overlayEdits.stageDraft(overlayOrientation),
+    bannerEdits.stageDraft(overlayOrientation)
+  ].filter((draft): draft is StageItemDraft => draft !== null)
   const selectedOverlayLayout = selectedOverlayItem ? overlayLayout[selectedOverlayItem] : null
   const patchSelectedOverlay = (
     patch: Partial<{ showOnStream: boolean; showInRecording: boolean }>
@@ -648,13 +732,7 @@ export function LayoutTab(): ReactElement {
                 !sceneSwitchPending
               }
               freeform={isFreeform}
-              outputAspect={
-                verticalView && verticalLeg?.video
-                  ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
-                  : verticalView
-                    ? 9 / 16
-                    : captureConfig.video.width / Math.max(1, captureConfig.video.height)
-              }
+              outputAspect={stageAspect}
               previewOpen={previewWindow.open}
               // Free resize: the backend honors custom camera width/height
               // (aspect law permitting) since plan phase 3.
@@ -669,25 +747,38 @@ export function LayoutTab(): ReactElement {
               // stage with that stream's overlay rects; the sources stay with
               // the primary (the stream is derived, plan 164 out of scope).
               scene={verticalView ? null : scene}
-              selectedSourceId={verticalView ? null : selectedSceneSourceId}
+              selectedSourceId={verticalView || selectedBanner ? null : selectedSceneSourceId}
               liveDocked={!verticalView && liveCanvasActive}
               liveHint={verticalView ? 'Vertical stream: overlay placement only.' : liveHint}
               liveSurface={!verticalView && liveSurface}
               slotRef={liveCanvasSupported && !verticalView ? slotRef : undefined}
               overlays={{
-                items: overlayStageItems(overlayLayout, overlayOrientation),
-                selectedItem: selectedOverlayItem,
-                draft:
-                  overlayEdits.draft?.orientation === overlayOrientation
-                    ? overlayEdits.draft
+                // Banners first: they draw under the overlay items (D5).
+                items: [
+                  ...bannerStageItems(banners, selectedBannerId, overlayOrientation, stageAspect),
+                  ...overlayStageItems(overlayLayout, overlayOrientation)
+                ],
+                selectedId: selectedBanner
+                  ? bannerStageId(selectedBanner.id)
+                  : selectedOverlayItem
+                    ? overlayStageId(selectedOverlayItem)
                     : null,
+                drafts: stageDrafts,
                 editable: !preciseEditPending && !sceneSwitchPending && !overlayBlockedReason,
-                onSelect: (item) => {
-                  setSelectedOverlayItem(item)
+                onSelect: (entry) => {
+                  if (entry.kind === 'banner') {
+                    selectStageBanner(entry.id)
+                    return
+                  }
+                  setSelectedOverlayItem(entry.item)
                   setSelectedSceneSourceId(null)
+                  selectBanner(null)
                 },
-                onCommit: (item, rect) =>
-                  overlayEdits.submit(overlayLayout, item, overlayOrientation, rect)
+                onCommit: (entry, rect) => {
+                  if (entry.kind === 'banner')
+                    bannerEdits.submit(entry.id, overlayOrientation, rect)
+                  else overlayEdits.submit(overlayLayout, entry.item, overlayOrientation, rect)
+                }
               }}
               onPopOut={
                 liveCanvasSupported ? () => void setPreviewWindowMode('floating') : undefined
@@ -707,6 +798,7 @@ export function LayoutTab(): ReactElement {
               onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
               onSelectSource={(sourceId) => {
                 setSelectedOverlayItem(null)
+                selectBanner(null)
                 setSelectedSceneSourceId(sourceId)
                 if (!sceneEditMode) {
                   setSceneEditMode(true)
@@ -733,7 +825,40 @@ export function LayoutTab(): ReactElement {
             camera's Placement, Lens and Green screen (plan 174 S3.9, C-33 and
             C-35). Inert only during a pointer gesture (C-5). */}
         <FieldSet className="min-w-0 gap-0" inert={stageDragging}>
-          {!selectedSource && selectedOverlayItem && selectedOverlayLayout ? (
+          {selectedBanner ? (
+            <BannerInspector
+              key={selectedBanner.id}
+              atBack={banners[0]?.id === selectedBanner.id}
+              banner={selectedBanner}
+              blockedReason={overlayBlockedReason}
+              inFront={banners[banners.length - 1]?.id === selectedBanner.id}
+              placeLabel={verticalView ? 'Place on the vertical stream' : 'Place'}
+              showLimitReason={bannerShowLimitReason}
+              sizeAdvice={bannerSizeAdvice({
+                banner: selectedBanner,
+                output: captureConfig.video,
+                verticalStream: verticalLeg?.video ?? null
+              })}
+              onBringToFront={() => moveSelectedBanner(banners.length - 1)}
+              onManage={() => openWorkspaceTab('assets')}
+              onPatch={(patch) => updateBanner(selectedBanner.id, patch)}
+              onSendToBack={() => moveSelectedBanner(0)}
+              onShowChange={(shown) => setBannerShown(selectedBanner.id, shown)}
+              onSnap={(snap) => {
+                const rect = bannerSnapRect(
+                  selectedBanner,
+                  selectedBanner[overlayOrientation],
+                  overlayOrientation,
+                  stageAspect,
+                  snap
+                )
+                void updateBanner(
+                  selectedBanner.id,
+                  overlayOrientation === 'vertical' ? { vertical: rect } : { horizontal: rect }
+                )
+              }}
+            />
+          ) : !selectedSource && selectedOverlayItem && selectedOverlayLayout ? (
             <PanelSection
               className="min-w-0"
               icon={AdjustIcon}
@@ -751,7 +876,7 @@ export function LayoutTab(): ReactElement {
           ) : !selectedSource ? (
             <PanelSection
               className="min-w-0"
-              description="Click a source or an overlay on the stage to edit it."
+              description="Click a source, an overlay or a banner on the stage to edit it."
               icon={AdjustIcon}
               title="Inspector"
             />
@@ -911,6 +1036,17 @@ export function LayoutTab(): ReactElement {
               </PanelSection>
             </>
           )}
+          {/* Every banner, below the selection's own sections (plan 186). */}
+          <SceneBannersSection
+            banners={banners}
+            loaded={bannersLoaded}
+            offline={bannersOffline}
+            selectedId={selectedBanner?.id ?? null}
+            showLimitReason={bannerShowLimitReason}
+            onOpenAssets={() => openWorkspaceTab('assets')}
+            onSelect={selectStageBanner}
+            onShowChange={(banner, shown) => setBannerShown(banner.id, shown)}
+          />
         </FieldSet>
       </div>
     </div>
