@@ -21,14 +21,18 @@ import { GO_LIVE_EXCLUDED_NOTE, GoLiveConfirmationDialog } from './go-live-dialo
 // primary), ⌘↵ goes live, the pending primary names its phase, and "Go live
 // without …" leaves a destination out of this livestream only.
 
-const mocked = vi.hoisted(() => ({ captureConfig: undefined as unknown }))
+const mocked = vi.hoisted(() => ({
+  captureConfig: undefined as unknown,
+  banners: [] as unknown[],
+  sharedVideo: null as unknown
+}))
 vi.mock('@/hooks/use-studio', () => ({
-  useStudioBanners: () => ({ banners: [] }),
+  useStudioBanners: () => ({ banners: mocked.banners }),
   useStudioCore: () => ({
     captureConfig: mocked.captureConfig,
     performanceCheck: undefined,
     streamOutputTopologyPreflight: { state: 'idle' },
-    streamSharedEncodeFallbackVideo: null,
+    streamSharedEncodeFallbackVideo: mocked.sharedVideo,
     overlayLayout: DEFAULT_OVERLAY_LAYOUT
   })
 }))
@@ -102,6 +106,8 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   mocked.captureConfig = twitchOn()
+  mocked.banners = []
+  mocked.sharedVideo = null
 })
 
 afterEach(() => {
@@ -314,5 +320,40 @@ describe('Go Live dialog phases (B-14)', () => {
     render({ pending: true, phase })
     expect(primary().textContent?.trim()).toBe(label)
     expect(primary().disabled).toBe(true)
+  })
+})
+
+describe('Go Live banner notices (plan 186, D13)', () => {
+  // A showing banner whose two switches differ, on the one shared encode.
+  const banner = (shown: boolean, showOnStream: boolean, showInRecording: boolean) => ({
+    shown,
+    showOnStream,
+    showInRecording
+  })
+  const notices = (): string[] =>
+    [...dialog().querySelectorAll('[data-videorc-go-live-overlay-notice="banners"]')].map(
+      (item) => item.textContent ?? ''
+    )
+
+  it('says the banner sentence once with the other notices, however many banners need it', () => {
+    mocked.sharedVideo = defaultCaptureConfig.video
+    mocked.banners = [
+      banner(true, true, false),
+      banner(true, false, true),
+      banner(false, true, false)
+    ]
+    render()
+    expect(notices()).toStrictEqual([
+      'Banners · Both the stream and the recording will include banners: this computer shares one encode for them.'
+    ])
+    expect(dialog().querySelector('[data-videorc-go-live-overlay-notices]')).not.toBeNull()
+  })
+
+  it('stays quiet while no showing banner splits its switches', () => {
+    mocked.sharedVideo = defaultCaptureConfig.video
+    mocked.banners = [banner(false, true, false), banner(true, true, true)]
+    render()
+    expect(notices()).toStrictEqual([])
+    expect(dialog().querySelector('[data-videorc-go-live-overlay-notices]')).toBeNull()
   })
 })

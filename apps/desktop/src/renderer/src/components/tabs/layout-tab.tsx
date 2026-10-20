@@ -1041,6 +1041,9 @@ export function LayoutTab(): ReactElement {
             banners={banners}
             loaded={bannersLoaded}
             offline={bannersOffline}
+            // The banner and overlay inspectors above lead with the same
+            // reconnecting lock: the pane says it once.
+            offlineAlert={!selectedBanner && !(!selectedSource && selectedOverlayItem)}
             selectedId={selectedBanner?.id ?? null}
             showLimitReason={bannerShowLimitReason}
             onOpenAssets={() => openWorkspaceTab('assets')}

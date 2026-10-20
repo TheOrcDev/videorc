@@ -318,5 +318,12 @@ describe('SceneBannersSection', () => {
     await renderSection(sectionProps({ offline: true, banners: [], loaded: false }))
     expect(document.body.textContent).not.toContain('Loading banners…')
     expect(document.body.textContent).not.toContain('No banners yet.')
+
+    // The inspector above already leads with the lock: the pane says it once.
+    await renderSection(sectionProps({ offline: true, offlineAlert: false }))
+    expect(document.body.textContent).not.toContain(OFFLINE_LOCK_REASON)
+    expect(
+      row('sponsor').querySelector<HTMLButtonElement>('button[aria-label="Hide Sponsor"]')!.disabled
+    ).toBe(true)
   })
 })

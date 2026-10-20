@@ -8,7 +8,7 @@ import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { Empty, EmptyContent } from '@/components/ui/empty'
+import { Empty, EmptyContent, EmptyDescription } from '@/components/ui/empty'
 import { Field, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field'
 import {
   ParameterSlider,
@@ -69,6 +69,7 @@ export function SceneBannersSection({
   banners,
   loaded,
   offline,
+  offlineAlert = true,
   selectedId,
   showLimitReason,
   onSelect,
@@ -80,6 +81,9 @@ export function SceneBannersSection({
   loaded: boolean
   /** Videorc is reconnecting: the alert says so, and Show and Hide wait. */
   offline: boolean
+  /** False when the inspector above already says Videorc is reconnecting:
+   * the pane says it once. */
+  offlineAlert?: boolean
   selectedId: string | null
   /** Why a hidden banner can't show now (four are showing), or null. */
   showLimitReason: string | null
@@ -94,7 +98,7 @@ export function SceneBannersSection({
       icon={ImageIcon}
       title="Banners"
     >
-      {offline ? <OfflineAlert /> : null}
+      {offline && offlineAlert ? <OfflineAlert /> : null}
       {banners.length > 0 ? (
         <GroupedList aria-label="Banners" data-videorc-scene-banners="">
           {banners.map((banner) => {
@@ -151,7 +155,7 @@ export function SceneBannersSection({
         )
       ) : (
         <Empty className="p-4" data-videorc-scene-banners-empty="">
-          <p className="text-meta text-muted-foreground">No banners yet.</p>
+          <EmptyDescription>No banners yet.</EmptyDescription>
           <EmptyContent>
             <Button variant="outline" onClick={onOpenAssets}>
               Open Assets
