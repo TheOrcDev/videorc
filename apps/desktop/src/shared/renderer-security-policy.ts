@@ -44,6 +44,8 @@ export const IPC_INVOKE_ROLES = {
   'system:pick-directory': MAIN_ONLY,
   'system:check-directory': MAIN_ONLY,
   'screens:pick-image': MAIN_ONLY,
+  // Assets → Banners → Import image… (plan 186): the Studio renderer only.
+  'banners:pick-image': MAIN_ONLY,
   'backgrounds:import-image': MAIN_ONLY,
   'scheduled-streams:import-thumbnail': MAIN_ONLY,
   // The Buddy's avatar images (plan 164 S-A3): the Studio renderer only.

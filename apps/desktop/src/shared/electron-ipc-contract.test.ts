@@ -56,8 +56,9 @@ describe('Electron IPC contract', () => {
     // 132: plan 174 S3.1 adds app:exit (the renderer's answer to a quit or
     // close asked while on air).
     // 131: plan 174 S3.18 adds resource:reveal-support-bundle (Show in Finder).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(133)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(133)
+    // 134: plan 186 adds banners:pick-image (Assets → Banners → Import image…).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(134)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(134)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -1037,4 +1038,30 @@ it('preserves and validates queue-loss revisions through delivery IPC mirrors', 
         snapshot: { ...view.snapshot, delivery: { ...view.snapshot.delivery, lossRevision } }
       })
     ).toThrow()
+})
+
+describe('banner image picker IPC (plan 186)', () => {
+  it('takes no arguments and returns null or exactly one input-file capability', () => {
+    expect(isElectronInvokeChannel('banners:pick-image')).toBe(true)
+    expect(electronInvokeApiMethods['banners:pick-image']).toBe('pickBannerImage')
+    expect(boundedPassthroughElectronInvokeChannels).not.toContain('banners:pick-image')
+    expectTypeOf<ElectronInvokeResult<'banners:pick-image'>>().toEqualTypeOf<
+      Awaited<ReturnType<VideorcApi['pickBannerImage']>>
+    >()
+    expect(validateElectronInvokeArgs('banners:pick-image', [])).toEqual([])
+    expect(() => validateElectronInvokeArgs('banners:pick-image', ['/tmp/x.png'])).toThrow()
+
+    const selection = { capabilityId: 'cap-1', kind: 'input-file', displayName: 'sponsor.png' }
+    expect(validateElectronInvokeResult('banners:pick-image', null)).toBeNull()
+    expect(validateElectronInvokeResult('banners:pick-image', selection)).toStrictEqual(selection)
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, kind: 'output-directory' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, path: '/tmp/x.png' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, capabilityId: '' })
+    ).toThrow()
+  })
 })

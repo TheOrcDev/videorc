@@ -4378,6 +4378,9 @@ export interface VideorcApi {
    */
   exitApp: (kind: AppExitKind) => Promise<void>
   pickScreenImage: () => Promise<ResourceSelection | null>
+  /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
+   * `input-file` capability for `banners.importImage`. */
+  pickBannerImage: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
   checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>

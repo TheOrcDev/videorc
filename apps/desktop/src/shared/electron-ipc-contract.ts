@@ -98,6 +98,7 @@ export const electronInvokeApiMethods = {
   'app:set-native-theme': 'setNativeTheme',
   'app:exit': 'exitApp',
   'screens:pick-image': 'pickScreenImage',
+  'banners:pick-image': 'pickBannerImage',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
   'buddy-assets:remove': 'removeBuddyPersona',
@@ -1116,6 +1117,16 @@ const optionalGenerationArgs = runtimeSchema<unknown[]>(
 const optionalGenerationOnlyArgs = tupleSchema([optionalSchema(nonNegativeSafeIntegerSchema)])
 
 const noArgs = tupleSchema([])
+/** A picked file as main hands it to the renderer: an opaque single-use
+ * `input-file` capability and the name to show, never the path itself. */
+const inputFileSelectionSchema = objectSchema(
+  {
+    capabilityId: boundedIdentifier,
+    kind: literalSchema('input-file'),
+    displayName: stringSchema({ maxLength: 32_768 })
+  },
+  { allowUnknown: false }
+)
 const videorcAccountSnapshotSchema = objectSchema(
   {
     status: enumSchema(['signed-out', 'signed-in']),
@@ -1477,7 +1488,9 @@ const specificRuntimeInvokeContracts = {
   'updates:install': invokeContract(noArgs, undefinedSchema),
   // Plan 174 S3.1 (D2): the renderer's answer after the livestream ended,
   // one of two words, nothing else.
-  'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema)
+  'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema),
+  // Plan 186: no arguments; null on cancel, else an input-file capability.
+  'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema))
 } satisfies Partial<Record<ElectronInvokeChannel, IpcRuntimeContract>>
 
 /** Channels deliberately using structural bounds instead of a semantic schema.

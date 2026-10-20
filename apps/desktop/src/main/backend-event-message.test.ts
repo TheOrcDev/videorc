@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   parseMainBackendWireMessage,
+  parseMainBannerList,
+  parseMainBannersChangedEvent,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
   parseMainPreviewSurfaceStatus,
@@ -34,5 +36,23 @@ describe('main backend event trust boundary', () => {
         updatedAt: '2026-07-12T00:00:00.000Z'
       })
     ).toMatchObject({ framesRendered: 42, width: 1920, height: 1080 })
+  })
+
+  it('isolates the banner feed: a bad list never retires the capture socket (plan 186)', () => {
+    const bad = { event: 'banners.changed', payload: [{ id: 'x', imageFile: '/etc/passwd' }] }
+    // Envelope parsing still runs; the payload is left for its handler.
+    expect(parseMainBackendWireMessage(JSON.stringify(bad))).toEqual(bad)
+    expect(() => parseMainBackendWireMessage(JSON.stringify({ ...bad, extra: true }))).toThrow(
+      'backend.event.extra'
+    )
+    // The handler validates at use, strictly.
+    expect(() => parseMainBannersChangedEvent(bad.payload)).toThrow('banners.changed')
+    expect(() => parseMainBannerList({})).toThrow('banners.list')
+    expect(parseMainBannersChangedEvent([])).toEqual([])
+    expect(parseMainBannerList([])).toEqual([])
+    // Every other event keeps validating before dispatch.
+    expect(() =>
+      parseMainBackendWireMessage(JSON.stringify({ event: 'recording.status', payload: {} }))
+    ).toThrow('recording.status')
   })
 })

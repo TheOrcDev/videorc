@@ -41,6 +41,7 @@ const api: VideorcApi = {
   retryHardwareAcceleration: () => invoke('app:retry-hardware-acceleration'),
   exitApp: (kind) => invoke('app:exit', kind),
   pickScreenImage: () => invoke('screens:pick-image'),
+  pickBannerImage: () => invoke('banners:pick-image'),
   importBackgroundImage: () => invoke('backgrounds:import-image'),
   importScheduledThumbnail: () => invoke('scheduled-streams:import-thumbnail'),
   removeBuddyPersona: (personaId) => invoke('buddy-assets:remove', personaId),
