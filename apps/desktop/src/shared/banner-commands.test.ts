@@ -4,10 +4,7 @@ import {
   BANNER_COMMAND_USAGE,
   NO_BANNERS_YET,
   bannerCompletions,
-  bannerRelayCommandSchema,
-  bannerRelayResolutionSchema,
   bannerSummaries,
-  bannerSummariesSchema,
   classifyBannerCommand,
   matchBannerName,
   type BannerSummary
@@ -107,57 +104,9 @@ describe('bannerCompletions', () => {
   })
 })
 
-describe('banner relay schemas', () => {
+describe('bannerSummaries', () => {
   it('carries only id, name and shown, whatever the list had', () => {
     const full = { ...sponsor, imageFile: 'sponsor.png', thumbnailFile: 'sponsor.thumb.png' }
     expect(bannerSummaries([full])).toEqual([sponsor])
-    expect(bannerSummariesSchema.parse([sponsor])).toEqual([sponsor])
-    expect(bannerSummariesSchema.parse(null)).toBeNull()
-    expect(() => bannerSummariesSchema.parse([full])).toThrow()
-    expect(() => bannerSummariesSchema.parse([{ ...sponsor, id: '../secret' }])).toThrow()
-    expect(() => bannerSummariesSchema.parse([{ ...sponsor, name: '' }])).toThrow()
-    expect(() => bannerSummariesSchema.parse(Array.from({ length: 25 }, () => sponsor))).toThrow()
-  })
-
-  it('accepts one explicit show, hide or hide-all, and nothing else', () => {
-    for (const command of [
-      { requestId: 'r1', action: 'show', id: 'sponsor' },
-      { requestId: 'r2', action: 'hide', id: 'sponsor' },
-      { requestId: 'r3', action: 'hideAll' }
-    ]) {
-      expect(bannerRelayCommandSchema.parse(command)).toEqual(command)
-    }
-    for (const command of [
-      { requestId: 'r1', action: 'toggle', id: 'sponsor' },
-      { requestId: 'r1', action: 'show' },
-      { requestId: 'r1', action: 'hideAll', id: 'sponsor' },
-      { requestId: '', action: 'hideAll' },
-      { requestId: 'r1', action: 'show', id: 'sponsor', path: '/tmp/a.png' },
-      { requestId: 'r1', action: 'show', id: 'a/b' }
-    ]) {
-      expect(() => bannerRelayCommandSchema.parse(command)).toThrow()
-    }
-  })
-
-  it('answers done or the sentence why not', () => {
-    expect(bannerRelayResolutionSchema.parse({ requestId: 'r1', ok: true, value: true })).toEqual({
-      requestId: 'r1',
-      ok: true,
-      value: true
-    })
-    const refused = {
-      requestId: 'r1',
-      ok: false,
-      error: 'Four banners are showing. Hide one first.'
-    }
-    expect(bannerRelayResolutionSchema.parse(refused)).toEqual(refused)
-    for (const resolution of [
-      { requestId: 'r1', ok: true },
-      { requestId: 'r1', ok: false },
-      { requestId: 'r1', ok: false, error: '' },
-      { requestId: 'r1', ok: true, value: true, error: 'x' }
-    ]) {
-      expect(() => bannerRelayResolutionSchema.parse(resolution)).toThrow()
-    }
   })
 })

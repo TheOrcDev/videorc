@@ -4,7 +4,7 @@ import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platfo
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/comments-header'
 import { providerBadgeTitle } from '@/components/comments-destination-status'
-import { ClipIcon, FrameIcon, ImageIcon, MoreIcon, PreviewIcon } from '@/components/icons'
+import { ClipIcon, FrameIcon, MoreIcon, PreviewIcon } from '@/components/icons'
 import { PIN_WINDOW_LABEL, PinWindowButton } from '@/components/pin-window-button'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarAction } from '@/components/status-bar-action'
@@ -369,9 +369,10 @@ export function StreamManagerStatusBar({
           {bannerItems ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
+                {/* The word alone, like Clear: no icon glyph rides into this
+                    window's bundle for it. */}
                 <StatusBarAction
                   hint="Show or hide your banners (or type /banner)"
-                  icon={<ImageIcon aria-hidden />}
                   label="Banners"
                   text="Banners"
                 />
@@ -460,10 +461,7 @@ export function StreamManagerStatusBar({
               ) : null}
               {bannerItems ? (
                 <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>
-                    <ImageIcon />
-                    Banners
-                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubTrigger>Banners</DropdownMenuSubTrigger>
                   <DropdownMenuSubContent className="w-56">{bannerItems}</DropdownMenuSubContent>
                 </DropdownMenuSub>
               ) : null}

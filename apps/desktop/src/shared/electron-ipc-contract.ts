@@ -44,16 +44,16 @@ import {
   markerRelayResultSchema
 } from './session-markers'
 import type { BannerRelayCommand, BannerSummary } from './banner-commands'
-import {
-  bannerRelayCommandSchema,
-  bannerRelayResolutionSchema,
-  bannerSummariesSchema
-} from './banner-commands'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
 import { sessionChatTotalsSchema } from './session-chat-totals'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
-import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
+import {
+  BANNER_MAX_COUNT,
+  COMMENT_HIGHLIGHT_ANCHORS,
+  DOCK_SLOTS,
+  LAYOUT_PRESET_VALUES
+} from './backend'
 import {
   CHAT_AVATAR_MAX_BYTES,
   chatAvatarBytesWithinCap,
@@ -1289,6 +1289,53 @@ const dashboardSchema = runtimeSchema<LiveDashboardState | null>(
     return state
   }
 )
+// Banners in the Stream Manager (plan 186 S7): `{id, name, shown}` and one
+// explicit action by id. Never an image, a file name or a path.
+const bannerStrict = { allowUnknown: false } as const
+/** The backend's id rule (`backend-rpc-contract.ts`): an opaque token. */
+const bannerIdSchema = runtimeSchema<string>('a banner id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a banner id')
+  }
+  return value
+})
+const bannerRequestIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+
+const bannerSummarySchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    name: stringSchema({ minLength: 1, maxLength: 256 }),
+    shown: booleanSchema
+  },
+  bannerStrict
+)
+/** Null until Studio has read the list once. */
+const bannerSummariesSchema = nullableSchema(
+  arraySchema(bannerSummarySchema, { maxLength: BANNER_MAX_COUNT })
+)
+const bannerRelayCommandSchema = unionSchema([
+  objectSchema(
+    { requestId: bannerRequestIdSchema, action: enumSchema(['show', 'hide']), id: bannerIdSchema },
+    bannerStrict
+  ),
+  objectSchema({ requestId: bannerRequestIdSchema, action: literalSchema('hideAll') }, bannerStrict)
+])
+/** Studio's answer: done, or the sentence that says why not. */
+const bannerRelayResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: bannerRequestIdSchema, ok: literalSchema(true), value: literalSchema(true) },
+    bannerStrict
+  ),
+  objectSchema(
+    {
+      requestId: bannerRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    bannerStrict
+  )
+])
+
 const specificRuntimeInvokeContracts = {
   'comments-window:marker-context-get': invokeContract(noArgs, markerContextSchema),
   'comments-window:marker-context-push': invokeContract(

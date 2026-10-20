@@ -77,7 +77,6 @@ import {
 } from '../../shared/comments-snapshot-delta'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
-import { bannerActionContext, bannerActionError } from '@/lib/banners'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -151,7 +150,7 @@ function CommentsWindowApp(): ReactElement {
   }, [])
   // One show or hide, relayed to Studio. Nothing says so when it works (the
   // picture and the menu's check are the confirmation); a refusal is a
-  // warning with its own sentence.
+  // warning with its own sentence. The banner rules load only then.
   const runBanner = useCallback(async (action: BannerRelayAction): Promise<boolean> => {
     try {
       if (!window.videorc?.bannerFromCommentsWindow)
@@ -159,9 +158,12 @@ function CommentsWindowApp(): ReactElement {
       await window.videorc.bannerFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
       return true
     } catch (error) {
-      toastUserError(bannerActionError(error), bannerActionContext(action.action), {
-        id: 'banner-refusal'
-      })
+      const options = { id: 'banner-refusal' }
+      await import('@/lib/banners').then(
+        ({ bannerActionContext, bannerActionError }) =>
+          toastUserError(bannerActionError(error), bannerActionContext(action.action), options),
+        () => toastUserError(error, { action: 'change', object: 'the banner' }, options)
+      )
       return false
     }
   }, [])

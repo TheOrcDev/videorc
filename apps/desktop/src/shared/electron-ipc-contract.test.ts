@@ -1093,6 +1093,57 @@ describe('Stream Manager banner IPC (plan 186 S7)', () => {
       expect(() => validateElectronInvokeResult('comments-window:banners-get', forged)).toThrow()
     }
     expect(() => validateElectronInvokeArgs('comments-window:banners-get', [true])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [[{ ...sponsor, id: '../x' }]])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [[{ ...sponsor, name: '' }]])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [
+        Array.from({ length: 25 }, () => sponsor)
+      ])
+    ).toThrow()
+  })
+
+  it('accepts one explicit show, hide or hide-all, and answers done or the sentence why not', () => {
+    for (const command of [
+      { requestId: 'r1', action: 'show', id: 'sponsor' },
+      { requestId: 'r2', action: 'hide', id: 'sponsor' },
+      { requestId: 'r3', action: 'hideAll' }
+    ]) {
+      expect(validateElectronInvokeArgs('comments-window:banner', [command])).toEqual([command])
+    }
+    for (const command of [
+      { requestId: 'r1', action: 'toggle', id: 'sponsor' },
+      { requestId: 'r1', action: 'show' },
+      { requestId: 'r1', action: 'hideAll', id: 'sponsor' },
+      { requestId: '', action: 'hideAll' },
+      { requestId: 'r1', action: 'show', id: 'sponsor', path: '/tmp/a.png' },
+      { requestId: 'r1', action: 'show', id: 'a/b' }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:banner', [command])).toThrow()
+    }
+    const refused = {
+      requestId: 'r1',
+      ok: false,
+      error: 'Four banners are showing. Hide one first.'
+    }
+    for (const resolution of [{ requestId: 'r1', ok: true, value: true }, refused]) {
+      expect(
+        validateElectronInvokeArgs('comments-window:banner-result-push', [resolution])
+      ).toEqual([resolution])
+    }
+    for (const resolution of [
+      { requestId: 'r1', ok: true },
+      { requestId: 'r1', ok: false },
+      { requestId: 'r1', ok: false, error: '' },
+      { requestId: 'r1', ok: true, value: true, error: 'x' }
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:banner-result-push', [resolution])
+      ).toThrow()
+    }
   })
 
   it('lets the Stream Manager read and ask, and only Studio push and answer', () => {

@@ -1,22 +1,8 @@
-import { BANNER_MAX_COUNT } from './backend'
-import {
-  arraySchema,
-  booleanSchema,
-  enumSchema,
-  literalSchema,
-  nullableSchema,
-  objectSchema,
-  runtimeSchema,
-  stringSchema,
-  unionSchema,
-  RuntimeSchemaError
-} from './runtime-schema'
-
 // Plan 186 S7: banners from the live controls. The Stream Manager, the chat
 // composer's `/banner`, ⌘K and the remotes see a banner the same way: its
 // opaque id, the name the streamer typed and whether it shows. Never its
-// image, a file name or a path. Pure: main, the preload, the Studio renderer
-// and the Stream Manager share it.
+// image, a file name or a path. Pure and schema-free, so the Stream Manager
+// carries only what it runs: the IPC schemas live in `electron-ipc-contract`.
 
 /** One banner as the live controls see it. */
 export interface BannerSummary {
@@ -39,51 +25,6 @@ export type BannerRelayCommand = BannerRelayAction & { requestId: string }
 export function bannerSummaries(banners: readonly BannerSummary[]): BannerSummary[] {
   return banners.map(({ id, name, shown }) => ({ id, name, shown }))
 }
-
-const strict = { allowUnknown: false } as const
-/** The backend's id rule (`backend-rpc-contract.ts`): an opaque token. */
-const bannerIdSchema = runtimeSchema<string>('a banner id', (value, path) => {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
-    throw new RuntimeSchemaError(path, 'a banner id')
-  }
-  return value
-})
-const requestIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
-
-export const bannerSummarySchema = objectSchema(
-  {
-    id: bannerIdSchema,
-    name: stringSchema({ minLength: 1, maxLength: 256 }),
-    shown: booleanSchema
-  },
-  strict
-)
-/** Null until Studio has read the list once. */
-export const bannerSummariesSchema = nullableSchema(
-  arraySchema(bannerSummarySchema, { maxLength: BANNER_MAX_COUNT })
-)
-export const bannerRelayCommandSchema = unionSchema([
-  objectSchema(
-    { requestId: requestIdSchema, action: enumSchema(['show', 'hide']), id: bannerIdSchema },
-    strict
-  ),
-  objectSchema({ requestId: requestIdSchema, action: literalSchema('hideAll') }, strict)
-])
-/** Studio's answer: done, or the sentence that says why not. */
-export const bannerRelayResolutionSchema = unionSchema([
-  objectSchema(
-    { requestId: requestIdSchema, ok: literalSchema(true), value: literalSchema(true) },
-    strict
-  ),
-  objectSchema(
-    {
-      requestId: requestIdSchema,
-      ok: literalSchema(false),
-      error: stringSchema({ minLength: 1, maxLength: 2000 })
-    },
-    strict
-  )
-])
 
 export type BannerNameMatch =
   | { kind: 'match'; banner: BannerSummary }
