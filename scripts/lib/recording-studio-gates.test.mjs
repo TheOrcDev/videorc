@@ -31,6 +31,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'record start/stop latency gate',
       'output-stall microphone survival smoke',
       'imported screen image recording smoke',
+      'banners recording and stream smoke',
       'real-user launch first-frame contract smoke',
       'layout/source preview liveness smoke',
       'active-session live layout switch recording smoke',
@@ -68,14 +69,15 @@ describe('buildRecordingStudioGateSteps', () => {
     ])
     assert.deepEqual(steps[1].args, ['test:scripts'])
     assert.deepEqual(steps[2].args, ['probe:live-audio-controls'])
-    assert.deepEqual(steps.at(-24).args, ['smoke:captions-contract'])
-    assert.deepEqual(steps.at(-23).args, ['smoke:captions-live'])
-    assert.deepEqual(steps.at(-22).args, ['smoke:noise-cleanup'])
-    assert.deepEqual(steps.at(-21).args, ['smoke:dev'])
-    assert.deepEqual(steps.at(-20).args, ['smoke:app-quit-recording'])
-    assert.deepEqual(steps.at(-19).args, ['smoke:record-latency:gate'])
-    assert.deepEqual(steps.at(-18).args, ['smoke:output-stall'])
-    assert.deepEqual(steps.at(-17).args, ['smoke:screens'])
+    assert.deepEqual(steps.at(-25).args, ['smoke:captions-contract'])
+    assert.deepEqual(steps.at(-24).args, ['smoke:captions-live'])
+    assert.deepEqual(steps.at(-23).args, ['smoke:noise-cleanup'])
+    assert.deepEqual(steps.at(-22).args, ['smoke:dev'])
+    assert.deepEqual(steps.at(-21).args, ['smoke:app-quit-recording'])
+    assert.deepEqual(steps.at(-20).args, ['smoke:record-latency:gate'])
+    assert.deepEqual(steps.at(-19).args, ['smoke:output-stall'])
+    assert.deepEqual(steps.at(-18).args, ['smoke:screens'])
+    assert.deepEqual(steps.at(-17).args, ['smoke:banners'])
     assert.deepEqual(steps.at(-16).args, ['smoke:preview-real-launch'])
     assert.deepEqual(steps.at(-15).args, ['smoke:layout-source-loop'])
     assert.deepEqual(steps.at(-14).args, ['smoke:live-layout-switch-recording'])
