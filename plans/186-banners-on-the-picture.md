@@ -194,6 +194,10 @@ good like you said".
 D1 and D6–D11 were not raised separately, so their recommendations stand.
 Ask before building if any of them should change.
 
+**Answered 2026-10-20, later:** "Execute the entire plan and create a PR."
+D11 changes: Phase 2 (S10 timer, S11 voice) is built in the same PR, after
+Phase 1's slices. The owner's by-eye pass covers both phases.
+
 | #     | Question | Recommendation |
 | ----- | -------- | -------------- |
 | D1    | What is it called? | **Banner**, everywhere in copy, plus a `CONTEXT.md` entry. Avoid "overlay" (it is an internal word for the three existing items), "image source" ("source" means a capture input), "sticker" and "Sponsors" (the web already has a "Sponsor Videorc" program). |
@@ -218,7 +222,7 @@ A row in a new backend table `banners`:
 | ----- | ------- |
 | `id` | UUID, stable. Used by remotes, the Stream Deck and the chat command. |
 | `name` | The file stem at import (trimmed to 40 characters), renamable. |
-| `fileName` | `<id>.png` in `userData/Banners/`. Never sent to the renderer as a path. |
+| `imageFile`, `thumbnailFile` | Basenames `<id>.png` and `<id>.thumb.png` in the managed `Banners` dir (beside `Screens`). Only basenames reach the renderer, never a path. |
 | `width`, `height` | Pixel size of the stored image. |
 | `hasAlpha` | Whether any pixel is not fully opaque. Shown in the inspector. |
 | `sortOrder` | Assets order, which is also the drawing order: later is on top. |
@@ -273,12 +277,60 @@ is contained in any case.
 | Shape | Horizontal place | Vertical place |
 | ----- | ---------------- | -------------- |
 | Full frame: `abs(a − 16/9) ≤ 0.02` and `width ≥ 1280` | `0 0 1 1` | Full width, centred vertically |
-| Wide: `a ≥ 2.5` | 60 % wide, bottom centre, 4 % margin | 90 % wide, bottom edge at 0.78 (the 22 % portrait safe area) |
+| Wide: `a ≥ 2.5` | 60 % wide, bottom centre, 4 % margin | Full width between the portrait side margins, bottom edge at 0.78 (the 22 % portrait safe area) |
 | Tall: `a ≤ 0.6` | 70 % high, right edge with a 4 % margin, top at 0.15 | 40 % high, right edge with a 4 % margin, top at 0.30 |
 | Badge: anything else | 20 % high, top right, 4 % margin | 30 % wide (or 30 % of the height when tall), top right below the 8 % safe top |
 
 Every rect is clamped inside 0..1 with sides of at least 0.02, the overlay
 rule.
+
+Pinned numbers (2026-10-20). The margins are the existing constants in
+`overlay_layout.rs`: `LANDSCAPE_SIDE_MARGIN` = 0.0225,
+`LANDSCAPE_EDGE_MARGIN` = 0.04, `PORTRAIT_SIDE_MARGIN` = 0.071111,
+`PORTRAIT_TOP_MARGIN` = 0.08 and `PORTRAIT_BOTTOM_MARGIN` = 0.22. On a
+canvas of aspect `C` (16/9 horizontal, 9/16 vertical), a rect's two sides
+are linked by `h = w × C / a`.
+
+- **Full frame**
+  - Horizontal: `0 0 1 1`.
+  - Vertical: `w = 1`, `x = 0`, `y = (1 − h) / 2`.
+- **Wide**
+  - Horizontal: `w = 0.60`, `x = 0.20`, `y = 1 − 0.04 − h`.
+  - Vertical: `w = 1 − 2 × PORTRAIT_SIDE_MARGIN`, `x = PORTRAIT_SIDE_MARGIN`,
+    `y = 0.78 − h`.
+- **Tall**
+  - Horizontal: `h = 0.70`, `x = 1 − LANDSCAPE_SIDE_MARGIN − w`, `y = 0.15`.
+  - Vertical: `h = 0.40`; if `w` would be over
+    `1 − 2 × PORTRAIT_SIDE_MARGIN`, shrink both sides; then
+    `x = 1 − PORTRAIT_SIDE_MARGIN − w` and `y = 0.30`.
+- **Badge**
+  - Horizontal: `h = 0.20`, `x = 1 − LANDSCAPE_SIDE_MARGIN − w`, `y = 0.04`.
+  - Vertical: `w = 0.30 × min(a, 1)`, `x = 1 − PORTRAIT_SIDE_MARGIN − w`,
+    `y = 0.08`.
+
+Round each value to 6 decimals, then clamp. `banner_default_places` is
+Rust-only (the renderer receives the stored rects), with a unit test for
+each row.
+
+**Where the image lands inside its rect** (`banner_draw_rect` in Rust,
+`bannerDrawRect` in TS). Both must reproduce every case in
+`protocol-fixtures/banner-geometry.json` exactly:
+
+1. `(left, top, right, bottom) = OverlayRect::pixels(canvas)`.
+2. `rw = max(1, right − left)` and `rh = max(1, bottom − top)`.
+3. Fit the image's longer side to the rect:
+   - If `iw × rh ≤ ih × rw`, then `dh = rh` and
+     `dw = min(rw, max(1, round(iw × rh / ih)))`.
+   - Otherwise `dw = rw` and `dh = min(rh, max(1, round(ih × rw / iw)))`.
+   - `round` is half away from zero. JS `Math.round` matches it for these
+     positive values.
+4. Horizontal position from `OverlayRect::horizontal_gravity`:
+   - Left: `dx = left`.
+   - Center: `dx = left + floor((rw − dw) / 2)`.
+   - Right: `dx = left + rw − dw`.
+5. Vertical position: `dy = top + rh − dh` when `bottom_gravity()`, else
+   `dy = top`.
+6. Finally `dx = min(dx, W − dw)` and `dy = min(dy, H − dh)`.
 
 ### Where it draws
 
@@ -406,17 +458,29 @@ mutation and lane tables, next to the `screens.*` rows (`main.rs:5520-5750`).
 | ------ | ---- | --------------- |
 | `banners.list` | observation | → `Banner[]` |
 | `banners.importImage` | AssetImport | `{sourceCapability}` → `Banner` |
-| `banners.update` | mutation | `{id, name?, horizontal?, vertical?, showOnStream?, showInRecording?, opacity?}` → `Banner` |
+| `banners.update` | mutation | `{id, name?, horizontal?, vertical?, showOnStream?, showInRecording?, opacity?, hideAfterSec?, repeatEveryMin?}` → `Banner` |
 | `banners.reorder` | mutation | `{ids}` → `Banner[]` |
-| `banners.delete` | mutation | `{id}` → `{}` (deletes the row and both files; refuses a path outside `userData/Banners`) |
+| `banners.delete` | mutation | `{id}` → `Banner[]` (the remaining list; deletes the row and both files; refuses a path outside the managed `Banners` dir) |
 | `banners.show` | LiveControl | `{id}` → `Banner` |
 | `banners.hide` | LiveControl | `{id?}` → `Banner[]` (no `id` hides all) |
 
 Event `banners.changed` carries the full list to every window.
 
-**`Banner` on the wire**: every field of the table except `fileName`, plus
-`imageUrl` and `thumbnailUrl` (`videorc-asset://banner/<file>`, added by
-main's existing path redaction).
+**`Banner` on the wire** (pinned 2026-10-20; the example is
+`protocol-fixtures/high-risk-contracts.json` → `banner.minimal` /
+`banner.withTimer`):
+- camelCase:
+  `{id, name, imageFile, thumbnailFile, width, height, hasAlpha, sortOrder, shown, horizontal, vertical, showOnStream, showInRecording, opacity, hideAfterSec?, repeatEveryMin?, createdAt, updatedAt}`.
+- `horizontal` and `vertical` are `OverlayRect {x, y, w, h}`.
+- The only optional fields are the Phase 2 timer, `hideAfterSec` and
+  `repeatEveryMin`. They are omitted when off (`skip_serializing_if`; never
+  `null`). In `banners.update`, `0` turns a timer off.
+- The renderer builds `videorc-asset://banner/<imageFile>` itself, the way
+  takeover cards do with their basename.
+
+**Refusals** come back as ordinary RPC errors whose message is the exact
+sentence from "Refusals". The renderer shows any `banners.*` refusal as a
+warning, never an error toast.
 
 **Remote intents** (`remote_control.rs` `RemoteIntent`,
 `docs/remote-control.md`):
@@ -612,8 +676,8 @@ Steps:
    IPC chain.
 3. Add a `videorc-asset://banner/<file>` host with a
    `resolveManagedBannerFile` root resolver (realpath, no symlinks; mirror
-   `resolveManagedScreenFile`, `index.ts:14076`), plus redaction of
-   `fileName` into `imageUrl` and `thumbnailUrl`.
+   `resolveManagedScreenFile`, `index.ts:14076`). The managed dir is
+   `Banners` beside `Screens`.
 
 Done when:
 - `pnpm --filter @videorc/desktop test -- backend-rpc-contract electron-ipc-contract protocol-contract-fixtures`

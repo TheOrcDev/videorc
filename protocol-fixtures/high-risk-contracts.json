@@ -1958,5 +1958,45 @@
     },
     "deleteParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
     "accepted": { "accepted": true }
+  },
+  "banner": {
+    "minimal": {
+      "id": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b",
+      "name": "Sponsor",
+      "imageFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.png",
+      "thumbnailFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.thumb.png",
+      "width": 2400,
+      "height": 400,
+      "hasAlpha": true,
+      "sortOrder": 0,
+      "shown": true,
+      "horizontal": { "x": 0.2, "y": 0.782222, "w": 0.6, "h": 0.177778 },
+      "vertical": { "x": 0.071111, "y": 0.699583, "w": 0.857778, "h": 0.080417 },
+      "showOnStream": true,
+      "showInRecording": false,
+      "opacity": 0.85,
+      "createdAt": "2026-10-20T18:00:00Z",
+      "updatedAt": "2026-10-20T18:05:00Z"
+    },
+    "withTimer": {
+      "id": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b",
+      "name": "Sponsor",
+      "imageFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.png",
+      "thumbnailFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.thumb.png",
+      "width": 2400,
+      "height": 400,
+      "hasAlpha": true,
+      "sortOrder": 0,
+      "shown": true,
+      "horizontal": { "x": 0.2, "y": 0.782222, "w": 0.6, "h": 0.177778 },
+      "vertical": { "x": 0.071111, "y": 0.699583, "w": 0.857778, "h": 0.080417 },
+      "showOnStream": true,
+      "showInRecording": false,
+      "opacity": 0.85,
+      "hideAfterSec": 30,
+      "repeatEveryMin": 15,
+      "createdAt": "2026-10-20T18:00:00Z",
+      "updatedAt": "2026-10-20T18:05:00Z"
+    }
   }
 }
