@@ -1105,6 +1105,87 @@ pub(crate) fn show_banner_within_budget(
     database.show_banner(id, BANNER_MAX_SHOWN)
 }
 
+/// `banners.show` as one call, for Buddy voice (plan 186 S11): the cap and
+/// budget refusals, the row, then the compositor and `banners.changed`.
+pub(crate) async fn show_banner_and_publish(state: &AppState, id: &str) -> Result<Banner> {
+    let canvases = crate::compositor::banner_prepare_canvases(state).await;
+    let banner = show_banner(&state.database, id, &canvases)?;
+    if let Err(error) = on_banners_changed(state).await {
+        tracing::warn!("Could not publish the banner list after a voice show: {error:#}");
+    }
+    Ok(banner)
+}
+
+/// `banners.hide` as one call, for Buddy voice (plan 186 S11): one banner, or
+/// every banner without an id, then the compositor and `banners.changed`.
+pub(crate) async fn hide_banners_and_publish(
+    state: &AppState,
+    id: Option<&str>,
+) -> Result<Vec<Banner>> {
+    match id {
+        Some(id) => {
+            state.database.hide_banner(id)?;
+        }
+        None => state.database.hide_all_banners()?,
+    }
+    on_banners_changed(state).await
+}
+
+/// How a spoken banner name resolved (plan 186 S11).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BannerNameMatch {
+    One(Box<Banner>),
+    /// The names it could mean, in the order given.
+    Several(Vec<String>),
+    None,
+}
+
+/// Plan 186 S11: the banner a spoken name means. Names and speech meet in
+/// `cohost_command::spoken_form`, and a name's own trailing "banner" is
+/// dropped ("Sponsor banner" answers to "the sponsor banner"). An exact name
+/// wins; otherwise the spoken words must begin exactly one name ("sponsor"
+/// finds "Sponsor Acme"). Two exact names, or two names that start the same
+/// way, are ambiguous.
+pub(crate) fn match_banner_name(banners: &[Banner], spoken: &str) -> BannerNameMatch {
+    let spoken = crate::cohost_command::spoken_form(spoken);
+    if spoken.is_empty() {
+        return BannerNameMatch::None;
+    }
+    let forms: Vec<(String, &Banner)> = banners
+        .iter()
+        .map(|banner| (banner_spoken_form(&banner.name), banner))
+        .collect();
+    let exact: Vec<&Banner> = forms
+        .iter()
+        .filter(|(form, _)| *form == spoken)
+        .map(|(_, banner)| *banner)
+        .collect();
+    let matched = if exact.is_empty() {
+        forms
+            .iter()
+            .filter(|(form, _)| form.starts_with(&spoken))
+            .map(|(_, banner)| *banner)
+            .collect()
+    } else {
+        exact
+    };
+    match matched.as_slice() {
+        [] => BannerNameMatch::None,
+        [one] => BannerNameMatch::One(Box::new((*one).clone())),
+        several => {
+            BannerNameMatch::Several(several.iter().map(|banner| banner.name.clone()).collect())
+        }
+    }
+}
+
+fn banner_spoken_form(name: &str) -> String {
+    let form = crate::cohost_command::spoken_form(name);
+    match form.strip_suffix(" banner") {
+        Some(stripped) => stripped.to_string(),
+        None => form,
+    }
+}
+
 // --- The seam to the compositor (S3) ----------------------------------------
 
 /// The banners the compositor draws, bottom to top: showing, in Assets order.

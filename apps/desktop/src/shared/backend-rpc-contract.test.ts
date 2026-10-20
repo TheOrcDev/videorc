@@ -2482,7 +2482,18 @@ describe('backend RPC contract', () => {
       const state = { ...base, command: { ...minimal, status } }
       expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     }
-    for (const kind of ['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']) {
+    for (const kind of [
+      'highlight',
+      'clear',
+      'remove',
+      'confirm',
+      'cancel',
+      'unknown',
+      // Plan 186 S11: banner commands finish at once, without a target.
+      'show-banner',
+      'hide-banner',
+      'hide-banners'
+    ]) {
       const state = { ...base, command: { ...minimal, kind } }
       expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     }

@@ -5841,9 +5841,20 @@ export interface CohostErrorDetail {
 
 /**
  * What a voice command asked for. `confirm` and `cancel` answer the open card,
- * so they update that command instead of standing on their own.
+ * so they update that command instead of standing on their own. The banner
+ * kinds (plan 186 S11: "show the sponsor banner", "hide the banners") finish
+ * at once: `done`, `not-found` or `refused`, with the sentence in `message`.
  */
-export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | 'cancel' | 'unknown'
+export type CohostCommandKind =
+  | 'highlight'
+  | 'clear'
+  | 'remove'
+  | 'confirm'
+  | 'cancel'
+  | 'unknown'
+  | 'show-banner'
+  | 'hide-banner'
+  | 'hide-banners'
 
 /**
  * Where the latest voice command stands:

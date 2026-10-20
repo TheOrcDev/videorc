@@ -23,6 +23,17 @@
 //! only while a chooser is open. `Unknown` is rare on purpose: only a clearly
 //! addressed "Buddy" followed by a closed sentence that matches nothing. When
 //! unsure, the detector says nothing.
+//!
+//! Banner commands (plan 186 S11): "show the sponsor banner", "put up the
+//! sponsor banner", "hide the sponsor banner", "take the sponsor banner
+//! down", "hide the banners". They need the wake word. The word "banner" (or
+//! "banners") in the sentence said to Buddy hands the utterance to the banner
+//! grammar before the highlight and clear grammar sees it, the way the marker
+//! grammar is consumed first (`docs/buddy-commands-contract.md`): a banner
+//! utterance never becomes a highlight of a viewer called "banner", and one
+//! that is not a banner command is "didn't catch that" once its sentence
+//! closes. The spoken name travels as `CommandTarget::Name`; the engine
+//! matches it against the banners that exist (`banners::match_banner_name`).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -122,6 +133,38 @@ fn is_persona_wake_token(text: &str) -> bool {
         .read()
         .is_ok_and(|tokens| tokens.iter().any(|token| token == text))
 }
+
+/// The form a name takes to meet speech (plan 186 S11): lowercase, Latin
+/// letters folded to ASCII, digits kept, apostrophes dropped and every other
+/// character a word break. "Sponsor_Banner 2" and "Café" become
+/// "sponsor banner 2" and "cafe", which is how the detector hears them. Both
+/// the spoken words and the stored name go through it before they compare.
+pub(crate) fn spoken_form(text: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if is_apostrophe(ch) {
+            continue;
+        }
+        let kept = if ch.is_numeric() {
+            Some(ch)
+        } else if ch.is_alphabetic() {
+            let lower = ch.to_lowercase().next().unwrap_or(ch);
+            Some(fold_ascii(lower).unwrap_or(lower))
+        } else {
+            None
+        };
+        match kept {
+            Some(ch) => current.push(ch),
+            None if !current.is_empty() => words.push(std::mem::take(&mut current)),
+            None => {}
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words.join(" ")
+}
 /// Words that introduce an address: "hey Buddy", "okay Buddy".
 const LEAD_INS: &[&str] = &[
     "hey", "ok", "okay", "hi", "yo", "so", "um", "uh", "and", "now", "alright", "oh", "right",
@@ -203,6 +246,36 @@ const PARTICLES: &[&str] = &[
     "quickly", "too", "as", "well", "most", "top", "bottom", "middle", "first", "second", "third",
     "1st", "2nd", "3rd", "next", "other", "another", "same", "both", "each", "every",
 ];
+
+// Banners (plan 186 S11). The noun owns the utterance: see the module doc.
+const BANNER_NOUNS: &[&str] = &["banner", "banners"];
+/// Verbs that show a banner. "put", "bring" and "throw" need "up" (or "on");
+/// "pull" shows with "up" and hides with "down" or "off".
+const BANNER_SHOW_VERBS: &[&str] = &[
+    "show",
+    "display",
+    "highlight",
+    "put",
+    "bring",
+    "pull",
+    "throw",
+];
+/// Verbs that hide a banner. "take" needs "down" or "off".
+const BANNER_HIDE_VERBS: &[&str] = &["hide", "take", "remove", "clear", "dismiss", "drop", "pull"];
+/// The banner verbs a particle may follow before the name ("put up the
+/// sponsor banner", "take down the sponsor banner").
+const BANNER_PARTICLE_VERBS: &[&str] = &["put", "bring", "throw", "pull", "take"];
+/// "hide all banners", "hide every banner", "take both banners down".
+const BANNER_ALL_WORDS: &[&str] = &["all", "every", "both", "each"];
+/// Words between the verb and the banner's name that are not the name:
+/// "show me the sponsor banner", "hide all of the banners". Once the name has
+/// started every word up to "banner" belongs to it ("follow me").
+const BANNER_SKIP_WORDS: &[&str] = &[
+    "the", "a", "an", "my", "our", "your", "this", "that", "these", "those", "of", "please", "now",
+    "just", "quickly", "me", "us", "again", "and", "then", "also",
+];
+/// A banner name is at most 40 characters; six spoken words cover it.
+const BANNER_NAME_MAX_WORDS: usize = 6;
 
 /// Decisive cancel words, with or without the wake word. While a removal
 /// card is open, any of these anywhere in a sentence cancels it: "Yeah I
@@ -348,6 +421,13 @@ pub enum CommandKind {
     Choose(u8),
     /// Buddy was clearly addressed and understood nothing.
     Unknown,
+    /// Plan 186 S11: "show the sponsor banner". The target is the spoken
+    /// name, or `None` for "show the banner" (fine with a single banner).
+    ShowBanner,
+    /// "hide the sponsor banner", "take the banner down". Same target rule.
+    HideBanner,
+    /// "hide the banners", "hide all banners", "take the banners down".
+    HideBanners,
 }
 
 impl CommandKind {
@@ -361,6 +441,9 @@ impl CommandKind {
             Self::Cancel => "cancel".to_string(),
             Self::Choose(index) => format!("choose {}", *index + 1),
             Self::Unknown => "unknown".to_string(),
+            Self::ShowBanner => "show banner".to_string(),
+            Self::HideBanner => "hide banner".to_string(),
+            Self::HideBanners => "hide banners".to_string(),
         }
     }
 }
@@ -844,7 +927,12 @@ fn scan_commands(
         !actions_only
             || matches!(
                 detection.command.kind,
-                CommandKind::Highlight | CommandKind::Clear | CommandKind::Remove
+                CommandKind::Highlight
+                    | CommandKind::Clear
+                    | CommandKind::Remove
+                    | CommandKind::ShowBanner
+                    | CommandKind::HideBanner
+                    | CommandKind::HideBanners
             )
     };
     let mut unknown: Option<Detection> = None;
@@ -963,7 +1051,22 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
             end: sentence_end,
         });
     }
-    match parse_command(words, from, span_end, false) {
+    // Plan 186 S11: "banner" in the sentence said to Buddy hands the
+    // utterance to the banner grammar, and it never falls through to the
+    // highlight and clear grammar (the marker precedence). A later sentence
+    // that only mentions a banner ("Buddy, highlight that comment. Nice
+    // banner.") leaves the command alone, unless the command reaches into
+    // that sentence.
+    if has_banner_noun(&words[from..=sentence_end]) {
+        return parse_banner_wake(words, wake, from, span_end, newest);
+    }
+    let parsed = parse_command(words, from, span_end, false);
+    if parsed.as_ref().is_some_and(|parsed| {
+        has_banner_noun(&words[from..=first_sentence_end(words, parsed.end, span_end)])
+    }) {
+        return parse_banner_wake(words, wake, from, span_end, newest);
+    }
+    match parsed {
         Some(parsed) => {
             if words[parsed.end].final_index != newest {
                 return WakeOutcome::Nothing;
@@ -1001,6 +1104,11 @@ fn parse_structured(words: &[Word], verb: usize, newest: u64) -> Option<Detectio
     if words[parsed.end].final_index != newest {
         return None;
     }
+    // Plan 186 S11: a phrase whose sentence holds a banner noun is never a
+    // comment command ("delete that banner, it's spam").
+    if has_banner_noun(&words[verb..=first_sentence_end(words, parsed.end, span_end)]) {
+        return None;
+    }
     let dedupe = Some(dedupe_key(&parsed));
     Some(Detection {
         command: DetectedCommand {
@@ -1014,6 +1122,178 @@ fn parse_structured(words: &[Word], verb: usize, newest: u64) -> Option<Detectio
         dedupe,
         end: parsed.end,
     })
+}
+
+/// Plan 186 S11: the span after the wake word holds "banner" or "banners".
+/// A banner command that ends in the newest final is reported; a span that is
+/// not one is "didn't catch that" once its sentence closes, never a highlight
+/// or a clear ("Buddy, pin the banner" is not a comment from "banner").
+fn parse_banner_wake(
+    words: &[Word],
+    wake: usize,
+    from: usize,
+    span_end: usize,
+    newest: u64,
+) -> WakeOutcome {
+    if let Some(parsed) = parse_banner_command(words, from, span_end) {
+        if words[parsed.end].final_index != newest {
+            return WakeOutcome::Nothing;
+        }
+        let dedupe = Some(dedupe_key(&parsed));
+        return WakeOutcome::Command(Detection {
+            command: DetectedCommand {
+                kind: parsed.kind,
+                target: parsed.target,
+                question: false,
+                reason: None,
+                heard: text_of(&words[wake..=parsed.end]),
+                wake_word: true,
+            },
+            dedupe,
+            end: parsed.end,
+        });
+    }
+    if !addressed(words, wake) {
+        return WakeOutcome::Nothing;
+    }
+    let span = &words[from..span_end];
+    let Some(last) = span.last() else {
+        return WakeOutcome::Nothing;
+    };
+    // "Buddy, take the banner" is still being said until a sentence mark or
+    // another wake word closes it.
+    let closed = last.sentence_end || span_end < words.len();
+    if !closed || last.final_index != newest {
+        return WakeOutcome::Nothing;
+    }
+    WakeOutcome::Unknown(Detection {
+        command: DetectedCommand {
+            kind: CommandKind::Unknown,
+            target: CommandTarget::None,
+            question: false,
+            reason: None,
+            heard: text_of(span),
+            wake_word: true,
+        },
+        dedupe: Some(format!("unknown|{}", words[wake].ordinal)),
+        end: span_end - 1,
+    })
+}
+
+/// The banner command in `words[from..end]`, anchored on its noun: the first
+/// "banner" or "banners", a banner verb earlier in the same sentence, the
+/// words between them minus leading small words as the name, and the verb's
+/// particle before the name ("put up the sponsor banner") or after the noun
+/// ("take the sponsor banner down"). `None` while the command is incomplete
+/// ("take the banner", no "down" yet) or not a banner command at all.
+fn parse_banner_command(words: &[Word], from: usize, end: usize) -> Option<Parsed> {
+    let noun = (from..end).find(|&index| BANNER_NOUNS.contains(&words[index].text.as_str()))?;
+    // The noun's own sentence: a command closed earlier never reaches it.
+    let sentence_start = (from..noun)
+        .rev()
+        .find(|&index| words[index].sentence_end)
+        .map_or(from, |index| index + 1);
+    let verb = (sentence_start..noun).find(|&index| is_banner_verb(&words[index].text))?;
+    let mut particles: Vec<&str> = Vec::new();
+    let mut all = false;
+    let mut name: Vec<&str> = Vec::new();
+    // A particle belongs to the verb only right after a verb that takes one
+    // ("put up the", "take down the"); anywhere else it is part of the name
+    // ("show the on air banner" names "on air").
+    let mut after_verb = BANNER_PARTICLE_VERBS.contains(&words[verb].text.as_str());
+    for word in &words[verb + 1..noun] {
+        let text = word.text.as_str();
+        if !name.is_empty() {
+            name.push(text);
+        } else if after_verb && TAIL_PARTICLES.contains(&text) {
+            particles.push(text);
+            continue;
+        } else if BANNER_ALL_WORDS.contains(&text) {
+            all = true;
+        } else if !BANNER_SKIP_WORDS.contains(&text) {
+            name.push(text);
+        }
+        after_verb = false;
+        if name.len() > BANNER_NAME_MAX_WORDS {
+            return None;
+        }
+    }
+    let mut last = noun;
+    if !words[noun].sentence_end {
+        for (index, word) in words.iter().enumerate().take(end).skip(noun + 1) {
+            if !TAIL_PARTICLES.contains(&word.text.as_str()) {
+                break;
+            }
+            particles.push(word.text.as_str());
+            last = index;
+            if word.sentence_end {
+                break;
+            }
+        }
+    }
+    let show = banner_verb_shows(&words[verb].text, &particles)?;
+    let plural = words[noun].text == "banners";
+    let target = if name.is_empty() {
+        CommandTarget::None
+    } else {
+        CommandTarget::Name(name.join(" "))
+    };
+    let kind = match (show, plural || all, &target) {
+        (true, false, _) => CommandKind::ShowBanner,
+        // "show all banners": which four? Not a command.
+        (true, true, _) => return None,
+        (false, true, CommandTarget::None) => CommandKind::HideBanners,
+        (false, _, _) => CommandKind::HideBanner,
+    };
+    Some(Parsed {
+        kind,
+        target,
+        question: false,
+        reason: None,
+        end: last,
+    })
+}
+
+fn is_banner_verb(text: &str) -> bool {
+    BANNER_SHOW_VERBS.contains(&text) || BANNER_HIDE_VERBS.contains(&text)
+}
+
+fn has_banner_noun(words: &[Word]) -> bool {
+    words
+        .iter()
+        .any(|word| BANNER_NOUNS.contains(&word.text.as_str()))
+}
+
+/// Plan 186 S11: whether a heard command names a banner. The engine keeps
+/// such an utterance away from the cloud command parser, which knows
+/// comments only: a banner sentence never becomes a highlight.
+pub(crate) fn heard_mentions_banner(heard: &str) -> bool {
+    heard.split(|ch: char| !ch.is_alphanumeric()).any(|word| {
+        BANNER_NOUNS
+            .iter()
+            .any(|noun| word.eq_ignore_ascii_case(noun))
+    })
+}
+
+/// Whether the banner verb shows (`true`) or hides, given its particles;
+/// `None` while a verb that needs one has none yet.
+fn banner_verb_shows(verb: &str, particles: &[&str]) -> Option<bool> {
+    let up = particles
+        .iter()
+        .any(|particle| matches!(*particle, "up" | "on" | "onto"));
+    let down = particles
+        .iter()
+        .any(|particle| matches!(*particle, "down" | "off" | "away"));
+    match verb {
+        "show" | "display" | "highlight" => Some(true),
+        "put" | "bring" | "throw" => up.then_some(true),
+        "pull" if up => Some(true),
+        "pull" if down => Some(false),
+        "pull" => None,
+        "hide" | "remove" | "clear" | "dismiss" | "drop" => Some(false),
+        "take" => down.then_some(false),
+        _ => None,
+    }
 }
 
 /// Buddy was addressed and nothing matched. Only once the sentence is closed
@@ -1901,6 +2181,280 @@ mod tests {
                 "text: {text:?}, context: {ctx:?}, found: {found:?}"
             );
         }
+    }
+
+    /// Plan 186 S11: the banner grammar, and the phrases it must not touch.
+    #[test]
+    fn banner_phrase_table() {
+        use CommandKind::{Clear, HideBanner, HideBanners, Highlight, Remove, ShowBanner, Unknown};
+        use CommandTarget::{Deixis, None as NoTarget};
+        let hit = |kind: CommandKind, target: CommandTarget| Some((kind, target, false, None));
+        let cases = [
+            // Show.
+            (
+                "Buddy, show the sponsor banner",
+                &PLAIN,
+                hit(ShowBanner, name("sponsor")),
+            ),
+            (
+                "Buddy, show sponsor banner",
+                &PLAIN,
+                hit(ShowBanner, name("sponsor")),
+            ),
+            (
+                "Buddy show the Sponsor banner.",
+                &PLAIN,
+                hit(ShowBanner, name("sponsor")),
+            ),
+            (
+                "Buddy, put up the sponsor banner",
+                &PLAIN,
+                hit(ShowBanner, name("sponsor")),
+            ),
+            (
+                "Buddy, put the sponsor banner up",
+                &PLAIN,
+                hit(ShowBanner, name("sponsor")),
+            ),
+            (
+                "Hey Buddy, can you please show me the follow me banner?",
+                &PLAIN,
+                hit(ShowBanner, name("follow me")),
+            ),
+            (
+                "Buddy, display the sale 50 banner",
+                &PLAIN,
+                hit(ShowBanner, name("sale 50")),
+            ),
+            (
+                "Buddy, bring up the logo banner now",
+                &PLAIN,
+                hit(ShowBanner, name("logo")),
+            ),
+            ("Buddy, show the banner", &PLAIN, hit(ShowBanner, NoTarget)),
+            // A particle is the verb's only right after a verb that takes one.
+            (
+                "Buddy, show the on air banner",
+                &PLAIN,
+                hit(ShowBanner, name("on air")),
+            ),
+            (
+                "Buddy, put the on air banner up",
+                &PLAIN,
+                hit(ShowBanner, name("on air")),
+            ),
+            (
+                "Buddy, take down the on air banner",
+                &PLAIN,
+                hit(HideBanner, name("on air")),
+            ),
+            // Hide one.
+            (
+                "Buddy, hide the sponsor banner",
+                &PLAIN,
+                hit(HideBanner, name("sponsor")),
+            ),
+            (
+                "Buddy, take down the sponsor banner",
+                &PLAIN,
+                hit(HideBanner, name("sponsor")),
+            ),
+            (
+                "Buddy, take the sponsor banner down",
+                &PLAIN,
+                hit(HideBanner, name("sponsor")),
+            ),
+            (
+                "Buddy, take the banner down",
+                &PLAIN,
+                hit(HideBanner, NoTarget),
+            ),
+            (
+                "Buddy, take the banner down.",
+                &PLAIN,
+                hit(HideBanner, NoTarget),
+            ),
+            (
+                "Buddy, remove the sponsor banner",
+                &PLAIN,
+                hit(HideBanner, name("sponsor")),
+            ),
+            (
+                "Buddy, pull the logo banner down",
+                &PLAIN,
+                hit(HideBanner, name("logo")),
+            ),
+            ("Buddy, hide the banner", &PLAIN, hit(HideBanner, NoTarget)),
+            // Hide all.
+            (
+                "Buddy, hide the banners",
+                &PLAIN,
+                hit(HideBanners, NoTarget),
+            ),
+            (
+                "Buddy, hide all banners",
+                &PLAIN,
+                hit(HideBanners, NoTarget),
+            ),
+            (
+                "Buddy, hide all the banners.",
+                &PLAIN,
+                hit(HideBanners, NoTarget),
+            ),
+            (
+                "Buddy, hide all of the banners",
+                &PLAIN,
+                hit(HideBanners, NoTarget),
+            ),
+            (
+                "Buddy, take the banners down",
+                &PLAIN,
+                hit(HideBanners, NoTarget),
+            ),
+            (
+                "Buddy, take all the banners down",
+                &PLAIN,
+                hit(HideBanners, NoTarget),
+            ),
+            (
+                "Buddy, clear the banners",
+                &PLAIN,
+                hit(HideBanners, NoTarget),
+            ),
+            // Still being said: "take" needs "down", "put" needs "up".
+            ("Buddy, take the banner", &PLAIN, None),
+            ("Buddy, put the sponsor banner", &PLAIN, None),
+            // Addressed, closed and not a banner command: didn't catch that,
+            // never a highlight of a viewer called "banner".
+            ("Buddy, take the banner.", &PLAIN, hit(Unknown, NoTarget)),
+            ("Buddy, pin the banner.", &PLAIN, hit(Unknown, NoTarget)),
+            (
+                "Buddy, the banner looks great.",
+                &PLAIN,
+                hit(Unknown, NoTarget),
+            ),
+            ("Buddy, show all banners.", &PLAIN, hit(Unknown, NoTarget)),
+            ("Buddy, ban the banner guy.", &PLAIN, hit(Unknown, NoTarget)),
+            // Not closed yet: nothing.
+            ("Buddy, the banner looks great", &PLAIN, None),
+            // Banner commands need the wake word, in every context.
+            ("show the sponsor banner", &PLAIN, None),
+            ("hide the banners", &PLAIN, None),
+            ("take the banner down", &PLAIN, None),
+            ("show the sponsor banner", &WAKE_REQUIRED, None),
+            (
+                "Buddy, hide the banners",
+                &WAKE_REQUIRED,
+                hit(HideBanners, NoTarget),
+            ),
+            // A banner command is a new command while a card is open.
+            (
+                "Buddy, hide the banners",
+                &ANSWERING,
+                hit(HideBanners, NoTarget),
+            ),
+            (
+                "Buddy, show the sponsor banner",
+                &CHOOSING,
+                hit(ShowBanner, name("sponsor")),
+            ),
+            // Talk about banners.
+            ("the sponsor banner is new", &PLAIN, None),
+            ("I made a banner for the stream", &PLAIN, None),
+            ("Buddy is on the banner", &PLAIN, None),
+            // A later sentence that only mentions a banner leaves the command
+            // alone; one the highlight grammar would read into it does not.
+            (
+                "Buddy, highlight that comment. Nice banner.",
+                &PLAIN,
+                hit(Highlight, Deixis),
+            ),
+            ("Buddy, show. Nice banner.", &PLAIN, hit(Unknown, NoTarget)),
+            (
+                "Buddy, ok. Delete that banner, it's spam.",
+                &PLAIN,
+                hit(Unknown, NoTarget),
+            ),
+            // Without the wake word a phrase whose sentence holds a banner
+            // noun is never a comment command.
+            ("delete that banner, it's spam", &PLAIN, None),
+            ("highlight the comment from banner fan", &PLAIN, None),
+            (
+                "delete that comment, it's spam",
+                &PLAIN,
+                Some((Remove, Deixis, false, Some("spam".to_string()))),
+            ),
+            // The highlight and clear grammar, unchanged (the collision cases).
+            ("Buddy, show that comment", &PLAIN, hit(Highlight, Deixis)),
+            ("Buddy, hide the highlight", &PLAIN, hit(Clear, NoTarget)),
+            ("Buddy, take it down", &PLAIN, hit(Clear, Deixis)),
+            ("Buddy, show this on stream", &PLAIN, hit(Highlight, Deixis)),
+            (
+                "Buddy, take the highlight down",
+                &PLAIN,
+                hit(Clear, NoTarget),
+            ),
+            ("Buddy, put this one up", &PLAIN, hit(Highlight, Deixis)),
+        ];
+        for (text, ctx, expected) in cases {
+            let found = detect_one(text, ctx);
+            assert_eq!(
+                found.as_ref().map(shape),
+                expected,
+                "text: {text:?}, context: {ctx:?}, found: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_banner_command_split_over_two_finals_completes_once() {
+        let mut detector = CommandDetector::default();
+        let at = Instant::now();
+        assert_eq!(
+            detector.observe_final("client", 1, "Buddy, take the sponsor", at, &PLAIN),
+            None
+        );
+        let second = detector
+            .observe_final(
+                "client",
+                2,
+                "banner down.",
+                at + Duration::from_secs(2),
+                &PLAIN,
+            )
+            .expect("the command completes with its particle");
+        assert_eq!(
+            shape(&second),
+            (CommandKind::HideBanner, name("sponsor"), false, None)
+        );
+        assert_eq!(second.heard, "buddy take the sponsor banner down");
+        assert!(second.wake_word);
+        // Closed by its sentence mark, the command is finished: a later final
+        // does not report it again.
+        assert_eq!(
+            detector.observe_final("client", 3, "great", at + Duration::from_secs(4), &PLAIN),
+            None
+        );
+    }
+
+    #[test]
+    fn heard_mentions_banner_reads_the_noun_only() {
+        assert!(heard_mentions_banner("buddy pin the banner"));
+        assert!(heard_mentions_banner("Buddy, the BANNERS."));
+        assert!(!heard_mentions_banner(
+            "buddy show what coders x just asked"
+        ));
+        assert!(!heard_mentions_banner("buddy highlight bannerking"));
+    }
+
+    #[test]
+    fn spoken_form_meets_names_the_way_the_detector_hears_them() {
+        assert_eq!(spoken_form("Sponsor_Banner 2"), "sponsor banner 2");
+        assert_eq!(spoken_form("  Café Crème! "), "cafe creme");
+        assert_eq!(spoken_form("Tom's"), "toms");
+        assert_eq!(spoken_form("FOLLOW ME"), "follow me");
+        assert_eq!(spoken_form("***"), "");
+        assert_eq!(spoken_form("Привет"), "привет");
     }
 
     #[test]

@@ -46,6 +46,79 @@ Named markers are original-timeline points. Legacy clip marks remain
 retrospective hints and report Moments remain ranges. See
 [Session markers](session-markers.md) for the user behavior.
 
+## Banner commands (desktop, plan 186 S11)
+
+Banners (plan 186) are shown and hidden by voice through the same detector
+as the highlight and clear commands (`cohost_command.rs`) and the same
+engine path (`cohost::run_detected_command`). They need the wake word; there
+is no structured phrase without it. The grammar:
+
+| Phrase | Kind | Target |
+| --- | --- | --- |
+| "show the {name} banner", "show {name} banner", "put up the {name} banner", "put the {name} banner up" | `show-banner` | the spoken name |
+| "show the banner" | `show-banner` | none: the only banner |
+| "hide the {name} banner", "take down the {name} banner", "take the {name} banner down" | `hide-banner` | the spoken name |
+| "hide the banner", "take the banner down" | `hide-banner` | none: the only one showing |
+| "hide the banners", "hide all banners", "hide all the banners", "take the banners down" | `hide-banners` | none |
+
+Show verbs: show, display, highlight, put, bring or throw (with "up" or
+"on"), pull (with "up"). Hide verbs: hide, remove, clear, dismiss, drop, take
+(with "down" or "off"), pull (with "down" or "off"). The particle comes right
+after the verb ("take down the sponsor banner") or after the noun ("take the
+sponsor banner down"); anywhere else it is part of the name ("show the on air
+banner" names "on air"). "all", "every", "both" or a plural noun make a hide
+a hide-all; "show all banners" is not a command. The name is every word
+between the verb and the noun, minus leading small words ("show me the
+follow me banner" names "follow me"), at most six words.
+
+**Precedence.** When the sentence said to Buddy (the words after the wake
+word, up to the first sentence mark) contains "banner" or "banners", the
+banner grammar runs first and the utterance never reaches the highlight and
+clear grammar (the marker precedence above): "Buddy, pin the banner." is
+never a highlight of a viewer called "banner". The same holds when the
+highlight grammar would read a banner noun into its command across a
+sentence mark ("Buddy, show. Nice banner."). A later sentence that only
+mentions a banner leaves an earlier command alone: "Buddy, highlight that
+comment. Nice banner." is still the highlight. An addressed, closed sentence
+with the noun that is not a banner command is `unknown` ("Buddy didn't catch
+that: '…'."), and it is never offered to the cloud command parser (plan 140
+S8), which knows comments only. One still open ("Buddy, take the banner", no
+"down" yet) is nothing until it closes. Without the wake word, a structured
+phrase that reads a banner noun is not a comment command ("delete that
+banner, it's spam"). Utterances without the noun behave exactly as before:
+"show that comment", "hide the highlight", "take it down" and "show this on
+stream" are unchanged. A banner command while a card or chooser is open is a
+new command, like a highlight: it replaces the card.
+
+**Names.** The engine matches the spoken name against the banners that exist
+when it is heard (`banners::match_banner_name`): both sides go through
+`cohost_command::spoken_form` (lowercase, ASCII-folded, alphanumeric words),
+and a name's own trailing "banner" is dropped ("Logo banner" answers to "the
+logo banner"). An exact name wins; otherwise the spoken words must begin
+exactly one name. No match is `not-found` ("Buddy couldn't find a banner
+named 'rainbow'."); two or more are `not-found` too, with the names ("Which
+banner? Sponsor or Sponsor Acme."). Without a name, a show means the only
+banner and a hide the only one showing; with several it is the same "Which
+banner?" sentence.
+
+**Execution.** Shows and hides go through the functions behind
+`banners.show` and `banners.hide` (`banners::show_banner_and_publish` and
+`banners::hide_banners_and_publish`, which end in `on_banners_changed`), so
+every refusal lands on the card verbatim with status `refused` ("Four
+banners are showing. Hide one first."). The voice gates are the usual ones
+(`unavailable` when voice commands are paused or without Premium); there is
+no banner gate of its own, because Buddy is Premium. A banner moves only for
+the Buddy session that heard the command. The card's sentences: "Showed the
+Sponsor banner.", "The Sponsor banner is already showing.", "Hid the Sponsor
+banner.", "The Sponsor banner isn't showing.", "Hid all banners.", "No banner
+is showing.", "You have no banners yet." A banner command never opens a
+chooser or a confirm card. Only `not-found` is counted in the session report
+(`notFound`).
+
+The wire kinds `show-banner`, `hide-banner` and `hide-banners` join part B's
+`kind` enum; a banner command carries no `target`, `candidates`,
+`operationId` or `reason`.
+
 ## A. Chat moderation (desktop, S4)
 
 Moderation is a chat feature. Manual removal is free; voice-sourced removal is
@@ -157,7 +230,7 @@ A provider's own deletion keeps its provider type (Twitch
 {
   "id": "cmd-uuid",
   "heard": "buddy highlight the comment from coders x",
-  "kind": "highlight|clear|remove|confirm|cancel|unknown",
+  "kind": "highlight|clear|remove|confirm|cancel|unknown|show-banner|hide-banner|hide-banners",
   "status": "done|not-found|ambiguous|confirm|refused|unavailable|cancelled|expired",
   "message": "Highlighted coders_x's comment.",
   "target": { "messageId": "…", "authorName": "coders_x", "platform": "twitch", "excerpt": "…" },

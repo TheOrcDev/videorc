@@ -3142,7 +3142,17 @@ const cohostCommandSchema = objectSchema(
   {
     id: boundedString,
     heard: stringSchema({ maxLength: 1000 }),
-    kind: enumSchema(['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']),
+    kind: enumSchema([
+      'highlight',
+      'clear',
+      'remove',
+      'confirm',
+      'cancel',
+      'unknown',
+      'show-banner',
+      'hide-banner',
+      'hide-banners'
+    ]),
     status: enumSchema([
       'done',
       'not-found',
