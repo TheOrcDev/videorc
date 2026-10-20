@@ -6,6 +6,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync
 } from 'node:fs'
@@ -23,7 +24,8 @@ import {
   HOLD_CARD_SETTLE_SECONDS,
   holdCardStats,
   parsePtsTimes,
-  sortedGapStats
+  sortedGapStats,
+  TEST_SHOW_CAP_SECONDS
 } from './lib/cloud-solo-gates.mjs'
 import {
   cloudAllowanceBlock,
@@ -77,6 +79,21 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //      VIDEORC_CLOUD_FEED_CA_FILE, and three direct FFmpeg publishes prove
 //      the check: the right roots pass the handshake, a wrong CA fails it,
 //      and a certificate for another name fails it.
+//   7. Test cloud (C6b), before Go Live: `cloud.selftest.run` pushes 10 s of
+//      synthetic video to the same runner with no platforms, and must pass
+//      on this machine's loopback: live within 20 s, the upload at least
+//      85% of the stream quality's bitrate. The fake web sees a `kind:
+//      "test"` create (a solo show capped at 30 s to the node) and its end,
+//      the runner applies no destinations.set, `GET /api/cloud/shows/current`
+//      stays empty while the test runs, the desktop's own show stays off,
+//      the receivers get nothing, and the node's usage report for the test
+//      is accepted and never metered. VIDEORC_CLOUD_SOLO_SHOTS_DIR=<dir> also
+//      captures the Livestream page's Test row idle, running, with the
+//      result and after a test the network blocked, each in dark and in
+//      light (the by-eye check).
+//   8. A test show nobody ends (the desktop died mid-test) ends on the
+//      runner `max-show` 30 s after its first feed frame, and the web closes
+//      it from the node's heartbeat.
 //
 // Why a proxy and not a killed process: the plan says "kill the stream
 // encoder", but on macOS the stream legs are fifo outputs of the one FFmpeg
@@ -111,6 +128,9 @@ const receiverKeys = ['solo-a', 'solo-b'].map(
   (name) => `${name}-SECRET-${Math.random().toString(36).slice(2, 10)}`
 )
 const cloudDir = resolve(process.env.VIDEORC_CLOUD_DIR ?? join(repoRoot, '..', 'videorc-cloud'))
+const shotsDir = process.env.VIDEORC_CLOUD_SOLO_SHOTS_DIR
+  ? resolve(process.env.VIDEORC_CLOUD_SOLO_SHOTS_DIR)
+  : null
 
 mkdirSync(appDataDir, { recursive: true })
 mkdirSync(userDataDir, { recursive: true })
@@ -131,6 +151,8 @@ const report = {
   stop: null,
   platformRowsLive: null,
   tls: null,
+  cloudTest: null,
+  testCap: null,
   secretLeaks: []
 }
 let web = null
@@ -141,8 +163,11 @@ let backend = null
 let collected = null
 let sessionActive = false
 let showId = null
-let secrets = []
+/** Each show's ingest key as the run learns it: `{ label, value }`. */
+const ingestSecrets = []
 const appLines = []
+/** Every renderer event of every launch: the leak scan reads them all. */
+const eventTexts = []
 const receivers = []
 
 try {
@@ -240,6 +265,9 @@ try {
   for (const [index, port] of ports.receivers.entries()) {
     const name = `receiver-${index + 1}`
     const recvPath = join(outputDirectory, `${name}.flv`)
+    // A reused VIDEORC_SMOKE_OUTPUT_DIR keeps an older run's file until the
+    // receiver opens its output, which would read as bytes from the start.
+    rmSync(recvPath, { force: true })
     const streamKey = receiverKeys[index]
     const target = {
       id: ['solo-a', 'solo-b'][index],
@@ -328,7 +356,10 @@ try {
     VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
     VIDEORC_SMOKE_STATE_DIR: outputDirectory,
     VIDEORC_APP_DATA_DIR: appDataDir,
-    VIDEORC_USER_DATA_DIR: userDataDir
+    VIDEORC_USER_DATA_DIR: userDataDir,
+    // The screenshots drive the renderer over CDP (the theme flip and the
+    // compositor capture, as scripts/ui-theme-screens.mjs does).
+    ...(shotsDir ? { VIDEORC_REMOTE_DEBUG_PORT: '0' } : {})
   }
   let launch = await launchApp(appEnv, 1)
   launched = launch.launched
@@ -343,6 +374,9 @@ try {
     'the cloud entitlement from the fake capabilities'
   )
   log(`desktop entitled (plan ${entitledStatus.plan ?? 'none'}, phase ${entitledStatus.phase})`)
+  // The by-eye captures reload the renderer once (onboarding), so before
+  // anything else is set up through it.
+  const shots = shotsDir ? await prepareCloudSectionShots(smoke) : null
   const health = await request(backend, timeoutMs, 'health.ping', { ffmpegPath })
   if (!health?.ffmpeg?.available) {
     throw new Error(health?.ffmpeg?.message ?? 'FFmpeg is unavailable for the cloud solo smoke.')
@@ -353,6 +387,148 @@ try {
     { kind: 'output-directory', path: outputDirectory },
     { timeoutMs }
   )
+
+  // 8b. Test cloud (C6b): 10 s of synthetic video at the stream quality to
+  //     the runner, with no platforms, before anything goes live. The test
+  //     runs the app's own FFmpeg, as the Test button does (this smoke leaves
+  //     smoke RPCs off, so no caller may name another), with the same
+  //     certificate check as the feed. The by-eye captures take the row idle,
+  //     while the push runs and with the result.
+  if (shots) await shots.capture('idle')
+  const testRequestedAtMs = Date.now()
+  const testStarted = await request(backend, timeoutMs, 'cloud.selftest.run', {
+    outputs: [{ orientation: 'horizontal', width: 1280, height: 720, fps: 30, videoKbps: 4000 }]
+  })
+  if (testStarted.test?.phase !== 'creating' || testStarted.show) {
+    throw new Error(`cloud.selftest.run did not start a test: ${JSON.stringify(testStarted.test)}`)
+  }
+  let currentDuringTest = undefined
+  let runningShots = null
+  const testDone = await waitForCloudStatus(
+    backend,
+    (status) => {
+      if (status.test?.phase === 'pushing') {
+        // While the push runs the web's current must stay empty: a crashed
+        // test must never become a Resume notice.
+        if (currentDuringTest === undefined) {
+          currentDuringTest = 'pending'
+          void fetch(`${web.httpOrigin}/api/cloud/shows/current`, {
+            headers: { authorization: `Bearer ${sessionToken}` }
+          })
+            .then((response) => response.json())
+            .then((body) => {
+              currentDuringTest = body?.show ?? null
+            })
+            .catch((error) => {
+              currentDuringTest = { error: String(error?.message ?? error) }
+            })
+        }
+        // The row while the push runs, captured beside the polling.
+        if (shots && !runningShots) runningShots = shots.capture('running')
+      }
+      return status.test?.phase === 'done'
+    },
+    90_000,
+    'the cloud test to finish'
+  )
+  const testTotalMs = Date.now() - testRequestedAtMs
+  const testResult = testDone.test?.result ?? null
+  const testShow = web.showsOfKind('test').at(-1) ?? null
+  if (!testShow) throw new Error('The fake web never saw a test show.')
+  ingestSecrets.push({ label: "the test show's ingest key", value: web.ingestKeyFor(testShow.id) })
+  if (runningShots) await runningShots
+  if (shots) await shots.capture('result')
+  await waitFor(() => currentDuringTest !== 'pending' || null, 10_000, 'the current probe').catch(
+    () => {}
+  )
+  const testAsked = web.state.agentCalls.find(
+    (call) => call.path === '/v1/shows' && call.showId === testShow.id
+  )
+  // The node reports the test's seconds once the show ends; the web accepts
+  // the report and counts nothing.
+  const usageIgnored = await waitFor(
+    () =>
+      web.state.testUsageIgnored.filter((report) => report.showId === testShow.id).length || null,
+    30_000,
+    "the node's usage report for the test show"
+  ).catch(() => 0)
+  report.cloudTest = {
+    requestedAt: new Date(testRequestedAtMs).toISOString(),
+    showId: testShow.id,
+    totalMs: testTotalMs,
+    ok: testResult?.ok ?? false,
+    reason: testResult?.reason ?? null,
+    message: testResult?.message ?? null,
+    timeToLiveMs: testResult?.timeToLiveMs ?? null,
+    uploads: testResult?.uploads ?? [],
+    webCreateStatus:
+      web.state.calls.find(
+        (call) =>
+          call.method === 'POST' &&
+          call.path === '/api/cloud/shows' &&
+          Date.parse(call.at) >= testRequestedAtMs - 1000
+      )?.status ?? null,
+    webEndStatus:
+      web.state.calls.find(
+        (call) => call.method === 'POST' && call.path === `/api/cloud/shows/${testShow.id}/end`
+      )?.status ?? null,
+    agentCreateStatus: testAsked?.status ?? null,
+    agentKind: testAsked?.kind ?? null,
+    agentMaxShowSeconds: testAsked?.maxShowSeconds ?? null,
+    agentEndStatus:
+      web.state.agentCalls.find((call) => call.path === `/v1/shows/${testShow.id}/end`)?.status ??
+      null,
+    currentDuringTest:
+      currentDuringTest === 'pending' ? { error: 'not probed' } : currentDuringTest,
+    destinationsSet: destinationsSetIntentTimes(agent.logPath).filter(
+      (atMs) => atMs >= testRequestedAtMs - 1000
+    ).length,
+    receiversUntouched: receivers.every(
+      (receiver) => receiver.firstBytesAtMs === null && fileSize(receiver.recvPath) <= 1024
+    ),
+    usageIgnored: usageIgnored || 0,
+    usageMetered: web.state.usageReports.filter((entry) => entry.showId === testShow.id).length,
+    showEndedOnWeb: web.showsOfKind('test').at(-1)?.endedAt !== null,
+    desktopShowStayedOff: !collected.cloudStates.some(
+      (entry) => entry.atMs >= testRequestedAtMs && entry.status?.show
+    )
+  }
+  if (shots) report.cloudTest.shots = shots.files
+  log(
+    `[test] ${report.cloudTest.ok ? 'PASS' : `FAIL (${report.cloudTest.reason})`}: live in ${report.cloudTest.timeToLiveMs ?? '?'} ms, upload ${report.cloudTest.uploads[0]?.measuredKbps ?? '?'} of ${report.cloudTest.uploads[0]?.targetKbps ?? '?'} kbps (plus 160 kbps audio), whole test ${testTotalMs} ms; the node was asked for a ${report.cloudTest.agentKind} show capped at ${report.cloudTest.agentMaxShowSeconds} s; current during the test: ${JSON.stringify(report.cloudTest.currentDuringTest)}; usage ignored ${report.cloudTest.usageIgnored}, metered ${report.cloudTest.usageMetered}; destinations.set ${report.cloudTest.destinationsSet}`
+  )
+
+  // 8c. The node's cap on a test show (C6b): a test whose desktop died
+  //     mid-test is never ended by anyone. The smoke creates one as the
+  //     desktop would, feeds it with its own FFmpeg and walks away; the
+  //     runner must end it `max-show` at the web's 30 s cap after its first
+  //     feed frame, and the web must close it from the node's heartbeat.
+  report.testCap = await testShowCapCheck({ caFile: serverCert })
+  log(
+    `[cap] the unended test show ended ${report.testCap.endReason ?? 'never'} ${report.testCap.liveToEndSeconds ?? '?'} s after it went live; the web closed it: ${report.testCap.webClosed} (${report.testCap.webEndReason ?? 'open'})`
+  )
+
+  // 8d. By eye only: a failed test reads as the row's error. The feed proxy
+  //     refuses the push (a network that blocks streaming), so the runner
+  //     never sees the feed; the proxy forwards again before Go Live.
+  if (shots) {
+    proxy.cut()
+    try {
+      await request(backend, timeoutMs, 'cloud.selftest.run', {
+        outputs: [{ orientation: 'horizontal', width: 1280, height: 720, fps: 30, videoKbps: 4000 }]
+      })
+      const failedTest = await waitForCloudStatus(
+        backend,
+        (status) => status.test?.phase === 'done',
+        60_000,
+        'the failing test to finish'
+      )
+      log(`[shots] the blocked test ended ${failedTest.test?.result?.reason ?? 'with no reason'}`)
+      await shots.capture('failed')
+    } finally {
+      proxy.forward()
+    }
+  }
 
   // 9. Go Live: record plus two destinations; the cloud switch is on by default.
   const goLiveAtMs = Date.now()
@@ -372,8 +548,12 @@ try {
   if (!/videorc-cloud|rtmps:\/\/(localhost|127\.0\.0\.1):/.test(String(started.streamUrl ?? ''))) {
     throw new Error(`The session did not stream through the cloud feed: ${started.streamUrl}`)
   }
+  // Go Live's own create: the test shows came before it (one clock).
   const createCall = web.state.calls.find(
-    (call) => call.method === 'POST' && call.path === '/api/cloud/shows'
+    (call) =>
+      call.method === 'POST' &&
+      call.path === '/api/cloud/shows' &&
+      Date.parse(call.at) >= goLiveAtMs
   )
   if (createCall?.status !== 201) {
     throw new Error(
@@ -382,7 +562,7 @@ try {
   }
   const show = web.currentShow()
   showId = show.id
-  secrets = [...receiverKeys, web.ingestKeyFor(showId), ...web.state.mintedTokens]
+  ingestSecrets.push({ label: 'the ingest key', value: web.ingestKeyFor(showId) })
   const liveStatus = await waitForCloudStatus(
     backend,
     (status) => status.phase === 'live' && status.show?.id === showId,
@@ -552,8 +732,12 @@ try {
       20_000,
       'the desktop to show Live on the resumed show'
     )
+    // Since Go Live: the test shows came before it and are not this show's.
     const createCalls = web.state.calls.filter(
-      (call) => call.method === 'POST' && call.path === '/api/cloud/shows'
+      (call) =>
+        call.method === 'POST' &&
+        call.path === '/api/cloud/shows' &&
+        Date.parse(call.at) >= goLiveAtMs
     )
     const drop2 = {
       kind: 'computer-died',
@@ -755,10 +939,11 @@ try {
       .filter((entry, index, all) => index === 0 || entry.phase !== all[index - 1].phase),
     closeCode: watcher.closeCode
   }
-  report.secretLeaks = findSecretLeaks(secrets, [
+  report.secretLeaks = findSecretLeaks(secretsToScan(), [
     ...appLines,
-    ...collected.raw,
-    JSON.stringify(web.state.calls)
+    ...eventTexts,
+    JSON.stringify(web.state.calls),
+    JSON.stringify(web.state.agentCalls)
   ])
   const failures = evaluateCloudSoloReport(report)
   report.failures = failures
@@ -771,8 +956,11 @@ try {
     )
   }
   const drop2 = report.drops[1]
+  const upload = report.cloudTest?.uploads?.[0]
   console.log(
-    `Cloud solo smoke PASS: feed cut held in ${report.drops[0].timeToHoldSeconds} s and came back ${report.drops[0].timeToResumeSeconds} s after the network; ` +
+    `Cloud solo smoke PASS: the cloud test went live in ${report.cloudTest?.timeToLiveMs ?? '?'} ms with the upload at ${upload?.measuredKbps ?? '?'} of ${upload?.targetKbps ?? '?'} kbps (plus 160 kbps audio); ` +
+      `an unended test show ended ${report.testCap?.endReason ?? '?'} ${report.testCap?.liveToEndSeconds ?? '?'} s after it went live; ` +
+      `feed cut held in ${report.drops[0].timeToHoldSeconds} s and came back ${report.drops[0].timeToResumeSeconds} s after the network; ` +
       (drop2
         ? `the dead computer's show held in ${drop2.timeToHoldSeconds} s and resumed ${drop2.timeToResumeSeconds} s after Resume; `
         : 'the computer-dies drop was skipped; ') +
@@ -798,7 +986,7 @@ try {
       phase: entry.phase
     })) ?? []
   report.desktop.health = collected?.health ?? []
-  report.secretLeaks = findSecretLeaks(secrets, [...appLines, ...(collected?.raw ?? [])])
+  report.secretLeaks = findSecretLeaks(secretsToScan(), [...appLines, ...eventTexts])
   report.artifacts = artifactInventory(outputDirectory)
   report.finishedAt = new Date().toISOString()
   writeFileSync(reportPath, JSON.stringify(report, null, 2))
@@ -852,6 +1040,7 @@ function collectEvents(ws) {
     if (!message?.event) return
     const atMs = Date.now()
     result.raw.push(String(event.data))
+    eventTexts.push(String(event.data))
     if (message.event === 'cloud.state') {
       result.cloudStates.push({ atMs, phase: message.payload?.phase, status: message.payload })
     } else if (message.event === 'stream.targets' && Array.isArray(message.payload?.targets)) {
@@ -1056,6 +1245,137 @@ function startShowWatcher({ url, token }) {
 
 function firstPhase(states, afterMs, phase) {
   return states.find((state) => state.atMs >= afterMs && state.phase === phase)?.atMs ?? null
+}
+
+// --- The test show's cap (C6b) -----------------------------------------------------
+
+/**
+ * A test show nobody ends: created through the fake web the way the desktop
+ * creates one, fed by the smoke's own FFmpeg with the feed's certificate
+ * check, then left alone, as when the desktop dies mid-test. The runner must
+ * end it `max-show` at the web's cap after its first feed frame (no
+ * `show.end` ever comes), and the web must close it from the node's next
+ * heartbeat. A second control client watches the runner's phases; the
+ * publisher is this run's own child, stopped through its own handle.
+ */
+async function testShowCapCheck({ caFile }) {
+  const response = await fetch(`${web.httpOrigin}/api/cloud/shows`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${sessionToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      kind: 'test',
+      outputs: [
+        {
+          orientation: 'horizontal',
+          width: 640,
+          height: 360,
+          fps: 30,
+          videoKbps: 800,
+          audioKbps: 64
+        }
+      ],
+      holdMaxSeconds: 1800,
+      client: { app: 'smoke', version: '1' }
+    })
+  })
+  const created = await response.json()
+  if (response.status !== 201) {
+    throw new Error(
+      `The fake web refused the capped test show: ${response.status} ${JSON.stringify(created?.error ?? null)}`
+    )
+  }
+  const id = created.show.id
+  ingestSecrets.push({ label: "the capped test show's ingest key", value: web.ingestKeyFor(id) })
+  const asked = web.state.agentCalls.find((call) => call.path === '/v1/shows' && call.showId === id)
+  const capWatcher = startShowWatcher({ url: created.control.url, token: created.control.token })
+  const ingest = created.ingest[0]
+  const publisher = spawn(
+    ffmpegPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-nostats',
+      '-loglevel',
+      'error',
+      '-re',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=size=640x360:rate=30',
+      '-re',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000',
+      // Longer than the cap: only the runner may end this show.
+      '-t',
+      String(TEST_SHOW_CAP_SECONDS + 30),
+      '-map',
+      '0:v',
+      '-map',
+      '1:a',
+      '-c:v',
+      'h264_videotoolbox',
+      '-b:v',
+      '800k',
+      '-g',
+      '60',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '64k',
+      '-ar',
+      '48000',
+      '-ac',
+      '2',
+      '-tls_verify',
+      '1',
+      '-ca_file',
+      caFile,
+      '-f',
+      'flv',
+      `${ingest.serverUrl}/${ingest.streamKey}`
+    ],
+    { stdio: ['ignore', 'ignore', 'ignore'] }
+  )
+  try {
+    const liveAtMs = await waitFor(
+      () => firstPhase(capWatcher.states, 0, 'live'),
+      30_000,
+      'the capped test show to go live'
+    ).catch(() => null)
+    const endedAtMs = await waitFor(
+      () =>
+        capWatcher.states.find((state) => state.phase === 'ending' || state.phase === 'ended')
+          ?.atMs ?? null,
+      (TEST_SHOW_CAP_SECONDS + 20) * 1000,
+      'the runner to end the capped test show'
+    ).catch(() => null)
+    const webClosed = await waitFor(
+      () => web.showsOfKind('test').find((entry) => entry.id === id)?.endedAt != null || null,
+      25_000,
+      'the web to close the capped test show'
+    ).catch(() => false)
+    return {
+      showId: id,
+      agentKind: asked?.kind ?? null,
+      agentMaxShowSeconds: asked?.maxShowSeconds ?? null,
+      liveAt: liveAtMs ? new Date(liveAtMs).toISOString() : null,
+      endedAt: endedAtMs ? new Date(endedAtMs).toISOString() : null,
+      liveToEndSeconds: secondsBetween(liveAtMs, endedAtMs),
+      endReason: capWatcher.states.find((state) => state.endReason)?.endReason ?? null,
+      webClosed: webClosed === true,
+      webEndReason: web.showsOfKind('test').find((entry) => entry.id === id)?.endReason ?? null,
+      publisherStillPushing: publisher.exitCode === null
+    }
+  } finally {
+    capWatcher.close()
+    if (publisher.exitCode === null) {
+      publisher.kill('SIGTERM')
+      await waitForExit(publisher, 3_000)
+      if (publisher.exitCode === null) publisher.kill('SIGKILL')
+    }
+  }
 }
 
 // --- The node side ---------------------------------------------------------------
@@ -1339,18 +1659,24 @@ async function waitForFinalRecording(reportedPath) {
   return fileSize(reportedPath) > 0 ? reportedPath : mp4
 }
 
-function findSecretLeaks(values, texts) {
+/**
+ * Every secret the run has seen so far, labelled: the platform keys, each
+ * show's ingest key (the tests' too) and every token the web minted.
+ */
+function secretsToScan() {
+  return [
+    ...receiverKeys.map((value, index) => ({ label: `platform key ${index + 1}`, value })),
+    ...ingestSecrets,
+    ...(web?.state.mintedTokens ?? []).map((value) => ({ label: 'a show token', value }))
+  ]
+}
+
+function findSecretLeaks(secrets, texts) {
   const leaks = []
-  for (const [index, secret] of values.entries()) {
-    if (!secret || secret.length < 8) continue
-    if (texts.some((text) => typeof text === 'string' && text.includes(secret))) {
-      leaks.push(
-        index < receiverKeys.length
-          ? `platform key ${index + 1}`
-          : index === receiverKeys.length
-            ? 'the ingest key'
-            : 'a show token'
-      )
+  for (const { label, value } of secrets) {
+    if (!value || value.length < 8) continue
+    if (texts.some((text) => typeof text === 'string' && text.includes(value))) {
+      if (!leaks.includes(label)) leaks.push(label)
     }
   }
   return leaks
@@ -1361,6 +1687,7 @@ function summarizeWeb(state) {
     calls: state.calls,
     heartbeats: state.heartbeats,
     usageReports: state.usageReports,
+    testUsageIgnored: state.testUsageIgnored,
     usageRejected: state.usageRejected,
     signatureFailures: state.signatureFailures,
     capabilityRequests: state.capabilityRequests,
@@ -1369,12 +1696,116 @@ function summarizeWeb(state) {
     agentCalls: state.agentCalls,
     shows: [...state.shows.values()].map((show) => ({
       id: show.id,
+      kind: show.kind,
       status: show.status,
       endReason: show.endReason,
       createdAt: show.createdAt.toISOString(),
       endedAt: show.endedAt?.toISOString() ?? null
     }))
   }
+}
+
+// --- The by-eye check (C6b) ------------------------------------------------------
+
+/**
+ * The Livestream page's Videorc Cloud section with the Test row, through CDP
+ * like scripts/ui-theme-screens.mjs, the capture the compositor's own. A
+ * fresh profile opens onboarding, so it is marked done and the renderer
+ * reloads once, here, before the test. Each `capture(stage)` takes the row
+ * in dark and in light: the sidebar's theme toggle flips it live (no
+ * reload, so the running state stays on screen), and the app goes back to
+ * dark after each.
+ */
+async function prepareCloudSectionShots(smoke) {
+  mkdirSync(shotsDir, { recursive: true })
+  const devtools = await waitFor(
+    () =>
+      appLines
+        .map((line) => /DevTools listening on (ws:\/\/\S+)/.exec(line)?.[1])
+        .findLast(Boolean),
+    10_000,
+    'the DevTools url in the app log (VIDEORC_REMOTE_DEBUG_PORT)'
+  )
+  const { host } = new URL(devtools.replace('ws://', 'http://'))
+  await cdpEvaluate(
+    host,
+    `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
+  )
+  await waitFor(
+    async () =>
+      (await cdpEvaluate(
+        host,
+        `document.readyState === 'complete' && Boolean(document.querySelector('[aria-label="Toggle color theme"]'))`
+      ).catch(() => false)) || null,
+    30_000,
+    'the renderer back after the onboarding reload'
+  )
+  await requestSmokeCommand(
+    smoke,
+    'open-tab',
+    { tab: 'streaming', waitFor: '[data-testid="cloud-test"]' },
+    { timeoutMs: 30_000 }
+  )
+  const files = {}
+  const theme = () =>
+    cdpEvaluate(host, `document.documentElement.classList.contains('dark') ? 'dark' : 'light'`)
+  const setTheme = async (wanted) => {
+    if ((await theme()) === wanted) return
+    await cdpEvaluate(
+      host,
+      `document.querySelector('[aria-label="Toggle color theme"]').click(); 'ok'`
+    )
+    await waitFor(async () => (await theme()) === wanted || null, 5_000, `the ${wanted} theme`)
+    await sleep(250)
+  }
+  return {
+    files,
+    async capture(stage) {
+      for (const wanted of ['dark', 'light']) {
+        await setTheme(wanted)
+        await cdpEvaluate(
+          host,
+          `document.querySelector('[data-testid="cloud-test"]').scrollIntoView({ block: 'center' }); 'ok'`
+        )
+        await sleep(200)
+        const shot = await cdpCall(host, 'Page.captureScreenshot', { format: 'png' })
+        const file = join(shotsDir, `cloud-test-${stage}-${wanted}.png`)
+        writeFileSync(file, Buffer.from(shot.data, 'base64'))
+        files[`${stage}-${wanted}`] = file
+        const line = await cdpEvaluate(
+          host,
+          `document.querySelector('[data-testid="cloud-test"]').innerText`
+        )
+        log(`[shots] ${stage} ${wanted}: ${file} (${JSON.stringify(line)})`)
+      }
+      await setTheme('dark')
+    }
+  }
+}
+
+async function cdpCall(host, method, params) {
+  const targets = await (await fetch(`http://${host}/json/list`)).json()
+  const mainTarget = targets.find(
+    (target) => target.type === 'page' && /^https?:\/\/localhost/.test(target.url ?? '')
+  )
+  if (!mainTarget) throw new Error('Main window CDP target not found.')
+  return new Promise((resolveCall, rejectCall) => {
+    const ws = new WebSocket(mainTarget.webSocketDebuggerUrl)
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ id: 1, method, params })))
+    ws.addEventListener('message', (event) => {
+      const message = JSON.parse(event.data)
+      if (message.id !== 1) return
+      ws.close()
+      if (message.error) rejectCall(new Error(message.error.message))
+      else resolveCall(message.result)
+    })
+    ws.addEventListener('error', () => rejectCall(new Error('CDP connect failed')))
+  })
+}
+
+async function cdpEvaluate(host, expression) {
+  const result = await cdpCall(host, 'Runtime.evaluate', { expression, returnByValue: true })
+  return result?.result?.value
 }
 
 function artifactInventory(directory) {

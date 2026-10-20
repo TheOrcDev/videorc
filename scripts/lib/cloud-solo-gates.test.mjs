@@ -246,11 +246,98 @@ describe('cloud solo gates: the run verdict', () => {
       wrongCa: { outcome: 'certificate-rejected' },
       otherName: { outcome: 'certificate-rejected' }
     },
+    cloudTest: {
+      ok: true,
+      timeToLiveMs: 2_300,
+      uploads: [{ orientation: 'horizontal', targetKbps: 4000, measuredKbps: 4150 }],
+      webCreateStatus: 201,
+      agentKind: 'solo',
+      agentMaxShowSeconds: 30,
+      webEndStatus: 200,
+      currentDuringTest: null,
+      destinationsSet: 0,
+      receiversUntouched: true,
+      usageMetered: 0,
+      usageIgnored: 1
+    },
+    testCap: {
+      agentKind: 'solo',
+      agentMaxShowSeconds: 30,
+      endReason: 'max-show',
+      liveToEndSeconds: 30.4,
+      webClosed: true
+    },
     secretLeaks: []
   })
 
   it('passes a clean run', () => {
     assert.deepEqual(evaluateCloudSoloReport(passing()), [])
+    // A run without the test steps (an older report) is judged on the rest.
+    const { cloudTest: _omitted, testCap: _cap, ...withoutTest } = passing()
+    assert.deepEqual(evaluateCloudSoloReport(withoutTest), [])
+  })
+
+  it('names every broken gate of the cloud test (C6b)', () => {
+    const report = passing()
+    report.cloudTest = {
+      ok: false,
+      reason: 'too-slow',
+      message: 'ffmpeg exited 0',
+      timeToLiveMs: 25_000,
+      uploads: [{ orientation: 'horizontal', targetKbps: 4000 }],
+      webCreateStatus: 503,
+      agentKind: 'solo',
+      agentMaxShowSeconds: 43_200,
+      webEndStatus: null,
+      currentDuringTest: { id: 'sh_test' },
+      destinationsSet: 1,
+      receiversUntouched: false,
+      desktopShowStayedOff: false,
+      usageMetered: 1,
+      usageIgnored: 0
+    }
+    assert.deepEqual(evaluateCloudSoloReport(report), [
+      'the cloud test failed (too-slow: ffmpeg exited 0)',
+      'the cloud test took 25000 ms to go live (limit 20 s)',
+      'the cloud test measured no upload',
+      'the web did not see the test show created',
+      'the web asked the node for a solo show capped at 43200 s, not a solo show capped at 30 s',
+      'the web did not see the test show ended',
+      'GET /api/cloud/shows/current listed the test show as current',
+      'the runner applied destinations.set 1 time(s) during the test',
+      'a receiver took bytes during the test',
+      "the desktop's own cloud show changed during the test",
+      '1 usage report(s) of the test show were metered',
+      "the node's usage report for the test show never reached the web"
+    ])
+    report.cloudTest = { ...passing().cloudTest, timeToLiveMs: null }
+    assert.deepEqual(evaluateCloudSoloReport(report), ['the cloud test never saw the runner live'])
+  })
+
+  it('holds a test show nobody ends to the 30 s cap (C6b)', () => {
+    const report = passing()
+    // On the cap's edges: a second early is jitter, eight late is the end
+    // sequence; past either is a broken cap.
+    for (const seconds of [29, 38]) {
+      report.testCap = { ...passing().testCap, liveToEndSeconds: seconds }
+      assert.deepEqual(evaluateCloudSoloReport(report), [])
+    }
+    report.testCap = { ...passing().testCap, liveToEndSeconds: 61 }
+    assert.deepEqual(evaluateCloudSoloReport(report), [
+      'the unended test show ended 61 s after it went live (cap 30 s)'
+    ])
+    report.testCap = {
+      agentKind: 'test',
+      agentMaxShowSeconds: 43_200,
+      endReason: 'no-feed',
+      liveToEndSeconds: 60,
+      webClosed: false
+    }
+    assert.deepEqual(evaluateCloudSoloReport(report), [
+      'the capped test show reached the node as a test show capped at 43200 s',
+      'the unended test show ended with no-feed, not max-show',
+      'the web never closed the capped test show'
+    ])
   })
 
   it('names every broken gate', () => {

@@ -47,6 +47,13 @@ export const MAX_SHOW_SECONDS = 12 * 60 * 60
 export const DEFAULT_HOLD_MAX_SECONDS = 30 * 60
 export const MIN_HOLD_MAX_SECONDS = 60
 export const MAX_HOLD_MAX_SECONDS = 60 * 60
+// Test cloud (plan 184 C6b), as `videorc-web/lib/cloud/shows.ts` has it: a
+// test show is a solo show to the node, capped at 30 s, expiring 120 s after
+// its creation, six an hour per account, never metered and never current.
+export const TEST_SHOW_MAX_SECONDS = 30
+export const TEST_SHOW_EXPIRES_SECONDS = 120
+export const TEST_SHOWS_PER_HOUR = 6
+export const TEST_SHOW_WINDOW_MS = 60 * 60 * 1000
 /** A show the node stops reporting ends at the next heartbeat once this old. */
 export const FORGOTTEN_SHOW_GRACE_MS = 30_000
 export const AGENT_TIMEOUT_MS = 8_000
@@ -305,14 +312,40 @@ function parseOutput(value, index) {
   return { orientation: value.orientation, width, height, fps, videoKbps, audioKbps }
 }
 
+/** A test is never "still live": current and /live leave it out. */
+export function isTestShow(show) {
+  return show?.kind === 'test'
+}
+
+/**
+ * The web's rate limit on test shows (`evaluateTestShowLimit`): `recentCreatedAt`
+ * are the account's test shows inside the window; at the limit, `resetAt` is
+ * when the oldest of the last six ages out. A test exactly one window old no
+ * longer counts. Pure.
+ * @returns {{ok:true}|{ok:false,resetAt:string}}
+ */
+export function evaluateTestShowLimit({
+  now,
+  recentCreatedAt,
+  limit = TEST_SHOWS_PER_HOUR,
+  windowMs = TEST_SHOW_WINDOW_MS
+}) {
+  const inWindow = recentCreatedAt
+    .filter((at) => at.getTime() > now.getTime() - windowMs)
+    .sort((a, b) => a.getTime() - b.getTime())
+  if (inWindow.length < limit) return { ok: true }
+  const frees = inWindow[inWindow.length - limit]
+  return { ok: false, resetAt: new Date(frees.getTime() + windowMs).toISOString() }
+}
+
 /**
  * The body of `POST /api/cloud/shows`, as the web parses it. Anything off is
  * one `{ message }`. Pure.
  */
 export function parseCreateShowBody(value) {
   if (!isRecord(value)) return { message: 'The body must be a JSON object.' }
-  if (value.kind !== 'solo' && value.kind !== 'talk') {
-    return { message: 'kind must be solo or talk.' }
+  if (value.kind !== 'solo' && value.kind !== 'talk' && value.kind !== 'test') {
+    return { message: 'kind must be solo, talk or test.' }
   }
   if (!Array.isArray(value.outputs) || value.outputs.length < 1 || value.outputs.length > 2) {
     return { message: 'outputs must list one or two outputs.' }
@@ -515,6 +548,8 @@ export async function startFakeCloudWeb({
     heartbeats: 0,
     endShowsSent: [],
     usageReports: [],
+    /** Reports of test shows: accepted so the node stops retrying, never counted. */
+    testUsageIgnored: [],
     usageRejected: 0,
     signatureFailures: 0,
     capabilityRequests: 0,
@@ -540,6 +575,12 @@ export async function startFakeCloudWeb({
   }
   const agent = async (path, body) => {
     const started = Date.now()
+    // What a create asked the node for, never its ingest key: the smokes
+    // check that a test show reaches the node as a solo show with the cap.
+    const asked =
+      path === '/v1/shows'
+        ? { showId: body?.showId, kind: body?.kind, maxShowSeconds: body?.maxShowSeconds }
+        : {}
     try {
       const result = await signedAgentRequest({
         agentUrl: node.agentUrl,
@@ -548,10 +589,16 @@ export async function startFakeCloudWeb({
         nodeId: node.id,
         secret: node.secret
       })
-      state.agentCalls.push({ path, status: result.status, ms: Date.now() - started })
+      state.agentCalls.push({ path, ...asked, status: result.status, ms: Date.now() - started })
       return result
     } catch (error) {
-      state.agentCalls.push({ path, status: null, error: error.message, ms: Date.now() - started })
+      state.agentCalls.push({
+        path,
+        ...asked,
+        status: null,
+        error: error.message,
+        ms: Date.now() - started
+      })
       return { status: null, json: null }
     }
   }
@@ -621,6 +668,12 @@ export async function startFakeCloudWeb({
           state.usageRejected += 1
           continue
         }
+        // A test show's seconds count toward nothing (C6b).
+        if (isTestShow(show)) {
+          state.testUsageIgnored.push({ showId: entry.showId, seq: entry.seq })
+          accepted.push({ showId: entry.showId, seq: entry.seq })
+          continue
+        }
         // Idempotent on (showId, seq): a duplicate is accepted, counted once.
         if (
           !state.usageReports.some(
@@ -657,7 +710,8 @@ export async function startFakeCloudWeb({
     if (req.method === 'GET' && path === '/api/cloud/shows/current') {
       await drain(req)
       const open = openShow()
-      if (!open) return answer(200, { show: null })
+      // A test mid-run is open on the web, but never "still live" to resume.
+      if (!open || isTestShow(open)) return answer(200, { show: null })
       return answer(200, { show: serializeShow(open), control: control(open, now) })
     }
     if (req.method === 'POST' && path === '/api/cloud/shows') {
@@ -672,6 +726,21 @@ export async function startFakeCloudWeb({
       if (parsed.kind === 'talk') {
         return fail(400, 'invalid-cloud-show', 'Talk shows are not available yet.')
       }
+      // A test (C6b) costs no hours; the rate limit protects the node instead.
+      const isTest = parsed.kind === 'test'
+      if (isTest) {
+        const limit = evaluateTestShowLimit({
+          now,
+          recentCreatedAt: [...state.shows.values()]
+            .filter((show) => show.userId === userId && isTestShow(show))
+            .map((show) => show.createdAt)
+        })
+        if (!limit.ok) {
+          return fail(429, 'cloud-test-limit', "You've run this hour's Videorc Cloud tests.", {
+            resetAt: limit.resetAt
+          })
+        }
+      }
       const open = openShow()
       if (open) {
         return fail(409, 'cloud-show-live', 'You already have a live show through Videorc Cloud.', {
@@ -680,10 +749,11 @@ export async function startFakeCloudWeb({
       }
       const showId = newShowId()
       const ingestKey = newIngestKey()
+      const maxShowSeconds = isTest ? TEST_SHOW_MAX_SECONDS : MAX_SHOW_SECONDS
       const show = {
         id: showId,
         userId,
-        kind: 'solo',
+        kind: parsed.kind,
         nodeId: node.id,
         status: 'ready',
         createdAt: now,
@@ -692,8 +762,12 @@ export async function startFakeCloudWeb({
         lastSeenAt: null,
         endedAt: null,
         endReason: null,
-        expiresAt: new Date(now.getTime() + (MAX_SHOW_SECONDS + parsed.holdMaxSeconds) * 1000),
+        expiresAt: new Date(
+          now.getTime() +
+            (isTest ? TEST_SHOW_EXPIRES_SECONDS : MAX_SHOW_SECONDS + parsed.holdMaxSeconds) * 1000
+        ),
         holdMaxSeconds: parsed.holdMaxSeconds,
+        maxShowSeconds,
         outputs: parsed.outputs,
         client: parsed.client,
         controlUrl: null,
@@ -704,10 +778,11 @@ export async function startFakeCloudWeb({
       const created = await agent('/v1/shows', {
         showId,
         userId,
+        // The node knows no test kind: a test is a solo show with a short cap.
         kind: 'solo',
         outputs: parsed.outputs,
         holdMaxSeconds: parsed.holdMaxSeconds,
-        maxShowSeconds: MAX_SHOW_SECONDS,
+        maxShowSeconds,
         ingestKey
       })
       const value = created.status === 200 ? parseAgentCreateResponse(created.json) : null
@@ -771,10 +846,16 @@ export async function startFakeCloudWeb({
   return {
     httpOrigin: `http://127.0.0.1:${address.port}`,
     state,
-    /** The show that is open right now, serialized, or null. */
+    /** The show that is open right now, serialized, or null; never a test (C6b). */
     currentShow() {
       const open = openShow()
-      return open ? serializeShow(open) : null
+      return open && !isTestShow(open) ? serializeShow(open) : null
+    },
+    /** Every show of one kind, serialized, oldest first (the smokes read the test's). */
+    showsOfKind(kind) {
+      return [...state.shows.values()]
+        .filter((show) => show.kind === kind)
+        .map((show) => serializeShow(show))
     },
     /** A token for the show, as the web would mint for a second client. */
     tokenFor(showId) {

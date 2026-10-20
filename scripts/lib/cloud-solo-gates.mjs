@@ -15,6 +15,13 @@ export const MAX_TIME_TO_HOLD_SECONDS = 6
 export const MIN_FREEZE_SECONDS = 1.5
 /** The hold card settles 1 s (freeze) plus 0.3 s (fade) after the hold. */
 export const HOLD_CARD_SETTLE_SECONDS = 1.3
+/** C6b: the test's push must be live on the runner within this long of the click. */
+export const MAX_TEST_TIME_TO_LIVE_SECONDS = 20
+/** C6b: the web caps a test show at this long on the node (`maxShowSeconds`). */
+export const TEST_SHOW_CAP_SECONDS = 30
+/** The cap's end reaches a control client this long after the cap, at most:
+ * the runner's state poll, its end sequence and the socket. */
+export const TEST_SHOW_CAP_SLACK_SECONDS = 8
 
 /** `ffprobe -show_entries packet=pts_time -of csv=p=0` output to numbers. */
 export function parsePtsTimes(text) {
@@ -314,6 +321,76 @@ export function evaluateCloudSoloReport(report) {
   }
   if (Array.isArray(report.secretLeaks) && report.secretLeaks.length > 0) {
     failures.push(`a secret reached the renderer events: ${report.secretLeaks.join(', ')}`)
+  }
+  // C6b: Test cloud ran before Go Live, against the same runner, with no
+  // platforms, no metering and nothing to resume.
+  if (report.cloudTest) {
+    const test = report.cloudTest
+    if (test.ok !== true) {
+      failures.push(
+        `the cloud test failed (${test.reason ?? 'no reason'}: ${test.message ?? 'no detail'})`
+      )
+    }
+    if (!Number.isFinite(test.timeToLiveMs)) {
+      failures.push('the cloud test never saw the runner live')
+    } else if (test.timeToLiveMs > MAX_TEST_TIME_TO_LIVE_SECONDS * 1000) {
+      failures.push(
+        `the cloud test took ${test.timeToLiveMs} ms to go live (limit ${MAX_TEST_TIME_TO_LIVE_SECONDS} s)`
+      )
+    }
+    const upload = test.uploads?.[0]
+    if (!upload || !Number.isFinite(upload.measuredKbps)) {
+      failures.push('the cloud test measured no upload')
+    }
+    if (test.webCreateStatus !== 201) failures.push('the web did not see the test show created')
+    // The node knows no test kind: a solo show with the short cap.
+    if (test.agentKind !== 'solo' || test.agentMaxShowSeconds !== TEST_SHOW_CAP_SECONDS) {
+      failures.push(
+        `the web asked the node for a ${test.agentKind ?? '?'} show capped at ${test.agentMaxShowSeconds ?? '?'} s, not a solo show capped at ${TEST_SHOW_CAP_SECONDS} s`
+      )
+    }
+    if (test.webEndStatus !== 200) failures.push('the web did not see the test show ended')
+    if (test.currentDuringTest !== null) {
+      failures.push('GET /api/cloud/shows/current listed the test show as current')
+    }
+    if (test.destinationsSet !== 0) {
+      failures.push(
+        `the runner applied destinations.set ${test.destinationsSet} time(s) during the test`
+      )
+    }
+    if (test.receiversUntouched !== true) failures.push('a receiver took bytes during the test')
+    if (test.desktopShowStayedOff === false) {
+      failures.push("the desktop's own cloud show changed during the test")
+    }
+    if (test.usageMetered !== 0) {
+      failures.push(`${test.usageMetered} usage report(s) of the test show were metered`)
+    }
+    if (test.usageIgnored === 0) {
+      failures.push("the node's usage report for the test show never reached the web")
+    }
+  }
+  // C6b: a test show nobody ends (a desktop that died mid-test) ends on the
+  // runner at the web's cap after its first feed frame, and the web closes
+  // it from the node's heartbeat.
+  if (report.testCap) {
+    const cap = report.testCap
+    if (cap.agentKind !== 'solo' || cap.agentMaxShowSeconds !== TEST_SHOW_CAP_SECONDS) {
+      failures.push(
+        `the capped test show reached the node as a ${cap.agentKind ?? '?'} show capped at ${cap.agentMaxShowSeconds ?? '?'} s`
+      )
+    }
+    if (cap.endReason !== 'max-show') {
+      failures.push(`the unended test show ended with ${cap.endReason ?? 'nothing'}, not max-show`)
+    } else if (
+      !Number.isFinite(cap.liveToEndSeconds) ||
+      cap.liveToEndSeconds < TEST_SHOW_CAP_SECONDS - 1 ||
+      cap.liveToEndSeconds > TEST_SHOW_CAP_SECONDS + TEST_SHOW_CAP_SLACK_SECONDS
+    ) {
+      failures.push(
+        `the unended test show ended ${cap.liveToEndSeconds} s after it went live (cap ${TEST_SHOW_CAP_SECONDS} s)`
+      )
+    }
+    if (cap.webClosed !== true) failures.push('the web never closed the capped test show')
   }
   return failures
 }

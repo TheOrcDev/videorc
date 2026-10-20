@@ -9,6 +9,7 @@ import {
   cloudAllowanceBlock,
   decodeNodeSecret,
   encodeNodeSecret,
+  evaluateTestShowLimit,
   isIngestKey,
   isShowId,
   mintShowToken,
@@ -197,13 +198,34 @@ describe('fake cloud web: bodies', () => {
       }
     )
     assert.equal(parseCreateShowBody({ kind: 'solo', outputs: [output] }).holdMaxSeconds, 1800)
-    assert.ok('message' in parseCreateShowBody({ kind: 'duo', outputs: [output] }))
+    // C6b: a test show parses like a solo show.
+    assert.equal(parseCreateShowBody({ kind: 'test', outputs: [output] }).kind, 'test')
+    assert.equal(
+      parseCreateShowBody({ kind: 'duo', outputs: [output] }).message,
+      'kind must be solo, talk or test.'
+    )
     assert.ok('message' in parseCreateShowBody({ kind: 'solo', outputs: [] }))
     assert.ok('message' in parseCreateShowBody({ kind: 'solo', outputs: [output, output] }))
     assert.ok(
       'message' in parseCreateShowBody({ kind: 'solo', outputs: [output], holdMaxSeconds: 10 })
     )
     assert.ok('message' in parseCreateShowBody({ kind: 'solo', outputs: [{ ...output, fps: 61 }] }))
+  })
+
+  it('mirrors the web rate limit on test shows: six an hour, on the window edge', () => {
+    const now = new Date('2026-10-17T12:00:00.000Z')
+    const minutesAgo = (minutes) => new Date(now.getTime() - minutes * 60_000)
+    assert.deepEqual(
+      evaluateTestShowLimit({
+        now,
+        recentCreatedAt: [minutesAgo(60), ...[50, 40, 30, 20, 10].map(minutesAgo)]
+      }),
+      { ok: true }
+    )
+    assert.deepEqual(
+      evaluateTestShowLimit({ now, recentCreatedAt: [55, 50, 40, 30, 20, 10].map(minutesAgo) }),
+      { ok: false, resetAt: '2026-10-17T12:05:00.000Z' }
+    )
   })
 
   it('serves the Premium capabilities with the plan and cloud blocks', () => {
@@ -523,6 +545,139 @@ describe('fake cloud web: the server against a fake agent', () => {
       assert.ok(
         web.state.calls.some((call) => call.path === '/api/cloud/shows' && call.status === 201)
       )
+    } finally {
+      await web.close()
+      await new Promise((resolveClose) => agent.close(resolveClose))
+    }
+  })
+
+  // C6b: a test show, as videorc-web/lib/cloud/shows-route.ts handles it.
+  it('runs a test show: a 30 s solo show to the node, never current, never metered, six an hour', async () => {
+    const secret = Buffer.alloc(32, 3)
+    const { privateKey } = newShowSigningKey()
+    const agentBodies = []
+    const agent = createServer(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      if (req.url === '/v1/shows') {
+        agentBodies.push(body)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            ingest: [
+              {
+                orientation: 'horizontal',
+                serverUrl: 'rtmps://localhost:19360/live',
+                streamKey: `${body.showId}-h.${body.ingestKey}`
+              }
+            ],
+            controlUrl: `ws://127.0.0.1:9443/v1/shows/${body.showId}/control`
+          })
+        )
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    })
+    await new Promise((resolveListen) => agent.listen(0, '127.0.0.1', resolveListen))
+    const web = await startFakeCloudWeb({
+      sessionToken: 'session-token',
+      node: { id: 'local-1', secret, agentUrl: `http://127.0.0.1:${agent.address().port}` },
+      signingKey: privateKey
+    })
+    const bearer = { authorization: 'Bearer session-token', 'content-type': 'application/json' }
+    const body = (kind) =>
+      JSON.stringify({
+        kind,
+        outputs: [
+          {
+            orientation: 'horizontal',
+            width: 1280,
+            height: 720,
+            fps: 30,
+            videoKbps: 4000,
+            audioKbps: 160
+          }
+        ],
+        client: { app: 'desktop', version: '0.9.144' }
+      })
+    const create = (kind) =>
+      fetch(`${web.httpOrigin}/api/cloud/shows`, {
+        method: 'POST',
+        headers: bearer,
+        body: body(kind)
+      })
+    const current = async () =>
+      (await fetch(`${web.httpOrigin}/api/cloud/shows/current`, { headers: bearer })).json()
+    const end = (id) =>
+      fetch(`${web.httpOrigin}/api/cloud/shows/${id}/end`, { method: 'POST', headers: bearer })
+    try {
+      const createResponse = await create('test')
+      assert.equal(createResponse.status, 201)
+      const created = await createResponse.json()
+      assert.equal(created.show.kind, 'test')
+      assert.equal(
+        new Date(created.show.expiresAt).getTime() - new Date(created.show.createdAt).getTime(),
+        120_000
+      )
+      // The node needs no protocol change: a solo show with the short cap.
+      assert.equal(agentBodies.at(-1).kind, 'solo')
+      assert.equal(agentBodies.at(-1).maxShowSeconds, 30)
+      // The smokes read what was asked from the call log, never the key.
+      const asked = web.state.agentCalls.find((call) => call.showId === created.show.id)
+      assert.deepEqual(
+        { kind: asked.kind, maxShowSeconds: asked.maxShowSeconds, status: asked.status },
+        { kind: 'solo', maxShowSeconds: 30, status: 200 }
+      )
+      assert.ok(!JSON.stringify(web.state.agentCalls).includes(agentBodies.at(-1).ingestKey))
+      // Open on the web, so a show cannot start beside it, but never current.
+      assert.equal((await create('solo')).status, 409)
+      assert.deepEqual(await current(), { show: null })
+      assert.equal(web.currentShow(), null)
+      assert.equal(web.showsOfKind('test').length, 1)
+
+      const usage = JSON.stringify({
+        nodeId: 'local-1',
+        reports: [
+          {
+            showId: created.show.id,
+            seq: 1,
+            liveSeconds: 10,
+            holdSeconds: 0,
+            at: new Date().toISOString()
+          }
+        ]
+      })
+      const usageResponse = await fetch(`${web.httpOrigin}/api/cloud/usage`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...signNodeRequest({ nodeId: 'local-1', rawBody: usage, secret, timestampMs: Date.now() })
+        },
+        body: usage
+      })
+      assert.deepEqual(await usageResponse.json(), {
+        ok: true,
+        accepted: [{ showId: created.show.id, seq: 1 }]
+      })
+      assert.deepEqual(web.state.usageReports, [])
+      assert.deepEqual(web.state.testUsageIgnored, [{ showId: created.show.id, seq: 1 }])
+
+      assert.equal((await end(created.show.id)).status, 200)
+      // Five more tests this hour pass; the seventh is refused with its reset.
+      for (let index = 0; index < 5; index += 1) {
+        const next = await create('test')
+        assert.equal(next.status, 201)
+        assert.equal((await end((await next.json()).show.id)).status, 200)
+      }
+      const seventh = await create('test')
+      assert.equal(seventh.status, 429)
+      const refused = await seventh.json()
+      assert.equal(refused.error.code, 'cloud-test-limit')
+      assert.ok(Date.parse(refused.resetAt) > Date.now())
+      // A show is not rate limited by the tests.
+      assert.equal((await create('solo')).status, 201)
     } finally {
       await web.close()
       await new Promise((resolveClose) => agent.close(resolveClose))
