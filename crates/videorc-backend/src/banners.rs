@@ -70,6 +70,11 @@ pub(crate) const REFUSAL_TOO_LARGE: &str =
 pub(crate) const REFUSAL_TOO_MANY: &str = "You have 24 banners. Delete one to import another.";
 pub(crate) const REFUSAL_FOUR_SHOWING: &str = "Four banners are showing. Hide one first.";
 pub(crate) const REFUSAL_DELETE_SHOWN_IN_SESSION: &str = "Hide this banner before you delete it.";
+/// A Show during a session that cannot draw a banner added after its start
+/// (plan 186 S4): the legacy FFmpeg graph without its overlay FIFO, or the
+/// Windows direct D3D11 recording.
+pub(crate) const REFUSAL_SESSION_CANNOT_ADD: &str =
+    "This recording can't add banners after it starts. Show the banner before you press Record.";
 /// The plan pins no sentence for the 16 px floor; this one follows the shape
 /// of its neighbours.
 pub(crate) const REFUSAL_TOO_SMALL: &str = "This image is too small. Use one at least 16 × 16 px.";
@@ -1056,26 +1061,40 @@ pub(crate) fn shown_banner_switches(database: &Database) -> Result<Vec<OverlaySw
         .collect())
 }
 
-/// `banners.show`: the cap of four and the 160 MB prepared-bitmap budget for
-/// `canvases` (the compositor's current primary and auxiliary canvases) are
-/// both refused with one sentence before the row changes. The store keeps
-/// the cap under its own transaction too.
+/// `banners.show`: a session that cannot draw a banner added after its start
+/// (`session_accepts_banners` is `Some(false)`; `None` when nothing runs), the
+/// cap of four and the 160 MB prepared-bitmap budget for `canvases` (the
+/// compositor's current primary and auxiliary canvases) are each refused with
+/// their one sentence before the row changes. The store keeps the cap under
+/// its own transaction too. Showing a banner that already shows is a no-op
+/// and refuses nothing.
 pub(crate) fn show_banner(
     database: &Database,
     id: &str,
     canvases: &[(u32, u32)],
+    session_accepts_banners: Option<bool>,
 ) -> Result<Banner> {
-    show_banner_within_budget(database, id, canvases, BANNER_BITMAP_BUDGET_BYTES)
+    show_banner_within_budget(
+        database,
+        id,
+        canvases,
+        session_accepts_banners,
+        BANNER_BITMAP_BUDGET_BYTES,
+    )
 }
 
 pub(crate) fn show_banner_within_budget(
     database: &Database,
     id: &str,
     canvases: &[(u32, u32)],
+    session_accepts_banners: Option<bool>,
     budget_bytes: u64,
 ) -> Result<Banner> {
     let candidate = database.banner_by_id(id)?;
     if !candidate.shown {
+        if session_accepts_banners == Some(false) {
+            bail!(REFUSAL_SESSION_CANNOT_ADD);
+        }
         let shown = shown_banners_for_compositor(database)?;
         if shown.len() >= BANNER_MAX_SHOWN
             || show_exceeds_budget(&shown, &candidate, canvases, budget_bytes)
@@ -1100,12 +1119,16 @@ pub(crate) fn shown_banners_for_compositor(database: &Database) -> Result<Vec<Ba
 
 /// The one place every banner mutation ends (import, update, reorder, delete,
 /// show, hide). The shown set is installed into the compositor first (the
-/// next tick draws it; no scene commit, no capture change), then the full
-/// list is republished as `banners.changed` under one lock so an older
-/// snapshot is never emitted after a newer one.
+/// next tick draws it; no scene commit, no capture change) and the legacy
+/// FFmpeg overlay frame is recomposed when such a session runs (S4), then
+/// the full list is republished as `banners.changed` under one lock so an
+/// older snapshot is never emitted after a newer one.
 pub(crate) async fn on_banners_changed(state: &AppState) -> Result<Vec<Banner>> {
     if let Err(error) = crate::compositor::install_banner_set(state).await {
         tracing::warn!("Could not install the banner set into the compositor: {error:#}");
+    }
+    if let Err(error) = crate::recording::apply_banners_to_legacy_overlay(state).await {
+        tracing::warn!("Could not recompose the legacy overlay frame with the banners: {error:#}");
     }
     let banners = {
         let _publication = state
@@ -2397,24 +2420,34 @@ mod tests {
         let second = import_banner(&database, &write_png(&dir, "two.png", 64, 64)).unwrap();
         let canvases = [(3840_u32, 2160_u32), (1080, 1920)];
         // Under budget: shown.
-        assert!(show_banner(&database, &first.id, &canvases).unwrap().shown);
+        assert!(
+            show_banner(&database, &first.id, &canvases, None)
+                .unwrap()
+                .shown
+        );
         // A budget the first banner already fills refuses the second with the
         // verbatim sentence, and leaves the row hidden.
         let one_banner_bytes = crate::banner_prepare::estimated_prepared_bytes([&first], &canvases);
-        let refused = show_banner_within_budget(&database, &second.id, &canvases, one_banner_bytes)
-            .unwrap_err()
-            .to_string();
+        let refused = show_banner_within_budget(
+            &database,
+            &second.id,
+            &canvases,
+            Some(true),
+            one_banner_bytes,
+        )
+        .unwrap_err()
+        .to_string();
         assert_eq!(refused, REFUSAL_FOUR_SHOWING);
         assert!(!database.banner_by_id(&second.id).unwrap().shown);
         // Showing a banner that already shows never re-checks the budget.
         assert!(
-            show_banner_within_budget(&database, &first.id, &canvases, 0)
+            show_banner_within_budget(&database, &first.id, &canvases, None, 0)
                 .unwrap()
                 .shown
         );
         // Without a compositor run there are no canvases and nothing to refuse.
         assert!(
-            show_banner_within_budget(&database, &second.id, &[], 0)
+            show_banner_within_budget(&database, &second.id, &[], None, 0)
                 .unwrap()
                 .shown
         );
@@ -2430,6 +2463,44 @@ mod tests {
                 2
             ]
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Plan 186 S4: a session that cannot draw a banner added after its start
+    /// (the legacy FFmpeg graph without its overlay FIFO, the Windows direct
+    /// D3D11 recording) refuses a new Show with the verbatim sentence, before
+    /// the cap and the budget; showing a banner that already shows stays a
+    /// no-op there, and a session that draws the set refuses nothing.
+    #[test]
+    fn show_refuses_a_new_banner_on_a_session_that_cannot_add_one() {
+        let dir = temp_dir("show-session");
+        let database = test_database(&dir);
+        let first = import_banner(&database, &write_png(&dir, "one.png", 64, 64)).unwrap();
+        let second = import_banner(&database, &write_png(&dir, "two.png", 64, 64)).unwrap();
+        assert!(
+            show_banner(&database, &first.id, &[], Some(true))
+                .unwrap()
+                .shown
+        );
+        let refused = show_banner(&database, &second.id, &[], Some(false))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            "This recording can't add banners after it starts. Show the banner before you press Record."
+        );
+        assert_eq!(refused, REFUSAL_SESSION_CANNOT_ADD);
+        assert!(!database.banner_by_id(&second.id).unwrap().shown);
+        // The session's refusal comes before the cap: nothing else is read.
+        assert_eq!(shown_banners_for_compositor(&database).unwrap().len(), 1);
+        // Already showing: a no-op, not a refusal.
+        assert!(
+            show_banner(&database, &first.id, &[], Some(false))
+                .unwrap()
+                .shown
+        );
+        // No session, or one that draws the set: shown.
+        assert!(show_banner(&database, &second.id, &[], None).unwrap().shown);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

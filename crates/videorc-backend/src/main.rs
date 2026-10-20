@@ -12419,6 +12419,9 @@ async fn handle_text_message_with_role(
                     // The 160 MB prepared-bitmap budget is judged against the
                     // canvases the compositor draws right now.
                     &compositor::banner_prepare_canvases(state).await,
+                    // A session that cannot draw a banner added after its
+                    // start refuses a new one (plan 186 S4).
+                    recording::active_session_accepts_banners(state).await,
                 ) {
                     Ok(banner) => {
                         let _ = banners::on_banners_changed(state).await;

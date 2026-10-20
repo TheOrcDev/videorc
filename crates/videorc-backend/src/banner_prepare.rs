@@ -111,12 +111,14 @@ pub(crate) struct BannerPrepareRequest {
 }
 
 /// A prepared bitmap: straight-alpha BGRA at its exact draw size, opacity
-/// baked into the alpha channel. `revision` is its Metal content key.
+/// baked into the alpha channel. `revision` is its content key on Metal and
+/// on Windows D3D11 (plan 186 S4), where the pixels are shared with the
+/// bounded upload path as this `Arc`, never copied per frame.
 #[derive(Debug)]
 pub(crate) struct BannerBitmap {
     pub width: u32,
     pub height: u32,
-    pub bgra: Vec<u8>,
+    pub bgra: Arc<Vec<u8>>,
     pub revision: u64,
 }
 
@@ -144,7 +146,7 @@ pub(crate) fn prepare_banner_bitmap(
     BannerBitmap {
         width: scaled.width(),
         height: scaled.height(),
-        bgra,
+        bgra: Arc::new(bgra),
         revision: next_bitmap_revision(),
     }
 }
@@ -569,8 +571,9 @@ fn prepare_request(
 }
 
 /// The production decoder: the stored PNG (any format `image` guesses is
-/// accepted) under an allocation limit, as straight-alpha RGBA.
-fn decode_banner_file(path: &Path) -> Result<image::RgbaImage, String> {
+/// accepted) under an allocation limit, as straight-alpha RGBA. The legacy
+/// FFmpeg overlay frame (plan 186 S4, `recording.rs`) prepares with it too.
+pub(crate) fn decode_banner_file(path: &Path) -> Result<image::RgbaImage, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|error| format!("open: {error}"))?;
     let mut bytes = Vec::new();
@@ -609,7 +612,7 @@ mod tests {
         BannerBitmap {
             width,
             height,
-            bgra: vec![0; (width * height * 4) as usize],
+            bgra: Arc::new(vec![0; (width * height * 4) as usize]),
             revision: next_bitmap_revision(),
         }
     }
