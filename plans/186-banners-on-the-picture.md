@@ -1061,7 +1061,31 @@ before either track started (`73482c69`).
 - `pnpm build` and `pnpm check:renderer-assets`: eager JS 389,082 gzip, under the 390,000 ceiling, which was not raised.
 - `pnpm smoke:banners`: PASS in recording, streaming and both modes, across 5 artifacts. The horizontal and vertical receiver contact sheets were inspected by eye: placement, the move, the half-alpha logo blended (teal over dark, grey over the red takeover), banners above the takeover, all hidden at the end.
 - `pnpm smoke:captions-contract`: PASS (voice track).
-- `pnpm smoke:recording-studio`: see the PR.
+- `pnpm smoke:recording-studio`: steps 1 to 29 passed. That includes
+  `smoke:banners`, `smoke:screens`, the comment-highlight stream gate
+  (dual-orientation included), the Buddy pet artifacts, freeform pointer
+  continuity, captions contract and live, record latency, and the preview
+  scene, pump, click, focus and stress smokes. The bundle stopped at
+  `probe:preview-lifecycle` with "Main window is not ready" (cycle 28). The
+  remaining steps then passed one by one: `probe:preview-window`,
+  `smoke:preview-surface` (57.6/60.3/55.8 fps), `smoke:screen-recording-real`,
+  `smoke:notes-window-invisible` and `smoke:system-audio`.
+- `probe:preview-lifecycle` A/B (APFS-cloned base worktree at `dacbec26`):
+  - Branch: failed at cycles 28 and 14, both runs right after heavy smoke
+    runs, then passed 100/100 three times in a row on a quiet machine.
+  - Base: passed 100/100 four times.
+  - The failure matches the pre-existing "Main window is not ready"
+    flake recorded for plans 044 and 058. Read as host-load sensitivity,
+    not a banner regression. Recorded rather than waived.
+- `pnpm smoke:remote-control`, `pnpm smoke:remote-lan`,
+  `pnpm smoke:captions-dual-orientation`: PASS.
+- CI:
+  - Linux gates, JS, and the Windows installer pass.
+  - The macOS Rust job is red at "Rust advisory audit" (RUSTSEC-2026-0381
+    and 0382 in `rustls-webpki`/`webpki-roots`, plus unmaintained `zbus`
+    crates). Those advisories were published after main's last green run.
+    This branch does not touch `Cargo.lock`, so the red is inherited. A
+    separate dependency PR is owed.
 
 **Owed**
 
