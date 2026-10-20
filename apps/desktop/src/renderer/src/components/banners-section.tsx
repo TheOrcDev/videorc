@@ -12,6 +12,7 @@ import {
 import { useRef, useState, type DragEvent, type KeyboardEvent, type ReactElement } from 'react'
 
 import { BannerThumbnail } from '@/components/banner-thumbnail'
+import { BannerTimingChip } from '@/components/banner-timing-chip'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { OfflineAlert } from '@/components/lock-alert'
@@ -344,8 +345,15 @@ function BannerTile({
       onKeyDown={moveFromKeyboard}
     >
       {/* The output's own 16:9 box, the image contained in it: a 6:1 strip
-          stays a strip, a logo stays square, never cropped. */}
-      <BannerThumbnail banner={banner} className="aspect-video rounded-chip" />
+          stays a strip, a logo stays square, never cropped. The timer's one
+          line sits on its corner, like a takeover's In use. */}
+      <div className="relative">
+        <BannerThumbnail banner={banner} className="aspect-video rounded-chip" />
+        <BannerTimingChip
+          banner={banner}
+          className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)]"
+        />
+      </div>
       <div className="flex min-h-7 min-w-0 items-center gap-1.5 pl-1">
         {renaming ? (
           <Input

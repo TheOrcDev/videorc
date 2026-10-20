@@ -183,6 +183,18 @@ describe('BannersSection states', () => {
     expect(tile('sponsor').className).toContain('ring-foreground/60')
     expect(tile('logo').className).not.toContain('ring-foreground/60')
   })
+
+  it("says a banner's timer in a neutral chip on its tile, and nothing without one", async () => {
+    mocked.banners = {
+      ...mocked.banners,
+      banners: [{ ...sponsor, hideAfterSec: 30, repeatEveryMin: 15 }, logo]
+    }
+    await render()
+    const chip = tile('sponsor').querySelector('[data-videorc-banner-timing]')!
+    expect(chip.textContent).toBe('Shows for 30 s every 15 min')
+    expect(chip.getAttribute('data-variant')).toBe('outline')
+    expect(tile('logo').querySelector('[data-videorc-banner-timing]')).toBeNull()
+  })
 })
 
 describe('BannersSection import', () => {

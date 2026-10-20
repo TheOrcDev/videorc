@@ -204,6 +204,78 @@ describe('BannerInspector', () => {
     expect(back.onBringToFront).toHaveBeenCalledTimes(1)
   })
 
+  it('folds Timing by default, and its header says the timer while one is set', async () => {
+    await renderInspector(inspectorProps())
+    const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
+    expect(fold.querySelector('h3')?.textContent).toBe('Timing')
+    expect(fold.getAttribute('data-state')).toBe('closed')
+    expect(fold.querySelector('[data-videorc-banner-hide-after]')).toBeNull()
+    expect(fold.querySelector('[data-videorc-banner-timing-summary]')).toBeNull()
+
+    const cases: [Partial<Banner>, string][] = [
+      [{ hideAfterSec: 30, repeatEveryMin: 15 }, 'Shows for 30 s every 15 min'],
+      [{ repeatEveryMin: 15 }, 'Every 15 min'],
+      [{ hideAfterSec: 30 }, 'Hides after 30 s']
+    ]
+    for (const [timing, line] of cases) {
+      await renderInspector(inspectorProps({ banner: banner('sponsor', timing) }))
+      const summary = document.querySelector('[data-videorc-banner-timing-summary]')!
+      expect(summary.textContent).toBe(line)
+      expect(summary.className).not.toContain('text-subtle')
+    }
+  })
+
+  it('sends one update per timing choice, and 0 for Off', async () => {
+    const props = inspectorProps()
+    await renderInspector(props)
+    const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
+    await act(async () => fold.querySelector<HTMLButtonElement>('h3 button')!.click())
+    expect(fold.getAttribute('data-state')).toBe('open')
+    // The helper is essential: secondary text that describes the control.
+    const repeat = fold.querySelector<HTMLButtonElement>('[data-videorc-banner-repeat]')!
+    const help = [...fold.querySelectorAll('[data-slot="field-description"]')].find(
+      (line) => line.textContent === "Repeats only while you're recording or live."
+    )!
+    expect(help.className).toContain('text-muted-foreground')
+    expect(repeat.getAttribute('aria-describedby')).toBe(help.id)
+
+    const choose = async (trigger: string, label: string): Promise<string[]> => {
+      await act(async () => fold.querySelector<HTMLButtonElement>(trigger)!.click())
+      const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+      const labels = options.map((option) => option.textContent ?? '')
+      await act(async () => options.find((option) => option.textContent === label)!.click())
+      return labels
+    }
+    const hideAfter = '[data-videorc-banner-hide-after]'
+    expect(fold.querySelector(hideAfter)?.textContent).toBe('Off')
+    expect(await choose(hideAfter, '30 s')).toEqual(['Off', '10 s', '30 s', '1 min', '5 min'])
+    expect(props.onPatch).toHaveBeenCalledTimes(1)
+    expect(props.onPatch).toHaveBeenLastCalledWith({ hideAfterSec: 30 })
+    expect(await choose('[data-videorc-banner-repeat]', '15 min')).toEqual([
+      'Off',
+      '5 min',
+      '10 min',
+      '15 min',
+      '30 min'
+    ])
+    expect(props.onPatch).toHaveBeenCalledTimes(2)
+    expect(props.onPatch).toHaveBeenLastCalledWith({ repeatEveryMin: 15 })
+
+    // Set, then Off: the update sends 0 (the contract's "off").
+    const timed = inspectorProps({
+      banner: banner('sponsor', { hideAfterSec: 60, repeatEveryMin: 5 })
+    })
+    await renderInspector(timed)
+    expect(fold.querySelector(hideAfter)?.textContent).toBe('1 min')
+    await choose(hideAfter, 'Off')
+    await choose('[data-videorc-banner-repeat]', 'Off')
+    expect(timed.onPatch).toHaveBeenNthCalledWith(1, { hideAfterSec: 0 })
+    expect(timed.onPatch).toHaveBeenNthCalledWith(2, { repeatEveryMin: 0 })
+    // Choosing the value it already has sends nothing.
+    await choose(hideAfter, '1 min')
+    expect(timed.onPatch).toHaveBeenCalledTimes(2)
+  })
+
   it('opens Assets to manage the banner', async () => {
     const props = inspectorProps()
     await renderInspector(props)
@@ -234,6 +306,14 @@ describe('BannerInspector', () => {
     expect(switchFor('Stream').disabled).toBe(true)
     expect(switchFor('Recording').disabled).toBe(true)
     expect(button('Manage in Assets').disabled).toBe(false)
+    const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
+    await act(async () => fold.querySelector<HTMLButtonElement>('h3 button')!.click())
+    expect(
+      fold.querySelector<HTMLButtonElement>('[data-videorc-banner-hide-after]')!.disabled
+    ).toBe(true)
+    expect(fold.querySelector<HTMLButtonElement>('[data-videorc-banner-repeat]')!.disabled).toBe(
+      true
+    )
   })
 })
 
@@ -284,6 +364,23 @@ describe('SceneBannersSection', () => {
       row('logo').querySelector<HTMLButtonElement>('[data-slot="list-row-button"]')!.click()
     )
     expect(props.onSelect).toHaveBeenCalledWith('logo')
+  })
+
+  it("says a banner's timer in a neutral chip beside its name", async () => {
+    await renderSection(
+      sectionProps({
+        banners: [
+          banner('sponsor', { repeatEveryMin: 15 }),
+          banner('logo', { shown: false, sortOrder: 1 })
+        ]
+      })
+    )
+    const chip = row('sponsor').querySelector('[data-videorc-banner-timing]')!
+    expect(chip.textContent).toBe('Every 15 min')
+    expect(chip.getAttribute('data-variant')).toBe('outline')
+    // Beside the name, never inside its button.
+    expect(chip.closest('[data-slot="list-row-button"]')).toBeNull()
+    expect(row('logo').querySelector('[data-videorc-banner-timing]')).toBeNull()
   })
 
   it('keeps Show off with the reason while four banners are showing', async () => {

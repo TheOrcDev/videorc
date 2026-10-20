@@ -1,15 +1,24 @@
-import { ArrowRightIcon, ImageIcon, WarningIcon } from '@/components/icons'
+import { ArrowRightIcon, ChevronDownIcon, ImageIcon, WarningIcon } from '@/components/icons'
 import { useRef, useState, type ReactElement } from 'react'
 
 import { BannerThumbnail } from '@/components/banner-thumbnail'
+import { BannerTimingChip } from '@/components/banner-timing-chip'
 import { GroupedList, ListRow, ListRowButton } from '@/components/list-row'
 import { LockAlert, OfflineAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Empty, EmptyContent, EmptyDescription } from '@/components/ui/empty'
-import { Field, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field'
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldLabel,
+  FieldLegend,
+  FieldSet
+} from '@/components/ui/field'
 import {
   ParameterSlider,
   ParameterSliderControl,
@@ -17,6 +26,14 @@ import {
   ParameterSliderLabel,
   ParameterSliderValue
 } from '@/components/ui/parameter-slider'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import {
   BANNER_OPACITY_MAX,
@@ -26,6 +43,16 @@ import {
 } from '@/lib/backend'
 import { BANNER_SNAPS, BANNER_SNAP_LABELS, type BannerSnap } from '@/lib/banner-place'
 import type { BannerSizeAdvice } from '@/lib/banner-size'
+import {
+  BANNER_HIDE_AFTER_CHOICES,
+  BANNER_REPEAT_CHOICES,
+  BANNER_REPEAT_DESCRIPTION,
+  bannerMinutesLabel,
+  bannerSecondsLabel,
+  bannerTimingChoices,
+  bannerTimingSummary
+} from '@/lib/banner-timing'
+import { cn } from '@/lib/utils'
 
 // Banners on the Scene page (plan 186, "UI → Scene page"): the inspector's
 // Banners list, and the inspector for the selected banner. Both are plain
@@ -44,10 +71,10 @@ const OPACITY_MAX_PCT = Math.round(BANNER_OPACITY_MAX * 100)
 export const BANNER_IN_FRONT_REASON = 'This banner is already in front.'
 export const BANNER_AT_BACK_REASON = 'This banner is already at the back.'
 
-/** The banner's two switches and its opacity: what the inspector changes in place. */
+/** The banner's two switches, its opacity and its timer: what the inspector changes in place. */
 export type BannerInspectorPatch = Pick<
   BannerUpdateParams,
-  'opacity' | 'showOnStream' | 'showInRecording'
+  'opacity' | 'showOnStream' | 'showInRecording' | 'hideAfterSec' | 'repeatEveryMin'
 >
 
 /** The "Showing" chip: the one in-use treatment (Assets' `InUseChip`). */
@@ -117,6 +144,8 @@ export function SceneBannersSection({
                   />
                 }
                 interactive
+                // The timer's one line beside the name; it truncates before Show or Hide does.
+                alias={<BannerTimingChip banner={banner} />}
                 selected={banner.id === selectedId}
                 title={
                   <ListRowButton
@@ -343,11 +372,116 @@ export function BannerInspector({
             </DisabledReason>
           </div>
         </Field>
+        <BannerTimingFold banner={banner} disabled={blocked} onPatch={onPatch} />
         <Button className="self-end" variant="ghost" onClick={onManage}>
           Manage in Assets
           <ArrowRightIcon data-icon="inline-end" />
         </Button>
       </div>
     </PanelSection>
+  )
+}
+
+/**
+ * Timing (plan 186 S10), folded by default: Hide after and Show every, for
+ * sponsor rotation. The backend runs the timer; a manual Show or Hide always
+ * wins and starts the cycle over. Each choice is one update, and Off sends 0.
+ * The header says the timer in one line while either is set.
+ */
+function BannerTimingFold({
+  banner,
+  disabled,
+  onPatch
+}: {
+  banner: Banner
+  /** Videorc is reconnecting: the inspector's lock says why. */
+  disabled: boolean
+  onPatch: (patch: BannerInspectorPatch) => Promise<unknown> | void
+}): ReactElement {
+  const hideAfter = banner.hideAfterSec ?? 0
+  const repeat = banner.repeatEveryMin ?? 0
+  const summary = bannerTimingSummary(banner)
+  return (
+    <Collapsible className="group/timing flex flex-col" data-videorc-banner-timing-fold="">
+      <h3>
+        {/* The label keeps the other fields' left edge; the hover block
+            reaches past it, and the chevron closes the row like More. */}
+        <CollapsibleTrigger className="-mx-2 flex w-[calc(100%+1rem)] min-w-0 items-center gap-2 rounded-row px-2 py-1.5 text-left text-sm font-medium text-foreground hover:bg-accent">
+          <span className="shrink-0">Timing</span>
+          {summary ? (
+            <span
+              className="ml-auto min-w-0 truncate text-meta font-normal text-muted-foreground"
+              data-videorc-banner-timing-summary=""
+            >
+              {summary}
+            </span>
+          ) : null}
+          <ChevronDownIcon
+            aria-hidden
+            className={cn(
+              'size-3.5 shrink-0 text-muted-foreground transition-transform duration-150 group-data-[state=open]/timing:rotate-180',
+              summary ? null : 'ml-auto'
+            )}
+          />
+        </CollapsibleTrigger>
+      </h3>
+      <CollapsibleContent className="flex flex-col gap-3 pt-2">
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel>Hide after</FieldLabel>
+          </FieldContent>
+          <Select
+            disabled={disabled}
+            value={String(hideAfter)}
+            onValueChange={(next) => {
+              const seconds = Number(next)
+              if (Number.isFinite(seconds) && seconds !== hideAfter)
+                void onPatch({ hideAfterSec: seconds })
+            }}
+          >
+            <SelectTrigger className="w-28 shrink-0" data-videorc-banner-hide-after="">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {bannerTimingChoices(BANNER_HIDE_AFTER_CHOICES, hideAfter).map((seconds) => (
+                  <SelectItem key={seconds} value={String(seconds)}>
+                    {seconds === 0 ? 'Off' : bannerSecondsLabel(seconds)}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel>Show every</FieldLabel>
+            <FieldDescription>{BANNER_REPEAT_DESCRIPTION}</FieldDescription>
+          </FieldContent>
+          <Select
+            disabled={disabled}
+            value={String(repeat)}
+            onValueChange={(next) => {
+              const minutes = Number(next)
+              if (Number.isFinite(minutes) && minutes !== repeat)
+                void onPatch({ repeatEveryMin: minutes })
+            }}
+          >
+            <SelectTrigger className="w-28 shrink-0" data-videorc-banner-repeat="">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {bannerTimingChoices(BANNER_REPEAT_CHOICES, repeat).map((minutes) => (
+                  <SelectItem key={minutes} value={String(minutes)}>
+                    {minutes === 0 ? 'Off' : bannerMinutesLabel(minutes)}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
