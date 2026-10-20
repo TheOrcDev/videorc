@@ -1109,7 +1109,14 @@ pub(crate) fn show_banner_within_budget(
 /// budget refusals, the row, then the compositor and `banners.changed`.
 pub(crate) async fn show_banner_and_publish(state: &AppState, id: &str) -> Result<Banner> {
     let canvases = crate::compositor::banner_prepare_canvases(state).await;
-    let banner = show_banner(&state.database, id, &canvases)?;
+    let banner = show_banner(
+        &state.database,
+        id,
+        &canvases,
+        // A session that cannot draw a banner added after its start refuses
+        // it here too (plan 186 S4).
+        crate::recording::active_session_accepts_banners(state).await,
+    )?;
     if let Err(error) = on_banners_changed(state).await {
         tracing::warn!("Could not publish the banner list after a voice show: {error:#}");
     }

@@ -274,7 +274,10 @@ mod tests {
         let start = Instant::now();
         let mut book = BannerTimerBook::default();
         book.observe(&[banner("a", false, Some(30), None)], start, false);
-        assert!(book.due(start + MINUTE).is_empty(), "hidden: nothing to hide");
+        assert!(
+            book.due(start + MINUTE).is_empty(),
+            "hidden: nothing to hide"
+        );
         assert_eq!(book.next_deadline(), None);
 
         // Shown at +10 s: due at +40 s, not before.
@@ -288,7 +291,11 @@ mod tests {
         );
 
         // A manual Hide before the deadline: nothing left to do.
-        book.observe(&[banner("a", false, Some(30), None)], shown_at + 5 * SECOND, false);
+        book.observe(
+            &[banner("a", false, Some(30), None)],
+            shown_at + 5 * SECOND,
+            false,
+        );
         assert!(book.due(shown_at + MINUTE).is_empty());
         assert_eq!(book.next_deadline(), None);
     }
@@ -298,10 +305,17 @@ mod tests {
         let start = Instant::now();
         let mut book = BannerTimerBook::default();
         book.observe(&[banner("a", true, Some(30), None)], start, false);
-        book.observe(&[banner("a", false, Some(30), None)], start + 20 * SECOND, false);
+        book.observe(
+            &[banner("a", false, Some(30), None)],
+            start + 20 * SECOND,
+            false,
+        );
         let again = start + 25 * SECOND;
         book.observe(&[banner("a", true, Some(30), None)], again, false);
-        assert!(book.due(start + 40 * SECOND).is_empty(), "counted from the new show");
+        assert!(
+            book.due(start + 40 * SECOND).is_empty(),
+            "counted from the new show"
+        );
         assert_eq!(book.next_deadline(), Some(again + 30 * SECOND));
         // Turning "Hide after" down to 10 s while showing: due from the show.
         book.observe(&[banner("a", true, Some(10), None)], again + SECOND, false);
@@ -321,7 +335,10 @@ mod tests {
         let mut book = BannerTimerBook::default();
         let idle = [banner("s", false, Some(30), Some(15))];
         book.observe(&idle, start, false);
-        assert!(book.due(start + 60 * MINUTE).is_empty(), "idle: never shows");
+        assert!(
+            book.due(start + 60 * MINUTE).is_empty(),
+            "idle: never shows"
+        );
         assert!(book.any_repeat());
 
         let session = start + MINUTE;
@@ -364,7 +381,11 @@ mod tests {
         book.observe(&hidden, start, true);
         // A manual Show at +4 min and a Hide at +6 min: the next timed show
         // is a full period after the Hide, not at +10 min.
-        book.observe(&[banner("s", true, None, Some(10))], start + 4 * MINUTE, true);
+        book.observe(
+            &[banner("s", true, None, Some(10))],
+            start + 4 * MINUTE,
+            true,
+        );
         book.observe(&hidden, start + 6 * MINUTE, true);
         assert!(book.due(start + 10 * MINUTE).is_empty());
         assert_eq!(
