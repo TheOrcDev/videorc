@@ -820,10 +820,18 @@ answers 201:
 
 ```json
 { "show": { "id": "sh_…", "status": "ready", "nodeId": "eu-hel-1", "createdAt": "…", "expiresAt": "…" },
-  "ingest": [{ "orientation": "horizontal", "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live", "streamKey": "sh_…-h.<ingestKey>" }],
+  "ingest": [{ "orientation": "horizontal", "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live", "streamKey": "sh_…-h?key=<ingestKey>",
+               "srt": { "url": "srt://eu-hel-1.live.videorc.com:8890", "streamId": "publish:live/sh_…-h", "passphrase": "<32 base62>", "latencyMs": 1000 } }],
   "control": { "url": "wss://eu-hel-1.live.videorc.com:9443/v1/shows/sh_…/control", "token": "vcs1.…" },
   "allowance": { "secondsPerMonth": 36000, "secondsUsed": 1200, "overageSeconds": 0, "resetAt": "…" } }
 ```
+
+- **`ingest`** (C1b, changed 2026-10-20 from `sh_…-h.<ingestKey>`): the
+  stream key names the feed's path and carries the ingest key in its query,
+  so no secret is in the path. `srt` is there only when the node takes SRT.
+  Its `streamId` is public (SRT sends it in the clear); its `passphrase` is
+  the secret, one per show, minted by the web like the ingest key and never
+  stored by it. `latencyMs` is SRT's receive window, set by the web.
 
 - **Errors:**
   - 401;
@@ -845,13 +853,17 @@ answers 201:
 - `GET /api/cloud/allowance` → plan 185's `cloud` block.
 - The ingest pair has the shape of any platform destination, so the
   desktop's cloud target is a plain `{server}/{key}` RTMPS target (C3).
+  With `srt` present, the desktop sends the feed over SRT when the node
+  answers SRT's handshake within 3 s at the start, else over RTMPS (C1b).
 
 ### Web → node agent (node-signed)
 
 - `POST {agentUrl}/v1/shows` with `{ "showId", "userId", "kind": "solo",
-  "outputs": [ …as above… ], "holdMaxSeconds", "maxShowSeconds", "ingestKey" }`.
-  - 200: `{ "ingest": [{ "orientation", "serverUrl", "streamKey" }],
-    "controlUrl" }`.
+  "outputs": [ …as above… ], "holdMaxSeconds", "maxShowSeconds", "ingestKey",
+  "srtPassphrase", "srtLatencyMs" }`. `srtPassphrase` is 32 base62
+  characters (C1b).
+  - 200: `{ "ingest": [{ "orientation", "serverUrl", "streamKey", "srt"? }],
+    "controlUrl" }`, the pairs the web hands the desktop as they are.
   - 409 when the show exists; 503 `node-full`.
 - `POST {agentUrl}/v1/shows/:id/end` → `{ "ok": true }`.
 - `GET {agentUrl}/v1/health` → `{ "ok", "version", "capacity": { "slots",
@@ -872,11 +884,23 @@ answers 201:
 
 ### Ingest on the node
 
-- MediaMTX listens for RTMPS on 1936, and for RTMP on 1935 in local
-  development only.
-- Publishing is authorised by the node agent. It accepts
-  `live/<showId>-<h|v>.<ingestKey>` only while that show is live.
-- The runner reads its feed locally from MediaMTX.
+- MediaMTX listens for RTMPS on 1936 (TCP) and SRT on 8890 (UDP, one port
+  for every show), and for RTMP on 1935 in local development only.
+- One path per feed, `live/<showId>-<h|v>`, for both protocols (C1b,
+  changed 2026-10-20; the S0c note, section 5). Publishing is authorised by
+  the node agent's hook, only while that show is live and has that
+  orientation:
+  - RTMPS publishes `live/<showId>-<h|v>?key=<ingestKey>`; the hook checks
+    the key in the query.
+  - SRT publishes with the stream id `publish:live/<showId>-<h|v>` and no
+    user, password or query, which the hook checks. MediaMTX then checks the
+    show's passphrase, which the agent sets on the path through MediaMTX's
+    local API when the show is created (`srtPublishPassphrase`), removes when
+    it ends, and sets again after MediaMTX restarts.
+- A publisher on one protocol replaces one on the other
+  (`overridePublisher`), so a feed can move between them mid-show.
+- The runner reads `live/<showId>-<h|v>` locally from MediaMTX, whatever
+  the protocol. Reads stay loopback only.
 
 ### Control socket (desktop ↔ node agent ↔ runner, over WSS)
 
@@ -897,8 +921,9 @@ answers 201:
   - `{ "t": "intent", "id", "kind": "hold.start" }`, and the same with
     `hold.stop` and `show.end`.
   - `{ "t": "intent", "id", "kind": "ingest.get" }`. The ack carries
-    `"result": { "ingest": [{ "orientation", "serverUrl", "streamKey" }] }`,
-    the same pairs the create response had (added 2026-10-17).
+    `"result": { "ingest": [{ "orientation", "serverUrl", "streamKey", "srt"? }] }`,
+    the same pairs the create response had (added 2026-10-17; `srt` with
+    C1b, so a relaunched desktop resumes over SRT).
     - Resume after a relaunch needs it. The web never stores ingest keys
       (W2), and the desktop never persists them, so only the node, which
       already holds the show's ingest key, can hand it back.
@@ -979,7 +1004,7 @@ survives the computer.
 ### Infra (`videorc-cloud`)
 
 - **I1. Nodes.** Provision 2 Hetzner dedicated servers (sizes from S0d) from
-  a script in `videorc-cloud/ops/`: firewall (SRT UDP range, RTMPS, control
+  a script in `videorc-cloud/ops/`: firewall (SRT's one UDP port, RTMPS, control
   socket, SSH from an allowlist), time sync, security updates only while
   drained, and a pinned GPL FFmpeg with x264.
   - **Done when** a fresh box comes up from the script and passes
@@ -1084,12 +1109,36 @@ survives the computer.
 
 - **C1. The feed over RTMPS (first).** The cloud target is a normal RTMPS
   target pointed at the runner, so neither FFmpeg path changes (D10).
-- **C1b. The feed over SRT (after S0c).**
-  - libsrt in the macOS FFmpeg build, then Windows and Linux.
-  - `srt://` in `validate_stream_publish_url`, and an MPEG-TS leg next to
-    the FLV builders.
-  - RTMPS stays the fallback when SRT can't connect within 3 s.
-  - `smoke:recording-matrix` stays green.
+- **C1b. The feed over SRT (after S0c).** The S0c note
+  (`docs/cloud/spike-srt-2026-10.md`, section 5) has the measurements.
+  - libsrt 1.5.7 in the macOS FFmpeg build (the spike's script change), with
+    `srt` in its checks and in `preflight-macos-package.mjs`, and the MPL-2.0
+    text, the UDT notice, `NOTICE.txt` and `SOURCE.txt` in the bundle.
+    Windows and Linux re-pin BtbN to autobuild 2026-09-30 (libsrt 1.5.7;
+    the current pin's is 1.5.5, older than the KMREQ CVE fix) and check
+    `--enable-libsrt` and the `srt` protocol.
+  - `srt://` in `validate_stream_publish_url` for the cloud feed only: a
+    port, no user info, no `passphrase` in the query.
+  - An MPEG-TS leg next to `fifo_flv_output_args`, and the same as a tee
+    slave: `pkt_size=1316`, `latency` from the web (FFmpeg takes
+    microseconds), `connect_timeout=1500` and a 1 s `recovery_wait_time`.
+    The passphrase goes in the output's options (`passphrase`,
+    `pbkeylen=16`), never in the URL, because FFmpeg prints the URL.
+  - `redact_stream_urls` learns `srt://` and masks its whole query.
+  - The choice is made once per start, before the leg exists: a probe from
+    Rust sends SRT's induction handshake every 250 ms, and no answer within
+    3 s means this network blocks UDP, so the feed goes over RTMPS. A dead
+    SRT leg mid-show keeps retrying SRT.
+  - Leg health reads the fifo's lines and the runner's
+    `state.feeds[].connected`, because libsrt prints nothing when a link
+    dies.
+  - `smoke:cloud-solo` adds an SRT pass through a UDP relay (a 2 s blackhole
+    keeps the connection; a 10 s one reconnects and resumes) and checks that
+    no passphrase is in the renderer events or the app log.
+    `smoke:recording-matrix` stays green.
+  - The node side: MediaMTX's SRT listener, the path per feed with its
+    passphrase, the hook's SRT rules and `ingest.get`'s `srt` block (Ingest
+    on the node). The web mints the passphrase and sets the latency.
 - **C2. `cloud_show.rs`.**
   - Creates the show through the web API and connects the control socket.
   - Keeps the state machine: `off`, `connecting`, `live`, `hold`,
