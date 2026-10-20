@@ -9,6 +9,7 @@ import type {
   AiCapabilitiesCloud,
   CloudSettingsPatch,
   CloudStatus,
+  CloudTestParams,
   EntitlementsSnapshot,
   CleanCutEdl,
   CleanCutGetResult,
@@ -261,7 +262,9 @@ interface HighRiskContractFixtures {
     statusHold: CloudStatus
     statusOff: CloudStatus
     statusFallback: CloudStatus
+    statusTest: CloudStatus
     settingsPatch: CloudSettingsPatch
+    testRunParams: CloudTestParams
   }
 }
 
@@ -460,17 +463,34 @@ describe('shared high-risk protocol fixture', () => {
   // answer. Rust round-trips the same JSON (cloud_show.rs), so a renamed field
   // or a `null` the schema calls absent fails on one side or the other.
   it('keeps the Videorc Cloud status identical across languages (plan 184)', () => {
-    const { statusHold, statusOff, statusFallback, settingsPatch } = fixtures.cloud
-    for (const status of [statusHold, statusOff, statusFallback]) {
+    const { statusHold, statusOff, statusFallback, statusTest, settingsPatch, testRunParams } =
+      fixtures.cloud
+    for (const status of [statusHold, statusOff, statusFallback, statusTest]) {
       expect(jsonShape(validateBackendEventPayload('cloud.state', status))).toEqual(status)
       expect(jsonShape(validateBackendRpcResult('cloud.status', status))).toEqual(status)
       expect(jsonShape(validateBackendRpcResult('cloud.show.end', status))).toEqual(status)
+      expect(jsonShape(validateBackendRpcResult('cloud.selftest.run', status))).toEqual(status)
     }
     expect(jsonShape(validateBackendRpcParams('cloud.settings.set', settingsPatch))).toEqual(
       settingsPatch
     )
-    // Secret-free: no field of the status could carry a url, token or key.
-    expect(JSON.stringify(statusHold)).not.toMatch(/rtmps?:|token|vcs1\.|streamKey/)
+    // C6b: the test's params and its block; a reason the schema does not
+    // know is refused like a phase.
+    expect(jsonShape(validateBackendRpcParams('cloud.selftest.run', testRunParams))).toEqual(
+      testRunParams
+    )
+    expect(statusTest.test?.result?.reason).toBe('too-slow')
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusTest,
+        test: { ...statusTest.test, result: { ...statusTest.test?.result, reason: 'sleepy' } }
+      })
+    ).toThrow()
+    // Secret-free: no field of the status could carry a url, token or key
+    // (the test's FFmpeg detail is redacted before it reaches `message`).
+    for (const status of [statusHold, statusTest]) {
+      expect(JSON.stringify(status)).not.toMatch(/rtmps?:|token|vcs1\.|streamKey/)
+    }
     // A phase or reason the schema does not know is refused, and so is a null
     // where the wire omits the field.
     expect(() =>

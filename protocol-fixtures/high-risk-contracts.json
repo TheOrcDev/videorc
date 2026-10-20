@@ -2171,6 +2171,30 @@
       },
       "directFallbackAvailable": false
     },
-    "settingsPatch": { "enabled": false, "holdMaxSeconds": 900, "holdImageScreenId": null }
+    "statusTest": {
+      "phase": "off",
+      "entitled": true,
+      "plan": "premium",
+      "settings": { "enabled": true, "holdMaxSeconds": 1800, "holdMaxChoices": [300, 900, 1800, 3600] },
+      "connected": false,
+      "directFallbackAvailable": false,
+      "test": {
+        "phase": "done",
+        "startedAt": "2026-10-17T12:00:00.000Z",
+        "result": {
+          "ok": false,
+          "reason": "too-slow",
+          "message": "ffmpeg exited 0",
+          "timeToLiveMs": 2300,
+          "uploads": [{ "orientation": "horizontal", "targetKbps": 6000, "measuredKbps": 2100 }]
+        }
+      }
+    },
+    "settingsPatch": { "enabled": false, "holdMaxSeconds": 900, "holdImageScreenId": null },
+    "testRunParams": {
+      "outputs": [
+        { "orientation": "horizontal", "width": 1920, "height": 1080, "fps": 60, "videoKbps": 6000 }
+      ]
+    }
   }
 }

@@ -4365,6 +4365,8 @@ export interface CloudStatus {
    * direct legs may reopen (stop, then go live directly). Never before.
    */
   directFallbackAvailable: boolean
+  /** C6b: the Test cloud that runs, or the last one that ran. */
+  test?: CloudTestStatus
 }
 
 /** `cloud.settings.set`: a partial patch; `holdImageScreenId: null` clears the image. */
@@ -4372,6 +4374,65 @@ export interface CloudSettingsPatch {
   enabled?: boolean
   holdMaxSeconds?: number
   holdImageScreenId?: string | null
+}
+
+// --- Test cloud (plan 184 C6b) ---
+
+export type CloudTestPhase = 'creating' | 'connecting' | 'pushing' | 'ending' | 'done'
+
+/** Why a test failed; `cloud-view.ts` words each one. */
+export type CloudTestReason =
+  | 'cant-reach'
+  | 'off'
+  | 'full'
+  | 'not-entitled'
+  | 'no-hours'
+  | 'limit'
+  | 'show-live'
+  | 'certificate'
+  | 'no-feed'
+  | 'too-slow'
+  | 'failed'
+
+export interface CloudTestUpload {
+  orientation: string
+  /** The stream quality's video bitrate, the number the streamer chose. */
+  targetKbps: number
+  /** What the cloud received, video and audio together; absent when nothing arrived. */
+  measuredKbps?: number
+}
+
+export interface CloudTestResult {
+  ok: boolean
+  reason?: CloudTestReason
+  /** The detail for the console, never copy. */
+  message?: string
+  /** From the Test click to the cloud reporting live. */
+  timeToLiveMs?: number
+  uploads?: CloudTestUpload[]
+  /** When the hour's tests free up again (`limit`), or the hours reset (`no-hours`). */
+  resetAt?: string
+}
+
+export interface CloudTestStatus {
+  phase: CloudTestPhase
+  startedAt: string
+  result?: CloudTestResult
+}
+
+/** One output of `cloud.selftest.run`: the stream quality per orientation. */
+export interface CloudTestOutput {
+  orientation: 'horizontal' | 'vertical'
+  width: number
+  height: number
+  fps: number
+  videoKbps: number
+}
+
+export interface CloudTestParams {
+  outputs: CloudTestOutput[]
+  /** The smokes' FFmpeg; a packaged renderer never sends one. */
+  ffmpegPath?: string
 }
 
 export type OAuthCallbackEnvelope = {

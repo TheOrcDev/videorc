@@ -22184,6 +22184,300 @@ fn cloud_feed_tls_verification(state: &AppState) -> Result<FeedTlsVerification> 
     })
 }
 
+// --- Test cloud (plan 184 C6b) ---------------------------------------------------
+
+/// The outputs of `cloud.selftest.run` as the test show is created: the renderer
+/// sends the stream quality per orientation; the feed's AAC rate is fixed.
+pub fn cloud_test_output_specs(
+    outputs: &[crate::cloud_show::CloudTestOutput],
+) -> Vec<crate::cloud_show::ShowOutputSpec> {
+    outputs
+        .iter()
+        .map(|output| crate::cloud_show::ShowOutputSpec {
+            orientation: output.orientation,
+            width: output.width,
+            height: output.height,
+            fps: output.fps,
+            video_kbps: output.video_kbps,
+            audio_kbps: CLOUD_FEED_AUDIO_KBPS,
+        })
+        .collect()
+}
+
+/// The encoder the test pushes with: the platform's stream encoder on macOS
+/// and the software tables elsewhere. VAAPI needs a probed render device and
+/// a hardware upload the test does not set up, and the test measures the
+/// network, not the encoder.
+fn cloud_test_h264_platform() -> std::result::Result<FfmpegH264Platform, PlatformEncoderUnsupported>
+{
+    Ok(match current_ffmpeg_h264_platform()? {
+        FfmpegH264Platform::LinuxVaapi => FfmpegH264Platform::LinuxSoftware,
+        FfmpegH264Platform::WindowsHardware
+        | FfmpegH264Platform::WindowsQsv
+        | FfmpegH264Platform::WindowsQsvStandardPower => FfmpegH264Platform::WindowsSoftware,
+        platform => platform,
+    })
+}
+
+/// The data-rate ceiling of the test's encode, as a share of its bitrate. A
+/// stream leg pins `-maxrate` to `-b:v`, and under that limit VideoToolbox
+/// settles near 70% of the bitrate on the noisy card (2,951 of 4,160 kbps at
+/// 720p30 on an M4, 2026-10-20), so every upload would read as too slow. At
+/// 140% each 2 s window carried 94 to 102% of video plus audio at 720p30,
+/// 1080p60, 1440p60 and 1080x1920: the push carries the stream's bitrate.
+const CLOUD_TEST_MAXRATE_PERCENT: u32 = 140;
+
+/// The test's FFmpeg command: `testsrc2` with per-frame noise, so the encoder
+/// spends its whole budget and the upload is measured at the stream bitrate
+/// rather than at what a flat test card compresses to, and a sine, both paced
+/// in real time; encoded like a stream leg at the output's shape, with the
+/// data-rate ceiling lifted (`CLOUD_TEST_MAXRATE_PERCENT`); to a plain FLV
+/// output with the node's certificate checked (C1c). The key rides only in
+/// the URL, the last argument, and never in a log line.
+fn cloud_test_feed_args(
+    url: &str,
+    output: &crate::cloud_show::ShowOutputSpec,
+    seconds: u64,
+    platform: FfmpegH264Platform,
+    tls: &FeedTlsVerification,
+) -> Vec<String> {
+    let video = VideoSettings {
+        preset: VideoPreset::Custom,
+        width: output.width.max(16),
+        height: output.height.max(16),
+        fps: output.fps.max(1),
+        bitrate_kbps: output.video_kbps.max(1),
+    };
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-nostdin".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "level+warning".to_string(),
+        "-re".to_string(),
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        format!(
+            "testsrc2=size={}x{}:rate={},noise=alls=20:allf=t,format=yuv420p",
+            video.width, video.height, video.fps
+        ),
+        "-re".to_string(),
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        "sine=frequency=440:sample_rate=48000".to_string(),
+        "-t".to_string(),
+        seconds.to_string(),
+        "-map".to_string(),
+        "0:v".to_string(),
+        "-map".to_string(),
+        "1:a".to_string(),
+    ];
+    append_h264_encoding_args_for_platform(
+        &mut args,
+        &video,
+        platform,
+        true,
+        LinuxVaapiArgProfile::Standard,
+        false,
+    );
+    if let Some(at) = args.iter().position(|arg| arg == "-maxrate")
+        && let Some(value) = args.get_mut(at + 1)
+    {
+        *value = format!(
+            "{}k",
+            video
+                .bitrate_kbps
+                .saturating_mul(CLOUD_TEST_MAXRATE_PERCENT)
+                / 100
+        );
+    }
+    args.extend([
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-b:a".to_string(),
+        format!("{}k", output.audio_kbps.max(32)),
+        "-ar".to_string(),
+        "48000".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
+    ]);
+    args.extend(tls_verification_cli_args(tls));
+    args.extend([
+        "-flvflags".to_string(),
+        "no_duration_filesize".to_string(),
+        "-f".to_string(),
+        "flv".to_string(),
+        url.to_string(),
+    ]);
+    args
+}
+
+/// FFmpeg refused the node's certificate (C1c): OpenSSL's verify errors on
+/// macOS and Linux (`certificate verify failed` covers a bad chain and a
+/// wrong name alike), and the SEC_E codes the Schannel backend prints for
+/// the same refusals on Windows (untrusted root, wrong name, expired).
+fn cloud_test_line_says_certificate_failed(line: &str) -> bool {
+    const SIGNS: [&str; 8] = [
+        "certificate verify failed",
+        "Hostname mismatch",
+        "certificate has expired",
+        "self-signed certificate",
+        "unable to get local issuer certificate",
+        "0x80090325",
+        "0x80090322",
+        "0x80090328",
+    ];
+    SIGNS.iter().any(|sign| line.contains(sign))
+}
+
+/// One FFmpeg line of a test push as the log and the result's detail keep
+/// it: the key replaced wherever FFmpeg prints it, whole or its secret part
+/// after the show id, then every URL token dropped and the line bounded, as
+/// a session's stderr tail is (`sanitized_ffmpeg_diagnostic_line`).
+fn redact_cloud_test_line(line: &str, stream_key: &str) -> String {
+    let mut line = line.to_string();
+    let secret = stream_key.rsplit_once('.').map(|(_, secret)| secret);
+    for part in [Some(stream_key), secret].into_iter().flatten() {
+        if !part.is_empty() {
+            line = line.replace(part, "••••");
+        }
+    }
+    sanitized_ffmpeg_diagnostic_line(&line, FFMPEG_STDERR_TAIL_LINE_CHARS)
+}
+
+/// How many FFmpeg lines a test push keeps for its detail.
+const CLOUD_TEST_STDERR_LINES: usize = 12;
+/// A push that outlives its length by this much is stuck on the network.
+const CLOUD_TEST_PUSH_GRACE: Duration = Duration::from_secs(15);
+
+/// Plan 184 C6b: pushes the Test cloud's synthetic feed with the app's own
+/// FFmpeg, resolved the way a session resolves it, encoded like a stream leg
+/// at the output's shape (`cloud_test_feed_args`), over RTMPS with the node's
+/// certificate checked (C1c). One FFmpeg per output, killed through the child
+/// this push spawned when the test is canceled or the push stalls; never a
+/// process scan.
+pub struct CloudTestFeedPusher {
+    ffmpeg_path: String,
+    platform: FfmpegH264Platform,
+    tls: FeedTlsVerification,
+}
+
+impl CloudTestFeedPusher {
+    /// Fails like a session start would: no roots to check against, or no
+    /// H.264 encoder on this platform, is a refusal before anything reaches
+    /// the web.
+    pub fn new(state: &AppState, ffmpeg_path: String) -> Result<Self> {
+        let tls = cloud_feed_tls_verification(state)?;
+        let platform = cloud_test_h264_platform().map_err(|unsupported| {
+            anyhow::anyhow!(
+                "Videorc Cloud can't be tested on {}: no H.264 encoder.",
+                unsupported.platform
+            )
+        })?;
+        Ok(Self {
+            ffmpeg_path,
+            platform,
+            tls,
+        })
+    }
+}
+
+impl crate::cloud_show::CloudTestPusher for CloudTestFeedPusher {
+    fn push(
+        &self,
+        ingest: crate::cloud_show::ShowIngest,
+        output: crate::cloud_show::ShowOutputSpec,
+        seconds: u64,
+        mut cancel: tokio::sync::watch::Receiver<bool>,
+    ) -> crate::cloud_show::TestPushFuture {
+        let ffmpeg_path = self.ffmpeg_path.clone();
+        let platform = self.platform;
+        let tls = self.tls.clone();
+        Box::pin(async move {
+            let url = format!(
+                "{}/{}",
+                ingest.server_url.trim_end_matches('/'),
+                ingest.stream_key
+            );
+            // The same checks as a show's feed leg (C3, C1c): a publish URL
+            // this computer can stream to, and a host whose name FFmpeg can
+            // bind the certificate to.
+            let template = cloud_feed_target(&ingest, None, &tls)?;
+            let args = cloud_test_feed_args(&url, &output, seconds, platform, &tls);
+            let mut command = Command::new(&ffmpeg_path);
+            command
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = command
+                .spawn()
+                .context("The Videorc Cloud test couldn't start FFmpeg.")?;
+            let pid = child.id();
+            tracing::info!(
+                pid,
+                orientation = ?output.orientation,
+                "Videorc Cloud test: pushing {seconds} s of {}x{} at {} kbps to {}",
+                output.width,
+                output.height,
+                output.video_kbps,
+                template.redacted_url
+            );
+            let stream_key = ingest.stream_key.clone();
+            let stderr = child.stderr.take();
+            // Every line is read (a full pipe would stall FFmpeg) and checked
+            // for a refused certificate; only the last few are kept, redacted.
+            let reader = tokio::spawn(async move {
+                let mut kept: std::collections::VecDeque<String> =
+                    std::collections::VecDeque::new();
+                let mut certificate_failed = false;
+                if let Some(stderr) = stderr {
+                    let mut stderr = BufReader::new(stderr);
+                    while let Ok(Some(line)) = read_bounded_ffmpeg_line(&mut stderr).await {
+                        certificate_failed |= cloud_test_line_says_certificate_failed(&line);
+                        if kept.len() == CLOUD_TEST_STDERR_LINES {
+                            kept.pop_front();
+                        }
+                        kept.push_back(redact_cloud_test_line(&line, &stream_key));
+                    }
+                }
+                (kept.into_iter().collect::<Vec<_>>(), certificate_failed)
+            });
+            let status = tokio::select! {
+                status = child.wait() => Some(status.context("The Videorc Cloud test lost FFmpeg.")?),
+                _ = crate::cloud_show::wait_canceled(&mut cancel) => {
+                    tracing::info!(pid, "Videorc Cloud test: push canceled, killing FFmpeg");
+                    let _ = child.kill().await;
+                    None
+                }
+                _ = sleep(Duration::from_secs(seconds) + CLOUD_TEST_PUSH_GRACE) => {
+                    tracing::warn!(pid, "Videorc Cloud test: the push outlived its length, killing FFmpeg");
+                    let _ = child.kill().await;
+                    None
+                }
+            };
+            let (lines, certificate_failed) = reader.await.unwrap_or_default();
+            let ok = status.is_some_and(|status| status.success());
+            if !ok {
+                tracing::info!(
+                    pid,
+                    "Videorc Cloud test: FFmpeg ended {} ({})",
+                    status.map_or("killed".to_string(), |status| status.to_string()),
+                    lines.last().map_or("no output", String::as_str)
+                );
+            }
+            Ok(crate::cloud_show::TestPushOutcome {
+                ok,
+                certificate_failed,
+                detail: (!lines.is_empty()).then(|| lines.join(" | ")),
+            })
+        })
+    }
+}
+
 /// The feed legs of a resume (C5b): one per orientation the show has that
 /// this session composes. The horizontal feed is the primary leg, encoded
 /// like a ready horizontal destination when there is one, else like the
@@ -22691,6 +22985,108 @@ mod cloud_seam_tests {
                 "flv",
                 &youtube.url
             ]
+        );
+    }
+
+    // C6b: the Test cloud's push is a stream leg's encode of a noisy test card
+    // and a sine, paced in real time, with the data-rate ceiling lifted so it
+    // carries the bitrate, over a plain FLV output that checks the node's
+    // certificate; the key rides only in the URL, last.
+    #[test]
+    fn the_cloud_test_push_encodes_like_a_leg_and_checks_the_certificate() {
+        let output = crate::cloud_show::ShowOutputSpec {
+            orientation: Horizontal,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            video_kbps: 4000,
+            audio_kbps: 160,
+        };
+        let url = "rtmps://eu-hel-1.live.videorc.com:1936/live/sh_x-h.KEYKEYKEY";
+        let args = cloud_test_feed_args(url, &output, 10, FfmpegH264Platform::Macos, &roots());
+        let joined = args.join(" ");
+        assert!(joined.contains(
+            "-re -f lavfi -i testsrc2=size=1280x720:rate=30,noise=alls=20:allf=t,format=yuv420p"
+        ));
+        assert!(joined.contains("-re -f lavfi -i sine=frequency=440:sample_rate=48000"));
+        assert!(joined.contains("-t 10 -map 0:v -map 1:a"));
+        assert!(joined.contains("-c:v h264_videotoolbox"));
+        // A leg's `-maxrate` is its bitrate; the test's is 140% of it.
+        assert!(joined.contains("-b:v 4000k -maxrate 5600k -bufsize 8000k -g 60"));
+        assert_eq!(
+            args.iter().filter(|arg| arg.as_str() == "-maxrate").count(),
+            1
+        );
+        assert!(joined.contains("-c:a aac -b:a 160k -ar 48000 -ac 2"));
+        // The certificate check precedes the output, and the URL comes last.
+        let tls_at = args.iter().position(|arg| arg == "-tls_verify").unwrap();
+        let flv_at = args.iter().position(|arg| arg == "flv").unwrap();
+        assert!(tls_at < flv_at);
+        assert_eq!(args[tls_at + 1], "1");
+        assert_eq!(args[tls_at + 2], "-ca_file");
+        assert_eq!(args.last().unwrap(), url);
+        assert_eq!(
+            args.iter().filter(|arg| arg.contains("KEYKEYKEY")).count(),
+            1
+        );
+        // Windows: Schannel checks on its own, with no roots file; software x264-free table.
+        let windows = cloud_test_feed_args(
+            url,
+            &output,
+            10,
+            FfmpegH264Platform::WindowsSoftware,
+            &FeedTlsVerification { ca_file: None },
+        );
+        assert!(windows.contains(&"-tls_verify".to_string()));
+        assert!(!windows.contains(&"-ca_file".to_string()));
+        assert!(windows.contains(&"libopenh264".to_string()));
+
+        // The specs the show is created with carry the feed's AAC rate.
+        let specs = cloud_test_output_specs(&[crate::cloud_show::CloudTestOutput {
+            orientation: crate::streaming::StreamOutputOrientation::Vertical,
+            width: 1080,
+            height: 1920,
+            fps: 30,
+            video_kbps: 3000,
+        }]);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].audio_kbps, CLOUD_FEED_AUDIO_KBPS);
+        assert_eq!(specs[0].video_kbps, 3000);
+        assert_eq!(
+            specs[0].orientation,
+            crate::streaming::StreamOutputOrientation::Vertical
+        );
+
+        // FFmpeg's words for a refused certificate, on either TLS backend.
+        assert!(cloud_test_line_says_certificate_failed(
+            "[tls @ 0x1] [error] error:0A000086:SSL routines::certificate verify failed"
+        ));
+        assert!(cloud_test_line_says_certificate_failed(
+            "[tls @ 0x1] [error] Hostname mismatch"
+        ));
+        assert!(cloud_test_line_says_certificate_failed(
+            "[tls @ 0x1] [error] Creating security context failed (0x80090325)"
+        ));
+        assert!(!cloud_test_line_says_certificate_failed(
+            "[rtmp @ 0x1] [error] Server error: not authorized"
+        ));
+        // The key never survives a kept line: not in a URL (the token goes
+        // whole), not bare, and not its secret part alone.
+        let key = "sh_x-h.KEYKEYKEY";
+        assert_eq!(
+            redact_cloud_test_line(
+                "[out#0/flv @ 0x1] [error] Error opening output rtmps://h:1936/live/sh_x-h.KEYKEYKEY: I/O error",
+                key
+            ),
+            "[out#0/flv @ 0x1] [error] Error opening output <url> I/O error"
+        );
+        assert_eq!(
+            redact_cloud_test_line("[rtmp @ 0x1] playpath live/sh_x-h.KEYKEYKEY", key),
+            "[rtmp @ 0x1] playpath live/••••"
+        );
+        assert_eq!(
+            redact_cloud_test_line("[rtmp @ 0x1] key KEYKEYKEY refused", key),
+            "[rtmp @ 0x1] key •••• refused"
         );
     }
 

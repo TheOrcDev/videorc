@@ -34,6 +34,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -42,7 +43,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::protocol::{AiCapabilitiesCloud, EntitlementPlan};
 use crate::streaming::{
@@ -320,6 +321,85 @@ pub struct CloudStatus {
     /// The web confirmed the show is gone while this computer was feeding it
     /// (C2): direct legs may reopen. Until then they never may.
     pub direct_fallback_available: bool,
+    /// C6b: the Test cloud that runs, or the last one that ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<CloudTestStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloudTestPhase {
+    Creating,
+    Connecting,
+    Pushing,
+    Ending,
+    Done,
+}
+
+/// Why a test failed, in the renderer's vocabulary (`cloud-view.ts` words
+/// each one). The web's and the runner's strings never reach the renderer
+/// unmapped; `message` carries the detail for the console.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloudTestReason {
+    /// The web or the node could not be reached, or the node refused the hello.
+    CantReach,
+    /// The rollout switch is off.
+    Off,
+    Full,
+    NotEntitled,
+    NoHours,
+    /// The hour's tests are used up; `reset_at` says when one frees.
+    Limit,
+    /// A show is already live through the cloud.
+    ShowLive,
+    /// FFmpeg refused the node's certificate (C1c).
+    Certificate,
+    /// The push ran but the runner never saw the feed.
+    NoFeed,
+    /// The feed arrived below its target bitrate.
+    TooSlow,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTestUpload {
+    pub orientation: String,
+    /// The stream quality's video bitrate, the number the streamer chose.
+    pub target_kbps: u32,
+    /// What the node received, video and audio together: the median of the
+    /// runner's feed readings during the push. Absent when nothing arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_kbps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTestResult {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<CloudTestReason>,
+    /// The detail for the console and the support bundle, never copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// From the Test click to the runner reporting live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_live_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uploads: Vec<CloudTestUpload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+}
+
+/// `CloudStatus.test`: the test that runs or the last one that ran.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTestStatus {
+    pub phase: CloudTestPhase,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<CloudTestResult>,
 }
 
 // --- Wire: desktop -> web ------------------------------------------------------
@@ -371,12 +451,23 @@ pub struct ShowRecord {
     pub id: String,
     #[serde(default)]
     pub status: String,
+    /// `solo`, `talk` or `test` (C6b).
+    #[serde(default)]
+    pub kind: String,
     #[serde(default)]
     pub node_id: String,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub expires_at: Option<String>,
+}
+
+impl ShowRecord {
+    /// A Test cloud's show (C6b): never resumable, and never worth keeping
+    /// open for a show or another test.
+    pub fn is_test(&self) -> bool {
+        self.kind == "test"
+    }
 }
 
 /// One ingest pair: `{serverUrl}/{streamKey}` is the desktop's cloud target
@@ -445,9 +536,14 @@ pub struct CurrentShowResponse {
 pub enum CloudApiError {
     Unauthorized,
     NotEntitled,
-    /// 409: a show is already live; the body carries it.
-    ShowLive(Option<ShowRecord>),
+    /// 409: a show is already live; the body carries it. Boxed, so every
+    /// `Result` that carries this error stays small.
+    ShowLive(Option<Box<ShowRecord>>),
     HoursUsedUp {
+        reset_at: Option<String>,
+    },
+    /// 429 on a test show (C6b): the hour's tests are used up.
+    TestLimit {
         reset_at: Option<String>,
     },
     Disabled,
@@ -468,6 +564,7 @@ impl std::fmt::Display for CloudApiError {
             Self::NotEntitled => write!(f, "Videorc Cloud comes with Videorc Premium."),
             Self::ShowLive(_) => write!(f, "A show is already live through Videorc Cloud."),
             Self::HoursUsedUp { .. } => write!(f, "This month's cloud hours are used up."),
+            Self::TestLimit { .. } => write!(f, "This hour's Videorc Cloud tests are used up."),
             Self::Disabled => write!(f, "Videorc Cloud is switched off right now."),
             Self::Full => write!(f, "Videorc Cloud is full right now."),
             Self::NodeUnreachable => write!(f, "Videorc Cloud could not be reached."),
@@ -501,7 +598,10 @@ impl CloudApiError {
             Self::Other { status, .. } if *status >= 500 => {
                 Some(CloudFallbackReason::CloudNodeUnreachable)
             }
-            Self::Unauthorized | Self::ShowLive(_) | Self::Other { .. } => None,
+            Self::Unauthorized
+            | Self::ShowLive(_)
+            | Self::TestLimit { .. }
+            | Self::Other { .. } => None,
         }
     }
 }
@@ -517,8 +617,9 @@ pub fn classify_cloud_failure(
     match (status, code) {
         (401, _) => CloudApiError::Unauthorized,
         (403, "cloud-not-entitled") => CloudApiError::NotEntitled,
-        (409, "cloud-show-live") => CloudApiError::ShowLive(live_show),
+        (409, "cloud-show-live") => CloudApiError::ShowLive(live_show.map(Box::new)),
         (429, "cloud-hours-used-up") => CloudApiError::HoursUsedUp { reset_at },
+        (429, "cloud-test-limit") => CloudApiError::TestLimit { reset_at },
         (503, "cloud-disabled") => CloudApiError::Disabled,
         (503, "cloud-full") => CloudApiError::Full,
         (503, "cloud-node-unreachable") => CloudApiError::NodeUnreachable,
@@ -830,6 +931,10 @@ pub struct CloudShowRuntime {
     /// Bumped with every new show or socket owner so a stale task stops.
     generation: u64,
     control_tx: Option<mpsc::UnboundedSender<ControlRequest>>,
+    /// C6b: the test that runs or the last one that ran, and the running
+    /// test task's cancel switch (`Some` only while it runs).
+    test: Option<CloudTestStatus>,
+    test_run: Option<watch::Sender<bool>>,
 }
 
 pub type CloudShowSlot = Arc<StdMutex<CloudShowRuntime>>;
@@ -933,6 +1038,26 @@ impl CloudShowRuntime {
                 .failed
                 .as_ref()
                 .is_some_and(|failed| failed.direct_fallback),
+            test: self.test.clone(),
+        }
+    }
+
+    /// A test is running (C6b): its task owns a show on the web.
+    pub fn test_running(&self) -> bool {
+        self.test_run.is_some()
+    }
+
+    /// Tells a running test to stop, without waiting (C6b): a recording or a
+    /// livestream starting needs the upload and the encoder, so the test
+    /// yields. Its task kills its FFmpeg and ends its show on its own, and
+    /// its result is dropped. True when a test was running.
+    pub fn signal_test_cancel(&self) -> bool {
+        match self.test_run.as_ref() {
+            Some(cancel) => {
+                let _ = cancel.send(true);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1562,6 +1687,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         if destinations.is_empty() {
             bail!("Videorc Cloud needs at least one destination to hand over.");
         }
+        // A Test cloud mid-run holds the account's one open show (C6b): the
+        // show wins, so the test ends first.
+        self.cancel_test().await;
 
         // A show that is live without a feed is what Go Live resumes (C5),
         // with the destinations it just prepared: Go Live is a new broadcast
@@ -1591,12 +1719,23 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         };
         let created = match self.web.create_show(&bearer, &request).await {
             Ok(created) => created,
+            // A Test cloud still open on the web (C6b): one a crashed desktop
+            // left, or one whose end did not reach the web. The web never
+            // offers a test for resume, so the show closes it and starts
+            // anew, once.
+            Err(CloudApiError::ShowLive(Some(live))) if live.is_test() => {
+                let _ = self.web.end_show(&bearer, &live.id).await;
+                match self.web.create_show(&bearer, &request).await {
+                    Ok(created) => created,
+                    Err(error) => return self.create_failed(session_id, error),
+                }
+            }
             Err(CloudApiError::ShowLive(live)) => {
                 match self
                     .adopt_live_show(
                         session_id,
                         &bearer,
-                        live,
+                        live.map(|live| *live),
                         destinations.clone(),
                         hold_image_png_base64.clone(),
                     )
@@ -1755,6 +1894,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let Some(show_id) = show_id else {
             bail!("There's no Videorc Cloud show to resume.");
         };
+        self.cancel_test().await;
         match self
             .resume_into_session(session_id, &bearer, &show_id, None, hold_image_png_base64)
             .await?
@@ -2080,6 +2220,679 @@ pub fn hold_image_png_base64(screen_path: &str) -> Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(png))
 }
 
+// --- Test cloud (C6b) ---------------------------------------------------------
+//
+// "Test Videorc Cloud" on the Livestream page: a 10-second private test
+// against a runner with no platforms, so a streamer learns before the show
+// whether the cloud works from this connection and whether the upload keeps
+// up with the stream quality. The web's `kind: "test"` show is capped at 30 s
+// on the node, costs no cloud hours and is never offered for resume. The test
+// never touches the Studio's session or the slot's show: it has its own
+// socket, its own FFmpeg children (behind `CloudTestPusher`) and reports
+// through `CloudStatus.test`. A Go Live or a Resume ends a running test first,
+// because the web allows one open show per account; any other start stops it
+// without waiting (`signal_test_cancel`), because the session needs the upload.
+
+/// How long the test pushes video.
+pub const TEST_PUSH_SECONDS: u64 = 10;
+/// Past this the push phase is abandoned: a stalled push or a silent runner.
+const TEST_DEADLINE: Duration = Duration::from_secs(45);
+/// A feed that carried less than this share of its target is too slow.
+pub const TEST_UPLOAD_OK_RATIO: f64 = 0.85;
+/// A cancel waits this long for the test task to end its show and exit.
+const TEST_CANCEL_WAIT: Duration = Duration::from_secs(10);
+
+/// `cloud.selftest.run`: the outputs from the user's stream settings (the shape a
+/// show would be created with) and the FFmpeg the smokes may point at.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTestParams {
+    pub outputs: Vec<CloudTestOutput>,
+    #[serde(default)]
+    pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTestOutput {
+    pub orientation: StreamOutputOrientation,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub video_kbps: u32,
+}
+
+/// What one output's push came to when its FFmpeg exited.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestPushOutcome {
+    /// FFmpeg ran the whole push and exited 0.
+    pub ok: bool,
+    /// FFmpeg refused the node's certificate (C1c): the test's hardest "no".
+    pub certificate_failed: bool,
+    /// The last FFmpeg lines, with the key redacted, for the log.
+    pub detail: Option<String>,
+}
+
+pub type TestPushFuture = Pin<Box<dyn Future<Output = Result<TestPushOutcome>> + Send>>;
+
+/// Pushes synthetic video and audio at one output's shape to its ingest for
+/// `seconds`, checking the node's certificate like a show's feed (C1c).
+/// `recording.rs` implements it with the app's FFmpeg; the tests use a fake.
+/// A push stops when `cancel` turns true and never outlives its future:
+/// whatever it spawns, it kills through the child handle it holds, never a
+/// process scan.
+pub trait CloudTestPusher: Send + Sync {
+    fn push(
+        &self,
+        ingest: ShowIngest,
+        output: ShowOutputSpec,
+        seconds: u64,
+        cancel: watch::Receiver<bool>,
+    ) -> TestPushFuture;
+}
+
+/// Why `cloud.selftest.run` did not start: an RPC error code and its line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudTestRefusal {
+    SignedOut,
+    NotEntitled,
+    ShowLive,
+    Running,
+    NoOutputs,
+}
+
+impl CloudTestRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::SignedOut => "cloud-signed-out",
+            Self::NotEntitled => "cloud-not-entitled",
+            Self::ShowLive => "cloud-test-show-live",
+            Self::Running => "cloud-test-running",
+            Self::NoOutputs => "cloud-test-no-outputs",
+        }
+    }
+}
+
+impl std::fmt::Display for CloudTestRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignedOut => write!(f, "Sign in to use Videorc Cloud."),
+            Self::NotEntitled => write!(f, "Videorc Cloud comes with Videorc Premium."),
+            Self::ShowLive => write!(f, "A show is live through Videorc Cloud. End it first."),
+            Self::Running => write!(f, "A Videorc Cloud test is already running."),
+            Self::NoOutputs => write!(
+                f,
+                "The test needs the stream quality of at least one output."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CloudTestRefusal {}
+
+/// Resolves once the test is canceled, or once its task is gone (the sender
+/// dropped). Returns nothing, so no borrow of the channel outlives an await:
+/// a `wait_for` guard inside `select!` would make the pushers' futures
+/// `!Send`.
+pub async fn wait_canceled(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        let canceled = *cancel.borrow();
+        if canceled {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+fn orientation_id(orientation: StreamOutputOrientation) -> String {
+    match orientation {
+        StreamOutputOrientation::Horizontal => "horizontal".to_string(),
+        StreamOutputOrientation::Vertical => "vertical".to_string(),
+    }
+}
+
+/// The web refused the test show: its reason in the renderer's vocabulary.
+fn test_result_from_api_error(
+    error: CloudApiError,
+    uploads: Vec<CloudTestUpload>,
+) -> CloudTestResult {
+    let (reason, reset_at) = match &error {
+        CloudApiError::NotEntitled => (CloudTestReason::NotEntitled, None),
+        CloudApiError::ShowLive(_) => (CloudTestReason::ShowLive, None),
+        CloudApiError::HoursUsedUp { reset_at } => (CloudTestReason::NoHours, reset_at.clone()),
+        CloudApiError::TestLimit { reset_at } => (CloudTestReason::Limit, reset_at.clone()),
+        CloudApiError::Disabled => (CloudTestReason::Off, None),
+        CloudApiError::Full => (CloudTestReason::Full, None),
+        CloudApiError::NodeUnreachable | CloudApiError::Transport(_) => {
+            (CloudTestReason::CantReach, None)
+        }
+        CloudApiError::Other { status, .. } if *status >= 500 => (CloudTestReason::CantReach, None),
+        CloudApiError::Unauthorized | CloudApiError::Other { .. } => {
+            (CloudTestReason::Failed, None)
+        }
+    };
+    CloudTestResult {
+        ok: false,
+        reason: Some(reason),
+        message: Some(error.to_string()),
+        time_to_live_ms: None,
+        uploads,
+        reset_at,
+    }
+}
+
+/// The middle reading: the first poll after connecting covers a partial
+/// window and a stalled link gives a low tail, so neither the max nor the
+/// mean says what the link held.
+fn median_kbps(samples: &[u32]) -> Option<u32> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    Some(sorted[sorted.len() / 2])
+}
+
+/// What the feed had to carry: the video at its bitrate and the audio.
+fn test_upload_target_total_kbps(output: &ShowOutputSpec) -> u32 {
+    output.video_kbps.saturating_add(output.audio_kbps)
+}
+
+/// The verdict on what the runner saw, pure so every rule is a test: the
+/// certificate first (nothing else is trusted after it), then a push that
+/// never ran (no FFmpeg, an ingest this computer can't stream to: this
+/// computer's fault, not the network's), then a feed that never arrived, then
+/// a show the runner ended, then a slow upload, then any push that did not
+/// run clean.
+fn test_verdict(input: TestVerdictInput<'_>) -> CloudTestResult {
+    let uploads: Vec<CloudTestUpload> = input
+        .outputs
+        .iter()
+        .map(|output| CloudTestUpload {
+            orientation: orientation_id(output.orientation),
+            target_kbps: output.video_kbps,
+            measured_kbps: input
+                .samples
+                .get(&orientation_id(output.orientation))
+                .and_then(|samples| median_kbps(samples)),
+        })
+        .collect();
+    let detail = input
+        .outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            Ok(outcome) => outcome.detail.clone(),
+            Err(error) => Some(format!("{error:#}")),
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let detail = (!detail.is_empty()).then_some(detail);
+    let mut result = CloudTestResult {
+        ok: false,
+        reason: None,
+        message: detail.clone(),
+        time_to_live_ms: input.time_to_live_ms,
+        uploads: uploads.clone(),
+        reset_at: None,
+    };
+    if input.outcomes.iter().any(|outcome| {
+        outcome
+            .as_ref()
+            .is_ok_and(|outcome| outcome.certificate_failed)
+    }) {
+        result.reason = Some(CloudTestReason::Certificate);
+        return result;
+    }
+    if input.outcomes.iter().any(Result::is_err) {
+        result.reason = Some(CloudTestReason::Failed);
+        return result;
+    }
+    if input.time_to_live_ms.is_none() {
+        result.reason = Some(CloudTestReason::NoFeed);
+        return result;
+    }
+    if let Some(end_reason) = input.ended_by_runner {
+        result.reason = Some(CloudTestReason::Failed);
+        result.message = Some(format!("the runner ended the test show: {end_reason}"));
+        return result;
+    }
+    // A feed the runner saw live but never measured (its readings come from
+    // the node's own ingest) is unmeasured, never slow: the renderer says so
+    // rather than blame the upload.
+    let slow = input.outputs.iter().zip(&uploads).any(|(output, upload)| {
+        let floor =
+            (f64::from(test_upload_target_total_kbps(output)) * TEST_UPLOAD_OK_RATIO) as u32;
+        upload
+            .measured_kbps
+            .is_some_and(|measured| measured < floor)
+    });
+    if slow {
+        result.reason = Some(CloudTestReason::TooSlow);
+        return result;
+    }
+    let clean = !input.timed_out
+        && input
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.as_ref().is_ok_and(|outcome| outcome.ok));
+    if !clean {
+        result.reason = Some(CloudTestReason::Failed);
+        if input.timed_out {
+            result.message = Some("the test did not finish in time".to_string());
+        }
+        return result;
+    }
+    result.ok = true;
+    result.message = None;
+    result
+}
+
+struct TestVerdictInput<'a> {
+    outputs: &'a [ShowOutputSpec],
+    /// The runner's feed readings during the push, by orientation.
+    samples: &'a HashMap<String, Vec<u32>>,
+    outcomes: &'a [Result<TestPushOutcome>],
+    time_to_live_ms: Option<u64>,
+    ended_by_runner: Option<String>,
+    timed_out: bool,
+}
+
+impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
+    /// Start the test and answer at once; the task reports through
+    /// `cloud.state` (`CloudStatus.test`). The caller refuses while a session
+    /// runs; this refuses while a show is live or resumable or a test runs.
+    pub fn start_test(
+        &self,
+        bearer: Option<String>,
+        outputs: Vec<ShowOutputSpec>,
+        pusher: Arc<dyn CloudTestPusher>,
+    ) -> std::result::Result<CloudStatus, CloudTestRefusal> {
+        let Some(bearer) = bearer else {
+            return Err(CloudTestRefusal::SignedOut);
+        };
+        if outputs.is_empty() {
+            return Err(CloudTestRefusal::NoOutputs);
+        }
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (started_at, hold_max_seconds) = {
+            let mut runtime = lock(&self.slot);
+            if !runtime.entitlement.entitled() {
+                return Err(CloudTestRefusal::NotEntitled);
+            }
+            if runtime.show.is_some() {
+                return Err(CloudTestRefusal::ShowLive);
+            }
+            if runtime.test_run.is_some() {
+                return Err(CloudTestRefusal::Running);
+            }
+            let started_at = now_rfc3339();
+            runtime.test = Some(CloudTestStatus {
+                phase: CloudTestPhase::Creating,
+                started_at: started_at.clone(),
+                result: None,
+            });
+            runtime.test_run = Some(cancel_tx);
+            (started_at, runtime.settings.hold_max_seconds)
+        };
+        let run = CloudTestRun {
+            context: self.clone(),
+            bearer,
+            outputs,
+            hold_max_seconds,
+            pusher,
+            cancel: cancel_rx,
+            started_at,
+            started: tokio::time::Instant::now(),
+        };
+        tokio::spawn(run.run());
+        let status = lock(&self.slot).status();
+        self.hooks.emit_from(&self.slot);
+        Ok(status)
+    }
+
+    /// Ends a running test and waits for its task to leave: a Go Live or a
+    /// Resume needs the account's one open show for itself. The result of a
+    /// canceled test is dropped, not shown.
+    pub async fn cancel_test(&self) {
+        if !lock(&self.slot).signal_test_cancel() {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + TEST_CANCEL_WAIT;
+        while lock(&self.slot).test_running() {
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!("The Videorc Cloud test did not stop in time; starting anyway.");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
+/// One test, on its own task: create the show, connect, push, read the
+/// runner's state frames, end the show, judge.
+struct CloudTestRun<W: CloudWebApi, C: ControlConnector> {
+    context: CloudShowContext<W, C>,
+    bearer: String,
+    outputs: Vec<ShowOutputSpec>,
+    hold_max_seconds: u32,
+    pusher: Arc<dyn CloudTestPusher>,
+    cancel: watch::Receiver<bool>,
+    started_at: String,
+    started: tokio::time::Instant,
+}
+
+impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
+    fn set_phase(&self, phase: CloudTestPhase) {
+        {
+            let mut runtime = lock(&self.context.slot);
+            if let Some(test) = runtime.test.as_mut() {
+                test.phase = phase;
+            }
+        }
+        self.context.hooks.emit_from(&self.context.slot);
+    }
+
+    fn uploads(&self) -> Vec<CloudTestUpload> {
+        self.outputs
+            .iter()
+            .map(|output| CloudTestUpload {
+                orientation: orientation_id(output.orientation),
+                target_kbps: output.video_kbps,
+                measured_kbps: None,
+            })
+            .collect()
+    }
+
+    fn failed(&self, reason: CloudTestReason, message: String) -> CloudTestResult {
+        CloudTestResult {
+            ok: false,
+            reason: Some(reason),
+            message: Some(message),
+            time_to_live_ms: None,
+            uploads: self.uploads(),
+            reset_at: None,
+        }
+    }
+
+    async fn run(mut self) {
+        let result = self.run_inner().await;
+        if let Some(result) = &result {
+            match &result.reason {
+                None => tracing::info!(
+                    "Videorc Cloud test passed: live in {:?} ms, uploads {:?}",
+                    result.time_to_live_ms,
+                    result.uploads
+                ),
+                Some(reason) => tracing::info!(
+                    "Videorc Cloud test failed ({reason:?}): {}",
+                    result.message.as_deref().unwrap_or("no detail")
+                ),
+            }
+        }
+        {
+            let mut runtime = lock(&self.context.slot);
+            runtime.test_run = None;
+            // A canceled test shows nothing: Go Live took its place.
+            runtime.test = result.map(|result| CloudTestStatus {
+                phase: CloudTestPhase::Done,
+                started_at: self.started_at.clone(),
+                result: Some(result),
+            });
+        }
+        self.context.hooks.emit_from(&self.context.slot);
+    }
+
+    /// The test show, or `None` when the test was canceled. A test still open
+    /// on the web (a crashed desktop's) would read as a live show nobody can
+    /// see, so it is ended and the create tried once more.
+    async fn create(
+        &self,
+        request: &CreateShowRequest,
+    ) -> Option<std::result::Result<CreateShowResponse, CloudApiError>> {
+        let mut cancel = self.cancel.clone();
+        let first = tokio::select! {
+            created = self.context.web.create_show(&self.bearer, request) => created,
+            _ = wait_canceled(&mut cancel) => return None,
+        };
+        match first {
+            Err(CloudApiError::ShowLive(Some(live))) if live.is_test() => {
+                let _ = self.context.web.end_show(&self.bearer, &live.id).await;
+                tokio::select! {
+                    created = self.context.web.create_show(&self.bearer, request) => Some(created),
+                    _ = wait_canceled(&mut cancel) => None,
+                }
+            }
+            other => Some(other),
+        }
+    }
+
+    /// `None` when the test was canceled.
+    async fn run_inner(&mut self) -> Option<CloudTestResult> {
+        // 1. The show: `kind: "test"`, the same outputs a show would carry.
+        let request = CreateShowRequest {
+            kind: "test".to_string(),
+            outputs: self.outputs.clone(),
+            hold_max_seconds: self.hold_max_seconds,
+            client: client_info(),
+        };
+        let created = match self.create(&request).await? {
+            Ok(created) => created,
+            Err(error) => return Some(test_result_from_api_error(error, self.uploads())),
+        };
+        if let Some(allowance) = created.allowance.clone() {
+            lock(&self.context.slot).entitlement.cloud = Some(allowance);
+        }
+        let show_id = created.show.id.clone();
+        // From here the show ends whatever happens below.
+        let outcome = self.run_show(&created).await;
+        self.set_phase(CloudTestPhase::Ending);
+        if let Err(error) = self.context.web.end_show(&self.bearer, &show_id).await {
+            tracing::info!(
+                "Videorc Cloud test end request failed (the node's cap stands): {error}"
+            );
+        }
+        outcome
+    }
+
+    async fn run_show(&mut self, created: &CreateShowResponse) -> Option<CloudTestResult> {
+        // 2. The socket, so the runner's own view of the feed is the measure.
+        self.set_phase(CloudTestPhase::Connecting);
+        let mut cancel = self.cancel.clone();
+        let connected = tokio::select! {
+            connected = connect_and_hello(self.context.connector.as_ref(), &created.control) => connected,
+            _ = wait_canceled(&mut cancel) => return None,
+        };
+        let (mut transport, welcome) = match connected {
+            Ok(connected) => connected,
+            Err(failure) => {
+                let message = match failure {
+                    HelloFailure::BadToken => "the node refused the show token".to_string(),
+                    HelloFailure::NoSuchShow => "the node does not know the show".to_string(),
+                    HelloFailure::Transport(message) => message,
+                };
+                return Some(self.failed(CloudTestReason::CantReach, message));
+            }
+        };
+
+        // 3. The push: one FFmpeg per output, to the ingest of its orientation.
+        self.set_phase(CloudTestPhase::Pushing);
+        let mut pushes = tokio::task::JoinSet::new();
+        for output in &self.outputs {
+            let Some(ingest) = created
+                .ingest
+                .iter()
+                .find(|entry| entry.orientation == output.orientation)
+            else {
+                let _ = transport.close().await;
+                return Some(self.failed(
+                    CloudTestReason::Failed,
+                    format!(
+                        "the show has no {} ingest",
+                        orientation_id(output.orientation)
+                    ),
+                ));
+            };
+            pushes.spawn(self.pusher.push(
+                ingest.clone(),
+                output.clone(),
+                TEST_PUSH_SECONDS,
+                self.cancel.clone(),
+            ));
+        }
+        let mut samples: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut live_at: Option<tokio::time::Instant> = None;
+        let mut observe = |state: &RunnerState| {
+            for feed in &state.feeds {
+                if feed.connected
+                    && let Some(kbps) = feed.kbps
+                    && kbps > 0
+                {
+                    samples
+                        .entry(feed.orientation.clone())
+                        .or_default()
+                        .push(u32::try_from(kbps).unwrap_or(u32::MAX));
+                }
+            }
+            if state.phase == "live" && live_at.is_none() {
+                live_at = Some(tokio::time::Instant::now());
+            }
+        };
+        observe(&welcome);
+        let mut outcomes: Vec<Result<TestPushOutcome>> = Vec::new();
+        let mut ended_by_runner = None;
+        let mut canceled = false;
+        let mut timed_out = false;
+        let mut ping = tokio::time::interval(PING_INTERVAL);
+        ping.tick().await;
+        let deadline = tokio::time::sleep(TEST_DEADLINE);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                joined = pushes.join_next() => match joined {
+                    Some(joined) => {
+                        outcomes.push(joined.unwrap_or_else(|error| Err(anyhow::anyhow!("{error}"))));
+                        if pushes.is_empty() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                frame = transport.recv() => match frame {
+                    None | Some(ControlFrameIn::Closed { .. }) => {
+                        ended_by_runner.get_or_insert_with(|| "the control socket closed".to_string());
+                        break;
+                    }
+                    Some(ControlFrameIn::Text(text)) => {
+                        if let Ok(RunnerFrame::State { state } | RunnerFrame::Welcome { state }) =
+                            serde_json::from_str::<RunnerFrame>(&text)
+                        {
+                            observe(&state);
+                            if state.phase == "ended" {
+                                ended_by_runner = Some(
+                                    state.end_reason.clone().unwrap_or_else(|| "ended".to_string()),
+                                );
+                                break;
+                            }
+                        }
+                    }
+                },
+                _ = ping.tick() => {
+                    let _ = transport.send(json!({ "t": "ping" })).await;
+                }
+                _ = wait_canceled(&mut cancel) => {
+                    canceled = true;
+                    break;
+                }
+                _ = &mut deadline => {
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+        // Whichever branch broke the loop, a cancel is a cancel: a pusher that
+        // saw it first may have ended the loop as the last push.
+        let canceled = canceled || *cancel.borrow();
+        if canceled {
+            // The pushers watch the same cancel: a moment to kill their FFmpeg
+            // by its PID and report, before whatever is left is dropped.
+            let grace = tokio::time::sleep(Duration::from_secs(5));
+            tokio::pin!(grace);
+            loop {
+                tokio::select! {
+                    joined = pushes.join_next() => match joined {
+                        Some(joined) => outcomes
+                            .push(joined.unwrap_or_else(|error| Err(anyhow::anyhow!("{error}")))),
+                        None => break,
+                    },
+                    _ = &mut grace => break,
+                }
+            }
+        }
+        // Whatever is still pushing dies with its future (kill_on_drop).
+        pushes.shutdown().await;
+
+        // 4. The show ends on the socket; the web's end follows in the caller.
+        let id = new_intent_id();
+        if transport.send(intent_frame(&id, "show.end")).await.is_ok() {
+            let _ = await_ack(&mut transport, &id, END_ACK_TIMEOUT).await;
+        }
+        transport.close().await;
+        if canceled {
+            return None;
+        }
+
+        // 5. The verdict.
+        Some(test_verdict(TestVerdictInput {
+            outputs: &self.outputs,
+            samples: &samples,
+            outcomes: &outcomes,
+            time_to_live_ms: live_at.map(|at| {
+                u64::try_from(at.duration_since(self.started).as_millis()).unwrap_or(u64::MAX)
+            }),
+            ended_by_runner,
+            timed_out,
+        }))
+    }
+}
+
+/// Reads frames until the ack for `id` or the timeout; other frames are
+/// state and are dropped (the test is over).
+async fn await_ack<T: ControlTransport>(
+    transport: &mut T,
+    id: &str,
+    timeout: Duration,
+) -> std::result::Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let frame = tokio::time::timeout_at(deadline, transport.recv())
+            .await
+            .map_err(|_| "the runner did not acknowledge in time".to_string())?;
+        match frame {
+            None | Some(ControlFrameIn::Closed { .. }) => {
+                return Err("the control socket closed".to_string());
+            }
+            Some(ControlFrameIn::Text(text)) => {
+                if let Ok(RunnerFrame::Ack {
+                    id: ack_id,
+                    ok,
+                    error,
+                    ..
+                }) = serde_json::from_str::<RunnerFrame>(&text)
+                    && ack_id == id
+                {
+                    return if ok {
+                        Ok(())
+                    } else {
+                        Err(error.unwrap_or_else(|| "refused".to_string()))
+                    };
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2115,6 +2928,7 @@ mod tests {
             show: ShowRecord {
                 id: "sh_abc".to_string(),
                 status: "ready".to_string(),
+                kind: "solo".to_string(),
                 node_id: "eu-hel-1".to_string(),
                 created_at: Some("2026-10-16T10:00:00Z".to_string()),
                 expires_at: Some("2026-10-16T22:30:00Z".to_string()),
@@ -2145,6 +2959,8 @@ mod tests {
         create_queue: StdMutex<VecDeque<std::result::Result<CreateShowResponse, CloudApiError>>>,
         current: StdMutex<VecDeque<std::result::Result<CurrentShowResponse, CloudApiError>>>,
         create_calls: AtomicUsize,
+        /// The `kind` of every create, in order (C6b sends `test`).
+        create_kinds: StdMutex<Vec<String>>,
         end_calls: StdMutex<Vec<String>>,
         current_calls: AtomicUsize,
     }
@@ -2153,9 +2969,10 @@ mod tests {
         async fn create_show(
             &self,
             _bearer: &str,
-            _request: &CreateShowRequest,
+            request: &CreateShowRequest,
         ) -> std::result::Result<CreateShowResponse, CloudApiError> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
+            self.create_kinds.lock().unwrap().push(request.kind.clone());
             if let Some(answer) = self.create_queue.lock().unwrap().pop_front() {
                 return answer;
             }
@@ -2438,6 +3255,7 @@ mod tests {
             "/cloud/statusHold",
             "/cloud/statusOff",
             "/cloud/statusFallback",
+            "/cloud/statusTest",
         ] {
             let wire = high_risk_fixture(pointer);
             let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
@@ -2453,6 +3271,13 @@ mod tests {
             serde_json::to_value(CloudShowRuntime::default().status()).unwrap(),
             high_risk_fixture("/cloud/statusOff")
         );
+        // C6b: the renderer's `cloud.selftest.run` params parse into the outputs
+        // the show is created with (the audio rate is the feed's, added later).
+        let params: CloudTestParams =
+            serde_json::from_value(high_risk_fixture("/cloud/testRunParams")).unwrap();
+        assert_eq!(params.outputs.len(), 1);
+        assert_eq!(params.outputs[0].video_kbps, 6000);
+        assert_eq!(params.ffmpeg_path, None);
     }
 
     #[test]
@@ -3055,7 +3880,7 @@ mod tests {
         web.create_queue
             .lock()
             .unwrap()
-            .push_back(Err(CloudApiError::ShowLive(Some(stale.clone()))));
+            .push_back(Err(CloudApiError::ShowLive(Some(Box::new(stale.clone())))));
         *web.create.lock().unwrap() = Some(Ok(created.clone()));
         for _ in 0..2 {
             web.current
@@ -3579,5 +4404,644 @@ mod tests {
             }
         }
         assert!(sent.iter().any(|frame| frame["kind"] == "destinations.set"));
+    }
+
+    // --- Test cloud (C6b) -------------------------------------------------------
+
+    /// A pusher that reports a scripted outcome after `seconds` of paused
+    /// time, or holds until canceled.
+    struct FakePusher {
+        outcome: StdMutex<TestPushOutcome>,
+        pushes: StdMutex<Vec<(String, u32)>>,
+        cancels: Arc<AtomicUsize>,
+        hold: bool,
+    }
+
+    impl FakePusher {
+        fn clean() -> Arc<Self> {
+            Arc::new(Self {
+                outcome: StdMutex::new(TestPushOutcome {
+                    ok: true,
+                    certificate_failed: false,
+                    detail: None,
+                }),
+                pushes: StdMutex::new(Vec::new()),
+                cancels: Arc::new(AtomicUsize::new(0)),
+                hold: false,
+            })
+        }
+
+        fn holding() -> Arc<Self> {
+            let mut pusher = Arc::try_unwrap(Self::clean()).ok().unwrap();
+            pusher.hold = true;
+            Arc::new(pusher)
+        }
+
+        fn with_outcome(outcome: TestPushOutcome) -> Arc<Self> {
+            let pusher = Self::clean();
+            *pusher.outcome.lock().unwrap() = outcome;
+            pusher
+        }
+    }
+
+    impl CloudTestPusher for FakePusher {
+        fn push(
+            &self,
+            _ingest: ShowIngest,
+            output: ShowOutputSpec,
+            seconds: u64,
+            mut cancel: watch::Receiver<bool>,
+        ) -> TestPushFuture {
+            self.pushes
+                .lock()
+                .unwrap()
+                .push((orientation_id(output.orientation), output.video_kbps));
+            let outcome = self.outcome.lock().unwrap().clone();
+            let hold = self.hold;
+            let cancels = self.cancels.clone();
+            Box::pin(async move {
+                let wait = async {
+                    if hold {
+                        std::future::pending::<()>().await;
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(seconds)).await;
+                    }
+                };
+                tokio::select! {
+                    _ = wait => Ok(outcome),
+                    _ = wait_canceled(&mut cancel) => {
+                        cancels.fetch_add(1, Ordering::SeqCst);
+                        Ok(TestPushOutcome { ok: false, certificate_failed: false, detail: Some("canceled".to_string()) })
+                    }
+                }
+            })
+        }
+    }
+
+    fn test_outputs() -> Vec<ShowOutputSpec> {
+        vec![ShowOutputSpec {
+            orientation: StreamOutputOrientation::Horizontal,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            video_kbps: 6000,
+            audio_kbps: 160,
+        }]
+    }
+
+    fn feed_state(phase: &str, kbps: u64) -> Value {
+        json!({ "t": "state", "state": {
+            "phase": phase,
+            "liveSeconds": 1,
+            "feeds": [{ "orientation": "horizontal", "connected": kbps > 0, "kbps": kbps }],
+            "legs": []
+        }})
+    }
+
+    /// Reads the desktop's frames until `show.end`, skipping pings, and acks it.
+    async fn ack_show_end(server: &mut FakeServer) {
+        loop {
+            let frame = server.next_frame().await;
+            if frame["kind"] == "show.end" {
+                server.send(ack(&frame["id"]));
+                return;
+            }
+            assert_eq!(frame["t"], "ping", "unexpected frame {frame}");
+        }
+    }
+
+    fn test_status(slot: &CloudShowSlot) -> CloudTestStatus {
+        lock(slot).status().test.expect("a test block")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_test_creates_a_test_show_pushes_ten_seconds_and_judges_the_upload() {
+        let harness = harness(true);
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        let pusher = FakePusher::clean();
+        let status = harness
+            .context
+            .start_test(Some("bearer".to_string()), test_outputs(), pusher.clone())
+            .unwrap();
+        assert_eq!(
+            status.test.as_ref().unwrap().phase,
+            CloudTestPhase::Creating
+        );
+        assert!(lock(&harness.context.slot).test_running());
+        // The slot's show is untouched: the Studio sees Off throughout.
+        assert_eq!(status.phase, CloudPhase::Off);
+
+        let mut server = harness.context.connector.accept().await;
+        let hello = server.next_frame().await;
+        assert_eq!(hello["t"], "hello");
+        server.send(welcome("starting"));
+        wait_until(|| test_status(&harness.context.slot).phase == CloudTestPhase::Pushing).await;
+        assert_eq!(
+            pusher.pushes.lock().unwrap().as_slice(),
+            &[("horizontal".to_string(), 6000)]
+        );
+        // The runner's view of the feed: a partial first poll, then steady.
+        server.send(feed_state("live", 2000));
+        server.send(feed_state("live", 6100));
+        server.send(feed_state("live", 6150));
+        server.send(feed_state("live", 6100));
+        ack_show_end(&mut server).await;
+        wait_until(|| !lock(&harness.context.slot).test_running()).await;
+
+        let test = test_status(&harness.context.slot);
+        assert_eq!(test.phase, CloudTestPhase::Done);
+        let result = test.result.unwrap();
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.reason, None);
+        assert!(result.time_to_live_ms.is_some());
+        assert_eq!(result.uploads.len(), 1);
+        assert_eq!(result.uploads[0].target_kbps, 6000);
+        assert_eq!(result.uploads[0].measured_kbps, Some(6100));
+        // The web saw a test create and its end; the runner saw show.end.
+        assert_eq!(
+            harness.context.web.create_kinds.lock().unwrap().as_slice(),
+            &["test".to_string()]
+        );
+        assert_eq!(
+            harness.context.web.end_calls.lock().unwrap().as_slice(),
+            &["sh_abc".to_string()]
+        );
+        let sent = harness.context.connector.sent.lock().unwrap().clone();
+        assert!(sent.iter().any(|frame| frame["kind"] == "show.end"));
+        assert!(
+            !sent.iter().any(|frame| frame["kind"] == "destinations.set"),
+            "a test never hands destinations over"
+        );
+        // The Studio's show slot never changed hands.
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+        assert!(lock(&harness.context.slot).show.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_upload_fails_the_test_with_what_it_reached() {
+        let harness = harness(true);
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        harness
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        let mut server = harness.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("starting"));
+        server.send(feed_state("live", 2100));
+        server.send(feed_state("live", 2050));
+        server.send(feed_state("live", 2100));
+        ack_show_end(&mut server).await;
+        wait_until(|| !lock(&harness.context.slot).test_running()).await;
+        let result = test_status(&harness.context.slot).result.unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.reason, Some(CloudTestReason::TooSlow));
+        assert_eq!(result.uploads[0].measured_kbps, Some(2100));
+        assert!(result.time_to_live_ms.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_certificate_and_a_feed_that_never_arrives_are_named() {
+        // The certificate first: FFmpeg refused the node, nothing else counts.
+        let refused = harness(true);
+        *refused.context.web.create.lock().unwrap() = Some(Ok(created()));
+        refused
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::with_outcome(TestPushOutcome {
+                    ok: false,
+                    certificate_failed: true,
+                    detail: Some("[tls] certificate verify failed".to_string()),
+                }),
+            )
+            .unwrap();
+        let mut server = refused.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("starting"));
+        ack_show_end(&mut server).await;
+        wait_until(|| !lock(&refused.context.slot).test_running()).await;
+        let result = test_status(&refused.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::Certificate));
+        assert!(
+            result
+                .message
+                .unwrap()
+                .contains("certificate verify failed")
+        );
+
+        // A clean push the runner never saw: something blocks the stream.
+        let quiet = harness(true);
+        *quiet.context.web.create.lock().unwrap() = Some(Ok(created()));
+        quiet
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        let mut server = quiet.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("starting"));
+        ack_show_end(&mut server).await;
+        wait_until(|| !lock(&quiet.context.slot).test_running()).await;
+        let result = test_status(&quiet.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::NoFeed));
+        assert_eq!(result.time_to_live_ms, None);
+        assert_eq!(result.uploads[0].measured_kbps, None);
+        assert_eq!(quiet.context.web.end_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_web_refusing_the_test_names_the_reason_and_nothing_connects() {
+        let harness = harness(true);
+        *harness.context.web.create.lock().unwrap() = Some(Err(CloudApiError::TestLimit {
+            reset_at: Some("2026-10-17T13:00:00.000Z".to_string()),
+        }));
+        harness
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| !lock(&harness.context.slot).test_running()).await;
+        let result = test_status(&harness.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::Limit));
+        assert_eq!(result.reset_at.as_deref(), Some("2026-10-17T13:00:00.000Z"));
+        assert_eq!(result.uploads[0].target_kbps, 6000);
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+
+        // The node unreachable at hello: can't reach, and the show is ended.
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .push_back(None);
+        harness
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| !lock(&harness.context.slot).test_running()).await;
+        let result = test_status(&harness.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::CantReach));
+        assert_eq!(
+            harness.context.web.end_calls.lock().unwrap().as_slice(),
+            &["sh_abc".to_string()]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_test_refuses_while_signed_out_unentitled_a_show_is_held_or_a_test_runs() {
+        let unentitled = harness(false);
+        assert_eq!(
+            unentitled
+                .context
+                .start_test(None, test_outputs(), FakePusher::clean())
+                .unwrap_err(),
+            CloudTestRefusal::SignedOut
+        );
+        assert_eq!(
+            unentitled
+                .context
+                .start_test(
+                    Some("bearer".to_string()),
+                    test_outputs(),
+                    FakePusher::clean()
+                )
+                .unwrap_err(),
+            CloudTestRefusal::NotEntitled
+        );
+
+        let harness = harness(true);
+        assert_eq!(
+            harness
+                .context
+                .start_test(Some("bearer".to_string()), Vec::new(), FakePusher::clean())
+                .unwrap_err(),
+            CloudTestRefusal::NoOutputs
+        );
+        lock(&harness.context.slot).show = Some(ActiveShow {
+            record: created().show,
+            control: created().control,
+            ingest: None,
+            session_id: None,
+            destinations: Vec::new(),
+            resuming: false,
+        });
+        assert_eq!(
+            harness
+                .context
+                .start_test(
+                    Some("bearer".to_string()),
+                    test_outputs(),
+                    FakePusher::clean()
+                )
+                .unwrap_err(),
+            CloudTestRefusal::ShowLive
+        );
+        lock(&harness.context.slot).show = None;
+
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        harness
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::holding(),
+            )
+            .unwrap();
+        assert_eq!(
+            harness
+                .context
+                .start_test(
+                    Some("bearer".to_string()),
+                    test_outputs(),
+                    FakePusher::clean()
+                )
+                .unwrap_err(),
+            CloudTestRefusal::Running
+        );
+        assert_eq!(CloudTestRefusal::Running.code(), "cloud-test-running");
+        harness.context.cancel_test().await;
+        assert!(!lock(&harness.context.slot).test_running());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn go_live_ends_a_running_test_first_and_drops_its_result() {
+        let harness = harness(true);
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        let pusher = FakePusher::holding();
+        harness
+            .context
+            .start_test(Some("bearer".to_string()), test_outputs(), pusher.clone())
+            .unwrap();
+        let mut test_server = harness.context.connector.accept().await;
+        let _hello = test_server.next_frame().await;
+        test_server.send(welcome("starting"));
+        wait_until(|| test_status(&harness.context.slot).phase == CloudTestPhase::Pushing).await;
+
+        let context = harness.context.clone();
+        let prepare = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-live",
+                    Some("bearer".to_string()),
+                    Vec::new(),
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        // The test ends on the socket and the web before the show is created.
+        ack_show_end(&mut test_server).await;
+        wait_until(|| !lock(&harness.context.slot).test_running()).await;
+        assert_eq!(pusher.cancels.load(Ordering::SeqCst), 1);
+        assert_eq!(lock(&harness.context.slot).status().test, None);
+        assert_eq!(
+            harness.context.web.end_calls.lock().unwrap().as_slice(),
+            &["sh_abc".to_string()]
+        );
+
+        let mut show_server = harness.context.connector.accept().await;
+        let _hello = show_server.next_frame().await;
+        show_server.send(welcome("starting"));
+        let set = show_server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        show_server.send(ack(&set["id"]));
+        let PrepareOutcome::Cloud(_) = prepare.await.unwrap().unwrap() else {
+            panic!("the show should have started through the cloud");
+        };
+        assert_eq!(
+            harness.context.web.create_kinds.lock().unwrap().as_slice(),
+            &["test".to_string(), "solo".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_test_verdict_orders_its_reasons() {
+        let outputs = test_outputs();
+        let clean: Vec<Result<TestPushOutcome>> = vec![Ok(TestPushOutcome {
+            ok: true,
+            certificate_failed: false,
+            detail: None,
+        })];
+        let steady: HashMap<String, Vec<u32>> =
+            HashMap::from([("horizontal".to_string(), vec![1000, 6100, 6200])]);
+        let verdict = |samples: &HashMap<String, Vec<u32>>,
+                       outcomes: &[Result<TestPushOutcome>],
+                       live: Option<u64>,
+                       ended: Option<&str>,
+                       timed_out: bool| {
+            test_verdict(TestVerdictInput {
+                outputs: &outputs,
+                samples,
+                outcomes,
+                time_to_live_ms: live,
+                ended_by_runner: ended.map(str::to_string),
+                timed_out,
+            })
+        };
+        let ok = verdict(&steady, &clean, Some(2300), None, false);
+        assert!(ok.ok);
+        assert_eq!(ok.uploads[0].measured_kbps, Some(6100));
+        assert_eq!(ok.time_to_live_ms, Some(2300));
+        assert_eq!(ok.message, None);
+
+        // 85% of video plus audio is the line: 5236 kbps here.
+        let edge = HashMap::from([("horizontal".to_string(), vec![5236])]);
+        assert!(verdict(&edge, &clean, Some(1), None, false).ok);
+        let under = HashMap::from([("horizontal".to_string(), vec![5235])]);
+        assert_eq!(
+            verdict(&under, &clean, Some(1), None, false).reason,
+            Some(CloudTestReason::TooSlow)
+        );
+        assert_eq!(
+            verdict(&steady, &clean, None, None, false).reason,
+            Some(CloudTestReason::NoFeed)
+        );
+        assert_eq!(
+            verdict(&steady, &clean, Some(1), Some("no-feed"), false).reason,
+            Some(CloudTestReason::Failed)
+        );
+        let timed = verdict(&steady, &clean, Some(1), None, true);
+        assert_eq!(timed.reason, Some(CloudTestReason::Failed));
+        assert_eq!(
+            timed.message.as_deref(),
+            Some("the test did not finish in time")
+        );
+        let certificate: Vec<Result<TestPushOutcome>> = vec![Ok(TestPushOutcome {
+            ok: false,
+            certificate_failed: true,
+            detail: Some("certificate verify failed".to_string()),
+        })];
+        assert_eq!(
+            verdict(&steady, &certificate, Some(1), Some("ended"), true).reason,
+            Some(CloudTestReason::Certificate)
+        );
+        let crashed: Vec<Result<TestPushOutcome>> = vec![Err(anyhow::anyhow!("ffmpeg exited 1"))];
+        let failed = verdict(&steady, &crashed, Some(1), None, false);
+        assert_eq!(failed.reason, Some(CloudTestReason::Failed));
+        assert!(failed.message.unwrap().contains("ffmpeg exited 1"));
+        // A push that never ran (FFmpeg missing) is this computer's failure,
+        // never a feed the network blocked.
+        let never_ran: Vec<Result<TestPushOutcome>> = vec![Err(anyhow::anyhow!(
+            "The Videorc Cloud test couldn't start FFmpeg."
+        ))];
+        assert_eq!(
+            verdict(&HashMap::new(), &never_ran, None, None, false).reason,
+            Some(CloudTestReason::Failed)
+        );
+        // Live and clean, but the node never measured the feed: unmeasured,
+        // never an unmeasured "too slow".
+        let unmeasured = verdict(&HashMap::new(), &clean, Some(1), None, false);
+        assert!(unmeasured.ok, "{unmeasured:?}");
+        assert_eq!(unmeasured.uploads[0].measured_kbps, None);
+        assert_eq!(median_kbps(&[]), None);
+        assert_eq!(median_kbps(&[3, 1, 2]), Some(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_test_show_left_open_on_the_web_is_ended_before_a_go_live_or_a_new_test() {
+        // A crashed desktop's test still holds the account's one open show.
+        let stale = ShowRecord {
+            id: "sh_test".to_string(),
+            status: "live".to_string(),
+            kind: "test".to_string(),
+            ..created().show
+        };
+
+        // Go Live: the web refuses with the test; it is ended, never adopted
+        // as resumable, and the show is created once more.
+        let go_live = harness(true);
+        let web = &go_live.context.web;
+        web.create_queue
+            .lock()
+            .unwrap()
+            .push_back(Err(CloudApiError::ShowLive(Some(Box::new(stale.clone())))));
+        *web.create.lock().unwrap() = Some(Ok(created()));
+        let context = go_live.context.clone();
+        let prepare = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-1",
+                    Some("bearer".to_string()),
+                    Vec::new(),
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        let mut server = go_live.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("starting"));
+        let set = server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        server.send(ack(&set["id"]));
+        let PrepareOutcome::Cloud(handover) = prepare.await.unwrap().unwrap() else {
+            panic!("Go Live goes through a new show");
+        };
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_test".to_string()]);
+        assert_eq!(web.create_calls.load(Ordering::SeqCst), 2, "one retry");
+        assert_eq!(web.current_calls.load(Ordering::SeqCst), 0, "never adopted");
+
+        // A new test: the stale one is ended and the new one runs.
+        let tester = harness(true);
+        let web = &tester.context.web;
+        web.create_queue
+            .lock()
+            .unwrap()
+            .push_back(Err(CloudApiError::ShowLive(Some(Box::new(stale.clone())))));
+        *web.create.lock().unwrap() = Some(Ok(created()));
+        tester
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        let mut server = tester.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("starting"));
+        server.send(feed_state("live", 6100));
+        server.send(feed_state("live", 6150));
+        ack_show_end(&mut server).await;
+        wait_until(|| !lock(&tester.context.slot).test_running()).await;
+        let result = test_status(&tester.context.slot).result.unwrap();
+        assert!(result.ok, "{result:?}");
+        assert_eq!(
+            *web.end_calls.lock().unwrap(),
+            vec!["sh_test".to_string(), "sh_abc".to_string()]
+        );
+        assert_eq!(
+            *web.create_kinds.lock().unwrap(),
+            vec!["test".to_string(), "test".to_string()]
+        );
+
+        // A show that is not a test stays: the test names it and ends nothing.
+        let busy = harness(true);
+        *busy.context.web.create.lock().unwrap() =
+            Some(Err(CloudApiError::ShowLive(Some(Box::new(ShowRecord {
+                status: "live".to_string(),
+                ..created().show
+            })))));
+        busy.context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| !lock(&busy.context.slot).test_running()).await;
+        let result = test_status(&busy.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::ShowLive));
+        assert!(busy.context.web.end_calls.lock().unwrap().is_empty());
+        assert_eq!(busy.context.web.create_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_start_stops_a_running_test_without_waiting_for_it() {
+        let harness = harness(true);
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        let pusher = FakePusher::holding();
+        harness
+            .context
+            .start_test(Some("bearer".to_string()), test_outputs(), pusher.clone())
+            .unwrap();
+        let mut server = harness.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome("starting"));
+        wait_until(|| test_status(&harness.context.slot).phase == CloudTestPhase::Pushing).await;
+
+        // The signal answers at once; the task stops the push and ends the
+        // test's show on its own, and its result is dropped.
+        assert!(lock(&harness.context.slot).signal_test_cancel());
+        assert!(lock(&harness.context.slot).test_running(), "nothing waited");
+        ack_show_end(&mut server).await;
+        wait_until(|| !lock(&harness.context.slot).test_running()).await;
+        assert_eq!(pusher.cancels.load(Ordering::SeqCst), 1);
+        assert_eq!(lock(&harness.context.slot).status().test, None);
+        assert_eq!(
+            *harness.context.web.end_calls.lock().unwrap(),
+            vec!["sh_abc".to_string()]
+        );
+        assert!(!lock(&harness.context.slot).signal_test_cancel());
     }
 }

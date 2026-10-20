@@ -5487,6 +5487,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.intent.ack"
         | "remote.intent"
         | "cloud.settings.set"
+        // Plan 184 C6b: the test runs on its own task and reports through
+        // `cloud.state`; the RPC only starts it.
+        | "cloud.selftest.run"
         | "compositor.scene.update"
         | "preview.camera.start"
         | "preview.camera.stop"
@@ -10383,6 +10386,60 @@ async fn handle_text_message_with_role(
                 "Videorc Cloud is unavailable in this build.",
             ),
         },
+        // Plan 184 C6b: Test cloud. The test never touches the Studio's
+        // session, so it refuses while one runs or finalizes; the show module
+        // refuses while a show is live or resumable or a test runs.
+        "cloud.selftest.run" => {
+            if !matches!(
+                current_recording_status(state).await.state,
+                RecordingState::Idle
+            ) {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-test-session-active",
+                    "Locked while you're recording or live.",
+                );
+            }
+            let params = match serde_json::from_value::<cloud_show::CloudTestParams>(command.params)
+            {
+                Ok(params) => params,
+                Err(error) => {
+                    return ServerResponse::error(command.id, "invalid-params", error.to_string());
+                }
+            };
+            let ffmpeg_path = resolve_trusted_ffmpeg_path(
+                params.ffmpeg_path.as_deref(),
+                role,
+                state.smoke_rpc_enabled,
+            );
+            let Some(context) = cloud_context(state) else {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-unavailable",
+                    "Videorc Cloud is unavailable in this build.",
+                );
+            };
+            let pusher = match recording::CloudTestFeedPusher::new(state, ffmpeg_path) {
+                Ok(pusher) => pusher,
+                Err(error) => {
+                    return ServerResponse::error(
+                        command.id,
+                        "cloud-test-failed",
+                        format!("{error:#}"),
+                    );
+                }
+            };
+            match context.start_test(
+                account::stored_session_token(),
+                recording::cloud_test_output_specs(&params.outputs),
+                std::sync::Arc::new(pusher),
+            ) {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(refusal) => {
+                    ServerResponse::error(command.id, refusal.code(), refusal.to_string())
+                }
+            }
+        }
         "remote.intent" => {
             match serde_json::from_value::<crate::remote_control::RemoteIntent>(
                 command.params.clone(),
@@ -13141,6 +13198,17 @@ async fn start_session_command(
         Ok(params) => {
             let streaming = params.streaming.clone();
             let attach_live_chat = session_attaches_live_chat(&params);
+            // Plan 184 C6b: a running Test cloud yields to the session, which
+            // needs the upload and the encoder; a cloud start also waits for
+            // the test's show to end (`prepare_session`).
+            if state
+                .cloud_show
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .signal_test_cancel()
+            {
+                tracing::info!("A session start stops the running Videorc Cloud test.");
+            }
             let started = match kind {
                 SessionStartKind::GoLive => start_session(state.clone(), params).await,
                 SessionStartKind::CloudResume => {

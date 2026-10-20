@@ -50,6 +50,7 @@ import type {
   ClearBuddyOverlayParams,
   CloudSettingsPatch,
   CloudStatus,
+  CloudTestParams,
   CohostStartParams,
   CohostState,
   CohostReportGetParams,
@@ -398,6 +399,8 @@ export interface BackendRpcMethodMap {
   /** C5: the same start as `session.start`, bound to the show that is live. */
   'cloud.show.resume': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'cloud.show.end': BackendRpcDefinition<undefined, CloudStatus>
+  /** C6b: starts the 10-second test; progress and the result ride `cloud.state`. */
+  'cloud.selftest.run': BackendRpcDefinition<CloudTestParams, CloudStatus>
   'cohost.status': BackendRpcDefinition<undefined, CohostState>
   'cohost.start': BackendRpcDefinition<CohostStartParams, CohostState>
   'cohost.stop': BackendRpcDefinition<undefined, CohostState>
@@ -4001,7 +4004,55 @@ const cloudStatusSchema = objectSchema(
     ),
     endReason: optionalSchema(stringSchema({ maxLength: 128 })),
     message: optionalText,
-    directFallbackAvailable: booleanSchema
+    directFallbackAvailable: booleanSchema,
+    test: optionalSchema(
+      objectSchema(
+        {
+          phase: enumSchema(['creating', 'connecting', 'pushing', 'ending', 'done']),
+          startedAt: timestamp,
+          result: optionalSchema(
+            objectSchema(
+              {
+                ok: booleanSchema,
+                reason: optionalSchema(
+                  enumSchema([
+                    'cant-reach',
+                    'off',
+                    'full',
+                    'not-entitled',
+                    'no-hours',
+                    'limit',
+                    'show-live',
+                    'certificate',
+                    'no-feed',
+                    'too-slow',
+                    'failed'
+                  ])
+                ),
+                message: optionalText,
+                timeToLiveMs: optionalSchema(nonNegativeInteger),
+                uploads: optionalSchema(
+                  arraySchema(
+                    objectSchema(
+                      {
+                        orientation: stringSchema({ maxLength: 32 }),
+                        targetKbps: nonNegativeInteger,
+                        measuredKbps: optionalSchema(nonNegativeInteger)
+                      },
+                      { allowUnknown: false }
+                    ),
+                    { maxLength: 4 }
+                  )
+                ),
+                resetAt: optionalSchema(timestamp)
+              },
+              { allowUnknown: false }
+            )
+          )
+        },
+        { allowUnknown: false }
+      )
+    )
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudStatus>
@@ -4011,6 +4062,26 @@ const cloudSettingsPatchSchema = objectSchema(
     enabled: optionalSchema(booleanSchema),
     holdMaxSeconds: optionalSchema(nonNegativeInteger),
     holdImageScreenId: optionalSchema(nullableSchema(boundedString))
+  },
+  { allowUnknown: false }
+)
+
+const cloudTestParamsSchema = objectSchema(
+  {
+    outputs: arraySchema(
+      objectSchema(
+        {
+          orientation: enumSchema(['horizontal', 'vertical']),
+          width: nonNegativeInteger,
+          height: nonNegativeInteger,
+          fps: nonNegativeInteger,
+          videoKbps: nonNegativeInteger
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 2 }
+    ),
+    ffmpegPath: optionalSchema(boundedString)
   },
   { allowUnknown: false }
 )
@@ -4375,6 +4446,7 @@ const runtimeContracts = {
   'cloud.allowance.refresh': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.show.resume': { params: sessionStartParamsSchema, result: recordingStatusSchema },
   'cloud.show.end': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.selftest.run': { params: cloudTestParamsSchema, result: cloudStatusSchema },
   'cohost.status': { params: undefinedSchema, result: cohostStateSchema },
   'cohost.start': { params: cohostStartParamsSchema, result: cohostStateSchema },
   'cohost.stop': { params: undefinedSchema, result: cohostStateSchema },
