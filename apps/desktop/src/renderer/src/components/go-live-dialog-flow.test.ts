@@ -23,6 +23,7 @@ import { GO_LIVE_EXCLUDED_NOTE, GoLiveConfirmationDialog } from './go-live-dialo
 
 const mocked = vi.hoisted(() => ({ captureConfig: undefined as unknown }))
 vi.mock('@/hooks/use-studio', () => ({
+  useStudioBanners: () => ({ banners: [] }),
   useStudioCore: () => ({
     captureConfig: mocked.captureConfig,
     performanceCheck: undefined,
