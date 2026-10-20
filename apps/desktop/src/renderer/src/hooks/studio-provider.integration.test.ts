@@ -49,6 +49,7 @@ import type {
   AudioMeterResult,
   AudioTrack,
   BackendConnection,
+  Banner,
   CaptureRecoveryStatus,
   CohostSettings,
   CohostSettingsPatch,
@@ -105,6 +106,7 @@ import {
   streamOutputTopologySplitRejected,
   streamOutputTopologyProbeRequestKey,
   useStudioAudio,
+  useStudioBanners,
   useStudioChat,
   useStudioCore,
   useStudioDiagnostics,
@@ -512,6 +514,7 @@ class StudioBackend {
   }
   screens: StreamScreen[] = []
   activeScreen: StreamScreen | null = null
+  banners: Banner[] = []
   audioMeterResult: AudioMeterResult = { status: 'ready', level: 0.4 }
   liveChatSnapshot: LiveChatSnapshot = {
     providers: [],
@@ -1044,6 +1047,33 @@ class StudioBackend {
         return this.screens
       case 'screens.active':
         return this.activeScreen
+      // Plan 186: a small in-memory banner store with the backend's replies.
+      case 'banners.list':
+        return this.banners
+      case 'banners.show':
+      case 'banners.update': {
+        const { id, ...patch } = params as { id: string } & Partial<Banner>
+        this.banners = this.banners.map((banner) =>
+          banner.id === id
+            ? { ...banner, ...(command.method === 'banners.show' ? { shown: true } : patch) }
+            : banner
+        )
+        return this.banners.find((banner) => banner.id === id)
+      }
+      case 'banners.hide':
+        this.banners = this.banners.map((banner) =>
+          params.id === undefined || banner.id === params.id ? { ...banner, shown: false } : banner
+        )
+        return this.banners
+      case 'banners.reorder':
+        this.banners = (params.ids as string[]).map((id, sortOrder) => ({
+          ...this.banners.find((banner) => banner.id === id)!,
+          sortOrder
+        }))
+        return this.banners
+      case 'banners.delete':
+        this.banners = this.banners.filter((banner) => banner.id !== params.id)
+        return this.banners
       case 'screens.activate': {
         if (this.screenActivateFailure === 'definite') {
           throw Object.assign(new Error('The test backend rejected takeover activation.'), {
@@ -1637,6 +1667,7 @@ class TestWebSocket {
 
 type StudioObservation = {
   audio: ReturnType<typeof useStudioAudio>
+  banners: ReturnType<typeof useStudioBanners>
   chat: ReturnType<typeof useStudioChat>
   core: StudioCoreContextValue
   diagnostics: ReturnType<typeof useStudioDiagnostics>
@@ -1653,13 +1684,14 @@ function MicVisualProbe({ observe }: { observe: (active: boolean) => void }): nu
 
 function Probe({ observe }: { observe: (value: StudioObservation) => void }): null {
   const audio = useStudioAudio()
+  const banners = useStudioBanners()
   const chat = useStudioChat()
   const core = useStudioCore()
   const diagnostics = useStudioDiagnostics()
   const recording = useStudioRecording()
   useEffect(
-    () => observe({ audio, chat, core, diagnostics, recording }),
-    [audio, chat, core, diagnostics, observe, recording]
+    () => observe({ audio, banners, chat, core, diagnostics, recording }),
+    [audio, banners, chat, core, diagnostics, observe, recording]
   )
   return null
 }
@@ -2104,6 +2136,201 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(latest().core.screens).toEqual([])
     expect(latest().core.screenImportPending).toBe(false)
+  })
+
+  // Plan 186 S5: the banner list, its actions and its refusals.
+  const testBanner = (id: string, sortOrder: number, extra: Partial<Banner> = {}): Banner => ({
+    id,
+    name: id,
+    imageFile: `${id}.png`,
+    thumbnailFile: `${id}.thumb.png`,
+    width: 2400,
+    height: 400,
+    hasAlpha: true,
+    sortOrder,
+    shown: false,
+    horizontal: { x: 0.2, y: 0.8, w: 0.6, h: 0.1 },
+    vertical: { x: 0.05, y: 0.8, w: 0.9, h: 0.06 },
+    showOnStream: true,
+    showInRecording: true,
+    opacity: 1,
+    createdAt: now,
+    updatedAt: now,
+    ...extra
+  })
+
+  async function mountBannerProvider(banners: Banner[]): Promise<{
+    backend: StudioBackend
+    latest: () => StudioObservation
+  }> {
+    const backend = new StudioBackend()
+    backend.banners = banners
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    await waitForObservation(() => observation?.banners.bannersLoaded === true)
+    return { backend, latest: () => observation! }
+  }
+
+  function emitBanners(backend: StudioBackend, banners: Banner[]): void {
+    for (const socket of backend.sockets)
+      socket.onmessage?.({ data: JSON.stringify({ event: 'banners.changed', payload: banners }) })
+  }
+
+  it('loads banners at connect, follows banners.changed and forgets a deleted selection', async () => {
+    const sponsor = testBanner('sponsor', 0)
+    const logo = testBanner('logo', 1)
+    const { backend, latest } = await mountBannerProvider([sponsor])
+    expect(latest().banners.banners).toEqual([sponsor])
+    expect(latest().banners.bannersOffline).toBe(false)
+    expect(latest().banners.bannerImportPhase).toBe('idle')
+
+    await act(async () => emitBanners(backend, [sponsor, logo]))
+    expect(latest().banners.banners).toEqual([sponsor, logo])
+
+    // Assets → Place on Scene: the Scene page reads this selection.
+    await act(async () => latest().banners.selectBanner('logo'))
+    expect(latest().banners.selectedBannerId).toBe('logo')
+    await act(async () => emitBanners(backend, [sponsor]))
+    expect(latest().banners.selectedBannerId).toBeNull()
+  })
+
+  it('shows, hides, renames and reorders through the backend without a success toast', async () => {
+    const { backend, latest } = await mountBannerProvider([
+      testBanner('sponsor', 0),
+      testBanner('logo', 1)
+    ])
+    backend.commands.length = 0
+    await act(async () => {
+      expect(await latest().banners.toggleBanner('sponsor')).toBe(true)
+    })
+    expect(latest().banners.banners.find((banner) => banner.id === 'sponsor')?.shown).toBe(true)
+    await act(async () => {
+      expect(await latest().banners.toggleBanner('sponsor')).toBe(true)
+    })
+    expect(latest().banners.banners.find((banner) => banner.id === 'sponsor')?.shown).toBe(false)
+    await act(async () => {
+      await latest().banners.hideBanner()
+      await latest().banners.updateBanner('sponsor', { name: 'ACME' })
+      await latest().banners.reorderBanners(['logo', 'sponsor'])
+    })
+    expect(latest().banners.banners.map((banner) => [banner.id, banner.name])).toEqual([
+      ['logo', 'logo'],
+      ['sponsor', 'ACME']
+    ])
+    expect(
+      backend.commands
+        .filter((command) => command.method.startsWith('banners.'))
+        .map((command) => [command.method, command.params])
+    ).toEqual([
+      ['banners.show', { id: 'sponsor' }],
+      ['banners.hide', { id: 'sponsor' }],
+      ['banners.hide', {}],
+      ['banners.update', { name: 'ACME', id: 'sponsor' }],
+      ['banners.reorder', { ids: ['logo', 'sponsor'] }]
+    ])
+    expect(toastSpies.success).not.toHaveBeenCalled()
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['delete', 'Hide this banner before you delete it.', "Couldn't delete the banner"],
+    ['show', 'Four banners are showing. Hide one first.', "Couldn't show the banner"]
+  ] as const)(
+    'a %s refusal is a warning with the backend sentence, and changes nothing',
+    async (action, sentence, title) => {
+      const shown = testBanner('sponsor', 0, { shown: action === 'delete' })
+      const { backend, latest } = await mountBannerProvider([shown])
+      backend.deferFailure(
+        `banners.${action}`,
+        Object.assign(new Error(sentence), { code: `banner-${action}-failed` })
+      )()
+      let result: boolean | undefined
+      await act(async () => {
+        result =
+          action === 'delete'
+            ? await latest().banners.deleteBanner('sponsor')
+            : await latest().banners.showBanner('sponsor')
+      })
+      expect(result).toBe(false)
+      // The refusal copy loads on demand, so its toast lands a moment later.
+      await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
+      expect(toastSpies.warning).toHaveBeenCalledWith(
+        title,
+        expect.objectContaining({ description: sentence })
+      )
+      expect(toastSpies.error).not.toHaveBeenCalled()
+      expect(toastSpies.success).not.toHaveBeenCalled()
+      expect(latest().banners.banners).toEqual([shown])
+    }
+  )
+
+  it('deletes a banner and names it, the one success a banner action says', async () => {
+    const { latest } = await mountBannerProvider([testBanner('sponsor', 0)])
+    await act(async () => {
+      expect(await latest().banners.deleteBanner('sponsor')).toBe(true)
+    })
+    expect(latest().banners.banners).toEqual([])
+    expect(toastSpies.success).toHaveBeenCalledWith('Deleted “sponsor”')
+  })
+
+  it('imports one banner at a time and never shows it; a refused import says why', async () => {
+    const logo = testBanner('logo', 0)
+    const { backend, latest } = await mountBannerProvider([])
+    window.videorc.pickBannerImage = vi.fn(async () => ({
+      capabilityId: 'chosen-banner',
+      kind: 'input-file' as const,
+      displayName: 'logo.png'
+    }))
+    const release = backend.deferResponse('banners.importImage', logo)
+    backend.commands.length = 0
+    let pending!: Promise<void>
+    act(() => {
+      pending = latest().banners.importBanner()
+    })
+    await waitForObservation(() => latest().banners.bannerImportPhase === 'importing')
+    await act(async () => latest().banners.importBanner())
+    expect(window.videorc.pickBannerImage).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      release()
+      await pending
+    })
+    expect(latest().banners.banners).toEqual([logo])
+    expect(latest().banners.bannerImportPhase).toBe('idle')
+    const methods = backend.commands.map((command) => command.method)
+    expect(
+      backend.commands.find((command) => command.method === 'banners.importImage')?.params
+    ).toEqual({ sourceCapability: 'chosen-banner' })
+    expect(methods).not.toContain('banners.show')
+
+    backend.deferFailure(
+      'banners.importImage',
+      Object.assign(new Error("Animated images aren't supported yet. Export a still PNG."), {
+        code: 'banner-import-failed'
+      })
+    )()
+    await act(async () => latest().banners.importBanner())
+    await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      "Couldn't import the image",
+      expect.objectContaining({
+        description: "Animated images aren't supported yet. Export a still PNG."
+      })
+    )
+    expect(latest().banners.bannerImportPhase).toBe('idle')
+    expect(latest().banners.banners).toEqual([logo])
   })
 
   function preciseTransformStatus(backend: StudioBackend): SceneCommitStatus {
