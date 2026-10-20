@@ -178,6 +178,22 @@ Plan 182 is merged.
 Each decision has a recommendation, and the slices below assume it. ⚑
 marks the ones most worth a look.
 
+**Answered 2026-10-20:** the owner said "this one can be available for
+free, we can have one set of banners in the beginning, Scene page is
+probably good to control this one, yes for stacking order, I think it's
+good like you said".
+
+- D2: free.
+- D3: one set of banners to start.
+- D4: the Scene page controls banners, and there is no Studio section. The
+  live mirrors stay as recommended: Stream Manager, `/banner`, ⌘K and the
+  remotes. They follow the owner's 10-12 rule of one button, a chat command
+  and voice.
+- D5: the stacking order as recommended.
+
+D1 and D6–D11 were not raised separately, so their recommendations stand.
+Ask before building if any of them should change.
+
 | #     | Question | Recommendation |
 | ----- | -------- | -------------- |
 | D1    | What is it called? | **Banner**, everywhere in copy, plus a `CONTEXT.md` entry. Avoid "overlay" (it is an internal word for the three existing items), "image source" ("source" means a capture input), "sticker" and "Sponsors" (the web already has a "Sponsor Videorc" program). |
@@ -537,7 +553,8 @@ Logo" for each banner, then "Hide all banners".
 Get answers to D1–D11, or "go with the recommendations". Record them under
 "Owner decisions" as **Answered <date>:**.
 
-Done when: the answers are in this file.
+Done when: the answers are in this file. **Done 2026-10-20** (D2–D5
+answered as recommended; the others keep their recommendations).
 
 ### S1: Backend store, import and RPCs
 

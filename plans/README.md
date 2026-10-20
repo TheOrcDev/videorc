@@ -10,8 +10,9 @@
   FFmpeg FIFO and the proof surface. Assets manages, Scene places and
   shows, with Stream Manager, `/banner`, ⌘K and Stream Deck/phone mirrors;
   sharp sizes plus a per-place "soft at this size" hint. Phase 2: timer
-  (sponsor rotation) and Buddy voice. 11 decisions (D1–D11), free (D2).
-  **PLANNED**, awaiting owner decisions.
+  (sponsor rotation) and Buddy voice. 11 decisions (D1–D11).
+  **PLANNED**; owner answered 2026-10-20: free, one set of banners, the
+  Scene page controls them, stacking as recommended.
 
 ### Plan 182 Import takeovers while recording or live
 
