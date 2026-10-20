@@ -77,6 +77,22 @@ pub enum RemoteIntent {
         asset_id: String,
     },
     TakeoverHide,
+    /// Banners (plan 186). Show and hide are explicit and idempotent; the
+    /// toggle is for a single deck key. `bannerHide` without a `bannerId`
+    /// hides every banner.
+    #[serde(rename_all = "camelCase")]
+    BannerShow {
+        banner_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    BannerHide {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        banner_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    BannerToggle {
+        banner_id: String,
+    },
     #[serde(rename_all = "camelCase")]
     WindowFront {
         window: RemoteWindow,
@@ -116,6 +132,11 @@ impl RemoteIntent {
             Self::SystemAudioOn | Self::SystemAudioOff | Self::SystemAudioToggle => "system-audio",
             Self::SceneApply { .. } => "scene",
             Self::TakeoverShow { .. } | Self::TakeoverHide => "takeover",
+            // A banner key and a takeover key are two keys: a "Be right back"
+            // tap must not swallow the "Follow me" tap beside it.
+            Self::BannerShow { .. } | Self::BannerHide { .. } | Self::BannerToggle { .. } => {
+                "banner"
+            }
             Self::WindowFront { .. } => "window",
             Self::CommentHighlight { .. } | Self::CommentHighlightClear => "highlight",
             Self::ClipMark => "clip",
@@ -135,6 +156,17 @@ impl RemoteIntent {
             }
             Self::TakeoverShow { asset_id } if asset_id.trim().is_empty() => {
                 Err("takeoverShow needs a non-empty assetId.".to_string())
+            }
+            Self::BannerShow { banner_id } if banner_id.trim().is_empty() => {
+                Err("bannerShow needs a non-empty bannerId.".to_string())
+            }
+            Self::BannerToggle { banner_id } if banner_id.trim().is_empty() => {
+                Err("bannerToggle needs a non-empty bannerId.".to_string())
+            }
+            Self::BannerHide {
+                banner_id: Some(banner_id),
+            } if banner_id.trim().is_empty() => {
+                Err("bannerHide needs a non-empty bannerId, or none to hide all.".to_string())
             }
             Self::CommentHighlight { message_id }
                 if message_id.trim().is_empty()
@@ -426,6 +458,130 @@ mod tests {
             }
             .validate()
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn banner_intents_use_camel_case_wire_tags_and_one_banner_bucket() {
+        let show: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"bannerShow","bannerId":"b-1"}"#).unwrap();
+        assert_eq!(
+            show,
+            RemoteIntent::BannerShow {
+                banner_id: "b-1".to_string()
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&show).unwrap(),
+            serde_json::json!({ "kind": "bannerShow", "bannerId": "b-1" })
+        );
+        let toggle: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"bannerToggle","bannerId":"b-1"}"#).unwrap();
+        assert_eq!(
+            toggle,
+            RemoteIntent::BannerToggle {
+                banner_id: "b-1".to_string()
+            }
+        );
+        // Hide all: no bannerId on the wire, in either direction, never null.
+        let hide_all: RemoteIntent = serde_json::from_str(r#"{"kind":"bannerHide"}"#).unwrap();
+        assert_eq!(hide_all, RemoteIntent::BannerHide { banner_id: None });
+        assert_eq!(
+            serde_json::to_value(&hide_all).unwrap(),
+            serde_json::json!({ "kind": "bannerHide" })
+        );
+        let hide_one: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"bannerHide","bannerId":"b-2"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&hide_one).unwrap(),
+            serde_json::json!({ "kind": "bannerHide", "bannerId": "b-2" })
+        );
+        for intent in [&show, &toggle, &hide_all, &hide_one] {
+            assert!(intent.validate().is_ok());
+            assert_eq!(intent.debounce_kind(), "banner");
+        }
+        // Not the takeover bucket: a banner key beside a takeover key passes.
+        assert_ne!(
+            show.debounce_kind(),
+            RemoteIntent::TakeoverHide.debounce_kind()
+        );
+        assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"bannerShow"}"#).is_err());
+        assert!(
+            serde_json::from_str::<RemoteIntent>(r#"{"kind":"banner_show","bannerId":"b"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn banner_show_and_toggle_need_an_id_and_hide_refuses_an_empty_one() {
+        for blank in ["", "   "] {
+            assert!(
+                RemoteIntent::BannerShow {
+                    banner_id: blank.to_string()
+                }
+                .validate()
+                .is_err()
+            );
+            assert!(
+                RemoteIntent::BannerToggle {
+                    banner_id: blank.to_string()
+                }
+                .validate()
+                .is_err()
+            );
+            assert!(
+                RemoteIntent::BannerHide {
+                    banner_id: Some(blank.to_string())
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            RemoteIntent::BannerHide { banner_id: None }
+                .validate()
+                .is_ok()
+        );
+
+        let mut runtime = RemoteControlRuntime::default();
+        let start = Instant::now();
+        assert!(
+            runtime
+                .admit_intent(
+                    &RemoteIntent::BannerToggle {
+                        banner_id: "b-1".to_string()
+                    },
+                    start
+                )
+                .accepted
+        );
+        // A bounce within the window is debounced whichever banner form it is.
+        assert!(
+            !runtime
+                .admit_intent(
+                    &RemoteIntent::BannerHide { banner_id: None },
+                    start + Duration::from_millis(50)
+                )
+                .accepted
+        );
+        // A takeover key at the same moment passes: separate buckets.
+        assert!(
+            runtime
+                .admit_intent(
+                    &RemoteIntent::TakeoverHide,
+                    start + Duration::from_millis(50)
+                )
+                .accepted
+        );
+        assert!(
+            runtime
+                .admit_intent(
+                    &RemoteIntent::BannerShow {
+                        banner_id: "b-2".to_string()
+                    },
+                    start + REMOTE_INTENT_DEBOUNCE + Duration::from_millis(1)
+                )
+                .accepted
         );
     }
 
