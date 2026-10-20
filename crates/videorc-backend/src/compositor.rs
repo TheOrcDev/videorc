@@ -13,12 +13,19 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use uuid::Uuid;
 
+use crate::banner_prepare::{
+    BannerBitmap, BannerBitmapKey, BannerPrepareRequest, BannerPrepareService,
+};
+use crate::banners::{
+    BannerLeg, BannerSet, banner_draw_rect, banner_leg_carries, banner_rect_for, banners_with_files,
+};
 use crate::capture_health::{
     CaptureHealthCameraEpoch, CaptureHealthCameraProducerSample, CaptureHealthMonitor,
     CaptureHealthSample, CaptureHealthScreenEpoch, CaptureHealthScreenProducerSample,
     CaptureHealthTransition,
 };
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
+use crate::overlay_layout::{OverlayOrientation, OverlayRect, OverlaySessionShape};
 
 #[path = "compositor_preview_frame_lease.rs"]
 mod preview_frame_lease;
@@ -442,6 +449,19 @@ pub struct CompositorRuntime {
     /// session's output canvas and the preview reconciler must neither
     /// resize nor retire it.
     capture_lease: Option<CompositorCaptureLease>,
+    /// The banners the picture carries (plan 186 S3), at snapshot level
+    /// beside the takeover and never inside `Scene`: the primary leg, the
+    /// auxiliary leg and the idle preview read one set. Swapped whole by
+    /// `install_banner_set`; no scene commit and no capture change is
+    /// involved, and the next tick sees it.
+    banners: Arc<BannerSet>,
+    /// The session shape banner leg plans are computed against, from session
+    /// start to its end; `None` on the idle preview, where every shown banner
+    /// with a switch on draws. A set swap mid-session re-plans in place.
+    banner_session_shape: Option<OverlaySessionShape>,
+    /// The auxiliary output of the current run, so a banner set change can
+    /// kick prepares for its canvas too.
+    stream_output: Option<CompositorAuxiliaryOutput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,6 +634,131 @@ pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> b
         return true;
     }
     config_tx.send(next).is_ok()
+}
+
+// --- Banners (plan 186 S3) ---------------------------------------------------
+
+impl CompositorRuntime {
+    /// The canvases banners are prepared for: the run's primary canvas and
+    /// its auxiliary output's, when a run is live.
+    fn banner_canvases(&self) -> Vec<(u32, u32)> {
+        let mut canvases = Vec::new();
+        if self.run_id.is_some() {
+            canvases.push((self.status.width.max(1), self.status.height.max(1)));
+            if let Some(output) = self.stream_output {
+                canvases.push((output.width.max(1), output.height.max(1)));
+            }
+        }
+        canvases
+    }
+
+    /// The prepares the current set wants on the current canvases, so the
+    /// bitmaps are (usually) ready before the first tick that draws them.
+    fn banner_prepare_requests(&self) -> Vec<BannerPrepareRequest> {
+        let canvases = self.banner_canvases();
+        let mut requests = Vec::new();
+        for layer in &self.banners.layers {
+            if layer.fade.hides() {
+                continue;
+            }
+            let Some(file_revision) = layer.file_revision else {
+                continue;
+            };
+            for canvas in &canvases {
+                let orientation = OverlayOrientation::for_canvas(canvas.0, canvas.1);
+                let rect = banner_rect_for(&layer.banner, orientation, None);
+                requests.push(BannerPrepareRequest {
+                    key: BannerBitmapKey::new(
+                        &layer.banner.id,
+                        file_revision,
+                        *canvas,
+                        rect,
+                        layer.banner.opacity,
+                    ),
+                    path: Arc::clone(&layer.image_path),
+                    rect,
+                    opacity: layer.banner.opacity,
+                });
+            }
+        }
+        requests
+    }
+
+    /// Drop the layers whose fade-out ended (D10). Runs every render tick
+    /// that gets the lock; swaps the `Arc` only when something leaves.
+    fn reap_faded_banners(&mut self, now: Instant) -> bool {
+        match self.banners.without_faded_out(now) {
+            Some(next) => {
+                self.banners = Arc::new(next);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Plan 186 S3: install the shown banners (`banners::shown_banners_for_compositor`)
+/// as the compositor's set. Called after every banner mutation (before
+/// `banners.changed` goes out) and once at backend start, because shown
+/// survives a relaunch (D3). Touches neither capture, the scene graph nor a
+/// session: the set is one `Arc` the next tick clones. Prepares for the
+/// current canvases are queued off this task.
+pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
+    let shown = crate::banners::shown_banners_for_compositor(&state.database)?;
+    // Stat the files before taking the lock.
+    let shown = banners_with_files(shown, &state.database.banner_assets_dir());
+    for (banner, path, revision) in &shown {
+        if revision.is_none() {
+            // Said, not hidden: the banner stays in the set but draws nothing.
+            tracing::warn!(
+                banner = %banner.id,
+                path = %path.display(),
+                "A showing banner's image file is missing; it will not be drawn"
+            );
+        }
+    }
+    let now = Instant::now();
+    let requests = {
+        let mut compositor = state.compositor.lock().await;
+        let next = compositor.banners.next_with_files(shown, now);
+        compositor.banners = Arc::new(next);
+        compositor.banner_prepare_requests()
+    };
+    for request in requests {
+        state.banner_prepare.request(request);
+    }
+    Ok(())
+}
+
+/// The session shape banner leg plans follow from now on (`Some` from a
+/// session's compositor start, `None` back on the idle preview). The stop
+/// and lease-release paths clear it themselves; this is for the session
+/// start, after the run is armed or started.
+pub async fn set_banner_session_shape(state: &AppState, shape: Option<OverlaySessionShape>) {
+    let requests = {
+        let mut compositor = state.compositor.lock().await;
+        compositor.banner_session_shape = shape;
+        compositor.banner_prepare_requests()
+    };
+    for request in requests {
+        state.banner_prepare.request(request);
+    }
+}
+
+/// The canvases a Show is budgeted against (`banners.show`): the live run's
+/// primary and auxiliary canvases, none without a run.
+pub async fn banner_prepare_canvases(state: &AppState) -> Vec<(u32, u32)> {
+    state.compositor.lock().await.banner_canvases()
+}
+
+#[cfg(test)]
+pub(crate) async fn banner_set_for_test(state: &AppState) -> Arc<BannerSet> {
+    Arc::clone(&state.compositor.lock().await.banners)
+}
+
+#[cfg(test)]
+pub(crate) async fn banner_session_shape_for_test(state: &AppState) -> Option<OverlaySessionShape> {
+    state.compositor.lock().await.banner_session_shape
 }
 
 /// Why a capture could not arm the preview compositor in place. Callers fall
@@ -834,6 +979,10 @@ struct CompositorRenderCache {
     editor_draft: Option<EditorDraft>,
     active_image_source: Option<CompositorImageSource>,
     background_image_source: Option<CompositorImageSource>,
+    /// The banner set and the session shape it is planned against (plan 186
+    /// S3): one `Arc` clone per tick, read by both legs.
+    banners: Arc<BannerSet>,
+    banner_session_shape: Option<OverlaySessionShape>,
 }
 
 impl CompositorRenderCache {
@@ -844,7 +993,9 @@ impl CompositorRenderCache {
 
     fn refresh_nonblocking(&mut self, state: &AppState) {
         if let Ok(mut compositor) = state.compositor.try_lock() {
-            compositor.reap_editor_draft(Instant::now());
+            let now = Instant::now();
+            compositor.reap_editor_draft(now);
+            compositor.reap_faded_banners(now);
             *self = Self::from_runtime(&compositor);
         }
     }
@@ -879,6 +1030,8 @@ impl CompositorRenderCache {
                 .filter(|_| compositor.capture_lease.is_none()),
             active_image_source,
             background_image_source,
+            banners: Arc::clone(&compositor.banners),
+            banner_session_shape: compositor.banner_session_shape,
         }
     }
 }
@@ -2244,6 +2397,7 @@ mod editor_draft_tests {
             highlight_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
+            banners: &[],
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -2619,6 +2773,9 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         preview_resize_revision: None,
         loop_config_tx: None,
         capture_lease: None,
+        banners: Arc::new(BannerSet::default()),
+        banner_session_shape: None,
+        stream_output: None,
     }
 }
 
@@ -2737,6 +2894,10 @@ async fn start_synthetic_compositor_with_lifecycle(
         compositor.capture_lease = None;
         // A new run is a new world: a drag from the previous run re-drafts.
         compositor.editor_draft = None;
+        // Banners stay (they are not run state); the session that owns this
+        // run sets its shape after the start, so it begins as the idle plan.
+        compositor.banner_session_shape = None;
+        compositor.stream_output = params.stream_output;
         // Spawn and publish the worker handle while holding the ownership lock. A concurrent
         // replacement can therefore never observe a live run id without the handle it must
         // await, avoiding the ineffective `abort` race of `spawn_blocking` workers.
@@ -2999,6 +3160,8 @@ async fn stop_compositor_if_run_id_with_lifecycle(
         }
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
+        compositor.stream_output = None;
+        compositor.banner_session_shape = None;
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
         compositor.status = status.clone();
@@ -3139,6 +3302,8 @@ pub async fn release_compositor_capture_lease(
             return None;
         }
         let lease = compositor.capture_lease.take()?;
+        // Back to the idle plan: every shown banner with a switch on draws.
+        compositor.banner_session_shape = None;
         let surface_live = surface.state == PreviewSurfaceState::Live
             && compositor.render_task.is_some()
             && compositor.stop_tx.is_some();
@@ -6189,6 +6354,74 @@ const _: () = assert!(
         == crate::buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE
 );
 
+// The banners' key-addressed slots (plan 186 S3) must be the namespace they
+// are keyed with, and hold the four that may show at once.
+#[cfg(target_os = "macos")]
+const _: () = assert!(
+    crate::metal_compositor::KEYED_TEXTURE_NAMESPACES[1]
+        == crate::banner_prepare::BANNER_METAL_NAMESPACE
+        && crate::metal_compositor::BANNER_KEYED_TEXTURE_SLOTS == crate::banners::BANNER_MAX_SHOWN
+);
+
+/// Banners on the Metal path (plan 186 S3): one blended quad per banner from
+/// a key-addressed texture in namespace 9 (slot = the banner, content = the
+/// prepared revision), so a bitmap uploads once per prepare and never per
+/// frame. The quad is the contained rect; a bitmap still being re-prepared is
+/// the banner's last one, which the linear sampler scales into the rect.
+/// Opacity is baked into the bitmap; the fade rides the per-layer opacity.
+/// Drawn after the scene and the takeover, before captions (D5).
+#[cfg(target_os = "macos")]
+fn push_banner_gpu_sources<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    inputs: &CompositorRenderInputs<'a>,
+) {
+    let canvas_width = f64::from(inputs.width.max(1));
+    let canvas_height = f64::from(inputs.height.max(1));
+    for draw in inputs.banners {
+        let bitmap = &*draw.bitmap;
+        let (bitmap_width, bitmap_height) = (bitmap.width as usize, bitmap.height as usize);
+        if bitmap_width == 0
+            || bitmap_height == 0
+            || bitmap.bgra.len() < bitmap_width * bitmap_height * 4
+        {
+            continue;
+        }
+        let (x, y, width, height) = draw.draw_rect(inputs.width, inputs.height);
+        if width == 0 || height == 0 {
+            continue;
+        }
+        prepared_sources.push(PreparedGpuSource {
+            pixels: PreparedGpuSourcePixels::Borrowed(&bitmap.bgra),
+            kind: crate::metal_compositor::GpuSourceKind::Image,
+            content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                namespace: crate::banner_prepare::BANNER_METAL_NAMESPACE,
+                revision: bitmap.revision,
+                variant: draw.slot,
+            }),
+            iosurface: None,
+            pixel_buffer: None,
+            width: bitmap_width,
+            height: bitmap_height,
+            dest: [
+                (x as f64 / canvas_width) as f32,
+                (y as f64 / canvas_height) as f32,
+                (width as f64 / canvas_width) as f32,
+                (height as f64 / canvas_height) as f32,
+            ],
+            crop: [0.0; 4],
+            mirror: false,
+            mask: SceneMask::None,
+            // Straight alpha over the picture: a PNG's soft edges and holes
+            // show what is beneath.
+            blend: true,
+            chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Linear,
+            opacity: draw.opacity,
+        });
+    }
+}
+
 /// The Buddy on the Metal path (plan 168 S-B2): the pet as one turned,
 /// linearly sampled quad from its atlas (namespace 7, a key-addressed slot
 /// that never re-uploads when another layer appears), then the bubble
@@ -6518,6 +6751,7 @@ fn try_gpu_compose_with_chrome(
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
         });
+        push_banner_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
                 inputs.caption_overlay,
@@ -6597,6 +6831,7 @@ fn try_gpu_compose_with_chrome(
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
         });
+        push_banner_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
                 inputs.caption_overlay,
@@ -6868,6 +7103,7 @@ fn try_gpu_compose_with_chrome(
     // Startup and all-hidden scenes still need a fresh black target. Metal's
     // render pass clears it even with no sources; rejecting the empty list
     // incorrectly degraded those frames to CPU and left native preview stale.
+    push_banner_gpu_sources(&mut prepared_sources, inputs);
     if let Some(overlay) = inputs.caption_overlay {
         let safe_inset = caption_overlay_safe_inset(
             inputs.caption_overlay,
@@ -7689,6 +7925,18 @@ async fn publish_compositor_frame(
                 .filter(|_| highlight_overlay_on_primary),
         )
     });
+    // Plan 186 S3: the banners each leg carries, fades at `published_at`
+    // (both legs share the clock). A `banner:<id>` draft moves its picture on
+    // the idle preview only (`editor_draft` is already gated to that run).
+    let primary_banners = banner_draws_for_leg(
+        &render_cache.banners,
+        render_cache.banner_session_shape,
+        BannerLeg::Primary,
+        (width, height),
+        published_at,
+        banner_draft_of(editor_draft),
+        &state.banner_prepare,
+    );
     let mut bytes;
     {
         let inputs = CompositorRenderInputs {
@@ -7716,6 +7964,7 @@ async fn publish_compositor_frame(
                 buddy_overlay_on_primary,
             ),
             buddy_leg: primary_buddy.as_ref(),
+            banners: &primary_banners,
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         match try_gpu_compose_with_chrome(
@@ -7826,6 +8075,17 @@ async fn publish_compositor_frame(
                 aux_highlight_overlay,
             )
         });
+        // The auxiliary leg picks each banner's rect by its own canvas (the
+        // vertical rect on the simulcast leg); drafts never reach it.
+        let aux_banners = banner_draws_for_leg(
+            &render_cache.banners,
+            render_cache.banner_session_shape,
+            BannerLeg::Auxiliary,
+            (stream_output.width.max(1), stream_output.height.max(1)),
+            published_at,
+            None,
+            &state.banner_prepare,
+        );
         let inputs = CompositorRenderInputs {
             sequence,
             width: stream_output.width.max(1),
@@ -7858,6 +8118,7 @@ async fn publish_compositor_frame(
                 buddy_overlay_on_aux,
             ),
             buddy_leg: aux_buddy.as_ref(),
+            banners: &aux_banners,
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -8063,13 +8324,119 @@ struct CompositorRenderInputs<'a> {
     /// S-B1): the pet draws after the caption bar, then the bubble (D9).
     /// `None` blits a bubble inside its own rect (tests, no pet frame).
     buddy_leg: Option<&'a crate::buddy_sprite::BuddyLegFrame>,
+    /// The banners this leg carries this tick (plan 186 S3), bottom to top:
+    /// drawn after the scene and the takeover, before captions (D5).
+    banners: &'a [BannerDraw],
 }
 
-/// Full frame render: the scene, then the caption overlay topmost — applied
-/// here (not in the scene renderer) so every scene early-return path still
-/// gets captions.
+/// One banner as a leg draws it this tick (plan 186 S3): the prepared bitmap
+/// (exact, or the banner's last one while a prepare is in flight), its Metal
+/// slot, the stored image size the contained rect is computed from, the rect
+/// (committed, or the live draft's on the idle preview) and the fade factor.
+/// Opacity is baked into the bitmap; `opacity` here is the fade alone.
+#[derive(Clone)]
+pub(crate) struct BannerDraw {
+    pub bitmap: Arc<BannerBitmap>,
+    pub slot: u64,
+    pub image: (u32, u32),
+    pub rect: OverlayRect,
+    pub opacity: f32,
+}
+
+impl BannerDraw {
+    /// Where the image lands on the canvas: `(x, y, w, h)` in canvas pixels.
+    fn draw_rect(&self, canvas_width: u32, canvas_height: u32) -> (usize, usize, usize, usize) {
+        banner_draw_rect(
+            self.image.0,
+            self.image.1,
+            canvas_width.max(1) as usize,
+            canvas_height.max(1) as usize,
+            self.rect,
+        )
+    }
+
+    /// The bitmap is the exact prepared size for this rect; otherwise it is
+    /// the last prepared one (a re-prepare in flight): Metal scales it into
+    /// the rect, the CPU draws it at its old size at the new position.
+    #[cfg(test)]
+    fn is_exact_on(&self, canvas_width: u32, canvas_height: u32) -> bool {
+        let (_, _, width, height) = self.draw_rect(canvas_width, canvas_height);
+        (self.bitmap.width as usize, self.bitmap.height as usize) == (width, height)
+    }
+}
+
+/// The banners `leg` draws on `canvas` this tick, bottom to top: the set's
+/// layers that the leg plan carries (`banners::banner_leg_carries`), each
+/// with its fade at `now` and its bitmap from the prepare service (which
+/// queues a prepare when the exact one is missing and never blocks). `draft`
+/// is the live Scene editor draft `(stage id, rect)` on the idle preview;
+/// a `banner:<id>` draft moves that banner's picture for the tick while the
+/// prepared bitmap stays keyed by the committed rect.
+pub(crate) fn banner_draws_for_leg(
+    set: &BannerSet,
+    shape: Option<OverlaySessionShape>,
+    leg: BannerLeg,
+    canvas: (u32, u32),
+    now: Instant,
+    draft: Option<(&str, OverlayRect)>,
+    prepare: &BannerPrepareService,
+) -> Vec<BannerDraw> {
+    let orientation = OverlayOrientation::for_canvas(canvas.0, canvas.1);
+    let mut draws = Vec::new();
+    for layer in &set.layers {
+        let fade = layer.fade.value_at(now);
+        if fade <= 0.0 || !banner_leg_carries(shape, leg, &layer.banner) {
+            continue;
+        }
+        let Some(file_revision) = layer.file_revision else {
+            continue;
+        };
+        let committed = banner_rect_for(&layer.banner, orientation, None);
+        let rect = banner_rect_for(&layer.banner, orientation, draft);
+        let request = BannerPrepareRequest {
+            key: BannerBitmapKey::new(
+                &layer.banner.id,
+                file_revision,
+                canvas,
+                committed,
+                layer.banner.opacity,
+            ),
+            path: Arc::clone(&layer.image_path),
+            rect: committed,
+            opacity: layer.banner.opacity,
+        };
+        let Some(bitmap) = prepare.lookup(&request, now).bitmap().cloned() else {
+            continue;
+        };
+        draws.push(BannerDraw {
+            bitmap,
+            slot: layer.metal_slot(),
+            image: (layer.banner.width, layer.banner.height),
+            rect,
+            opacity: fade,
+        });
+    }
+    draws
+}
+
+/// The `(stage id, rect)` of a live draft with a transform, for
+/// `banner_draws_for_leg`. The renderer's banner drafts carry the exact image
+/// rect on the primary canvas, so the contained draw lands on it.
+fn banner_draft_of(draft: Option<&EditorDraft>) -> Option<(&str, OverlayRect)> {
+    let draft = draft?;
+    let transform = draft.transform.as_ref()?;
+    Some((
+        draft.source_id.as_str(),
+        OverlayRect::new(transform.x, transform.y, transform.width, transform.height),
+    ))
+}
+
+/// Full frame render: the scene, then the banners, then the caption overlay
+/// and the rest — applied here (not in the scene renderer) so every scene
+/// early-return path still gets them.
 fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &mut [u8]) {
     render_compositor_yuv420p_scene(inputs, bytes);
+    composite_banners(&inputs, bytes);
     if let Some(overlay) = inputs.caption_overlay {
         composite_caption_overlay(
             overlay,
@@ -8095,10 +8462,39 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
     }
     if let Some(overlay) = inputs.buddy_overlay {
         let layout = buddy_bubble_layout(overlay, inputs.buddy_leg, inputs.width, inputs.height);
-        composite_overlay_at(overlay, inputs.width, inputs.height, bytes, layout);
+        composite_overlay_at(overlay, inputs.width, inputs.height, bytes, layout, 1.0);
     }
     if let Some(overlay) = inputs.highlight_overlay {
         composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
+    }
+}
+
+/// Banners on the CPU path (plan 186 S3): a 1:1 straight-alpha blit of each
+/// prepared bitmap at its contained rect, the fade as the opacity. A bitmap
+/// still being re-prepared (the banner's last one) draws at its old size at
+/// the new position, clipped to the canvas.
+fn composite_banners(inputs: &CompositorRenderInputs<'_>, dest: &mut [u8]) {
+    let canvas_width = inputs.width.max(1) as usize;
+    for draw in inputs.banners {
+        let bitmap = &*draw.bitmap;
+        let (x, y, _, _) = draw.draw_rect(inputs.width, inputs.height);
+        let draw_width = (bitmap.width as usize).min(canvas_width.saturating_sub(x));
+        if draw_width == 0 {
+            continue;
+        }
+        composite_straight_alpha_at(
+            StraightAlphaBitmap {
+                bytes: &bitmap.bgra,
+                order: OverlayPixelOrder::Bgra,
+                width: bitmap.width as usize,
+                height: bitmap.height as usize,
+            },
+            inputs.width,
+            inputs.height,
+            dest,
+            (0, x, y, draw_width),
+            draw.opacity,
+        );
     }
 }
 
@@ -8266,6 +8662,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         highlight_overlay: _,
         buddy_overlay: _,
         buddy_leg: _,
+        banners: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -8980,32 +9377,100 @@ fn composite_caption_overlay(
         overlay.blit_rect(canvas_width.max(1), canvas_height.max(1)),
         safe_inset,
     );
-    composite_overlay_at(overlay, canvas_width, canvas_height, dest, layout);
+    composite_overlay_at(overlay, canvas_width, canvas_height, dest, layout, 1.0);
 }
 
 /// Straight-alpha blit of an overlay bitmap at a layout from
 /// `overlay_blit_layout` (or `buddy_bubble_blit_layout`): `(source_left,
 /// dest_left, dest_top, draw_width)`, rows cut at the canvas height.
+/// `opacity` multiplies every alpha; `1.0` is exactly the plain blit.
 fn composite_overlay_at(
     overlay: &crate::captions::CaptionOverlay,
     canvas_width: u32,
     canvas_height: u32,
     dest: &mut [u8],
     layout: (usize, usize, usize, usize),
+    opacity: f32,
+) {
+    composite_straight_alpha_at(
+        StraightAlphaBitmap {
+            bytes: &overlay.rgba,
+            order: OverlayPixelOrder::Rgba,
+            width: overlay.width as usize,
+            height: overlay.height as usize,
+        },
+        canvas_width,
+        canvas_height,
+        dest,
+        layout,
+        opacity,
+    );
+}
+
+/// Channel order of a straight-alpha overlay bitmap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayPixelOrder {
+    Rgba,
+    /// Prepared banner bitmaps, read as-is (no second copy; plan 186 S3).
+    Bgra,
+}
+
+/// A straight-alpha bitmap for `composite_straight_alpha_at`.
+#[derive(Clone, Copy)]
+struct StraightAlphaBitmap<'a> {
+    bytes: &'a [u8],
+    order: OverlayPixelOrder,
+    width: usize,
+    height: usize,
+}
+
+/// `opacity` as a fixed-point alpha multiplier, 256 = exactly 1.
+fn opacity_scale(opacity: f32) -> u32 {
+    (opacity.clamp(0.0, 1.0) * 256.0).round() as u32
+}
+
+/// `alpha × scale / 256`, rounded; the identity at scale 256.
+fn scaled_alpha(alpha: u8, scale: u32) -> u8 {
+    ((u32::from(alpha) * scale + 128) >> 8).min(255) as u8
+}
+
+/// The shared straight-alpha source-over blit behind `composite_overlay_at`
+/// and the banners (plan 186 S3): luma per pixel, chroma per 2x2 block from
+/// its top-left sample, rows and columns cut at the canvas.
+fn composite_straight_alpha_at(
+    bitmap: StraightAlphaBitmap<'_>,
+    canvas_width: u32,
+    canvas_height: u32,
+    dest: &mut [u8],
+    layout: (usize, usize, usize, usize),
+    opacity: f32,
 ) {
     let canvas_width = canvas_width.max(1) as usize;
     let canvas_height = canvas_height.max(1) as usize;
     if dest.len() < raw_yuv420p_len(canvas_width as u32, canvas_height as u32) {
         return;
     }
-    let overlay_width = overlay.width as usize;
-    let overlay_height = overlay.height as usize;
-    if overlay.rgba.len() < overlay_width * overlay_height * 4 {
+    let overlay_width = bitmap.width;
+    let overlay_height = bitmap.height;
+    if bitmap.bytes.len() < overlay_width * overlay_height * 4 {
         return;
     }
 
-    let draw_height = overlay_height.min(canvas_height);
     let (source_left, dest_left, dest_top, draw_width) = layout;
+    if dest_left >= canvas_width || dest_top >= canvas_height || source_left >= overlay_width {
+        return;
+    }
+    let draw_width = draw_width
+        .min(canvas_width - dest_left)
+        .min(overlay_width - source_left);
+    let draw_height = overlay_height.min(canvas_height - dest_top);
+    if draw_width == 0 || draw_height == 0 {
+        return;
+    }
+    let scale = opacity_scale(opacity);
+    if scale == 0 {
+        return;
+    }
 
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
@@ -9015,12 +9480,21 @@ fn composite_overlay_at(
 
     let overlay_pixel = |x: usize, y: usize| -> (u8, u8, u8, u8) {
         let index = (y * overlay_width + x) * 4;
-        (
-            overlay.rgba[index],
-            overlay.rgba[index + 1],
-            overlay.rgba[index + 2],
-            overlay.rgba[index + 3],
-        )
+        let alpha = scaled_alpha(bitmap.bytes[index + 3], scale);
+        match bitmap.order {
+            OverlayPixelOrder::Rgba => (
+                bitmap.bytes[index],
+                bitmap.bytes[index + 1],
+                bitmap.bytes[index + 2],
+                alpha,
+            ),
+            OverlayPixelOrder::Bgra => (
+                bitmap.bytes[index + 2],
+                bitmap.bytes[index + 1],
+                bitmap.bytes[index],
+                alpha,
+            ),
+        }
     };
     let blend = alpha_blend_channel;
 
@@ -10808,6 +11282,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             true,
         )
@@ -10827,6 +11302,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             true,
         )
@@ -10917,6 +11393,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             true,
         )
@@ -11047,6 +11524,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             true,
         )
@@ -11147,6 +11625,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             false,
         )
@@ -11554,6 +12033,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             true,
         ) {
@@ -11606,6 +12086,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             true,
         ) {
@@ -14637,6 +15118,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -14717,6 +15199,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -14812,6 +15295,7 @@ mod tests {
             highlight_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
+            banners: &[],
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14822,6 +15306,7 @@ mod tests {
                 highlight_overlay: Some(&highlight),
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
                 ..base_inputs
             },
             &mut with_both,
@@ -15186,6 +15671,7 @@ mod tests {
                 highlight_overlay: highlight,
                 buddy_overlay: buddy,
                 buddy_leg: None,
+                banners: &[],
             }
         }
         let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
@@ -15311,6 +15797,7 @@ mod tests {
             highlight_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
+            banners: &[],
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -15338,6 +15825,7 @@ mod tests {
                     highlight_overlay: Some(&highlight),
                     buddy_overlay: None,
                     buddy_leg: None,
+                    banners: &[],
                     ..base_inputs
                 },
                 &mut frame,
@@ -15444,6 +15932,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -15464,6 +15953,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut scene_only,
         );
@@ -15500,6 +15990,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -15527,6 +16018,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut baseline,
         );
@@ -15618,6 +16110,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -15714,6 +16207,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -15822,6 +16316,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -16075,6 +16570,7 @@ mod tests {
                 highlight_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -16968,6 +17464,7 @@ mod buddy_sprite_tests {
             highlight_overlay: highlight,
             buddy_overlay: bubble,
             buddy_leg,
+            banners: &[],
         }
     }
 
@@ -17366,5 +17863,991 @@ mod buddy_sprite_tests {
         let [x, y, w, h] = leg.buddy_box;
         let centre = (y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize;
         assert_eq!(cpu[centre], rgb_to_yuv(230, 40, 40).0);
+    }
+}
+
+/// Plan 186 S3: banners through the CPU and Metal paths.
+#[cfg(test)]
+mod banner_tests {
+    use super::*;
+    use crate::banner_prepare::{BannerFileRevision, prepare_banner_bitmap};
+    use crate::banners::{BannerFade, BannerLayer};
+    use crate::protocol::{Banner, StreamScreen, StreamScreenStatus};
+
+    const WIDTH: u32 = 1280;
+    const HEIGHT: u32 = 720;
+
+    fn banner_row(id: &str, width: u32, height: u32) -> Banner {
+        Banner {
+            id: id.to_string(),
+            name: id.to_string(),
+            image_file: format!("{id}.png"),
+            thumbnail_file: format!("{id}.thumb.png"),
+            width,
+            height,
+            has_alpha: true,
+            sort_order: 0,
+            shown: true,
+            horizontal: OverlayRect::new(0.1, 0.2, 400.0 / 1280.0, 200.0 / 720.0),
+            vertical: OverlayRect::new(0.1, 0.1, 0.8, 0.2),
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// A `width` x `height` image of `rgb`, opaque inside, alpha 128 on a
+    /// 2 px border (the half-alpha edge), as the import would store it.
+    fn edged_image(width: u32, height: u32, rgb: [u8; 3]) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let edge = x < 2 || y < 2 || x + 2 >= width || y + 2 >= height;
+            image::Rgba([rgb[0], rgb[1], rgb[2], if edge { 128 } else { 255 }])
+        })
+    }
+
+    fn draw(
+        bitmap: Arc<BannerBitmap>,
+        banner: &Banner,
+        rect: OverlayRect,
+        fade: f32,
+    ) -> BannerDraw {
+        BannerDraw {
+            bitmap,
+            slot: crate::banners::banner_metal_slot(&banner.id),
+            image: (banner.width, banner.height),
+            rect,
+            opacity: fade,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn inputs<'a>(
+        sequence: u64,
+        width: u32,
+        height: u32,
+        snapshot: Option<&'a CompositorSceneSnapshot>,
+        active_image_source: Option<&'a CompositorImageSource>,
+        caption: Option<&'a crate::captions::CaptionOverlay>,
+        highlight: Option<&'a crate::captions::CaptionOverlay>,
+        banners: &'a [BannerDraw],
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence,
+            width,
+            height,
+            snapshot,
+            active_image_source,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: None,
+            caption_overlay: caption,
+            highlight_overlay: highlight,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners,
+        }
+    }
+
+    fn cpu_frame(inputs: CompositorRenderInputs<'_>) -> Vec<u8> {
+        let mut bytes = vec![0; raw_yuv420p_len(inputs.width, inputs.height)];
+        render_compositor_yuv420p_frame(inputs, &mut bytes);
+        bytes
+    }
+
+    fn solid_overlay(
+        width: u32,
+        height: u32,
+        rgba_pixel: [u8; 4],
+        rect: OverlayRect,
+    ) -> crate::captions::CaptionOverlay {
+        let rgba = std::iter::repeat_n(rgba_pixel, (width * height) as usize)
+            .flatten()
+            .collect::<Vec<_>>();
+        crate::captions::CaptionOverlay {
+            bgra: Arc::new(rgba_to_bgra_bytes(&rgba)),
+            rgba: Arc::new(rgba),
+            width,
+            height,
+            placement: crate::captions::OverlayPlacement::new(
+                Some(rect),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
+            revision: 1,
+        }
+    }
+
+    fn file_revision() -> BannerFileRevision {
+        BannerFileRevision {
+            size: 1,
+            modified_nanos: 1,
+        }
+    }
+
+    fn layer(banner: Banner, now: Instant) -> BannerLayer {
+        BannerLayer {
+            image_path: Arc::from(Path::new("/nonexistent").join(&banner.image_file)),
+            banner,
+            file_revision: Some(file_revision()),
+            fade: BannerFade {
+                from: 1.0,
+                to: 1.0,
+                started_at: now,
+            },
+        }
+    }
+
+    /// Seed the service with the exact bitmap for `banner` on `canvas`.
+    fn seed(
+        service: &BannerPrepareService,
+        banner: &Banner,
+        canvas: (u32, u32),
+        rgb: [u8; 3],
+    ) -> Arc<BannerBitmap> {
+        let orientation = OverlayOrientation::for_canvas(canvas.0, canvas.1);
+        let rect = banner_rect_for(banner, orientation, None);
+        let (_, _, width, height) = banner_draw_rect(
+            banner.width,
+            banner.height,
+            canvas.0 as usize,
+            canvas.1 as usize,
+            rect,
+        );
+        let image = edged_image(banner.width, banner.height, rgb);
+        service.insert_for_test(
+            BannerBitmapKey::new(&banner.id, file_revision(), canvas, rect, banner.opacity),
+            prepare_banner_bitmap(&image, width as u32, height as u32, banner.opacity),
+        )
+    }
+
+    fn close(a: u8, b: u8, tolerance: i16) -> bool {
+        (i16::from(a) - i16::from(b)).abs() <= tolerance
+    }
+
+    /// Parity fixture: a 400x200 banner at (128, 144) on a black 1280x720
+    /// canvas, half-alpha 2 px edges, opacity 0.5 baked, under a 200x100 red
+    /// highlight card at (384, 216) that covers its right part. CPU and Metal
+    /// agree within 2 per channel inside (8 on the soft edge ring), both
+    /// match the analytic blend inside, and the card wins the overlap on
+    /// both (owner answer 7).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_draw_the_same_banner() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let mut banner = banner_row("parity", 400, 200);
+        banner.opacity = 0.5;
+        let rgb = [0, 160, 255];
+        let bitmap = Arc::new(prepare_banner_bitmap(
+            &edged_image(400, 200, rgb),
+            400,
+            200,
+            banner.opacity,
+        ));
+        let draws = [draw(Arc::clone(&bitmap), &banner, banner.horizontal, 1.0)];
+        assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (128, 144, 400, 200));
+        assert!(draws[0].is_exact_on(WIDTH, HEIGHT));
+        let card = solid_overlay(
+            200,
+            100,
+            [255, 0, 0, 255],
+            OverlayRect::new(0.3, 0.3, 0.25, 0.2),
+        );
+        let card_rect = (384_usize, 216_usize, 584_usize, 316_usize);
+        let cpu_clean = cpu_frame(inputs(1, WIDTH, HEIGHT, None, None, None, None, &[]));
+        let cpu = cpu_frame(inputs(
+            1,
+            WIDTH,
+            HEIGHT,
+            None,
+            None,
+            None,
+            Some(&card),
+            &draws,
+        ));
+        let metal_clean = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(1, WIDTH, HEIGHT, None, None, None, None, &[]),
+            true,
+        )
+        .expect("clean frame on Metal")
+        .yuv;
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(1, WIDTH, HEIGHT, None, None, None, Some(&card), &draws),
+            true,
+        )
+        .expect("banner frame on Metal")
+        .yuv;
+        assert_eq!(metal.len(), cpu.len());
+
+        // Inside: the banner's colour at alpha 128/255 (opacity 0.5 baked)
+        // over TV black, in RGB: (0, 80, 128).
+        let (inside_y, inside_u, inside_v) = rgb_to_yuv(0, 80, 128);
+        let (red_y, red_u, red_v) = rgb_to_yuv(255, 0, 0);
+        let (width, height) = (WIDTH as usize, HEIGHT as usize);
+        let banner_rect = (128_usize, 144_usize, 528_usize, 344_usize);
+        let inside = |rect: (usize, usize, usize, usize), x: usize, y: usize| {
+            (rect.0..rect.2).contains(&x) && (rect.1..rect.3).contains(&y)
+        };
+        let on_edge = |x: usize, y: usize| {
+            x < banner_rect.0 + 2
+                || y < banner_rect.1 + 2
+                || x + 2 >= banner_rect.2
+                || y + 2 >= banner_rect.3
+        };
+        let mut worst = 0_i16;
+        for y in banner_rect.1 - 2..banner_rect.3 + 2 {
+            for x in banner_rect.0 - 2..banner_rect.2 + 2 {
+                let index = y * width + x;
+                let difference = (i16::from(cpu[index]) - i16::from(metal[index])).abs();
+                if inside(card_rect, x, y) {
+                    assert!(close(cpu[index], red_y, 2), "cpu card luma at {x},{y}");
+                    assert!(close(metal[index], red_y, 2), "metal card luma at {x},{y}");
+                } else if inside(banner_rect, x, y) {
+                    let tolerance = if on_edge(x, y) { 8 } else { 2 };
+                    worst = worst.max(difference);
+                    assert!(
+                        close(cpu[index], metal[index], tolerance),
+                        "luma at {x},{y}: cpu {} metal {}",
+                        cpu[index],
+                        metal[index]
+                    );
+                    if !on_edge(x, y) {
+                        assert!(
+                            close(cpu[index], inside_y, 3),
+                            "cpu luma at {x},{y}: {}",
+                            cpu[index]
+                        );
+                        // The half-alpha edge is visibly lighter than the inside
+                        // on both paths (blended, not thresholded).
+                    }
+                } else {
+                    assert!(
+                        close(cpu[index], cpu_clean[index], 2),
+                        "cpu border at {x},{y}"
+                    );
+                    assert!(
+                        close(metal[index], metal_clean[index], 2),
+                        "metal border at {x},{y}"
+                    );
+                }
+            }
+        }
+        eprintln!("banner parity: worst luma difference {worst}");
+        // The soft edge: alpha 64/255 over black is darker than the inside
+        // and lighter than black on both paths.
+        let (black_y, _, _) = rgb_to_yuv(0, 0, 0);
+        for (x, y) in [(128_usize, 200_usize), (300, 144), (300, 343), (527, 200)] {
+            for (frame, path) in [(&cpu, "cpu"), (&metal, "metal")] {
+                let luma = frame[y * width + x];
+                assert!(
+                    luma > black_y + 8 && luma < inside_y - 8,
+                    "{path} edge at {x},{y}: {luma}"
+                );
+            }
+        }
+        // Chroma, strictly inside the banner's exclusive area and the card.
+        let (uv_width, uv_height) = (width.div_ceil(2), height.div_ceil(2));
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        let chroma = |rect: (usize, usize, usize, usize), u: u8, v: u8, name: &str| {
+            for uv_y in (rect.1 + 4) / 2..(rect.3 - 4) / 2 {
+                for uv_x in (rect.0 + 4) / 2..(rect.2 - 4) / 2 {
+                    let uv_index = uv_y * uv_width + uv_x;
+                    for (plane, expected, start) in [("u", u, u_start), ("v", v, v_start)] {
+                        assert!(
+                            close(cpu[start + uv_index], expected, 3),
+                            "cpu {name} {plane} at {uv_x},{uv_y}: {}",
+                            cpu[start + uv_index]
+                        );
+                        assert!(
+                            close(metal[start + uv_index], expected, 3),
+                            "metal {name} {plane} at {uv_x},{uv_y}: {}",
+                            metal[start + uv_index]
+                        );
+                    }
+                }
+            }
+        };
+        chroma(
+            (banner_rect.0, banner_rect.1, card_rect.0, banner_rect.3),
+            inside_u,
+            inside_v,
+            "banner",
+        );
+        chroma(card_rect, red_u, red_v, "card");
+    }
+
+    /// D5 z order: scene -> takeover -> banners -> captions -> card, on the
+    /// CPU path and (when a GPU is here) on Metal's takeover branch.
+    #[test]
+    fn banners_draw_above_the_takeover_and_below_captions_and_the_card() {
+        let layout = crate::protocol::default_layout_settings();
+        let scene = crate::scene::scene_from_capture_config(crate::protocol::SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: true,
+            },
+            layout: layout.clone(),
+            video: None,
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let snapshot = CompositorSceneSnapshot {
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: Some(StreamScreen {
+                id: "takeover".to_string(),
+                name: "Takeover".to_string(),
+                image_path: "/tmp/takeover.png".to_string(),
+                thumbnail_path: None,
+                sort_order: 1,
+                status: StreamScreenStatus::Ready,
+                created_at: String::new(),
+                updated_at: String::new(),
+            }),
+        };
+        // A 16x9 white takeover (contained, so the aspect fills the canvas).
+        let takeover = CompositorImageSource {
+            image_path: "takeover.png".to_string(),
+            file_revision: None,
+            width: Some(16),
+            height: Some(9),
+            rgba: Some(Arc::new([255, 255, 255, 255].repeat(16 * 9))),
+            bgra: Some(Arc::new([255, 255, 255, 255].repeat(16 * 9))),
+            content_revision: 1,
+            state: "live".to_string(),
+            message: None,
+        };
+        let banner = banner_row("over-takeover", 400, 200);
+        let bitmap = Arc::new(prepare_banner_bitmap(
+            &image::RgbaImage::from_pixel(400, 200, image::Rgba([0, 0, 255, 255])),
+            400,
+            200,
+            1.0,
+        ));
+        let draws = [draw(bitmap, &banner, banner.horizontal, 1.0)];
+        // A caption bar across the banner's bottom-left rows (clear of the
+        // card's columns, so the collision rule leaves it in place) and the
+        // card over the banner's right part.
+        let caption = solid_overlay(
+            256,
+            20,
+            [0, 255, 0, 255],
+            OverlayRect::new(0.1, 324.0 / 720.0, 256.0 / 1280.0, 20.0 / 720.0),
+        );
+        let card = solid_overlay(
+            200,
+            100,
+            [255, 0, 0, 255],
+            OverlayRect::new(0.3, 0.3, 0.25, 0.2),
+        );
+        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        let (green_y, _, _) = rgb_to_yuv(0, 255, 0);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        let check = |frame: &[u8], path: &str| {
+            let luma = |x: usize, y: usize| frame[y * WIDTH as usize + x];
+            assert!(close(luma(10, 10), white_y, 2), "{path}: the takeover");
+            assert!(
+                close(luma(200, 200), blue_y, 2),
+                "{path}: the banner over the takeover"
+            );
+            assert!(
+                close(luma(200, 334), green_y, 2),
+                "{path}: the caption over the banner"
+            );
+            assert!(
+                close(luma(450, 250), red_y, 2),
+                "{path}: the card over the banner"
+            );
+        };
+        let frame_inputs = || {
+            inputs(
+                1,
+                WIDTH,
+                HEIGHT,
+                Some(&snapshot),
+                Some(&takeover),
+                Some(&caption),
+                Some(&card),
+                &draws,
+            )
+        };
+        check(&cpu_frame(frame_inputs()), "cpu");
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut gpu) = new_gpu_compositor(false) {
+                let metal = try_gpu_compose(Some(&mut gpu), &frame_inputs(), true)
+                    .expect("metal frame")
+                    .yuv;
+                check(&metal, "metal");
+            }
+        }
+    }
+
+    /// Each leg picks the rect for its own canvas: the vertical simulcast leg
+    /// draws the vertical rect, keyed to its own prepared bitmap.
+    #[test]
+    fn the_vertical_leg_draws_the_vertical_rect() {
+        let now = Instant::now();
+        let service = BannerPrepareService::with_decoder(
+            Arc::new(|_: &Path| Err("no decode in this test".to_string())),
+            crate::banner_prepare::BANNER_BITMAP_BUDGET_BYTES,
+        );
+        let banner = banner_row("legs", 2400, 400);
+        let primary_canvas = (WIDTH, HEIGHT);
+        let vertical_canvas = (HEIGHT, WIDTH);
+        let horizontal_bitmap = seed(&service, &banner, primary_canvas, [1, 2, 3]);
+        let vertical_bitmap = seed(&service, &banner, vertical_canvas, [1, 2, 3]);
+        assert_ne!(
+            (horizontal_bitmap.width, horizontal_bitmap.height),
+            (vertical_bitmap.width, vertical_bitmap.height)
+        );
+        let set = BannerSet {
+            layers: vec![layer(banner.clone(), now)],
+        };
+        let shape = Some(OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: true,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::VerticalSimulcast,
+        });
+        let primary = banner_draws_for_leg(
+            &set,
+            shape,
+            BannerLeg::Primary,
+            primary_canvas,
+            now,
+            None,
+            &service,
+        );
+        let aux = banner_draws_for_leg(
+            &set,
+            shape,
+            BannerLeg::Auxiliary,
+            vertical_canvas,
+            now,
+            None,
+            &service,
+        );
+        assert_eq!(primary.len(), 1);
+        assert_eq!(aux.len(), 1);
+        assert_eq!(primary[0].rect, banner.horizontal);
+        assert_eq!(aux[0].rect, banner.vertical);
+        assert!(Arc::ptr_eq(&primary[0].bitmap, &horizontal_bitmap));
+        assert!(Arc::ptr_eq(&aux[0].bitmap, &vertical_bitmap));
+        assert!(primary[0].is_exact_on(WIDTH, HEIGHT));
+        assert!(aux[0].is_exact_on(HEIGHT, WIDTH));
+        // The contained rect lands inside the portrait canvas.
+        let (x, y, w, h) = aux[0].draw_rect(HEIGHT, WIDTH);
+        assert!(x + w <= HEIGHT as usize && y + h <= WIDTH as usize);
+        // Nothing was queued: both lookups were exact.
+        assert_eq!(service.prepares_completed(), 0);
+        // A stream-only banner stays off the recording's primary leg when a
+        // split stream leg carries it.
+        let mut stream_only = banner_row("stream-only", 2400, 400);
+        stream_only.show_in_recording = false;
+        seed(&service, &stream_only, primary_canvas, [1, 2, 3]);
+        let set = BannerSet {
+            layers: vec![layer(stream_only, now)],
+        };
+        let split = Some(OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: true,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
+        });
+        assert!(
+            banner_draws_for_leg(
+                &set,
+                split,
+                BannerLeg::Primary,
+                primary_canvas,
+                now,
+                None,
+                &service
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            banner_draws_for_leg(
+                &set,
+                split,
+                BannerLeg::Auxiliary,
+                primary_canvas,
+                now,
+                None,
+                &service
+            )
+            .len(),
+            1
+        );
+    }
+
+    /// Until a re-prepare lands, the last prepared bitmap draws: at the new
+    /// rect on Metal (the quad scales it), at its old size at the new
+    /// position on the CPU, and the exact key is queued once.
+    #[test]
+    fn a_stale_bitmap_draws_at_the_new_place_while_the_prepare_is_queued() {
+        let now = Instant::now();
+        let service = BannerPrepareService::with_decoder(
+            Arc::new(|_: &Path| {
+                std::thread::sleep(Duration::from_secs(30));
+                Err("never".to_string())
+            }),
+            crate::banner_prepare::BANNER_BITMAP_BUDGET_BYTES,
+        );
+        let mut banner = banner_row("moving", 400, 200);
+        let old = seed(&service, &banner, (WIDTH, HEIGHT), [0, 0, 255]);
+        // The rect grows: the exact bitmap would be 800x400.
+        banner.horizontal = OverlayRect::new(0.05, 0.1, 800.0 / 1280.0, 400.0 / 720.0);
+        let set = BannerSet {
+            layers: vec![layer(banner.clone(), now)],
+        };
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            None,
+            &service,
+        );
+        assert_eq!(draws.len(), 1);
+        assert!(
+            Arc::ptr_eq(&draws[0].bitmap, &old),
+            "the last bitmap stands in"
+        );
+        assert!(!draws[0].is_exact_on(WIDTH, HEIGHT));
+        assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (64, 72, 800, 400));
+        // CPU: the old 400x200 pixels at (64, 72), nothing beyond them (the
+        // fixture's outer 2 px are half-alpha, so sample inside them).
+        let frame = cpu_frame(inputs(1, WIDTH, HEIGHT, None, None, None, None, &draws));
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        let (black_y, _, _) = rgb_to_yuv(0, 0, 0);
+        let luma = |x: usize, y: usize| frame[y * WIDTH as usize + x];
+        assert!(close(luma(64 + 10, 72 + 10), blue_y, 2));
+        assert!(close(luma(64 + 397, 72 + 197), blue_y, 2));
+        assert!(close(luma(64 + 400, 72 + 10), black_y, 2));
+        assert!(close(luma(64 + 10, 72 + 200), black_y, 2));
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut gpu) = new_gpu_compositor(false) {
+                let metal = try_gpu_compose(
+                    Some(&mut gpu),
+                    &inputs(1, WIDTH, HEIGHT, None, None, None, None, &draws),
+                    true,
+                )
+                .expect("metal frame")
+                .yuv;
+                let luma = |x: usize, y: usize| metal[y * WIDTH as usize + x];
+                // Metal scales the old bitmap into the whole new rect.
+                assert!(close(luma(64 + 10, 72 + 10), blue_y, 2));
+                assert!(close(luma(64 + 790, 72 + 390), blue_y, 2));
+                assert!(close(luma(64 + 810, 72 + 10), black_y, 2));
+            }
+        }
+    }
+
+    /// Steady state uploads nothing: the banner's texture uploads once and
+    /// stays through 120 ticks while a caption comes and goes under it; a new
+    /// prepared revision uploads once more into the same slot.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_uploads_a_banner_once_across_120_ticks() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let banner = banner_row("steady", 400, 200);
+        let image = edged_image(400, 200, [0, 160, 255]);
+        let bitmap = Arc::new(prepare_banner_bitmap(&image, 400, 200, 1.0));
+        let caption = solid_overlay(
+            400,
+            20,
+            [0, 255, 0, 255],
+            OverlayRect::new(0.1, 0.8, 400.0 / 1280.0, 20.0 / 720.0),
+        );
+        let fade_at = |frame: u64| (frame as f32 / 120.0).clamp(0.0, 1.0);
+        for frame in 0..120_u64 {
+            // The fade changes the layer opacity, never the texture.
+            let draws = [draw(
+                Arc::clone(&bitmap),
+                &banner,
+                banner.horizontal,
+                fade_at(frame),
+            )];
+            let caption = (frame / 10 % 2 == 0).then_some(&caption);
+            try_gpu_compose(
+                Some(&mut gpu),
+                &inputs(frame, WIDTH, HEIGHT, None, None, caption, None, &draws),
+                frame == 119,
+            )
+            .expect("metal frame");
+            if frame == 0 {
+                assert_eq!(gpu.keyed_texture_uploads(), 1, "uploaded on the first tick");
+            }
+        }
+        assert_eq!(gpu.keyed_texture_uploads(), 1, "no upload across 120 ticks");
+        // A re-prepare (new revision, same slot) uploads once more.
+        let next = Arc::new(prepare_banner_bitmap(&image, 400, 200, 0.5));
+        for frame in 120..124_u64 {
+            let draws = [draw(Arc::clone(&next), &banner, banner.horizontal, 1.0)];
+            try_gpu_compose(
+                Some(&mut gpu),
+                &inputs(frame, WIDTH, HEIGHT, None, None, None, None, &draws),
+                false,
+            )
+            .expect("metal frame");
+        }
+        assert_eq!(gpu.keyed_texture_uploads(), 2);
+        assert_eq!(
+            gpu.keyed_slot_count(crate::banner_prepare::BANNER_METAL_NAMESPACE),
+            1
+        );
+    }
+
+    /// Namespace 9 holds four slots (the four banners that may show); a
+    /// fifth slot id evicts the least recently drawn one. The Buddy's
+    /// namespace 7 keeps its single slot.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_keeps_four_banner_slots_and_evicts_the_least_recently_drawn() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let namespace = crate::banner_prepare::BANNER_METAL_NAMESPACE;
+        let banners = (0..5)
+            .map(|index| {
+                let mut banner = banner_row(&format!("slot-{index}"), 64, 32);
+                banner.horizontal = OverlayRect::new(0.05 * index as f64, 0.1, 0.2, 0.2);
+                let bitmap = Arc::new(prepare_banner_bitmap(
+                    &image::RgbaImage::from_pixel(64, 32, image::Rgba([10, 20, 30, 255])),
+                    64,
+                    32,
+                    1.0,
+                ));
+                (banner, bitmap)
+            })
+            .collect::<Vec<_>>();
+        let draws_of = |indices: &[usize]| {
+            indices
+                .iter()
+                .map(|index| {
+                    let (banner, bitmap) = &banners[*index];
+                    draw(Arc::clone(bitmap), banner, banner.horizontal, 1.0)
+                })
+                .collect::<Vec<_>>()
+        };
+        let compose = |gpu: &mut GpuCompositor, frame: u64, draws: &[BannerDraw]| {
+            try_gpu_compose(
+                Some(gpu),
+                &inputs(frame, WIDTH, HEIGHT, None, None, None, None, draws),
+                false,
+            )
+            .expect("metal frame");
+        };
+        compose(&mut gpu, 1, &draws_of(&[0, 1, 2, 3]));
+        compose(&mut gpu, 2, &draws_of(&[0, 1, 2, 3]));
+        assert_eq!(gpu.keyed_texture_uploads(), 4);
+        assert_eq!(gpu.keyed_slot_count(namespace), 4);
+        // A fifth banner takes the least recently drawn slot (banner 0 was
+        // drawn first on the last frame).
+        compose(&mut gpu, 3, &draws_of(&[4]));
+        assert_eq!(gpu.keyed_texture_uploads(), 5);
+        assert_eq!(gpu.keyed_slot_count(namespace), 4);
+        // Banner 4 is resident now; banner 0 must come back (evicting 1).
+        compose(&mut gpu, 4, &draws_of(&[4]));
+        assert_eq!(gpu.keyed_texture_uploads(), 5);
+        compose(&mut gpu, 5, &draws_of(&[0]));
+        assert_eq!(gpu.keyed_texture_uploads(), 6);
+        compose(&mut gpu, 6, &draws_of(&[2, 3, 4, 0]));
+        assert_eq!(gpu.keyed_texture_uploads(), 6, "the four residents stay");
+        assert_eq!(gpu.keyed_slot_count(namespace), 4);
+    }
+
+    /// A `banner:<id>` draft with a transform moves that banner's picture on
+    /// the idle preview for the tick; the bitmap stays keyed by the committed
+    /// rect, so no prepare is queued for a drag sample. A chrome-only draft
+    /// and other stage ids change nothing.
+    #[test]
+    fn a_banner_draft_moves_the_picture_without_a_prepare() {
+        let now = Instant::now();
+        let service = BannerPrepareService::with_decoder(
+            Arc::new(|_: &Path| Err("no decode in this test".to_string())),
+            crate::banner_prepare::BANNER_BITMAP_BUDGET_BYTES,
+        );
+        let banner = banner_row("dragged", 400, 200);
+        let bitmap = seed(&service, &banner, (WIDTH, HEIGHT), [0, 0, 255]);
+        let set = BannerSet {
+            layers: vec![layer(banner.clone(), now)],
+        };
+        let dragged = OverlayRect::new(0.5, 0.5, 400.0 / 1280.0, 200.0 / 720.0);
+        let chrome = EditorChrome {
+            selected: CameraTransform {
+                x: 0.5,
+                y: 0.5,
+                width: dragged.w,
+                height: dragged.h,
+            },
+            handles: true,
+            active_handle: None,
+            guides: Vec::new(),
+            scale: 1.0,
+            slot_css_width: None,
+        };
+        let mut draft = EditorDraft {
+            source_id: "banner:dragged".to_string(),
+            transform: Some(CameraTransform {
+                x: dragged.x,
+                y: dragged.y,
+                width: dragged.w,
+                height: dragged.h,
+            }),
+            chrome: chrome.clone(),
+            refreshed_at: now,
+            release_at_revision: None,
+            generation: 1,
+        };
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            banner_draft_of(Some(&draft)),
+            &service,
+        );
+        assert_eq!(draws.len(), 1);
+        assert_eq!(draws[0].rect, dragged);
+        assert!(
+            Arc::ptr_eq(&draws[0].bitmap, &bitmap),
+            "the committed bitmap, moved"
+        );
+        assert!(draws[0].is_exact_on(WIDTH, HEIGHT), "a move keeps the size");
+        assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (640, 360, 400, 200));
+        assert_eq!(service.cache_len(), 1, "no prepare for a drag sample");
+        // A resize draws the committed bitmap scaled into the drafted rect.
+        draft.transform = Some(CameraTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0 / 1280.0,
+            height: 400.0 / 720.0,
+        });
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            banner_draft_of(Some(&draft)),
+            &service,
+        );
+        assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (0, 0, 800, 400));
+        assert!(!draws[0].is_exact_on(WIDTH, HEIGHT));
+        // Chrome-only hold: the committed rect.
+        draft.transform = None;
+        assert!(banner_draft_of(Some(&draft)).is_none());
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            banner_draft_of(Some(&draft)),
+            &service,
+        );
+        assert_eq!(draws[0].rect, banner.horizontal);
+        // A source drag leaves banners alone.
+        draft.source_id = "camera-1".to_string();
+        draft.transform = Some(CameraTransform {
+            x: 0.5,
+            y: 0.5,
+            width: 0.2,
+            height: 0.2,
+        });
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            banner_draft_of(Some(&draft)),
+            &service,
+        );
+        assert_eq!(draws[0].rect, banner.horizontal);
+        // Faded out: nothing draws, even with a draft.
+        let gone = BannerSet {
+            layers: vec![BannerLayer {
+                fade: BannerFade {
+                    from: 0.0,
+                    to: 0.0,
+                    started_at: now,
+                },
+                ..layer(banner, now)
+            }],
+        };
+        assert!(
+            banner_draws_for_leg(
+                &gone,
+                None,
+                BannerLeg::Primary,
+                (WIDTH, HEIGHT),
+                now,
+                None,
+                &service
+            )
+            .is_empty()
+        );
+    }
+
+    /// `install_banner_set` swaps one `Arc` on the runtime and nothing else:
+    /// no scene, no run, no capture is touched; a hidden banner fades out and
+    /// is reaped once gone; the session shape set by a session is cleared
+    /// when its run stops.
+    #[tokio::test]
+    async fn install_banner_set_swaps_the_set_and_touches_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("videorc-banner-install-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
+        );
+        let png = dir.join("sponsor.png");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 40, 40, 255]))
+            .save(&png)
+            .unwrap();
+        let banner = crate::banners::import_banner(&state.database, &png).unwrap();
+        install_banner_set(&state).await.unwrap();
+        assert!(
+            banner_set_for_test(&state).await.layers.is_empty(),
+            "hidden: not in the set"
+        );
+        state.database.show_banner(&banner.id, 4).unwrap();
+        let before = Instant::now();
+        install_banner_set(&state).await.unwrap();
+        let set = banner_set_for_test(&state).await;
+        assert_eq!(set.layers.len(), 1);
+        let layer = &set.layers[0];
+        assert_eq!(layer.banner.id, banner.id);
+        assert!(layer.file_revision.is_some(), "the stored file was found");
+        assert!(layer.fade.started_at >= before && !layer.fade.hides());
+        assert!(layer.image_path.ends_with(&banner.image_file));
+        {
+            let compositor = state.compositor.lock().await;
+            assert!(compositor.scene.is_none(), "no scene commit");
+            assert!(compositor.run_id.is_none(), "no run started");
+            assert!(compositor.capture_lease.is_none());
+            assert!(compositor.banner_session_shape.is_none());
+        }
+        // A second install with no change keeps the fade (the Arc may swap,
+        // the layer does not restart).
+        install_banner_set(&state).await.unwrap();
+        assert_eq!(banner_set_for_test(&state).await.layers[0].fade, layer.fade);
+        // Hide: the banner stays, fading out; the tick reaps it once settled.
+        state.database.hide_banner(&banner.id).unwrap();
+        install_banner_set(&state).await.unwrap();
+        let hiding = banner_set_for_test(&state).await;
+        assert_eq!(hiding.layers.len(), 1);
+        assert!(hiding.layers[0].fade.hides());
+        {
+            let mut compositor = state.compositor.lock().await;
+            assert!(!compositor.reap_faded_banners(Instant::now()));
+            assert!(compositor.reap_faded_banners(Instant::now() + crate::banners::BANNER_FADE));
+            assert!(compositor.banners.layers.is_empty());
+        }
+        // The session shape: set by a session, cleared with its run.
+        let shape = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: false,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+        };
+        set_banner_session_shape(&state, Some(shape)).await;
+        assert_eq!(banner_session_shape_for_test(&state).await, Some(shape));
+        set_banner_session_shape(&state, None).await;
+        assert_eq!(banner_session_shape_for_test(&state).await, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `composite_overlay_at` at opacity 1.0 is the plain blit, byte for
+    /// byte; a lower opacity blends less; 0 draws nothing.
+    #[test]
+    fn overlay_opacity_one_is_the_identity_blit() {
+        let overlay = solid_overlay(
+            8,
+            4,
+            [255, 255, 255, 200],
+            OverlayRect::new(0.25, 0.25, 0.5, 0.5),
+        );
+        let (canvas_w, canvas_h) = (32_u32, 16_u32);
+        let layout = (0_usize, 8_usize, 4_usize, 8_usize);
+        let mut plain = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_straight_alpha_at(
+            StraightAlphaBitmap {
+                bytes: &overlay.rgba,
+                order: OverlayPixelOrder::Rgba,
+                width: 8,
+                height: 4,
+            },
+            canvas_w,
+            canvas_h,
+            &mut plain,
+            layout,
+            1.0,
+        );
+        let mut full = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_overlay_at(&overlay, canvas_w, canvas_h, &mut full, layout, 1.0);
+        assert_eq!(plain, full);
+        assert_eq!(scaled_alpha(200, opacity_scale(1.0)), 200);
+        assert_eq!(scaled_alpha(255, opacity_scale(1.0)), 255);
+        assert_eq!(scaled_alpha(200, opacity_scale(0.5)), 100);
+        // The BGRA order reads the same pixels swapped.
+        let mut bgra = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_straight_alpha_at(
+            StraightAlphaBitmap {
+                bytes: &overlay.bgra,
+                order: OverlayPixelOrder::Bgra,
+                width: 8,
+                height: 4,
+            },
+            canvas_w,
+            canvas_h,
+            &mut bgra,
+            layout,
+            1.0,
+        );
+        assert_eq!(bgra, full);
+        let index = 4 * canvas_w as usize + 8;
+        let mut half = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_overlay_at(&overlay, canvas_w, canvas_h, &mut half, layout, 0.5);
+        assert!(half[index] > 0 && half[index] < full[index]);
+        let mut none = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_overlay_at(&overlay, canvas_w, canvas_h, &mut none, layout, 0.0);
+        assert!(none.iter().all(|byte| *byte == 0));
+        // A layout past the canvas edge is clipped, never a panic.
+        let mut clipped = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_overlay_at(
+            &overlay,
+            canvas_w,
+            canvas_h,
+            &mut clipped,
+            (0, 28, 14, 8),
+            1.0,
+        );
+        assert!(clipped[14 * canvas_w as usize + 28] > 0);
+        assert!(clipped[15 * canvas_w as usize + 31] > 0);
     }
 }

@@ -563,13 +563,85 @@ pub fn overlay_layout_needs_split(shape: OverlaySessionShape, layout: &OverlayLa
     })
 }
 
+/// What a start notice names: one of the three placeable items, or every
+/// shown banner as one item (plan 186 D6, mid-sentence label `banners`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayNoticeItem {
+    Highlight,
+    Captions,
+    Buddy,
+    Banners,
+}
+
+impl From<OverlayItem> for OverlayNoticeItem {
+    fn from(item: OverlayItem) -> Self {
+        match item {
+            OverlayItem::Highlight => OverlayNoticeItem::Highlight,
+            OverlayItem::Captions => OverlayNoticeItem::Captions,
+            OverlayItem::Buddy => OverlayNoticeItem::Buddy,
+        }
+    }
+}
+
+impl OverlayNoticeItem {
+    /// How the Go Live sheet names the item mid-sentence.
+    pub fn label(self) -> &'static str {
+        match self {
+            OverlayNoticeItem::Highlight => OverlayItem::Highlight.label(),
+            OverlayNoticeItem::Captions => OverlayItem::Captions.label(),
+            OverlayNoticeItem::Buddy => OverlayItem::Buddy.label(),
+            OverlayNoticeItem::Banners => "banners",
+        }
+    }
+}
+
+/// The two output switches of one item, as the notices see them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlaySwitches {
+    pub show_on_stream: bool,
+    pub show_in_recording: bool,
+}
+
 /// A D13 fallback the Go Live sheet shows verbatim before the session
 /// starts: the item and one sentence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayStartNotice {
-    pub item: OverlayItem,
+    pub item: OverlayNoticeItem,
     pub notice: String,
+}
+
+/// The one sentence for an item whose switches cannot both be honoured on
+/// this session shape; `None` when they can (or when captions keep the plan
+/// 090 block instead of a notice).
+fn start_notice_sentence(
+    shape: OverlaySessionShape,
+    item: OverlayNoticeItem,
+    switches: OverlaySwitches,
+) -> Option<String> {
+    if !(shape.record_enabled && shape.stream_enabled)
+        || switches.show_on_stream == switches.show_in_recording
+    {
+        return None;
+    }
+    let notice = match shape.aux_leg {
+        OverlayAuxLeg::Stream => return None,
+        OverlayAuxLeg::VerticalSimulcast if switches.show_on_stream => format!(
+            "Recording will include {} while streaming vertical.",
+            item.label()
+        ),
+        OverlayAuxLeg::VerticalSimulcast => format!(
+            "The horizontal stream will include {} while streaming vertical.",
+            item.label()
+        ),
+        OverlayAuxLeg::None if item == OverlayNoticeItem::Captions => return None,
+        OverlayAuxLeg::None => format!(
+            "Both the stream and the recording will include {}: this computer shares one encode for them.",
+            item.label()
+        ),
+    };
+    Some(notice)
 }
 
 /// Every impossible-to-honour switch pair for this session shape (D13),
@@ -579,32 +651,45 @@ pub fn overlay_start_notices(
     shape: OverlaySessionShape,
     layout: &OverlayLayout,
 ) -> Vec<OverlayStartNotice> {
+    overlay_start_notices_with_banners(shape, layout, &[])
+}
+
+/// `overlay_start_notices` plus the shown banners (plan 186 D6): they act as
+/// one item labelled `banners`, and each sentence any of them yields appears
+/// once, after the three items.
+pub fn overlay_start_notices_with_banners(
+    shape: OverlaySessionShape,
+    layout: &OverlayLayout,
+    banners: &[OverlaySwitches],
+) -> Vec<OverlayStartNotice> {
     let mut notices = Vec::new();
-    if !(shape.record_enabled && shape.stream_enabled) {
-        return notices;
-    }
     for item in OverlayItem::ALL {
-        let switches = layout.item(item);
-        if switches.show_on_stream == switches.show_in_recording {
+        let layout = layout.item(item);
+        let switches = OverlaySwitches {
+            show_on_stream: layout.show_on_stream,
+            show_in_recording: layout.show_in_recording,
+        };
+        if let Some(notice) = start_notice_sentence(shape, item.into(), switches) {
+            notices.push(OverlayStartNotice {
+                item: item.into(),
+                notice,
+            });
+        }
+    }
+    for switches in banners {
+        let Some(notice) = start_notice_sentence(shape, OverlayNoticeItem::Banners, *switches)
+        else {
+            continue;
+        };
+        if notices.iter().any(|existing| {
+            existing.item == OverlayNoticeItem::Banners && existing.notice == notice
+        }) {
             continue;
         }
-        let notice = match shape.aux_leg {
-            OverlayAuxLeg::Stream => continue,
-            OverlayAuxLeg::VerticalSimulcast if switches.show_on_stream => format!(
-                "Recording will include {} while streaming vertical.",
-                item.label()
-            ),
-            OverlayAuxLeg::VerticalSimulcast => format!(
-                "The horizontal stream will include {} while streaming vertical.",
-                item.label()
-            ),
-            OverlayAuxLeg::None if item == OverlayItem::Captions => continue,
-            OverlayAuxLeg::None => format!(
-                "Both the stream and the recording will include {}: this computer shares one encode for them.",
-                item.label()
-            ),
-        };
-        notices.push(OverlayStartNotice { item, notice });
+        notices.push(OverlayStartNotice {
+            item: OverlayNoticeItem::Banners,
+            notice,
+        });
     }
     notices
 }
@@ -995,11 +1080,11 @@ mod tests {
             shared,
             vec![
                 OverlayStartNotice {
-                    item: OverlayItem::Highlight,
+                    item: OverlayNoticeItem::Highlight,
                     notice: "Both the stream and the recording will include highlights: this computer shares one encode for them.".to_string(),
                 },
                 OverlayStartNotice {
-                    item: OverlayItem::Buddy,
+                    item: OverlayNoticeItem::Buddy,
                     notice: "Both the stream and the recording will include the Buddy: this computer shares one encode for them.".to_string(),
                 },
             ]
@@ -1021,6 +1106,79 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&vertical[0]).unwrap()["item"],
             "highlight"
+        );
+    }
+
+    /// Plan 186 D6: every shown banner is one item, `banners`; each sentence
+    /// any of them yields appears once, after the three items, byte for byte
+    /// the strings the renderer's `lib/overlay-layout.ts` builds.
+    #[test]
+    fn start_notices_name_all_shown_banners_once() {
+        let switches = |show_on_stream, show_in_recording| OverlaySwitches {
+            show_on_stream,
+            show_in_recording,
+        };
+        let layout = OverlayLayout::default();
+        let stream_only = switches(true, false);
+        let recording_only = switches(false, true);
+        let both = switches(true, true);
+        let shared = shape(true, true, OverlayAuxLeg::None);
+        // Honoured switches say nothing; the three items are unchanged.
+        assert!(overlay_start_notices_with_banners(shared, &layout, &[both, both]).is_empty());
+        assert_eq!(
+            overlay_start_notices_with_banners(shared, &layout, &[]),
+            overlay_start_notices(shared, &layout)
+        );
+        // One shared encode: two stream-only banners, one sentence.
+        assert_eq!(
+            overlay_start_notices_with_banners(shared, &layout, &[stream_only, both, stream_only]),
+            vec![OverlayStartNotice {
+                item: OverlayNoticeItem::Banners,
+                notice: "Both the stream and the recording will include banners: this computer shares one encode for them.".to_string(),
+            }]
+        );
+        // Recording-only on a shared encode is the same sentence.
+        assert_eq!(
+            overlay_start_notices_with_banners(shared, &layout, &[recording_only])[0].notice,
+            "Both the stream and the recording will include banners: this computer shares one encode for them."
+        );
+        // Vertical simulcast: each direction has its own sentence, once each.
+        let vertical = shape(true, true, OverlayAuxLeg::VerticalSimulcast);
+        assert_eq!(
+            overlay_start_notices_with_banners(
+                vertical,
+                &layout,
+                &[stream_only, recording_only, stream_only]
+            )
+            .iter()
+            .map(|notice| notice.notice.as_str())
+            .collect::<Vec<_>>(),
+            vec![
+                "Recording will include banners while streaming vertical.",
+                "The horizontal stream will include banners while streaming vertical.",
+            ]
+        );
+        // A split leg, a stream-only or a record-only session: no sentence.
+        for shape in [
+            shape(true, true, OverlayAuxLeg::Stream),
+            shape(false, true, OverlayAuxLeg::None),
+            shape(true, false, OverlayAuxLeg::VerticalSimulcast),
+        ] {
+            assert!(
+                overlay_start_notices_with_banners(shape, &layout, &[stream_only, recording_only])
+                    .is_empty(),
+                "{shape:?}"
+            );
+        }
+        // Banners come after the items, and serialize as `banners`.
+        let mut layout = OverlayLayout::default();
+        layout.highlight.show_in_recording = false;
+        let notices = overlay_start_notices_with_banners(shared, &layout, &[stream_only]);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].item, OverlayNoticeItem::Highlight);
+        assert_eq!(
+            serde_json::to_value(&notices[1]).unwrap()["item"],
+            "banners"
         );
     }
 

@@ -11,6 +11,7 @@ mod audience;
 mod audio;
 mod audio_capture_adapter;
 mod backend_authority;
+mod banner_prepare;
 mod banners;
 mod buddy_animator;
 mod buddy_motion;
@@ -559,6 +560,10 @@ async fn run_backend() -> Result<()> {
     }
     let mut state = AppState::new(token.clone(), port, events, database);
     state.oauth_callback_port = oauth_callback_port;
+    // Plan 186 D3: a banner that was showing is showing again after a relaunch.
+    if let Err(error) = compositor::install_banner_set(&state).await {
+        tracing::warn!("Could not install the stored banners into the compositor: {error:#}");
+    }
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -12408,10 +12413,13 @@ async fn handle_text_message_with_role(
         }
         "banners.show" => {
             match serde_json::from_value::<protocol::BannerIdParams>(command.params) {
-                Ok(params) => match state
-                    .database
-                    .show_banner(&params.id, banners::BANNER_MAX_SHOWN)
-                {
+                Ok(params) => match banners::show_banner(
+                    &state.database,
+                    &params.id,
+                    // The 160 MB prepared-bitmap budget is judged against the
+                    // canvases the compositor draws right now.
+                    &compositor::banner_prepare_canvases(state).await,
+                ) {
                     Ok(banner) => {
                         let _ = banners::on_banners_changed(state).await;
                         ServerResponse::ok(command.id, banner)

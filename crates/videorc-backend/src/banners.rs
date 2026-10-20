@@ -14,16 +14,21 @@
 
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use image::ImageDecoder;
 use uuid::Uuid;
 
 use crate::atomic_file;
+use crate::banner_prepare::{
+    BANNER_BITMAP_BUDGET_BYTES, BannerFileRevision, banner_file_revision, show_exceeds_budget,
+};
 use crate::overlay_layout::{
     LANDSCAPE_EDGE_MARGIN, LANDSCAPE_SIDE_MARGIN, OVERLAY_RECT_MIN_SIZE, OverlayHorizontalGravity,
-    OverlayOrientation, OverlayRect, PORTRAIT_SIDE_MARGIN, PORTRAIT_TOP_MARGIN, RECT_EPSILON,
-    round6,
+    OverlayOrientation, OverlayRect, OverlaySessionShape, OverlaySwitches, PORTRAIT_SIDE_MARGIN,
+    PORTRAIT_TOP_MARGIN, RECT_EPSILON, overlay_leg_plan, round6,
 };
 use crate::protocol::{Banner, UpdateBannerParams};
 use crate::state::AppState;
@@ -244,11 +249,7 @@ pub(crate) fn image_has_alpha(image: &image::RgbaImage) -> bool {
     image.pixels().any(|pixel| pixel[3] != 255)
 }
 
-/// Step 6: the longest side brought down to `max_side`, never up. Lanczos3 on
-/// premultiplied pixels and straight alpha again afterwards (the
-/// `buddy_sprite::scale_cell` recipe), so a soft edge gets no dark halo. An
-/// opaque image skips the premultiply, which is the identity for it. The
-/// premultiplied copy stays 8-bit: a 40 MP source in `f32` would be 640 MB.
+/// Step 6: the longest side brought down to `max_side`, never up.
 pub(crate) fn fit_within(image: &image::RgbaImage, max_side: u32) -> image::RgbaImage {
     let (width, height) = image.dimensions();
     let longest = width.max(height);
@@ -258,6 +259,27 @@ pub(crate) fn fit_within(image: &image::RgbaImage, max_side: u32) -> image::Rgba
     let scale = f64::from(max_side) / f64::from(longest);
     let target_width = ((f64::from(width) * scale).round() as u32).clamp(1, max_side);
     let target_height = ((f64::from(height) * scale).round() as u32).clamp(1, max_side);
+    resize_straight_alpha(image, target_width, target_height)
+}
+
+/// Scale a straight-alpha image to exactly `target_width` × `target_height`.
+/// Lanczos3 on premultiplied pixels and straight alpha again afterwards (the
+/// `buddy_sprite::scale_cell` recipe), so a soft edge gets no dark halo. An
+/// opaque image skips the premultiply, which is the identity for it. The
+/// premultiplied copy stays 8-bit: a 40 MP source in `f32` would be 640 MB.
+/// Shared by the import (`fit_within`) and the compositor's prepared bitmaps
+/// (`banner_prepare`, S3).
+pub(crate) fn resize_straight_alpha(
+    image: &image::RgbaImage,
+    target_width: u32,
+    target_height: u32,
+) -> image::RgbaImage {
+    let (width, height) = image.dimensions();
+    let target_width = target_width.max(1);
+    let target_height = target_height.max(1);
+    if (width, height) == (target_width, target_height) {
+        return image.clone();
+    }
     if !image_has_alpha(image) {
         return image::imageops::resize(
             image,
@@ -738,9 +760,6 @@ fn rounded_ratio(numerator: u64, denominator: u64) -> u64 {
 /// image is contained in its rect (aspect kept, longer side fitted) and hugs
 /// the rect edge its gravity picks. Shared by every render path and pinned
 /// against the TS twin by `protocol-fixtures/banner-geometry.json`.
-// S3 (the compositor) is the first production caller; until then only the
-// fixture test exercises it.
-#[allow(dead_code)]
 pub(crate) fn banner_draw_rect(
     image_width: u32,
     image_height: u32,
@@ -782,13 +801,296 @@ pub(crate) fn banner_draw_rect(
     )
 }
 
+// --- The compositor's set (S3) ----------------------------------------------
+
+/// How long a banner fades on Show and Hide (D10).
+pub(crate) const BANNER_FADE: Duration = Duration::from_millis(200);
+
+/// Ease-out cubic, `1 − (1 − t)³`: quick to appear, soft to settle.
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+/// One banner's fade: `from` → `to` over `BANNER_FADE` from `started_at`. The
+/// factor multiplies the layer's (pre-baked) opacity once per tick at the
+/// snapshot, so the bitmap is never re-prepared for a fade.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BannerFade {
+    pub from: f32,
+    pub to: f32,
+    pub started_at: Instant,
+}
+
+impl BannerFade {
+    /// A banner that just appeared: 0 → 1 from `now`.
+    pub(crate) fn appearing_at(now: Instant) -> Self {
+        Self {
+            from: 0.0,
+            to: 1.0,
+            started_at: now,
+        }
+    }
+
+    pub(crate) fn value_at(&self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.started_at).as_secs_f32();
+        let t = (elapsed / BANNER_FADE.as_secs_f32()).clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * ease_out_cubic(t)
+    }
+
+    pub(crate) fn is_settled_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started_at) >= BANNER_FADE
+    }
+
+    /// Whether this fade ends with the banner gone.
+    pub(crate) fn hides(&self) -> bool {
+        self.to <= 0.0
+    }
+
+    /// The fade toward `to`, reversed from the current value when the
+    /// direction changes (Show mid-fade-out starts where the fade-out is, not
+    /// from zero) and left alone when it already heads there.
+    pub(crate) fn toward(&self, to: f32, now: Instant) -> Self {
+        if self.to == to {
+            return *self;
+        }
+        Self {
+            from: self.value_at(now),
+            to,
+            started_at: now,
+        }
+    }
+}
+
+/// One banner as the compositor holds it: the row, where its stored image
+/// is, which file revision the prepared bitmaps are keyed by, and its fade.
+#[derive(Debug, Clone)]
+pub(crate) struct BannerLayer {
+    pub banner: Banner,
+    pub image_path: Arc<Path>,
+    pub file_revision: Option<BannerFileRevision>,
+    pub fade: BannerFade,
+}
+
+/// A shown banner with its stored file inspected: the input of
+/// `BannerSet::next_with_files`.
+pub(crate) type BannerWithFile = (Banner, Arc<Path>, Option<BannerFileRevision>);
+
+/// Join each shown banner onto the managed `Banners` root and stat its file
+/// (cheap; done before any lock is taken).
+pub(crate) fn banners_with_files(shown: Vec<Banner>, assets_root: &Path) -> Vec<BannerWithFile> {
+    shown
+        .into_iter()
+        .map(|banner| {
+            let image_path: Arc<Path> = Arc::from(assets_root.join(&banner.image_file));
+            let file_revision = banner_file_revision(&image_path);
+            (banner, image_path, file_revision)
+        })
+        .collect()
+}
+
+impl BannerLayer {
+    /// The key-addressed Metal slot this banner draws from (namespace 9): a
+    /// stable hash of its id, so a reorder or a fade never re-uploads.
+    pub(crate) fn metal_slot(&self) -> u64 {
+        banner_metal_slot(&self.banner.id)
+    }
+}
+
+/// FNV-1a over the id: 64 bits is plenty for four banners.
+pub(crate) fn banner_metal_slot(banner_id: &str) -> u64 {
+    banner_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
+/// The banners the picture carries, bottom to top (Assets order, D5). Swapped
+/// as one `Arc` on `CompositorRuntime`; a hidden banner stays in the set until
+/// its fade-out ends.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BannerSet {
+    pub layers: Vec<BannerLayer>,
+}
+
+impl BannerSet {
+    /// The set after a change: `shown` (bottom to top, files inspected by
+    /// `banners_with_files`) is what the store says shows now. A banner
+    /// already in the set keeps its fade (reversed when it was leaving); a
+    /// new one fades in; one that left fades out from where it is; one whose
+    /// fade-out already ended is dropped. Pure.
+    pub(crate) fn next_with_files(&self, shown: Vec<BannerWithFile>, now: Instant) -> Self {
+        let mut layers = shown
+            .into_iter()
+            .map(|(banner, image_path, file_revision)| {
+                let fade = self
+                    .layers
+                    .iter()
+                    .find(|layer| layer.banner.id == banner.id)
+                    .map(|layer| layer.fade.toward(1.0, now))
+                    .unwrap_or_else(|| BannerFade::appearing_at(now));
+                BannerLayer {
+                    banner,
+                    image_path,
+                    file_revision,
+                    fade,
+                }
+            })
+            .collect::<Vec<_>>();
+        for layer in &self.layers {
+            if layers.iter().any(|next| next.banner.id == layer.banner.id) {
+                continue;
+            }
+            let fade = layer.fade.toward(0.0, now);
+            if fade.hides() && fade.is_settled_at(now) {
+                continue;
+            }
+            layers.push(BannerLayer {
+                fade,
+                ..layer.clone()
+            });
+        }
+        layers.sort_by(|a, b| {
+            a.banner
+                .sort_order
+                .cmp(&b.banner.sort_order)
+                .then_with(|| a.banner.id.cmp(&b.banner.id))
+        });
+        Self { layers }
+    }
+
+    /// The set without the layers whose fade-out ended by `now`; `None` when
+    /// nothing is due, so the caller keeps its `Arc`.
+    pub(crate) fn without_faded_out(&self, now: Instant) -> Option<Self> {
+        let keep = |layer: &BannerLayer| !(layer.fade.hides() && layer.fade.is_settled_at(now));
+        if self.layers.iter().all(keep) {
+            return None;
+        }
+        Some(Self {
+            layers: self
+                .layers
+                .iter()
+                .filter(|layer| keep(layer))
+                .cloned()
+                .collect(),
+        })
+    }
+}
+
+/// Which compositor leg a draw is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BannerLeg {
+    Primary,
+    Auxiliary,
+}
+
+/// Whether `leg` carries `banner` (plan 186 "Which leg carries a banner").
+/// Idle (`shape` is `None`): the preview draws every banner with at least one
+/// switch on. In a session: the overlay leg plan, with the shared-leg
+/// fallback when the switches disagree on one shared leg, exactly as the
+/// highlight card and the Buddy.
+pub(crate) fn banner_leg_carries(
+    shape: Option<OverlaySessionShape>,
+    leg: BannerLeg,
+    banner: &Banner,
+) -> bool {
+    let Some(shape) = shape else {
+        return leg == BannerLeg::Primary && (banner.show_on_stream || banner.show_in_recording);
+    };
+    let plan = overlay_leg_plan(
+        shape.record_enabled,
+        shape.stream_enabled,
+        shape.aux_leg,
+        banner.show_on_stream,
+        banner.show_in_recording,
+    );
+    let plan = if plan.needs_split {
+        plan.shared_leg_fallback()
+    } else {
+        plan
+    };
+    match leg {
+        BannerLeg::Primary => plan.primary,
+        BannerLeg::Auxiliary => plan.aux,
+    }
+}
+
+/// The stage id prefix the Scene editor's drafts use for a banner (pinned):
+/// `banner:<bannerId>`.
+pub(crate) const BANNER_DRAFT_ID_PREFIX: &str = "banner:";
+
+/// The banner id a `scene.editor.draft.set` stage id names, if it is one.
+pub(crate) fn banner_draft_id(source_id: &str) -> Option<&str> {
+    source_id.strip_prefix(BANNER_DRAFT_ID_PREFIX)
+}
+
+/// The rect a leg draws `banner` in: its rect for the canvas orientation,
+/// unless a live draft (`banner:<id>` plus a transform, idle preview only)
+/// overrides it for this tick. The draft's transform is already the exact
+/// image rect, so the contained draw lands on it.
+pub(crate) fn banner_rect_for(
+    banner: &Banner,
+    orientation: OverlayOrientation,
+    draft: Option<(&str, OverlayRect)>,
+) -> OverlayRect {
+    if let Some((source_id, rect)) = draft
+        && banner_draft_id(source_id) == Some(banner.id.as_str())
+    {
+        return rect;
+    }
+    match orientation {
+        OverlayOrientation::Horizontal => banner.horizontal,
+        OverlayOrientation::Vertical => banner.vertical,
+    }
+}
+
+/// The switches of every shown banner, for the D13 start notices
+/// (`overlay_layout::overlay_start_notices_with_banners`).
+pub(crate) fn shown_banner_switches(database: &Database) -> Result<Vec<OverlaySwitches>> {
+    Ok(shown_banners_for_compositor(database)?
+        .iter()
+        .map(|banner| OverlaySwitches {
+            show_on_stream: banner.show_on_stream,
+            show_in_recording: banner.show_in_recording,
+        })
+        .collect())
+}
+
+/// `banners.show`: the cap of four and the 160 MB prepared-bitmap budget for
+/// `canvases` (the compositor's current primary and auxiliary canvases) are
+/// both refused with one sentence before the row changes. The store keeps
+/// the cap under its own transaction too.
+pub(crate) fn show_banner(
+    database: &Database,
+    id: &str,
+    canvases: &[(u32, u32)],
+) -> Result<Banner> {
+    show_banner_within_budget(database, id, canvases, BANNER_BITMAP_BUDGET_BYTES)
+}
+
+pub(crate) fn show_banner_within_budget(
+    database: &Database,
+    id: &str,
+    canvases: &[(u32, u32)],
+    budget_bytes: u64,
+) -> Result<Banner> {
+    let candidate = database.banner_by_id(id)?;
+    if !candidate.shown {
+        let shown = shown_banners_for_compositor(database)?;
+        if shown.len() >= BANNER_MAX_SHOWN
+            || show_exceeds_budget(&shown, &candidate, canvases, budget_bytes)
+        {
+            bail!(REFUSAL_FOUR_SHOWING);
+        }
+    }
+    database.show_banner(id, BANNER_MAX_SHOWN)
+}
+
 // --- The seam to the compositor (S3) ----------------------------------------
 
 /// The banners the compositor draws, bottom to top: showing, in Assets order.
-/// S3's `install_banner_set` reads this at backend start (shown survives a
-/// relaunch, D3) and from `on_banners_changed`.
-// S3 adds the production caller; S1 only tests it.
-#[allow(dead_code)]
+/// `compositor::install_banner_set` reads this at backend start (shown
+/// survives a relaunch, D3) and from `on_banners_changed`.
 pub(crate) fn shown_banners_for_compositor(database: &Database) -> Result<Vec<Banner>> {
     let mut banners = database.list_banners()?;
     banners.retain(|banner| banner.shown);
@@ -797,12 +1099,14 @@ pub(crate) fn shown_banners_for_compositor(database: &Database) -> Result<Vec<Ba
 }
 
 /// The one place every banner mutation ends (import, update, reorder, delete,
-/// show, hide). S1: republish the full list as `banners.changed`, under one
-/// lock so an older snapshot is never emitted after a newer one. S3 extends
-/// this to install the shown set into the compositor
-/// (`shown_banners_for_compositor`) before the event goes out, which is why
-/// it is already `async`.
+/// show, hide). The shown set is installed into the compositor first (the
+/// next tick draws it; no scene commit, no capture change), then the full
+/// list is republished as `banners.changed` under one lock so an older
+/// snapshot is never emitted after a newer one.
 pub(crate) async fn on_banners_changed(state: &AppState) -> Result<Vec<Banner>> {
+    if let Err(error) = crate::compositor::install_banner_set(state).await {
+        tracing::warn!("Could not install the banner set into the compositor: {error:#}");
+    }
     let banners = {
         let _publication = state
             .banner_list_publication
@@ -1832,6 +2136,300 @@ mod tests {
             );
             assert!(escape.exists());
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // --- The compositor's set (S3) ------------------------------------------
+
+    fn sample_banner(id: &str, sort_order: i64) -> Banner {
+        let (horizontal, vertical) = banner_default_places(2400, 400);
+        Banner {
+            id: id.to_string(),
+            name: id.to_string(),
+            image_file: format!("{id}.png"),
+            thumbnail_file: format!("{id}.thumb.png"),
+            width: 2400,
+            height: 400,
+            has_alpha: true,
+            sort_order,
+            shown: true,
+            horizontal,
+            vertical,
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn with_file(banner: Banner) -> BannerWithFile {
+        let path: Arc<Path> = Arc::from(Path::new("/nonexistent").join(&banner.image_file));
+        let revision = BannerFileRevision {
+            size: 1,
+            modified_nanos: 1,
+        };
+        (banner, path, Some(revision))
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn the_fade_is_200_ms_ease_out_and_reverses_from_where_it_is() {
+        let t0 = Instant::now();
+        let ms = |millis: u64| t0 + Duration::from_millis(millis);
+        let fade = BannerFade::appearing_at(t0);
+        // 0, 100 and 200 ms: 0, 1 - 0.5^3, 1.
+        assert!(close(fade.value_at(ms(0)), 0.0));
+        assert!(close(fade.value_at(ms(100)), 0.875));
+        assert!(close(fade.value_at(ms(200)), 1.0));
+        assert!(close(fade.value_at(ms(900)), 1.0));
+        assert!(!fade.is_settled_at(ms(199)));
+        assert!(fade.is_settled_at(ms(200)));
+        assert!(!fade.hides());
+        // Heading the same way leaves the fade alone.
+        assert_eq!(fade.toward(1.0, ms(50)), fade);
+        // Hide at 100 ms: a fade-out from 0.875, not from 1.
+        let out = fade.toward(0.0, ms(100));
+        assert!(out.hides());
+        assert_eq!(out.started_at, ms(100));
+        assert!(close(out.value_at(ms(100)), 0.875));
+        assert!(close(out.value_at(ms(200)), 0.875 * (1.0 - 0.875)));
+        assert!(close(out.value_at(ms(300)), 0.0));
+        // Show again mid-fade-out: back up from the current value (D10).
+        let back = out.toward(1.0, ms(200));
+        assert!(close(back.from, 0.875 * 0.125));
+        assert!(close(back.value_at(ms(400)), 1.0));
+    }
+
+    #[test]
+    fn the_set_fades_banners_in_and_out_and_drops_them_once_gone() {
+        let t0 = Instant::now();
+        let ms = |millis: u64| t0 + Duration::from_millis(millis);
+        let empty = BannerSet::default();
+        // Show a and b (b first in Assets order): both appear from 0.
+        let shown = empty.next_with_files(
+            vec![
+                with_file(sample_banner("b", 0)),
+                with_file(sample_banner("a", 1)),
+            ],
+            ms(0),
+        );
+        let ids = |set: &BannerSet| {
+            set.layers
+                .iter()
+                .map(|layer| layer.banner.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&shown), ["b", "a"]);
+        assert!(
+            shown
+                .layers
+                .iter()
+                .all(|layer| layer.fade == BannerFade::appearing_at(ms(0)))
+        );
+        assert_eq!(shown.layers[0].metal_slot(), banner_metal_slot("b"));
+        assert_ne!(shown.layers[0].metal_slot(), shown.layers[1].metal_slot());
+        // Hide a at 100 ms: it stays, fading out from 0.875, in its place.
+        let hiding = shown.next_with_files(vec![with_file(sample_banner("b", 0))], ms(100));
+        assert_eq!(ids(&hiding), ["b", "a"]);
+        assert_eq!(
+            hiding.layers[0].fade,
+            BannerFade::appearing_at(ms(0)),
+            "b untouched"
+        );
+        let a = &hiding.layers[1];
+        assert!(a.fade.hides());
+        assert!(close(a.fade.from, 0.875));
+        // The next tick keeps it until the fade-out ends, then drops it.
+        assert!(hiding.without_faded_out(ms(250)).is_none());
+        let dropped = hiding.without_faded_out(ms(300)).expect("a leaves the set");
+        assert_eq!(ids(&dropped), ["b"]);
+        // A mutation after the fade-out ended drops it too.
+        assert_eq!(
+            ids(&hiding.next_with_files(vec![with_file(sample_banner("b", 0))], ms(300))),
+            ["b"]
+        );
+        // Show a again at 200 ms, mid-fade-out: it comes back from where it is.
+        let back = hiding.next_with_files(
+            vec![
+                with_file(sample_banner("b", 0)),
+                with_file(sample_banner("a", 1)),
+            ],
+            ms(200),
+        );
+        let a = &back.layers[1];
+        assert!(!a.fade.hides());
+        assert!(close(a.fade.from, 0.875 * 0.125));
+        assert_eq!(a.fade.started_at, ms(200));
+        // A reorder re-sorts (later draws on top) without touching fades.
+        let reordered = back.next_with_files(
+            vec![
+                with_file(sample_banner("a", 0)),
+                with_file(sample_banner("b", 1)),
+            ],
+            ms(250),
+        );
+        assert_eq!(ids(&reordered), ["a", "b"]);
+        assert_eq!(reordered.layers[1].fade, BannerFade::appearing_at(ms(0)));
+    }
+
+    /// The leg plan per banner across the exhaustive session table: in a
+    /// session exactly `overlay_leg_plan` with the shared-leg fallback (as
+    /// the highlight card and the Buddy); idle, the primary draws every
+    /// banner with a switch on and the auxiliary nothing.
+    #[test]
+    fn banner_leg_plan_follows_the_overlay_table_and_the_idle_rule() {
+        use crate::overlay_layout::OverlayAuxLeg;
+        let switches = [(false, false), (true, false), (false, true), (true, true)];
+        for (on_stream, in_recording) in switches {
+            let mut banner = sample_banner("a", 0);
+            banner.show_on_stream = on_stream;
+            banner.show_in_recording = in_recording;
+            assert_eq!(
+                banner_leg_carries(None, BannerLeg::Primary, &banner),
+                on_stream || in_recording,
+                "idle primary on_stream={on_stream} in_recording={in_recording}"
+            );
+            assert!(!banner_leg_carries(None, BannerLeg::Auxiliary, &banner));
+            for record in [false, true] {
+                for stream in [false, true] {
+                    for aux_leg in [
+                        OverlayAuxLeg::None,
+                        OverlayAuxLeg::Stream,
+                        OverlayAuxLeg::VerticalSimulcast,
+                    ] {
+                        let shape = OverlaySessionShape {
+                            record_enabled: record,
+                            stream_enabled: stream,
+                            aux_leg,
+                        };
+                        let plan =
+                            overlay_leg_plan(record, stream, aux_leg, on_stream, in_recording);
+                        let expected = if plan.needs_split {
+                            plan.shared_leg_fallback()
+                        } else {
+                            plan
+                        };
+                        assert_eq!(
+                            (
+                                banner_leg_carries(Some(shape), BannerLeg::Primary, &banner),
+                                banner_leg_carries(Some(shape), BannerLeg::Auxiliary, &banner),
+                            ),
+                            (expected.primary, expected.aux),
+                            "{shape:?} on_stream={on_stream} in_recording={in_recording}"
+                        );
+                    }
+                }
+            }
+        }
+        // The one row that falls back: record + stream on one shared leg with
+        // the switches apart burns the shared leg and never asks for a split.
+        let mut stream_only = sample_banner("a", 0);
+        stream_only.show_in_recording = false;
+        let shared = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: true,
+            aux_leg: OverlayAuxLeg::None,
+        };
+        assert!(banner_leg_carries(
+            Some(shared),
+            BannerLeg::Primary,
+            &stream_only
+        ));
+        assert!(!banner_leg_carries(
+            Some(shared),
+            BannerLeg::Auxiliary,
+            &stream_only
+        ));
+    }
+
+    #[test]
+    fn the_draw_rect_follows_the_orientation_unless_a_banner_draft_moves_it() {
+        let banner = sample_banner("abc", 0);
+        assert_eq!(
+            banner_rect_for(&banner, OverlayOrientation::Horizontal, None),
+            banner.horizontal
+        );
+        assert_eq!(
+            banner_rect_for(&banner, OverlayOrientation::Vertical, None),
+            banner.vertical
+        );
+        let dragged = OverlayRect::new(0.3, 0.4, 0.2, 0.1);
+        assert_eq!(
+            banner_rect_for(
+                &banner,
+                OverlayOrientation::Horizontal,
+                Some(("banner:abc", dragged))
+            ),
+            dragged
+        );
+        // Another banner's draft, or a source draft, leaves it alone.
+        assert_eq!(
+            banner_rect_for(
+                &banner,
+                OverlayOrientation::Horizontal,
+                Some(("banner:zzz", dragged))
+            ),
+            banner.horizontal
+        );
+        assert_eq!(
+            banner_rect_for(
+                &banner,
+                OverlayOrientation::Horizontal,
+                Some(("camera-1", dragged))
+            ),
+            banner.horizontal
+        );
+        assert_eq!(banner_draft_id("banner:abc"), Some("abc"));
+        assert_eq!(banner_draft_id("camera-1"), None);
+    }
+
+    #[test]
+    fn show_refuses_past_the_prepared_bitmap_budget_with_the_four_showing_sentence() {
+        let dir = temp_dir("show-budget");
+        let database = test_database(&dir);
+        let first = import_banner(&database, &write_png(&dir, "one.png", 64, 64)).unwrap();
+        let second = import_banner(&database, &write_png(&dir, "two.png", 64, 64)).unwrap();
+        let canvases = [(3840_u32, 2160_u32), (1080, 1920)];
+        // Under budget: shown.
+        assert!(show_banner(&database, &first.id, &canvases).unwrap().shown);
+        // A budget the first banner already fills refuses the second with the
+        // verbatim sentence, and leaves the row hidden.
+        let one_banner_bytes = crate::banner_prepare::estimated_prepared_bytes([&first], &canvases);
+        let refused = show_banner_within_budget(&database, &second.id, &canvases, one_banner_bytes)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(refused, REFUSAL_FOUR_SHOWING);
+        assert!(!database.banner_by_id(&second.id).unwrap().shown);
+        // Showing a banner that already shows never re-checks the budget.
+        assert!(
+            show_banner_within_budget(&database, &first.id, &canvases, 0)
+                .unwrap()
+                .shown
+        );
+        // Without a compositor run there are no canvases and nothing to refuse.
+        assert!(
+            show_banner_within_budget(&database, &second.id, &[], 0)
+                .unwrap()
+                .shown
+        );
+        assert_eq!(shown_banners_for_compositor(&database).unwrap().len(), 2);
+        // The switches the start notices read, in Assets order.
+        assert_eq!(
+            shown_banner_switches(&database).unwrap(),
+            vec![
+                OverlaySwitches {
+                    show_on_stream: true,
+                    show_in_recording: true
+                };
+                2
+            ]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

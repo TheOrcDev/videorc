@@ -4275,10 +4275,18 @@ async fn start_session_with_timeline(
     }
     // D13: every switch pair this session cannot honour is said out loud
     // (the Go Live sheet already showed the same sentence before start).
+    // Plan 186 D6: the shown banners are one more item, `banners`.
     if use_encoder_bridge {
-        for notice in
-            crate::overlay_layout::overlay_start_notices(overlay_session_shape, &overlay_layout)
-        {
+        let banner_switches = crate::banners::shown_banner_switches(&state.database)
+            .unwrap_or_else(|error| {
+                tracing::warn!("Could not read the shown banners for the start notices: {error:#}");
+                Vec::new()
+            });
+        for notice in crate::overlay_layout::overlay_start_notices_with_banners(
+            overlay_session_shape,
+            &overlay_layout,
+            &banner_switches,
+        ) {
             let _ = emit_health_event(
                 &state,
                 Some(&session_id),
@@ -4527,6 +4535,10 @@ async fn start_session_with_timeline(
                 .await;
             }
             timeline.mark(RecordingStartPhase::CompositorArm);
+            // Plan 186 S3: banners follow the session's leg plan from its
+            // first frame; the stop and lease-release paths return the
+            // compositor to the idle plan.
+            crate::compositor::set_banner_session_shape(&state, Some(overlay_session_shape)).await;
             let scene = params.scene.clone().unwrap_or_else(|| {
                 scene_from_capture_config(SceneConfigParams {
                     transition_ms: None,

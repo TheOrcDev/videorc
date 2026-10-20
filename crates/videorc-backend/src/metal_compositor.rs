@@ -289,16 +289,48 @@ pub enum GpuSourceSampler {
 
 /// Content namespaces whose texture lives in a key-addressed slot rather than
 /// the per-index cache (plan 168 D8): a layer whose index shifts (a caption
-/// appearing below it) never re-uploads. One slot per namespace.
-/// Namespace 7 is the Buddy sprite atlas (`buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE`;
-/// the compositor asserts the two agree at compile time).
-pub const KEYED_TEXTURE_NAMESPACES: [u64; 1] = [7];
+/// appearing below it) never re-uploads.
+/// Namespace 7 is the Buddy sprite atlas (`buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE`),
+/// one slot whatever its key's `variant`. Namespace 9 is the banners (plan
+/// 186 S3, `banner_prepare::BANNER_METAL_NAMESPACE`): one slot per `variant`
+/// (the banner's slot id), at most `BANNER_KEYED_TEXTURE_SLOTS` of them, the
+/// least recently drawn evicted first. The compositor asserts both at compile
+/// time.
+pub const KEYED_TEXTURE_NAMESPACES: [u64; 2] = [7, 9];
+/// The banners showing at once (D7), so four slots never evict each other.
+pub const BANNER_KEYED_TEXTURE_SLOTS: usize = 4;
 
-fn keyed_texture_namespace(source: &GpuSource<'_>) -> Option<u64> {
-    source
-        .content_key
-        .map(|key| key.namespace)
-        .filter(|namespace| KEYED_TEXTURE_NAMESPACES.contains(namespace))
+/// Which key-addressed slot a source draws from: `(namespace, slot)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyedSlotId {
+    namespace: u64,
+    slot: u64,
+}
+
+/// How many slots a keyed namespace may hold.
+fn keyed_slot_capacity(namespace: u64) -> usize {
+    if namespace == KEYED_TEXTURE_NAMESPACES[1] {
+        BANNER_KEYED_TEXTURE_SLOTS
+    } else {
+        1
+    }
+}
+
+fn keyed_slot_id(source: &GpuSource<'_>) -> Option<KeyedSlotId> {
+    let key = source.content_key?;
+    if !KEYED_TEXTURE_NAMESPACES.contains(&key.namespace) {
+        return None;
+    }
+    // A one-slot namespace ignores the variant: the Buddy keeps its slot.
+    let slot = if keyed_slot_capacity(key.namespace) > 1 {
+        key.variant
+    } else {
+        0
+    };
+    Some(KeyedSlotId {
+        namespace: key.namespace,
+        slot,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -799,8 +831,11 @@ pub struct MetalSceneCompositor {
     target_width: usize,
     target_height: usize,
     source_textures: Vec<Option<CachedSourceTexture>>,
-    /// Key-addressed slots (`KEYED_TEXTURE_NAMESPACES`), one per namespace.
-    keyed_textures: Vec<CachedSourceTexture>,
+    /// Key-addressed slots (`KEYED_TEXTURE_NAMESPACES`): one per namespace,
+    /// or per `(namespace, variant)` for a multi-slot namespace.
+    keyed_textures: Vec<KeyedSourceTexture>,
+    /// Advances on every keyed use; the eviction order of a full namespace.
+    keyed_texture_clock: u64,
     /// Byte uploads into the key-addressed slots, for the "uploads once"
     /// contract (plan 168 S-B2).
     keyed_texture_uploads: u64,
@@ -833,6 +868,14 @@ struct CachedSourceTexture {
     height: usize,
     content_key: Option<GpuSourceContentKey>,
     _retention: Option<MetalRetentionLease>,
+}
+
+/// One key-addressed slot: which `(namespace, slot)` it serves and when it
+/// was last drawn from.
+struct KeyedSourceTexture {
+    id: KeyedSlotId,
+    cached: CachedSourceTexture,
+    used_at: u64,
 }
 
 enum CachedSourceBacking {
@@ -1181,6 +1224,7 @@ impl MetalSceneCompositor {
             target_height: 0,
             source_textures: Vec::new(),
             keyed_textures: Vec::new(),
+            keyed_texture_clock: 0,
             keyed_texture_uploads: 0,
             source_texture_cache,
             pending_source_import_stats: PendingMetalSourceImportStats::default(),
@@ -1367,8 +1411,8 @@ impl MetalSceneCompositor {
                     break;
                 }
             }
-            let texture = match keyed_texture_namespace(source) {
-                Some(namespace) => self.keyed_texture(namespace),
+            let texture = match keyed_slot_id(source) {
+                Some(id) => self.keyed_texture(id),
                 None => self.source_textures[source_index]
                     .as_ref()
                     .map(|cached| &*cached.texture),
@@ -1565,33 +1609,34 @@ impl MetalSceneCompositor {
         self.targets.get(self.target_cursor)
     }
 
-    /// The texture of a key-addressed namespace's slot.
-    fn keyed_texture(&self, namespace: u64) -> Option<&MetalTexture> {
+    /// The texture of a key-addressed slot.
+    fn keyed_texture(&self, id: KeyedSlotId) -> Option<&MetalTexture> {
         self.keyed_textures
             .iter()
-            .find(|cached| cached.content_key.map(|key| key.namespace) == Some(namespace))
-            .map(|cached| &*cached.texture)
+            .find(|slot| slot.id == id)
+            .map(|slot| &*slot.cached.texture)
     }
 
     /// Plan 168 D8: an immutable source addressed by its content key, not its
-    /// layer index. The slot of its namespace is reused while the key (and
-    /// size) holds; a new revision uploads once into it.
+    /// layer index. Its slot is reused while the key (and size) holds; a new
+    /// revision uploads once into it. A namespace at its slot capacity gives
+    /// a new slot id the least recently drawn slot (plan 186: four banners).
     fn ensure_keyed_texture(
         &mut self,
-        namespace: u64,
+        id: KeyedSlotId,
         source: &GpuSource<'_>,
     ) -> Result<SourceTextureReady, SourceImportFailures> {
         let failures = SourceImportFailures::default();
-        let position = self
-            .keyed_textures
-            .iter()
-            .position(|cached| cached.content_key.map(|key| key.namespace) == Some(namespace));
+        self.keyed_texture_clock = self.keyed_texture_clock.wrapping_add(1);
+        let now = self.keyed_texture_clock;
+        let position = self.keyed_textures.iter().position(|slot| slot.id == id);
         if let Some(index) = position {
-            let cached = &self.keyed_textures[index];
-            if cached.width == source.width
-                && cached.height == source.height
-                && cached.content_key == source.content_key
+            let slot = &mut self.keyed_textures[index];
+            if slot.cached.width == source.width
+                && slot.cached.height == source.height
+                && slot.cached.content_key == source.content_key
             {
+                slot.used_at = now;
                 return Ok(SourceTextureReady {
                     outcome: SourceImportOutcome::ImmutableByteReused,
                     failures,
@@ -1599,7 +1644,7 @@ impl MetalSceneCompositor {
             }
         }
         let reusable = position.filter(|index| {
-            let cached = &self.keyed_textures[*index];
+            let cached = &self.keyed_textures[*index].cached;
             cached.width == source.width && cached.height == source.height
         });
         let index = match reusable {
@@ -1612,35 +1657,67 @@ impl MetalSceneCompositor {
                     MTLTextureUsage::ShaderRead,
                 )
                 .ok_or(failures)?;
-                let cached = CachedSourceTexture {
-                    texture,
-                    backing: CachedSourceBacking::ByteUpload,
-                    width: source.width,
-                    height: source.height,
-                    content_key: None,
-                    _retention: None,
+                let slot = KeyedSourceTexture {
+                    id,
+                    cached: CachedSourceTexture {
+                        texture,
+                        backing: CachedSourceBacking::ByteUpload,
+                        width: source.width,
+                        height: source.height,
+                        content_key: None,
+                        _retention: None,
+                    },
+                    used_at: now,
                 };
-                match position {
+                match position.or_else(|| self.keyed_slot_to_evict(id.namespace)) {
                     Some(index) => {
-                        self.keyed_textures[index] = cached;
+                        self.keyed_textures[index] = slot;
                         index
                     }
                     None => {
-                        self.keyed_textures.push(cached);
+                        self.keyed_textures.push(slot);
                         self.keyed_textures.len() - 1
                     }
                 }
             }
         };
-        let cached = &mut self.keyed_textures[index];
-        upload_bgra_to_texture(&cached.texture, source).ok_or(failures)?;
-        // The namespace stays on the slot even before the first key lands.
-        cached.content_key = source.content_key;
+        let slot = &mut self.keyed_textures[index];
+        upload_bgra_to_texture(&slot.cached.texture, source).ok_or(failures)?;
+        // The slot id stays on the slot even before the first key lands.
+        slot.cached.content_key = source.content_key;
+        slot.used_at = now;
         self.keyed_texture_uploads = self.keyed_texture_uploads.saturating_add(1);
         Ok(SourceTextureReady {
             outcome: SourceImportOutcome::ImmutableByteUploaded,
             failures,
         })
+    }
+
+    /// The slot a new id in `namespace` replaces: the least recently drawn
+    /// one once the namespace holds its capacity, else none (append).
+    fn keyed_slot_to_evict(&self, namespace: u64) -> Option<usize> {
+        let in_namespace = self
+            .keyed_textures
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.id.namespace == namespace)
+            .collect::<Vec<_>>();
+        if in_namespace.len() < keyed_slot_capacity(namespace) {
+            return None;
+        }
+        in_namespace
+            .into_iter()
+            .min_by_key(|(_, slot)| slot.used_at)
+            .map(|(index, _)| index)
+    }
+
+    /// How many key-addressed slots `namespace` holds now.
+    #[cfg(test)]
+    pub(crate) fn keyed_slot_count(&self, namespace: u64) -> usize {
+        self.keyed_textures
+            .iter()
+            .filter(|slot| slot.id.namespace == namespace)
+            .count()
     }
 
     #[cfg(test)]
@@ -1653,8 +1730,8 @@ impl MetalSceneCompositor {
         index: usize,
         source: &GpuSource<'_>,
     ) -> Result<SourceTextureReady, SourceImportFailures> {
-        if let Some(namespace) = keyed_texture_namespace(source) {
-            return self.ensure_keyed_texture(namespace, source);
+        if let Some(id) = keyed_slot_id(source) {
+            return self.ensure_keyed_texture(id, source);
         }
         if self.source_textures.len() <= index {
             self.source_textures.resize_with(index + 1, || None);
