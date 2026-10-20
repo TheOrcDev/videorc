@@ -2402,6 +2402,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const bannerListRef = useRef(bannerList)
   bannerListRef.current = bannerList
   const [selectedBannerId, setSelectedBannerId] = useState<string | null>(null)
+  // The Stream Manager's read-only copy (plan 186 S7): `{id, name, shown}`.
+  useEffect(() => {
+    void window.videorc?.pushCommentsBanners?.(
+      bannerList && bannerList.map(({ id, name, shown }) => ({ id, name, shown }))
+    )
+  }, [bannerList])
   const [platformAccounts, setPlatformAccounts] = useState<PlatformAccount[]>([])
   const [platformAccountValidations, setPlatformAccountValidations] = useState<
     PlatformAccountValidation[]
@@ -3006,11 +3012,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         })
     })
+    // Banners from the Stream Manager (plan 186 S7): by id, quietly here; a
+    // refusal's sentence goes back to the window that asked.
+    const offBanner = window.videorc?.onBannerRequest?.(({ requestId, ...action }) => {
+      void (async () => {
+        if (!client) throw offlineError()
+        const { runBannerAction } = await loadBannerRules()
+        return runBannerAction(client, action, bannerListRef.current ?? NO_BANNERS)
+      })()
+        .catch((error: unknown) => ({ ok: false, message: ipcErrorMessage(error) }))
+        .then(({ ok, message }) =>
+          window.videorc?.pushBannerResult?.(
+            ok
+              ? { requestId, ok, value: true }
+              : { requestId, ok, error: message || "Couldn't change the banner." }
+          )
+        )
+    })
     return () => {
       cancelled = true
       offState?.()
       offClear?.()
       offClipMark?.()
+      offBanner?.()
       offMarker?.()
       offMarkerCreated?.()
       offMarkerRefused?.()
@@ -15746,6 +15770,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }
       },
+      banners: bannerListRef.current ?? NO_BANNERS,
       markClip: async () => {
         try {
           const event = await client.request<ClipMarkedEvent>('clip.mark')
@@ -15807,7 +15832,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS],
     screens.map((screen) => ({ id: screen.id, name: screen.name })),
     systemAudioStatus,
-    systemAudioShown
+    systemAudioShown,
+    bannerList ?? NO_BANNERS
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on

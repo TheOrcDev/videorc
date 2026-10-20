@@ -4,14 +4,18 @@ const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
 vi.mock('@/lib/toast', () => ({ toast }))
 
 import {
+  BANNER_ACTION_COPY,
   BANNER_COUNT_LIMIT_REASON,
   BANNER_REFUSALS,
   BANNER_SHOWN_LIMIT_REASON,
+  bannerActionContext,
+  bannerActionError,
   bannerImportBlockedReason,
   bannerImportLabel,
   bannerOrderAfterMove,
   bannerRefusal,
-  bannerRefusalError
+  bannerRefusalError,
+  runBannerAction
 } from './banners'
 import { OFFLINE_REASON, toastUserError, userErrorMessage } from './user-error'
 
@@ -106,5 +110,84 @@ describe('banner order', () => {
     expect(bannerOrderAfterMove(list, 'a', 99)).toEqual(['b', 'c', 'a'])
     expect(bannerOrderAfterMove(list, 'a', -1)).toBeNull()
     expect(bannerOrderAfterMove(list, 'missing', 0)).toBeNull()
+  })
+})
+
+describe('banner actions away from Studio (plan 186 S7)', () => {
+  const banners = [{ id: 'sponsor' }, { id: 'logo' }]
+  function client(failure?: Error) {
+    const calls: Array<[string, unknown]> = []
+    return {
+      calls,
+      request: async <T>(method: string, params?: unknown): Promise<T> => {
+        calls.push([method, params])
+        if (failure) throw failure
+        return undefined as T
+      }
+    }
+  }
+
+  it('runs the explicit backend call for each action, by id', async () => {
+    const backend = client()
+    for (const action of [
+      { action: 'show', id: 'sponsor' },
+      { action: 'hide', id: 'logo' },
+      { action: 'hideAll' }
+    ] as const) {
+      expect(await runBannerAction(backend, action, banners)).toEqual({ ok: true })
+    }
+    expect(backend.calls).toEqual([
+      ['banners.show', { id: 'sponsor' }],
+      ['banners.hide', { id: 'logo' }],
+      ['banners.hide', {}]
+    ])
+  })
+
+  it('says a banner is gone without asking the backend', async () => {
+    const backend = client()
+    expect(await runBannerAction(backend, { action: 'show', id: 'deleted' }, banners)).toEqual({
+      ok: false,
+      message: "That banner isn't available anymore."
+    })
+    expect(backend.calls).toEqual([])
+  })
+
+  it('keeps a refusal verbatim and gives anything else the plain sentence', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const refused = client(backendError('banner-show-failed', BANNER_SHOWN_LIMIT_REASON))
+    expect(await runBannerAction(refused, { action: 'show', id: 'sponsor' }, banners)).toEqual({
+      ok: false,
+      message: BANNER_SHOWN_LIMIT_REASON
+    })
+    const broken = client(new Error('socket closed'))
+    for (const action of [
+      { action: 'show', id: 'sponsor' },
+      { action: 'hide', id: 'sponsor' },
+      { action: 'hideAll' }
+    ] as const) {
+      expect(await runBannerAction(broken, action, banners)).toEqual({
+        ok: false,
+        message: BANNER_ACTION_COPY[action.action]
+      })
+    }
+    warn.mockRestore()
+  })
+
+  it('turns a relayed refusal into a warning with its sentence, and a gone banner too', () => {
+    const relayed = (message: string) =>
+      new Error(`Error invoking remote method 'comments-window:banner': Error: ${message}`)
+    for (const sentence of [BANNER_SHOWN_LIMIT_REASON, BANNER_ACTION_COPY.missing]) {
+      expect(
+        userErrorMessage(bannerActionError(relayed(sentence)), bannerActionContext('show'))
+      ).toMatchObject({ title: "Couldn't show the banner", description: sentence, tone: 'warning' })
+    }
+    expect(
+      userErrorMessage(bannerActionError(relayed(OFFLINE_REASON)), bannerActionContext('hideAll'))
+    ).toMatchObject({ kind: 'offline', title: "Couldn't hide the banners", tone: 'warning' })
+    const unknown = userErrorMessage(
+      bannerActionError(relayed("Couldn't hide the banner.")),
+      bannerActionContext('hide')
+    )
+    expect(unknown).toMatchObject({ kind: 'unknown', title: "Couldn't hide the banner" })
   })
 })

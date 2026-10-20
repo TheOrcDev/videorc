@@ -716,6 +716,9 @@ let latestChatGifMode: TwitchGifMode = DEFAULT_TWITCH_GIF_MODE
 /** The Stream Manager's latest dashboard, history included (plan 055, S7). */
 let latestDashboardState: LiveDashboardState | null = null
 let markerContext: import('../shared/session-markers').MarkerContext | null = null
+/** The banner list the Stream Manager shows (plan 186 S7): `{id, name, shown}`
+ * from the Studio renderer, null until it has read the list. */
+let latestCommentsBanners: import('../shared/banner-commands').BannerSummary[] | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -15512,6 +15515,31 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.resolve(resolution)
     }
   )
+  // Banners (plan 186 S7): the Studio renderer pushes the read-only list and
+  // the Stream Manager follows it; a show or hide from the window relays to
+  // the MAIN renderer, which owns the `banners.*` RPCs, like Mark clip.
+  secureIpcHandle('comments-window:banners-get', () => latestCommentsBanners)
+  secureIpcHandle('comments-window:banners-push', (event, banners) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    latestCommentsBanners = banners
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:banners', banners)
+    return true
+  })
+  secureIpcHandle('comments-window:banner', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can show or hide banners here.'))
+    }
+    return commentsCommandBroker.request<true>(command.requestId, () => {
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      sendElectronEvent(mainWindow.webContents, 'comments-window:banner-request', command)
+      return true
+    })
+  })
+  secureIpcHandle('comments-window:banner-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
   // Chat removal relay (plan 140, S6): the Stream Manager asks, the MAIN
   // renderer owns the backend socket and makes the liveChat.moderation.* call,
   // and the operation comes back as the reply. The window can ask for one

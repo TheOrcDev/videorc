@@ -1,7 +1,8 @@
 import { BANNER_MAX_COUNT, type Banner } from '@/lib/backend'
 import type { BannerImportPhase } from '@/lib/banner-import'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
-import { OFFLINE_REASON, UserFacingError } from '@/lib/user-error'
+import { OFFLINE_REASON, UserFacingError, type UserErrorContext } from '@/lib/user-error'
+import type { BannerRelayAction, BannerSummary } from '../../../shared/banner-commands'
 
 // Plan 186: the banner words and rules every surface shares (Assets, the
 // Scene page, the Stream Manager relay and the remotes). Pure: no React, no
@@ -86,4 +87,64 @@ export function bannerOrderAfterMove(
   ids.splice(from, 1)
   ids.splice(to, 0, id)
   return ids
+}
+
+// --- Live controls (plan 186 S7) --------------------------------------------
+// The Stream Manager, the remotes and the phone show or hide a banner by id.
+// Nothing toasts in Studio for them: the outcome carries the sentence the
+// asking surface shows, and `banners.changed` brings the list to every window.
+
+/** What a show or hide away from Studio says when it can't run. */
+export const BANNER_ACTION_COPY = {
+  missing: "That banner isn't available anymore.",
+  show: "Couldn't show the banner.",
+  hide: "Couldn't hide the banner.",
+  hideAll: "Couldn't hide the banners."
+} as const
+
+/** The verb and object a failed action names: "Couldn't hide the banners". */
+export function bannerActionContext(action: BannerRelayAction['action']): UserErrorContext {
+  return {
+    action: action === 'show' ? 'show' : 'hide',
+    object: action === 'hideAll' ? 'the banners' : 'the banner'
+  }
+}
+
+/**
+ * A failed action as the error `toastUserError` and `userErrorMessage` read:
+ * a refusal, or a banner that is gone, keeps its own sentence as a warning;
+ * anything else stays as it is, for the usual copy.
+ */
+export function bannerActionError(error: unknown): unknown {
+  const sentence =
+    bannerRefusal(error) ??
+    (ipcErrorMessage(error).includes(BANNER_ACTION_COPY.missing)
+      ? BANNER_ACTION_COPY.missing
+      : null)
+  return sentence ? new UserFacingError(sentence, 'warning') : error
+}
+
+type BannerActionClient = { request<T>(method: string, params?: unknown): Promise<T> }
+
+/**
+ * One show or hide from the Stream Manager or a remote, on Studio's backend
+ * connection. A banner the list no longer has says so; a refusal's own
+ * sentence comes back verbatim, any other failure the plain one.
+ */
+export async function runBannerAction(
+  client: BannerActionClient,
+  action: BannerRelayAction,
+  banners: readonly Pick<BannerSummary, 'id'>[]
+): Promise<{ ok: boolean; message?: string }> {
+  if (action.action !== 'hideAll' && !banners.some((banner) => banner.id === action.id)) {
+    return { ok: false, message: BANNER_ACTION_COPY.missing }
+  }
+  try {
+    if (action.action === 'show') await client.request('banners.show', { id: action.id })
+    else await client.request('banners.hide', action.action === 'hide' ? { id: action.id } : {})
+    return { ok: true }
+  } catch (error) {
+    console.warn('[banners] show or hide failed:', error)
+    return { ok: false, message: bannerRefusal(error) ?? BANNER_ACTION_COPY[action.action] }
+  }
 }

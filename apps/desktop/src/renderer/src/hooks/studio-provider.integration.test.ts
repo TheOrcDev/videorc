@@ -2333,6 +2333,163 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().banners.banners).toEqual([logo])
   })
 
+  // Plan 186 S7: the Stream Manager's copy, its relay, and the remotes.
+  it('pushes id, name and shown to the Stream Manager and answers its relay quietly', async () => {
+    const sponsor = testBanner('sponsor', 0, { name: 'Sponsor' })
+    const logo = testBanner('logo', 1, { name: 'Logo', shown: true })
+    const backend = new StudioBackend()
+    backend.banners = [sponsor, logo]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      }
+    })
+    const pushed: unknown[] = []
+    const answers: unknown[] = []
+    api.pushCommentsBanners = async (banners) => {
+      pushed.push(banners)
+      return true
+    }
+    api.pushBannerResult = async (resolution) => {
+      answers.push(resolution)
+      return true
+    }
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    await waitForObservation(() => observation?.banners.bannersLoaded === true)
+    // Null until the list loads, then the projection: never a file or a place.
+    expect(pushed[0]).toBeNull()
+    expect(pushed.at(-1)).toEqual([
+      { id: 'sponsor', name: 'Sponsor', shown: false },
+      { id: 'logo', name: 'Logo', shown: true }
+    ])
+
+    backend.commands.length = 0
+    await act(async () => {
+      emitIpc!('onBannerRequest', { requestId: 'r-show', action: 'show', id: 'sponsor' })
+      emitIpc!('onBannerRequest', { requestId: 'r-gone', action: 'hide', id: 'deleted' })
+    })
+    await waitForObservation(() => answers.length === 2)
+    expect(answers).toEqual(
+      expect.arrayContaining([
+        { requestId: 'r-show', ok: true, value: true },
+        { requestId: 'r-gone', ok: false, error: "That banner isn't available anymore." }
+      ])
+    )
+
+    backend.deferFailure(
+      'banners.show',
+      Object.assign(new Error('Four banners are showing. Hide one first.'), {
+        code: 'banner-show-failed'
+      })
+    )()
+    await act(async () => {
+      emitIpc!('onBannerRequest', { requestId: 'r-full', action: 'show', id: 'sponsor' })
+    })
+    await waitForObservation(() => answers.length === 3)
+    expect(answers.at(-1)).toEqual({
+      requestId: 'r-full',
+      ok: false,
+      error: 'Four banners are showing. Hide one first.'
+    })
+    expect(
+      backend.commands
+        .filter((command) => command.method.startsWith('banners.'))
+        .map((command) => [command.method, command.params])
+    ).toEqual([
+      ['banners.show', { id: 'sponsor' }],
+      ['banners.show', { id: 'sponsor' }]
+    ])
+    // The window that asked says why; Studio stays quiet.
+    expect(toastSpies.warning).not.toHaveBeenCalled()
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(toastSpies.success).not.toHaveBeenCalled()
+
+    // A banners.changed reaches the window as the new projection.
+    await act(async () => emitBanners(backend, [{ ...sponsor, shown: true }]))
+    await waitForObservation(() => pushed.length > 0 && (pushed.at(-1) as unknown[]).length === 1)
+    expect(pushed.at(-1)).toEqual([{ id: 'sponsor', name: 'Sponsor', shown: true }])
+  })
+
+  it('runs banner intents from a deck or the phone and describes banners to them', async () => {
+    const { backend, latest } = await mountBannerProvider([
+      testBanner('sponsor', 0, { name: 'Sponsor', shown: true }),
+      testBanner('logo', 1, { name: 'Logo' })
+    ])
+    const intent = (intentId: string, body: Record<string, unknown>): void => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({ event: 'remote.intent', payload: { intentId, intent: body } })
+        })
+      }
+    }
+    const ack = (intentId: string) =>
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === intentId
+      )?.params
+    // The remote surface publishes once the backend says it is ready.
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({ data: JSON.stringify({ event: 'backend.ready', payload: null }) })
+      }
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.surface.publish' &&
+          (command.params as { describe?: { banners?: unknown[] } }).describe?.banners?.length === 2
+      )
+    )
+    const published = backend.sentCommands.filter(
+      (command) => command.method === 'remote.surface.publish'
+    )
+    expect(
+      (published.at(-1)!.params as { describe: { banners: unknown } }).describe.banners
+    ).toEqual([
+      { id: 'sponsor', name: 'Sponsor', shown: true },
+      { id: 'logo', name: 'Logo', shown: false }
+    ])
+    expect(JSON.stringify(published.map((command) => command.params))).not.toMatch(/\.png/)
+
+    backend.commands.length = 0
+    await act(async () => intent('ri-toggle', { kind: 'bannerToggle', bannerId: 'sponsor' }))
+    await waitForObservation(() => ack('ri-toggle') !== undefined)
+    await act(async () => intent('ri-show', { kind: 'bannerShow', bannerId: 'logo' }))
+    await waitForObservation(() => ack('ri-show') !== undefined)
+    await act(async () => intent('ri-gone', { kind: 'bannerShow', bannerId: 'deleted' }))
+    await waitForObservation(() => ack('ri-gone') !== undefined)
+    expect(ack('ri-toggle')).toEqual({ intentId: 'ri-toggle', ok: true })
+    expect(ack('ri-show')).toEqual({ intentId: 'ri-show', ok: true })
+    expect(ack('ri-gone')).toEqual({
+      intentId: 'ri-gone',
+      ok: false,
+      message: "That banner isn't available anymore."
+    })
+    expect(
+      backend.commands
+        .filter((command) => command.method.startsWith('banners.'))
+        .map((command) => [command.method, command.params])
+    ).toEqual([
+      ['banners.hide', { id: 'sponsor' }],
+      ['banners.show', { id: 'logo' }]
+    ])
+    expect(latest().banners.banners).toHaveLength(2)
+  })
+
   function preciseTransformStatus(backend: StudioBackend): SceneCommitStatus {
     const scene: Scene = {
       ...backend.currentScene,

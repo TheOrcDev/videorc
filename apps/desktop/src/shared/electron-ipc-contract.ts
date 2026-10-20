@@ -43,6 +43,12 @@ import {
   markerRelayResolutionSchema,
   markerRelayResultSchema
 } from './session-markers'
+import type { BannerRelayCommand, BannerSummary } from './banner-commands'
+import {
+  bannerRelayCommandSchema,
+  bannerRelayResolutionSchema,
+  bannerSummariesSchema
+} from './banner-commands'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
 import { sessionChatTotalsSchema } from './session-chat-totals'
@@ -177,6 +183,10 @@ export const electronInvokeApiMethods = {
   'comments-window:marker-result-push': 'pushMarkerResult',
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
+  'comments-window:banners-get': 'getCommentsBanners',
+  'comments-window:banners-push': 'pushCommentsBanners',
+  'comments-window:banner': 'bannerFromCommentsWindow',
+  'comments-window:banner-result-push': 'pushBannerResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
@@ -273,6 +283,8 @@ export interface ElectronIpcEventMap {
   'comments-window:marker-context': MarkerContext | null
   'comments-window:marker-request': MarkerRelayCommand
   'comments-window:clip-mark-request': ClipMarkCommand
+  'comments-window:banners': BannerSummary[] | null
+  'comments-window:banner-request': BannerRelayCommand
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
@@ -320,6 +332,8 @@ export const electronEventChannels = [
   'comments-window:marker-context',
   'comments-window:marker-request',
   'comments-window:clip-mark-request',
+  'comments-window:banners',
+  'comments-window:banner-request',
   'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
@@ -1289,6 +1303,22 @@ const specificRuntimeInvokeContracts = {
     tupleSchema([markerRelayResolutionSchema]),
     booleanSchema
   ),
+  // Banners in the Stream Manager (plan 186 S7): a read-only `{id, name,
+  // shown}` list one way, and one explicit show or hide the other. Never an
+  // image, a file name or a path.
+  'comments-window:banners-get': invokeContract(noArgs, bannerSummariesSchema),
+  'comments-window:banners-push': invokeContract(
+    tupleSchema([bannerSummariesSchema]),
+    booleanSchema
+  ),
+  'comments-window:banner': invokeContract(
+    tupleSchema([bannerRelayCommandSchema]),
+    literalSchema(true)
+  ),
+  'comments-window:banner-result-push': invokeContract(
+    tupleSchema([bannerRelayResolutionSchema]),
+    booleanSchema
+  ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
   'comments-window:dashboard-get': invokeContract(noArgs, dashboardSchema),
   'comments-window:push-snapshot': invokeContract(tupleSchema([commentsViewSchema])),
@@ -1630,6 +1660,8 @@ const specificRuntimeEventSchemas = {
   'comments-window:marker-context': markerContextSchema,
   'comments-window:marker-request': markerRelayCommandSchema,
   'comments-window:dashboard': dashboardSchema,
+  'comments-window:banners': bannerSummariesSchema,
+  'comments-window:banner-request': bannerRelayCommandSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,

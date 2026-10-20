@@ -94,6 +94,12 @@ const api: VideorcApi = {
   markClipFromCommentsWindow: (command) => invoke('comments-window:clip-mark', command),
   onClipMarkRequest: (callback) => subscribe('comments-window:clip-mark-request', callback),
   pushClipMarkResult: (resolution) => invoke('comments-window:clip-mark-result-push', resolution),
+  getCommentsBanners: () => invoke('comments-window:banners-get'),
+  pushCommentsBanners: (banners) => invoke('comments-window:banners-push', banners),
+  onCommentsBanners: (callback) => subscribe('comments-window:banners', callback),
+  bannerFromCommentsWindow: (command) => invoke('comments-window:banner', command),
+  onBannerRequest: (callback) => subscribe('comments-window:banner-request', callback),
+  pushBannerResult: (resolution) => invoke('comments-window:banner-result-push', resolution),
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),

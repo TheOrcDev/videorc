@@ -3294,6 +3294,7 @@ export interface ClipMoment {
 
 /** Who placed a clip mark: a spoken "clip that" or the Mark clip control. */
 import type { MarkerContext, MarkerRelayCommand, MarkerRelayResult } from './session-markers'
+import type { BannerRelayCommand, BannerSummary } from './banner-commands'
 export type * from './session-markers'
 
 export type ClipMarkSource = 'voice' | 'manual'
@@ -4460,6 +4461,17 @@ export interface VideorcApi {
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
   onClipMarkRequest: (callback: (command: ClipMarkCommand) => void) => () => void
   pushClipMarkResult: (resolution: CommentsCommandResolution<ClipMarkedEvent>) => Promise<boolean>
+  /** Banners in the Stream Manager (plan 186 S7): the Studio renderer pushes
+   * the read-only list (`{id, name, shown}`, null until it loads); the window
+   * seeds from main's copy and follows. */
+  getCommentsBanners: () => Promise<BannerSummary[] | null>
+  pushCommentsBanners: (banners: BannerSummary[] | null) => Promise<boolean>
+  onCommentsBanners: (callback: (banners: BannerSummary[] | null) => void) => () => void
+  /** Show or hide from the Stream Manager: relayed to the MAIN renderer, which
+   * owns the backend socket; a refusal comes back as the reply's error. */
+  bannerFromCommentsWindow: (command: BannerRelayCommand) => Promise<boolean>
+  onBannerRequest: (callback: (command: BannerRelayCommand) => void) => () => void
+  pushBannerResult: (resolution: CommentsCommandResolution<boolean>) => Promise<boolean>
   /** Show who followed from the Stream Manager (plan 071, S2): Electron main
    * starts the Twitch reconnect with the follow permission over its admin
    * socket and opens the browser, so the main window's eager bundle carries
