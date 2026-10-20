@@ -1015,6 +1015,57 @@ skill loaded and screenshots in both themes. S2 and S7 are wiring for
 `gpt-5.5`. Every agent prompt says: "read files with
 `git show origin/main:<path>`; gates run once at the end".
 
-## As built
+## As built (2026-10-21, branch `plan-186-banners`, PR #728)
 
-_Not started._
+Every slice, Phase 1 and Phase 2, is built. Two parallel tracks were merged
+into this branch: the TypeScript UI (`plan-186-banners-ui`) and Buddy voice
+(`plan-186-banners-voice`). The wire contract and geometry were pinned
+before either track started (`73482c69`).
+
+**Slices**
+
+| Slice | Commits | Notes |
+| ----- | ------- | ----- |
+| S1 store, import, RPCs | `ffdeb735` | Refusal sentences are verbatim. One sentence was added: "This image is too small. Use one at least 16 × 16 px." |
+| S2 contracts, main, asset host | `cd62115f`, `af2c88db` | Main learns the list on its own backend socket for the proof surface. Banner layers never count as source liveness. |
+| S3 compositor | `81d4a8f1`, `a1e4c730` | Metal and CPU parity: worst luma diff 1. Namespace 9 has four keyed slots, with one upload per prepare across 120 ticks. The live drag moves the picture, so the chrome-only fallback was not needed. |
+| S4 Windows, legacy, refusal | `90f0965f`, `f71b119d` | D3D11 layers sit at z 6 to 9. Checked with `cargo xwin check` (including `--tests`) and with xwin clippy under the CI flags. The proof surface came with S2. |
+| S5 Assets | `406a6ba8`, `b999cd3f` | `useStudioBanners()` has its own context, so banner changes never republish the core context. |
+| S6 Scene | `c86bd25e`, `4ff15c2f`, `8af1340c` | The stage badge reads "hidden" in lower case, matching "off" and "stream only". |
+| S7 live controls | `3ca94825` (Rust), `35c88786`, `1d82e7fa`, `29c1bdfd`, `262db15d` | Stream Manager relays one `comments-window:banner` action union. Banner intents debounce in their own "banner" bucket, not the takeover's. |
+| S8 docs and smoke | `1b0a83eb`, `22adcbd5` | `docs/banners.md`, `CONTEXT.md` **Banner**, `docs/overlays.md`. `smoke:banners` joins `smoke:recording-studio`. The changelog entry is written at release. |
+| S10 timer | `05402aa9` (UI), `76ddea2a` | The cycle runs show to show. Only a manual Hide restarts it, a refused Show waits one period, and a failed Hide is retried after 5 s. |
+| S11 voice | `d06eaf17`, `044712ed`, `d3ae0cba` | Banner phrases are parsed before the highlight grammar, scoped to the sentence said to Buddy. Kinds: `show-banner`, `hide-banner`, `hide-banners`. |
+
+**Deviations from the plan text**
+
+- The banner remote intents debounce in their own "banner" bucket, not the
+  takeover bucket.
+- The Stream Manager relay is one action union, not the plan's two
+  channels.
+- A rename happens in place on the Assets tile.
+- No icon on the Stream Manager Banners action: the glyph would have cost
+  about 615 B gzip in that window.
+- The phone has per-banner keys only, with no "Hide all" key.
+- The Go Live alert title still reads "Overlays this time", with a
+  "Banners ·" line under it. The owner may want it renamed (D1).
+
+**Gates (local, macOS)**
+
+- `cargo test -p videorc-backend`: 3,553 passed, 15 ignored.
+- `cargo fmt --check --all` and `cargo clippy -p videorc-backend -- -D warnings`: clean.
+- `CARGO_PROFILE_RELEASE_STRIP=false cargo build --release -p videorc-backend`: passed.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: passed.
+- Desktop tests: 486 files, 5,036 passed, 1 skipped.
+- `pnpm test:scripts`: 2,419 passed.
+- `pnpm build` and `pnpm check:renderer-assets`: eager JS 389,082 gzip, under the 390,000 ceiling, which was not raised.
+- `pnpm smoke:banners`: PASS in recording, streaming and both modes, across 5 artifacts. The horizontal and vertical receiver contact sheets were inspected by eye: placement, the move, the half-alpha logo blended (teal over dark, grey over the red takeover), banners above the takeover, all hidden at the end.
+- `pnpm smoke:captions-contract`: PASS (voice track).
+- `pnpm smoke:recording-studio`: see the PR.
+
+**Owed**
+
+- Owner by-eye in light and dark (S9 list).
+- A packaged-app take.
+- A real Windows session. Windows CI compiles and runs the D3D11 tests,
+  but no physical Windows pass has been done.

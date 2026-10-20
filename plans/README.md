@@ -11,8 +11,10 @@
   shows, with Stream Manager, `/banner`, ⌘K and Stream Deck/phone mirrors;
   sharp sizes plus a per-place "soft at this size" hint. Phase 2: timer
   (sponsor rotation) and Buddy voice. 11 decisions (D1–D11).
-  **PLANNED**; owner answered 2026-10-20: free, one set of banners, the
-  Scene page controls them, stacking as recommended.
+  **EXECUTED** 2026-10-21 (whole plan, both phases) in draft PR #728: free,
+  one set of banners, the Scene page controls them, stacking as
+  recommended; smoke:banners passes on recording, stream and the vertical
+  stream; owner by-eye owed.
 
 ### Plan 182 Import takeovers while recording or live
 
