@@ -1062,6 +1062,9 @@ pub struct AppState {
     pub screen_import_capacity: Arc<tokio::sync::Semaphore>,
     /// Serialize list snapshots with their events, never image preparation.
     pub screen_list_publication: Arc<StdMutex<()>>,
+    /// The same for banners (plan 186): `banners.changed` snapshots leave in
+    /// order, never behind an import's decode.
+    pub banner_list_publication: Arc<StdMutex<()>>,
     /// Completion truth for layout/live-control mutations across reconnects.
     pub operator_command_fence: Arc<CommandCompletionFence>,
     /// Physical camera/screen transition completion, independent from the
@@ -1343,6 +1346,7 @@ impl AppState {
             websocket_command_admission: Arc::new(StdMutex::new(())),
             screen_import_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
             screen_list_publication: Arc::new(StdMutex::new(())),
+            banner_list_publication: Arc::new(StdMutex::new(())),
             operator_command_fence: Arc::new(CommandCompletionFence::default()),
             source_transition_fence: Arc::new(CommandCompletionFence::default()),
             live_control_command_order: Arc::new(CommandCompletionFence::default()),

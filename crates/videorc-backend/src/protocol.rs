@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::overlay_layout::OverlayRect;
 use crate::repair::GateStatus;
 use crate::source_registry::SourceRegistrySnapshot;
 use crate::streaming::StreamingSettings;
@@ -4602,6 +4603,88 @@ pub struct RenameScreenParams {
 #[serde(rename_all = "camelCase")]
 pub struct ReorderScreensParams {
     pub screen_ids: Vec<String>,
+}
+
+/// A banner on the wire (plan 186, pinned 2026-10-20 in
+/// `protocol-fixtures/high-risk-contracts.json` → `banner`). Only basenames
+/// cross the wire: the renderer builds `videorc-asset://banner/<imageFile>`.
+/// The two timer fields are the only optionals and are omitted when off,
+/// never `null` (the serde null trap).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Banner {
+    pub id: String,
+    pub name: String,
+    pub image_file: String,
+    pub thumbnail_file: String,
+    pub width: u32,
+    pub height: u32,
+    pub has_alpha: bool,
+    pub sort_order: i64,
+    pub shown: bool,
+    pub horizontal: OverlayRect,
+    pub vertical: OverlayRect,
+    pub show_on_stream: bool,
+    pub show_in_recording: bool,
+    pub opacity: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hide_after_sec: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_every_min: Option<u32>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `banners.importImage` after main's `sourceCapability` has been resolved to
+/// a path (the same exchange `screens.importImage` makes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBannerImageParams {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BannerIdParams {
+    pub id: String,
+}
+
+/// `banners.hide`: no `id` hides every banner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HideBannerParams {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderBannersParams {
+    pub ids: Vec<String>,
+}
+
+/// `banners.update`: every field but `id` is optional and leaves the stored
+/// value alone when absent. A timer of `0` turns that timer off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBannerParams {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub horizontal: Option<OverlayRect>,
+    #[serde(default)]
+    pub vertical: Option<OverlayRect>,
+    #[serde(default)]
+    pub show_on_stream: Option<bool>,
+    #[serde(default)]
+    pub show_in_recording: Option<bool>,
+    #[serde(default)]
+    pub opacity: Option<f64>,
+    #[serde(default)]
+    pub hide_after_sec: Option<u32>,
+    #[serde(default)]
+    pub repeat_every_min: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

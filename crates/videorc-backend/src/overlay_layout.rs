@@ -21,18 +21,19 @@ pub const OVERLAY_LAYOUT_KEY: &str = "overlayLayout";
 const OVERLAY_LAYOUT_MIGRATION_KEY: &str = "overlayLayoutMigration";
 /// Smallest side a placed rect may have (canvas units).
 pub const OVERLAY_RECT_MIN_SIZE: f64 = 0.02;
-const RECT_EPSILON: f64 = 1e-6;
+pub(crate) const RECT_EPSILON: f64 = 1e-6;
 
 /// Landscape side margin: 4% of the canvas height, expressed against a 16:9
-/// width (43 px of 1920 at 1080p, the pre-plan-164 corner margin).
-const LANDSCAPE_SIDE_MARGIN: f64 = 0.04 * 9.0 / 16.0;
-const LANDSCAPE_EDGE_MARGIN: f64 = 0.04;
+/// width (43 px of 1920 at 1080p, the pre-plan-164 corner margin). The
+/// margins are shared with the banner default places (plan 186, `banners.rs`).
+pub(crate) const LANDSCAPE_SIDE_MARGIN: f64 = 0.04 * 9.0 / 16.0;
+pub(crate) const LANDSCAPE_EDGE_MARGIN: f64 = 0.04;
 /// Portrait side margin: 4% of the canvas height against a 9:16 width (77 px
 /// of 1080 on a 1080x1920 leg).
-const PORTRAIT_SIDE_MARGIN: f64 = 0.04 * 16.0 / 9.0;
+pub(crate) const PORTRAIT_SIDE_MARGIN: f64 = 0.04 * 16.0 / 9.0;
 /// Portrait platform safe area (plan 077): 8% top, 22% bottom.
-const PORTRAIT_TOP_MARGIN: f64 = 0.08;
-const PORTRAIT_BOTTOM_MARGIN: f64 = 0.22;
+pub(crate) const PORTRAIT_TOP_MARGIN: f64 = 0.08;
+pub(crate) const PORTRAIT_BOTTOM_MARGIN: f64 = 0.22;
 
 /// A normalized rect in canvas units: `x`/`w` over the width, `y`/`h` over the
 /// height.
@@ -232,7 +233,7 @@ pub fn overlay_snap_rect(
     OverlayRect::new(round6(x.max(0.0)), round6(y.max(0.0)), round6(w), round6(h))
 }
 
-fn round6(value: f64) -> f64 {
+pub(crate) fn round6(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
 }
 
