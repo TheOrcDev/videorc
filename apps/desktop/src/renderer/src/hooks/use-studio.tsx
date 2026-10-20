@@ -306,6 +306,7 @@ import type {
   CohostWindowState,
   CloudSettingsPatch,
   CloudStatus,
+  CloudTestOutput,
   BuddyOverlaySnapshot,
   CommentHighlightAnchor,
   CommentHighlightCanvases,
@@ -1656,6 +1657,12 @@ export interface StudioCloudContextValue {
    * platform; the runner keeps the legs it holds. Resolves like a start.
    */
   resumeCloudShow: () => Promise<boolean>
+  /**
+   * Test cloud (plan 184 C6b): 10 seconds of test video to a runner, with no
+   * platforms. The backend runs it on its own and reports through
+   * `cloud.state` (`CloudStatus.test`); this only starts it.
+   */
+  runCloudTest: (outputs: CloudTestOutput[]) => Promise<void>
 }
 
 const NO_CLOUD: StudioCloudContextValue = {
@@ -1663,7 +1670,8 @@ const NO_CLOUD: StudioCloudContextValue = {
   setCloudSettings: async () => {},
   refreshCloudAllowance: async () => {},
   endCloudShow: async () => {},
-  resumeCloudShow: async () => false
+  resumeCloudShow: async () => false,
+  runCloudTest: async () => {}
 }
 
 /** Which start RPC a session start sends (plan 184 C5b). */
@@ -4556,6 +4564,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
     }
   }, [client, commitCloudStatus])
+  // The result is never a toast: the Livestream row shows it (C6b). Only a
+  // refusal of the click itself reaches one, as a warning.
+  const runCloudTest = useCallback(
+    async (outputs: CloudTestOutput[]): Promise<void> => {
+      if (!client) return
+      try {
+        commitCloudStatus(await client.requestTyped('cloud.selftest.run', { outputs }))
+      } catch (error) {
+        toastUserError(error, { action: 'test', object: 'Videorc Cloud' }, { id: CLOUD_TOAST_ID })
+      }
+    },
+    [client, commitCloudStatus]
+  )
   // `cloudValue` is built after the starts below: Resume is one of them.
 
   useEffect(() => {
@@ -14287,9 +14308,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       endCloudShow,
       refreshCloudAllowance,
       resumeCloudShow,
+      runCloudTest,
       setCloudSettings
     }),
-    [cloudStatus, endCloudShow, refreshCloudAllowance, resumeCloudShow, setCloudSettings]
+    [
+      cloudStatus,
+      endCloudShow,
+      refreshCloudAllowance,
+      resumeCloudShow,
+      runCloudTest,
+      setCloudSettings
+    ]
   )
 
   const cancelGoLiveConfirmation = useCallback(() => {

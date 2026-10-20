@@ -62,13 +62,22 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   'noise-cleanup-mutation-blocked':
     'Noise cleanup is still working on this recording. Try again when it finishes.',
   'session-rename-invalid': 'A title needs 1 to 120 characters.',
-  'youtube-quota-paused': "Videorc's daily YouTube API limit is used up. Try again after it resets."
+  'youtube-quota-paused':
+    "Videorc's daily YouTube API limit is used up. Try again after it resets.",
+  // Plan 184 C6b: the Test cloud's refusals (the button is disabled for each,
+  // so these cover a click that raced a change).
+  'cloud-test-session-active': "Locked while you're recording or live.",
+  'cloud-test-show-live': 'A show is live through Videorc Cloud. End it first.',
+  'cloud-test-running': 'A Videorc Cloud test is already running.'
 }
 const WARNING_CODES = new Set([
   'command-expired-before-dispatch',
   'command-lane-full',
   'screen-import-busy',
   'command-not-applied',
+  'cloud-test-session-active',
+  'cloud-test-show-live',
+  'cloud-test-running',
   'clean-cut-mutation-blocked',
   'noise-cleanup-mutation-blocked'
 ])

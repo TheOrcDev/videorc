@@ -1,4 +1,12 @@
-import type { AiCapabilitiesCloud, CloudFallbackReason, CloudStatus } from './backend'
+import type {
+  AiCapabilitiesCloud,
+  CloudFallbackReason,
+  CloudStatus,
+  CloudTestResult,
+  CloudTestStatus,
+  CloudTestUpload
+} from './backend'
+import { formatBitrate } from './format-video'
 
 // What the renderer says about Videorc Cloud (plan 184 C4 to C7), derived
 // from the backend's `CloudStatus`. Pure, so every line of copy is a test.
@@ -151,4 +159,174 @@ export function cloudSectionState(status: CloudStatus | null): CloudSectionState
   // say so plainly rather than selling the plan it already has.
   if (status.plan) return { kind: 'unavailable' }
   return { kind: 'upsell' }
+}
+
+// --- Test cloud (C6b) ---
+
+/** The Test row's description while no test ran. */
+export const CLOUD_TEST_DESCRIPTION = 'Sends 10 seconds of test video. Nothing goes public.'
+/** The session lock, in the words of the lock Alert (docs/ui-copy.md). */
+export const CLOUD_TEST_SESSION_REASON = "Locked while you're recording or live."
+export const CLOUD_TEST_SHOW_LIVE_REASON = 'A show is live through Videorc Cloud. End it first.'
+
+const RESET_TIME = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' })
+
+/** "2:05 PM", the local time a limit frees up. */
+function formatResetTime(resetAt: string | undefined): string | null {
+  if (!resetAt) return null
+  const date = new Date(resetAt)
+  return Number.isNaN(date.getTime()) ? null : RESET_TIME.format(date)
+}
+
+/** "2.3 s": a short duration, the time the cloud took to go live. */
+function formatShortSeconds(ms: number): string {
+  return `${(Math.max(0, ms) / 1000).toFixed(1)} s`
+}
+
+/** "6.2 of 6 Mbps": what arrived against the stream quality's bitrate. */
+function uploadFigure(upload: CloudTestUpload): string {
+  const measured = formatBitrate(upload.measuredKbps ?? 0).replace(/ Mbps$/, '')
+  return `${measured} of ${formatBitrate(upload.targetKbps)}`
+}
+
+/**
+ * "Upload held 6.2 of 6 Mbps." for one stream; a dual-orientation test names
+ * both: "... for the horizontal stream and 3.1 of 3 Mbps for the vertical."
+ */
+function uploadsLine(uploads: CloudTestUpload[] | undefined, verb: 'held' | 'reached'): string {
+  const measured = (uploads ?? []).filter((upload) => upload.measuredKbps !== undefined)
+  if (measured.length === 0) return ''
+  if (measured.length === 1) return `Upload ${verb} ${uploadFigure(measured[0]!)}.`
+  const [first, ...rest] = measured
+  return `Upload ${verb} ${uploadFigure(first!)} for the ${first!.orientation} stream and ${rest
+    .map((upload) => `${uploadFigure(upload)} for the ${upload.orientation}`)
+    .join(' and ')}.`
+}
+
+/** A test is running: the button reads "Testing…" and stays disabled. */
+export function cloudTestRunning(test: CloudTestStatus | undefined): boolean {
+  return test !== undefined && test.phase !== 'done'
+}
+
+/** One line for the finished test: what works, or what to do. */
+export function cloudTestResultLine(result: CloudTestResult): string {
+  if (result.ok) {
+    const live =
+      typeof result.timeToLiveMs === 'number'
+        ? ` Live in ${formatShortSeconds(result.timeToLiveMs)}.`
+        : ''
+    // Never an unmeasured zero: a feed the cloud saw but never measured
+    // says so instead of a figure.
+    const upload =
+      uploadsLine(result.uploads, 'held') ||
+      (result.uploads?.length ? "Videorc couldn't measure the upload." : '')
+    return `Videorc Cloud works from here.${live}${upload ? ` ${upload}` : ''}`
+  }
+  const reset = formatResetTime(result.resetAt)
+  switch (result.reason) {
+    case 'too-slow': {
+      // The control above this section reads "Stream quality".
+      const upload = uploadsLine(result.uploads, 'reached')
+      return `${upload ? `Your ${upload.charAt(0).toLowerCase()}${upload.slice(1)} ` : 'Your upload fell short. '}Choose a lower stream quality or use a wired connection.`
+    }
+    case 'cant-reach':
+      return "Videorc Cloud couldn't be reached from here. Check your connection and try again."
+    case 'off':
+      return 'Videorc Cloud is off right now. Try again later.'
+    case 'full':
+      return 'Videorc Cloud is full right now. Try again in a few minutes.'
+    case 'not-entitled':
+      return CLOUD_PREMIUM_REASON
+    case 'no-hours': {
+      const day = formatCloudResetDate(result.resetAt)
+      return day
+        ? `You've used this month's cloud hours. They come back ${day}.`
+        : "You've used this month's cloud hours."
+    }
+    case 'limit':
+      return reset
+        ? `You've run this hour's tests. Try again after ${reset}.`
+        : "You've run this hour's tests. Try again in a while."
+    case 'show-live':
+      return CLOUD_TEST_SHOW_LIVE_REASON
+    case 'certificate':
+      return "Videorc Cloud's certificate couldn't be checked on this network. Try another network, or turn off apps that inspect secure connections."
+    case 'no-feed':
+      return "Videorc Cloud didn't receive the test video. This network or a firewall may block streaming. Try another network."
+    case 'failed':
+    case undefined:
+      return "Couldn't test Videorc Cloud. Try again. If it keeps happening, export a support bundle from Health."
+  }
+}
+
+/**
+ * A finished test that failed in a way the streamer acts on: the upload,
+ * this network or the run itself. A refusal (the hour's tests, the cloud off
+ * or full, a live show, the plan) is a plain line, never an error.
+ */
+function cloudTestFailed(result: CloudTestResult): boolean {
+  if (result.ok) return false
+  switch (result.reason) {
+    case 'too-slow':
+    case 'cant-reach':
+    case 'certificate':
+    case 'no-feed':
+    case 'failed':
+    case undefined:
+      return true
+    case 'off':
+    case 'full':
+    case 'not-entitled':
+    case 'no-hours':
+    case 'limit':
+    case 'show-live':
+      return false
+  }
+}
+
+/**
+ * The Test row's two lines (plan 184 C6b): the description says what the
+ * test does, the step under way or a result that works; a failure is the
+ * row's own error instead (`FieldError`: monochrome words, the error glyph).
+ * Never a toast.
+ */
+export function cloudTestRowLines(test: CloudTestStatus | undefined): {
+  description: string | null
+  error: string | null
+} {
+  const result = test?.phase === 'done' ? test.result : undefined
+  if (result && cloudTestFailed(result)) {
+    return { description: null, error: cloudTestResultLine(result) }
+  }
+  return { description: cloudTestLine(test), error: null }
+}
+
+/** The Test row's description: the step under way, the result, or what it does. */
+export function cloudTestLine(test: CloudTestStatus | undefined): string {
+  if (!test) return CLOUD_TEST_DESCRIPTION
+  switch (test.phase) {
+    case 'creating':
+    case 'connecting':
+      return 'Connecting to Videorc Cloud…'
+    case 'pushing':
+      return 'Sending 10 seconds of test video…'
+    case 'ending':
+      return 'Finishing the test…'
+    case 'done':
+      return test.result ? cloudTestResultLine(test.result) : CLOUD_TEST_DESCRIPTION
+  }
+}
+
+/**
+ * Why Test is disabled in an open section, one reason: a recording or
+ * livestream runs, or a show is live or resumable through the cloud. Null
+ * while a test may run (a running test disables the button on its own).
+ */
+export function cloudTestBlockedReason(
+  status: CloudStatus | null,
+  sessionActive: boolean
+): string | null {
+  if (sessionActive) return CLOUD_TEST_SESSION_REASON
+  if (status?.show) return CLOUD_TEST_SHOW_LIVE_REASON
+  return null
 }

@@ -1,13 +1,19 @@
 import { describe, expect, it } from 'vitest'
 
-import type { CloudStatus } from './backend'
+import type { CloudStatus, CloudTestResult } from './backend'
 import {
+  CLOUD_TEST_DESCRIPTION,
   cloudFallbackMessage,
   cloudFallbackToast,
   cloudHoursLine,
   cloudLostToast,
   cloudResumeNotice,
   cloudSectionState,
+  cloudTestBlockedReason,
+  cloudTestLine,
+  cloudTestResultLine,
+  cloudTestRowLines,
+  cloudTestRunning,
   formatCloudCountdown,
   formatCloudResetDate,
   formatHoldLimit,
@@ -130,5 +136,150 @@ describe('cloud copy (plan 184)', () => {
       kind: 'upsell'
     })
     expect(cloudSectionState(null)).toBeNull()
+  })
+})
+
+describe('Test cloud copy (plan 184 C6b)', () => {
+  const held: CloudTestResult = {
+    ok: true,
+    timeToLiveMs: 2_300,
+    uploads: [{ orientation: 'horizontal', targetKbps: 6000, measuredKbps: 6160 }]
+  }
+
+  it('says the step under way, then the result, else what the test does', () => {
+    expect(cloudTestLine(undefined)).toBe(CLOUD_TEST_DESCRIPTION)
+    expect(cloudTestLine({ phase: 'creating', startedAt: 't' })).toBe(
+      'Connecting to Videorc Cloud…'
+    )
+    expect(cloudTestLine({ phase: 'connecting', startedAt: 't' })).toBe(
+      'Connecting to Videorc Cloud…'
+    )
+    expect(cloudTestLine({ phase: 'pushing', startedAt: 't' })).toBe(
+      'Sending 10 seconds of test video…'
+    )
+    expect(cloudTestLine({ phase: 'ending', startedAt: 't' })).toBe('Finishing the test…')
+    expect(cloudTestLine({ phase: 'done', startedAt: 't', result: held })).toBe(
+      'Videorc Cloud works from here. Live in 2.3 s. Upload held 6.2 of 6 Mbps.'
+    )
+    expect(cloudTestLine({ phase: 'done', startedAt: 't' })).toBe(CLOUD_TEST_DESCRIPTION)
+    expect(cloudTestRunning(undefined)).toBe(false)
+    expect(cloudTestRunning({ phase: 'pushing', startedAt: 't' })).toBe(true)
+    expect(cloudTestRunning({ phase: 'done', startedAt: 't', result: held })).toBe(false)
+  })
+
+  it('names both streams of a dual-orientation test', () => {
+    expect(
+      cloudTestResultLine({
+        ...held,
+        uploads: [
+          { orientation: 'horizontal', targetKbps: 6000, measuredKbps: 6160 },
+          { orientation: 'vertical', targetKbps: 3000, measuredKbps: 3100 }
+        ]
+      })
+    ).toBe(
+      'Videorc Cloud works from here. Live in 2.3 s. Upload held 6.2 of 6 Mbps for the horizontal stream and 3.1 of 3 Mbps for the vertical.'
+    )
+  })
+
+  it('tells a slow upload what it reached and what to do', () => {
+    expect(
+      cloudTestResultLine({
+        ok: false,
+        reason: 'too-slow',
+        timeToLiveMs: 2_100,
+        uploads: [{ orientation: 'horizontal', targetKbps: 6000, measuredKbps: 2100 }]
+      })
+    ).toBe(
+      'Your upload reached 2.1 of 6 Mbps. Choose a lower stream quality or use a wired connection.'
+    )
+    expect(cloudTestResultLine({ ok: false, reason: 'too-slow' })).toBe(
+      'Your upload fell short. Choose a lower stream quality or use a wired connection.'
+    )
+  })
+
+  it('says when the upload went unmeasured instead of showing a zero', () => {
+    expect(
+      cloudTestResultLine({
+        ok: true,
+        timeToLiveMs: 2_300,
+        uploads: [{ orientation: 'horizontal', targetKbps: 6000 }]
+      })
+    ).toBe("Videorc Cloud works from here. Live in 2.3 s. Videorc couldn't measure the upload.")
+    expect(cloudTestResultLine({ ok: true, timeToLiveMs: 2_300 })).toBe(
+      'Videorc Cloud works from here. Live in 2.3 s.'
+    )
+  })
+
+  it('words every other reason plainly, with the limit and the hours reset', () => {
+    const line = (reason: CloudTestResult['reason'], resetAt?: string) =>
+      cloudTestResultLine({ ok: false, reason, resetAt })
+    expect(line('cant-reach')).toBe(
+      "Videorc Cloud couldn't be reached from here. Check your connection and try again."
+    )
+    expect(line('off')).toBe('Videorc Cloud is off right now. Try again later.')
+    expect(line('full')).toBe('Videorc Cloud is full right now. Try again in a few minutes.')
+    expect(line('not-entitled')).toBe('Videorc Cloud is part of Videorc Premium.')
+    expect(line('no-hours', '2026-11-01T00:00:00.000Z')).toBe(
+      "You've used this month's cloud hours. They come back Nov 1."
+    )
+    expect(line('no-hours')).toBe("You've used this month's cloud hours.")
+    expect(line('limit', '2026-10-17T13:05:00.000Z')).toMatch(
+      /^You've run this hour's tests\. Try again after \d{1,2}:\d{2} (AM|PM)\.$/
+    )
+    expect(line('limit')).toBe("You've run this hour's tests. Try again in a while.")
+    expect(line('show-live')).toBe('A show is live through Videorc Cloud. End it first.')
+    expect(line('certificate')).toBe(
+      "Videorc Cloud's certificate couldn't be checked on this network. Try another network, or turn off apps that inspect secure connections."
+    )
+    expect(line('no-feed')).toBe(
+      "Videorc Cloud didn't receive the test video. This network or a firewall may block streaming. Try another network."
+    )
+    expect(line('failed')).toBe(
+      "Couldn't test Videorc Cloud. Try again. If it keeps happening, export a support bundle from Health."
+    )
+    expect(line(undefined)).toBe(line('failed'))
+  })
+
+  it('makes a failure the row error and keeps a refusal or a pass in the description', () => {
+    const done = (result: CloudTestResult) =>
+      cloudTestRowLines({ phase: 'done', startedAt: 't', result })
+    expect(cloudTestRowLines(undefined)).toEqual({
+      description: CLOUD_TEST_DESCRIPTION,
+      error: null
+    })
+    expect(cloudTestRowLines({ phase: 'pushing', startedAt: 't' })).toEqual({
+      description: 'Sending 10 seconds of test video…',
+      error: null
+    })
+    expect(done(held).error).toBeNull()
+    for (const reason of ['too-slow', 'cant-reach', 'certificate', 'no-feed', 'failed'] as const) {
+      const lines = done({ ok: false, reason })
+      expect(lines.description).toBeNull()
+      expect(lines.error).toBe(cloudTestResultLine({ ok: false, reason }))
+    }
+    for (const reason of [
+      'off',
+      'full',
+      'not-entitled',
+      'no-hours',
+      'limit',
+      'show-live'
+    ] as const) {
+      const lines = done({ ok: false, reason })
+      expect(lines.error).toBeNull()
+      expect(lines.description).toBe(cloudTestResultLine({ ok: false, reason }))
+    }
+  })
+
+  it('blocks Test with one reason while a session or a cloud show runs', () => {
+    expect(cloudTestBlockedReason(status(), false)).toBeNull()
+    expect(cloudTestBlockedReason(null, false)).toBeNull()
+    expect(cloudTestBlockedReason(status(), true)).toBe("Locked while you're recording or live.")
+    expect(
+      cloudTestBlockedReason(
+        status({ show: { id: 'sh_1', nodeId: 'eu-hel-1', resumable: true } }),
+        false
+      )
+    ).toBe('A show is live through Videorc Cloud. End it first.')
   })
 })

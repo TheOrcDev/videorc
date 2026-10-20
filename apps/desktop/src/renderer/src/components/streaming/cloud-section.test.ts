@@ -22,9 +22,11 @@ const studio = vi.hoisted(() => ({
     cloudStatus: null as CloudStatus | null,
     setCloudSettings: vi.fn(async () => {}),
     refreshCloudAllowance: vi.fn(async () => {}),
-    endCloudShow: vi.fn(async () => {})
+    endCloudShow: vi.fn(async () => {}),
+    runCloudTest: vi.fn(async () => {})
   },
   core: {
+    captureConfig: null as unknown,
     isSessionActive: false,
     screens: [{ id: 'screen-1', name: 'Starting soon' }]
   }
@@ -33,6 +35,12 @@ const studio = vi.hoisted(() => ({
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCloud: () => studio.cloud,
   useStudioCore: () => studio.core
+}))
+
+vi.mock('@/lib/cloud-test-outputs', () => ({
+  cloudTestOutputs: () => [
+    { orientation: 'horizontal', width: 1920, height: 1080, fps: 60, videoKbps: 6000 }
+  ]
 }))
 
 function status(overrides: Partial<CloudStatus> = {}): CloudStatus {
@@ -63,6 +71,15 @@ function renderSection(next: CloudStatus | null, sessionActive = false): string 
 
 function switchMarkup(html: string): string {
   return html.match(/<button[^>]*role="switch"[^>]*>/)?.[0] ?? ''
+}
+
+function testButton(html: string): string {
+  return html.match(/<button[^>]*data-testid="cloud-test-run"[\s\S]*?<\/button>/)?.[0] ?? ''
+}
+
+/** The Test row, from its field to the button that closes it. */
+function testRow(html: string): string {
+  return html.match(/data-testid="cloud-test"[\s\S]*?data-testid="cloud-test-run"/)?.[0] ?? ''
 }
 
 function checkedHold(html: string): string | undefined {
@@ -118,6 +135,87 @@ describe('Videorc Cloud section (plan 184 C6)', () => {
     const html = renderSection(status(), true)
     expect(switchMarkup(html)).toContain('disabled=""')
     expect(html).toContain('aria-disabled="true"')
+  })
+
+  // C6b: Test Videorc Cloud, a row of the open section.
+  it('offers Test with what it does, and locks it with the section', () => {
+    const html = renderSection(status())
+    expect(html).toContain('Test Videorc Cloud')
+    expect(html).toContain('Sends 10 seconds of test video. Nothing goes public.')
+    expect(testButton(html)).toContain('>Test')
+    expect(testButton(html)).not.toContain('disabled=""')
+
+    const locked = renderSection(status({ entitled: false, plan: undefined }))
+    expect(testButton(locked)).toContain('disabled=""')
+    // The LockAlert leads the locked section; the button needs no tooltip.
+    expect(locked).not.toContain('Locked while you&#x27;re recording or live.')
+  })
+
+  it('disables Test with one reason while a session or a cloud show runs', () => {
+    const recording = renderSection(status(), true)
+    expect(testButton(recording)).toContain('disabled=""')
+    expect(recording).toContain('Locked while you&#x27;re recording or live.')
+
+    const live = renderSection(
+      status({ phase: 'hold', show: { id: 'sh_1', nodeId: 'eu-hel-1', resumable: true } })
+    )
+    expect(testButton(live)).toContain('disabled=""')
+    expect(live).toContain('A show is live through Videorc Cloud. End it first.')
+  })
+
+  it('reads Testing… while a test runs and shows the result in the row', () => {
+    const running = renderSection(
+      status({ test: { phase: 'pushing', startedAt: '2026-10-17T12:00:00.000Z' } })
+    )
+    expect(testButton(running)).toContain('Testing…')
+    expect(testButton(running)).toContain('disabled=""')
+    // The busy button's spinner stays silent beside its own words.
+    expect(testButton(running)).toMatch(/data-slot="spinner"[^>]*aria-hidden="true"/)
+    expect(running).toContain('Sending 10 seconds of test video…')
+
+    const done = renderSection(
+      status({
+        test: {
+          phase: 'done',
+          startedAt: '2026-10-17T12:00:00.000Z',
+          result: {
+            ok: true,
+            timeToLiveMs: 2_300,
+            uploads: [{ orientation: 'horizontal', targetKbps: 6000, measuredKbps: 6160 }]
+          }
+        }
+      })
+    )
+    expect(testButton(done)).toContain('>Test')
+    expect(testButton(done)).not.toContain('disabled=""')
+    expect(done).toContain(
+      'Videorc Cloud works from here. Live in 2.3 s. Upload held 6.2 of 6 Mbps.'
+    )
+    expect(testRow(done)).not.toContain('data-slot="field-error"')
+    // No success toast: the row is the confirmation.
+    expect(done).not.toContain('role="status" data-variant')
+  })
+
+  it('shows a failure as the row error and a refusal as a plain line', () => {
+    const done = (result: NonNullable<CloudStatus['test']>['result']) =>
+      renderSection(status({ test: { phase: 'done', startedAt: '2026-10-17T12:00:00Z', result } }))
+    const slow = testRow(
+      done({
+        ok: false,
+        reason: 'too-slow',
+        timeToLiveMs: 2_100,
+        uploads: [{ orientation: 'horizontal', targetKbps: 6000, measuredKbps: 2100 }]
+      })
+    )
+    expect(slow).toMatch(/data-slot="field-error"[\s\S]*Your upload reached 2.1 of 6 Mbps\./)
+    // The error replaces the description; the button stays a plain Test.
+    expect(slow).not.toContain('Sends 10 seconds of test video.')
+
+    const limited = testRow(
+      done({ ok: false, reason: 'limit', resetAt: '2026-10-17T13:05:00.000Z' })
+    )
+    expect(limited).toContain('You&#x27;ve run this hour&#x27;s tests.')
+    expect(limited).not.toContain('data-slot="field-error"')
   })
 })
 

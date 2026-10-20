@@ -2,6 +2,8 @@ import { useEffect, type ReactElement } from 'react'
 
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
+import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Field, FieldDescription, FieldGroup, FieldLabel, SettingsRow } from '@/components/ui/field'
 import {
   Select,
@@ -11,19 +13,27 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { SegmentedControl } from '@/components/ui/segmented-control'
+import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
+import { cloudTestOutputs } from '@/lib/cloud-test-outputs'
 import {
   CLOUD_NOT_YET_REASON,
   CLOUD_PREMIUM_REASON,
   cloudSectionState,
+  cloudTestBlockedReason,
+  cloudTestRowLines,
+  cloudTestRunning,
   formatHoldLimit
 } from '@/lib/cloud-view'
 import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
 
 // The Livestream page's Videorc Cloud section (plan 184 C6). Stream settings
 // live on this page, so the cloud's do too: the switch, the month's hours,
-// what viewers see if this computer drops, and for how long. Go Live itself
+// what viewers see if this computer drops, and for how long, plus Test
+// Videorc Cloud (C6b): 10 seconds of test video to a runner, with no
+// platforms, so you learn before the show whether the cloud works from here
+// and whether the upload keeps up with the stream quality. Go Live itself
 // never grows a control (D11): with the switch on it goes through the cloud.
 // Locked means disabled with one reason: the plan's lock leads this section,
 // and a running session's is the page's own SessionLockAlert.
@@ -31,8 +41,8 @@ import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
 const BRB_CARD = 'default'
 
 export function CloudSection(): ReactElement | null {
-  const { cloudStatus, refreshCloudAllowance, setCloudSettings } = useStudioCloud()
-  const { isSessionActive, screens } = useStudioCore()
+  const { cloudStatus, refreshCloudAllowance, runCloudTest, setCloudSettings } = useStudioCloud()
+  const { captureConfig, isSessionActive, screens } = useStudioCore()
   const section = cloudSectionState(cloudStatus)
   const kind = section?.kind
 
@@ -52,6 +62,12 @@ export function CloudSection(): ReactElement | null {
   // folds the hold choices away while the switch is off.
   const enabled = available && settings.enabled
   const showHold = !available || settings.enabled
+  // The Test row: locked with the section (the LockAlert says why), else one
+  // reason while a recording, a livestream or a cloud show runs. The result
+  // takes the row's description, or its error when it failed; never a toast.
+  const testRunning = cloudTestRunning(cloudStatus.test)
+  const testBlocked = available ? cloudTestBlockedReason(cloudStatus, isSessionActive) : null
+  const testLines = cloudTestRowLines(cloudStatus.test)
   return (
     <PanelSection
       description="Your stream stays on air if this computer drops."
@@ -76,6 +92,30 @@ export function CloudSection(): ReactElement | null {
             disabled={disabled}
             onCheckedChange={(next) => void setCloudSettings({ enabled: next })}
           />
+        </SettingsRow>
+        <SettingsRow
+          data-testid="cloud-test"
+          description={testLines.description}
+          error={testLines.error}
+          label="Test Videorc Cloud"
+        >
+          <DisabledReason reason={testBlocked}>
+            <Button
+              data-testid="cloud-test-run"
+              disabled={disabled || testRunning || testBlocked !== null}
+              variant="outline"
+              onClick={() => void runCloudTest(cloudTestOutputs(captureConfig))}
+            >
+              {testRunning ? (
+                <>
+                  <Spinner aria-hidden data-icon="inline-start" />
+                  Testing…
+                </>
+              ) : (
+                'Test'
+              )}
+            </Button>
+          </DisabledReason>
         </SettingsRow>
       </FieldGroup>
       {showHold ? (
