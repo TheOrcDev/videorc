@@ -500,7 +500,9 @@ describe('shipping phone remote banners (plan 186 S7)', () => {
   }
 
   it('lists banners by name, shows or hides each by id, and follows describe after state', async () => {
-    expect(page.document.getElementById('banners-label')!.hidden).toBe(true)
+    expect((page.document.getElementById('banners-label') as unknown as HTMLElement).hidden).toBe(
+      true
+    )
     remote.banners = [
       { id: 'sponsor', name: 'Sponsor', shown: true },
       { id: 'follow', name: 'Follow me', shown: false }
@@ -510,7 +512,9 @@ describe('shipping phone remote banners (plan 186 S7)', () => {
     stateUpdate({})
     await settle()
     expect(remote.describeCalls).toBeGreaterThan(before)
-    expect(page.document.getElementById('banners-label')!.hidden).toBe(false)
+    expect((page.document.getElementById('banners-label') as unknown as HTMLElement).hidden).toBe(
+      false
+    )
     expect(bannerKeys()).toEqual([
       { name: 'Sponsor', hint: 'Showing. Tap to hide', pressed: 'true' },
       { name: 'Follow me', hint: null, pressed: 'false' }
