@@ -108,7 +108,22 @@ describe('userErrorMessage', () => {
   it('keeps a renderer-written reason, and an unmapped code stays generic', () => {
     expect(
       userErrorMessage(new UserFacingError('The selected output folder is unavailable.'), IMPORT)
-    ).toMatchObject({ kind: 'known', description: 'The selected output folder is unavailable.' })
+    ).toMatchObject({
+      kind: 'known',
+      tone: 'error',
+      description: 'The selected output folder is unavailable.'
+    })
+    // A refusal the renderer recognized keeps its sentence, as a warning (plan 186).
+    expect(
+      userErrorMessage(
+        new UserFacingError('Hide this banner before you delete it.', 'warning'),
+        IMPORT
+      )
+    ).toMatchObject({
+      kind: 'known',
+      tone: 'warning',
+      description: 'Hide this banner before you delete it.'
+    })
     expect(
       userErrorMessage(backendError('session-duplicate-failed', 'io error: disk full'), IMPORT)
         .description

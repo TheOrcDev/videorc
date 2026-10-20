@@ -33,6 +33,10 @@ export const AUXILIARY_API_KEYS = {
     'onMarkerContext',
     'markerFromCommentsWindow',
     'markClipFromCommentsWindow',
+    // Banners (plan 186 S7): read the list, ask for a show or hide; never push.
+    'getCommentsBanners',
+    'onCommentsBanners',
+    'bannerFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
     // Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5).

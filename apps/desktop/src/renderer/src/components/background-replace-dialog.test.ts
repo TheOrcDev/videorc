@@ -24,6 +24,7 @@ const mocked = vi.hoisted(() => ({
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
 vi.mock('@/lib/toast', () => ({ toast: mocked.toast }))
 vi.mock('@/components/takeover-screens-section', () => ({ TakeoverScreensSection: () => null }))
+vi.mock('@/components/banners-section', () => ({ BannersSection: () => null }))
 
 const imported = createImportedAsset({
   id: 'imported-1',

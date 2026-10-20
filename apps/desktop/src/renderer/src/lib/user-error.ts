@@ -24,9 +24,20 @@ export class VideorcOfflineError extends Error {
   }
 }
 
-/** A renderer-written reason that already reads as copy; shown as is. */
+/**
+ * A reason that already reads as copy; shown as is. A refusal ("can't now",
+ * like a backend sentence the renderer recognized) passes `warning`: it is
+ * never an error (plan 174 S2.4).
+ */
 export class UserFacingError extends Error {
   readonly name = 'UserFacingError'
+
+  constructor(
+    message: string,
+    readonly tone: 'error' | 'warning' = 'error'
+  ) {
+    super(message)
+  }
 }
 
 /** The rejection for a call made while Videorc's engine is down. */
@@ -134,7 +145,9 @@ export function userErrorMessage(error: unknown, context?: UserErrorContext): Us
   if (name === 'VideorcOfflineError' || OFFLINE_RAW.some((pattern) => pattern.test(raw))) {
     return shape('offline', OFFLINE_REASON, 'warning', true)
   }
-  if (name === 'UserFacingError' && raw) return shape('known', raw, 'error')
+  if (name === 'UserFacingError' && raw) {
+    return shape('known', raw, (error as UserFacingError).tone === 'warning' ? 'warning' : 'error')
+  }
   if (code && KNOWN_CODES[code]) {
     return shape('known', KNOWN_CODES[code], WARNING_CODES.has(code) ? 'warning' : 'error')
   }

@@ -35,6 +35,7 @@ function remoteIntentContext(overrides: Partial<RemoteIntentContext> = {}) {
     showCommentHighlight: vi.fn(async () => ({ ok: true })),
     clearCommentHighlight: vi.fn(async () => ({ ok: true })),
     markClip: vi.fn(async () => ({ ok: true })),
+    banners: [],
     ...overrides
   }
   return { context, requests }
@@ -471,7 +472,8 @@ describe('RemoteSurfacePublisher', () => {
     ['screen-camera'],
     [],
     systemAudioStatus,
-    systemAudioShown
+    systemAudioShown,
+    []
   ]
 
   it('projects system audio as two booleans, masked while the device cannot run', async () => {
@@ -561,7 +563,8 @@ describe('remoteLayoutLabels (plan 174 I-14)', () => {
         ['screen-camera', 'camera-only'],
         [{ id: 'brb', name: 'Be right back' }],
         undefined,
-        false
+        false,
+        []
       ])
       await vi.runAllTimersAsync()
       const [{ describe: described }] = published as Array<{
@@ -571,6 +574,154 @@ describe('remoteLayoutLabels (plan 174 I-14)', () => {
         'screen-camera': 'Screen + camera',
         'camera-only': 'Camera only'
       })
+      publisher.detach()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('banner intents (plan 186 S7)', () => {
+  const banners = [
+    { id: 'sponsor', name: 'Sponsor', shown: true },
+    { id: 'follow', name: 'Follow me', shown: false }
+  ]
+  const acks = (requests: Array<{ method: string; params: unknown }>) =>
+    requests.filter(({ method }) => method === 'remote.intent.ack').map(({ params }) => params)
+  const calls = (requests: Array<{ method: string; params: unknown }>) =>
+    requests
+      .filter(({ method }) => method.startsWith('banners.'))
+      .map(({ method, params }) => [method, params])
+
+  it('shows, hides and toggles by id through the explicit backend calls', async () => {
+    const { context, requests } = remoteIntentContext({ banners })
+    for (const [intentId, intent] of [
+      ['b-1', { kind: 'bannerShow', bannerId: 'follow' }],
+      ['b-2', { kind: 'bannerHide', bannerId: 'sponsor' }],
+      // A toggle picks its verb from the state the remotes are shown.
+      ['b-3', { kind: 'bannerToggle', bannerId: 'sponsor' }],
+      ['b-4', { kind: 'bannerToggle', bannerId: 'follow' }],
+      // Without an id, hide hides them all.
+      ['b-5', { kind: 'bannerHide' }]
+    ] as const) {
+      await executeRemoteIntent({ intentId, intent }, context)
+    }
+    expect(calls(requests)).toEqual([
+      ['banners.show', { id: 'follow' }],
+      ['banners.hide', { id: 'sponsor' }],
+      ['banners.hide', { id: 'sponsor' }],
+      ['banners.show', { id: 'follow' }],
+      ['banners.hide', {}]
+    ])
+    expect(acks(requests)).toEqual(
+      ['b-1', 'b-2', 'b-3', 'b-4', 'b-5'].map((intentId) => ({ intentId, ok: true }))
+    )
+  })
+
+  it('refuses a banner the list no longer has without calling the backend', async () => {
+    const { context, requests } = remoteIntentContext({ banners })
+    for (const [intentId, intent] of [
+      ['gone-1', { kind: 'bannerShow', bannerId: 'deleted' }],
+      ['gone-2', { kind: 'bannerToggle', bannerId: 'deleted' }],
+      ['gone-3', { kind: 'bannerHide', bannerId: 'deleted' }],
+      ['gone-4', { kind: 'bannerShow' }]
+    ] as const) {
+      await executeRemoteIntent({ intentId, intent }, context)
+    }
+    expect(calls(requests)).toEqual([])
+    expect(acks(requests)).toEqual(
+      ['gone-1', 'gone-2', 'gone-3', 'gone-4'].map((intentId) => ({
+        intentId,
+        ok: false,
+        message: "That banner isn't available anymore."
+      }))
+    )
+  })
+
+  it("relays the backend's refusal verbatim and says plainly when anything else fails", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const sent: Array<{ method: string; params: unknown }> = []
+    const failing = (error: Error): RemoteIntentContext['client'] => ({
+      request: async (method, params) => {
+        sent.push({ method, params })
+        if (method.startsWith('banners.')) throw error
+        return undefined as never
+      }
+    })
+    const refused = remoteIntentContext({
+      banners,
+      client: failing(new Error('Four banners are showing. Hide one first.'))
+    })
+    await executeRemoteIntent(
+      { intentId: 'full', intent: { kind: 'bannerShow', bannerId: 'follow' } },
+      refused.context
+    )
+    const broken = remoteIntentContext({ banners, client: failing(new Error('socket closed')) })
+    await executeRemoteIntent(
+      { intentId: 'show-broken', intent: { kind: 'bannerShow', bannerId: 'follow' } },
+      broken.context
+    )
+    await executeRemoteIntent(
+      { intentId: 'hide-broken', intent: { kind: 'bannerToggle', bannerId: 'sponsor' } },
+      broken.context
+    )
+    await executeRemoteIntent(
+      { intentId: 'all-broken', intent: { kind: 'bannerHide' } },
+      broken.context
+    )
+    expect(acks(sent)).toEqual([
+      { intentId: 'full', ok: false, message: 'Four banners are showing. Hide one first.' },
+      { intentId: 'show-broken', ok: false, message: "Couldn't show the banner." },
+      { intentId: 'hide-broken', ok: false, message: "Couldn't hide the banner." },
+      { intentId: 'all-broken', ok: false, message: "Couldn't hide the banners." }
+    ])
+    vi.mocked(console.warn).mockRestore()
+  })
+
+  it('describes banners as id, name and shown only, never a file or a place', async () => {
+    vi.useFakeTimers()
+    try {
+      const published: unknown[] = []
+      const publisher = new RemoteSurfacePublisher()
+      publisher.attach({
+        request: async (_method, params) => {
+          published.push(params)
+          return undefined as never
+        }
+      })
+      publisher.markConnected()
+      // Studio hands over its whole banner list; describe keeps three fields.
+      const full = {
+        id: 'sponsor',
+        name: 'Sponsor',
+        shown: true,
+        imageFile: 'sponsor.png',
+        thumbnailFile: 'sponsor.thumb.png',
+        horizontal: { x: 0, y: 0, w: 1, h: 1 }
+      }
+      publisher.syncValues([
+        'idle',
+        false,
+        true,
+        false,
+        false,
+        'screen-camera',
+        null,
+        false,
+        false,
+        false,
+        ['screen-camera'],
+        [],
+        undefined,
+        false,
+        [full]
+      ])
+      await vi.runAllTimersAsync()
+      const [{ describe: described }] = published as Array<{
+        describe: { banners: unknown }
+      }>
+      expect(described.banners).toEqual([{ id: 'sponsor', name: 'Sponsor', shown: true }])
+      expect(JSON.stringify(published)).not.toMatch(/\.png|horizontal/)
       publisher.detach()
     } finally {
       vi.useRealTimers()

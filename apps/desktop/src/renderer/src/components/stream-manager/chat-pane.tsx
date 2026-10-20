@@ -16,6 +16,12 @@ import {
 } from 'react'
 
 import { classifyComposerDraft, markerTime } from '../../../../shared/session-markers'
+import {
+  bannerCompletions,
+  type BannerRelayAction,
+  type BannerSummary,
+  type ComposerCompletion
+} from '../../../../shared/banner-commands'
 import type { MarkerContext, SessionMarker } from '@/lib/backend'
 import { Command, CommandItem, CommandList } from '@/components/ui/command'
 import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platform-icon'
@@ -126,6 +132,8 @@ export function ChatPane({
   markerContext,
   onMarker,
   onUndoMarker,
+  banners,
+  onBanner,
   prefill = null,
   cohostNudge = false,
   onCohostNudgeTurnOn,
@@ -166,6 +174,9 @@ export function ChatPane({
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
+  /** Plan 186 S7: the banners `/banner` reads, and its show or hide. */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => Promise<boolean>
   onSend?: (text: string, options?: ChatSendOptions) => void
   prefill?: ChatPrefill | null
   cohostNudge?: boolean
@@ -688,6 +699,8 @@ export function ChatPane({
           markerContext={markerContext}
           onMarker={onMarker}
           onUndoMarker={onUndoMarker}
+          banners={banners}
+          onBanner={onBanner}
           cohostNudge={cohostNudge}
           failures={sendFailures}
           focusSignal={composerFocusSignal + composerFocus}
@@ -704,6 +717,13 @@ export function ChatPane({
   )
 }
 
+/** The composer's own commands, in the order the completion list offers them. */
+const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
+  { value: '/marker', hint: ' [title] · Save a timeline point' },
+  { value: '/banner', hint: ' [name] · Show or hide a banner' },
+  { value: '/help', hint: ' · Command help' }
+]
+
 export function Composer({
   providers,
   pending,
@@ -717,11 +737,20 @@ export function Composer({
   onSend,
   markerContext,
   onMarker,
-  onUndoMarker
+  onUndoMarker,
+  banners,
+  onBanner
 }: {
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
+  /**
+   * Plan 186 S7: `/banner <name>` shows or hides one of these, `/banner off`
+   * hides them all. Resolves false when it didn't happen; the window has
+   * said why. Never posts to chat.
+   */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => Promise<boolean>
   providers: readonly LiveChatProviderState[]
   pending: boolean
   failures: ChatSendFailure[]
@@ -770,21 +799,32 @@ export function Composer({
   const targetPlatforms = [...new Set(targets.map((provider) => provider.platform))]
   // The draft must fit the STRICTEST destination it reaches (140 with X).
   const maxChars = chatDraftMaxChars(targetPlatforms)
-  const command = classifyComposerDraft(draft)
+  const bannerList = onBanner ? (banners ?? []) : null
+  const command = classifyComposerDraft(draft, bannerList ?? [])
   const local = command.kind !== 'chat'
   const canSend = local
     ? !localPending &&
       (command.kind !== 'marker' ||
         Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker))
     : targets.length > 0 && !pending
-  const completions = ['/marker', '/help'].filter(
-    (value) =>
-      draft.startsWith('/') && !draft.includes(' ') && value.startsWith(draft.toLowerCase())
-  )
+  // Under `/banner`, the banner names (plan 186); otherwise the commands.
+  const completions: readonly ComposerCompletion[] =
+    (bannerList && bannerCompletions(draft, bannerList)) ??
+    COMPOSER_COMMANDS.filter(
+      (entry) =>
+        draft.startsWith('/') &&
+        !draft.includes(' ') &&
+        (bannerList || entry.value !== '/banner') &&
+        entry.value.startsWith(draft.toLowerCase())
+    )
   const showCompletions = completions.length > 0 && !completionDismissed
+  const selectedCompletion = completions[completionIndex] ?? completions[0]
   const complete = (value: string): void => {
-    setDraft(value + (value === '/marker' ? ' ' : ''))
-    setCompletionDismissed(true)
+    const takesArgument = value === '/marker' || value === '/banner'
+    setDraft(value + (takesArgument ? ' ' : ''))
+    // `/banner` goes straight on to the banner names (plan 186).
+    setCompletionDismissed(value !== '/banner')
+    setCompletionIndex(0)
     inputRef.current?.focus()
   }
 
@@ -833,8 +873,25 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        '/marker [title] saves a point on this recording or livestream. // sends a literal slash to chat. Markers are in Library → Session actions → Markers.'
+        `/marker [title] saves a point on this recording or livestream.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
+      return
+    }
+    if (command.kind === 'banner') {
+      if (!onBanner) return
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(null)
+      // The picture is the confirmation; a refusal is the window's toast.
+      void onBanner(command.action)
+        .then((done) => {
+          if (done && draftRef.current === submitted) setDraft('')
+        })
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
       return
     }
     if (command.kind === 'marker') {
@@ -979,10 +1036,11 @@ export function Composer({
               if (
                 showCompletions &&
                 (event.key === 'Tab' ||
-                  (event.key === 'Enter' && draft !== completions[completionIndex]))
+                  (event.key === 'Enter' &&
+                    draft.trim().toLowerCase() !== selectedCompletion.value.toLowerCase()))
               ) {
                 event.preventDefault()
-                complete(completions[completionIndex] ?? completions[0])
+                complete(selectedCompletion.value)
                 return
               }
               if (event.key === 'Enter') {
@@ -1038,15 +1096,15 @@ export function Composer({
         {showCompletions ? (
           <Command
             shouldFilter={false}
-            value={completions[completionIndex]}
+            value={selectedCompletion.value}
             className="mt-1"
             aria-label="Local commands"
           >
             <CommandList>
-              {completions.map((value) => (
+              {completions.map(({ value, hint }) => (
                 <CommandItem key={value} value={value} onSelect={() => complete(value)}>
                   {value}
-                  {value === '/marker' ? ' [title] · Save a timeline point' : ' · Command help'}
+                  {hint}
                 </CommandItem>
               ))}
             </CommandList>

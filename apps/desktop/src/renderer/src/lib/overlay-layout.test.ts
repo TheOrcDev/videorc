@@ -17,6 +17,11 @@ import {
   overlayStartNotices,
   type OverlayAuxLeg
 } from './overlay-layout'
+import {
+  START_NOTICE_LABELS,
+  bannerStartNotices,
+  overlayAndBannerStartNotices
+} from './banner-start-notices'
 
 const fixtures = JSON.parse(
   readFileSync(
@@ -227,5 +232,72 @@ describe('overlay start notices (D13)', () => {
     expect(overlayItemOutputBadge(layout.highlight)).toBe('stream only')
     expect(overlayItemOutputBadge(layout.buddy)).toBe('recording only')
     expect(overlayItemOutputBadge(DEFAULT_OVERLAY_LAYOUT.buddy)).toBeNull()
+  })
+})
+
+describe('banner start notices (plan 186, D13 with the label `banners`)', () => {
+  const SHARED =
+    'Both the stream and the recording will include banners: this computer shares one encode for them.'
+  const RECORDING = 'Recording will include banners while streaming vertical.'
+  const HORIZONTAL = 'The horizontal stream will include banners while streaming vertical.'
+  const banner = (shown: boolean, showOnStream: boolean, showInRecording: boolean) => ({
+    shown,
+    showOnStream,
+    showInRecording
+  })
+  const both = { recordEnabled: true, streamEnabled: true }
+  const streamOnly = banner(true, true, false)
+  const recordingOnly = banner(true, false, true)
+
+  it('pins the three sentences byte for byte (the Rust twin builds the same)', () => {
+    expect(bannerStartNotices({ ...both, auxLeg: 'none' }, [streamOnly])).toStrictEqual([
+      { item: 'banners', notice: SHARED }
+    ])
+    expect(
+      bannerStartNotices({ ...both, auxLeg: 'vertical-simulcast' }, [streamOnly])
+    ).toStrictEqual([{ item: 'banners', notice: RECORDING }])
+    expect(
+      bannerStartNotices({ ...both, auxLeg: 'vertical-simulcast' }, [recordingOnly])
+    ).toStrictEqual([{ item: 'banners', notice: HORIZONTAL }])
+    expect(START_NOTICE_LABELS.banners).toBe('Banners')
+  })
+
+  it('says each sentence once, however many showing banners need it', () => {
+    expect(
+      bannerStartNotices({ ...both, auxLeg: 'none' }, [streamOnly, recordingOnly, streamOnly])
+    ).toStrictEqual([{ item: 'banners', notice: SHARED }])
+    expect(
+      bannerStartNotices({ ...both, auxLeg: 'vertical-simulcast' }, [
+        recordingOnly,
+        streamOnly,
+        streamOnly
+      ]).map((notice) => notice.notice)
+    ).toStrictEqual([RECORDING, HORIZONTAL])
+  })
+
+  it('needs no sentence for hidden banners, agreeing switches, a split leg or one output', () => {
+    const hidden = banner(false, true, false)
+    const agreeing = [banner(true, true, true), banner(true, false, false)]
+    expect(bannerStartNotices({ ...both, auxLeg: 'none' }, [hidden, ...agreeing])).toStrictEqual([])
+    expect(bannerStartNotices({ ...both, auxLeg: 'stream' }, [streamOnly])).toStrictEqual([])
+    expect(
+      bannerStartNotices({ recordEnabled: false, streamEnabled: true, auxLeg: 'none' }, [
+        streamOnly
+      ])
+    ).toStrictEqual([])
+    expect(
+      bannerStartNotices({ recordEnabled: true, streamEnabled: false, auxLeg: 'none' }, [
+        recordingOnly
+      ])
+    ).toStrictEqual([])
+  })
+
+  it('follows the overlay items in the Go Live sheet', () => {
+    const layout = withSwitches(DEFAULT_OVERLAY_LAYOUT, 'highlight', true, false)
+    expect(
+      overlayAndBannerStartNotices({ ...both, auxLeg: 'none' }, layout, [recordingOnly]).map(
+        (notice) => notice.item
+      )
+    ).toStrictEqual(['highlight', 'banners'])
   })
 })
