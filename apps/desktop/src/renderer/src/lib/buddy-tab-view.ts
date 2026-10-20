@@ -281,6 +281,16 @@ export const BUDDY_VOICE_COMMANDS: readonly {
     phrases: ['Yes', 'Do it', 'Remove it', 'No', 'Cancel', 'Never mind']
   },
   {
+    // Plan 186 S11: banners by name (`cohost_command.rs`, the banner grammar).
+    title: 'Banners',
+    result: 'Shows or hides your banners by name.',
+    phrases: [
+      'Buddy, show the sponsor banner',
+      'Buddy, take the sponsor banner down',
+      'Buddy, hide the banners'
+    ]
+  },
+  {
     // Plan 174 F-16: the marker command (`marker_voice.rs`), with your title.
     title: 'Marker',
     result: 'Marks this moment in your recording, under the title you say.',
