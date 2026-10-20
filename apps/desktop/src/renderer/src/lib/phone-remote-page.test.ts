@@ -20,7 +20,12 @@ type FakeClient = {
   setStatus: (status: string) => void
 }
 
-const remote = vi.hoisted(() => ({ client: null as FakeClient | null, state: {} as State }))
+const remote = vi.hoisted(() => ({
+  client: null as FakeClient | null,
+  state: {} as State,
+  banners: [] as Array<{ id: string; name: string; shown: boolean }>,
+  describeCalls: 0
+}))
 
 // Load the shipping app module unchanged, replacing only its transport. Fragment
 // parsing remains real; no renderer, socket, backend session or media is started.
@@ -60,11 +65,13 @@ vi.mock(
         }
 
         async describe(): Promise<unknown> {
+          remote.describeCalls += 1
           return {
             describe: {
               layoutPresets: ['screen-only', 'vertical-split'],
               layoutLabels: { 'screen-only': 'Screen only', 'vertical-split': 'Vertical split' },
-              takeovers: []
+              takeovers: [],
+              banners: remote.banners
             },
             state: remote.state
           }
@@ -114,6 +121,8 @@ beforeEach(async () => {
   vi.resetModules()
   vi.useFakeTimers()
   remote.client = null
+  remote.banners = []
+  remote.describeCalls = 0
   remote.state = {
     sessionState: 'recording',
     sessionActive: true,
@@ -475,5 +484,45 @@ describe('shipping phone remote states and semantics (plan 174 S3.20)', () => {
     expect($('view-gate').hidden).toBe(false)
     expect($('gate-title').textContent).toBe('Pair this phone')
     expect(page.location.hash).toBe('')
+  })
+})
+
+describe('shipping phone remote banners (plan 186 S7)', () => {
+  const bannerKeys = () =>
+    [...page.document.querySelectorAll<HTMLButtonElement>('#deck-banners .key')].map((key) => ({
+      name: key.querySelector('.name')!.textContent,
+      hint: key.querySelector('.hint')?.textContent ?? null,
+      pressed: key.getAttribute('aria-pressed')
+    }))
+  // Let the describe re-read that follows a state event land.
+  const settle = async () => {
+    for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  }
+
+  it('lists banners by name, shows or hides each by id, and follows describe after state', async () => {
+    expect(page.document.getElementById('banners-label')!.hidden).toBe(true)
+    remote.banners = [
+      { id: 'sponsor', name: 'Sponsor', shown: true },
+      { id: 'follow', name: 'Follow me', shown: false }
+    ]
+    // A banner change on the desktop arrives as remote.state; the page re-reads describe.
+    const before = remote.describeCalls
+    stateUpdate({})
+    await settle()
+    expect(remote.describeCalls).toBeGreaterThan(before)
+    expect(page.document.getElementById('banners-label')!.hidden).toBe(false)
+    expect(bannerKeys()).toEqual([
+      { name: 'Sponsor', hint: 'Showing. Tap to hide', pressed: 'true' },
+      { name: 'Follow me', hint: null, pressed: 'false' }
+    ])
+    const keys = page.document.querySelectorAll<HTMLButtonElement>('#deck-banners .key')
+    keys[0].click()
+    keys[1].click()
+    expect(client().intent.mock.calls.map(([intent]) => intent)).toEqual([
+      { kind: 'bannerHide', bannerId: 'sponsor' },
+      { kind: 'bannerShow', bannerId: 'follow' }
+    ])
+    // Names only: no image or path ever reaches the page.
+    expect(page.document.querySelector('#deck-banners img')).toBeNull()
   })
 })
