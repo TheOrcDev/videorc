@@ -4532,6 +4532,13 @@ impl CompositorRuntime {
             .is_some_and(|scene| scene.active_screen.is_some())
     }
 
+    /// The banner set the Windows D3D11 media session draws (plan 186 S4),
+    /// read with the committed snapshot each tick like the takeover.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_banner_set(&self) -> Arc<BannerSet> {
+        Arc::clone(&self.banners)
+    }
+
     #[cfg(target_os = "windows")]
     pub(crate) fn windows_scene_images(
         &self,
@@ -8345,7 +8352,11 @@ pub(crate) struct BannerDraw {
 
 impl BannerDraw {
     /// Where the image lands on the canvas: `(x, y, w, h)` in canvas pixels.
-    fn draw_rect(&self, canvas_width: u32, canvas_height: u32) -> (usize, usize, usize, usize) {
+    pub(crate) fn draw_rect(
+        &self,
+        canvas_width: u32,
+        canvas_height: u32,
+    ) -> (usize, usize, usize, usize) {
         banner_draw_rect(
             self.image.0,
             self.image.1,

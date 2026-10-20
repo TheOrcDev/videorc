@@ -4246,18 +4246,19 @@ async fn start_session_with_timeline(
                 None
             }
             WindowsD3d11SessionSelection::Candidate(plan) => {
-                let d3d11_overlay_plans = crate::overlay_layout::overlay_session_plans(
-                    crate::overlay_layout::OverlaySessionShape {
-                        record_enabled: params.output.record_enabled,
-                        stream_enabled: params.output.stream_enabled,
-                        // The D3D11 path refuses simulcast sessions above, so
-                        // its auxiliary is always a split stream leg.
-                        aux_leg: if plan.auxiliary.is_some() {
-                            crate::overlay_layout::OverlayAuxLeg::Stream
-                        } else {
-                            crate::overlay_layout::OverlayAuxLeg::None
-                        },
+                let d3d11_overlay_shape = crate::overlay_layout::OverlaySessionShape {
+                    record_enabled: params.output.record_enabled,
+                    stream_enabled: params.output.stream_enabled,
+                    // The D3D11 path refuses simulcast sessions above, so its
+                    // auxiliary is always a split stream leg.
+                    aux_leg: if plan.auxiliary.is_some() {
+                        crate::overlay_layout::OverlayAuxLeg::Stream
+                    } else {
+                        crate::overlay_layout::OverlayAuxLeg::None
                     },
+                };
+                let d3d11_overlay_plans = crate::overlay_layout::overlay_session_plans(
+                    d3d11_overlay_shape,
                     &overlay_layout,
                 );
                 let (highlight_on_primary, highlight_on_auxiliary) = (
@@ -4275,6 +4276,10 @@ async fn start_session_with_timeline(
                     highlight_on_auxiliary,
                     buddy_on_primary: d3d11_overlay_plans.buddy.primary,
                     buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
+                    // Plan 186 S4: banners follow this session's leg plan
+                    // live, from the compositor's banner set.
+                    banner_shape: d3d11_overlay_shape,
+                    banner_prepare: state.banner_prepare.clone(),
                 };
                 state.buddy_sprite.prepare(&buddy_sprite_legs(
                     d3d11_overlay_plans.buddy,
