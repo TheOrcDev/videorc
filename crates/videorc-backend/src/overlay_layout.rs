@@ -646,18 +646,10 @@ fn start_notice_sentence(
 
 /// Every impossible-to-honour switch pair for this session shape (D13),
 /// decided before start and never silent. Captions on a shared encode keep
-/// the plan 090 block instead of a notice, so they never appear here.
+/// the plan 090 block instead of a notice, so they never appear here. The
+/// shown banners (plan 186 D6) act as one item labelled `banners`, after the
+/// three items; each sentence any of them yields appears once.
 pub fn overlay_start_notices(
-    shape: OverlaySessionShape,
-    layout: &OverlayLayout,
-) -> Vec<OverlayStartNotice> {
-    overlay_start_notices_with_banners(shape, layout, &[])
-}
-
-/// `overlay_start_notices` plus the shown banners (plan 186 D6): they act as
-/// one item labelled `banners`, and each sentence any of them yields appears
-/// once, after the three items.
-pub fn overlay_start_notices_with_banners(
     shape: OverlaySessionShape,
     layout: &OverlayLayout,
     banners: &[OverlaySwitches],
@@ -1063,19 +1055,26 @@ mod tests {
     #[test]
     fn start_notices_name_every_impossible_switch_pair_and_nothing_else() {
         let mut layout = OverlayLayout::default();
-        assert!(overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout).is_empty());
+        assert!(
+            overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout, &[]).is_empty()
+        );
         layout.highlight.show_in_recording = false;
         layout.buddy.show_in_recording = true;
         layout.captions.show_on_stream = true;
         // A split leg honours everything.
         assert!(
-            overlay_start_notices(shape(true, true, OverlayAuxLeg::Stream), &layout).is_empty()
+            overlay_start_notices(shape(true, true, OverlayAuxLeg::Stream), &layout, &[])
+                .is_empty()
         );
         // Stream-only or record-only sessions never need a notice.
-        assert!(overlay_start_notices(shape(false, true, OverlayAuxLeg::None), &layout).is_empty());
-        assert!(overlay_start_notices(shape(true, false, OverlayAuxLeg::None), &layout).is_empty());
+        assert!(
+            overlay_start_notices(shape(false, true, OverlayAuxLeg::None), &layout, &[]).is_empty()
+        );
+        assert!(
+            overlay_start_notices(shape(true, false, OverlayAuxLeg::None), &layout, &[]).is_empty()
+        );
         // Shared encode: highlight and Buddy burn on both; captions keep the block.
-        let shared = overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout);
+        let shared = overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout, &[]);
         assert_eq!(
             shared,
             vec![
@@ -1090,8 +1089,11 @@ mod tests {
             ]
         );
         // Vertical simulcast: the recording shares the horizontal pixels.
-        let vertical =
-            overlay_start_notices(shape(true, true, OverlayAuxLeg::VerticalSimulcast), &layout);
+        let vertical = overlay_start_notices(
+            shape(true, true, OverlayAuxLeg::VerticalSimulcast),
+            &layout,
+            &[],
+        );
         assert_eq!(
             vertical
                 .iter()
@@ -1123,15 +1125,11 @@ mod tests {
         let recording_only = switches(false, true);
         let both = switches(true, true);
         let shared = shape(true, true, OverlayAuxLeg::None);
-        // Honoured switches say nothing; the three items are unchanged.
-        assert!(overlay_start_notices_with_banners(shared, &layout, &[both, both]).is_empty());
-        assert_eq!(
-            overlay_start_notices_with_banners(shared, &layout, &[]),
-            overlay_start_notices(shared, &layout)
-        );
+        // Honoured switches say nothing.
+        assert!(overlay_start_notices(shared, &layout, &[both, both]).is_empty());
         // One shared encode: two stream-only banners, one sentence.
         assert_eq!(
-            overlay_start_notices_with_banners(shared, &layout, &[stream_only, both, stream_only]),
+            overlay_start_notices(shared, &layout, &[stream_only, both, stream_only]),
             vec![OverlayStartNotice {
                 item: OverlayNoticeItem::Banners,
                 notice: "Both the stream and the recording will include banners: this computer shares one encode for them.".to_string(),
@@ -1139,13 +1137,13 @@ mod tests {
         );
         // Recording-only on a shared encode is the same sentence.
         assert_eq!(
-            overlay_start_notices_with_banners(shared, &layout, &[recording_only])[0].notice,
+            overlay_start_notices(shared, &layout, &[recording_only])[0].notice,
             "Both the stream and the recording will include banners: this computer shares one encode for them."
         );
         // Vertical simulcast: each direction has its own sentence, once each.
         let vertical = shape(true, true, OverlayAuxLeg::VerticalSimulcast);
         assert_eq!(
-            overlay_start_notices_with_banners(
+            overlay_start_notices(
                 vertical,
                 &layout,
                 &[stream_only, recording_only, stream_only]
@@ -1165,15 +1163,14 @@ mod tests {
             shape(true, false, OverlayAuxLeg::VerticalSimulcast),
         ] {
             assert!(
-                overlay_start_notices_with_banners(shape, &layout, &[stream_only, recording_only])
-                    .is_empty(),
+                overlay_start_notices(shape, &layout, &[stream_only, recording_only]).is_empty(),
                 "{shape:?}"
             );
         }
         // Banners come after the items, and serialize as `banners`.
         let mut layout = OverlayLayout::default();
         layout.highlight.show_in_recording = false;
-        let notices = overlay_start_notices_with_banners(shared, &layout, &[stream_only]);
+        let notices = overlay_start_notices(shared, &layout, &[stream_only]);
         assert_eq!(notices.len(), 2);
         assert_eq!(notices[0].item, OverlayNoticeItem::Highlight);
         assert_eq!(

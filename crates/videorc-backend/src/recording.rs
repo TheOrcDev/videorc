@@ -4282,7 +4282,7 @@ async fn start_session_with_timeline(
                 tracing::warn!("Could not read the shown banners for the start notices: {error:#}");
                 Vec::new()
             });
-        for notice in crate::overlay_layout::overlay_start_notices_with_banners(
+        for notice in crate::overlay_layout::overlay_start_notices(
             overlay_session_shape,
             &overlay_layout,
             &banner_switches,

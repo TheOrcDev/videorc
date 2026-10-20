@@ -227,6 +227,7 @@ impl BannerBitmapCache {
         self.entries.iter().map(|entry| entry.bitmap.bytes()).sum()
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -307,6 +308,7 @@ impl BannerBitmapLookup {
         self.exact.as_ref().or(self.fallback.as_ref())
     }
 
+    #[cfg(test)]
     pub(crate) fn is_exact(&self) -> bool {
         self.exact.is_some()
     }
@@ -429,10 +431,12 @@ impl BannerPrepareService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn cache_bytes(&self) -> u64 {
         self.inner.cache().bytes()
     }
 
+    #[cfg(test)]
     pub(crate) fn prepares_completed(&self) -> u64 {
         self.inner.prepares_completed.load(Ordering::Acquire)
     }
