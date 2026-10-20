@@ -12,6 +12,7 @@ mod audio;
 mod audio_capture_adapter;
 mod backend_authority;
 mod banner_prepare;
+mod banner_timers;
 mod banners;
 mod buddy_animator;
 mod buddy_motion;
@@ -564,6 +565,8 @@ async fn run_backend() -> Result<()> {
     if let Err(error) = compositor::install_banner_set(&state).await {
         tracing::warn!("Could not install the stored banners into the compositor: {error:#}");
     }
+    // Plan 186 S10: "Hide after" and "Show every" for the whole process.
+    tokio::spawn(banner_timers::run_banner_timers(state.clone()));
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))

@@ -1139,6 +1139,9 @@ pub(crate) async fn on_banners_changed(state: &AppState) -> Result<Vec<Banner>> 
         state.emit_event(BANNERS_CHANGED_EVENT, banners.clone());
         banners
     };
+    // Plan 186 S10: "Hide after" and "Show every" follow every change,
+    // however it was made.
+    state.banner_timer_wake.notify_one();
     Ok(banners)
 }
 
