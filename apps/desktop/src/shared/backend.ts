@@ -2150,7 +2150,11 @@ export interface CompositorFrameReady {
   updatedAt: string
 }
 
-export type PreviewSurfaceSceneLayerKind = SceneSourceKind | 'screen-image' | 'background'
+export type PreviewSurfaceSceneLayerKind =
+  | SceneSourceKind
+  | 'screen-image'
+  | 'background'
+  | 'banner'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
@@ -2164,6 +2168,8 @@ export interface PreviewSurfaceSceneLayer {
   fit: PreviewSurfaceSceneLayerFit
   mirror: boolean
   shape?: CameraShape
+  /** 0..1; absent is fully opaque. Banners only (plan 186). */
+  opacity?: number
 }
 
 export interface PreviewSurfaceSceneState {
@@ -2175,6 +2181,12 @@ export interface PreviewSurfaceSceneState {
   activeScreenId?: string
   /** Normalized per-side inset derived from background visibilityPercent. */
   backgroundStageMargin?: number
+  /**
+   * The canvas in pixels the `banner` layers were placed against (plan 186).
+   * Banners are snapshot-level, not part of the scene revision, so the scene
+   * fingerprint ignores both this and the banner layers.
+   */
+  bannerCanvas?: { width: number; height: number }
   updatedAt: string
 }
 
@@ -5385,6 +5397,87 @@ export interface MigrateHighlightAnchorParams {
   anchor: CommentHighlightAnchor
 }
 // --- end overlay layout (plan 164) ------------------------------------------
+
+// --- Banners (plan 186) -----------------------------------------------------
+// The streamer's own images placed anywhere on the picture. Backend-owned
+// (SQLite `banners`, images in the managed `Banners` dir beside `Screens`).
+// One set for every scene; `shown` survives a relaunch. Places reuse the
+// overlay model: a normalized `OverlayRect` per orientation and the two
+// "Appears in" switches. Pinned by `protocol-fixtures/high-risk-contracts.json`
+// → `banner`.
+
+/** At most this many banners in Assets (plan 186 D7). */
+export const BANNER_MAX_COUNT = 24
+/** At most this many banners showing at once (plan 186 D7). */
+export const BANNER_MAX_SHOWN = 4
+export const BANNER_OPACITY_MIN = 0.2
+export const BANNER_OPACITY_MAX = 1
+
+export interface Banner {
+  /** Stable UUID, used by remotes, the Stream Deck and `/banner`. */
+  id: string
+  name: string
+  /** Basename in the managed Banners dir, `<id>.png`. Never a path. */
+  imageFile: string
+  /** Basename of the ~480 px thumbnail, `<id>.thumb.png`. */
+  thumbnailFile: string
+  /** Pixel size of the stored image. */
+  width: number
+  height: number
+  hasAlpha: boolean
+  /** Assets order, also the drawing order: later is on top. */
+  sortOrder: number
+  /** Showing now. Persists across a relaunch. */
+  shown: boolean
+  horizontal: OverlayRect
+  vertical: OverlayRect
+  /** "Appears in: Stream". */
+  showOnStream: boolean
+  /** "Appears in: Recording". */
+  showInRecording: boolean
+  /** 0.2 to 1.0. */
+  opacity: number
+  /** Phase 2 timer: omitted when off, never `null`. */
+  hideAfterSec?: number
+  /** Phase 2 timer: omitted when off, never `null`. */
+  repeatEveryMin?: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** `banners.importImage`: a main-issued `input-file` capability. */
+export interface BannerImportImageParams {
+  sourceCapability: string
+}
+
+/** `banners.update`: only the fields to change. A timer of `0` turns it off. */
+export interface BannerUpdateParams {
+  id: string
+  name?: string
+  horizontal?: OverlayRect
+  vertical?: OverlayRect
+  showOnStream?: boolean
+  showInRecording?: boolean
+  opacity?: number
+  hideAfterSec?: number
+  repeatEveryMin?: number
+}
+
+/** `banners.reorder`: every banner id in the new Assets order. */
+export interface BannerReorderParams {
+  ids: string[]
+}
+
+/** `banners.delete` and `banners.show`. */
+export interface BannerIdParams {
+  id: string
+}
+
+/** `banners.hide`: one banner, or every banner when `id` is absent. */
+export interface BannerHideParams {
+  id?: string
+}
+// --- end banners (plan 186) -------------------------------------------------
 
 // --- Buddy overlay (plan 164) ---------------------------------------------
 // The Buddy on stream (Phase C): the backend owns which avatar state shows
