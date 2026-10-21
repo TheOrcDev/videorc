@@ -17997,6 +17997,17 @@ fn append_bridge_copy_flv_output(
     args.extend(fifo_flv_output_args(target));
 }
 
+/// The fifo muxer's recovery, one list for both shapes that use it: the
+/// per-leg fifo output and a cloud feed's tee slave (`use_fifo`).
+const FIFO_RECOVERY_OPTIONS: [(&str, &str); 6] = [
+    ("queue_size", "512"),
+    ("drop_pkts_on_overflow", "1"),
+    ("attempt_recovery", "1"),
+    ("recover_any_error", "1"),
+    ("restart_with_keyframe", "1"),
+    ("recovery_wait_time", "2"),
+];
+
 /// The `fifo`-wrapped FLV output of one leg, URL last. A cloud feed carries
 /// its TLS check as the fifo's `format_opts` (plan 184 C1c): the fifo copies
 /// them into every `ff_format_output_open`, so a reconnect checks again.
@@ -18006,19 +18017,11 @@ fn fifo_flv_output_args(target: &StreamTarget) -> Vec<String> {
         "fifo".to_string(),
         "-fifo_format".to_string(),
         "flv".to_string(),
-        "-queue_size".to_string(),
-        "512".to_string(),
-        "-drop_pkts_on_overflow".to_string(),
-        "1".to_string(),
-        "-attempt_recovery".to_string(),
-        "1".to_string(),
-        "-recover_any_error".to_string(),
-        "1".to_string(),
-        "-restart_with_keyframe".to_string(),
-        "1".to_string(),
-        "-recovery_wait_time".to_string(),
-        "2".to_string(),
     ];
+    for (name, value) in FIFO_RECOVERY_OPTIONS {
+        args.push(format!("-{name}"));
+        args.push(value.to_string());
+    }
     if let Some(tls) = &target.tls_verification {
         args.extend(["-format_opts".to_string(), tls_verification_dict(tls)]);
     }
@@ -18118,14 +18121,33 @@ fn append_bridge_audio_input_args(
 /// A cloud feed adds its TLS check to the slave's options (plan 184 C1c); the
 /// tee hands them to the slave's protocol open, through the fifo when it
 /// wraps one.
+///
+/// A cloud feed must come back by itself after a network drop, while the
+/// runner holds the platforms (plan 184), and the raw path's tee has no
+/// recovery of its own: a dropped slave stayed gone for the whole session
+/// (cloud test on ogre, 2026-10-21). So a cloud feed's slave runs inside the
+/// fifo muxer with the per-leg recovery (`use_fifo`); the slave's own options,
+/// the TLS check included, apply to every reopen. `fifo_options` is a
+/// dictionary inside the slave's dictionary, so its separators are escaped
+/// twice. Direct platform legs are unchanged.
 fn rtmp_tee_leg(target: &StreamTarget) -> String {
     let tls = target
         .tls_verification
         .as_ref()
         .map(|tls| format!(":{}", tls_verification_dict(tls)))
         .unwrap_or_default();
+    let fifo = if is_cloud_feed_target(&target.target_id) {
+        let options = FIFO_RECOVERY_OPTIONS
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("\\\\:");
+        format!(":use_fifo=1:fifo_options={options}")
+    } else {
+        String::new()
+    };
     format!(
-        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}{tls}]{}",
+        "[f=flv:onfail=ignore{fifo}:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}{tls}]{}",
         escape_tee_target(&target.url)
     )
 }
@@ -22952,6 +22974,16 @@ mod cloud_seam_tests {
             tee.contains(&format!(":rw_timeout=8000000:{dict}]")),
             "{tee}"
         );
+        // ... and inside the fifo, so the raw path's feed reconnects by
+        // itself (the twice-escaped dictionary FFmpeg 8.1 parses; proven on
+        // ogre against MediaMTX: back 0.04 s after an 8 s cut, and a wrong CA
+        // still refused on every reopen).
+        assert!(
+            tee.starts_with(
+                "[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512\\\\:drop_pkts_on_overflow=1\\\\:attempt_recovery=1\\\\:recover_any_error=1\\\\:restart_with_keyframe=1\\\\:recovery_wait_time=2:flvflags="
+            ),
+            "{tee}"
+        );
         assert!(tee.ends_with(&feed.url));
 
         // A lone plain FLV output: CLI protocol options first.
@@ -22985,6 +23017,7 @@ mod cloud_seam_tests {
         );
         assert_eq!(fifo.last(), Some(&youtube.url));
         assert!(!rtmp_tee_leg(youtube).contains("tls_verify"));
+        assert!(!rtmp_tee_leg(youtube).contains("use_fifo"));
         assert_eq!(
             plain_flv_output_args(youtube),
             [
