@@ -496,6 +496,13 @@ describe('shared high-risk protocol fixture', () => {
     expect(() =>
       validateBackendEventPayload('cloud.state', { ...statusHold, phase: 'paused' })
     ).toThrow()
+    expect(statusHold.restart?.destinationsResent).toBe(true)
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusHold,
+        restart: { ...statusHold.restart, destinationsResent: 'yes' }
+      })
+    ).toThrow()
     expect(() =>
       validateBackendEventPayload('cloud.state', { ...statusHold, sessionId: null })
     ).toThrow()

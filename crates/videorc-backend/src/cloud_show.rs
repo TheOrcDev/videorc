@@ -74,6 +74,8 @@ const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 2, 4, 8, 15];
 /// The hold image sent to the runner, PNG, at most this many bytes.
 const HOLD_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CLOSE_CODE_BAD_TOKEN: u16 = 4401;
+/// What a waiting intent hears when the socket drops under it.
+const SOCKET_DROPPED: &str = "the control socket dropped";
 const CLOSE_CODE_NO_SUCH_SHOW: u16 = 4404;
 
 // --- Settings (C6's model; the UI is a later pass) -------------------------
@@ -280,6 +282,19 @@ pub struct CloudFeedStatus {
     pub kbps: Option<u64>,
 }
 
+/// The runner restarted mid-show and lost its destinations (plan 184 "When
+/// things break": "Videorc Cloud restarted your show"). The restarted runner
+/// resumes the show in hold and waits for `destinations.set` again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRestart {
+    pub at: String,
+    /// This computer sent the destinations again. False when it holds no
+    /// keys to send (the show was resumed after a relaunch) or the runner
+    /// refused them: the platforms stay dark until a new Go Live.
+    pub destinations_resent: bool,
+}
+
 /// The whole cloud state, sent on every change as `cloud.state` and answered
 /// by `cloud.status`. Secret-free by construction: no url, token or key type
 /// is reachable from it.
@@ -324,6 +339,9 @@ pub struct CloudStatus {
     /// C6b: the Test cloud that runs, or the last one that ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<CloudTestStatus>,
+    /// The runner restarted during this show (the last time it did).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<CloudRestart>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -754,6 +772,14 @@ pub struct RunnerState {
     pub feeds: Vec<CloudFeedStatus>,
     #[serde(default)]
     pub legs: Vec<RunnerLeg>,
+    /// This runner process holds a destination list (from a client or from
+    /// the agent). `None` from a runner older than the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destinations_set: Option<bool>,
+    /// How many times the agent restarted this show's runner after a crash;
+    /// it only grows. `None` from a runner older than the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -904,6 +930,9 @@ struct ActiveShow {
     /// The local session feeding the show; `None` is a resumable show.
     session_id: Option<String>,
     destinations: Vec<HandoverDestination>,
+    /// The runner acked `destinations` for this show: from then on a state
+    /// without legs means it restarted and lost them.
+    handed_over: bool,
     /// Set by a resume until the runner reports live again.
     resuming: bool,
 }
@@ -935,6 +964,7 @@ pub struct CloudShowRuntime {
     /// test task's cancel switch (`Some` only while it runs).
     test: Option<CloudTestStatus>,
     test_run: Option<watch::Sender<bool>>,
+    restart: Option<CloudRestart>,
 }
 
 pub type CloudShowSlot = Arc<StdMutex<CloudShowRuntime>>;
@@ -1039,6 +1069,7 @@ impl CloudShowRuntime {
                 .as_ref()
                 .is_some_and(|failed| failed.direct_fallback),
             test: self.test.clone(),
+            restart: self.restart.clone(),
         }
     }
 
@@ -1102,6 +1133,7 @@ impl CloudShowRuntime {
     fn clear_show(&mut self, end_reason: Option<String>) {
         self.show = None;
         self.runner = None;
+        self.restart = None;
         self.ending = false;
         self.end_reason = end_reason;
         self.bump_generation();
@@ -1254,6 +1286,8 @@ fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
         control,
         show_id,
         generation,
+        restart_seen_on_socket: false,
+        resend: None,
     };
     tokio::spawn(task.run(transport, rx));
     tx
@@ -1265,6 +1299,92 @@ struct ControlLoop<W: CloudWebApi, C: ControlConnector> {
     control: ShowControl,
     show_id: String,
     generation: u64,
+    /// A runner restart was already handled on this socket: re-send once.
+    restart_seen_on_socket: bool,
+    /// Destinations to send again on the current socket (a runner restart).
+    resend: Option<Vec<HandoverDestination>>,
+}
+
+/// A runner that restarted mid-show (plan 184 "When things break"). The
+/// agent restarts a crashed runner and hands it the destinations it last
+/// relayed, but they live in memory only: after an agent restart too, the
+/// runner has none. The runner says so (`destinationsSet`, `restarts`); an
+/// older runner only shows it as a state without legs. Pure, so the decision
+/// is a test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RunnerRestart {
+    /// The runner has no destinations: send these again; the legs reconnect.
+    Resend(Vec<HandoverDestination>),
+    /// The node gave the runner its destinations back by itself.
+    Recovered,
+    /// The runner has none and this computer holds no keys for the show (it
+    /// was resumed after a relaunch, C5b): dark until a new Go Live, unless
+    /// the node still gives them back.
+    CannotResend,
+}
+
+fn detect_runner_restart(
+    show: &ActiveShow,
+    previous: Option<&RunnerState>,
+    state: &RunnerState,
+) -> Option<RunnerRestart> {
+    if state.phase == "ended" {
+        return None;
+    }
+    let previous_legs = previous.map(|runner| runner.legs.as_slice()).unwrap_or(&[]);
+    let lost = match state.destinations_set {
+        Some(set) => !set,
+        None => state.legs.is_empty(),
+    };
+    let restarted = match (previous.and_then(|runner| runner.restarts), state.restarts) {
+        (Some(before), Some(now)) => now > before,
+        _ => false,
+    } || (state.destinations_set.is_none()
+        && state.legs.is_empty()
+        && !previous_legs.is_empty());
+    if lost && show.handed_over && !show.destinations.is_empty() {
+        return Some(RunnerRestart::Resend(show.destinations.clone()));
+    }
+    if !restarted {
+        return None;
+    }
+    Some(if lost {
+        RunnerRestart::CannotResend
+    } else {
+        RunnerRestart::Recovered
+    })
+}
+
+/// The rows the session shows after a restart; `None` keeps the runner's own.
+fn restart_leg_rows(
+    restart: &RunnerRestart,
+    previous_legs: &[RunnerLeg],
+) -> Option<Vec<StreamTargetRuntime>> {
+    Some(match restart {
+        RunnerRestart::Resend(destinations) => destinations
+            .iter()
+            .map(|destination| StreamTargetRuntime {
+                target_id: destination.id.clone(),
+                platform: parse_platform(&destination.platform),
+                label: destination.label.clone(),
+                state: StreamTargetState::Reconnecting,
+                message: Some("Videorc Cloud restarted your show.".to_string()),
+                redacted_url: None,
+            })
+            .collect(),
+        RunnerRestart::CannotResend => previous_legs
+            .iter()
+            .map(|leg| StreamTargetRuntime {
+                state: StreamTargetState::Failed,
+                message: Some(
+                    "Videorc Cloud restarted your show. Stop, then go live again to reconnect."
+                        .to_string(),
+                ),
+                ..runner_leg_to_runtime(leg)
+            })
+            .collect(),
+        RunnerRestart::Recovered => return None,
+    })
 }
 
 enum LoopExit {
@@ -1295,7 +1415,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     // Connecting, then reconnect with backoff; the runner
                     // keeps the show, and only the web may say it is gone.
                     for (_, waiter) in pending.drain() {
-                        let _ = waiter.send(Err("the control socket dropped".to_string()));
+                        let _ = waiter.send(Err(SOCKET_DROPPED.to_string()));
                     }
                     if !self.current() {
                         break LoopExit::Superseded;
@@ -1343,6 +1463,10 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         loop {
             if !self.current() {
                 return Ok(LoopExit::Superseded);
+            }
+            if let Some(destinations) = self.resend.take() {
+                self.send_destinations_again(transport, pending, &destinations)
+                    .await?;
             }
             tokio::select! {
                 frame = transport.recv() => {
@@ -1392,26 +1516,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 if state.phase == "ended" {
                     return Some(LoopExit::Ended(state.end_reason.clone()));
                 }
-                let (session, legs) = {
-                    let mut runtime = lock(&self.context.slot);
-                    if state.phase == "live"
-                        && let Some(show) = runtime.show.as_mut()
-                    {
-                        show.resuming = false;
-                    }
-                    let session = runtime.feeding_session();
-                    let legs: Vec<StreamTargetRuntime> =
-                        state.legs.iter().map(runner_leg_to_runtime).collect();
-                    runtime.runner = Some(state);
-                    runtime.connected = true;
-                    (session, legs)
-                };
-                if let Some(session_id) = session
-                    && !legs.is_empty()
-                {
-                    (self.context.hooks.legs)(&session_id, legs);
-                }
-                self.context.hooks.emit_from(&self.context.slot);
+                self.absorb_state(state);
                 None
             }
             RunnerFrame::Ack {
@@ -1433,6 +1538,119 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         }
     }
 
+    /// A runner state into the slot and the session's legs. A runner that
+    /// lists no legs after the hand-over restarted and lost its destinations
+    /// (plan 184 "When things break"): once per socket, the rows go to
+    /// Reconnecting and the destinations go again, or, with no keys on this
+    /// computer, the rows say so.
+    fn absorb_state(&mut self, state: RunnerState) {
+        let (session, legs) = {
+            let mut runtime = lock(&self.context.slot);
+            if state.phase == "live"
+                && let Some(show) = runtime.show.as_mut()
+            {
+                show.resuming = false;
+            }
+            let previous = runtime.runner.take();
+            let previous_legs = previous
+                .as_ref()
+                .map(|runner| runner.legs.clone())
+                .unwrap_or_default();
+            let restart = if self.restart_seen_on_socket {
+                None
+            } else {
+                runtime
+                    .show
+                    .as_ref()
+                    .and_then(|show| detect_runner_restart(show, previous.as_ref(), &state))
+            };
+            let session = runtime.feeding_session();
+            let mut legs: Vec<StreamTargetRuntime> =
+                state.legs.iter().map(runner_leg_to_runtime).collect();
+            // Legs back after a restart: the platforms are reconnecting.
+            if !state.legs.is_empty()
+                && let Some(open) = runtime.restart.as_mut()
+            {
+                open.destinations_resent = true;
+            }
+            if let Some(restart) = restart {
+                self.restart_seen_on_socket = true;
+                if let Some(rows) = restart_leg_rows(&restart, &previous_legs) {
+                    legs = rows;
+                }
+                let destinations_resent = !matches!(restart, RunnerRestart::CannotResend);
+                tracing::warn!(
+                    show = %self.show_id,
+                    destinations_resent,
+                    "Videorc Cloud restarted the show"
+                );
+                // One restart until the legs come back: a socket that drops
+                // before the ack sends again, under the same notice.
+                let at = match &runtime.restart {
+                    Some(open) if previous_legs.is_empty() => open.at.clone(),
+                    _ => now_rfc3339(),
+                };
+                runtime.restart = Some(CloudRestart {
+                    at,
+                    destinations_resent,
+                });
+                if let RunnerRestart::Resend(destinations) = restart {
+                    self.resend = Some(destinations);
+                }
+            }
+            runtime.runner = Some(state);
+            runtime.connected = true;
+            (session, legs)
+        };
+        if let Some(session_id) = session
+            && !legs.is_empty()
+        {
+            (self.context.hooks.legs)(&session_id, legs);
+        }
+        self.context.hooks.emit_from(&self.context.slot);
+    }
+
+    /// `destinations.set` again after a runner restart. The ack is awaited
+    /// off the loop: a refusal or silence marks the restart unrecovered; a
+    /// socket that drops first sends them again after the reconnect.
+    async fn send_destinations_again(
+        &self,
+        transport: &mut C::Transport,
+        pending: &mut HashMap<String, AckSender>,
+        destinations: &[HandoverDestination],
+    ) -> std::result::Result<(), ()> {
+        let id = new_intent_id();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        pending.insert(id.clone(), ack_tx);
+        transport
+            .send(destinations_set_frame(&id, destinations))
+            .await
+            .map_err(|_| ())?;
+        let slot = self.context.slot.clone();
+        let hooks = self.context.hooks.clone();
+        let generation = self.generation;
+        tokio::spawn(async move {
+            let problem = match tokio::time::timeout(ACK_TIMEOUT, ack_rx).await {
+                Ok(Ok(Ok(_))) | Ok(Err(_)) => return,
+                Ok(Ok(Err(problem))) if problem == SOCKET_DROPPED => return,
+                Ok(Ok(Err(problem))) => problem,
+                Err(_) => "the runner did not acknowledge in time".to_string(),
+            };
+            tracing::warn!("Videorc Cloud did not take the destinations again: {problem}");
+            {
+                let mut runtime = lock(&slot);
+                if runtime.generation != generation {
+                    return;
+                }
+                if let Some(restart) = runtime.restart.as_mut() {
+                    restart.destinations_resent = false;
+                }
+            }
+            hooks.emit_from(&slot);
+        });
+        Ok(())
+    }
+
     /// Reconnect with backoff. From the second failure on, ask the web
     /// whether the show still exists: gone means the runner no longer holds
     /// the platforms, and only then may the desktop treat the show as lost.
@@ -1446,12 +1664,9 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             }
             match connect_and_hello(self.context.connector.as_ref(), &self.control).await {
                 Ok((transport, welcome)) => {
-                    {
-                        let mut runtime = lock(&self.context.slot);
-                        runtime.connected = true;
-                        runtime.runner = Some(welcome);
-                    }
-                    self.context.hooks.emit_from(&self.context.slot);
+                    self.restart_seen_on_socket = false;
+                    self.resend = None;
+                    self.absorb_state(welcome);
                     return Ok(transport);
                 }
                 Err(HelloFailure::NoSuchShow) => {
@@ -1504,6 +1719,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             let fed_by_session = runtime.feeding_session().is_some();
             runtime.show = None;
             runtime.runner = None;
+            runtime.restart = None;
             runtime.ending = false;
             runtime.failed = Some(FailedShow {
                 end_reason: end_reason.to_string(),
@@ -1795,10 +2011,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 ingest: Some(ingest.clone()),
                 session_id: Some(session_id.to_string()),
                 destinations: destinations.clone(),
+                handed_over: false,
                 resuming: false,
             });
             runtime.end_reason = None;
             runtime.message = None;
+            runtime.restart = None;
         }
         let tx = install_control_loop(
             self,
@@ -1851,6 +2069,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                         ingest,
                         session_id: None,
                         destinations: Vec::new(),
+                        handed_over: false,
                         resuming: false,
                     });
                     runtime.bump_generation();
@@ -1949,6 +2168,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             bail!("Videorc Cloud did not take the destinations: {problem}.");
         }
+        if let Some(show) = lock(&self.slot)
+            .show
+            .as_mut()
+            .filter(|show| show.record.id == show_id)
+        {
+            show.handed_over = true;
+        }
         send_hold_image(tx, hold_image_png_base64).await;
         Ok(())
     }
@@ -2043,6 +2269,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             runtime.end_reason = None;
             runtime.message = None;
+            runtime.restart = None;
         }
         let tx = install_control_loop(
             self,
@@ -2150,6 +2377,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 ingest: current.ingest,
                 session_id: None,
                 destinations: Vec::new(),
+                handed_over: false,
                 resuming: false,
             });
             runtime.bump_generation();
@@ -3207,6 +3435,59 @@ mod tests {
         json!({ "t": "ack", "id": id, "ok": true })
     }
 
+    /// The runner's legs for `destinations()`, both live.
+    fn live_legs() -> Value {
+        json!([
+            { "id": "youtube-main", "platform": "youtube", "label": "YouTube", "orientation": "horizontal", "state": "live" },
+            { "id": "twitch-main", "platform": "twitch", "label": "Twitch", "orientation": "horizontal", "state": "live" }
+        ])
+    }
+
+    /// A reconnect to the same runner: it still holds its legs.
+    fn welcome_with_legs(phase: &str) -> Value {
+        json!({ "t": "welcome", "state": { "phase": phase, "liveSeconds": 0, "feeds": [], "legs": live_legs() } })
+    }
+
+    /// Go Live through the cloud up to the runner live with both legs, and
+    /// the node's end of the socket.
+    async fn live_show(harness: &Harness) -> FakeServer {
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        let context = harness.context.clone();
+        let prepare = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-1",
+                    Some("bearer".to_string()),
+                    vec![ShowOutputSpec {
+                        orientation: StreamOutputOrientation::Horizontal,
+                        width: 1920,
+                        height: 1080,
+                        fps: 60,
+                        video_kbps: 6000,
+                        audio_kbps: 160,
+                    }],
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(welcome("starting"));
+        let set = server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        server.send(ack(&set["id"]));
+        assert!(matches!(
+            prepare.await.unwrap().unwrap(),
+            PrepareOutcome::Cloud(_)
+        ));
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 3, "feeds": [], "legs": live_legs()
+        }}));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+        server
+    }
+
     /// Polls in 1 ms steps of paused time, so backoff timers run as needed.
     async fn wait_until(mut done: impl FnMut() -> bool) {
         for _ in 0..30_000 {
@@ -3583,11 +3864,12 @@ mod tests {
         assert_eq!(ping["t"], "ping");
         server.send(json!({ "t": "pong" }));
 
-        // 5. The feed drops: the runner holds. The desktop shows Hold.
+        // 5. The feed drops: the runner holds, its legs stay up. The desktop
+        //    shows Hold.
         server.send(json!({ "t": "state", "state": {
             "phase": "hold", "liveSeconds": 40,
             "hold": { "active": true, "since": "2026-10-16T10:01:00Z", "reason": "feed-lost", "remainingSeconds": 1790 },
-            "feeds": [{ "orientation": "horizontal", "connected": false }], "legs": []
+            "feeds": [{ "orientation": "horizontal", "connected": false }], "legs": live_legs()
         }}));
         wait_for_phase(&harness.context.slot, CloudPhase::Hold).await;
         let status = lock(&harness.context.slot).status();
@@ -3610,9 +3892,11 @@ mod tests {
         let mut server = harness.context.connector.accept().await;
         let hello = server.next_frame().await;
         assert_eq!(hello["t"], "hello");
-        server.send(welcome("live"));
+        server.send(welcome_with_legs("live"));
         wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
         assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 2);
+        // The same runner: nothing is handed over again.
+        assert_eq!(lock(&harness.context.slot).status().restart, None);
         // The web was never asked: one dropped socket is not a lost show.
         assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 0);
 
@@ -3647,6 +3931,259 @@ mod tests {
         assert!(phases.contains(&CloudPhase::Hold));
         assert!(phases.contains(&CloudPhase::Ending));
         assert_eq!(phases.last(), Some(&CloudPhase::Off));
+    }
+
+    // Plan 184 "When things break": the runner crashes, the agent restarts it,
+    // and it resumes in hold without destinations (they live in memory only).
+    // The desktop sends them again on the new socket, the rows show
+    // Reconnecting, and the host reads "Videorc Cloud restarted your show".
+    #[tokio::test(start_paused = true)]
+    async fn a_restarted_runner_gets_the_destinations_again_and_the_host_is_told() {
+        let harness = harness(true);
+        let server = live_show(&harness).await;
+        server.drop_socket();
+        wait_for_phase(&harness.context.slot, CloudPhase::Connecting).await;
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+
+        // The restarted runner: hold, no legs.
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(json!({ "t": "welcome", "state": {
+            "phase": "hold", "liveSeconds": 38,
+            "hold": { "active": true, "reason": "feed-lost" }, "feeds": [], "legs": []
+        }}));
+        let set = server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        assert_eq!(set["destinations"][0]["id"], "youtube-main");
+        assert_eq!(
+            set["destinations"][0]["url"],
+            format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}")
+        );
+        assert_eq!(set["destinations"][1]["id"], "twitch-main");
+        server.send(ack(&set["id"]));
+        {
+            let status = lock(&harness.context.slot).status();
+            let restart = status.restart.expect("the restart is reported");
+            assert!(restart.destinations_resent);
+            // The show carries on: never Failed, never direct.
+            assert_eq!(status.phase, CloudPhase::Hold);
+            assert!(!status.direct_fallback_available);
+            // The old rows no longer read live.
+            let legs = harness.legs.lock().unwrap();
+            let (session, rows) = legs.last().unwrap();
+            assert_eq!(session, "session-1");
+            assert_eq!(rows.len(), 2);
+            assert!(
+                rows.iter()
+                    .all(|row| row.state == StreamTargetState::Reconnecting)
+            );
+            assert_eq!(rows[0].target_id, "youtube-main");
+            assert_eq!(rows[0].platform, StreamPlatform::Youtube);
+        }
+        // Once per socket: another empty state sends nothing more.
+        server.send(json!({ "t": "state", "state": {
+            "phase": "hold", "liveSeconds": 39, "feeds": [], "legs": []
+        }}));
+        tokio::time::advance(Duration::from_millis(5_100)).await;
+        assert_eq!(server.next_frame().await["t"], "ping");
+
+        // The legs come back: their own states reach the session again.
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 42, "feeds": [], "legs": live_legs()
+        }}));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+        let rows = harness.legs.lock().unwrap().last().unwrap().1.clone();
+        assert!(rows.iter().all(|row| row.state == StreamTargetState::Live));
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 1);
+        // The restart frame went to the node only, never to the renderer.
+        let emitted = serde_json::to_string(&*harness.emitted.lock().unwrap()).unwrap();
+        assert!(!emitted.contains(YOUTUBE_KEY) && !emitted.contains(TWITCH_KEY));
+    }
+
+    // C-C3: the agent hands a restarted runner its destinations itself; the
+    // desktop only tells the host, and sends nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_runner_the_node_restarted_with_its_destinations_is_only_reported() {
+        let harness = harness(true);
+        let server = live_show(&harness).await;
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 4, "feeds": [], "legs": live_legs(),
+            "destinationsSet": true, "restarts": 0
+        }}));
+        wait_until(|| {
+            lock(&harness.context.slot)
+                .runner
+                .as_ref()
+                .is_some_and(|runner| runner.restarts == Some(0))
+        })
+        .await;
+        server.drop_socket();
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(json!({ "t": "welcome", "state": {
+            "phase": "hold", "liveSeconds": 30, "feeds": [], "legs": live_legs(),
+            "destinationsSet": true, "restarts": 1
+        }}));
+        wait_until(|| lock(&harness.context.slot).status().restart.is_some()).await;
+        assert!(
+            lock(&harness.context.slot)
+                .status()
+                .restart
+                .unwrap()
+                .destinations_resent
+        );
+        tokio::time::advance(Duration::from_millis(5_100)).await;
+        assert_eq!(server.next_frame().await["t"], "ping");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restarted_runner_that_refuses_the_destinations_is_reported_unrecovered() {
+        let harness = harness(true);
+        let server = live_show(&harness).await;
+        server.drop_socket();
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(welcome("hold"));
+        let set = server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        let first_at = lock(&harness.context.slot).status().restart.unwrap().at;
+        // The socket drops before the ack: the next socket sends them again,
+        // under the same restart.
+        server.drop_socket();
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(welcome("hold"));
+        let set = server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        let restart = lock(&harness.context.slot).status().restart.unwrap();
+        assert_eq!(restart.at, first_at);
+        assert!(restart.destinations_resent);
+        server.send(json!({ "t": "ack", "id": set["id"], "ok": false, "error": "bad url" }));
+        wait_until(|| {
+            lock(&harness.context.slot)
+                .status()
+                .restart
+                .is_some_and(|restart| !restart.destinations_resent)
+        })
+        .await;
+        // Still the show, still not a fallback: only the web may say it's gone.
+        assert_ne!(lock(&harness.context.slot).phase(), CloudPhase::Failed);
+    }
+
+    #[test]
+    fn a_restart_is_a_runner_that_lost_its_destinations_or_says_it_restarted() {
+        let show = |handed_over: bool, destinations: Vec<HandoverDestination>| ActiveShow {
+            record: created().show,
+            control: created().control,
+            ingest: None,
+            session_id: Some("session-1".to_string()),
+            destinations,
+            handed_over,
+            resuming: false,
+        };
+        let state = |value: Value| -> RunnerState { serde_json::from_value(value).unwrap() };
+        let had = state(json!({ "phase": "live", "legs": live_legs() }));
+        let handed = show(true, destinations());
+        // Before the hand-over's ack the runner has no legs yet: not a restart.
+        assert_eq!(
+            detect_runner_restart(
+                &show(false, destinations()),
+                None,
+                &state(json!({ "phase": "hold", "legs": [] }))
+            ),
+            None
+        );
+        // Legs listed, or the show ended: nothing to do.
+        assert_eq!(detect_runner_restart(&handed, Some(&had), &had), None);
+        assert_eq!(
+            detect_runner_restart(
+                &handed,
+                Some(&had),
+                &state(json!({ "phase": "ended", "legs": [] }))
+            ),
+            None
+        );
+        // An older runner: legs gone after the hand-over means send them again.
+        assert_eq!(
+            detect_runner_restart(
+                &handed,
+                None,
+                &state(json!({ "phase": "hold", "legs": [] }))
+            ),
+            Some(RunnerRestart::Resend(destinations()))
+        );
+        // The runner says it has none (C-C3), whatever its legs list.
+        assert_eq!(
+            detect_runner_restart(
+                &handed,
+                Some(&had),
+                &state(
+                    json!({ "phase": "hold", "legs": [], "destinationsSet": false, "restarts": 1 })
+                )
+            ),
+            Some(RunnerRestart::Resend(destinations()))
+        );
+        // The node gave them back itself: say it restarted, send nothing.
+        let before = state(
+            json!({ "phase": "live", "legs": live_legs(), "destinationsSet": true, "restarts": 0 }),
+        );
+        let after = state(
+            json!({ "phase": "hold", "legs": live_legs(), "destinationsSet": true, "restarts": 1 }),
+        );
+        assert_eq!(
+            detect_runner_restart(&handed, Some(&before), &after),
+            Some(RunnerRestart::Recovered)
+        );
+        assert_eq!(detect_runner_restart(&handed, Some(&after), &after), None);
+        // A first welcome that already counts a restart (it happened while
+        // this computer was away) is not news.
+        assert_eq!(detect_runner_restart(&handed, None, &after), None);
+        // A show resumed after a relaunch holds no keys (C5b): it can only
+        // say so, on the rows the runner had.
+        let resumed = show(false, Vec::new());
+        assert_eq!(
+            detect_runner_restart(
+                &resumed,
+                Some(&had),
+                &state(json!({ "phase": "hold", "legs": [] }))
+            ),
+            Some(RunnerRestart::CannotResend)
+        );
+        assert_eq!(
+            detect_runner_restart(
+                &resumed,
+                Some(&before),
+                &state(
+                    json!({ "phase": "hold", "legs": [], "destinationsSet": false, "restarts": 1 })
+                )
+            ),
+            Some(RunnerRestart::CannotResend)
+        );
+        assert_eq!(
+            detect_runner_restart(
+                &resumed,
+                None,
+                &state(json!({ "phase": "hold", "legs": [] }))
+            ),
+            None
+        );
+        let rows = restart_leg_rows(&RunnerRestart::CannotResend, &had.legs).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| row.state == StreamTargetState::Failed)
+        );
+        assert!(
+            rows[0]
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("go live again")
+        );
+        assert_eq!(restart_leg_rows(&RunnerRestart::Recovered, &had.legs), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3891,7 +4428,8 @@ mod tests {
         assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
         wait_for_phase(&harness.context.slot, CloudPhase::Resuming).await;
         assert!(!lock(&harness.context.slot).status().show.unwrap().resumable);
-        server.send(json!({ "t": "state", "state": { "phase": "live", "liveSeconds": 900 } }));
+        // The runner lists the legs it was just handed.
+        server.send(json!({ "t": "state", "state": { "phase": "live", "liveSeconds": 900, "legs": live_legs() } }));
         wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
 
         // End from the banner's End stream (no session): Off.
@@ -4790,6 +5328,7 @@ mod tests {
             ingest: None,
             session_id: None,
             destinations: Vec::new(),
+            handed_over: false,
             resuming: false,
         });
         assert_eq!(

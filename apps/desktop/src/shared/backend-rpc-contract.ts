@@ -4052,6 +4052,9 @@ const cloudStatusSchema = objectSchema(
         },
         { allowUnknown: false }
       )
+    ),
+    restart: optionalSchema(
+      objectSchema({ at: timestamp, destinationsResent: booleanSchema }, { allowUnknown: false })
     )
   },
   { allowUnknown: false }

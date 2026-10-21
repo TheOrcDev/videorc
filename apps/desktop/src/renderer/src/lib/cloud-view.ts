@@ -74,6 +74,24 @@ export function cloudLostToast(previous: CloudStatus | null, next: CloudStatus):
   return 'Videorc Cloud lost your show. Stop, then go live again to stream directly from this computer.'
 }
 
+/**
+ * The runner restarted mid-show (plan 184 "When things break"): once per
+ * restart, and once more if the platforms then could not be reconnected.
+ */
+export function cloudRestartToast(previous: CloudStatus | null, next: CloudStatus): string | null {
+  const restart = next.restart
+  if (!restart) return null
+  const before = previous?.restart
+  const unrecovered =
+    "Videorc Cloud restarted your show, but your platforms couldn't be reconnected. Stop, then go live again."
+  if (before?.at === restart.at) {
+    return before.destinationsResent && !restart.destinationsResent ? unrecovered : null
+  }
+  return restart.destinationsResent
+    ? 'Videorc Cloud restarted your show. Your platforms reconnect in a few seconds.'
+    : unrecovered
+}
+
 function hoursOrMinutes(seconds: number): string {
   if (seconds >= 3600) {
     const hours = Math.floor(seconds / 3600)

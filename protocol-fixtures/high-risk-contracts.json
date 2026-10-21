@@ -2148,7 +2148,8 @@
         }
       ],
       "liveSeconds": 2400,
-      "directFallbackAvailable": false
+      "directFallbackAvailable": false,
+      "restart": { "at": "2026-10-16T12:39:58.000Z", "destinationsResent": true }
     },
     "statusOff": {
       "phase": "off",

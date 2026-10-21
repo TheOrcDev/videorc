@@ -74,7 +74,12 @@ import {
   trashName
 } from '@/lib/platform'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
-import { CLOUD_TOAST_ID, cloudFallbackToast, cloudLostToast } from '@/lib/cloud-view'
+import {
+  CLOUD_TOAST_ID,
+  cloudFallbackToast,
+  cloudLostToast,
+  cloudRestartToast
+} from '@/lib/cloud-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
 
@@ -4414,8 +4419,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // --- Videorc Cloud (plan 184) ----------------------------------------------
   // The BACKEND owns the show (cloud_show.rs); the renderer renders
   // `cloud.state` and asks for three things. Toast discipline: a Go Live that
-  // streamed directly says why once (the fallback names its session), and a
-  // show the cloud lost while this computer fed it warns once. Nothing else
+  // streamed directly says why once (the fallback names its session), a
+  // show the cloud lost while this computer fed it warns once, and so does a
+  // runner restart (its platforms reconnect, or they could not). Nothing else
   // here is news: the Livestream page and the Stream health stat show the rest.
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
   const cloudStatusRef = useRef<CloudStatus | null>(null)
@@ -4427,6 +4433,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
     const lost = cloudLostToast(previous, next)
     if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
+    const restarted = cloudRestartToast(previous, next)
+    if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
   }, [])
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------

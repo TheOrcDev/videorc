@@ -7,6 +7,7 @@ import {
   cloudFallbackToast,
   cloudHoursLine,
   cloudLostToast,
+  cloudRestartToast,
   cloudResumeNotice,
   cloudSectionState,
   cloudTestBlockedReason,
@@ -74,6 +75,34 @@ describe('cloud copy (plan 184)', () => {
     const lost = status({ directFallbackAvailable: true, phase: 'failed' })
     expect(cloudLostToast(status(), lost)).toMatch(/Stop, then go live again/)
     expect(cloudLostToast(lost, lost)).toBeNull()
+  })
+
+  it('says a runner restart once, and again only if the platforms stay dark', () => {
+    const live = status({ phase: 'live' })
+    const restarted = status({
+      phase: 'hold',
+      restart: { at: '2026-10-21T10:00:00.000Z', destinationsResent: true }
+    })
+    expect(cloudRestartToast(live, live)).toBeNull()
+    expect(cloudRestartToast(live, restarted)).toBe(
+      'Videorc Cloud restarted your show. Your platforms reconnect in a few seconds.'
+    )
+    expect(cloudRestartToast(restarted, { ...restarted, phase: 'live' })).toBeNull()
+    const refused = { ...restarted, restart: { ...restarted.restart!, destinationsResent: false } }
+    expect(cloudRestartToast(restarted, refused)).toMatch(
+      /couldn't be reconnected\. Stop, then go live again\.$/
+    )
+    expect(cloudRestartToast(refused, refused)).toBeNull()
+    // A resumed show holds no keys: the first word is already the bad news.
+    expect(cloudRestartToast(live, refused)).toMatch(/couldn't be reconnected/)
+    // A later restart is news again.
+    const again = {
+      ...restarted,
+      restart: { at: '2026-10-21T11:00:00.000Z', destinationsResent: true }
+    }
+    expect(cloudRestartToast(restarted, again)).toMatch(/reconnect in a few seconds/)
+    // Never a key, a url or a word the copy rules forbid.
+    expect(cloudRestartToast(live, restarted)).not.toMatch(/runner|relay|rtmp/i)
   })
 
   it('counts cloud hours plainly, minutes under an hour, overage with no charge', () => {

@@ -4296,6 +4296,17 @@ export type CloudFallbackReason =
   | 'cloud-node-unreachable'
   | 'not-entitled'
 
+/**
+ * The runner restarted mid-show and lost its destinations (plan 184 "When
+ * things break"). `destinationsResent` is false when this computer holds no
+ * keys to send again (a show resumed after a relaunch) or the cloud refused
+ * them: the platforms stay dark until a new Go Live.
+ */
+export interface CloudRestart {
+  at: string
+  destinationsResent: boolean
+}
+
 export interface CloudFallback {
   reason: CloudFallbackReason
   at: string
@@ -4367,6 +4378,8 @@ export interface CloudStatus {
   directFallbackAvailable: boolean
   /** C6b: the Test cloud that runs, or the last one that ran. */
   test?: CloudTestStatus
+  /** The runner restarted during this show (the last time it did). */
+  restart?: CloudRestart
 }
 
 /** `cloud.settings.set`: a partial patch; `holdImageScreenId: null` clears the image. */
