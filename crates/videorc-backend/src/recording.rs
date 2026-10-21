@@ -13554,6 +13554,18 @@ pub(crate) async fn background_h264_encode_decision(ffmpeg_path: &str) -> Backgr
     }
 }
 
+/// Unit tests never open a GPU unless asked: on a multi-GPU box the probe
+/// would encode on whichever node comes first, and on ogre that once hung
+/// the AMD card mid-`cargo test` (2026-10-20). The opt-in is for a tester who
+/// pinned a safe node on purpose.
+#[cfg(target_os = "linux")]
+const TEST_HARDWARE_PROBE_ENV: &str = "VIDEORC_TEST_HARDWARE_PROBE";
+
+#[cfg(any(test, target_os = "linux"))]
+fn hardware_probe_allowed(test_build: bool, opt_in: Option<&str>) -> bool {
+    !test_build || opt_in.map(str::trim) == Some("1")
+}
+
 async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpegH264Encoder> {
     #[cfg(target_os = "linux")]
     {
@@ -13563,6 +13575,18 @@ async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpeg
         .map_err(anyhow::Error::msg)?;
         if preference == LinuxH264EncoderPreference::OpenH264 {
             return select_linux_h264_encoder(preference, None, None);
+        }
+        if !hardware_probe_allowed(
+            cfg!(test),
+            std::env::var(TEST_HARDWARE_PROBE_ENV).ok().as_deref(),
+        ) {
+            return select_linux_h264_encoder(
+                preference,
+                None,
+                Some(format!(
+                    "unit tests never probe a render node (set {TEST_HARDWARE_PROBE_ENV}=1 to)"
+                )),
+            );
         }
         let pin = crate::linux_vaapi::parse_device_pin(
             std::env::var(crate::linux_vaapi::DEVICE_PIN_ENV)
@@ -26200,6 +26224,17 @@ mod tests {
             ffmpeg_h264_platform_for_target(RuntimePlatform::Linux),
             Ok(FfmpegH264Platform::LinuxSoftware)
         );
+    }
+
+    #[test]
+    fn unit_tests_never_probe_a_render_node_unless_asked() {
+        // A shipped or dev build always may; a test build only on `1`.
+        assert!(hardware_probe_allowed(false, None));
+        assert!(hardware_probe_allowed(false, Some("0")));
+        assert!(!hardware_probe_allowed(true, None));
+        assert!(!hardware_probe_allowed(true, Some("")));
+        assert!(!hardware_probe_allowed(true, Some("yes")));
+        assert!(hardware_probe_allowed(true, Some(" 1 ")));
     }
 
     #[test]

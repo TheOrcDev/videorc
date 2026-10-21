@@ -61,18 +61,29 @@ listed in diagnostics as `skipped`. On ogre the Intel node is safe and the
 AMD node hangs the whole host on VAAPI encode, so the pin is not optional
 there:
 
+The numbering is not stable: on ogre `renderD128` has been the Intel node on
+some boots and the AMD node on others (2026-10-20), and following a
+hard-coded `renderD128` hung the AMD card. Check the drivers on every boot
+and pin the node by its driver, never by its number:
+
 ```bash
+for d in /sys/class/drm/renderD*; do echo "$d $(readlink "$d/device/driver")"; done
+intel=$(for d in /sys/class/drm/renderD*; do
+  [ "$(basename "$(readlink "$d/device/driver")")" = i915 ] && echo "/dev/dri/$(basename "$d")"
+done)
+[ -n "$intel" ] || echo "no i915 render node: do not pin, use openh264" >&2
 export LIBVA_DRIVER_NAME=iHD
 export LIBVA_DRIVERS_PATH=/usr/lib/dri
-export LIBVA_DEVICE=/dev/dri/renderD128
-export VIDEORC_LINUX_VAAPI_DEVICE=/dev/dri/renderD128
+export LIBVA_DEVICE=$intel
+export VIDEORC_LINUX_VAAPI_DEVICE=$intel
 # Safe default while diagnosing the bridge: the software encoder only.
 export VIDEORC_LINUX_H264_ENCODER=openh264
 ```
 
 `VIDEORC_LINUX_H264_ENCODER=auto|vaapi|openh264` picks the encoder; `auto` is
-the default. Find the driver behind each node with
-`readlink /sys/class/drm/renderD128/device/driver` (i915, xe, amdgpu, …).
+the default. The backend's unit tests never probe a render node unless
+`VIDEORC_TEST_HARDWARE_PROBE=1` is set, so `cargo test` is safe on a
+multi-GPU box without a pin.
 
 The backend remembers a probe that never returned. Before it probes a node it
 writes `linux-vaapi/probe-in-progress.json` under the app data directory; if
