@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  classifyFeedHandshake,
   dropTimings,
   estimateReceiverClockOffset,
   evaluateCloudSoloReport,
@@ -11,6 +12,46 @@ import {
   parsePtsTimes,
   sortedGapStats
 } from './cloud-solo-gates.mjs'
+
+describe('cloud solo gates: the feed certificate probe (C1c)', () => {
+  // FFmpeg 8.1 (OpenSSL) at level+debug against MediaMTX 1.21.2 with no
+  // catch-all path, as the runner's dev/mediamtx.yml.tpl has it since C1b.
+  const url = 'rtmps://localhost:47212/live/sh_probe-h?key=not-a-key'
+  it('reads a probe refused after the RTMP connect as a passed handshake', () => {
+    const lines = [
+      '[rtmps @ 0x7f7030460] [debug] No default whitelist set',
+      '[tls @ 0x7f6c2c300] [debug] Info method=SSL_connect state=SSLOK(SSL negotiation finished successfully), where=4097, ret=1',
+      '[rtmps @ 0x7f7030460] [debug] Handshaking...',
+      '[rtmps @ 0x7f7030460] [debug] Type answer 3',
+      '[rtmps @ 0x7f7030460] [debug] Server version 0.0.0.0',
+      "[rtmps @ 0x7f7030460] [debug] Sending publish command for 'sh_probe-h?key=not-a-key'",
+      `[fifo @ 0x7f6c1c280] [error] Error opening ${url}: Input/output error`
+    ]
+    assert.equal(classifyFeedHandshake(lines), 'handshake-passed')
+    // The same error with no RTMP line is not proof that TLS passed.
+    assert.equal(classifyFeedHandshake(lines.slice(-1)), 'unknown')
+    // An RTMP-level refusal at info level still counts (the old catch-all path).
+    assert.equal(
+      classifyFeedHandshake(['[rtmps @ 0x1] [error] Server error: Not authorized']),
+      'handshake-passed'
+    )
+  })
+
+  it('reads a refused certificate as rejected, RTMP lines or not', () => {
+    const lines = [
+      '[tls @ 0x929034300] [debug] Alert method=write state=SSLERR(error), where=16392, ret=560',
+      '[tls @ 0x929024f80] [error] error:0A000086:SSL routines::certificate verify failed',
+      '[rtmps @ 0x929038460] [error] Cannot open connection tls://localhost:47212',
+      `[fifo @ 0x929020280] [error] Error opening ${url}: Input/output error`
+    ]
+    assert.equal(classifyFeedHandshake(lines), 'certificate-rejected')
+    assert.equal(
+      classifyFeedHandshake(['[rtmps @ 0x1] [debug] Handshaking...', ...lines]),
+      'certificate-rejected'
+    )
+    assert.equal(classifyFeedHandshake([]), 'unknown')
+  })
+})
 
 describe('cloud solo gates: receiver continuity', () => {
   it('parses ffprobe csv and measures the largest gap in presentation order', () => {
@@ -359,6 +400,7 @@ describe('cloud solo gates: the run verdict', () => {
     report.tls.wrongCa = { outcome: 'handshake-passed' }
     report.tls.otherName = { outcome: 'handshake-passed' }
     report.secretLeaks = ['ingest key']
+    report.web = { droppedSrt: [{ showId: 'sh_x', orientation: 'horizontal', problem: 'url' }] }
     const failures = evaluateCloudSoloReport(report)
     assert.deepEqual(failures, [
       'feed-cut: hold took 9 s (limit 6 s)',
@@ -373,7 +415,8 @@ describe('cloud solo gates: the run verdict', () => {
       "the runner's platform leg states never reached the desktop as live",
       'the feed accepted a certificate its roots did not sign (handshake-passed)',
       'the feed accepted a certificate for another name (handshake-passed)',
-      'a secret reached the renderer events: ingest key'
+      'a secret reached the renderer events: ingest key',
+      "the web dropped the node's srt block (horizontal: url)"
     ])
     assert.ok(evaluateCloudSoloReport({}).includes('no drop was measured'))
   })

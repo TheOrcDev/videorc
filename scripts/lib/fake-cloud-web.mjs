@@ -30,7 +30,8 @@ import { capabilitiesDocument } from './fake-transcript-service.mjs'
  *   half the agent holds as `VIDEORC_CLOUD_SHOW_PUBLIC_KEY`.
  *
  * Every call is recorded for the report as method, path and status only.
- * Bearer tokens, show tokens, ingest keys and stream keys never reach a log.
+ * Bearer tokens, show tokens, ingest keys, SRT passphrases and stream keys
+ * never reach a log.
  */
 
 export const NODE_HEADER_ID = 'x-videorc-node'
@@ -57,9 +58,23 @@ export const TEST_SHOW_WINDOW_MS = 60 * 60 * 1000
 /** A show the node stops reporting ends at the next heartbeat once this old. */
 export const FORGOTTEN_SHOW_GRACE_MS = 30_000
 export const AGENT_TIMEOUT_MS = 8_000
+// SRT (plan 184 C1b), as `videorc-web/lib/cloud/shows.ts` has it: every create
+// sends the node an SRT passphrase and latency (the node refuses a create
+// without the passphrase), and the node's `srt` blocks reach the desktop as
+// they are. The latency is VIDEORC_CLOUD_SRT_LATENCY_MS on the web, 1000 ms
+// when unset.
+export const DEFAULT_SRT_LATENCY_MS = 1000
+export const MIN_SRT_LATENCY_MS = 120
+export const MAX_SRT_LATENCY_MS = 8000
 
 const SHOW_ID_PATTERN = /^sh_[0-9A-Za-z]{22}$/
 const INGEST_KEY_PATTERN = /^[0-9A-Za-z]{32}$/
+/** `srt://host:port` and nothing more: no user info, path or query. */
+const SRT_URL_PATTERN = /^srt:\/\/(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):(\d{1,5})$/
+/** SRT takes stream ids of up to 512 characters; printable ASCII, no space. */
+const SRT_STREAM_ID_PATTERN = /^[\x21-\x7e]{1,512}$/
+/** SRT takes 10 to 79 characters; base62 keeps it clear of FFmpeg's option syntax. */
+const SRT_PASSPHRASE_SHAPE = /^[0-9A-Za-z]{10,79}$/
 const NODE_ID_PATTERN = /^(?=.{1,64}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
 /** An Ed25519 SPKI DER is this fixed prefix followed by the 32 key bytes. */
@@ -81,6 +96,11 @@ export function newShowId() {
 
 /** 32 base62 characters: the node's hook accepts 16 to 128 base62 only. */
 export function newIngestKey() {
+  return base62(32)
+}
+
+/** The show's SRT secret (C1b): 32 base62 characters, never stored by the web. */
+export function newSrtPassphrase() {
   return base62(32)
 }
 
@@ -498,10 +518,48 @@ export async function signedAgentRequest({
   return { status: response.status, json }
 }
 
-function parseAgentCreateResponse(value) {
+/**
+ * A feed's `srt` block (C1b) as the web checks it: the block, or the name of
+ * the first field that is wrong (never its value; the block carries the
+ * passphrase). Pure.
+ */
+export function parseSrtBlock(value) {
+  if (!isRecord(value)) return 'not-an-object'
+  const url = typeof value.url === 'string' ? value.url : ''
+  const port = Number(SRT_URL_PATTERN.exec(url)?.[1] ?? Number.NaN)
+  if (!(port >= 1 && port <= 65_535)) return 'url'
+  if (typeof value.streamId !== 'string' || !SRT_STREAM_ID_PATTERN.test(value.streamId)) {
+    return 'streamId'
+  }
+  if (typeof value.passphrase !== 'string' || !SRT_PASSPHRASE_SHAPE.test(value.passphrase)) {
+    return 'passphrase'
+  }
+  if (
+    typeof value.latencyMs !== 'number' ||
+    !Number.isInteger(value.latencyMs) ||
+    value.latencyMs < MIN_SRT_LATENCY_MS ||
+    value.latencyMs > MAX_SRT_LATENCY_MS
+  ) {
+    return 'latencyMs'
+  }
+  return {
+    latencyMs: value.latencyMs,
+    passphrase: value.passphrase,
+    streamId: value.streamId,
+    url
+  }
+}
+
+/**
+ * The node's create answer as the web reads it: the pairs go to the desktop
+ * as they are, `srt` blocks included. A malformed `srt` block costs that feed
+ * SRT, never the show (it lands in `droppedSrt` by field name). Pure.
+ */
+export function parseAgentCreateResponse(value) {
   if (!isRecord(value) || !Array.isArray(value.ingest) || value.ingest.length === 0) return null
   if (typeof value.controlUrl !== 'string' || !/^wss?:\/\//.test(value.controlUrl)) return null
   const ingest = []
+  const droppedSrt = []
   for (const entry of value.ingest) {
     if (
       !isRecord(entry) ||
@@ -513,13 +571,23 @@ function parseAgentCreateResponse(value) {
     ) {
       return null
     }
-    ingest.push({
+    const pair = {
       orientation: entry.orientation,
       serverUrl: entry.serverUrl,
       streamKey: entry.streamKey
-    })
+    }
+    // `srt` is there only when the node takes SRT; null says the same.
+    if (entry.srt !== undefined && entry.srt !== null) {
+      const srt = parseSrtBlock(entry.srt)
+      if (typeof srt === 'string') {
+        droppedSrt.push({ orientation: entry.orientation, problem: srt })
+      } else {
+        pair.srt = srt
+      }
+    }
+    ingest.push(pair)
   }
-  return { controlUrl: value.controlUrl, ingest }
+  return { controlUrl: value.controlUrl, ingest, droppedSrt }
 }
 
 // --- The server -------------------------------------------------------------------
@@ -531,13 +599,16 @@ function parseAgentCreateResponse(value) {
  * @param {import('node:crypto').KeyObject} options.signingKey - mints show tokens.
  * @param {string} [options.userId]
  * @param {object} [options.allowance] - the `cloud` block (cloudAllowanceBlock).
+ * @param {number} [options.srtLatencyMs] - SRT's receive window for every show
+ *   (the web's VIDEORC_CLOUD_SRT_LATENCY_MS, 1000 ms by default).
  */
 export async function startFakeCloudWeb({
   sessionToken,
   node,
   signingKey,
   userId = 'user_cloud_smoke',
-  allowance
+  allowance,
+  srtLatencyMs = DEFAULT_SRT_LATENCY_MS
 }) {
   if (!sessionToken || !node?.id || !node?.secret || !node?.agentUrl || !signingKey) {
     throw new Error('The fake cloud web needs a session token, a node and a signing key.')
@@ -547,6 +618,8 @@ export async function startFakeCloudWeb({
     calls: [],
     heartbeats: 0,
     endShowsSent: [],
+    /** `srt` blocks the node sent malformed: show, orientation and field, never a value. */
+    droppedSrt: [],
     usageReports: [],
     /** Reports of test shows: accepted so the node stops retrying, never counted. */
     testUsageIgnored: [],
@@ -749,6 +822,9 @@ export async function startFakeCloudWeb({
       }
       const showId = newShowId()
       const ingestKey = newIngestKey()
+      // One passphrase per show, a test's included: the desktop picks the
+      // transport (C1b).
+      const srtPassphrase = newSrtPassphrase()
       const maxShowSeconds = isTest ? TEST_SHOW_MAX_SECONDS : MAX_SHOW_SECONDS
       const show = {
         id: showId,
@@ -771,8 +847,9 @@ export async function startFakeCloudWeb({
         outputs: parsed.outputs,
         client: parsed.client,
         controlUrl: null,
-        // Never serialized or logged; the web proper never stores it at all.
-        ingestKey
+        // Never serialized or logged; the web proper never stores either.
+        ingestKey,
+        srtPassphrase
       }
       state.shows.set(showId, show)
       const created = await agent('/v1/shows', {
@@ -783,9 +860,14 @@ export async function startFakeCloudWeb({
         outputs: parsed.outputs,
         holdMaxSeconds: parsed.holdMaxSeconds,
         maxShowSeconds,
-        ingestKey
+        ingestKey,
+        srtPassphrase,
+        srtLatencyMs
       })
       const value = created.status === 200 ? parseAgentCreateResponse(created.json) : null
+      for (const { orientation, problem } of value?.droppedSrt ?? []) {
+        state.droppedSrt.push({ showId, orientation, problem })
+      }
       if (!value) {
         show.status = 'ended'
         show.endedAt = now
@@ -868,6 +950,12 @@ export async function startFakeCloudWeb({
       const show = state.shows.get(showId)
       if (!show) throw new Error(`The fake web knows no show ${showId}.`)
       return show.ingestKey
+    },
+    /** The show's SRT passphrase (C1b), for a leak scan only. */
+    srtPassphraseFor(showId) {
+      const show = state.shows.get(showId)
+      if (!show) throw new Error(`The fake web knows no show ${showId}.`)
+      return show.srtPassphrase
     },
     /** The control socket address the agent gave the show. */
     controlUrlFor(showId) {

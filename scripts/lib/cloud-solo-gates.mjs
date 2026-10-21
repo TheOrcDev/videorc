@@ -224,6 +224,36 @@ export function holdCardStats(rgb, width, height, { darkMax = 48, brightMin = 16
 }
 
 /**
+ * How one FFmpeg publish through the feed's TLS options ended (C1c), from
+ * its stderr lines at `-loglevel level+debug`:
+ * - `certificate-rejected`: OpenSSL refused the certificate (chain or name);
+ * - `handshake-passed`: the RTMP layer ran over the TLS connection. FFmpeg
+ *   opens RTMP only after the TLS handshake, the certificate check
+ *   included, succeeded, so its RTMP debug lines prove it whatever RTMP did
+ *   next. The node's MediaMTX configures no catch-all path (runner C1b), so
+ *   a probe's path is refused right after the RTMP connect and FFmpeg's only
+ *   error is "Input/output error"; an RTMP-level refusal counts as well;
+ * - `unknown`: anything else.
+ */
+export function classifyFeedHandshake(lines) {
+  const errors = lines.filter((line) => line.includes('[error]'))
+  if (errors.some((line) => line.includes('certificate verify failed'))) {
+    return 'certificate-rejected'
+  }
+  const rtmpRan = lines.some((line) =>
+    /\[rtmps @ [^\]]+\] \[debug\] (?:Handshaking\.\.\.|Server version )/.test(line)
+  )
+  const rtmpRefused = errors.some(
+    (line) =>
+      line.includes('RTMP handshake') ||
+      line.includes('Server error') ||
+      line.includes('End of file') ||
+      line.includes('Connection reset')
+  )
+  return rtmpRan || rtmpRefused ? 'handshake-passed' : 'unknown'
+}
+
+/**
  * The whole run's verdict: every gate the smoke enforces, as a list of
  * failures (empty is a pass). `report` is the smoke's report object.
  */
@@ -321,6 +351,15 @@ export function evaluateCloudSoloReport(report) {
   }
   if (Array.isArray(report.secretLeaks) && report.secretLeaks.length > 0) {
     failures.push(`a secret reached the renderer events: ${report.secretLeaks.join(', ')}`)
+  }
+  // C1b: every `srt` block the node sent must pass the web's own check. One
+  // the web drops leaves that feed RTMPS only: the node and the web drifted.
+  if (Array.isArray(report.web?.droppedSrt) && report.web.droppedSrt.length > 0) {
+    failures.push(
+      `the web dropped the node's srt block (${report.web.droppedSrt
+        .map((dropped) => `${dropped.orientation}: ${dropped.problem}`)
+        .join(', ')})`
+    )
   }
   // C6b: Test cloud ran before Go Live, against the same runner, with no
   // platforms, no metering and nothing to resume.

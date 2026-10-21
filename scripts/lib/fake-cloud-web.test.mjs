@@ -16,8 +16,11 @@ import {
   newIngestKey,
   newShowId,
   newShowSigningKey,
+  newSrtPassphrase,
   nodeSignature,
+  parseAgentCreateResponse,
   parseCreateShowBody,
+  parseSrtBlock,
   showPublicKeyBase64Url,
   signNodeRequest,
   startFakeCloudWeb,
@@ -44,6 +47,48 @@ function rfc8032Key() {
     type: 'pkcs8',
     key: Buffer.concat([PKCS8_ED25519_PREFIX, Buffer.from(RFC8032_SEED_HEX, 'hex')])
   })
+}
+
+/**
+ * What the real node agent answers `POST /v1/shows` since C1b (the runner
+ * repo's crates/node-agent/src/http.rs and docs/wire-notes.md): 400
+ * `bad-request` without an SRT passphrase of 10 to 79 base62 or with a
+ * latency outside 120 to 8000 ms; else the stream key
+ * `<showId>-h?key=<ingestKey>` and an `srt` block with the show's passphrase.
+ */
+function nodeCreateAnswer(body, { serverUrl = 'rtmps://127.0.0.1:19360/live' } = {}) {
+  const latencyMs = body.srtLatencyMs ?? 1000
+  if (
+    typeof body.srtPassphrase !== 'string' ||
+    !/^[0-9A-Za-z]{10,79}$/.test(body.srtPassphrase) ||
+    !Number.isInteger(latencyMs) ||
+    latencyMs < 120 ||
+    latencyMs > 8000
+  ) {
+    return {
+      status: 400,
+      json: { error: { code: 'bad-request', message: 'srtPassphrase must be 10 to 79 base62' } }
+    }
+  }
+  return {
+    status: 200,
+    json: {
+      ingest: [
+        {
+          orientation: 'horizontal',
+          serverUrl,
+          streamKey: `${body.showId}-h?key=${body.ingestKey}`,
+          srt: {
+            url: 'srt://localhost:8890',
+            streamId: `publish:live/${body.showId}-h`,
+            passphrase: body.srtPassphrase,
+            latencyMs
+          }
+        }
+      ],
+      controlUrl: `ws://127.0.0.1:9443/v1/shows/${body.showId}/control`
+    }
+  }
 }
 
 describe('fake cloud web: node signatures', () => {
@@ -172,6 +217,55 @@ describe('fake cloud web: bodies', () => {
     const ingestKey = newIngestKey()
     assert.ok(isIngestKey(ingestKey), ingestKey)
     assert.ok(!isIngestKey('with-dash-and_underscore_padding00'))
+    assert.match(newSrtPassphrase(), /^[0-9A-Za-z]{32}$/)
+  })
+
+  // C1b, as videorc-web/lib/cloud/agent-client.ts reads the node's answer.
+  it('passes the node’s srt blocks through and drops a malformed one by field name', () => {
+    const showId = newShowId()
+    const passphrase = newSrtPassphrase()
+    const srt = {
+      url: 'srt://eu-hel-1.live.videorc.com:8890',
+      streamId: `publish:live/${showId}-h`,
+      passphrase,
+      latencyMs: 1000
+    }
+    const pair = (extra) => ({
+      orientation: 'horizontal',
+      serverUrl: 'rtmps://eu-hel-1.live.videorc.com:1936/live',
+      streamKey: `${showId}-h?key=${newIngestKey()}`,
+      ...extra
+    })
+    const answer = (ingest) => ({ ingest, controlUrl: `wss://n/v1/shows/${showId}/control` })
+
+    const parsed = parseAgentCreateResponse(answer([pair({ srt })]))
+    assert.deepEqual(parsed.ingest[0].srt, srt)
+    assert.deepEqual(parsed.droppedSrt, [])
+    // No block, or null: the feed is RTMPS only.
+    for (const none of [{}, { srt: null }]) {
+      const rtmpsOnly = parseAgentCreateResponse(answer([pair(none)]))
+      assert.equal('srt' in rtmpsOnly.ingest[0], false)
+      assert.deepEqual(rtmpsOnly.droppedSrt, [])
+    }
+    for (const [bad, problem] of [
+      ['not a block', 'not-an-object'],
+      [{ ...srt, url: 'srt://host:8890?passphrase=x' }, 'url'],
+      [{ ...srt, url: 'srt://host' }, 'url'],
+      [{ ...srt, streamId: 'has space' }, 'streamId'],
+      [{ ...srt, passphrase: 'short' }, 'passphrase'],
+      [{ ...srt, passphrase: 'not:base62:at:all' }, 'passphrase'],
+      [{ ...srt, latencyMs: 119 }, 'latencyMs'],
+      [{ ...srt, latencyMs: 8001 }, 'latencyMs']
+    ]) {
+      assert.equal(parseSrtBlock(bad), problem)
+      const dropped = parseAgentCreateResponse(answer([pair({ srt: bad })]))
+      assert.equal('srt' in dropped.ingest[0], false, problem)
+      assert.deepEqual(dropped.droppedSrt, [{ orientation: 'horizontal', problem }])
+      // The record names the field, never the passphrase.
+      assert.ok(!JSON.stringify(dropped.droppedSrt).includes(passphrase))
+    }
+    // A broken pair still fails the whole answer, as before.
+    assert.equal(parseAgentCreateResponse(answer([pair({ streamKey: '' })])), null)
   })
 
   it('parses the create body as the web does', () => {
@@ -334,24 +428,16 @@ describe('fake cloud web: the server against a fake agent', () => {
       }
       if (req.url === '/v1/shows') {
         const body = JSON.parse(rawBody)
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            ingest: [
-              {
-                orientation: 'horizontal',
-                serverUrl: 'rtmps://127.0.0.1:19360/live',
-                streamKey: `${body.showId}-h.${body.ingestKey}`
-              }
-            ],
-            controlUrl: `ws://127.0.0.1:9443/v1/shows/${body.showId}/control`
-          })
-        )
+        agentCreates.push(body)
+        const { status, json } = nodeCreateAnswer(body)
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(json))
         return
       }
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true }))
     })
+    const agentCreates = []
     await new Promise((resolveListen) => agent.listen(0, '127.0.0.1', resolveListen))
     const agentUrl = `http://127.0.0.1:${agent.address().port}`
     const web = await startFakeCloudWeb({
@@ -402,7 +488,20 @@ describe('fake cloud web: the server against a fake agent', () => {
       assert.equal(created.show.nodeId, 'local-1')
       assert.equal(created.show.holdMaxSeconds, 900)
       assert.equal(created.ingest[0].serverUrl, 'rtmps://127.0.0.1:19360/live')
-      assert.ok(created.ingest[0].streamKey.startsWith(`${created.show.id}-h.`))
+      // C1b: the key rides in the stream key's query, and the node's srt
+      // block reaches the desktop as it is, with the show's passphrase.
+      const sent = agentCreates.at(-1)
+      assert.equal(created.ingest[0].streamKey, `${created.show.id}-h?key=${sent.ingestKey}`)
+      assert.match(sent.srtPassphrase, /^[0-9A-Za-z]{32}$/)
+      assert.equal(sent.srtLatencyMs, 1000)
+      assert.deepEqual(created.ingest[0].srt, {
+        url: 'srt://localhost:8890',
+        streamId: `publish:live/${created.show.id}-h`,
+        passphrase: sent.srtPassphrase,
+        latencyMs: 1000
+      })
+      assert.equal(web.srtPassphraseFor(created.show.id), sent.srtPassphrase)
+      assert.deepEqual(web.state.droppedSrt, [])
       assert.equal(created.control.url, `ws://127.0.0.1:9443/v1/shows/${created.show.id}/control`)
       const payload = verifyShowToken({
         token: created.control.token,
@@ -423,7 +522,9 @@ describe('fake cloud web: the server against a fake agent', () => {
           'outputs',
           'holdMaxSeconds',
           'maxShowSeconds',
-          'ingestKey'
+          'ingestKey',
+          'srtPassphrase',
+          'srtLatencyMs'
         ]
       })
 
@@ -542,6 +643,9 @@ describe('fake cloud web: the server against a fake agent', () => {
       assert.ok(!logged.includes('session-token'))
       assert.ok(!logged.includes(created.control.token))
       assert.ok(!logged.includes(created.ingest[0].streamKey))
+      for (const record of [logged, JSON.stringify(web.state.agentCalls)]) {
+        assert.ok(!record.includes(created.ingest[0].srt.passphrase))
+      }
       assert.ok(
         web.state.calls.some((call) => call.path === '/api/cloud/shows' && call.status === 201)
       )
@@ -562,19 +666,11 @@ describe('fake cloud web: the server against a fake agent', () => {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
       if (req.url === '/v1/shows') {
         agentBodies.push(body)
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            ingest: [
-              {
-                orientation: 'horizontal',
-                serverUrl: 'rtmps://localhost:19360/live',
-                streamKey: `${body.showId}-h.${body.ingestKey}`
-              }
-            ],
-            controlUrl: `ws://127.0.0.1:9443/v1/shows/${body.showId}/control`
-          })
-        )
+        const { status, json } = nodeCreateAnswer(body, {
+          serverUrl: 'rtmps://localhost:19360/live'
+        })
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(json))
         return
       }
       res.writeHead(200, { 'content-type': 'application/json' })
@@ -631,6 +727,10 @@ describe('fake cloud web: the server against a fake agent', () => {
         { kind: 'solo', maxShowSeconds: 30, status: 200 }
       )
       assert.ok(!JSON.stringify(web.state.agentCalls).includes(agentBodies.at(-1).ingestKey))
+      // A test gets a passphrase like a show (C1b): the desktop picks the transport.
+      assert.match(agentBodies.at(-1).srtPassphrase, /^[0-9A-Za-z]{32}$/)
+      assert.equal(created.ingest[0].srt.passphrase, agentBodies.at(-1).srtPassphrase)
+      assert.ok(!JSON.stringify(web.state.agentCalls).includes(agentBodies.at(-1).srtPassphrase))
       // Open on the web, so a show cannot start beside it, but never current.
       assert.equal((await create('solo')).status, 409)
       assert.deepEqual(await current(), { show: null })

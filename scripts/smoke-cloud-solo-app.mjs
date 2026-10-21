@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { createSocket as createUdpSocket } from 'node:dgram'
 import {
   chmodSync,
   existsSync,
@@ -17,6 +18,7 @@ import { createServer as createTlsServer } from 'node:tls'
 
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
 import {
+  classifyFeedHandshake,
   dropTimings,
   evaluateCloudSoloReport,
   estimateReceiverClockOffset,
@@ -183,6 +185,9 @@ try {
     api: await freePort(),
     agent: await freePort(),
     proxy: await freePort(),
+    // MediaMTX's SRT listener (C1b; UDP). The node takes SRT by default and
+    // hands its address to the desktop; this desktop still feeds RTMPS.
+    srt: await freeUdpPort(),
     receivers: [await freePort(), await freePort()]
   }
   const runnerPorts = await freePortRange(4)
@@ -220,6 +225,7 @@ try {
       // The desktop publishes through the feed proxy; MediaMTX listens behind it.
       VIDEORC_NODE_RTMPS_PORT: String(ports.proxy),
       VIDEORC_NODE_RTMP_PORT: String(ports.rtmp),
+      VIDEORC_NODE_SRT_PORT: String(ports.srt),
       VIDEORC_NODE_STATE_DIR: agentStateDir,
       VIDEORC_RUNNER_BIN: binaries.runner,
       VIDEORC_NODE_FFMPEG: ffmpegPath,
@@ -329,14 +335,14 @@ try {
 
   // 7b. The feed's certificate check (C1c), with FFmpeg itself and the same
   //     fifo output shape the app uses: against MediaMTX behind the proxy
-  //     with the right roots (the handshake passes; the publish then fails
-  //     on the key, which is not what is measured), with a CA that did not
-  //     sign the cert, and against a cert for another name.
+  //     with the right roots (the handshake passes; MediaMTX then refuses
+  //     the probe's path, which is not what is measured), with a CA that
+  //     did not sign the cert, and against a cert for another name.
   const serverCert = join(certDir, 'server.crt')
   report.tls = await feedCertificateChecks({
     certDir,
     rightCa: serverCert,
-    url: `rtmps://localhost:${ports.proxy}/live/sh_probe-h.not-a-key`
+    url: `rtmps://localhost:${ports.proxy}/live/sh_probe-h?key=not-a-key`
   })
   log(
     `[tls] right roots: ${report.tls.rightRoots.outcome}; wrong CA: ${report.tls.wrongCa.outcome}; other name: ${report.tls.otherName.outcome}`
@@ -1447,7 +1453,9 @@ function mediamtxConfigFromTemplate(template, { certDir, hook, ports }) {
     [/^apiAddress: .*$/m, `apiAddress: 127.0.0.1:${ports.api}`],
     [/^rtspAddress: .*$/m, `rtspAddress: 127.0.0.1:${ports.rtsp}`],
     [/^rtmpAddress: .*$/m, `rtmpAddress: 127.0.0.1:${ports.rtmp}`],
-    [/^rtmpsAddress: .*$/m, `rtmpsAddress: 127.0.0.1:${ports.rtmps}`]
+    [/^rtmpsAddress: .*$/m, `rtmpsAddress: 127.0.0.1:${ports.rtmps}`],
+    // The template's SRT listener is :8890 on every interface (C1b).
+    [/^srtAddress: .*$/m, `srtAddress: 127.0.0.1:${ports.srt}`]
   ]
   let config = template.replaceAll('@CERT_DIR@', certDir).replaceAll('@HOOK@', hook)
   for (const [pattern, line] of replacements) {
@@ -1661,12 +1669,18 @@ async function waitForFinalRecording(reportedPath) {
 
 /**
  * Every secret the run has seen so far, labelled: the platform keys, each
- * show's ingest key (the tests' too) and every token the web minted.
+ * show's ingest key (the tests' too), every show's SRT passphrase (C1b: the
+ * desktop gets it in the create answer and in `ingest.get`'s ack even while
+ * it feeds RTMPS) and every token the web minted.
  */
 function secretsToScan() {
   return [
     ...receiverKeys.map((value, index) => ({ label: `platform key ${index + 1}`, value })),
     ...ingestSecrets,
+    ...(web ? [...web.state.shows.values()] : []).map((show) => ({
+      label: 'an SRT passphrase',
+      value: show.srtPassphrase
+    })),
     ...(web?.state.mintedTokens ?? []).map((value) => ({ label: 'a show token', value }))
   ]
 }
@@ -1693,6 +1707,7 @@ function summarizeWeb(state) {
     capabilityRequests: state.capabilityRequests,
     unknownRoutes: state.unknownRoutes,
     endShowsSent: state.endShowsSent,
+    droppedSrt: state.droppedSrt,
     agentCalls: state.agentCalls,
     shows: [...state.shows.values()].map((show) => ({
       id: show.id,
@@ -1915,14 +1930,27 @@ function freePort() {
   })
 }
 
+/** A free loopback UDP port (MediaMTX's SRT listener). */
+function freeUdpPort() {
+  return new Promise((resolvePort, rejectPort) => {
+    const socket = createUdpSocket('udp4')
+    socket.once('error', rejectPort)
+    socket.bind(0, '127.0.0.1', () => {
+      const { port } = socket.address()
+      socket.close(() => resolvePort(port))
+    })
+  })
+}
+
 // --- The feed's certificate check (C1c) ----------------------------------------------
 
 /**
  * Three direct FFmpeg publishes with the app's fifo output shape and the
  * app's TLS options (`tls_verify=1:ca_file=…` as the fifo's format_opts):
  * - `rightRoots`: the run's cert as the roots, against MediaMTX behind the
- *   proxy. The TLS handshake passes; the publish then fails on the key,
- *   which is not what is measured.
+ *   proxy. The TLS handshake passes; MediaMTX then refuses the probe's path
+ *   (the agent adds only live shows' feed paths), which is not what is
+ *   measured.
  * - `wrongCa`: a CA that did not sign MediaMTX's cert: the handshake fails.
  * - `otherName`: a tiny TLS server with a cert for `other.test`, trusted as
  *   its own CA, reached as `localhost`: the chain is fine and the name is
@@ -1982,7 +2010,7 @@ async function feedCertificateChecks({ certDir, rightCa, url }) {
       rightRoots: await ffmpegFeedHandshake(url, rightCa),
       wrongCa: await ffmpegFeedHandshake(url, wrongCa),
       otherName: await ffmpegFeedHandshake(
-        `rtmps://localhost:${otherPort}/live/sh_probe-h.not-a-key`,
+        `rtmps://localhost:${otherPort}/live/sh_probe-h?key=not-a-key`,
         otherCert
       )
     }
@@ -2011,17 +2039,17 @@ function startTlsEcho({ cert, key, port }) {
 
 /**
  * One FFmpeg publish of a second of silence to `url` through the fifo muxer
- * with the app's TLS options, one recovery attempt. `handshake-passed` when
- * FFmpeg got past TLS (RTMP then fails: EOF or a refused key),
- * `certificate-rejected` when OpenSSL refused the certificate (chain or
- * name), else the first error line.
+ * with the app's TLS options, one recovery attempt, at debug level so the
+ * RTMP lines prove the TLS handshake passed (classifyFeedHandshake):
+ * `handshake-passed`, `certificate-rejected` (chain or name) or `unknown`,
+ * with the first error line.
  */
 async function ffmpegFeedHandshake(url, caFile) {
   const args = [
     '-hide_banner',
     '-nostdin',
     '-loglevel',
-    'level+info',
+    'level+debug',
     '-f',
     'lavfi',
     '-i',
@@ -2065,20 +2093,12 @@ async function ffmpegFeedHandshake(url, caFile) {
       resolveRun(Buffer.concat(stderr).toString('utf8').split('\n'))
     })
   })
-  const errors = lines.filter((line) => line.includes('[error]'))
-  const rejected = errors.some((line) => line.includes('certificate verify failed'))
-  const rtmp = errors.some(
-    (line) =>
-      line.includes('RTMP handshake') ||
-      line.includes('Server error') ||
-      line.includes('End of file') ||
-      line.includes('Connection reset')
-  )
+  const firstError = lines.find((line) => line.includes('[error]'))
   return {
     url: url.replace(/\/[^/]*$/, '/••••'),
     caFile,
-    outcome: rejected ? 'certificate-rejected' : rtmp ? 'handshake-passed' : 'unknown',
-    firstError: errors[0]?.trim() ?? null
+    outcome: classifyFeedHandshake(lines),
+    firstError: firstError?.trim() ?? null
   }
 }
 
