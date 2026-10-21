@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BuddyIdentity, BuddySayFooter } from '@/components/cohost-pane'
+import { buddyOffOutputsNotice } from '@/lib/buddy-output-notice'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { BuddyPetPreviewHandle, BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
 import type { CohostWindowBuddy } from '@/lib/backend'
@@ -212,6 +213,29 @@ describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', ()
       container.querySelector<HTMLButtonElement>('[data-testid="buddy-show-on-stream"]')?.disabled
     ).toBe(true)
     expect(sayInput().disabled).toBe(true)
+  })
+
+  it('says in words when the Buddy is on no output, with the switch one click away', async () => {
+    const onShowOnStreamChange = vi.fn()
+    const offOutputsNotice = buddyOffOutputsNotice({
+      enabled: true,
+      onAir: true,
+      showOnStream: false,
+      showInRecording: false,
+      name: 'Grum'
+    })
+    await render(buddy({ showOnStream: false }), { offOutputsNotice, onShowOnStreamChange })
+    const notice = container.querySelector<HTMLElement>('[data-testid="buddy-off-outputs"]')!
+    expect(notice.textContent).toContain("Grum isn't on stream.")
+    expect(notice.textContent).toContain("Viewers can't see it")
+    const show = [...notice.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show on stream'
+    )!
+    await act(async () => show.click())
+    expect(onShowOnStreamChange).toHaveBeenCalledWith(true)
+    // Nothing without a notice: the footer is the same as before.
+    await render(buddy({ showOnStream: true }), { onShowOnStreamChange })
+    expect(container.querySelector('[data-testid="buddy-off-outputs"]')).toBeNull()
   })
 })
 

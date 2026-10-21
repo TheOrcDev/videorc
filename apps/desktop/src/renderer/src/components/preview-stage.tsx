@@ -304,8 +304,8 @@ export function dockHiddenDisplay(
       return { title: 'Placing preview…', detail: '' }
     case 'overlay-open':
       return {
-        title: 'Preview paused behind dialog',
-        detail: 'It returns as soon as the dialog closes.'
+        title: 'Preview hidden under this window',
+        detail: 'It returns as soon as it closes. Recording and streaming keep going.'
       }
     case 'scrolled-away':
       return {

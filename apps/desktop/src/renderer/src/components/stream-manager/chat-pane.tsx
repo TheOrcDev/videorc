@@ -32,7 +32,7 @@ import {
   PlatformFilter,
   PlatformFilterMenuItems
 } from '@/components/stream-manager/platform-filter'
-import { AlertIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
+import { AlertIcon, ArrowDownIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -78,20 +78,16 @@ import {
   validateChatDraft,
   type ChatSendFailure
 } from '@/lib/chat-send'
+import { useChatFollow } from '@/hooks/use-chat-follow'
 import {
   chatPaneMessages,
-  followChatOnResize,
   pickedSendProviders,
-  spotlightScrollAllowed,
   writableProviders,
   type ChatPaneFilter
 } from '@/lib/stream-manager-chat'
 import { liveChatEmptyMessage } from '@/lib/live-chat-view'
 import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { cn } from '@/lib/utils'
-
-const BOTTOM_THRESHOLD_PX = 64
-const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
 
 export interface ChatPrefill {
   seq: number
@@ -155,7 +151,10 @@ export function ChatPane({
   highlightFailure?: { messageId: string; reason: string } | null
   cohostFlags?: ReadonlyMap<string, CohostFlag>
   cohostSuggested?: ReadonlySet<string>
-  /** The message the streamer is talking about: marked, and pulled into view. */
+  /**
+   * The message the streamer is talking about: marked "Talking about this",
+   * never scrolled to. The list stays on the newest message (2026-10-21).
+   */
   cohostSpotlight?: string | null
   /** Messages behind Buddy's open questions (the Questions filter). */
   questionMessageIds: ReadonlySet<string>
@@ -245,58 +244,19 @@ export function ChatPane({
     getItemKey: (index) => shown[index]?.id ?? index
   })
 
-  const [pinned, setPinned] = useState(true)
   const [unread, setUnread] = useState(0)
-  const pinnedRef = useRef(true)
   const [incomplete, setIncomplete] = useState(false)
   const arrivalRef = useRef({ key: arrivalKey, cursor: deliveryCursor(delivery) })
-  // When the streamer last scrolled by hand (wheel, touch, keys, the
-  // scrollbar); programmatic follow and jump scrolls never count.
-  const lastUserScrollAtRef = useRef<number | null>(null)
-  useEffect(() => {
-    if (!viewport) return
-    const onScroll = (): void => {
-      const atBottom =
-        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= BOTTOM_THRESHOLD_PX
-      pinnedRef.current = atBottom
-      setPinned(atBottom)
-      if (atBottom) {
-        setUnread(0)
-        setIncomplete(false)
-      }
-    }
-    const onUserScroll = (): void => {
-      lastUserScrollAtRef.current = Date.now()
-    }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (SCROLL_KEYS.has(event.key)) onUserScroll()
-    }
-    const onPointerDown = (event: PointerEvent): void => {
-      if ((event.target as Element | null)?.closest?.('[data-slot="scroll-area-scrollbar"]')) {
-        onUserScroll()
-      }
-    }
-    const root = rootRef.current
-    viewport.addEventListener('scroll', onScroll, { passive: true })
-    viewport.addEventListener('wheel', onUserScroll, { passive: true })
-    viewport.addEventListener('touchmove', onUserScroll, { passive: true })
-    viewport.addEventListener('keydown', onKeyDown)
-    root?.addEventListener('pointerdown', onPointerDown)
-    return () => {
-      viewport.removeEventListener('scroll', onScroll)
-      viewport.removeEventListener('wheel', onUserScroll)
-      viewport.removeEventListener('touchmove', onUserScroll)
-      viewport.removeEventListener('keydown', onKeyDown)
-      root?.removeEventListener('pointerdown', onPointerDown)
-    }
-  }, [viewport])
-
-  // A resize (the window, the composer's notes, a row whose emotes loaded)
-  // keeps a pinned chat on its newest row (plan 057, P4).
-  useEffect(() => {
-    if (!viewport || typeof ResizeObserver === 'undefined') return
-    return followChatOnResize(viewport, () => pinnedRef.current)
-  }, [viewport])
+  // Newest at the bottom, and the list stays there (hooks/use-chat-follow.ts):
+  // only the streamer scrolling up stops it, and reaching the bottom (or the
+  // jump chip) follows again with nothing unread.
+  const clearUnread = useCallback((): void => {
+    setUnread(0)
+    setIncomplete(false)
+  }, [])
+  const { pinned, pinnedRef, stick, follow, release } = useChatFollow(viewport, {
+    onFollow: clearUnread
+  })
 
   // Paint retention and filter refreshes are not delivery evidence.
   useEffect(() => {
@@ -315,22 +275,18 @@ export function ChatPane({
       setUnread((value) => value + progress.count)
       if (progress.incomplete) setIncomplete(true)
     }
-  }, [arrivalKey, delivery, filter, mentionNames, questionMessageIds])
+  }, [arrivalKey, delivery, filter, mentionNames, pinnedRef, questionMessageIds])
+  // A new newest message while following: show it before the frame paints.
+  // The bottom of the viewport, not the virtualizer's index scroll, whose
+  // settle loop could pull a streamer who just scrolled up back down.
   const newestId = shown.at(-1)?.id
-  useEffect(() => {
-    if (pinnedRef.current && shown.length > 0)
-      virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
-  }, [newestId, shown.length, virtualizer])
-
-  const jumpToLatest = useCallback((): void => {
-    pinnedRef.current = true
-    setPinned(true)
-    setUnread(0)
-    setIncomplete(false)
-    if (shown.length > 0) virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
-  }, [shown.length, virtualizer])
+  useLayoutEffect(() => {
+    if (pinnedRef.current) stick()
+  }, [newestId, pinnedRef, shown.length, stick])
 
   // Buddy's "jump to message": clear filters that hide it, then scroll there.
+  // The streamer asked for it, so the list stops following until they come
+  // back down or press the jump chip.
   const handledJumpSeqRef = useRef<number | null>(null)
   useEffect(() => {
     if (!jumpTo || handledJumpSeqRef.current === jumpTo.seq) return
@@ -344,44 +300,9 @@ export function ChatPane({
       return
     }
     handledJumpSeqRef.current = jumpTo.seq
-    pinnedRef.current = false
-    setPinned(false)
+    release()
     virtualizer.scrollToIndex(index, { align: 'center' })
-  }, [filtering, jumpTo, shown, virtualizer])
-
-  // Buddy's pull-up: scroll the comment being talked about into view once per
-  // spotlight, unless the streamer is reading back (spotlightScrollAllowed).
-  // If it took them away from the latest, they go back there when it ends,
-  // unless they scrolled in the meantime.
-  const handledSpotlightRef = useRef<string | null>(null)
-  const spotlightLeftLatestAtRef = useRef<number | null>(null)
-  useEffect(() => {
-    if (!cohostSpotlight) {
-      handledSpotlightRef.current = null
-      const leftAt = spotlightLeftLatestAtRef.current
-      spotlightLeftLatestAtRef.current = null
-      if (leftAt !== null && (lastUserScrollAtRef.current ?? 0) < leftAt) jumpToLatest()
-      return
-    }
-    if (handledSpotlightRef.current === cohostSpotlight) return
-    const index = shown.findIndex((message) => message.id === cohostSpotlight)
-    if (index < 0) return
-    handledSpotlightRef.current = cohostSpotlight
-    const nowMs = Date.now()
-    if (
-      !spotlightScrollAllowed({
-        pinned: pinnedRef.current,
-        lastUserScrollAtMs: lastUserScrollAtRef.current,
-        nowMs
-      })
-    ) {
-      return
-    }
-    if (pinnedRef.current) spotlightLeftLatestAtRef.current = nowMs
-    pinnedRef.current = false
-    setPinned(false)
-    virtualizer.scrollToIndex(index, { align: 'center' })
-  }, [cohostSpotlight, jumpToLatest, shown, virtualizer])
+  }, [filtering, jumpTo, release, shown, virtualizer])
 
   const searchRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -604,7 +525,13 @@ export function ChatPane({
       </div>
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <ScrollArea ref={rootRef} className="min-h-0 flex-1 px-2 py-1">
+        {/* The follow owns this scroll position, so the browser's own scroll
+            anchoring stays out of it. */}
+        <ScrollArea
+          ref={rootRef}
+          className="min-h-0 flex-1 px-2 py-1"
+          viewportClassName="[overflow-anchor:none]"
+        >
           {shown.length === 0 ? (
             filtering ? (
               <Empty className="h-full">
@@ -678,17 +605,19 @@ export function ChatPane({
             </ol>
           )}
         </ScrollArea>
-        {!pinned && (unread > 0 || incomplete) ? (
+        {!pinned ? (
+          // Whenever the list is not on the newest message, one way back.
           // A glass chip, not an ad-hoc pill (plan 174 H-17): the Badge is
           // the button.
           <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto">
             <button
-              aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
+              aria-label={`Chat paused: ${incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'reading back'}. Jump to the newest`}
               data-testid="chat-paused"
               type="button"
-              onClick={jumpToLatest}
+              onClick={follow}
             >
-              {incomplete ? 'New chat' : `${unread} new`} ↓
+              {incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'Latest'}
+              <ArrowDownIcon data-icon="inline-end" />
             </button>
           </Badge>
         ) : null}

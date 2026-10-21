@@ -20913,12 +20913,30 @@ pub async fn apply_overlay_layout_to_active_session(
         },
     )
     .await;
+    // Plan 168 S-B1, mid-session: the pet's atlases for a leg it just joined
+    // start building now, as they do at session start. The first frames
+    // after the swap draw it as soon as the atlas exists (`leg_frame` asks
+    // too, so this only shortens the wait).
+    let buddy_canvases = if swapped && (plans.buddy.primary || plans.buddy.aux) {
+        let canvases = crate::compositor::banner_prepare_canvases(state).await;
+        match canvases.first() {
+            Some(primary) => {
+                let legs = buddy_sprite_legs(plans.buddy, *primary, canvases.get(1).copied());
+                state.buddy_sprite.prepare(&legs);
+                legs.len()
+            }
+            None => 0,
+        }
+    } else {
+        0
+    };
     tracing::info!(
         session = %session_id,
         highlight_primary = plans.highlight.primary,
         highlight_aux = plans.highlight.aux,
         buddy_primary = plans.buddy.primary,
         buddy_aux = plans.buddy.aux,
+        buddy_legs_prepared = buddy_canvases,
         swapped,
         "overlay layout changed mid-session"
     );

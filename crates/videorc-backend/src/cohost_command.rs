@@ -34,6 +34,16 @@
 //! that is not a banner command is "didn't catch that" once its sentence
 //! closes. The spoken name travels as `CommandTarget::Name`; the engine
 //! matches it against the banners that exist (`banners::match_banner_name`).
+//!
+//! Buddy presence commands: "show up", "come on screen", "appear", "show
+//! yourself", "get on stream" put the Buddy itself on the picture; "hide",
+//! "go away", "leave the screen", "get off stream", "disappear" take it off.
+//! They need the wake word, and they are read before the highlight and clear
+//! grammar, which would otherwise hear "show up and do something on screen"
+//! as a highlight of a viewer called "something". A sentence that points at a
+//! comment (a name marker, a possessive, "that", "the last", a comment or
+//! chat noun) is never about the Buddy: "show coders X's question", "show
+//! that comment" and "show bob on screen" stay highlights.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -265,6 +275,43 @@ const BANNER_HIDE_VERBS: &[&str] = &["hide", "take", "remove", "clear", "dismiss
 /// The banner verbs a particle may follow before the name ("put up the
 /// sponsor banner", "take down the sponsor banner").
 const BANNER_PARTICLE_VERBS: &[&str] = &["put", "bring", "throw", "pull", "take"];
+
+// The Buddy itself: "show up", "come on screen", "go away" (see the module
+// doc and `parse_buddy_presence`).
+/// Words that make the Buddy its own object: "show yourself".
+const BUDDY_SELF_WORDS: &[&str] = &["yourself", "urself", "yourselves", "thyself"];
+/// Verbs that put the Buddy on the picture by themselves.
+const BUDDY_APPEAR_VERBS: &[&str] = &[
+    "appear",
+    "appears",
+    "reappear",
+    "materialize",
+    "materialise",
+    "join",
+];
+/// Verbs that take the Buddy off the picture by themselves. Never a sign-off
+/// ("bye", "goodbye", "go home"): the switch is saved, and a Buddy sent away
+/// by a farewell would be missing from the next stream too. "leave" needs a
+/// place ("leave the screen", `buddy_presence_cue`).
+const BUDDY_LEAVE_VERBS: &[&str] = &["disappear", "vanish", "scram", "begone"];
+/// Verbs whose particle says which way: "come on", "get off", "pop up".
+const BUDDY_MOVE_VERBS: &[&str] = &[
+    "come", "get", "go", "pop", "jump", "hop", "step", "be", "stay", "stand",
+];
+/// Particles that bring the Buddy on: "get on", "jump in", "pop up".
+const BUDDY_IN_PARTICLES: &[&str] = &["on", "onto", "in", "into", "up", "over", "back", "here"];
+/// Particles that send the Buddy off: "get off", "go away", "step out".
+const BUDDY_OUT_PARTICLES: &[&str] = &["off", "away", "lost"];
+/// Where the Buddy shows, beyond the screen nouns: "get in the picture".
+const BUDDY_PLACE_NOUNS: &[&str] = &[
+    "picture",
+    "shot",
+    "frame",
+    "video",
+    "broadcast",
+    "camera",
+    "feed",
+];
 /// "hide all banners", "hide every banner", "take both banners down".
 const BANNER_ALL_WORDS: &[&str] = &["all", "every", "both", "each"];
 /// Words between the verb and the banner's name that are not the name:
@@ -428,6 +475,12 @@ pub enum CommandKind {
     HideBanner,
     /// "hide the banners", "hide all banners", "take the banners down".
     HideBanners,
+    /// "show up", "come on screen", "appear", "show yourself": the Buddy
+    /// itself goes on the stream (`overlayLayout.buddy.showOnStream`).
+    ShowBuddy,
+    /// "hide", "go away", "leave the screen", "get off stream": the Buddy
+    /// itself leaves the stream.
+    HideBuddy,
 }
 
 impl CommandKind {
@@ -444,6 +497,8 @@ impl CommandKind {
             Self::ShowBanner => "show banner".to_string(),
             Self::HideBanner => "hide banner".to_string(),
             Self::HideBanners => "hide banners".to_string(),
+            Self::ShowBuddy => "show buddy".to_string(),
+            Self::HideBuddy => "hide buddy".to_string(),
         }
     }
 }
@@ -933,6 +988,8 @@ fn scan_commands(
                     | CommandKind::ShowBanner
                     | CommandKind::HideBanner
                     | CommandKind::HideBanners
+                    | CommandKind::ShowBuddy
+                    | CommandKind::HideBuddy
             )
     };
     let mut unknown: Option<Detection> = None;
@@ -1065,6 +1122,27 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
         has_banner_noun(&words[from..=first_sentence_end(words, parsed.end, span_end)])
     }) {
         return parse_banner_wake(words, wake, from, span_end, newest);
+    }
+    // A sentence about the Buddy itself ("show up", "go away") is read before
+    // the comment grammar, which would hear "show up and do something on
+    // screen" as a highlight of a viewer called "something".
+    if let Some(parsed) = parse_buddy_presence(words, from, span_end) {
+        if words[parsed.end].final_index != newest {
+            return WakeOutcome::Nothing;
+        }
+        let dedupe = Some(dedupe_key(&parsed));
+        return WakeOutcome::Command(Detection {
+            command: DetectedCommand {
+                kind: parsed.kind,
+                target: CommandTarget::None,
+                question: false,
+                reason: None,
+                heard: text_of(&words[wake..=parsed.end]),
+                wake_word: true,
+            },
+            dedupe,
+            end: parsed.end,
+        });
     }
     match parsed {
         Some(parsed) => {
@@ -1294,6 +1372,168 @@ fn banner_verb_shows(verb: &str, particles: &[&str]) -> Option<bool> {
         "take" => down.then_some(false),
         _ => None,
     }
+}
+
+/// The Buddy itself as the object (see the module doc): "show up", "come on
+/// screen", "appear", "show yourself", "get on stream" show it; "hide", "go
+/// away", "leave the screen", "get off stream", "disappear" hide it. Read in
+/// the first sentence after the wake word. A sentence that points at a
+/// comment (a possessive, a name marker, "that", "the last", a comment or
+/// chat noun, a reason) is never about the Buddy, so "show coders X's
+/// question" and "show bob on screen" stay highlights. The first cue in the
+/// sentence decides; `None` when it holds none.
+fn parse_buddy_presence(words: &[Word], from: usize, end: usize) -> Option<Parsed> {
+    if from >= end {
+        return None;
+    }
+    let sentence_end = first_sentence_end(words, from, end);
+    let span = &words[from..=sentence_end];
+    let about_a_comment = span.iter().any(|word| {
+        let text = word.text.as_str();
+        word.possessive
+            || matches!(noun_class(text), Some(Noun::Comment | Noun::Chat))
+            || DEIXIS.contains(&text)
+            || LAST_WORDS.contains(&text)
+            || NAME_MARKERS.contains(&text)
+            || SPEECH_VERBS.contains(&text)
+            || reason_for(text).is_some()
+            || text == "what"
+    });
+    if about_a_comment {
+        return None;
+    }
+    let (cue, (shows, last)) =
+        (0..span.len()).find_map(|offset| Some((offset, buddy_presence_cue(span, offset)?)))?;
+    // A comment verb before the cue owns the sentence: "highlight bob and go
+    // on" is a highlight, never "go on".
+    if span[..cue]
+        .iter()
+        .any(|word| verb_class(&word.text).is_some())
+    {
+        return None;
+    }
+    Some(Parsed {
+        kind: if shows {
+            CommandKind::ShowBuddy
+        } else {
+            CommandKind::HideBuddy
+        },
+        target: CommandTarget::None,
+        question: false,
+        reason: None,
+        end: from + last,
+    })
+}
+
+/// The presence cue starting at `offset` of the sentence: whether the Buddy
+/// shows, and the offset of the cue's last word.
+fn buddy_presence_cue(span: &[Word], offset: usize) -> Option<(bool, usize)> {
+    let text = span[offset].text.as_str();
+    let rest = &span[offset + 1..];
+    // "show yourself", "show us yourself": the self word within three words.
+    let self_word =
+        (offset + 1..span.len().min(offset + 4)).find(|&index| is_buddy_self_word(span, index));
+    if BUDDY_APPEAR_VERBS.contains(&text) {
+        return Some((true, offset));
+    }
+    if BUDDY_LEAVE_VERBS.contains(&text) {
+        return Some((false, offset));
+    }
+    if text == "leave" {
+        // "leave the screen", never "leave it" or "leave a note".
+        return rest
+            .iter()
+            .take(3)
+            .position(|word| is_buddy_place(&word.text))
+            .map(|place| (false, offset + 1 + place));
+    }
+    if text == "hide" {
+        // "hide the overlay" clears the card (the clear grammar); "hide" or
+        // "hide yourself" hides the Buddy.
+        if rest.iter().any(|word| is_buddy_place(&word.text)) {
+            return None;
+        }
+        return match self_word {
+            Some(last) => Some((false, last)),
+            None if rest.iter().all(|word| is_buddy_small_word(&word.text)) => {
+                Some((false, offset))
+            }
+            None => None,
+        };
+    }
+    if text == "show" {
+        if rest.first().is_some_and(|word| word.text == "up") {
+            return Some((true, offset + 1));
+        }
+        return self_word.map(|last| (true, last));
+    }
+    if BUDDY_MOVE_VERBS.contains(&text) {
+        // The particles right after the verb ("come on out"), one small word
+        // allowed between ("get yourself on").
+        let mut particles: Vec<(usize, &str)> = Vec::new();
+        for (index, word) in span.iter().enumerate().skip(offset + 1).take(3) {
+            let word_text = word.text.as_str();
+            if BUDDY_IN_PARTICLES.contains(&word_text)
+                || BUDDY_OUT_PARTICLES.contains(&word_text)
+                || word_text == "out"
+            {
+                particles.push((index, word_text));
+            } else if !(is_buddy_small_word(word_text) || is_buddy_self_word(span, index)) {
+                break;
+            }
+        }
+        let out = particles
+            .iter()
+            .find(|(_, particle)| BUDDY_OUT_PARTICLES.contains(particle));
+        return match text {
+            // "come on", "come out", "come back" bring it on; "come off"
+            // sends it away; a bare "come" is no command.
+            "come" => match out {
+                Some((index, _)) => Some((false, *index)),
+                None => particles.last().map(|(index, _)| (true, *index)),
+            },
+            // "get on", "jump in", "pop up" bring it on; "get off", "go
+            // away", "step out" send it away; no particle, no command.
+            _ => particles
+                .first()
+                .map(|(index, particle)| (BUDDY_IN_PARTICLES.contains(particle), *index)),
+        };
+    }
+    // "Buddy, off screen" / "Buddy, on screen": the particle and the place alone.
+    if (text == "off" || text == "on")
+        && span[..offset]
+            .iter()
+            .all(|word| is_buddy_small_word(&word.text))
+        && let Some(place) = rest
+            .iter()
+            .take(2)
+            .position(|word| is_buddy_place(&word.text))
+    {
+        return Some((text == "on", offset + 1 + place));
+    }
+    None
+}
+
+/// "yourself", or "face" after "your" ("show your face").
+fn is_buddy_self_word(span: &[Word], index: usize) -> bool {
+    let text = span[index].text.as_str();
+    BUDDY_SELF_WORDS.contains(&text)
+        || (text == "face"
+            && index > 0
+            && matches!(span[index - 1].text.as_str(), "your" | "ur" | "yer"))
+}
+
+/// A screen noun or one of the Buddy's own place words.
+fn is_buddy_place(text: &str) -> bool {
+    noun_class(text) == Some(Noun::Screen) || BUDDY_PLACE_NOUNS.contains(&text)
+}
+
+/// A word that carries nothing in a presence sentence ("the", "please").
+fn is_buddy_small_word(text: &str) -> bool {
+    PARTICLES.contains(&text)
+        || FILLERS.contains(&text)
+        || LEAD_INS.contains(&text)
+        || is_stop_word(text)
 }
 
 /// Buddy was addressed and nothing matched. Only once the sentence is closed
@@ -1769,6 +2009,146 @@ mod tests {
 
     fn detect_one(text: &str, ctx: &DetectContext) -> Option<DetectedCommand> {
         CommandDetector::default().observe_final("client", 1, text, Instant::now(), ctx)
+    }
+
+    /// The Buddy itself: "show up" and "go away" with the wake word, read
+    /// before the comment grammar; a sentence that points at a comment or a
+    /// banner keeps its old meaning.
+    #[test]
+    fn buddy_presence_phrases() {
+        use CommandKind::{Clear, HideBanners, HideBuddy, Highlight, ShowBanner, ShowBuddy};
+        use CommandTarget::{Deixis, Last, None as NoTarget};
+        let shows = [
+            // The sentence the owner said on 2026-10-21, heard as a highlight
+            // of a viewer called "something" before this grammar existed.
+            "Buddy, can you show up and do something on screen",
+            "Buddy show up",
+            "Buddy, come on screen",
+            "Buddy appear",
+            "Buddy, show yourself",
+            "Buddy get on stream",
+            "hey Buddy, pop up",
+            "Buddy, come on out",
+            "Buddy show your face",
+            "Buddy, jump in",
+            "Buddy, get in the picture",
+            "Buddy on screen",
+            "Okay Buddy, go ahead and show up",
+        ];
+        for text in shows {
+            let command = detect_one(text, &PLAIN).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(command.kind, ShowBuddy, "{text}");
+            assert_eq!(command.target, NoTarget, "{text}");
+            assert!(command.wake_word, "{text}");
+        }
+        let hides = [
+            "Buddy hide",
+            "Buddy, go away",
+            "Buddy leave the screen",
+            "Buddy get off stream",
+            "Buddy, hide yourself",
+            "Buddy disappear",
+            "Buddy, come off the screen",
+            "Buddy off screen",
+            "Buddy, hide please",
+            "Buddy step out",
+        ];
+        for text in hides {
+            let command = detect_one(text, &PLAIN).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(command.kind, HideBuddy, "{text}");
+            assert_eq!(command.target, NoTarget, "{text}");
+        }
+        // What was heard stops at the cue: the words after it are not the
+        // command's.
+        assert_eq!(
+            detect_one("Buddy, can you show up and do something on screen", &PLAIN)
+                .unwrap()
+                .heard,
+            "buddy can you show up"
+        );
+        // Comments keep their grammar: a possessive, "that", "the last", a
+        // name marker or a comment noun is never about the Buddy.
+        let comments = [
+            (
+                "Buddy, show coders X's question",
+                Highlight,
+                name("coders x"),
+            ),
+            ("Buddy, show that comment", Highlight, Deixis),
+            ("Buddy show coders X on screen", Highlight, name("coders x")),
+            ("Buddy, put this one up", Highlight, Deixis),
+            ("Buddy, show the last comment", Highlight, Last),
+            (
+                "Buddy, show up the comment from coders X",
+                Highlight,
+                name("coders x"),
+            ),
+            ("Buddy, hide the overlay", Clear, NoTarget),
+            ("Buddy, hide it", Clear, Deixis),
+            ("Buddy, take it down", Clear, Deixis),
+            // A comment verb before the cue owns the sentence.
+            (
+                "Buddy, highlight coders X and go on",
+                Highlight,
+                name("coders x"),
+            ),
+        ];
+        for (text, kind, target) in comments {
+            let command = detect_one(text, &PLAIN).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!((command.kind, command.target), (kind, target), "{text}");
+        }
+        // Banners keep theirs.
+        assert_eq!(
+            detect_one("Buddy, show up the sponsor banner", &PLAIN)
+                .unwrap()
+                .kind,
+            ShowBanner
+        );
+        assert_eq!(
+            detect_one("Buddy, hide the banners", &PLAIN).unwrap().kind,
+            HideBanners
+        );
+        // A farewell or a loose "leave" never sends the Buddy away: the
+        // switch is saved, so it would be missing from the next stream too.
+        for text in [
+            "Buddy, goodbye",
+            "Buddy, bye",
+            "Buddy, go home",
+            "Buddy, leave it",
+            "Buddy, leave a note for later",
+            "Buddy, calm down",
+            "Buddy, come",
+        ] {
+            let kind = detect_one(text, &PLAIN).map(|command| command.kind);
+            assert!(
+                !matches!(kind, Some(HideBuddy | ShowBuddy)),
+                "{text}: {kind:?}"
+            );
+        }
+        // Without the wake word nothing is about the Buddy.
+        assert!(detect_one("show up", &PLAIN).is_none());
+        assert!(detect_one("go away", &PLAIN).is_none());
+        // Buddy as a subject is not an address.
+        assert!(detect_one("Buddy is great, he always shows up", &PLAIN).is_none());
+        // The same request twice within the dedupe window is one command.
+        let mut detector = CommandDetector::default();
+        let now = Instant::now();
+        assert!(
+            detector
+                .observe_final("client", 1, "Buddy show up", now, &PLAIN)
+                .is_some()
+        );
+        assert!(
+            detector
+                .observe_final("client", 2, "Buddy show up", now, &PLAIN)
+                .is_none()
+        );
+        assert_eq!(
+            detector
+                .observe_final("client", 3, "Buddy go away", now, &PLAIN)
+                .map(|command| command.kind),
+            Some(HideBuddy)
+        );
     }
 
     #[test]

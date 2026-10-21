@@ -11625,7 +11625,9 @@ async function runSmokePreviewMotionCommand(
       `(() => {
         const viewport = document.querySelector('[data-pane="chat"] [data-slot="scroll-area-viewport"]');
         const action = ${JSON.stringify(params.chatAction)};
-        if (action === 'back' && viewport) { viewport.scrollTop = 0; viewport.dispatchEvent(new Event('scroll')); }
+        // Reading back is the streamer's gesture: only a scroll up by hand
+        // stops the chat following (use-chat-follow.ts), so the wheel comes first.
+        if (action === 'back' && viewport) { viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true })); viewport.scrollTop = 0; viewport.dispatchEvent(new Event('scroll')); }
         if (action === 'latest') document.querySelector('button[aria-label^="Chat paused:"]')?.click();
         const rows = Array.from(document.querySelectorAll('[data-message-id]'));
         const composer = document.querySelector('input[aria-label="Message or local command"]');

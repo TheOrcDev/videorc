@@ -3151,7 +3151,9 @@ const cohostCommandSchema = objectSchema(
       'unknown',
       'show-banner',
       'hide-banner',
-      'hide-banners'
+      'hide-banners',
+      'show-buddy',
+      'hide-buddy'
     ]),
     status: enumSchema([
       'done',
@@ -3230,6 +3232,7 @@ const cohostStateSchema = objectSchema(
     tickInFlight: optionalSchema(booleanSchema),
     pendingMessages: optionalSchema(nonNegativeInteger),
     nextTickAt: optionalSchema(nullableSchema(timestamp)),
+    retryAt: optionalSchema(nullableSchema(timestamp)),
     messagesSeen: optionalSchema(nonNegativeInteger),
     questionsTotal: optionalSchema(nonNegativeInteger),
     // Tick wire v2: omitted by the backend while empty.
