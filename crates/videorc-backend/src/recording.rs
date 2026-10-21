@@ -2074,6 +2074,12 @@ pub struct ActiveRecording {
     /// so a layout saved mid-session can re-plan the compositor flags. None
     /// on paths without the compositor bridge (nothing draws overlays there).
     pub overlay_session_shape: Option<crate::overlay_layout::OverlaySessionShape>,
+    /// Whether a banner shown after the start reaches this session's picture
+    /// (plan 186 S4): the compositor paths read the banner set every tick; the
+    /// legacy FFmpeg graph only through its overlay FIFO, and the direct D3D11
+    /// recording draws nothing over the screen. `banners.show` refuses a new
+    /// banner while this is false.
+    accepts_banners: bool,
     pub _capture_permit: Option<CapturePermit>,
     /// Signals the process monitor at the exact user-stop edge. The monitor
     /// orders this against FFmpeg exit readiness before it touches the shared
@@ -2190,6 +2196,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
         overlay_session_shape: None,
+        accepts_banners: true,
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
@@ -2281,11 +2288,41 @@ pub struct ScreenOverlaySession {
     /// frame may outlive the short recording-lock snapshot which described
     /// it, so installation must compare this token before touching pixels.
     generation_token: Arc<()>,
+    /// What the frame is composed from (plan 186 S4): the takeover and the
+    /// banners. Shared with the preparation tickets, which replace one part
+    /// under this lock and compose off every lock.
+    inputs: Arc<StdMutex<LegacyOverlayInputs>>,
     current_frame: Arc<StdMutex<Vec<u8>>>,
+    /// The inputs revision the installed frame was composed from, so a slow
+    /// composition never replaces a newer one that already carried its
+    /// change.
+    installed_revision: StdMutex<u64>,
     stop: Arc<AtomicBool>,
     writer: Option<JoinHandle<()>>,
     #[cfg(test)]
     preparation_blocker: Option<ScreenOverlayPreparationBlocker>,
+}
+
+/// The legacy FFmpeg graph's live layer is one full-canvas RGBA frame at
+/// `SCREEN_OVERLAY_FPS`; it is composed from these (plan 186 S4): the takeover
+/// image scaled to the canvas and the banners prepared for the canvas. Every
+/// replacement bumps `revision`.
+#[derive(Debug, Default)]
+struct LegacyOverlayInputs {
+    takeover: Option<Arc<Vec<u8>>>,
+    banners: Arc<Vec<LegacyBannerLayer>>,
+    revision: u64,
+}
+
+/// One banner on the legacy overlay frame: its bitmap prepared once for the
+/// canvas (straight-alpha BGRA at its contained size, opacity baked;
+/// `banner_prepare::prepare_banner_bitmap`) at its canvas position
+/// (`banners::banner_draw_rect`). Show and Hide are instant here: no fade.
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyBannerLayer {
+    x: usize,
+    y: usize,
+    bitmap: Arc<crate::banner_prepare::BannerBitmap>,
 }
 
 #[derive(Debug, Clone)]
@@ -2294,6 +2331,7 @@ pub(crate) struct ScreenOverlayPreparationTicket {
     generation_token: Arc<()>,
     width: u32,
     height: u32,
+    inputs: Arc<StdMutex<LegacyOverlayInputs>>,
     #[cfg(test)]
     blocker: Option<ScreenOverlayPreparationBlocker>,
 }
@@ -2305,6 +2343,8 @@ pub(crate) struct PreparedScreenOverlayFrame {
     width: u32,
     height: u32,
     frame: Vec<u8>,
+    /// The inputs revision this frame was composed from.
+    revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2357,25 +2397,203 @@ impl ScreenOverlayPreparationBlocker {
 }
 
 impl ScreenOverlayPreparationTicket {
+    /// The frame with `path` as the takeover (none clears it) over the
+    /// banners installed now. Decode, scale and compose run here, off every
+    /// lock; the takeover is replaced under the inputs lock first, so any
+    /// composition that starts later carries it too.
     pub(crate) fn prepare(self, path: Option<String>) -> Result<PreparedScreenOverlayFrame> {
         #[cfg(test)]
         if let Some(blocker) = self.blocker.as_ref() {
             blocker.block();
         }
-        let frame = match path {
-            Some(path) => {
-                screen_overlay_frame_from_path(Path::new(&path), self.width, self.height)?
-            }
-            None => transparent_overlay_frame(self.width, self.height),
+        let takeover = match path {
+            Some(path) => Some(Arc::new(screen_overlay_frame_from_path(
+                Path::new(&path),
+                self.width,
+                self.height,
+            )?)),
+            None => None,
         };
-        Ok(PreparedScreenOverlayFrame {
+        let (takeover, banners, revision) = {
+            let mut inputs = self
+                .inputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inputs.takeover = takeover;
+            inputs.revision += 1;
+            (
+                inputs.takeover.clone(),
+                Arc::clone(&inputs.banners),
+                inputs.revision,
+            )
+        };
+        Ok(self.composed(takeover, &banners, revision))
+    }
+
+    /// The frame with `shown` as the banners (bottom to top; plan 186 S4)
+    /// over the takeover installed now. Each banner is decoded and scaled
+    /// once to its contained size on this canvas, opacity baked, on this
+    /// thread; the writer thread only ever copies the composed frame.
+    pub(crate) fn prepare_banners(
+        self,
+        shown: Vec<crate::banners::BannerWithFile>,
+    ) -> Result<PreparedScreenOverlayFrame> {
+        #[cfg(test)]
+        if let Some(blocker) = self.blocker.as_ref() {
+            blocker.block();
+        }
+        let banners = Arc::new(prepare_legacy_banner_layers(
+            &shown,
+            self.width,
+            self.height,
+        ));
+        let (takeover, banners, revision) = {
+            let mut inputs = self
+                .inputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inputs.banners = banners;
+            inputs.revision += 1;
+            (
+                inputs.takeover.clone(),
+                Arc::clone(&inputs.banners),
+                inputs.revision,
+            )
+        };
+        Ok(self.composed(takeover, &banners, revision))
+    }
+
+    fn composed(
+        self,
+        takeover: Option<Arc<Vec<u8>>>,
+        banners: &[LegacyBannerLayer],
+        revision: u64,
+    ) -> PreparedScreenOverlayFrame {
+        let frame = legacy_overlay_frame(
+            takeover.as_deref().map(Vec::as_slice),
+            banners,
+            self.width,
+            self.height,
+        );
+        PreparedScreenOverlayFrame {
             session_id: self.session_id,
             generation_token: self.generation_token,
             width: self.width,
             height: self.height,
             frame,
-        })
+            revision,
+        }
     }
+}
+
+/// The banners shown at a legacy session's start, prepared for its canvas
+/// (plan 186 S4): decoded, scaled to the contained rect of the canvas's
+/// orientation and opacity-baked, the same recipe as the compositor's
+/// prepare worker. A banner whose file cannot be read is skipped with a
+/// warning; the others still draw.
+fn prepare_legacy_banner_layers(
+    shown: &[crate::banners::BannerWithFile],
+    width: u32,
+    height: u32,
+) -> Vec<LegacyBannerLayer> {
+    let orientation = crate::overlay_layout::OverlayOrientation::for_canvas(width, height);
+    shown
+        .iter()
+        .filter_map(|(banner, path, _)| {
+            let image = match crate::banner_prepare::decode_banner_file(path) {
+                Ok(image) => image,
+                Err(error) => {
+                    tracing::warn!(
+                        banner = %banner.id,
+                        path = %path.display(),
+                        "Could not prepare a banner for the legacy overlay frame: {error}"
+                    );
+                    return None;
+                }
+            };
+            let rect = crate::banners::banner_rect_for(banner, orientation, None);
+            let (x, y, draw_width, draw_height) = crate::banners::banner_draw_rect(
+                image.width(),
+                image.height(),
+                width.max(1) as usize,
+                height.max(1) as usize,
+                rect,
+            );
+            let bitmap = crate::banner_prepare::prepare_banner_bitmap(
+                &image,
+                draw_width as u32,
+                draw_height as u32,
+                banner.opacity,
+            );
+            Some(LegacyBannerLayer {
+                x,
+                y,
+                bitmap: Arc::new(bitmap),
+            })
+        })
+        .collect()
+}
+
+/// The legacy FFmpeg graph's overlay frame (plan 186 S4): full-canvas
+/// straight-alpha RGBA, transparent where nothing is drawn, the takeover
+/// first (when it is a full-canvas frame) and then each banner, bottom to
+/// top, source-over at its canvas position. Pure.
+fn legacy_overlay_frame(
+    takeover: Option<&[u8]>,
+    banners: &[LegacyBannerLayer],
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let canvas_width = width as usize;
+    let canvas_height = height as usize;
+    let mut frame = match takeover {
+        Some(takeover) if takeover.len() == canvas_width * canvas_height * 4 => takeover.to_vec(),
+        _ => transparent_overlay_frame(width, height),
+    };
+    for layer in banners {
+        let bitmap = &*layer.bitmap;
+        let bitmap_width = bitmap.width as usize;
+        let bitmap_height = bitmap.height as usize;
+        if bitmap.bgra.len() < bitmap_width * bitmap_height * 4
+            || layer.x >= canvas_width
+            || layer.y >= canvas_height
+        {
+            continue;
+        }
+        let draw_width = bitmap_width.min(canvas_width - layer.x);
+        let draw_height = bitmap_height.min(canvas_height - layer.y);
+        for row in 0..draw_height {
+            let source_row = &bitmap.bgra[row * bitmap_width * 4..][..draw_width * 4];
+            let dest_start = ((layer.y + row) * canvas_width + layer.x) * 4;
+            let dest_row = &mut frame[dest_start..dest_start + draw_width * 4];
+            for (source, dest) in source_row.chunks_exact(4).zip(dest_row.chunks_exact_mut(4)) {
+                blend_bgra_over_rgba(source, dest);
+            }
+        }
+    }
+    frame
+}
+
+/// Straight-alpha source-over of one BGRA pixel onto one RGBA pixel, both
+/// un-premultiplied: `a = sa + da(1 − sa)`, `c = (sc·sa + dc·da(1 − sa)) / a`.
+fn blend_bgra_over_rgba(source: &[u8], dest: &mut [u8]) {
+    let source_alpha = u32::from(source[3]);
+    if source_alpha == 0 {
+        return;
+    }
+    if source_alpha == 255 {
+        dest.copy_from_slice(&[source[2], source[1], source[0], 255]);
+        return;
+    }
+    let dest_alpha = u32::from(dest[3]);
+    // Alphas in 1/255 units; the result alpha here is in 1/(255·255) units.
+    let out_alpha = source_alpha * 255 + dest_alpha * (255 - source_alpha);
+    for (channel, source_channel) in [source[2], source[1], source[0]].into_iter().enumerate() {
+        let source_weight = u32::from(source_channel) * source_alpha * 255;
+        let dest_weight = u32::from(dest[channel]) * dest_alpha * (255 - source_alpha);
+        dest[channel] = ((source_weight + dest_weight + out_alpha / 2) / out_alpha).min(255) as u8;
+    }
+    dest[3] = ((out_alpha + 127) / 255).min(255) as u8;
 }
 
 impl ScreenOverlaySession {
@@ -2384,13 +2602,23 @@ impl ScreenOverlaySession {
         width: u32,
         height: u32,
         initial_image_path: Option<String>,
+        initial_banners: Vec<LegacyBannerLayer>,
     ) -> Result<Self> {
-        let transparent = transparent_overlay_frame(width, height);
-        let initial = match initial_image_path {
-            Some(path) => screen_overlay_frame_from_path(Path::new(&path), width, height)
-                .unwrap_or_else(|_| transparent.clone()),
-            None => transparent,
-        };
+        let takeover = initial_image_path
+            .and_then(|path| screen_overlay_frame_from_path(Path::new(&path), width, height).ok())
+            .map(Arc::new);
+        let banners = Arc::new(initial_banners);
+        let initial = legacy_overlay_frame(
+            takeover.as_deref().map(Vec::as_slice),
+            &banners,
+            width,
+            height,
+        );
+        let inputs = Arc::new(StdMutex::new(LegacyOverlayInputs {
+            takeover,
+            banners,
+            revision: 0,
+        }));
         let current_frame = Arc::new(StdMutex::new(initial));
         let stop = Arc::new(AtomicBool::new(false));
         let writer_path = fifo_path.clone();
@@ -2405,7 +2633,9 @@ impl ScreenOverlaySession {
             width,
             height,
             generation_token: Arc::new(()),
+            inputs,
             current_frame,
+            installed_revision: StdMutex::new(0),
             stop,
             writer: Some(writer),
             #[cfg(test)]
@@ -2419,11 +2649,16 @@ impl ScreenOverlaySession {
             generation_token: self.generation_token.clone(),
             width: self.width,
             height: self.height,
+            inputs: Arc::clone(&self.inputs),
             #[cfg(test)]
             blocker: self.preparation_blocker.clone(),
         }
     }
 
+    /// `false` when the frame belongs to another overlay generation or
+    /// canvas. `true` when its change is on the picture: installed, or
+    /// already carried by a newer composition (which read the inputs after
+    /// this one replaced its part), which an older frame must not undo.
     fn install_prepared_frame(&self, prepared: PreparedScreenOverlayFrame) -> bool {
         if !Arc::ptr_eq(&self.generation_token, &prepared.generation_token)
             || self.width != prepared.width
@@ -2431,9 +2666,17 @@ impl ScreenOverlaySession {
         {
             return false;
         }
+        let mut installed = self
+            .installed_revision
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if prepared.revision < *installed {
+            return true;
+        }
         if let Ok(mut current) = self.current_frame.lock() {
             *current = prepared.frame;
         }
+        *installed = prepared.revision;
         true
     }
 
@@ -2449,7 +2692,9 @@ impl ScreenOverlaySession {
             width,
             height,
             generation_token: Arc::new(()),
+            inputs: Arc::new(StdMutex::new(LegacyOverlayInputs::default())),
             current_frame: Arc::new(StdMutex::new(transparent_overlay_frame(width, height))),
+            installed_revision: StdMutex::new(0),
             stop: Arc::new(AtomicBool::new(false)),
             writer: None,
             preparation_blocker: Some(blocker),
@@ -2615,6 +2860,78 @@ impl ActiveRecording {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
+}
+
+impl ActiveRecording {
+    /// See the `accepts_banners` field (plan 186 S4).
+    pub(crate) fn accepts_banners(&self) -> bool {
+        self.accepts_banners
+    }
+}
+
+/// Whether a session can take a banner shown after it started (plan 186 S4).
+/// The compositor paths (Metal, CPU, the Windows D3D11 media session) read
+/// the banner set every tick. The legacy FFmpeg graph is static; its only
+/// live layer is the overlay FIFO, created only when the session starts with
+/// a takeover, a stream or a banner. The direct D3D11 recording path draws
+/// nothing over the screen (it is never chosen with a banner showing).
+fn session_accepts_banners(
+    use_encoder_bridge: bool,
+    direct_d3d11_recording: bool,
+    legacy_overlay_fifo: bool,
+) -> bool {
+    if use_encoder_bridge {
+        !direct_d3d11_recording
+    } else {
+        legacy_overlay_fifo
+    }
+}
+
+/// `Some(accepts)` for the active session, `None` when nothing runs
+/// (`banners.show` refuses a new banner on a session that cannot draw it).
+pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
+    let recording = state.recording.lock().await;
+    recording.as_ref().map(ActiveRecording::accepts_banners)
+}
+
+/// Plan 186 S4: recompose the legacy FFmpeg overlay frame when the banner
+/// set changes mid-session (Show, Hide, a rect or opacity change, a reorder).
+/// The compositor paths read the set on their next tick; only the legacy
+/// graph's FIFO holds pixels. Decode and compose run off `state.recording`,
+/// like the takeover's, so Stop never waits on them. A session without the
+/// FIFO is left alone: `banners.show` already refused a new banner there, and
+/// hiding one that never drew changes nothing.
+pub async fn apply_banners_to_legacy_overlay(state: &AppState) -> Result<()> {
+    let preparation = {
+        let recording = state.recording.lock().await;
+        recording
+            .as_ref()
+            .and_then(ActiveRecording::active_screen_overlay_preparation)
+    };
+    let Some(preparation) = preparation else {
+        return Ok(());
+    };
+    let shown = crate::banners::banners_with_files(
+        crate::banners::shown_banners_for_compositor(&state.database)?,
+        &state.database.banner_assets_dir(),
+    );
+    let prepared = tokio::task::spawn_blocking(move || preparation.prepare_banners(shown))
+        .await
+        .context("Legacy banner overlay preparation task stopped")??;
+    let commit = {
+        let recording = state.recording.lock().await;
+        recording
+            .as_ref()
+            .map_or(PreparedScreenOverlayCommit::Retired, |recording| {
+                recording.commit_prepared_active_screen(prepared)
+            })
+    };
+    if commit == PreparedScreenOverlayCommit::Superseded {
+        tracing::debug!(
+            "The legacy overlay session changed while the banners were prepared; the new session composed its own frame."
+        );
+    }
+    Ok(())
 }
 
 /// Returns the current session's authoritative per-destination runtime state.
@@ -3554,6 +3871,10 @@ async fn start_session_with_timeline(
     let has_session_audio = has_native_audio || silent_audio_fifo.is_some();
     let audio_tracks = capture_audio_tracks(&capture);
     let active_screen = state.database.active_stream_screen()?;
+    // Plan 186 S4: the banners showing when the session starts decide whether
+    // the legacy graph gets its overlay FIFO and whether the direct D3D11
+    // recording (which draws nothing over the screen) may be chosen.
+    let shown_banners_at_start = crate::banners::shown_banners_for_compositor(&state.database)?;
     let use_encoder_bridge =
         should_use_compositor_encoder_bridge(&state, &params, active_screen.as_ref()).await?;
     if matches!(capture.video, VideoInput::TestPattern)
@@ -3925,18 +4246,19 @@ async fn start_session_with_timeline(
                 None
             }
             WindowsD3d11SessionSelection::Candidate(plan) => {
-                let d3d11_overlay_plans = crate::overlay_layout::overlay_session_plans(
-                    crate::overlay_layout::OverlaySessionShape {
-                        record_enabled: params.output.record_enabled,
-                        stream_enabled: params.output.stream_enabled,
-                        // The D3D11 path refuses simulcast sessions above, so
-                        // its auxiliary is always a split stream leg.
-                        aux_leg: if plan.auxiliary.is_some() {
-                            crate::overlay_layout::OverlayAuxLeg::Stream
-                        } else {
-                            crate::overlay_layout::OverlayAuxLeg::None
-                        },
+                let d3d11_overlay_shape = crate::overlay_layout::OverlaySessionShape {
+                    record_enabled: params.output.record_enabled,
+                    stream_enabled: params.output.stream_enabled,
+                    // The D3D11 path refuses simulcast sessions above, so its
+                    // auxiliary is always a split stream leg.
+                    aux_leg: if plan.auxiliary.is_some() {
+                        crate::overlay_layout::OverlayAuxLeg::Stream
+                    } else {
+                        crate::overlay_layout::OverlayAuxLeg::None
                     },
+                };
+                let d3d11_overlay_plans = crate::overlay_layout::overlay_session_plans(
+                    d3d11_overlay_shape,
                     &overlay_layout,
                 );
                 let (highlight_on_primary, highlight_on_auxiliary) = (
@@ -3954,6 +4276,10 @@ async fn start_session_with_timeline(
                     highlight_on_auxiliary,
                     buddy_on_primary: d3d11_overlay_plans.buddy.primary,
                     buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
+                    // Plan 186 S4: banners follow this session's leg plan
+                    // live, from the compositor's banner set.
+                    banner_shape: d3d11_overlay_shape,
+                    banner_prepare: state.banner_prepare.clone(),
                 };
                 state.buddy_sprite.prepare(&buddy_sprite_legs(
                     d3d11_overlay_plans.buddy,
@@ -4114,15 +4440,21 @@ async fn start_session_with_timeline(
             .release_native_session_output(&session_id);
     }
 
-    let screen_overlay_fifo =
-        if !use_encoder_bridge && (active_screen.is_some() || params.output.stream_enabled) {
-            let fifo_path = screen_overlay_fifo_path(&session_id);
-            create_screen_overlay_fifo(&fifo_path)?;
-            startup_resources.track_fifo(&fifo_path);
-            Some(fifo_path)
-        } else {
-            None
-        };
+    // The legacy graph's only live layer: the full-canvas RGBA FIFO. It exists
+    // when the session starts with a takeover, a stream, or (plan 186 S4) a
+    // banner; a banner shown later on a session without it is refused.
+    let screen_overlay_fifo = if !use_encoder_bridge
+        && (active_screen.is_some()
+            || params.output.stream_enabled
+            || !shown_banners_at_start.is_empty())
+    {
+        let fifo_path = screen_overlay_fifo_path(&session_id);
+        create_screen_overlay_fifo(&fifo_path)?;
+        startup_resources.track_fifo(&fifo_path);
+        Some(fifo_path)
+    } else {
+        None
+    };
 
     let mut pipeline = RecordingPipeline::new(
         params.output.record_enabled,
@@ -4275,10 +4607,18 @@ async fn start_session_with_timeline(
     }
     // D13: every switch pair this session cannot honour is said out loud
     // (the Go Live sheet already showed the same sentence before start).
+    // Plan 186 D6: the shown banners are one more item, `banners`.
     if use_encoder_bridge {
-        for notice in
-            crate::overlay_layout::overlay_start_notices(overlay_session_shape, &overlay_layout)
-        {
+        let banner_switches = crate::banners::shown_banner_switches(&state.database)
+            .unwrap_or_else(|error| {
+                tracing::warn!("Could not read the shown banners for the start notices: {error:#}");
+                Vec::new()
+            });
+        for notice in crate::overlay_layout::overlay_start_notices(
+            overlay_session_shape,
+            &overlay_layout,
+            &banner_switches,
+        ) {
             let _ = emit_health_event(
                 &state,
                 Some(&session_id),
@@ -4301,6 +4641,9 @@ async fn start_session_with_timeline(
         && params.output.record_enabled
         && !params.output.stream_enabled
         && params.scene.is_none()
+        // Plan 186 S4: the direct path draws nothing over the screen, so a
+        // banner showing at start keeps the session on the D3D11 compositor.
+        && shown_banners_at_start.is_empty()
         && matches!(
             params.layout.layout_preset,
             LayoutPreset::ScreenOnly | LayoutPreset::ScreenCamera
@@ -4386,6 +4729,7 @@ async fn start_session_with_timeline(
     let direct_d3d11_consumer_lease = direct_d3d11_recording_source
         .as_ref()
         .map(crate::preview_screen::PreviewScreenD3D11FrameSource::consumer_lease);
+    let direct_d3d11_recording = direct_d3d11_recording_source.is_some();
     if direct_d3d11_recording_source.is_some() {
         let direct_description = if cfg!(target_os = "windows")
             && matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera)
@@ -4527,6 +4871,10 @@ async fn start_session_with_timeline(
                 .await;
             }
             timeline.mark(RecordingStartPhase::CompositorArm);
+            // Plan 186 S3: banners follow the session's leg plan from its
+            // first frame; the stop and lease-release paths return the
+            // compositor to the idle plan.
+            crate::compositor::set_banner_session_shape(&state, Some(overlay_session_shape)).await;
             let scene = params.scene.clone().unwrap_or_else(|| {
                 scene_from_capture_config(SceneConfigParams {
                     transition_ms: None,
@@ -5466,12 +5814,35 @@ async fn start_session_with_timeline(
             pump.monitor(),
         )
     });
+    // Plan 186 S4: the banners showing at start, prepared for the output
+    // canvas off this task (decode and Lanczos scale, tens of milliseconds
+    // at 4K). A preparation failure costs the banners, never the session.
+    let legacy_banner_layers = if screen_overlay_fifo.is_some()
+        && !shown_banners_at_start.is_empty()
+    {
+        let shown = crate::banners::banners_with_files(
+            shown_banners_at_start.clone(),
+            &state.database.banner_assets_dir(),
+        );
+        let (width, height) = (params.output.video.width, params.output.video.height);
+        tokio::task::spawn_blocking(move || prepare_legacy_banner_layers(&shown, width, height))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "Legacy banner preparation task stopped; the session starts without banners: {error}"
+                );
+                Vec::new()
+            })
+    } else {
+        Vec::new()
+    };
     let screen_overlay = match screen_overlay_fifo {
         Some(screen_overlay_fifo) => match ScreenOverlaySession::start(
             screen_overlay_fifo,
             params.output.video.width,
             params.output.video.height,
             active_screen.clone().map(|screen| screen.image_path),
+            legacy_banner_layers,
         ) {
             Ok(screen_overlay) => Some(screen_overlay),
             Err(error) => {
@@ -5498,6 +5869,26 @@ async fn start_session_with_timeline(
         },
         None => None,
     };
+    // Plan 186 S4: whether a banner shown from now on reaches this picture.
+    let accepts_banners = session_accepts_banners(
+        use_encoder_bridge,
+        direct_d3d11_recording,
+        screen_overlay.is_some(),
+    );
+    if !accepts_banners {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Info,
+            "recording-banners-fixed-at-start",
+            if direct_d3d11_recording {
+                "Direct D3D11 screen recording draws no banner overlay; a banner shown now is refused until the session ends."
+            } else {
+                "This FFmpeg session has no overlay layer (no takeover, stream or banner at start); a banner shown now is refused until the session ends."
+            },
+            None,
+        );
+    }
     pending_active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -5549,6 +5940,7 @@ async fn start_session_with_timeline(
         ),
         comment_highlight_vertical_canvas,
         overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
+        accepts_banners,
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
@@ -24120,6 +24512,7 @@ mod tests {
             width: 2,
             height: 2,
             frame: vec![7; 16],
+            revision: 1,
         };
         let mut replacement = test_active_recording_stub("reused-session-id");
         replacement.screen_overlay = Some(ScreenOverlaySession::test_stub(2, 2, blocker));
@@ -24138,6 +24531,210 @@ mod tests {
                 .all(|byte| *byte == 0),
             "a prepared frame must not enter a successor overlay generation"
         );
+    }
+
+    fn legacy_banner(
+        x: usize,
+        y: usize,
+        width: u32,
+        height: u32,
+        bgra: &[u8],
+    ) -> LegacyBannerLayer {
+        assert_eq!(bgra.len(), (width * height * 4) as usize);
+        LegacyBannerLayer {
+            x,
+            y,
+            bitmap: Arc::new(crate::banner_prepare::BannerBitmap {
+                width,
+                height,
+                bgra: Arc::new(bgra.to_vec()),
+                revision: 1,
+            }),
+        }
+    }
+
+    fn rgba_at(frame: &[u8], width: u32, x: usize, y: usize) -> [u8; 4] {
+        let start = (y * width as usize + x) * 4;
+        frame[start..start + 4].try_into().unwrap()
+    }
+
+    /// Plan 186 S4: the legacy overlay frame is the takeover first, then the
+    /// banners source-over at their rects; transparent where nothing draws.
+    #[test]
+    fn legacy_overlay_frame_composes_the_takeover_then_the_banners() {
+        const WIDTH: u32 = 4;
+        const HEIGHT: u32 = 4;
+        let blue = [0_u8, 0, 255, 255];
+        let takeover = blue.repeat((WIDTH * HEIGHT) as usize);
+        // A 2x1 banner at (1, 2): an opaque red pixel and a half-alpha green
+        // one (BGRA, opacity already baked by the prepare).
+        let banner = legacy_banner(1, 2, 2, 1, &[0, 0, 255, 255, 0, 255, 0, 128]);
+
+        let frame = legacy_overlay_frame(
+            Some(&takeover[..]),
+            std::slice::from_ref(&banner),
+            WIDTH,
+            HEIGHT,
+        );
+        assert_eq!(frame.len(), (WIDTH * HEIGHT * 4) as usize);
+        assert_eq!(
+            rgba_at(&frame, WIDTH, 1, 2),
+            [255, 0, 0, 255],
+            "red over blue"
+        );
+        assert_eq!(
+            rgba_at(&frame, WIDTH, 2, 2),
+            [0, 128, 127, 255],
+            "half green over opaque blue"
+        );
+        for (x, y) in [(0, 0), (3, 3), (0, 2), (3, 2), (1, 1), (1, 3)] {
+            assert_eq!(
+                rgba_at(&frame, WIDTH, x, y),
+                blue,
+                "({x}, {y}) is the takeover"
+            );
+        }
+
+        // No takeover: transparent except the banner's own pixels, straight alpha kept.
+        let frame = legacy_overlay_frame(None, std::slice::from_ref(&banner), WIDTH, HEIGHT);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 2, 2), [0, 255, 0, 128]);
+        assert_eq!(rgba_at(&frame, WIDTH, 0, 0), [0, 0, 0, 0]);
+
+        // Banners stack bottom to top: a later opaque banner wins its pixel,
+        // and a banner hanging off the canvas is cut, never wrapped.
+        let top = legacy_banner(2, 2, 3, 3, &[255, 255, 255, 255].repeat(9));
+        let frame = legacy_overlay_frame(Some(&takeover[..]), &[banner, top], WIDTH, HEIGHT);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 2, 2), [255, 255, 255, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 3, 3), [255, 255, 255, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 0, 3), blue);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 3), blue);
+
+        // A takeover of the wrong size is not a frame: transparent instead.
+        let frame = legacy_overlay_frame(Some(&takeover[..8]), &[], WIDTH, HEIGHT);
+        assert!(frame.iter().all(|byte| *byte == 0));
+    }
+
+    /// Plan 186 S4: a legacy session recomposes its FIFO frame whenever the
+    /// takeover or the banner set changes, each prepared off the recording
+    /// lock; the takeover stays under the banners and an older composition
+    /// never undoes a newer one.
+    #[test]
+    fn legacy_overlay_session_recomposes_when_the_takeover_or_the_banners_change() {
+        let dir = std::env::temp_dir().join(format!("videorc-legacy-banners-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let banner_path = dir.join("banner.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(&banner_path)
+            .unwrap();
+        let takeover_path = dir.join("takeover.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]))
+            .save(&takeover_path)
+            .unwrap();
+        let banner = crate::protocol::Banner {
+            id: "b1".to_string(),
+            name: "b1".to_string(),
+            image_file: "banner.png".to_string(),
+            thumbnail_file: "banner.thumb.png".to_string(),
+            width: 2,
+            height: 2,
+            has_alpha: false,
+            sort_order: 0,
+            shown: true,
+            // Half the canvas, bottom right: a 2x2 image contained at (2, 2).
+            horizontal: crate::overlay_layout::OverlayRect::new(0.5, 0.5, 0.5, 0.5),
+            vertical: crate::overlay_layout::OverlayRect::new(0.5, 0.5, 0.5, 0.5),
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let shown = || {
+            vec![(
+                banner.clone(),
+                Arc::<Path>::from(banner_path.as_path()),
+                crate::banner_prepare::banner_file_revision(&banner_path),
+            )]
+        };
+        let blocker = ScreenOverlayPreparationBlocker::new();
+        blocker.release();
+        let mut active = test_active_recording_stub("legacy-banners");
+        active.screen_overlay = Some(ScreenOverlaySession::test_stub(4, 4, blocker));
+        let frame =
+            |active: &ActiveRecording| active.screen_overlay.as_ref().unwrap().test_current_frame();
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+
+        // Show: the banner lands at its contained rect over nothing.
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket.prepare_banners(shown()).unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        let shown_frame = frame(&active);
+        assert_eq!(rgba_at(&shown_frame, 4, 2, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&shown_frame, 4, 3, 3), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&shown_frame, 4, 0, 0), [0, 0, 0, 0]);
+        assert_eq!(rgba_at(&shown_frame, 4, 1, 2), [0, 0, 0, 0]);
+
+        // A takeover activated later goes under the banner.
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket
+            .prepare(Some(takeover_path.display().to_string()))
+            .unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        let both = frame(&active);
+        assert_eq!(rgba_at(&both, 4, 0, 0), [0, 0, 255, 255]);
+        assert_eq!(rgba_at(&both, 4, 2, 2), [255, 0, 0, 255]);
+
+        // Two prepares in flight: the one that read the inputs last carries
+        // both changes; the older one, committed after it, changes nothing.
+        let hide_ticket = active.active_screen_overlay_preparation().unwrap();
+        let clear_ticket = active.active_screen_overlay_preparation().unwrap();
+        let hidden = hide_ticket.prepare_banners(Vec::new()).unwrap();
+        let cleared = clear_ticket.prepare(None).unwrap();
+        assert!(cleared.revision > hidden.revision);
+        assert_eq!(
+            active.commit_prepared_active_screen(cleared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+        assert_eq!(
+            active.commit_prepared_active_screen(hidden),
+            PreparedScreenOverlayCommit::Applied,
+            "its change is on the picture already"
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+
+        // A banner whose file is gone is skipped; the frame still composes.
+        std::fs::remove_file(&banner_path).unwrap();
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket.prepare_banners(shown()).unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Plan 186 S4: which sessions take a banner shown after their start.
+    #[test]
+    fn session_accepts_banners_follows_the_render_path() {
+        // The compositor bridge (Metal, CPU, the Windows D3D11 media session).
+        assert!(session_accepts_banners(true, false, false));
+        // The direct D3D11 recording draws nothing over the screen.
+        assert!(!session_accepts_banners(true, true, false));
+        // The legacy FFmpeg graph: only with its overlay FIFO.
+        assert!(session_accepts_banners(false, false, true));
+        assert!(!session_accepts_banners(false, false, false));
     }
 
     #[derive(Debug)]
@@ -27506,6 +28103,7 @@ mod tests {
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
             overlay_session_shape: None,
+            accepts_banners: true,
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
@@ -34301,6 +34899,7 @@ mod tests {
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
             overlay_session_shape: None,
+            accepts_banners: true,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,

@@ -578,6 +578,50 @@ function renderDeck() {
       })
     })
   )
+
+  // Plan 186: banners by name only (never an image or a path), each its own
+  // explicit show or hide, from the `shown` describe carries.
+  const banners = describe.banners ?? []
+  $('banners-label').hidden = banners.length === 0
+  $('deck-banners').replaceChildren(
+    ...banners.map((banner) =>
+      key({
+        name: banner.name,
+        hint: banner.shown ? 'Showing. Tap to hide' : undefined,
+        on: banner.shown,
+        toggle: true,
+        onTap: () => send({ kind: banner.shown ? 'bannerHide' : 'bannerShow', bannerId: banner.id })
+      })
+    )
+  )
+}
+
+// A banner shown or hidden changes describe, not state (plan 186), and every
+// change the desktop publishes arrives as remote.state: re-read describe
+// after each one, one read at a time, keeping the newer state from events.
+let describeReading = false
+let describeStale = false
+async function refreshDescribe() {
+  if (describeReading) {
+    describeStale = true
+    return
+  }
+  describeReading = true
+  try {
+    const answer = await client?.describe()
+    if (answer?.describe) {
+      describe = answer.describe
+      renderDeck()
+    }
+  } catch {
+    // The next remote.state reads it again.
+  } finally {
+    describeReading = false
+    if (describeStale) {
+      describeStale = false
+      void refreshDescribe()
+    }
+  }
 }
 
 /** The renderer publishes describe/state shortly AFTER it connects. */
@@ -681,6 +725,7 @@ function start() {
     own((next) => {
       state = next
       if (!describe) void loadDescribe()
+      else void refreshDescribe()
       renderDeck()
     })
   )

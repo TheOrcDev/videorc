@@ -124,6 +124,13 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:screens']
       },
       {
+        // Plan 186: banners drawn, moved, routed per leg and blended in the
+        // recording and both stream orientations, above a takeover.
+        label: 'banners recording and stream smoke',
+        command: 'pnpm',
+        args: ['smoke:banners']
+      },
+      {
         // The reality gate: real capture config (no synthetic preview scene),
         // isolated backend state, and the first-frame contract at launch. This
         // is the scenario every other preview smoke bypasses via

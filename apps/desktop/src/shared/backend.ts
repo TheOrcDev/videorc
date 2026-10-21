@@ -2150,7 +2150,11 @@ export interface CompositorFrameReady {
   updatedAt: string
 }
 
-export type PreviewSurfaceSceneLayerKind = SceneSourceKind | 'screen-image' | 'background'
+export type PreviewSurfaceSceneLayerKind =
+  | SceneSourceKind
+  | 'screen-image'
+  | 'background'
+  | 'banner'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
@@ -2164,6 +2168,8 @@ export interface PreviewSurfaceSceneLayer {
   fit: PreviewSurfaceSceneLayerFit
   mirror: boolean
   shape?: CameraShape
+  /** 0..1; absent is fully opaque. Banners only (plan 186). */
+  opacity?: number
 }
 
 export interface PreviewSurfaceSceneState {
@@ -2175,6 +2181,12 @@ export interface PreviewSurfaceSceneState {
   activeScreenId?: string
   /** Normalized per-side inset derived from background visibilityPercent. */
   backgroundStageMargin?: number
+  /**
+   * The canvas in pixels the `banner` layers were placed against (plan 186).
+   * Banners are snapshot-level, not part of the scene revision, so the scene
+   * fingerprint ignores both this and the banner layers.
+   */
+  bannerCanvas?: { width: number; height: number }
   updatedAt: string
 }
 
@@ -3282,6 +3294,7 @@ export interface ClipMoment {
 
 /** Who placed a clip mark: a spoken "clip that" or the Mark clip control. */
 import type { MarkerContext, MarkerRelayCommand, MarkerRelayResult } from './session-markers'
+import type { BannerRelayCommand, BannerSummary } from './banner-commands'
 export type * from './session-markers'
 
 export type ClipMarkSource = 'voice' | 'manual'
@@ -4366,6 +4379,9 @@ export interface VideorcApi {
    */
   exitApp: (kind: AppExitKind) => Promise<void>
   pickScreenImage: () => Promise<ResourceSelection | null>
+  /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
+   * `input-file` capability for `banners.importImage`. */
+  pickBannerImage: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
   checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>
@@ -4445,6 +4461,17 @@ export interface VideorcApi {
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
   onClipMarkRequest: (callback: (command: ClipMarkCommand) => void) => () => void
   pushClipMarkResult: (resolution: CommentsCommandResolution<ClipMarkedEvent>) => Promise<boolean>
+  /** Banners in the Stream Manager (plan 186 S7): the Studio renderer pushes
+   * the read-only list (`{id, name, shown}`, null until it loads); the window
+   * seeds from main's copy and follows. */
+  getCommentsBanners: () => Promise<BannerSummary[] | null>
+  pushCommentsBanners: (banners: BannerSummary[] | null) => Promise<boolean>
+  onCommentsBanners: (callback: (banners: BannerSummary[] | null) => void) => () => void
+  /** Show or hide from the Stream Manager: relayed to the MAIN renderer, which
+   * owns the backend socket; a refusal comes back as the reply's error. */
+  bannerFromCommentsWindow: (command: BannerRelayCommand) => Promise<boolean>
+  onBannerRequest: (callback: (command: BannerRelayCommand) => void) => () => void
+  pushBannerResult: (resolution: CommentsCommandResolution<boolean>) => Promise<boolean>
   /** Show who followed from the Stream Manager (plan 071, S2): Electron main
    * starts the Twitch reconnect with the follow permission over its admin
    * socket and opens the browser, so the main window's eager bundle carries
@@ -5386,6 +5413,87 @@ export interface MigrateHighlightAnchorParams {
 }
 // --- end overlay layout (plan 164) ------------------------------------------
 
+// --- Banners (plan 186) -----------------------------------------------------
+// The streamer's own images placed anywhere on the picture. Backend-owned
+// (SQLite `banners`, images in the managed `Banners` dir beside `Screens`).
+// One set for every scene; `shown` survives a relaunch. Places reuse the
+// overlay model: a normalized `OverlayRect` per orientation and the two
+// "Appears in" switches. Pinned by `protocol-fixtures/high-risk-contracts.json`
+// → `banner`.
+
+/** At most this many banners in Assets (plan 186 D7). */
+export const BANNER_MAX_COUNT = 24
+/** At most this many banners showing at once (plan 186 D7). */
+export const BANNER_MAX_SHOWN = 4
+export const BANNER_OPACITY_MIN = 0.2
+export const BANNER_OPACITY_MAX = 1
+
+export interface Banner {
+  /** Stable UUID, used by remotes, the Stream Deck and `/banner`. */
+  id: string
+  name: string
+  /** Basename in the managed Banners dir, `<id>.png`. Never a path. */
+  imageFile: string
+  /** Basename of the ~480 px thumbnail, `<id>.thumb.png`. */
+  thumbnailFile: string
+  /** Pixel size of the stored image. */
+  width: number
+  height: number
+  hasAlpha: boolean
+  /** Assets order, also the drawing order: later is on top. */
+  sortOrder: number
+  /** Showing now. Persists across a relaunch. */
+  shown: boolean
+  horizontal: OverlayRect
+  vertical: OverlayRect
+  /** "Appears in: Stream". */
+  showOnStream: boolean
+  /** "Appears in: Recording". */
+  showInRecording: boolean
+  /** 0.2 to 1.0. */
+  opacity: number
+  /** Phase 2 timer: omitted when off, never `null`. */
+  hideAfterSec?: number
+  /** Phase 2 timer: omitted when off, never `null`. */
+  repeatEveryMin?: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** `banners.importImage`: a main-issued `input-file` capability. */
+export interface BannerImportImageParams {
+  sourceCapability: string
+}
+
+/** `banners.update`: only the fields to change. A timer of `0` turns it off. */
+export interface BannerUpdateParams {
+  id: string
+  name?: string
+  horizontal?: OverlayRect
+  vertical?: OverlayRect
+  showOnStream?: boolean
+  showInRecording?: boolean
+  opacity?: number
+  hideAfterSec?: number
+  repeatEveryMin?: number
+}
+
+/** `banners.reorder`: every banner id in the new Assets order. */
+export interface BannerReorderParams {
+  ids: string[]
+}
+
+/** `banners.delete` and `banners.show`. */
+export interface BannerIdParams {
+  id: string
+}
+
+/** `banners.hide`: one banner, or every banner when `id` is absent. */
+export interface BannerHideParams {
+  id?: string
+}
+// --- end banners (plan 186) -------------------------------------------------
+
 // --- Buddy overlay (plan 164) ---------------------------------------------
 // The Buddy on stream (Phase C): the backend owns which avatar state shows
 // and the bubble that is up; the renderer rasterizes the avatar per output
@@ -5733,9 +5841,20 @@ export interface CohostErrorDetail {
 
 /**
  * What a voice command asked for. `confirm` and `cancel` answer the open card,
- * so they update that command instead of standing on their own.
+ * so they update that command instead of standing on their own. The banner
+ * kinds (plan 186 S11: "show the sponsor banner", "hide the banners") finish
+ * at once: `done`, `not-found` or `refused`, with the sentence in `message`.
  */
-export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | 'cancel' | 'unknown'
+export type CohostCommandKind =
+  | 'highlight'
+  | 'clear'
+  | 'remove'
+  | 'confirm'
+  | 'cancel'
+  | 'unknown'
+  | 'show-banner'
+  | 'hide-banner'
+  | 'hide-banners'
 
 /**
  * Where the latest voice command stands:

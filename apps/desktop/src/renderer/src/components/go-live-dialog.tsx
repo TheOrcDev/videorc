@@ -20,7 +20,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioBanners, useStudioCore } from '@/hooks/use-studio'
 import { simulcastArmed } from '@/lib/capture'
 import type {
   CommentsReadState,
@@ -44,7 +44,7 @@ import {
 } from '@/lib/go-live-dialog-view'
 import { streamingWithoutTargets } from '@/lib/go-live-exclusions'
 import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
-import { OVERLAY_ITEM_LABELS, overlayStartNotices } from '@/lib/overlay-layout'
+import { START_NOTICE_LABELS, overlayAndBannerStartNotices } from '@/lib/banner-start-notices'
 import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
 import { isCommandKey, shortcutAriaKeys } from '@/lib/platform'
@@ -119,6 +119,7 @@ export function GoLiveConfirmationDialog({
     streamSharedEncodeFallbackVideo,
     overlayLayout
   } = useStudioCore()
+  const { banners } = useStudioBanners()
   const titleRef = useRef<HTMLInputElement>(null)
   const primaryRef = useRef<HTMLButtonElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
@@ -145,8 +146,9 @@ export function GoLiveConfirmationDialog({
   // D13 (plan 164): every overlay switch pair this session cannot honour,
   // said before start. The auxiliary leg is the topology's, never an
   // overlay's: the vertical leg when simulcast is armed, a split stream leg
-  // when the output check proved one, else the one shared encode.
-  const overlayNotices = overlayStartNotices(
+  // when the output check proved one, else the one shared encode. Banners
+  // that are showing count as one item, "Banners" (plan 186).
+  const overlayNotices = overlayAndBannerStartNotices(
     {
       recordEnabled: captureConfig.recordEnabled,
       streamEnabled: true,
@@ -159,7 +161,8 @@ export function GoLiveConfirmationDialog({
           ? 'stream'
           : 'none'
     },
-    overlayLayout
+    overlayLayout,
+    banners
   )
   // What the finished check and this computer's measurement say about the
   // stream as configured, before anything starts.
@@ -388,9 +391,12 @@ export function GoLiveConfirmationDialog({
                 <AlertDescription>
                   <ul className="grid gap-1">
                     {overlayNotices.map((notice) => (
-                      <li key={notice.item} data-videorc-go-live-overlay-notice={notice.item}>
+                      <li
+                        key={`${notice.item}:${notice.notice}`}
+                        data-videorc-go-live-overlay-notice={notice.item}
+                      >
                         <span className="font-medium text-foreground">
-                          {OVERLAY_ITEM_LABELS[notice.item]}
+                          {START_NOTICE_LABELS[notice.item]}
                         </span>
                         {' · '}
                         {notice.notice}

@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::banners::{
+    BannerUpdate, NewBanner, REFUSAL_FOUR_SHOWING, REFUSAL_TOO_MANY, banner_image_file_name,
+    banner_thumbnail_file_name,
+};
 use crate::diagnostics::permission_pane_for_log;
 use crate::live_chat::{
     CommentsSendOperation, CommentsSendOperationPhase, LiveChatAuthorVerified,
@@ -21,14 +25,15 @@ use crate::live_chat::{
     MembershipKind, SubscriptionKind,
 };
 use crate::live_chat_moderation::{ModerationOperation, ModerationPhase};
+use crate::overlay_layout::OverlayRect;
 use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
-    AiArtifact, AiArtifactKind, AiArtifactStatus, CleanCutEdl, CleanCutJob, CleanCutJobState,
-    CleanCutMode, CohostReportChatPlatformCount, CohostSessionReport, DiagnosticStats, HealthEvent,
-    HealthLevel, LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings,
-    SessionAiArtifactsPage, SessionHealthEventsPage, SessionListItem, SessionListPage,
-    SessionLogEntry, SessionLogsPage, SessionStorageTotals, SessionSummary, SourceSelection,
-    StreamScreen, StreamScreenStatus,
+    AiArtifact, AiArtifactKind, AiArtifactStatus, Banner, CleanCutEdl, CleanCutJob,
+    CleanCutJobState, CleanCutMode, CohostReportChatPlatformCount, CohostSessionReport,
+    DiagnosticStats, HealthEvent, HealthLevel, LayoutSettings, NoiseCleanupJob,
+    NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage, SessionHealthEventsPage,
+    SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage, SessionStorageTotals,
+    SessionSummary, SourceSelection, StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
 use crate::streaming::{
@@ -6450,6 +6455,240 @@ impl Database {
         self.list_stream_screens()
     }
 
+    // --- Banners (plan 186) ------------------------------------------------
+
+    /// Every banner in Assets order, which is also the drawing order.
+    pub(crate) fn list_banners(&self) -> Result<Vec<Banner>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {BANNER_COLUMNS} FROM banners ORDER BY sort_order ASC, created_at ASC"
+        ))?;
+        let rows = stmt.query_map([], banner_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn banner_by_id(&self, id: &str) -> Result<Banner> {
+        let conn = self.lock()?;
+        banner_by_id_locked(&conn, id)
+    }
+
+    pub(crate) fn count_banners(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM banners", [], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Inserts an imported banner last in Assets order: hidden, both
+    /// "Appears in" switches on, opacity 1.0, no timer. The count cap is
+    /// checked again inside the transaction so two imports can never exceed
+    /// it, and a refusal rolls back.
+    pub(crate) fn insert_banner(&self, new: NewBanner, max_count: usize) -> Result<Banner> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM banners", [], |row| row.get(0))?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= max_count {
+            bail!(REFUSAL_TOO_MANY);
+        }
+        let next_order: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM banners",
+            [],
+            |row| row.get(0),
+        )?;
+        let banner = Banner {
+            image_file: banner_image_file_name(&new.id),
+            thumbnail_file: banner_thumbnail_file_name(&new.id),
+            id: new.id,
+            name: new.name,
+            width: new.width,
+            height: new.height,
+            has_alpha: new.has_alpha,
+            sort_order: next_order,
+            shown: false,
+            horizontal: new.horizontal,
+            vertical: new.vertical,
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        transaction.execute(
+            "INSERT INTO banners (
+                id, name, image_file, thumbnail_file, width, height, has_alpha, sort_order,
+                shown, horizontal_json, vertical_json, show_on_stream, show_in_recording,
+                opacity, hide_after_sec, repeat_every_min, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                banner.id,
+                banner.name,
+                banner.image_file,
+                banner.thumbnail_file,
+                banner.width,
+                banner.height,
+                banner.has_alpha,
+                banner.sort_order,
+                banner.shown,
+                serde_json::to_string(&banner.horizontal)?,
+                serde_json::to_string(&banner.vertical)?,
+                banner.show_on_stream,
+                banner.show_in_recording,
+                banner.opacity,
+                banner.hide_after_sec,
+                banner.repeat_every_min,
+                banner.created_at,
+                banner.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    /// Applies a validated `banners.update`. A field left `None` keeps its
+    /// stored value; `Some(None)` on a timer turns that timer off.
+    pub(crate) fn update_banner(&self, id: &str, update: BannerUpdate) -> Result<Banner> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut banner = banner_by_id_locked(&transaction, id)?;
+        if let Some(name) = update.name {
+            banner.name = name;
+        }
+        if let Some(rect) = update.horizontal {
+            banner.horizontal = rect;
+        }
+        if let Some(rect) = update.vertical {
+            banner.vertical = rect;
+        }
+        if let Some(value) = update.show_on_stream {
+            banner.show_on_stream = value;
+        }
+        if let Some(value) = update.show_in_recording {
+            banner.show_in_recording = value;
+        }
+        if let Some(value) = update.opacity {
+            banner.opacity = value;
+        }
+        if let Some(value) = update.hide_after_sec {
+            banner.hide_after_sec = value;
+        }
+        if let Some(value) = update.repeat_every_min {
+            banner.repeat_every_min = value;
+        }
+        banner.updated_at = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE banners SET name = ?2, horizontal_json = ?3, vertical_json = ?4,
+                    show_on_stream = ?5, show_in_recording = ?6, opacity = ?7,
+                    hide_after_sec = ?8, repeat_every_min = ?9, updated_at = ?10
+             WHERE id = ?1",
+            params![
+                banner.id,
+                banner.name,
+                serde_json::to_string(&banner.horizontal)?,
+                serde_json::to_string(&banner.vertical)?,
+                banner.show_on_stream,
+                banner.show_in_recording,
+                banner.opacity,
+                banner.hide_after_sec,
+                banner.repeat_every_min,
+                banner.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    /// `ids` is the new Assets order and must name every banner exactly once.
+    pub(crate) fn reorder_banners(&self, ids: &[String]) -> Result<Vec<Banner>> {
+        let conn = self.lock()?;
+        let existing_ids = {
+            let mut stmt = conn.prepare("SELECT id FROM banners")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let existing = existing_ids.iter().collect::<HashSet<_>>();
+        let requested = ids.iter().collect::<HashSet<_>>();
+        if existing.len() != requested.len()
+            || existing_ids.len() != ids.len()
+            || existing != requested
+        {
+            bail!("Banner reorder must include every banner exactly once.");
+        }
+
+        let updated_at = Utc::now().to_rfc3339();
+        for (index, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE banners SET sort_order = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, index as i64, updated_at],
+            )?;
+        }
+
+        drop(conn);
+        self.list_banners()
+    }
+
+    /// The row only. `banners::delete_banner` owns the session refusal, the
+    /// path guard and the files, and calls this once SQLite may commit.
+    pub(crate) fn delete_banner_row(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute("DELETE FROM banners WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            bail!("Banner not found.");
+        }
+        Ok(())
+    }
+
+    /// Show a banner, idempotently, under the cap of `max_shown` showing at
+    /// once. The cap is enforced here, in the backend, not only in the UI.
+    pub(crate) fn show_banner(&self, id: &str, max_shown: usize) -> Result<Banner> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut banner = banner_by_id_locked(&transaction, id)?;
+        if banner.shown {
+            return Ok(banner);
+        }
+        let shown: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM banners WHERE shown = 1", [], |row| {
+                row.get(0)
+            })?;
+        if usize::try_from(shown).unwrap_or(usize::MAX) >= max_shown {
+            bail!(REFUSAL_FOUR_SHOWING);
+        }
+        banner.shown = true;
+        banner.updated_at = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE banners SET shown = 1, updated_at = ?2 WHERE id = ?1",
+            params![banner.id, banner.updated_at],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    pub(crate) fn hide_banner(&self, id: &str) -> Result<Banner> {
+        let conn = self.lock()?;
+        let mut banner = banner_by_id_locked(&conn, id)?;
+        if banner.shown {
+            banner.shown = false;
+            banner.updated_at = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE banners SET shown = 0, updated_at = ?2 WHERE id = ?1",
+                params![banner.id, banner.updated_at],
+            )?;
+        }
+        Ok(banner)
+    }
+
+    pub(crate) fn hide_all_banners(&self) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE banners SET shown = 0, updated_at = ?1 WHERE shown = 1",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn active_stream_screen_selection(&self) -> Result<ActiveStreamScreenSelection> {
         let conn = self.lock()?;
         let Some(screen_id) = self.active_screen_id_locked(&conn)? else {
@@ -6750,6 +6989,21 @@ impl Database {
         std::env::temp_dir().join("videorc-screens")
     }
 
+    /// The managed `Banners` directory beside `Screens` (plan 186). Only
+    /// basenames reach the renderer; main's `videorc-asset://banner/<file>`
+    /// resolver and the compositor join them onto this root.
+    pub(crate) fn banner_assets_dir(&self) -> PathBuf {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return parent.join("Banners");
+        }
+
+        std::env::temp_dir().join("videorc-banners")
+    }
+
     #[cfg(test)]
     pub(crate) fn migrate_for_marker_test(&self) {
         self.migrate().unwrap();
@@ -6909,6 +7163,27 @@ impl Database {
                 thumbnail_path TEXT,
                 sort_order INTEGER NOT NULL,
                 status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS banners (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                image_file TEXT NOT NULL,
+                thumbnail_file TEXT NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                has_alpha INTEGER NOT NULL,
+                sort_order INTEGER NOT NULL,
+                shown INTEGER NOT NULL,
+                horizontal_json TEXT NOT NULL,
+                vertical_json TEXT NOT NULL,
+                show_on_stream INTEGER NOT NULL,
+                show_in_recording INTEGER NOT NULL,
+                opacity REAL NOT NULL,
+                hide_after_sec INTEGER,
+                repeat_every_min INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -7436,6 +7711,56 @@ fn stream_screen_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamScr
     })
 }
 
+/// The `banners` columns in `banner_from_row` order.
+const BANNER_COLUMNS: &str = "id, name, image_file, thumbnail_file, width, height, has_alpha, \
+     sort_order, shown, horizontal_json, vertical_json, show_on_stream, show_in_recording, \
+     opacity, hide_after_sec, repeat_every_min, created_at, updated_at";
+
+fn banner_by_id_locked(conn: &Connection, id: &str) -> Result<Banner> {
+    conn.query_row(
+        &format!("SELECT {BANNER_COLUMNS} FROM banners WHERE id = ?1"),
+        params![id],
+        banner_from_row,
+    )
+    .optional()?
+    .context("Banner not found.")
+}
+
+fn banner_rect_from_json(json: &str, index: usize) -> rusqlite::Result<OverlayRect> {
+    serde_json::from_str(json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+fn banner_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Banner> {
+    let horizontal_json: String = row.get(9)?;
+    let vertical_json: String = row.get(10)?;
+    Ok(Banner {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        image_file: row.get(2)?,
+        thumbnail_file: row.get(3)?,
+        width: row.get(4)?,
+        height: row.get(5)?,
+        has_alpha: row.get(6)?,
+        sort_order: row.get(7)?,
+        shown: row.get(8)?,
+        horizontal: banner_rect_from_json(&horizontal_json, 9)?,
+        vertical: banner_rect_from_json(&vertical_json, 10)?,
+        show_on_stream: row.get(11)?,
+        show_in_recording: row.get(12)?,
+        opacity: row.get(13)?,
+        hide_after_sec: row.get(14)?,
+        repeat_every_min: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+    })
+}
+
 fn health_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HealthEvent> {
     let level_json: String = row.get(2)?;
     let permission_json: Option<String> = row.get(5)?;
@@ -7537,7 +7862,7 @@ fn resolve_managed_screen_image_path(root: &Path, screen_id: &str, path: &Path) 
     Ok(canonical)
 }
 
-fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }

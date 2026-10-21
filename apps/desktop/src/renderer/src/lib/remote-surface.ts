@@ -1,6 +1,12 @@
 import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
+import { BANNER_ACTION_COPY, runBannerAction } from '@/lib/banners'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { systemAudioTarget } from '@/lib/system-audio'
+import {
+  bannerSummaries,
+  type BannerRelayAction,
+  type BannerSummary
+} from '../../../shared/banner-commands'
 
 /** The state projection deck keys render. Minimal by design and the ONLY
  * payload remote sockets receive — never widen it with tokens/paths/URLs. */
@@ -36,6 +42,13 @@ export interface RemoteSurfaceDescribe {
    */
   layoutLabels: Readonly<Record<string, string>>
   takeovers: { id: string; name: string }[]
+  /**
+   * Plan 186 S7: every banner as `{id, name, shown}`, in Assets order. Ids
+   * are opaque, names are labels the streamer typed for graphics viewers
+   * see; never an image, a file name or a path. A banner key renders
+   * `shown` from here, so a client re-reads describe after `remote.state`.
+   */
+  banners: BannerSummary[]
   windows: readonly string[]
 }
 
@@ -68,7 +81,8 @@ export type RemoteSurfaceValues = readonly [
   layoutPresets: readonly LayoutPreset[],
   takeovers: { id: string; name: string }[],
   systemAudioStatus: DeviceStatus | undefined,
-  systemAudioShown: boolean
+  systemAudioShown: boolean,
+  banners: readonly BannerSummary[]
 ]
 
 function snapshotFromValues(values: RemoteSurfaceValues): RemoteSurfaceSnapshot {
@@ -89,6 +103,8 @@ function snapshotFromValues(values: RemoteSurfaceValues): RemoteSurfaceSnapshot 
       layoutPresets: values[10],
       layoutLabels: remoteLayoutLabels(values[10]),
       takeovers: values[11],
+      // Whitelisted here: Studio hands over its whole banner list.
+      banners: bannerSummaries(values[14]),
       windows: ['notes', 'comments', 'preview']
     }
   }
@@ -134,6 +150,10 @@ export interface RemoteIntentContext {
   /** Plan 068 D6: mark the current moment for a clip. The backend stamps the
    * capture clock; `ok: false` carries why nothing was kept. */
   markClip: () => Promise<RemoteIntentOutcome>
+  /** Plan 186 S7: the banner list the remotes are shown. `bannerShow` and
+   * `bannerHide` run the backend's own explicit RPCs; `bannerToggle` picks
+   * its verb from `shown` here. */
+  banners: readonly BannerSummary[]
 }
 
 export interface RemoteIntentOutcome {
@@ -259,6 +279,10 @@ export const REMOTE_INTENT_COPY = {
   takeoverMissing: "That takeover isn't available anymore.",
   takeoverShow: "Couldn't show the takeover.",
   takeoverHide: "Couldn't hide the takeover.",
+  bannerMissing: BANNER_ACTION_COPY.missing,
+  bannerShow: BANNER_ACTION_COPY.show,
+  bannerHide: BANNER_ACTION_COPY.hide,
+  bannersHide: BANNER_ACTION_COPY.hideAll,
   windowMissing: "That window isn't available.",
   messageMissing: 'Choose a message to put on stream.',
   unsupported: "This version of Videorc can't do that. Update Videorc.",
@@ -385,6 +409,23 @@ export async function executeRemoteIntent(
           return void (await ack(false, REMOTE_INTENT_COPY.takeoverHide))
         }
         return void (await ack(true))
+      }
+      case 'bannerShow':
+      case 'bannerHide':
+      case 'bannerToggle': {
+        // Plan 186 S7: by id; without one, `bannerHide` hides them all.
+        const bannerId = typeof intent.bannerId === 'string' ? intent.bannerId : undefined
+        const banner = context.banners.find((candidate) => candidate.id === bannerId)
+        if (bannerId !== undefined ? !banner : intent.kind !== 'bannerHide') {
+          return void (await ack(false, REMOTE_INTENT_COPY.bannerMissing))
+        }
+        const action: BannerRelayAction = !banner
+          ? { action: 'hideAll' }
+          : intent.kind === 'bannerShow' || (intent.kind === 'bannerToggle' && !banner.shown)
+            ? { action: 'show', id: banner.id }
+            : { action: 'hide', id: banner.id }
+        const outcome = await runBannerAction(context.client, action, context.banners)
+        return void (await ack(outcome.ok, outcome.message))
       }
       case 'windowFront': {
         const windowName = intent.window as string | undefined

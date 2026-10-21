@@ -4,6 +4,7 @@ import {
   ClipIcon,
   DarkModeIcon,
   DesktopIcon,
+  ImageIcon,
   LightModeIcon,
   LivestreamIcon,
   BuddyIcon,
@@ -47,12 +48,12 @@ import {
   type WorkspaceTab,
   type WorkspaceTabGroup
 } from '@/components/workspace-nav'
-import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
+import { useStudioBanners, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // ⌘K (plan 174 S3.21, A-9, A-13): Session first (the transport's own
 // actions), then every page with one verb, the windows, the saved scenes,
-// Buddy's and Settings' tabs, and the look. Each item's value is the words
+// the banners (plan 186), Buddy's and Settings' tabs, and the look. Each item's value is the words
 // the footer shows for it, and its keywords are what people type instead.
 
 /** What people type for a page that is not its name. */
@@ -61,7 +62,7 @@ export const PAGE_KEYWORDS: Readonly<Record<WorkspaceTab, readonly string[]>> = 
   ai: ['companion', 'ai', 'chat', 'voice', 'reports', 'clean cut'],
   sources: ['camera', 'microphone', 'screen', 'window', 'devices', 'audio', 'mixer'],
   layouts: ['layout', 'layouts', 'composition', 'background', 'takeover', 'presets'],
-  assets: ['backgrounds', 'overlays', 'images', 'takeovers'],
+  assets: ['backgrounds', 'overlays', 'images', 'takeovers', 'banners'],
   live: ['destinations', 'stream key', 'youtube', 'twitch', 'kick', 'schedule', 'go live'],
   captions: ['subtitles', 'transcription'],
   recording: ['recording', 'quality', 'resolution', 'folder', 'file', 'storage'],
@@ -129,6 +130,7 @@ export function CommandPalette({
     toggleCaptionsWindow
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
+  const { banners, showBanner, hideBanner } = useStudioBanners()
   const platform = runtimeInfo?.platform
   const { theme, setTheme } = useTheme()
   // cmdk's selected item; the footer names it.
@@ -360,6 +362,42 @@ export function CommandPalette({
                   <Context>Saved scene</Context>
                 </CommandItem>
               ))}
+            </CommandGroup>
+          </>
+        ) : null}
+
+        {/* Plan 186 S7: each banner by its verb now, then Hide all banners
+            while any shows. The picture is the confirmation. */}
+        {banners.length ? (
+          <>
+            <CommandSeparator />
+            <CommandGroup heading="Banners">
+              {banners.map((banner) => {
+                const label = `${banner.shown ? 'Hide' : 'Show'} banner: ${banner.name}`
+                return (
+                  <CommandItem
+                    key={banner.id}
+                    value={label}
+                    keywords={['banner', 'sponsor', 'logo', 'image', 'overlay']}
+                    onSelect={() =>
+                      run(() => void (banner.shown ? hideBanner(banner.id) : showBanner(banner.id)))
+                    }
+                  >
+                    <ImageIcon className="size-4" />
+                    {label}
+                  </CommandItem>
+                )
+              })}
+              {banners.some((banner) => banner.shown) ? (
+                <CommandItem
+                  value="Hide all banners"
+                  keywords={['banners', 'off', 'clear', 'remove']}
+                  onSelect={() => run(() => void hideBanner())}
+                >
+                  <ImageIcon className="size-4" />
+                  Hide all banners
+                </CommandItem>
+              ) : null}
             </CommandGroup>
           </>
         ) : null}

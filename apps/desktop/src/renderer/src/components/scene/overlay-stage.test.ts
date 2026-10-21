@@ -1,18 +1,25 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { OverlayLayout } from '@/lib/backend'
+import type { Banner, OverlayLayout, OverlayOrientation, OverlayRect } from '@/lib/backend'
 import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
 import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 
 import {
+  BannerEdits,
   OverlayEdits,
+  bannerIdFromStageId,
+  bannerStageId,
+  bannerStageItems,
   overlayEditsBlockedReason,
   overlayItemFromStageId,
   overlayStageId,
   overlayStageItems,
   stageRectToOverlay,
-  withOverlayRect
+  withOverlayRect,
+  type BannerStageItem
 } from './overlay-stage'
+import { StageGesture } from './stage-gesture'
+import { stageSnapTargets } from './stage-transform'
 
 const flush = async (): Promise<void> => {
   await Promise.resolve()
@@ -165,5 +172,192 @@ describe('overlay failures are reported (plan 174, C-6)', () => {
     for (const status of ['waiting', 'connecting', 'failed', 'closed'] as const) {
       expect(overlayEditsBlockedReason(status)).toBe(OFFLINE_LOCK_REASON)
     }
+  })
+})
+
+// Plan 186: banners are stage items too, under the overlay items.
+
+const banner = (id: string, extra: Partial<Banner> = {}): Banner => ({
+  id,
+  name: id === 'sponsor' ? 'Sponsor' : id,
+  imageFile: `${id}.png`,
+  thumbnailFile: `${id}.thumb.png`,
+  width: 2400,
+  height: 400,
+  hasAlpha: true,
+  sortOrder: 0,
+  shown: true,
+  // The 6:1 strip's default places: they fit the image exactly.
+  horizontal: { x: 0.2, y: 0.782222, w: 0.6, h: 0.177778 },
+  vertical: { x: 0.071111, y: 0.699583, w: 0.857778, h: 0.080417 },
+  showOnStream: true,
+  showInRecording: true,
+  opacity: 1,
+  createdAt: '2026-10-20T00:00:00Z',
+  updatedAt: '2026-10-20T00:00:00Z',
+  ...extra
+})
+
+const LANDSCAPE = 16 / 9
+/** A 16:9 canvas on screen, in CSS px: what the gesture projects the aspect in. */
+const PIXELS = { width: 1600, height: 900 }
+const modifiers = { shiftKey: false, altKey: false }
+/** The rect's aspect in canvas pixels. */
+const pixelAspect = (rect: OverlayRect, canvasAspect = LANDSCAPE): number =>
+  (rect.w * canvasAspect) / rect.h
+
+describe('banners on the stage (plan 186)', () => {
+  it('pins the banner stage id the backend draft matches', () => {
+    expect(bannerStageId('3f1c')).toBe('banner:3f1c')
+    expect(bannerIdFromStageId('banner:3f1c')).toBe('3f1c')
+    expect(bannerIdFromStageId('banner:')).toBeNull()
+    expect(bannerIdFromStageId('overlay:buddy')).toBeNull()
+    expect(overlayItemFromStageId('banner:3f1c')).toBeNull()
+  })
+
+  it('lists the showing banners and the selected one, in Assets order', () => {
+    const banners = [
+      banner('sponsor', { sortOrder: 0, showInRecording: false }),
+      banner('logo', { sortOrder: 1, shown: false, width: 512, height: 512 }),
+      banner('follow', { sortOrder: 2, shown: false }),
+      banner('frame', { sortOrder: 3, showOnStream: false, showInRecording: false })
+    ]
+    expect(bannerStageItems(banners, null, 'horizontal', LANDSCAPE).map((item) => item.id)).toEqual(
+      ['sponsor', 'frame']
+    )
+    const items = bannerStageItems(banners, 'logo', 'horizontal', LANDSCAPE)
+    expect(items.map((item) => item.id)).toEqual(['sponsor', 'logo', 'frame'])
+    expect(items[0]).toMatchObject({
+      kind: 'banner',
+      stageId: 'banner:sponsor',
+      label: 'Sponsor',
+      badge: 'stream only',
+      off: false,
+      aspectLocked: true,
+      rect: { x: 0.2, y: 0.782222, width: 0.6, height: 0.177778 }
+    })
+    // A selected hidden banner is dimmed and says so (the plan 174 "off" treatment).
+    expect(items[1]).toMatchObject({ badge: 'hidden', off: true })
+    expect(items[2]).toMatchObject({ badge: 'off', off: true })
+  })
+
+  it("draws a banner's rect around its image, in canvas units", () => {
+    // The logo's place is wider than the logo: the rect hugs the square
+    // picture at the place's right edge (its gravity).
+    const [logo] = bannerStageItems(
+      [
+        banner('logo', {
+          width: 512,
+          height: 512,
+          horizontal: { x: 0.5, y: 0.04, w: 0.48, h: 0.2 }
+        })
+      ],
+      null,
+      'horizontal',
+      LANDSCAPE
+    )
+    expect(logo!.rect).toStrictEqual({ x: 0.8675, y: 0.04, width: 0.1125, height: 0.2 })
+    // On the vertical stream the vertical rect is placed, in 9:16 units.
+    const [vertical] = bannerStageItems([banner('sponsor')], null, 'vertical', 9 / 16)
+    expect(vertical!.rect.width).toBe(0.857778)
+    expect(pixelAspect(stageRectToOverlay(vertical!.rect), 9 / 16)).toBeCloseTo(6, 3)
+  })
+
+  it('commits one banners.update per drag, with an aspect-locked, clamped rect', async () => {
+    const [entry] = bannerStageItems([banner('sponsor')], 'sponsor', 'horizontal', LANDSCAPE)
+    const item = entry as BannerStageItem
+    // The stage's gesture: a corner pulled up and left, Shift held for part of
+    // it. A banner is aspect-locked and forced, so Shift never frees it.
+    const gesture = new StageGesture(
+      item.stageId,
+      1,
+      'nw',
+      item.rect,
+      { x: item.rect.x, y: item.rect.y },
+      PIXELS,
+      stageSnapTargets([]),
+      false,
+      item.aspectLocked,
+      item.aspectLocked
+    )
+    gesture.sample({ x: item.rect.x - 0.05, y: item.rect.y - 0.3 }, modifiers)
+    const released = gesture.sample(
+      { x: item.rect.x - 0.15, y: item.rect.y - 0.02 },
+      { shiftKey: true, altKey: false }
+    ).rect
+    const commit = vi.fn<
+      (id: string, patch: Partial<Record<OverlayOrientation, OverlayRect>>) => Promise<unknown>
+    >(async () => banner('sponsor'))
+    const changed = vi.fn()
+    const edits = new BannerEdits(commit, changed)
+    edits.submit(item.id, 'horizontal', released)
+    expect(edits.stageDraft('horizontal')?.stageId).toBe('banner:sponsor')
+    expect(edits.stageDraft('vertical')).toBeNull()
+    await flush()
+    expect(commit).toHaveBeenCalledTimes(1)
+    const [id, patch] = commit.mock.calls[0]!
+    expect(id).toBe('sponsor')
+    expect(Object.keys(patch)).toEqual(['horizontal'])
+    const rect = patch.horizontal!
+    // Bigger, still the image's 6:1 in canvas pixels, inside the canvas.
+    expect(rect.w).toBeGreaterThan(0.6)
+    expect(pixelAspect(rect)).toBeCloseTo(6, 2)
+    expect(rect.x).toBeGreaterThanOrEqual(0)
+    expect(rect.y).toBeGreaterThanOrEqual(0)
+    expect(rect.x + rect.w).toBeLessThanOrEqual(1)
+    expect(rect.y + rect.h).toBeLessThanOrEqual(1)
+    expect(rect).toStrictEqual(stageRectToOverlay(released))
+    // The update's reply is in the banner list: the draft is done.
+    expect(edits.draft).toBeNull()
+  })
+
+  it('clamps a drag past the canvas edge before it reaches the wire', async () => {
+    const commit = vi.fn(async () => banner('sponsor'))
+    const edits = new BannerEdits(commit, () => {})
+    edits.submit('sponsor', 'vertical', { x: 0.4, y: 0.98, width: 0.8, height: 0.001 })
+    await flush()
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(commit).toHaveBeenCalledWith('sponsor', {
+      vertical: { x: 0.2, y: 0.98, w: 0.8, h: 0.02 }
+    })
+  })
+
+  it('keeps the released rect until the list echoes it, and drops it on a failure', async () => {
+    let finish: (value: Banner | null) => void = () => {}
+    const commit = vi.fn(
+      () =>
+        new Promise<Banner | null>((resolve) => {
+          finish = resolve
+        })
+    )
+    const edits = new BannerEdits(commit, () => {})
+    edits.submit('sponsor', 'horizontal', { x: 0.1, y: 0.1, width: 0.3, height: 0.05 })
+    await flush()
+    edits.observe([banner('sponsor')])
+    expect(edits.draft).not.toBeNull()
+    edits.observe([banner('sponsor', { horizontal: { x: 0.1, y: 0.1, w: 0.3, h: 0.05 } })])
+    expect(edits.draft).toBeNull()
+    finish(banner('sponsor'))
+    await flush()
+
+    // A failed update (the hook has already said why) drops the draft.
+    const failing = new BannerEdits(
+      async () => null,
+      () => {}
+    )
+    failing.submit('sponsor', 'horizontal', { x: 0.1, y: 0.1, width: 0.3, height: 0.05 })
+    expect(failing.draft).not.toBeNull()
+    await flush()
+    await flush()
+    expect(failing.draft).toBeNull()
+
+    // A banner deleted meanwhile takes its draft with it.
+    const orphan = new BannerEdits(
+      () => new Promise(() => {}),
+      () => {}
+    )
+    orphan.submit('gone', 'horizontal', { x: 0.1, y: 0.1, width: 0.3, height: 0.05 })
+    orphan.observe([banner('sponsor')])
+    expect(orphan.draft).toBeNull()
   })
 })

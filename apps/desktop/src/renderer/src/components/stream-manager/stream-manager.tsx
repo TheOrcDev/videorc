@@ -124,6 +124,7 @@ import {
 } from '@/lib/chat-removal-view'
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
+import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
@@ -282,6 +283,14 @@ export interface StreamManagerProps {
   onMarker?: (label?: string) => Promise<import('@/lib/backend').SessionMarker>
   onUndoMarker?: (marker: import('@/lib/backend').SessionMarker) => Promise<void>
   onMarkClip?: () => void
+  /**
+   * Banners (plan 186 S7): the list Studio pushed (null until it loads) and
+   * one show or hide, relayed to Studio. The status bar's Banners menu and
+   * the composer's `/banner` use them, on air or not: banners matter in
+   * recordings too. Resolves false when it didn't happen, already said.
+   */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => Promise<boolean>
   onOpenPreview?: () => void
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
@@ -388,6 +397,8 @@ export function StreamManager({
   onHighlight,
   onClear,
   onMarkClip,
+  banners,
+  onBanner,
   markerContext,
   onMarker,
   onUndoMarker,
@@ -1193,6 +1204,8 @@ export function StreamManager({
             markerContext={inHistory ? null : markerContext}
             onMarker={inHistory ? undefined : onMarker}
             onUndoMarker={inHistory ? undefined : onUndoMarker}
+            banners={banners}
+            onBanner={inHistory ? undefined : onBanner}
             onSend={onSend}
           />
         </div>
@@ -1240,6 +1253,8 @@ export function StreamManager({
         onFocusComposer={composerAvailable ? writeInChat : undefined}
         onHighlightAnchorChange={inHistory ? undefined : onHighlightAnchorChange}
         onMarkClip={onAir ? onMarkClip : undefined}
+        banners={banners}
+        onBanner={onBanner}
         onOpenPreview={onOpenPreview}
         onSearchChat={searchChat}
         onStatsLayoutChange={changeStatsLayout}

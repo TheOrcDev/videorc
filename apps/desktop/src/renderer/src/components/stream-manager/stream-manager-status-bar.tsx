@@ -40,6 +40,7 @@ import {
 } from '@/lib/stream-manager-stats-layout'
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
+import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
 import { cn } from '@/lib/utils'
 
 // The Stream Manager's status bar (plan 055, D6): each provider's chat state
@@ -115,6 +116,54 @@ export function providerCapabilityTitle(
   return lines.filter(Boolean).join('\n')
 }
 
+/**
+ * The Banners menu's items (plan 186 S7), in Assets order: one check per
+ * banner (checked while it shows), then Hide all banners. Each choice asks
+ * Studio, and the check moves when the list comes back, so the menu stays
+ * open for the next one. Before the list loads, and with none, one line says
+ * so.
+ */
+function BannerMenuItems({
+  banners,
+  onBanner
+}: {
+  banners: readonly BannerSummary[] | null
+  onBanner: (action: BannerRelayAction) => void
+}): ReactElement {
+  if (!banners?.length) {
+    return (
+      <DropdownMenuItem disabled>
+        {banners ? 'Import banners in Assets' : 'Loading banners…'}
+      </DropdownMenuItem>
+    )
+  }
+  return (
+    <>
+      <DropdownMenuGroup>
+        {banners.map((banner) => (
+          <DropdownMenuCheckboxItem
+            key={banner.id}
+            checked={banner.shown}
+            onCheckedChange={(checked) =>
+              onBanner({ action: checked === true ? 'show' : 'hide', id: banner.id })
+            }
+            onSelect={(event) => event.preventDefault()}
+          >
+            <span className="truncate">{banner.name}</span>
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuGroup>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem
+        disabled={!banners.some((banner) => banner.shown)}
+        onSelect={() => onBanner({ action: 'hideAll' })}
+      >
+        Hide all banners
+      </DropdownMenuItem>
+    </>
+  )
+}
+
 export function StreamManagerStatusBar({
   providers,
   audience,
@@ -124,6 +173,8 @@ export function StreamManagerStatusBar({
   onHighlightAnchorChange,
   onClear,
   onMarkClip,
+  banners = null,
+  onBanner,
   onOpenPreview,
   onSearchChat,
   onFocusComposer,
@@ -141,6 +192,10 @@ export function StreamManagerStatusBar({
   /** Plan 068 D6: present only while on air. Word and icon: mid-stream there
    * is no time to hover. */
   onMarkClip?: () => void
+  /** Plan 186 S7: the Banners menu, on air or not (banners matter in
+   * recordings too). `banners` is null until Studio has read the list. */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => unknown
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
    * is still clickable; below 800 px only the key shows, below 640 px they
@@ -161,6 +216,9 @@ export function StreamManagerStatusBar({
   // cannot be undone, so both its homes (the button, the ⋯ menu) ask first.
   const [confirmingClear, setConfirmingClear] = useState(false)
   const requestClear = onClear ? () => setConfirmingClear(true) : undefined
+  const bannerItems = onBanner ? (
+    <BannerMenuItems banners={banners} onBanner={(action) => void onBanner(action)} />
+  ) : null
   const hints = [
     ...(onSearchChat
       ? [
@@ -308,6 +366,22 @@ export function StreamManagerStatusBar({
               onClick={onMarkClip}
             />
           ) : null}
+          {bannerItems ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                {/* The word alone, like Clear: no icon glyph rides into this
+                    window's bundle for it. */}
+                <StatusBarAction
+                  hint="Show or hide your banners (or type /banner)"
+                  label="Banners"
+                  text="Banners"
+                />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56" side="top">
+                {bannerItems}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
           {requestClear ? (
             <StatusBarAction
               hint="Clear view (keeps Library history)"
@@ -384,6 +458,12 @@ export function StreamManagerStatusBar({
                   <ClipIcon />
                   Mark clip
                 </DropdownMenuItem>
+              ) : null}
+              {bannerItems ? (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>Banners</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="w-56">{bannerItems}</DropdownMenuSubContent>
+                </DropdownMenuSub>
               ) : null}
               {onOpenPreview ? (
                 <DropdownMenuItem onSelect={onOpenPreview}>

@@ -43,11 +43,17 @@ import {
   markerRelayResolutionSchema,
   markerRelayResultSchema
 } from './session-markers'
+import type { BannerRelayCommand, BannerSummary } from './banner-commands'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
 import { sessionChatTotalsSchema } from './session-chat-totals'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
-import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
+import {
+  BANNER_MAX_COUNT,
+  COMMENT_HIGHLIGHT_ANCHORS,
+  DOCK_SLOTS,
+  LAYOUT_PRESET_VALUES
+} from './backend'
 import {
   CHAT_AVATAR_MAX_BYTES,
   chatAvatarBytesWithinCap,
@@ -98,6 +104,7 @@ export const electronInvokeApiMethods = {
   'app:set-native-theme': 'setNativeTheme',
   'app:exit': 'exitApp',
   'screens:pick-image': 'pickScreenImage',
+  'banners:pick-image': 'pickBannerImage',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
   'buddy-assets:remove': 'removeBuddyPersona',
@@ -176,6 +183,10 @@ export const electronInvokeApiMethods = {
   'comments-window:marker-result-push': 'pushMarkerResult',
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
+  'comments-window:banners-get': 'getCommentsBanners',
+  'comments-window:banners-push': 'pushCommentsBanners',
+  'comments-window:banner': 'bannerFromCommentsWindow',
+  'comments-window:banner-result-push': 'pushBannerResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
@@ -272,6 +283,8 @@ export interface ElectronIpcEventMap {
   'comments-window:marker-context': MarkerContext | null
   'comments-window:marker-request': MarkerRelayCommand
   'comments-window:clip-mark-request': ClipMarkCommand
+  'comments-window:banners': BannerSummary[] | null
+  'comments-window:banner-request': BannerRelayCommand
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
@@ -319,6 +332,8 @@ export const electronEventChannels = [
   'comments-window:marker-context',
   'comments-window:marker-request',
   'comments-window:clip-mark-request',
+  'comments-window:banners',
+  'comments-window:banner-request',
   'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
@@ -1116,6 +1131,16 @@ const optionalGenerationArgs = runtimeSchema<unknown[]>(
 const optionalGenerationOnlyArgs = tupleSchema([optionalSchema(nonNegativeSafeIntegerSchema)])
 
 const noArgs = tupleSchema([])
+/** A picked file as main hands it to the renderer: an opaque single-use
+ * `input-file` capability and the name to show, never the path itself. */
+const inputFileSelectionSchema = objectSchema(
+  {
+    capabilityId: boundedIdentifier,
+    kind: literalSchema('input-file'),
+    displayName: stringSchema({ maxLength: 32_768 })
+  },
+  { allowUnknown: false }
+)
 const videorcAccountSnapshotSchema = objectSchema(
   {
     status: enumSchema(['signed-out', 'signed-in']),
@@ -1264,6 +1289,53 @@ const dashboardSchema = runtimeSchema<LiveDashboardState | null>(
     return state
   }
 )
+// Banners in the Stream Manager (plan 186 S7): `{id, name, shown}` and one
+// explicit action by id. Never an image, a file name or a path.
+const bannerStrict = { allowUnknown: false } as const
+/** The backend's id rule (`backend-rpc-contract.ts`): an opaque token. */
+const bannerIdSchema = runtimeSchema<string>('a banner id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a banner id')
+  }
+  return value
+})
+const bannerRequestIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+
+const bannerSummarySchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    name: stringSchema({ minLength: 1, maxLength: 256 }),
+    shown: booleanSchema
+  },
+  bannerStrict
+)
+/** Null until Studio has read the list once. */
+const bannerSummariesSchema = nullableSchema(
+  arraySchema(bannerSummarySchema, { maxLength: BANNER_MAX_COUNT })
+)
+const bannerRelayCommandSchema = unionSchema([
+  objectSchema(
+    { requestId: bannerRequestIdSchema, action: enumSchema(['show', 'hide']), id: bannerIdSchema },
+    bannerStrict
+  ),
+  objectSchema({ requestId: bannerRequestIdSchema, action: literalSchema('hideAll') }, bannerStrict)
+])
+/** Studio's answer: done, or the sentence that says why not. */
+const bannerRelayResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: bannerRequestIdSchema, ok: literalSchema(true), value: literalSchema(true) },
+    bannerStrict
+  ),
+  objectSchema(
+    {
+      requestId: bannerRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    bannerStrict
+  )
+])
+
 const specificRuntimeInvokeContracts = {
   'comments-window:marker-context-get': invokeContract(noArgs, markerContextSchema),
   'comments-window:marker-context-push': invokeContract(
@@ -1276,6 +1348,22 @@ const specificRuntimeInvokeContracts = {
   ),
   'comments-window:marker-result-push': invokeContract(
     tupleSchema([markerRelayResolutionSchema]),
+    booleanSchema
+  ),
+  // Banners in the Stream Manager (plan 186 S7): a read-only `{id, name,
+  // shown}` list one way, and one explicit show or hide the other. Never an
+  // image, a file name or a path.
+  'comments-window:banners-get': invokeContract(noArgs, bannerSummariesSchema),
+  'comments-window:banners-push': invokeContract(
+    tupleSchema([bannerSummariesSchema]),
+    booleanSchema
+  ),
+  'comments-window:banner': invokeContract(
+    tupleSchema([bannerRelayCommandSchema]),
+    literalSchema(true)
+  ),
+  'comments-window:banner-result-push': invokeContract(
+    tupleSchema([bannerRelayResolutionSchema]),
     booleanSchema
   ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
@@ -1477,7 +1565,9 @@ const specificRuntimeInvokeContracts = {
   'updates:install': invokeContract(noArgs, undefinedSchema),
   // Plan 174 S3.1 (D2): the renderer's answer after the livestream ended,
   // one of two words, nothing else.
-  'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema)
+  'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema),
+  // Plan 186: no arguments; null on cancel, else an input-file capability.
+  'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema))
 } satisfies Partial<Record<ElectronInvokeChannel, IpcRuntimeContract>>
 
 /** Channels deliberately using structural bounds instead of a semantic schema.
@@ -1617,6 +1707,8 @@ const specificRuntimeEventSchemas = {
   'comments-window:marker-context': markerContextSchema,
   'comments-window:marker-request': markerRelayCommandSchema,
   'comments-window:dashboard': dashboardSchema,
+  'comments-window:banners': bannerSummariesSchema,
+  'comments-window:banner-request': bannerRelayCommandSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,

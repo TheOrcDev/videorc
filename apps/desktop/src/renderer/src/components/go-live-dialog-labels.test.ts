@@ -19,6 +19,7 @@ import { GoLiveConfirmationDialog, GoLiveDestinationRow } from './go-live-dialog
 // "Sign in" or "Stream key", never OAuth or Manual RTMP.
 
 vi.mock('@/hooks/use-studio', () => ({
+  useStudioBanners: () => ({ banners: [] }),
   useStudioCore: () => ({
     captureConfig: defaultCaptureConfig,
     performanceCheck: undefined,
