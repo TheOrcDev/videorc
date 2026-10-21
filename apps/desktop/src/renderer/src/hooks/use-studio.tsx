@@ -4877,6 +4877,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Presence is unconditional: before the engine reports (or when it is off)
   // the relay carries the off shape, never null.
   const buddyShowOnStream = overlayLayout.buddy.showOnStream
+  const buddyShowInRecording = overlayLayout.buddy.showInRecording
   const cohostAutoChat = cohostSettings?.autoChat
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
@@ -4903,7 +4904,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               },
               state: buddyOverlay?.state ?? 'idle',
               bubble: buddyOverlay?.bubble?.text ?? null,
-              showOnStream: buddyShowOnStream
+              showOnStream: buddyShowOnStream,
+              showInRecording: buddyShowInRecording
             }
           }
         : {}),
@@ -4918,7 +4920,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostState,
       buddyOverlay,
       buddyPersona,
-      buddyShowOnStream
+      buddyShowOnStream,
+      buddyShowInRecording
     ]
   )
 

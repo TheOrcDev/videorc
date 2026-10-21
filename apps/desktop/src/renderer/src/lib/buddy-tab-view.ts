@@ -291,6 +291,13 @@ export const BUDDY_VOICE_COMMANDS: readonly {
     ]
   },
   {
+    // The Buddy itself (`cohost_command.rs`, the presence grammar): the same
+    // switch as "{name} on stream" in the Stream Manager's Buddy pane.
+    title: 'On stream',
+    result: 'Puts Buddy on the stream, or takes it off.',
+    phrases: ['Buddy, show up', 'Buddy, come on screen', 'Buddy, hide', 'Buddy, go away']
+  },
+  {
     // Plan 174 F-16: the marker command (`marker_voice.rs`), with your title.
     title: 'Marker',
     result: 'Marks this moment in your recording, under the title you say.',

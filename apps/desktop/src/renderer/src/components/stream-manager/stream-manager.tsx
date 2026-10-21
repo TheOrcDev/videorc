@@ -117,6 +117,7 @@ import {
 } from '@/components/stream-manager/command-cards'
 import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
 import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import { buddyOffOutputsNotice } from '@/lib/buddy-output-notice'
 import {
   removalPaneView,
   removeFromChatAvailable,
@@ -1046,6 +1047,13 @@ export function StreamManager({
       {cohostBuddy ? (
         <BuddySayFooter
           buddy={cohostBuddy}
+          offOutputsNotice={buddyOffOutputsNotice({
+            enabled: cohostEnabled,
+            onAir,
+            showOnStream: cohostBuddy.showOnStream,
+            showInRecording: cohostBuddy.showInRecording,
+            name: buddyName
+          })}
           packReactions={buddyPackReactions}
           previewRef={buddyPreviewRef}
           sayChatCap={sendTargets.length > 0 ? chatDraftMaxChars(sendTargets) : null}

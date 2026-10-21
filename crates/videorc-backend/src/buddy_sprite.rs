@@ -1543,6 +1543,18 @@ fn run_build(
     );
     let mut built = Vec::with_capacity(legs.len());
     for ((leg, key), (requested, cell_px)) in legs.iter().zip(requested.iter().zip(&planned)) {
+        // One line per atlas build (a session start, a leg joined
+        // mid-session, a resize), never per frame: the log says whether the
+        // pet was ever asked for, and for which canvas.
+        inner.log(
+            "info",
+            format!(
+                "Buddy on stream: building the {} atlas for a {}×{} canvas ({cell_px} px cells).",
+                leg.label(),
+                key.canvas.0,
+                key.canvas.1
+            ),
+        );
         if cell_px < requested {
             inner.log(
                 "warn",

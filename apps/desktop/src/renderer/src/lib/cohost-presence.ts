@@ -4,7 +4,8 @@ import {
   cohostErrorDetail,
   cohostErrorDetailText,
   cohostListeningView,
-  cohostReasonLabel
+  cohostReasonLabel,
+  cohostRetryReasonLabel
 } from './cohost-view'
 
 // Co-host presence (W2). One pure derivation of `cohost.state` that every
@@ -23,6 +24,9 @@ export type CohostPresenceKind =
   | 'reading'
   | 'thinking'
   | 'paused'
+  /** A tick failed and the next attempt is scheduled (`retryAt`): Buddy is
+   * still there, so it reads calm, never as stopped. */
+  | 'retrying'
   | 'error'
 
 export interface CohostPresenceView {
@@ -86,7 +90,9 @@ function presenceKind(
   options: CohostPresenceOptions
 ): CohostPresenceKind {
   if (!state || state.status === 'off') return options.starting ? 'starting' : 'off'
-  if (state.status === 'error') return 'error'
+  // A failed tick with its next attempt scheduled is a retry, not a stop:
+  // the engine only publishes `retryAt` while its backoff still climbs.
+  if (state.status === 'error') return state.retryAt ? 'retrying' : 'error'
   if (state.status === 'paused') return 'paused'
   // Listening. Thinking outranks reading: a tick is already carrying whatever
   // was pending, so "thinking…" is the truthful newer fact.
@@ -119,6 +125,10 @@ function presenceLabel(
     case 'paused': {
       const reason = cohostReasonLabel(state?.reason ?? null)
       return reason ? `Paused: ${reason}` : 'Paused'
+    }
+    case 'retrying': {
+      const reason = cohostRetryReasonLabel(state?.reason ?? null)
+      return reason ? `Retrying: ${reason}` : 'Retrying'
     }
     case 'error': {
       const reason = cohostReasonLabel(state?.reason ?? null)
@@ -168,6 +178,10 @@ function presenceTooltip(
   const nextPass = cohostNextPassLabel(state?.nextTickAt ?? null, nowMs)
   if (nextPass) lines.push(`next pass in ${nextPass}`)
 
+  // A retry is a promise the engine made (`retryAt`), so it is said in time.
+  const nextTry = kind === 'retrying' ? cohostNextPassLabel(state?.retryAt ?? null, nowMs) : null
+  if (nextTry) lines.push(`next try in ${nextTry}`)
+
   if (state?.partial === true) lines.push('Chat outran one AI pass; the newest messages were used.')
 
   // Whether Buddy hears the streamer (plan 068): a sentence, never a second dot.
@@ -176,7 +190,7 @@ function presenceTooltip(
 
   // The failed tick in the server's own words — the one thing a streamer can
   // paste into a bug report. Only ever shown on a state that actually failed.
-  if (kind === 'error' || kind === 'paused') {
+  if (kind === 'error' || kind === 'retrying' || kind === 'paused') {
     const detail = cohostErrorDetailText(cohostErrorDetail(state))
     if (detail) lines.push(detail)
   }
@@ -206,7 +220,9 @@ export function cohostPresenceView(
         : kind === 'listening' || kind === 'reading' || kind === 'thinking'
           ? 'live'
           : 'muted',
-    pulse: kind === 'starting' || kind === 'thinking',
+    // A retry pulses like a start: the engine is doing something the
+    // streamer cannot see yet. The dot stays chrome; red is for a real stop.
+    pulse: kind === 'starting' || kind === 'thinking' || kind === 'retrying',
     dots: kind === 'reading' || kind === 'thinking',
     tooltipLines: presenceTooltip(kind, state, openCount, now),
     openCount,
@@ -224,6 +240,9 @@ export function cohostEmptyStateCopy(view: CohostPresenceView, state: CohostStat
   if (view.kind === 'thinking') return 'Thinking about the last batch…'
   if (view.kind === 'listening') return 'Reading chat. Questions will appear here.'
   if (view.kind === 'starting') return 'Starting. Questions from chat will appear here.'
+  if (view.kind === 'retrying') {
+    return "Videorc AI didn't answer. Buddy is trying again; questions will appear here."
+  }
   return 'Questions from chat will appear here once Buddy is reading chat again.'
 }
 
