@@ -2901,7 +2901,10 @@ mod tests {
 
     const YOUTUBE_KEY: &str = "ytkey-SECRET-0f3a9b";
     const TWITCH_KEY: &str = "live_12345_SECRETtwitch";
-    const INGEST_KEY: &str = "sh_abc-h.ingestSECRET";
+    /// The C1b stream key: the feed's path, the ingest key in its query.
+    const INGEST_KEY: &str = "sh_abc-h?key=ingestSECRET";
+    /// The show's SRT passphrase (C1b): 32 base62, in every `srt` block.
+    const SRT_PASSPHRASE: &str = "srtSECRETpassphrase0123456789abc";
     const TOKEN: &str = "vcs1.eyJ2IjoxfQ.sigSECRET";
 
     fn destinations() -> Vec<HandoverDestination> {
@@ -2948,6 +2951,44 @@ mod tests {
                 seconds_used: 1_200,
                 ..AiCapabilitiesCloud::default()
             }),
+        }
+    }
+
+    /// C1b (Wire shape, 2026-10-20): the web hands the node's pairs over as
+    /// they are, so a create answer carries an `srt` block per pair and the
+    /// ingest key in the stream key's query. A desktop that feeds RTMPS reads
+    /// that answer, keeps the stream key whole for `{serverUrl}/{streamKey}`,
+    /// and its Debug shows neither the key nor the passphrase.
+    #[test]
+    fn a_c1b_create_answer_parses_and_its_debug_shows_no_secret() {
+        let answer: CreateShowResponse = serde_json::from_value(json!({
+            "show": {
+                "id": "sh_abc", "status": "ready", "kind": "solo", "nodeId": "eu-hel-1",
+                "createdAt": "2026-10-20T10:00:00Z", "expiresAt": "2026-10-20T22:30:00Z"
+            },
+            "ingest": [{
+                "orientation": "horizontal",
+                "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live",
+                "streamKey": INGEST_KEY,
+                "srt": {
+                    "url": "srt://eu-hel-1.live.videorc.com:8890",
+                    "streamId": "publish:live/sh_abc-h",
+                    "passphrase": SRT_PASSPHRASE,
+                    "latencyMs": 1000
+                }
+            }],
+            "control": {
+                "url": "wss://eu-hel-1.live.videorc.com:9443/v1/shows/sh_abc/control",
+                "token": TOKEN
+            },
+            "allowance": { "enabled": true, "secondsPerMonth": 36000, "secondsUsed": 1200 }
+        }))
+        .expect("a C1b create answer parses");
+        assert_eq!(answer.ingest.len(), 1);
+        assert_eq!(answer.ingest[0].stream_key, INGEST_KEY);
+        let printed = format!("{answer:?}");
+        for secret in ["ingestSECRET", SRT_PASSPHRASE, TOKEN] {
+            assert!(!printed.contains(secret), "{printed}");
         }
     }
 
@@ -4123,9 +4164,13 @@ mod tests {
             "t": "ack",
             "id": ask["id"],
             "ok": true,
+            // As the C1b node answers: an `srt` block per pair, which this
+            // desktop (RTMPS only) reads past.
             "result": { "ingest": [
-                { "orientation": "horizontal", "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live", "streamKey": INGEST_KEY },
-                { "orientation": "vertical", "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live", "streamKey": "sh_abc-v.ingestSECRET" },
+                { "orientation": "horizontal", "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live", "streamKey": INGEST_KEY,
+                  "srt": { "url": "srt://eu-hel-1.live.videorc.com:8890", "streamId": "publish:live/sh_abc-h", "passphrase": SRT_PASSPHRASE, "latencyMs": 1000 } },
+                { "orientation": "vertical", "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live", "streamKey": "sh_abc-v?key=ingestSECRET",
+                  "srt": { "url": "srt://eu-hel-1.live.videorc.com:8890", "streamId": "publish:live/sh_abc-v", "passphrase": SRT_PASSPHRASE, "latencyMs": 1000 } },
             ] },
         }));
         // The picked hold image, and nothing about destinations.
@@ -4147,6 +4192,9 @@ mod tests {
             ],
             "every orientation the show has"
         );
+        // The RTMPS pairs, whole: the ingest key stays in the stream key's query.
+        assert_eq!(handover.ingest[0].stream_key, INGEST_KEY);
+        assert_eq!(handover.ingest[1].stream_key, "sh_abc-v?key=ingestSECRET");
         assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
         assert!(
             harness

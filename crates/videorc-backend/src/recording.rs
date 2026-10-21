@@ -22591,7 +22591,8 @@ mod cloud_seam_tests {
     use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
 
     const YOUTUBE_KEY: &str = "yt-SECRET-key";
-    const INGEST_KEY: &str = "sh_abc-h.ingestSECRET";
+    /// The C1b stream key: the feed's path, the ingest key in its query.
+    const INGEST_KEY: &str = "sh_abc-h?key=ingestSECRET";
 
     fn video(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> VideoSettings {
         VideoSettings {
@@ -22670,7 +22671,7 @@ mod cloud_seam_tests {
         let feeds = cloud_feed_targets(
             &[
                 ingest(Horizontal, INGEST_KEY),
-                ingest(Vertical, "sh_abc-v.otherSECRET"),
+                ingest(Vertical, "sh_abc-v?key=otherSECRET"),
             ],
             &platforms(),
             &roots(),
@@ -22754,7 +22755,7 @@ mod cloud_seam_tests {
         let feeds = cloud_feed_targets(
             &[
                 ingest(Horizontal, INGEST_KEY),
-                ingest(Vertical, "sh_abc-v.x"),
+                ingest(Vertical, "sh_abc-v?key=x"),
             ],
             &platforms(),
             &roots(),
@@ -22850,7 +22851,7 @@ mod cloud_seam_tests {
     fn resume_feeds_follow_the_ingest_per_orientation_the_session_composes() {
         let ingest = [
             ingest(Horizontal, INGEST_KEY),
-            ingest(Vertical, "sh_abc-v.ingestSECRET"),
+            ingest(Vertical, "sh_abc-v?key=ingestSECRET"),
         ];
         let portrait = video(1080, 1920, 30, 4000);
         // A vertical scene is armed: both feeds, the vertical one at the
