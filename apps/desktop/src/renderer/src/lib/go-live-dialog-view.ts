@@ -13,12 +13,13 @@ export type GoLivePhase =
   | { kind: 'starting' }
 
 /** "Checking…", "Preparing YouTube…", "Starting…". */
-export function goLivePendingLabel(phase: GoLivePhase | null): string {
+export function goLivePendingLabel(phase: GoLivePhase | null, throughCloud = false): string {
   switch (phase?.kind) {
     case 'preparing':
       return `Preparing ${platformLabel(phase.platform)}…`
     case 'starting':
-      return 'Starting…'
+      // Plan 184 C4: the start's one extra step is the cloud show.
+      return throughCloud ? 'Connecting to Videorc Cloud…' : 'Starting…'
     default:
       return 'Checking…'
   }

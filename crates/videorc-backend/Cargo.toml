@@ -36,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-segmentation = "1.13"
 uuid = { version = "1.19", features = ["v4"] }
+webpki-root-certs = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.1"

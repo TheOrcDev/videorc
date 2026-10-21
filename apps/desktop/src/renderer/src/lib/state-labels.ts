@@ -1,6 +1,7 @@
 import type { StatusTone } from '@/components/status-badge'
 import type {
   CaptionsStatus,
+  CloudPhase,
   LiveChatProviderState,
   PreviewCameraState,
   PreviewLiveState,
@@ -86,6 +87,25 @@ const DESTINATION_STATE_LABELS: Record<StreamTargetState, string> = {
  */
 export function destinationStateLabel(state: StreamTargetState): string {
   return DESTINATION_STATE_LABELS[state] ?? statusWordFromValue(state)
+}
+
+const CLOUD_PHASE_LABELS: Record<CloudPhase, string> = {
+  off: 'Off',
+  connecting: 'Connecting…',
+  live: 'On air',
+  hold: 'Be right back',
+  resuming: 'Resuming…',
+  ending: 'Ending…',
+  failed: 'Failed'
+}
+
+/**
+ * The Videorc Cloud show's state in a word, in the Stream Manager's health
+ * details (plan 184 C7): "On air" like a destination, "Be right back" while
+ * viewers see the hold image.
+ */
+export function cloudPhaseLabel(phase: CloudPhase): string {
+  return CLOUD_PHASE_LABELS[phase] ?? statusWordFromValue(phase)
 }
 
 type CaptionsStatusInput = Pick<CaptionsStatus, 'state' | 'desiredEnabled'>

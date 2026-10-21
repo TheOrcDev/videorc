@@ -1,5 +1,145 @@
 {
   "schemaVersion": 2,
+  "accountPlans": {
+    "capabilitiesMax": {
+      "entitlement": {
+        "checkedAt": "2026-10-16T12:00:00.000Z",
+        "cloudAi": true,
+        "expiresAt": "2026-10-16T12:05:00.000Z",
+        "isPremium": true,
+        "subscriptionStatus": "active",
+        "tier": "premium"
+      },
+      "plan": { "id": "max", "name": "Max" },
+      "cloud": {
+        "enabled": true,
+        "secondsPerMonth": 360000,
+        "secondsUsed": 133200,
+        "overageSeconds": 0,
+        "resetAt": "2026-11-01T00:00:00Z",
+        "talkShows": true,
+        "guestsOnStage": 5,
+        "roomSize": 10,
+        "recordingRetentionDays": 30
+      },
+      "features": {
+        "cloudAiEnabled": true,
+        "gatewayConfigured": true,
+        "modelTestingEnabled": true,
+        "multipartAudioJobsEnabled": true,
+        "objectBackedJobsEnabled": false,
+        "transcriptJobsEnabled": true,
+        "uploadTicketsEnabled": false
+      },
+      "generatedAt": "2026-10-16T12:30:00.000Z",
+      "limits": {
+        "dailyJobs": 25,
+        "maxAudioBytes": null,
+        "maxAudioMegabytes": null,
+        "maxOutputTokens": null,
+        "maxTranscriptCharacters": 90000,
+        "monthlyJobs": 600
+      },
+      "models": {
+        "allowedTextModelCount": 2,
+        "allowedTextModelsConfigured": true,
+        "defaultTextModel": null,
+        "fallbackTextModels": []
+      },
+      "objectStorage": {
+        "deleteConfigured": false,
+        "downloadConfigured": false,
+        "provider": null,
+        "providerError": null,
+        "proofConfigured": false,
+        "proofTtlMs": null,
+        "uploadConfigured": false
+      },
+      "readiness": {
+        "access": { "cloudAiEntitled": true, "globallyDisabled": false },
+        "gateway": { "configError": null, "configured": true },
+        "objectStorage": {
+          "deleteConfigError": null,
+          "downloadConfigError": null,
+          "proofConfigError": null,
+          "providerError": null,
+          "uploadConfigError": null
+        },
+        "transcription": { "configError": null, "configured": true }
+      },
+      "transcription": {
+        "configured": true,
+        "configError": null,
+        "maxAudioBytes": null,
+        "maxAudioMegabytes": null,
+        "requestTimeoutMs": 65000
+      },
+      "workflow": { "inputModes": [], "kind": "post-recording-publish-pack", "outputs": [] }
+    },
+    "cloudPremium": {
+      "enabled": true,
+      "secondsPerMonth": 36000,
+      "secondsUsed": 1200,
+      "overageSeconds": 0,
+      "resetAt": "2026-11-01T00:00:00Z",
+      "talkShows": false
+    },
+    "entitlementsMax": {
+      "schemaVersion": 1,
+      "tier": "premium",
+      "plan": "max",
+      "source": "creem",
+      "capabilities": [
+        { "featureId": "local-recording", "state": "enabled" },
+        { "featureId": "livestreaming", "state": "enabled" },
+        { "featureId": "multistreaming", "state": "enabled" },
+        { "featureId": "cloud-ai", "state": "enabled" },
+        { "featureId": "noise-cleanup", "state": "enabled" },
+        { "featureId": "live-cohost", "state": "enabled" }
+      ],
+      "limits": {
+        "recording": { "maxWidth": 3840, "maxHeight": 2160, "maxFps": 60 },
+        "streaming": {
+          "maxWidth": 3840,
+          "maxHeight": 2160,
+          "maxFps": 60,
+          "maxBitrateKbps": 30000,
+          "maxDestinations": 5
+        }
+      }
+    },
+    "entitlementsBasic": {
+      "schemaVersion": 1,
+      "tier": "basic",
+      "source": "local-default",
+      "capabilities": [
+        { "featureId": "local-recording", "state": "enabled" },
+        { "featureId": "livestreaming", "state": "enabled" },
+        { "featureId": "multistreaming", "state": "enabled" },
+        {
+          "featureId": "cloud-ai",
+          "state": "disabled",
+          "reason": "Cloud AI is a Videorc Premium feature. Sign in with a Premium account to enable it."
+        },
+        {
+          "featureId": "noise-cleanup",
+          "state": "disabled",
+          "reason": "Noise Cleanup requires Videorc Premium."
+        },
+        { "featureId": "live-cohost", "state": "disabled", "reason": "Buddy requires Videorc Premium." }
+      ],
+      "limits": {
+        "recording": { "maxWidth": 3840, "maxHeight": 2160, "maxFps": 60 },
+        "streaming": {
+          "maxWidth": 3840,
+          "maxHeight": 2160,
+          "maxFps": 60,
+          "maxBitrateKbps": 30000,
+          "maxDestinations": 5
+        }
+      }
+    }
+  },
   "sessionChatTotals": {
     "params": { "sessionId": "session-fixture" },
     "available": {
@@ -1958,5 +2098,103 @@
     },
     "deleteParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
     "accepted": { "accepted": true }
+  },
+  "cloud": {
+    "statusHold": {
+      "phase": "hold",
+      "entitled": true,
+      "plan": "max",
+      "settings": {
+        "enabled": true,
+        "holdMaxSeconds": 1800,
+        "holdMaxChoices": [300, 900, 1800, 3600],
+        "holdImageScreenId": "screen-1"
+      },
+      "allowance": {
+        "enabled": true,
+        "secondsPerMonth": 360000,
+        "secondsUsed": 133200,
+        "overageSeconds": 0,
+        "resetAt": "2026-11-01T00:00:00.000Z",
+        "talkShows": true,
+        "guestsOnStage": 5,
+        "roomSize": 10,
+        "recordingRetentionDays": 30
+      },
+      "show": {
+        "id": "sh_0123456789abcdefghijkl",
+        "nodeId": "eu-hel-1",
+        "createdAt": "2026-10-16T12:00:00.000Z",
+        "expiresAt": "2026-10-17T00:30:00.000Z",
+        "resumable": false
+      },
+      "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
+      "connected": true,
+      "hold": {
+        "active": true,
+        "since": "2026-10-16T12:40:00.000Z",
+        "reason": "feed-lost",
+        "remainingSeconds": 1650
+      },
+      "feeds": [{ "orientation": "horizontal", "connected": false, "kbps": 0 }],
+      "legs": [
+        { "targetId": "youtube", "platform": "youtube", "label": "YouTube", "state": "live" },
+        {
+          "targetId": "twitch",
+          "platform": "twitch",
+          "label": "Twitch",
+          "state": "reconnecting",
+          "message": "ingest closed the connection"
+        }
+      ],
+      "liveSeconds": 2400,
+      "directFallbackAvailable": false
+    },
+    "statusOff": {
+      "phase": "off",
+      "entitled": false,
+      "settings": { "enabled": true, "holdMaxSeconds": 1800, "holdMaxChoices": [300, 900, 1800, 3600] },
+      "connected": false,
+      "directFallbackAvailable": false
+    },
+    "statusFallback": {
+      "phase": "off",
+      "entitled": true,
+      "plan": "premium",
+      "settings": { "enabled": true, "holdMaxSeconds": 1800, "holdMaxChoices": [300, 900, 1800, 3600] },
+      "connected": false,
+      "fallback": {
+        "reason": "cloud-full",
+        "at": "2026-10-16T12:00:00.000Z",
+        "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
+        "message": "Videorc Cloud is full right now."
+      },
+      "directFallbackAvailable": false
+    },
+    "statusTest": {
+      "phase": "off",
+      "entitled": true,
+      "plan": "premium",
+      "settings": { "enabled": true, "holdMaxSeconds": 1800, "holdMaxChoices": [300, 900, 1800, 3600] },
+      "connected": false,
+      "directFallbackAvailable": false,
+      "test": {
+        "phase": "done",
+        "startedAt": "2026-10-17T12:00:00.000Z",
+        "result": {
+          "ok": false,
+          "reason": "too-slow",
+          "message": "ffmpeg exited 0",
+          "timeToLiveMs": 2300,
+          "uploads": [{ "orientation": "horizontal", "targetKbps": 6000, "measuredKbps": 2100 }]
+        }
+      }
+    },
+    "settingsPatch": { "enabled": false, "holdMaxSeconds": 900, "holdImageScreenId": null },
+    "testRunParams": {
+      "outputs": [
+        { "orientation": "horizontal", "width": 1920, "height": 1080, "fps": 60, "videoKbps": 6000 }
+      ]
+    }
   }
 }

@@ -51,6 +51,8 @@ describe('Go Live dialog view (plan 174 S3.4)', () => {
       'Preparing YouTube…'
     )
     expect(goLivePendingLabel({ kind: 'starting' })).toBe('Starting…')
+    expect(goLivePendingLabel({ kind: 'starting' }, true)).toBe('Connecting to Videorc Cloud…')
+    expect(goLivePendingLabel({ kind: 'checking' }, true)).toBe('Checking…')
   })
 
   it('lets the Title field own title problems: typed, they no longer block', () => {

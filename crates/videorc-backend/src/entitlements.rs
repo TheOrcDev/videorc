@@ -1,8 +1,9 @@
 use anyhow::{Result, bail};
 
 use crate::protocol::{
-    EntitlementCapability, EntitlementLimits, EntitlementSource, EntitlementState, EntitlementTier,
-    EntitlementsSnapshot, FeatureId, RecordingEntitlementLimits, StreamingEntitlementLimits,
+    EntitlementCapability, EntitlementLimits, EntitlementPlan, EntitlementSource, EntitlementState,
+    EntitlementTier, EntitlementsSnapshot, FeatureId, RecordingEntitlementLimits,
+    StreamingEntitlementLimits,
 };
 
 pub const PREMIUM_FEATURES_ENV_VAR: &str = "VIDEORC_PREMIUM_FEATURES";
@@ -50,7 +51,18 @@ const ACCOUNT_HYDRATION_MAX_AGE: std::time::Duration = std::time::Duration::from
 #[derive(Debug, Clone, Copy)]
 struct AccountEntitlementHydration {
     is_premium: bool,
+    /// Plan 185 D2: the paid plan beside `is_premium`. Read only while
+    /// premium; a Basic hydration never carries a plan.
+    plan: Option<EntitlementPlan>,
     valid_until: std::time::SystemTime,
+}
+
+impl AccountEntitlementHydration {
+    /// What the snapshot shows: premium (and which plan), or nothing. Any
+    /// change here is a change the renderer must hear about.
+    fn effective(self) -> Option<(bool, Option<EntitlementPlan>)> {
+        self.is_premium.then_some((true, self.plan))
+    }
 }
 
 static ACCOUNT_HYDRATION: std::sync::Mutex<Option<AccountEntitlementHydration>> =
@@ -61,23 +73,26 @@ fn set_hydration(
     next: Option<AccountEntitlementHydration>,
 ) -> bool {
     let mut guard = slot.lock().expect("entitlement hydration lock");
-    // "Changed" means the EFFECTIVE outcome moved: hydrated-premium on one
-    // side and anything non-premium (hydrated basic OR cleared) on the other.
-    let was_premium = guard.is_some_and(|current| current.is_premium);
-    let is_premium = next.is_some_and(|hydration| hydration.is_premium);
+    // "Changed" means the EFFECTIVE outcome moved: hydrated-premium (with its
+    // plan) on one side and anything else (hydrated basic, a different plan,
+    // or cleared) on the other.
+    let was = guard.and_then(AccountEntitlementHydration::effective);
+    let is = next.and_then(AccountEntitlementHydration::effective);
     *guard = next;
-    was_premium != is_premium
+    was != is
 }
 
 /// Record the signed-in account's verified entitlement from the UNSIGNED
 /// capabilities boolean (legacy path — used when the server minted no signed
-/// token). Bounded by the short staleness ceiling. Returns true when the
-/// effective snapshot may have changed (callers emit `entitlements.updated`).
-pub fn hydrate_account_entitlements(is_premium: bool) -> bool {
+/// token), with the plan the capabilities named. Bounded by the short
+/// staleness ceiling. Returns true when the effective snapshot may have
+/// changed (callers emit `entitlements.updated`).
+pub fn hydrate_account_entitlements(is_premium: bool, plan: Option<EntitlementPlan>) -> bool {
     set_hydration(
         &ACCOUNT_HYDRATION,
         Some(AccountEntitlementHydration {
             is_premium,
+            plan: plan.filter(|_| is_premium),
             valid_until: std::time::SystemTime::now() + ACCOUNT_HYDRATION_MAX_AGE,
         }),
     )
@@ -87,12 +102,26 @@ pub fn hydrate_account_entitlements(is_premium: bool) -> bool {
 /// hydration stays valid until the token's `exp` (so a persisted token gives
 /// a premium user offline grace across restarts). Fail-closed: any signature,
 /// format, or expiry problem leaves the current hydration untouched.
-pub fn hydrate_account_entitlements_from_token(token: &str) -> anyhow::Result<bool> {
+///
+/// The plan comes from the token's optional `plan` claim (plan 185); a token
+/// minted before the claim existed falls back to `plan_fallback`, which the
+/// capabilities answer names.
+pub fn hydrate_account_entitlements_from_token(
+    token: &str,
+    plan_fallback: Option<EntitlementPlan>,
+) -> anyhow::Result<bool> {
     let payload = verify_entitlement_token(token, cfg!(debug_assertions), unix_now())?;
+    let plan = payload
+        .plan
+        .as_deref()
+        .and_then(EntitlementPlan::parse)
+        .or(plan_fallback)
+        .filter(|_| payload.premium);
     Ok(set_hydration(
         &ACCOUNT_HYDRATION,
         Some(AccountEntitlementHydration {
             is_premium: payload.premium,
+            plan,
             valid_until: std::time::UNIX_EPOCH + std::time::Duration::from_secs(payload.exp),
         }),
     ))
@@ -103,13 +132,24 @@ pub fn clear_account_entitlements() -> bool {
     set_hydration(&ACCOUNT_HYDRATION, None)
 }
 
-fn account_hydrated_premium() -> bool {
+/// The account's live hydration: `(premium, plan)` while verified and fresh.
+fn account_hydration() -> Option<(bool, Option<EntitlementPlan>)> {
     ACCOUNT_HYDRATION
         .lock()
         .expect("entitlement hydration lock")
-        .is_some_and(|hydration| {
-            hydration.is_premium && std::time::SystemTime::now() <= hydration.valid_until
-        })
+        .filter(|hydration| std::time::SystemTime::now() <= hydration.valid_until)
+        .and_then(AccountEntitlementHydration::effective)
+}
+
+fn account_hydrated_premium() -> bool {
+    account_hydration().is_some_and(|(premium, _)| premium)
+}
+
+/// The paid plan the account is on (plan 185 D2), while the hydration is
+/// premium and fresh. Cloud shows read it for copy; entitlement itself comes
+/// from the `cloud` block.
+pub fn account_plan() -> Option<EntitlementPlan> {
+    account_hydration().and_then(|(_, plan)| plan)
 }
 
 fn unix_now() -> u64 {
@@ -121,11 +161,17 @@ fn unix_now() -> u64 {
 
 pub fn current_entitlements() -> EntitlementsSnapshot {
     let value = std::env::var(PREMIUM_FEATURES_ENV_VAR).ok();
-    current_entitlements_resolved(
+    let mut snapshot = current_entitlements_resolved(
         value.as_deref(),
         cfg!(debug_assertions),
         account_hydrated_premium(),
-    )
+    );
+    // The plan rides only a Premium snapshot: Basic has none, and the
+    // Developer tier is a dev-build override with no account behind it.
+    if snapshot.tier == EntitlementTier::Premium {
+        snapshot.plan = account_plan();
+    }
+    snapshot
 }
 
 // The env var is DOWNGRADE-ONLY. It can force Basic (the only way to exercise
@@ -187,6 +233,7 @@ pub fn basic_entitlements() -> EntitlementsSnapshot {
     EntitlementsSnapshot {
         schema_version: ENTITLEMENT_SCHEMA_VERSION,
         tier: EntitlementTier::Basic,
+        plan: None,
         source: EntitlementSource::LocalDefault,
         capabilities: vec![
             EntitlementCapability {
@@ -230,6 +277,7 @@ pub fn premium_entitlements(source: EntitlementSource) -> EntitlementsSnapshot {
     EntitlementsSnapshot {
         schema_version: ENTITLEMENT_SCHEMA_VERSION,
         tier: EntitlementTier::Premium,
+        plan: None,
         source,
         capabilities: enabled_capabilities(EntitlementState::Enabled, None),
         limits: entitlement_limits(),
@@ -350,6 +398,10 @@ struct EntitlementTokenPayload {
     sub: String,
     #[allow(dead_code)]
     tier: String,
+    /// Plan 185: an optional claim naming the paid plan. Tokens minted before
+    /// it existed, and Basic tokens, omit it.
+    #[serde(default)]
+    plan: Option<String>,
 }
 
 fn decode_hex_32(hex: &str) -> Result<[u8; 32]> {
@@ -622,6 +674,7 @@ mod tests {
             std::sync::Mutex::new(None);
         let hydration = |premium: bool| AccountEntitlementHydration {
             is_premium: premium,
+            plan: None,
             valid_until: std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
         };
         assert!(
@@ -642,6 +695,84 @@ mod tests {
         );
         set_hydration(&slot, Some(hydration(true)));
         assert!(set_hydration(&slot, None), "sign-out drops premium");
+    }
+
+    // Plan 185 D2: Max is Premium plus a plan. The plan rides the hydration,
+    // a plan change is a change the renderer hears about, and a Basic
+    // hydration never carries one.
+    #[test]
+    fn account_hydration_carries_the_plan_beside_premium() {
+        let slot: std::sync::Mutex<Option<AccountEntitlementHydration>> =
+            std::sync::Mutex::new(None);
+        let hydration =
+            |premium: bool, plan: Option<EntitlementPlan>| AccountEntitlementHydration {
+                is_premium: premium,
+                plan,
+                valid_until: std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+            };
+        assert!(set_hydration(
+            &slot,
+            Some(hydration(true, Some(EntitlementPlan::Premium)))
+        ));
+        assert!(
+            set_hydration(&slot, Some(hydration(true, Some(EntitlementPlan::Max)))),
+            "Premium -> Max is a change"
+        );
+        assert!(
+            !set_hydration(&slot, Some(hydration(true, Some(EntitlementPlan::Max)))),
+            "Max -> Max is a no-op"
+        );
+        // A Basic hydration shows no plan whatever it claims.
+        assert_eq!(
+            hydration(false, Some(EntitlementPlan::Max)).effective(),
+            None
+        );
+        assert_eq!(
+            hydration(true, Some(EntitlementPlan::Max)).effective(),
+            Some((true, Some(EntitlementPlan::Max)))
+        );
+        // The snapshot constructors never carry a plan on their own; only the
+        // live hydration adds it, and only to a Premium snapshot.
+        assert_eq!(basic_entitlements().plan, None);
+        assert_eq!(premium_entitlements(EntitlementSource::Creem).plan, None);
+        assert_eq!(developer_test_entitlements().plan, None);
+        let value = serde_json::to_value(premium_entitlements(EntitlementSource::Creem)).unwrap();
+        assert!(
+            value.get("plan").is_none(),
+            "an absent plan is no key, never null"
+        );
+    }
+
+    #[test]
+    fn entitlement_token_plan_claim_is_optional_and_premium_only() {
+        let key = test_signing_key();
+        let with_plan = mint_test_token(
+            r#"{"exp":2000000000,"iat":1751700000,"premium":true,"sub":"user_1","tier":"premium","plan":"max"}"#,
+            &key,
+        );
+        let payload =
+            verify_entitlement_token_with_key(&with_plan, &key.verifying_key(), 1751700000)
+                .unwrap();
+        assert_eq!(payload.plan.as_deref(), Some("max"));
+        assert_eq!(
+            payload.plan.as_deref().and_then(EntitlementPlan::parse),
+            Some(EntitlementPlan::Max)
+        );
+        // Older tokens omit the claim and still verify.
+        let without_plan = mint_test_token(
+            r#"{"exp":2000000000,"iat":1751700000,"premium":true,"sub":"user_1","tier":"premium"}"#,
+            &key,
+        );
+        let payload =
+            verify_entitlement_token_with_key(&without_plan, &key.verifying_key(), 1751700000)
+                .unwrap();
+        assert_eq!(payload.plan, None);
+        // An unknown plan id verifies and reads as no plan.
+        assert_eq!(EntitlementPlan::parse("enterprise"), None);
+        assert_eq!(
+            EntitlementPlan::parse(" premium "),
+            Some(EntitlementPlan::Premium)
+        );
     }
 
     #[test]

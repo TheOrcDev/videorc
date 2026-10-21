@@ -48,6 +48,9 @@ import type {
   OverlayTargetsInfo,
   SetBuddyOverlayParams,
   ClearBuddyOverlayParams,
+  CloudSettingsPatch,
+  CloudStatus,
+  CloudTestParams,
   CohostStartParams,
   CohostState,
   CohostReportGetParams,
@@ -389,6 +392,15 @@ export interface BackendRpcMethodMap {
     GateStatus
   >
   'repair.restore_file': BackendRpcDefinition<{ sessionId: string }, { restored: boolean }>
+  // --- Videorc Cloud (plan 184 C2 to C6) ---
+  'cloud.status': BackendRpcDefinition<undefined, CloudStatus>
+  'cloud.settings.set': BackendRpcDefinition<CloudSettingsPatch, CloudStatus>
+  'cloud.allowance.refresh': BackendRpcDefinition<undefined, CloudStatus>
+  /** C5: the same start as `session.start`, bound to the show that is live. */
+  'cloud.show.resume': BackendRpcDefinition<StartSessionParams, RecordingStatus>
+  'cloud.show.end': BackendRpcDefinition<undefined, CloudStatus>
+  /** C6b: starts the 10-second test; progress and the result ride `cloud.state`. */
+  'cloud.selftest.run': BackendRpcDefinition<CloudTestParams, CloudStatus>
   'cohost.status': BackendRpcDefinition<undefined, CohostState>
   'cohost.start': BackendRpcDefinition<CohostStartParams, CohostState>
   'cohost.stop': BackendRpcDefinition<undefined, CohostState>
@@ -515,6 +527,8 @@ export interface BackendEventMap {
   'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
+  /** The whole secret-free cloud status, on every change (plan 184). */
+  'cloud.state': CloudStatus
   'cohost.report.saved': CohostReportSavedEvent
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
@@ -641,6 +655,8 @@ const entitlementsSchema = objectSchema(
   {
     schemaVersion: nonNegativeInteger,
     tier: enumSchema(['basic', 'premium', 'developer']),
+    // Plan 185 D2: the plan is a field beside the tier, never a tier value.
+    plan: optionalSchema(enumSchema(['premium', 'max'])),
     source: enumSchema([
       'local-default',
       'env-override',
@@ -3893,6 +3909,183 @@ const sessionSourcesSchema = objectSchema(
   { allowUnknown: false }
 )
 
+// --- Videorc Cloud (plan 184) ------------------------------------------------
+// `CloudStatus` is secret-free by construction (no url, token or key). Phases
+// and the fallback reason are closed here because the backend and this
+// renderer ship together; the runner's own strings never reach the renderer
+// unmapped (cloud_show.rs maps them).
+
+const cloudAllowanceSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    secondsPerMonth: nonNegativeInteger,
+    secondsUsed: nonNegativeInteger,
+    overageSeconds: nonNegativeInteger,
+    resetAt: optionalSchema(timestamp),
+    talkShows: booleanSchema,
+    guestsOnStage: optionalSchema(nonNegativeInteger),
+    roomSize: optionalSchema(nonNegativeInteger),
+    recordingRetentionDays: optionalSchema(nonNegativeInteger)
+  },
+  { allowUnknown: false }
+)
+
+const cloudStatusSchema = objectSchema(
+  {
+    phase: enumSchema(['off', 'connecting', 'live', 'hold', 'resuming', 'ending', 'failed']),
+    entitled: booleanSchema,
+    plan: optionalSchema(enumSchema(['premium', 'max'])),
+    settings: objectSchema(
+      {
+        enabled: booleanSchema,
+        holdMaxSeconds: nonNegativeInteger,
+        holdMaxChoices: arraySchema(nonNegativeInteger, { maxLength: 8 }),
+        holdImageScreenId: optionalSchema(boundedString)
+      },
+      { allowUnknown: false }
+    ),
+    allowance: optionalSchema(cloudAllowanceSchema),
+    show: optionalSchema(
+      objectSchema(
+        {
+          id: boundedString,
+          nodeId: stringSchema({ maxLength: 128 }),
+          createdAt: optionalSchema(timestamp),
+          expiresAt: optionalSchema(timestamp),
+          resumable: booleanSchema
+        },
+        { allowUnknown: false }
+      )
+    ),
+    sessionId: optionalSchema(boundedString),
+    connected: booleanSchema,
+    hold: optionalSchema(
+      objectSchema(
+        {
+          active: booleanSchema,
+          since: optionalSchema(timestamp),
+          reason: optionalSchema(stringSchema({ maxLength: 64 })),
+          remainingSeconds: optionalSchema(nonNegativeInteger)
+        },
+        { allowUnknown: false }
+      )
+    ),
+    feeds: optionalSchema(
+      arraySchema(
+        objectSchema(
+          {
+            orientation: stringSchema({ maxLength: 32 }),
+            connected: booleanSchema,
+            kbps: optionalSchema(nonNegativeInteger)
+          },
+          { allowUnknown: false }
+        ),
+        { maxLength: 4 }
+      )
+    ),
+    legs: optionalSchema(arraySchema(streamTargetRuntimeSchema, { maxLength: 16 })),
+    liveSeconds: optionalSchema(nonNegativeInteger),
+    fallback: optionalSchema(
+      objectSchema(
+        {
+          reason: enumSchema([
+            'cloud-disabled',
+            'cloud-full',
+            'cloud-hours-used-up',
+            'cloud-node-unreachable',
+            'not-entitled'
+          ]),
+          at: timestamp,
+          sessionId: boundedString,
+          message: optionalText
+        },
+        { allowUnknown: false }
+      )
+    ),
+    endReason: optionalSchema(stringSchema({ maxLength: 128 })),
+    message: optionalText,
+    directFallbackAvailable: booleanSchema,
+    test: optionalSchema(
+      objectSchema(
+        {
+          phase: enumSchema(['creating', 'connecting', 'pushing', 'ending', 'done']),
+          startedAt: timestamp,
+          result: optionalSchema(
+            objectSchema(
+              {
+                ok: booleanSchema,
+                reason: optionalSchema(
+                  enumSchema([
+                    'cant-reach',
+                    'off',
+                    'full',
+                    'not-entitled',
+                    'no-hours',
+                    'limit',
+                    'show-live',
+                    'certificate',
+                    'no-feed',
+                    'too-slow',
+                    'failed'
+                  ])
+                ),
+                message: optionalText,
+                timeToLiveMs: optionalSchema(nonNegativeInteger),
+                uploads: optionalSchema(
+                  arraySchema(
+                    objectSchema(
+                      {
+                        orientation: stringSchema({ maxLength: 32 }),
+                        targetKbps: nonNegativeInteger,
+                        measuredKbps: optionalSchema(nonNegativeInteger)
+                      },
+                      { allowUnknown: false }
+                    ),
+                    { maxLength: 4 }
+                  )
+                ),
+                resetAt: optionalSchema(timestamp)
+              },
+              { allowUnknown: false }
+            )
+          )
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudStatus>
+
+const cloudSettingsPatchSchema = objectSchema(
+  {
+    enabled: optionalSchema(booleanSchema),
+    holdMaxSeconds: optionalSchema(nonNegativeInteger),
+    holdImageScreenId: optionalSchema(nullableSchema(boundedString))
+  },
+  { allowUnknown: false }
+)
+
+const cloudTestParamsSchema = objectSchema(
+  {
+    outputs: arraySchema(
+      objectSchema(
+        {
+          orientation: enumSchema(['horizontal', 'vertical']),
+          width: nonNegativeInteger,
+          height: nonNegativeInteger,
+          fps: nonNegativeInteger,
+          videoKbps: nonNegativeInteger
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 2 }
+    ),
+    ffmpegPath: optionalSchema(boundedString)
+  },
+  { allowUnknown: false }
+)
+
 const runtimeContracts = {
   'session.sources.get': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
@@ -4248,6 +4441,12 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: objectSchema({ restored: booleanSchema }, { allowUnknown: false })
   },
+  'cloud.status': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.settings.set': { params: cloudSettingsPatchSchema, result: cloudStatusSchema },
+  'cloud.allowance.refresh': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.show.resume': { params: sessionStartParamsSchema, result: recordingStatusSchema },
+  'cloud.show.end': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.selftest.run': { params: cloudTestParamsSchema, result: cloudStatusSchema },
   'cohost.status': { params: undefinedSchema, result: cohostStateSchema },
   'cohost.start': { params: cohostStartParamsSchema, result: cohostStateSchema },
   'cohost.stop': { params: undefinedSchema, result: cohostStateSchema },
@@ -4446,6 +4645,7 @@ const runtimeEventSchemas = {
   'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
+  'cloud.state': cloudStatusSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,

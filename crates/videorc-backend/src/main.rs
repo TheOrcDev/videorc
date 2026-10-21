@@ -25,6 +25,7 @@ mod capture_interruption;
 mod capture_recovery;
 mod clean_cut;
 mod clip_marks;
+mod cloud_show;
 mod cohost;
 mod cohost_ack;
 mod cohost_auto_chat;
@@ -639,13 +640,17 @@ async fn run_backend() -> Result<()> {
     if account::stored_session_token().is_some()
         && let Some(entitlement_token) = account::stored_entitlement_token()
         && let Err(error) =
-            entitlements::hydrate_account_entitlements_from_token(&entitlement_token)
+            entitlements::hydrate_account_entitlements_from_token(&entitlement_token, None)
     {
         tracing::info!("Stored entitlement token not restored: {error:#}");
     }
     {
         let entitlement_state = state.clone();
-        tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
+        tokio::spawn(async move {
+            refresh_account_entitlements(&entitlement_state).await;
+            // Plan 184 C5: a show a crash left live shows the Resume banner.
+            cloud_show_detect_at_launch(&entitlement_state).await;
+        });
     }
     // Plan 094 (S7): remote service flags at startup and every 30 minutes;
     // fails open to compiled defaults.
@@ -5346,8 +5351,14 @@ fn websocket_command_is_session_stop(text: &str) -> bool {
 }
 
 fn websocket_command_is_session_start(text: &str) -> bool {
-    serde_json::from_str::<ClientCommand>(text)
-        .is_ok_and(|command| command.method == "session.start")
+    // Plan 184 C5: a cloud resume IS a session start (the same params, the
+    // same publication fence), bound to the show that is live.
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "session.start" | "cloud.show.resume"
+        )
+    })
 }
 
 /// These commands already own stricter process-lifecycle contracts than a
@@ -5359,7 +5370,11 @@ fn websocket_command_has_session_lifecycle_policy(text: &str) -> bool {
     serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
         matches!(
             command.method.as_str(),
-            "session.start" | "session.stop" | "recording.stop" | "recording.start_test"
+            "session.start"
+                | "cloud.show.resume"
+                | "session.stop"
+                | "recording.stop"
+                | "recording.start_test"
         )
     })
 }
@@ -5471,6 +5486,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.surface.publish"
         | "remote.intent.ack"
         | "remote.intent"
+        | "cloud.settings.set"
+        // Plan 184 C6b: the test runs on its own task and reports through
+        // `cloud.state`; the RPC only starts it.
+        | "cloud.selftest.run"
         | "compositor.scene.update"
         | "preview.camera.start"
         | "preview.camera.stop"
@@ -5577,6 +5596,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.x.prepare"
         | "streamTargets.x.publish"
         | "streamTargets.x.end"
+        // Plan 184: both talk to videorc.com (and the show's node).
+        | "cloud.allowance.refresh"
+        | "cloud.show.end"
         | "repair.restore_file"
         | "preview.snapshot" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
@@ -5606,9 +5628,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "diagnostics.metricsJournal.set"
         | "usageStats.set" => Some(DEFAULT_MUTATION_POLICY),
 
-        "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
-            Some(SessionLifecycle)
-        }
+        "session.start"
+        | "cloud.show.resume"
+        | "session.stop"
+        | "recording.stop"
+        | "recording.start_test" => Some(SessionLifecycle),
 
         COMMAND_LANE_SMOKE_STATUS_METHOD
         | CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD
@@ -5650,6 +5674,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.lan.status"
         | "remote.chat.snapshot"
         | "remote.describe"
+        | "cloud.status"
         | "compositor.status"
         | "preview.camera.status"
         | "preview.screen.status"
@@ -9020,6 +9045,7 @@ async fn handle_text_message_with_role(
                         if entitlements::clear_account_entitlements() {
                             publish_entitlements_updated(state);
                         }
+                        cloud_show_hydrate(state, None, None);
                     },
                     account::clear_persisted_account_and_advance_intent,
                 ));
@@ -9163,6 +9189,7 @@ async fn handle_text_message_with_role(
                         if entitlements::clear_account_entitlements() {
                             publish_entitlements_updated(state);
                         }
+                        cloud_show_hydrate(state, None, None);
                     },
                 ) {
                     Some(resolved) => (resolved, true),
@@ -10299,6 +10326,120 @@ async fn handle_text_message_with_role(
                 serde_json::json!({ "describe": describe, "state": snapshot, "protocol": 1 }),
             )
         }
+        // Plan 184 (C2 to C6): the cloud show surface. `cloud.status` is the
+        // one cloud method a remote role may call (backend_authority.rs);
+        // every answer and the `cloud.state` event are the same secret-free
+        // `CloudStatus`.
+        "cloud.status" => ServerResponse::ok(command.id, cloud_show_status(state)),
+        "cloud.settings.set" => {
+            match serde_json::from_value::<cloud_show::CloudSettingsPatch>(command.params) {
+                Ok(patch) => match cloud_show_set_settings(state, &patch) {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-settings-invalid",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.allowance.refresh" => {
+            let Some(bearer) = account::stored_session_token() else {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-signed-out",
+                    "Sign in to use Videorc Cloud.",
+                );
+            };
+            match cloud_context(state) {
+                Some(context) => match context.refresh_allowance(&bearer).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-allowance-failed",
+                        error.to_string(),
+                    ),
+                },
+                None => ServerResponse::error(
+                    command.id,
+                    "cloud-unavailable",
+                    "Videorc Cloud is unavailable in this build.",
+                ),
+            }
+        }
+        "cloud.show.end" => match cloud_context(state) {
+            Some(context) => match context
+                .end_current_show(account::stored_session_token())
+                .await
+            {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-end-failed", error.to_string())
+                }
+            },
+            None => ServerResponse::error(
+                command.id,
+                "cloud-unavailable",
+                "Videorc Cloud is unavailable in this build.",
+            ),
+        },
+        // Plan 184 C6b: Test cloud. The test never touches the Studio's
+        // session, so it refuses while one runs or finalizes; the show module
+        // refuses while a show is live or resumable or a test runs.
+        "cloud.selftest.run" => {
+            if !matches!(
+                current_recording_status(state).await.state,
+                RecordingState::Idle
+            ) {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-test-session-active",
+                    "Locked while you're recording or live.",
+                );
+            }
+            let params = match serde_json::from_value::<cloud_show::CloudTestParams>(command.params)
+            {
+                Ok(params) => params,
+                Err(error) => {
+                    return ServerResponse::error(command.id, "invalid-params", error.to_string());
+                }
+            };
+            let ffmpeg_path = resolve_trusted_ffmpeg_path(
+                params.ffmpeg_path.as_deref(),
+                role,
+                state.smoke_rpc_enabled,
+            );
+            let Some(context) = cloud_context(state) else {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-unavailable",
+                    "Videorc Cloud is unavailable in this build.",
+                );
+            };
+            let pusher = match recording::CloudTestFeedPusher::new(state, ffmpeg_path) {
+                Ok(pusher) => pusher,
+                Err(error) => {
+                    return ServerResponse::error(
+                        command.id,
+                        "cloud-test-failed",
+                        format!("{error:#}"),
+                    );
+                }
+            };
+            match context.start_test(
+                account::stored_session_token(),
+                recording::cloud_test_output_specs(&params.outputs),
+                std::sync::Arc::new(pusher),
+            ) {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(refusal) => {
+                    ServerResponse::error(command.id, refusal.code(), refusal.to_string())
+                }
+            }
+        }
         "remote.intent" => {
             match serde_json::from_value::<crate::remote_control::RemoteIntent>(
                 command.params.clone(),
@@ -10910,39 +11051,12 @@ async fn handle_text_message_with_role(
             ServerResponse::ok(command.id, performance_check::current_state(state).await)
         }
         "session.start" => {
-            let mut params_value = command.params;
-            if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
-                return ServerResponse::error(
-                    command.id,
-                    "resource-capability-rejected",
-                    error.to_string(),
-                );
-            }
-            match serde_json::from_value::<protocol::StartSessionParams>(params_value) {
-                Ok(params) => {
-                    let streaming = params.streaming.clone();
-                    let attach_live_chat = session_attaches_live_chat(&params);
-                    match start_session(state.clone(), params).await {
-                        Ok(status) => {
-                            if attach_live_chat
-                                && let Some(streaming) = streaming.as_ref()
-                                && let Some(session_id) = status.session_id.as_deref()
-                            {
-                                spawn_session_live_chat(state, session_id, streaming).await;
-                            }
-                            ServerResponse::ok(command.id, status)
-                        }
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "session-start-failed",
-                            error.to_string(),
-                        ),
-                    }
-                }
-                Err(error) => {
-                    ServerResponse::error(command.id, "invalid-params", error.to_string())
-                }
-            }
+            start_session_command(state, command, role, SessionStartKind::GoLive).await
+        }
+        // Plan 184 C5: the Resume banner. The same params as `session.start`;
+        // the start then feeds the show that is live instead of creating one.
+        "cloud.show.resume" => {
+            start_session_command(state, command, role, SessionStartKind::CloudResume).await
         }
         "session.stop" => {
             // Buddy's listen task drains with this capture (plan 068 review).
@@ -10956,7 +11070,12 @@ async fn handle_text_message_with_role(
                     .unwrap_or_default()
             };
             match stop_recording_with_intent(state.clone(), stop_params).await {
-                Ok(status) => ServerResponse::ok(command.id, status),
+                Ok(status) => {
+                    // Plan 184 C4: the desktop's Stop ends the cloud show this
+                    // session fed. YouTube's `complete` stays with the renderer.
+                    cloud_show_session_stopped(state, status.session_id.as_deref()).await;
+                    ServerResponse::ok(command.id, status)
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "session-stop-failed", error.to_string())
                 }
@@ -12831,7 +12950,10 @@ async fn handle_text_message_with_role(
             ServerResponse::ok(command.id, status)
         }
         "recording.stop" => match stop_recording(state.clone()).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
+            Ok(status) => {
+                cloud_show_session_stopped(state, status.session_id.as_deref()).await;
+                ServerResponse::ok(command.id, status)
+            }
             Err(error) => {
                 ServerResponse::error(command.id, "recording-stop-failed", error.to_string())
             }
@@ -12903,6 +13025,213 @@ fn clear_account_credentials_fail_closed<T>(
 
 fn stored_ai_session_token() -> Result<String> {
     account::stored_session_token().context("Sign in to use cloud AI.")
+}
+
+// --- Videorc Cloud glue (plan 184) --------------------------------------------
+// The show module owns the state machine behind traits; this is the one place
+// that binds it to the real web client, the real socket, the event bus and the
+// session's leg model.
+
+type AppCloudShowContext =
+    cloud_show::CloudShowContext<videorc_api::VideorcApiClient, cloud_show::WsConnector>;
+
+fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
+    let emit_state = state.clone();
+    let legs_state = state.clone();
+    cloud_show::CloudHooks {
+        emit: std::sync::Arc::new(move |status| {
+            emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
+        }),
+        legs: std::sync::Arc::new(move |session_id: &str, legs| {
+            // C2: the runner's legs into the session's own leg model, then
+            // the same `stream.targets` event the FFmpeg monitor emits.
+            let state = legs_state.clone();
+            let session_id = session_id.to_string();
+            tokio::spawn(async move {
+                if let Some(snapshot) =
+                    recording::apply_cloud_leg_states(&state, &session_id, &legs).await
+                {
+                    state.emit_event("stream.targets", snapshot);
+                }
+            });
+        }),
+    }
+}
+
+fn cloud_context(state: &AppState) -> Option<AppCloudShowContext> {
+    let web = match videorc_api::VideorcApiClient::new() {
+        Ok(web) => web,
+        Err(error) => {
+            tracing::warn!("Videorc Cloud web client could not be built: {error:#}");
+            return None;
+        }
+    };
+    Some(cloud_show::CloudShowContext {
+        slot: state.cloud_show.clone(),
+        hooks: cloud_hooks(state),
+        web: std::sync::Arc::new(web),
+        connector: std::sync::Arc::new(cloud_show::WsConnector),
+    })
+}
+
+fn cloud_show_status(state: &AppState) -> cloud_show::CloudStatus {
+    state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .status()
+}
+
+/// The account's plan and `cloud` block, from the capabilities refresh;
+/// `(None, None)` at sign-out.
+fn cloud_show_hydrate(
+    state: &AppState,
+    plan: Option<protocol::EntitlementPlan>,
+    cloud: Option<protocol::AiCapabilitiesCloud>,
+) {
+    if let Some(context) = cloud_context(state) {
+        context.hydrate_entitlement(plan, cloud);
+    }
+}
+
+fn cloud_show_set_settings(
+    state: &AppState,
+    patch: &cloud_show::CloudSettingsPatch,
+) -> Result<cloud_show::CloudStatus> {
+    let status = {
+        let mut runtime = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut next = runtime.settings.clone();
+        next.apply(patch)?;
+        state
+            .database
+            .save_setting(cloud_show::CLOUD_SETTINGS_KEY, &next)
+            .context("Could not save the Videorc Cloud settings.")?;
+        runtime.settings = next;
+        runtime.status()
+    };
+    state.emit_event(cloud_show::CLOUD_STATE_EVENT, &status);
+    Ok(status)
+}
+
+/// After a stop: end the show the stopped session fed. With no session id
+/// (an older status), the show with a feeding session is the one that stopped.
+async fn cloud_show_session_stopped(state: &AppState, session_id: Option<&str>) {
+    let feeding = state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .feeding_session();
+    let Some(session_id) = session_id.map(str::to_string).or(feeding) else {
+        return;
+    };
+    let Some(context) = cloud_context(state) else {
+        return;
+    };
+    context
+        .on_session_stopped(&session_id, account::stored_session_token())
+        .await;
+}
+
+/// C5: at launch, after the entitlement refresh, ask the web for a live show.
+async fn cloud_show_detect_at_launch(state: &AppState) {
+    let Some(bearer) = account::stored_session_token() else {
+        return;
+    };
+    let entitled = state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entitlement
+        .entitled();
+    if !entitled {
+        return;
+    }
+    let Some(context) = cloud_context(state) else {
+        return;
+    };
+    if let Err(error) = context.detect_current_show(&bearer).await {
+        tracing::info!("Videorc Cloud launch check did not complete: {error:#}");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionStartKind {
+    GoLive,
+    /// Plan 184 C5: the same params as `session.start`, bound to the show
+    /// that is live. C5b: nothing is set up on a platform and no key is
+    /// needed; the runner keeps the legs it holds.
+    CloudResume,
+}
+
+async fn start_session_command(
+    state: &AppState,
+    command: ClientCommand,
+    role: BackendRole,
+    kind: SessionStartKind,
+) -> ServerResponse {
+    if kind == SessionStartKind::CloudResume {
+        let resumable = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .resumable_show_id();
+        if resumable.is_none() {
+            return ServerResponse::error(
+                command.id,
+                "cloud-nothing-to-resume",
+                "There is no Videorc Cloud show to resume.",
+            );
+        }
+    }
+    let mut params_value = command.params;
+    if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
+        return ServerResponse::error(
+            command.id,
+            "resource-capability-rejected",
+            error.to_string(),
+        );
+    }
+    match serde_json::from_value::<protocol::StartSessionParams>(params_value) {
+        Ok(params) => {
+            let streaming = params.streaming.clone();
+            let attach_live_chat = session_attaches_live_chat(&params);
+            // Plan 184 C6b: a running Test cloud yields to the session, which
+            // needs the upload and the encoder; a cloud start also waits for
+            // the test's show to end (`prepare_session`).
+            if state
+                .cloud_show
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .signal_test_cancel()
+            {
+                tracing::info!("A session start stops the running Videorc Cloud test.");
+            }
+            let started = match kind {
+                SessionStartKind::GoLive => start_session(state.clone(), params).await,
+                SessionStartKind::CloudResume => {
+                    recording::start_cloud_resume_session(state.clone(), params).await
+                }
+            };
+            match started {
+                Ok(status) => {
+                    if attach_live_chat
+                        && let Some(streaming) = streaming.as_ref()
+                        && let Some(session_id) = status.session_id.as_deref()
+                    {
+                        spawn_session_live_chat(state, session_id, streaming).await;
+                    }
+                    ServerResponse::ok(command.id, status)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "session-start-failed", error.to_string())
+                }
+            }
+        }
+        Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+    }
 }
 
 async fn get_ai_capabilities() -> Result<protocol::AiCapabilities> {
@@ -13010,11 +13339,21 @@ fn apply_prepared_account_entitlement_refresh(
             entitlements::clear_account_entitlements()
         }
         PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+            // Plan 185 D2: the plan named beside the tier. The token's own
+            // `plan` claim wins when present; this is the fallback for tokens
+            // minted before the claim existed.
+            let plan = capabilities
+                .plan
+                .as_ref()
+                .and_then(|plan| protocol::EntitlementPlan::parse(&plan.id));
             match capabilities.entitlement_token.as_deref() {
                 // Prefer the signed token: verified locally, persisted for
                 // offline grace until its exp.
                 Some(entitlement_token) => {
-                    match entitlements::hydrate_account_entitlements_from_token(entitlement_token) {
+                    match entitlements::hydrate_account_entitlements_from_token(
+                        entitlement_token,
+                        plan,
+                    ) {
                         Ok(changed) => {
                             account::persist_entitlement_token(entitlement_token);
                             changed
@@ -13026,15 +13365,17 @@ fn apply_prepared_account_entitlement_refresh(
                             );
                             entitlements::hydrate_account_entitlements(
                                 capabilities.entitlement.is_premium,
+                                plan,
                             )
                         }
                     }
                 }
                 // Older web deploy / unconfigured signing key: unsigned
                 // boolean with its short staleness ceiling.
-                None => {
-                    entitlements::hydrate_account_entitlements(capabilities.entitlement.is_premium)
-                }
+                None => entitlements::hydrate_account_entitlements(
+                    capabilities.entitlement.is_premium,
+                    plan,
+                ),
             }
         }
         PreparedAccountEntitlementRefreshOutcome::KeepCached(error) => {
@@ -13074,6 +13415,12 @@ async fn refresh_account_entitlements(state: &AppState) {
     let mut tick_version: Option<Option<u32>> = None;
     // Plan 170 D9: the same read turns the account Buddy library on or off.
     let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
+    // Plan 184 / 185: the same read carries the plan and the `cloud` block.
+    // Signed out reads as no cloud; a failed read keeps the last answer.
+    let mut cloud_block: Option<(
+        Option<protocol::EntitlementPlan>,
+        Option<protocol::AiCapabilitiesCloud>,
+    )> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -13101,6 +13448,17 @@ async fn refresh_account_entitlements(state: &AppState) {
                     ),
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
+                cloud_block = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some((None, None)),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => Some((
+                        capabilities
+                            .plan
+                            .as_ref()
+                            .and_then(|plan| protocol::EntitlementPlan::parse(&plan.id)),
+                        capabilities.cloud.clone(),
+                    )),
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
                 apply_prepared_account_entitlement_refresh(prepared.outcome)
             })
             .unwrap_or(false)
@@ -13117,6 +13475,9 @@ async fn refresh_account_entitlements(state: &AppState) {
         publish_entitlements_updated(state);
     }
     drop(transition);
+    if let Some((plan, cloud)) = cloud_block {
+        cloud_show_hydrate(state, plan, cloud);
+    }
     if let Some(enabled) = command_parser {
         cohost::set_command_parser_capability(state, enabled).await;
     }
@@ -15734,6 +16095,9 @@ mod tests {
         assert_eq!(
             lifecycle_exemptions,
             [
+                // Plan 184 C5: Resume is the same atomic Start, bound to the
+                // live cloud show.
+                "cloud.show.resume",
                 "recording.start_test",
                 "recording.stop",
                 "session.start",

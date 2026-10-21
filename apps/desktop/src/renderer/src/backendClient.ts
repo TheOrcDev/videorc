@@ -140,6 +140,8 @@ const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   'sessions.delete': 45_000,
   'stream.output.topology.probe': 120_000,
   'session.start': 120_000,
+  // Plan 184 C5b: a resume is a session start bound to the live cloud show.
+  'cloud.show.resume': 120_000,
   'session.stop': 120_000,
   'session.remux_mp4': 10 * 60_000,
   'sessions.import': 10 * 60_000,
