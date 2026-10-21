@@ -1077,6 +1077,15 @@ impl CloudShowRuntime {
         }
     }
 
+    /// At launch, ask the web for a live show (C5) when the account could
+    /// own one: entitled now, or on a paid plan whose cloud block says off.
+    /// The rollback switch turns the block off (lane 3 R1), but a show that
+    /// was live when it flipped keeps running, and only `current` tells a
+    /// relaunched desktop which one to resume or end.
+    pub fn may_own_a_show(&self) -> bool {
+        self.entitlement.entitled() || self.entitlement.plan.is_some()
+    }
+
     /// The switch is on and the account is entitled.
     #[cfg(test)]
     pub fn cloud_mode_on(&self) -> bool {
@@ -3720,6 +3729,24 @@ mod tests {
             GoLiveDecision::DirectByChoice
         );
         assert!(!runtime.cloud_mode_on());
+    }
+
+    #[test]
+    fn a_relaunch_looks_for_a_live_show_whenever_the_account_could_own_one() {
+        let mut runtime = CloudShowRuntime::default();
+        // Basic, or signed out: no request at all.
+        assert!(!runtime.may_own_a_show());
+        // The rollback switch off: the block says not enabled, the plan stays.
+        runtime.entitlement = CloudEntitlement {
+            plan: Some(EntitlementPlan::Max),
+            cloud: Some(AiCapabilitiesCloud {
+                enabled: false,
+                ..AiCapabilitiesCloud::default()
+            }),
+        };
+        assert!(runtime.may_own_a_show());
+        runtime.entitlement.cloud.as_mut().unwrap().enabled = true;
+        assert!(runtime.may_own_a_show());
     }
 
     #[test]

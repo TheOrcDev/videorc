@@ -13135,18 +13135,18 @@ async fn cloud_show_session_stopped(state: &AppState, session_id: Option<&str>) 
         .await;
 }
 
-/// C5: at launch, after the entitlement refresh, ask the web for a live show.
+/// C5: at launch, after the entitlement refresh, ask the web for a live show,
+/// also while the rollback switch has the cloud off (`may_own_a_show`).
 async fn cloud_show_detect_at_launch(state: &AppState) {
     let Some(bearer) = account::stored_session_token() else {
         return;
     };
-    let entitled = state
+    let may_own_a_show = state
         .cloud_show
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .entitlement
-        .entitled();
-    if !entitled {
+        .may_own_a_show();
+    if !may_own_a_show {
         return;
     }
     let Some(context) = cloud_context(state) else {
