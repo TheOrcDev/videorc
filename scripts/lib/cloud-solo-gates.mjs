@@ -19,6 +19,16 @@ export const HOLD_CARD_SETTLE_SECONDS = 1.3
 export const MAX_TEST_TIME_TO_LIVE_SECONDS = 20
 /** C6b: the web caps a test show at this long on the node (`maxShowSeconds`). */
 export const TEST_SHOW_CAP_SECONDS = 30
+
+/**
+ * The H.264 encoder for the smoke's own direct publishes (the capped test
+ * show): VideoToolbox on macOS, libx264 elsewhere, the GPL FFmpeg the node's
+ * runner already needs. A macOS-only encoder on Linux never pushed a frame,
+ * so the capped test ended `no-feed` instead of at its cap. Pure.
+ */
+export function smokePublishH264Encoder(platform = process.platform) {
+  return platform === 'darwin' ? 'h264_videotoolbox' : 'libx264'
+}
 /** The cap's end reaches a control client this long after the cap, at most:
  * the runner's state poll, its end sequence and the socket. */
 export const TEST_SHOW_CAP_SLACK_SECONDS = 8

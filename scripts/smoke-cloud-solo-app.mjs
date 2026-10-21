@@ -26,6 +26,7 @@ import {
   HOLD_CARD_SETTLE_SECONDS,
   holdCardStats,
   parsePtsTimes,
+  smokePublishH264Encoder,
   sortedGapStats,
   TEST_SHOW_CAP_SECONDS
 } from './lib/cloud-solo-gates.mjs'
@@ -1321,7 +1322,7 @@ async function testShowCapCheck({ caFile }) {
       '-map',
       '1:a',
       '-c:v',
-      'h264_videotoolbox',
+      smokePublishH264Encoder(),
       '-b:v',
       '800k',
       '-g',

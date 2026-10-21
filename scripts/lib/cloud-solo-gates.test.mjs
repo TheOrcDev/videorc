@@ -10,6 +10,7 @@ import {
   firstPhaseAt,
   holdCardStats,
   parsePtsTimes,
+  smokePublishH264Encoder,
   sortedGapStats
 } from './cloud-solo-gates.mjs'
 
@@ -419,5 +420,13 @@ describe('cloud solo gates: the run verdict', () => {
       "the web dropped the node's srt block (horizontal: url)"
     ])
     assert.ok(evaluateCloudSoloReport({}).includes('no drop was measured'))
+  })
+})
+
+describe('cloud solo smoke: its own publishes', () => {
+  it('encode with an encoder the platform has', () => {
+    assert.equal(smokePublishH264Encoder('darwin'), 'h264_videotoolbox')
+    assert.equal(smokePublishH264Encoder('linux'), 'libx264')
+    assert.equal(smokePublishH264Encoder('win32'), 'libx264')
   })
 })
