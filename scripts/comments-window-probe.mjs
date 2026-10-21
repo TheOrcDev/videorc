@@ -937,21 +937,30 @@ async function probeNarrowWidths() {
 }
 
 async function layoutAt(width, options = {}) {
-  await smokeCommand('comments-window-set-bounds', { width, height: 640 })
-  await waitFor(
-    () => smokeCommand('comments-window-state'),
-    (s) => s.bounds && Math.abs(s.bounds.width - width) <= 1,
-    5000
-  )
-  // One layout pass after the resize event, then measure.
-  await sleep(250)
-  const metrics = await smokeCommand('comments-window-layout-metrics', options)
+  // A single setBounds from a much smaller frame can land 2px wide on Linux
+  // without a window manager (420 → 1280 measured 1282). Ask again; a second
+  // setBounds at the same size is what later passes already do.
+  let laidOut = { ok: false, last: null }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await smokeCommand('comments-window-set-bounds', { width, height: 640 })
+    await waitFor(
+      () => smokeCommand('comments-window-state'),
+      (s) => s.bounds && Math.abs(s.bounds.width - width) <= 1,
+      5000
+    )
+    laidOut = await waitFor(
+      () => smokeCommand('comments-window-layout-metrics', options),
+      (metrics) => Math.abs(metrics.windowWidth - width) <= 1,
+      attempt === 0 ? 800 : 2500
+    )
+    if (laidOut.ok) break
+  }
   assertProbe(
-    Math.abs(metrics.windowWidth - width) <= 1,
+    laidOut.ok,
     `narrow ${width}px: renderer laid out at the requested width`,
-    String(metrics.windowWidth)
+    String(laidOut.last?.windowWidth)
   )
-  return metrics
+  return laidOut.last
 }
 
 function assertHeaderFits(metrics, tag) {

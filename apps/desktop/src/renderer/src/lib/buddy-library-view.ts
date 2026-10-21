@@ -127,6 +127,13 @@ const CATALOG_OFFICIAL_ENTRIES: readonly BuddyOfficialEntry[] = BUDDY_OFFICIAL_C
 )
 
 /**
+ * Signed in, listed nothing, and no failure: the web's library is off.
+ * Matches the backend's `check_library` / `library_error` sentence so My
+ * Buddies never says the library is empty.
+ */
+export const BUDDY_LIBRARY_UNAVAILABLE = 'The Buddy library is not available right now.'
+
+/**
  * The line a pack or import job shows while it runs (plan 172): whose moves
  * download or upload, or which Buddy is being saved to the library; null
  * for the other jobs (their card spinner says enough).

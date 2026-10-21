@@ -1,5 +1,21 @@
 # Implementation Plans
 
+- 2026-10-20: [Plan 186](186-banners-on-the-picture.md), Banners. The
+  owner wants their own images (a sponsor strip, "Follow me", a logo, a
+  full-frame frame) placed anywhere on the picture, with recommended sizes.
+  A banner is an overlay-style layer, not a source: a backend-owned
+  `banners` table (alpha kept, 24 in Assets, 4 showing), rects per
+  orientation and the overlay leg plan unchanged, prepared off the render
+  thread to exact pixels and drawn 1:1 on Metal, CPU, D3D11, the legacy
+  FFmpeg FIFO and the proof surface. Assets manages, Scene places and
+  shows, with Stream Manager, `/banner`, ⌘K and Stream Deck/phone mirrors;
+  sharp sizes plus a per-place "soft at this size" hint. Phase 2: timer
+  (sponsor rotation) and Buddy voice. 11 decisions (D1–D11).
+  **EXECUTED** 2026-10-21 (whole plan, both phases) in draft PR #728: free,
+  one set of banners, the Scene page controls them, stacking as
+  recommended; smoke:banners passes on recording, stream and the vertical
+  stream; owner by-eye owed.
+
 ### Plan 182 Import takeovers while recording or live
 
 - 2026-10-13: [Plan 182](182-import-takeovers-during-recording-and-livestreams.md)

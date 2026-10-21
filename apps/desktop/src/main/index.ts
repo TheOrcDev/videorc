@@ -21,6 +21,7 @@ import { commandModifierHeld, normalizeAccelerator } from '../shared/accelerator
 import { openableChatLink } from '../shared/chat-link'
 import { WINDOW_NAMES } from '../shared/window-names'
 import type {
+  Banner,
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
   SessionMediaGrantResult,
@@ -186,6 +187,8 @@ import {
 } from '../shared/windows-live-audio-smoke'
 import {
   parseMainBackendWireMessage,
+  parseMainBannerList,
+  parseMainBannersChangedEvent,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
   parseMainPreviewSurfaceStatus,
@@ -193,6 +196,14 @@ import {
   parseMainRecordingStatus,
   parseMainRecordingStatusEvent
 } from './backend-event-message'
+import {
+  fallbackPreviewSurfaceCanvas,
+  previewSurfaceBannerLayers,
+  previewSurfaceCanvasFromCompositor,
+  previewSurfaceCanvasFromOutputs,
+  withPreviewSurfaceBanners
+} from './preview-surface-banners'
+import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
 import { safeConsole } from './safe-console'
 import {
   BACKEND_PROCESS_OWNERSHIP_PREFIX,
@@ -716,6 +727,9 @@ let latestChatGifMode: TwitchGifMode = DEFAULT_TWITCH_GIF_MODE
 /** The Stream Manager's latest dashboard, history included (plan 055, S7). */
 let latestDashboardState: LiveDashboardState | null = null
 let markerContext: import('../shared/session-markers').MarkerContext | null = null
+/** The banner list the Stream Manager shows (plan 186 S7): `{id, name, shown}`
+ * from the Studio renderer, null until it has read the list. */
+let latestCommentsBanners: import('../shared/banner-commands').BannerSummary[] | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -849,6 +863,10 @@ let deferredPermissionRestartState: DeferredPermissionRestartState =
 let smokePreviewMotionServer: HttpServer | null = null
 let smokePreviewCompositorFrameId = 0
 let nativePreviewSurfaceScene: PreviewSurfaceSceneState | null = null
+// The banner list (plan 186) from main's own backend event socket: the proof
+// surface draws the showing banners as image layers. Kept across reconnects;
+// a new connection re-reads `banners.list`.
+let previewSurfaceBanners: readonly Banner[] = []
 let nativePreviewCommittedCompositorScene: PreviewSurfaceSceneState | null = null
 let nativePreviewCommittedCompositorRunId: string | undefined
 const nativePreviewCompositorRunAuthority = new NativePreviewRunAuthority()
@@ -5066,6 +5084,13 @@ function buildPreviewSurfaceScene(
     })
   }
 
+  // Plan 186 D5: banners draw above the scene and the takeover.
+  const bannerCanvas =
+    previewSurfaceCanvasFromOutputs(params.scene?.outputs) ??
+    nativePreviewSurfaceScene?.bannerCanvas ??
+    fallbackPreviewSurfaceCanvas(params.layout)
+  layers.push(...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas))
+
   return {
     revision: params.revision,
     sceneId: params.scene?.id,
@@ -5073,6 +5098,7 @@ function buildPreviewSurfaceScene(
     sources: layers,
     activeScreenId: activeScreen?.id,
     backgroundStageMargin,
+    bannerCanvas,
     updatedAt: new Date().toISOString()
   }
 }
@@ -5114,6 +5140,14 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
     }))
   ]
 
+  // Plan 186 D5: banners draw above the scene and the takeover, placed
+  // against the canvas the compositor reports.
+  const bannerCanvas =
+    previewSurfaceCanvasFromCompositor(status) ??
+    nativePreviewSurfaceScene?.bannerCanvas ??
+    fallbackPreviewSurfaceCanvas(status.sceneLayout)
+  layers.push(...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas))
+
   return {
     revision: status.sceneRevision,
     sceneId: status.sceneId,
@@ -5121,6 +5155,7 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
     sources: layers,
     activeScreenId: status.activeScreenId,
     backgroundStageMargin,
+    bannerCanvas,
     updatedAt: status.updatedAt
   }
 }
@@ -5272,6 +5307,12 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
       }
 
       .scene-layer > img[data-live="1"] {
+        opacity: 1;
+      }
+
+      /* Banners (plan 186) show once decoded but never count as source
+         liveness: they are overlays, not proof that a source is live. */
+      .scene-layer[data-kind="banner"] > img[data-loaded="1"] {
         opacity: 1;
       }
 
@@ -5603,7 +5644,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           poll();
         }
 
-        function upsertLayer(layer) {
+        function upsertLayer(layer, order) {
           const id = String(layer.id);
           let entry = layers.get(id);
           if (!entry) {
@@ -5629,7 +5670,18 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           element.style.width = percent(transform.width || 0);
           element.style.height = percent(transform.height || 0);
           element.style.borderRadius = layerBorderRadius(layer);
-          element.style.zIndex = layer.kind === 'background' ? '0' : '1';
+          // Banners stack above every scene layer in list order (plan 186
+          // D5); DOM order alone would keep a reordered banner where it was.
+          element.style.zIndex =
+            layer.kind === 'background'
+              ? '0'
+              : layer.kind === 'banner'
+                ? String(2 + (Number.isInteger(order) ? order : 0))
+                : '1';
+          element.style.opacity =
+            typeof layer.opacity === 'number' && Number.isFinite(layer.opacity)
+              ? String(Math.min(1, Math.max(0, layer.opacity)))
+              : '';
 
           const crop = cropStyle(transform);
           image.style.left = crop.left;
@@ -5645,6 +5697,25 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             image.removeAttribute('src');
             image.dataset.live = '1';
             markLive(layer.kind, id);
+            return;
+          }
+
+          if (layer.kind === 'banner') {
+            // An overlay, not a source: shown once decoded, never marked live.
+            stopLayerPoller(id);
+            if (!layer.imageUrl) {
+              image.dataset.loaded = '0';
+              image.removeAttribute('src');
+            } else if (image.src !== layer.imageUrl) {
+              image.dataset.loaded = '0';
+              image.onload = () => {
+                image.dataset.loaded = '1';
+              };
+              image.onerror = () => {
+                image.dataset.loaded = '0';
+              };
+              image.src = layer.imageUrl;
+            }
             return;
           }
 
@@ -6580,6 +6651,65 @@ async function applyNativePreviewSurfaceScene(
     updatedAt: new Date().toISOString(),
     message: 'Native preview surface scene updated.'
   }
+  return nativePreviewSurfaceStatus
+}
+
+// --- Banners on the proof surface (plan 186 S4) -------------------------------
+// Main learns the list from its own backend event socket (`banners.list` on
+// connect, then `banners.changed`). Both scene builders place the showing
+// banners; a change between scene updates re-places them on the current scene
+// without touching its revision (banners are not scene content).
+function acceptPreviewSurfaceBanners(read: () => Banner[], source: string): void {
+  let banners: Banner[]
+  try {
+    banners = read()
+  } catch (error) {
+    logBackend('warn', `Main dropped an invalid ${source} payload: ${errorMessageText(error)}`)
+    return
+  }
+  previewSurfaceBanners = banners
+  void updateNativePreviewSurfaceBanners().catch((error) => {
+    logBackend('warn', `Preview banners failed to update: ${errorMessageText(error)}`)
+  })
+}
+
+async function updateNativePreviewSurfaceBanners(): Promise<PreviewSurfaceStatus> {
+  const generation = previewWindowSurfaceGeneration()
+  return runNativePreviewSurfaceMutation(
+    () => applyNativePreviewSurfaceBanners(generation),
+    'update-banners'
+  )
+}
+
+async function applyNativePreviewSurfaceBanners(generation: number): Promise<PreviewSurfaceStatus> {
+  const current = nativePreviewSurfaceScene
+  if (!current || !nativePreviewPresentationAllowedForGeneration(generation)) {
+    return nativePreviewSurfaceStatus
+  }
+  const next = withPreviewSurfaceBanners(current, previewSurfaceBanners)
+  if (JSON.stringify(next.sources) === JSON.stringify(current.sources)) {
+    return nativePreviewSurfaceStatus
+  }
+  nativePreviewSurfaceScene = next
+  const surfaceWindow = nativePreviewSurfaceWindow
+  if (!surfaceWindow || surfaceWindow.isDestroyed()) {
+    return nativePreviewSurfaceStatus
+  }
+  await waitForNativePreviewSurfaceScript(surfaceWindow)
+  if (
+    !nativePreviewPresentationAllowedForGeneration(generation) ||
+    nativePreviewSurfaceWindow !== surfaceWindow ||
+    surfaceWindow.isDestroyed() ||
+    !nativePreviewSurfaceScene
+  ) {
+    return nativePreviewSurfaceStatus
+  }
+  // The latest scene: a compositor present may have replaced it meanwhile,
+  // and every builder already reads the new list.
+  await surfaceWindow.webContents.executeJavaScript(
+    `window.__videorcSetPreviewScene?.(${jsonForInlineScript(nativePreviewSurfaceScene)})`,
+    true
+  )
   return nativePreviewSurfaceStatus
 }
 
@@ -9342,12 +9472,14 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const eventFilterRequestId = `main-event-filter-${Date.now()}`
   const recordingStatusRequestId = `main-recording-status-${Date.now()}`
   const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
+  const bannersListRequestId = `main-banners-list-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
     if (backendEventSocket === socket) {
       logBackend('info', 'Main process connected to backend events.')
-      const includedEvents = ['recording.status']
+      // Plan 186: the proof surface draws the showing banners.
+      const includedEvents = ['recording.status', 'banners.changed']
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
       }
@@ -9379,6 +9511,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             socket.send(
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
+            socket.send(JSON.stringify({ id: bannersListRequestId, method: 'banners.list' }))
             if (process.platform === 'win32') {
               previewSurfaceStatusRequestGeneration = previewWindowSurfaceGeneration()
               socket.send(
@@ -9414,12 +9547,31 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        if (parsed.id === bannersListRequestId) {
+          // Never fatal: the banner feed must not retire capture state or
+          // the present pump.
+          if (parsed.ok === true) {
+            acceptPreviewSurfaceBanners(() => parseMainBannerList(parsed.payload), 'banners.list')
+          } else {
+            logBackend(
+              'warn',
+              `Main could not read the banner list: ${parsed.error?.message ?? 'unknown error'}`
+            )
+          }
+        }
         // Responses to fire-and-forget present reports are deliberately ignored.
         return
       }
 
       if (parsed.event === 'recording.status') {
         updateMainCaptureState(parseMainRecordingStatusEvent(parsed.payload))
+        return
+      }
+      if (parsed.event === 'banners.changed') {
+        acceptPreviewSurfaceBanners(
+          () => parseMainBannersChangedEvent(parsed.payload),
+          'banners.changed'
+        )
         return
       }
       if (parsed.event === 'preview.surface.status') {
@@ -13650,6 +13802,31 @@ async function revokeResourceCapability({ capabilityId }: ResourceSelection): Pr
   await requestBackendAdmin('resource.capability.revoke', { capabilityId })
 }
 
+// Assets → Banners → Import image… (plan 186): the same single-use input-file
+// capability as a takeover image; the backend sniffs, scales and stores it.
+async function pickBannerImage(): Promise<ResourceSelection | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose banner image',
+    properties: ['openFile'],
+    filters: [
+      {
+        name: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'webp']
+      }
+    ]
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+
+  if (result.canceled) {
+    return null
+  }
+
+  const path = result.filePaths[0]
+  return path ? issueResourceCapability(path, 'input-file') : null
+}
+
 // Native directory picker + directory facts for the Settings output-directory
 // row (ST2): Browse, exists/writable validation, create-on-demand, free space.
 async function pickDirectoryPath(): Promise<ResourceSelection | null> {
@@ -14109,6 +14286,17 @@ function resolveManagedScreenFile(fileName: string): string | null {
   return resolveRegularFileInsideRoot(join(app.getPath('userData'), 'Screens'), fileName)
 }
 
+// Banner images (plan 186) live in the backend-managed Banners dir beside
+// Screens; the renderer and the proof surface address them by bare basename
+// (`videorc-asset://banner/<file>`), resolved with the same realpath, no
+// symlink, regular-file checks.
+function resolveManagedBannerFile(fileName: string): string | null {
+  if (!fileName || fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
+    return null
+  }
+  return resolveRegularFileInsideRoot(join(app.getPath('userData'), BANNERS_FOLDER), fileName)
+}
+
 async function withBuddyCorsHeader(pending: Promise<Response>): Promise<Response> {
   const response = await pending
   const headers = new Headers(response.headers)
@@ -14147,9 +14335,11 @@ function registerManagedAssetProtocol(): void {
               ? resolveManagedAvatarFile(fileName)
               : url.host === 'screen'
                 ? resolveManagedScreenFile(fileName)
-                : url.host === 'buddy'
-                  ? resolveManagedBuddyFile(fileName)
-                  : null
+                : url.host === BANNER_ASSET_HOST
+                  ? resolveManagedBannerFile(fileName)
+                  : url.host === 'buddy'
+                    ? resolveManagedBuddyFile(fileName)
+                    : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
@@ -14801,6 +14991,7 @@ app.whenReady().then(async () => {
   secureIpcHandle('screens:authorize-dropped-images', (_event, paths: string[]) =>
     authorizeDroppedScreenImages(paths)
   )
+  secureIpcHandle('banners:pick-image', () => pickBannerImage())
   secureIpcHandle('system:pick-file', () => pickFilePath())
   secureIpcHandle('system:pick-directory', () => pickDirectoryPath())
   secureIpcHandle('system:check-directory', (_event, capabilityId: unknown) =>
@@ -15356,6 +15547,31 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.resolve(resolution)
     }
   )
+  // Banners (plan 186 S7): the Studio renderer pushes the read-only list and
+  // the Stream Manager follows it; a show or hide from the window relays to
+  // the MAIN renderer, which owns the `banners.*` RPCs, like Mark clip.
+  secureIpcHandle('comments-window:banners-get', () => latestCommentsBanners)
+  secureIpcHandle('comments-window:banners-push', (event, banners) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    latestCommentsBanners = banners
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:banners', banners)
+    return true
+  })
+  secureIpcHandle('comments-window:banner', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can show or hide banners here.'))
+    }
+    return commentsCommandBroker.request<true>(command.requestId, () => {
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      sendElectronEvent(mainWindow.webContents, 'comments-window:banner-request', command)
+      return true
+    })
+  })
+  secureIpcHandle('comments-window:banner-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
   // Chat removal relay (plan 140, S6): the Stream Manager asks, the MAIN
   // renderer owns the backend socket and makes the liveChat.moderation.* call,
   // and the operation comes back as the reply. The window can ask for one

@@ -31,7 +31,7 @@ import {
   buddyNameToSave
 } from '@/lib/buddy-persona-view'
 import { BUDDY_ONBOARDING_STEP3 } from '@/lib/buddy-onboarding-copy'
-import { toastUserError } from '@/lib/user-error'
+import { inlineUserError, toastUserError } from '@/lib/user-error'
 import { BuddyBubbleSample } from '@/components/buddy-bubble-sample'
 import { BUDDY_LIBRARY_CONTEXT_MAX_CHARS } from '../../../shared/buddy-library'
 
@@ -61,7 +61,11 @@ export function BuddyPersonaSection(): ReactElement | null {
     try {
       await patchCohostSettings({ persona: next })
     } catch (failure: unknown) {
-      const message = failure instanceof Error ? failure.message : "Couldn't save the changes."
+      const message = inlineUserError(
+        failure,
+        { action: 'save', object: 'the changes' },
+        'buddy-persona'
+      )
       setError(message)
       throw failure
     }
@@ -72,7 +76,7 @@ export function BuddyPersonaSection(): ReactElement | null {
   const saveNotes = (next: string): void => {
     setError(null)
     void patchCohostSettings({ notes: next }).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : "Couldn't save the changes.")
+      setError(inlineUserError(failure, { action: 'save', object: 'the changes' }, 'buddy-persona'))
     )
   }
 

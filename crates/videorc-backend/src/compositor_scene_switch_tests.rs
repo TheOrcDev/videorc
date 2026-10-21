@@ -48,6 +48,7 @@ fn inputs(snapshot: Option<&CompositorSceneSnapshot>) -> CompositorRenderInputs<
         highlight_overlay: None,
         buddy_overlay: None,
         buddy_leg: None,
+        banners: &[],
     }
 }
 

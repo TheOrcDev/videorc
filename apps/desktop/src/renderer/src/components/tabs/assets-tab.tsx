@@ -53,6 +53,7 @@ import {
   BackgroundReplaceDialog,
   type PendingBackgroundReplace
 } from '@/components/background-replace-dialog'
+import { BannersSection } from '@/components/banners-section'
 import {
   IN_USE_RING,
   InUseChip,
@@ -189,7 +190,7 @@ export function AssetsTab(): ReactElement {
   return (
     <PageStack className="min-h-full">
       <PageHeader
-        description="Backgrounds for your scenes and takeovers for the output. Click a background to apply it, then tune it with Adjust style on its tile."
+        description="Backgrounds for your scenes, banners for your picture and takeovers for the output. Click a background to apply it, then tune it with Adjust style on its tile."
         title="Assets"
       />
 
@@ -308,6 +309,7 @@ export function AssetsTab(): ReactElement {
           setRemovingSlotId(null)
         }}
       />
+      <BannersSection />
       <TakeoverScreensSection />
       <BackgroundReplaceDialog
         pending={pendingReplace}

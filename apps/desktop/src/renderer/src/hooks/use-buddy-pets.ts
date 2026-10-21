@@ -3,12 +3,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { BackendClient } from '@/backendClient'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { BuddyPetSummary } from '@/lib/backend'
+import { inlineUserError } from '@/lib/user-error'
 
 /** The persona's pet packs as the Buddy tab sees them (plan 168 S-D2). */
 export interface BuddyPets {
   /** Null until the first list arrives (offline, or still asking). */
   packs: BuddyPetSummary[] | null
-  /** Why the list could not be read, in the backend's words. */
+  /** Why the list could not be read, in streamer-facing words. */
   error: string | null
   refresh: () => Promise<void>
   /** `cohost.pet.remove`, then a fresh list. Throws the backend's reason. */
@@ -52,7 +53,7 @@ export function useBuddyPets(): BuddyPets {
       setPacks(await client.requestTyped('cohost.pet.list'))
       setError(null)
     } catch (failure: unknown) {
-      setError(failure instanceof Error ? failure.message : 'Try again in a moment.')
+      setError(inlineUserError(failure, { action: 'load', object: "Buddy's packs" }, 'buddy-pets'))
     }
   }, [client])
 

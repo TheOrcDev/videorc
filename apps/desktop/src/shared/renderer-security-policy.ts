@@ -45,6 +45,8 @@ export const IPC_INVOKE_ROLES = {
   'system:check-directory': MAIN_ONLY,
   'screens:pick-images': MAIN_ONLY,
   'screens:authorize-dropped-images': MAIN_ONLY,
+  // Assets → Banners → Import image… (plan 186): the Studio renderer only.
+  'banners:pick-image': MAIN_ONLY,
   'backgrounds:import-image': MAIN_ONLY,
   'scheduled-streams:import-thumbnail': MAIN_ONLY,
   // The Buddy's avatar images (plan 164 S-A3): the Studio renderer only.
@@ -144,6 +146,13 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:marker-result-push': MAIN_ONLY,
   'comments-window:clip-mark': MAIN_AND_COMMENTS,
   'comments-window:clip-mark-result-push': MAIN_ONLY,
+  // Banners (plan 186 S7): the Stream Manager reads the list Studio pushes
+  // and asks for a show or hide (its handler refuses any other sender);
+  // Studio replies.
+  'comments-window:banners-get': MAIN_AND_COMMENTS,
+  'comments-window:banners-push': MAIN_ONLY,
+  'comments-window:banner': MAIN_AND_COMMENTS,
+  'comments-window:banner-result-push': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
   'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
   // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):

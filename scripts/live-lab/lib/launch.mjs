@@ -65,6 +65,9 @@ export function buildLaunchEnv({ dirs, config, scenario }) {
     // apps/desktop/src/main/windows-pilot-update.ts reads exactly this name;
     // without it the updater would swap a candidate for the public release.
     VIDEORC_DISABLE_AUTO_UPDATE: '1',
+    // Lab runs use a fresh profile each time; sharing usage stats would count
+    // every run as a new install that went live (crates/videorc-backend/src/usage_stats.rs).
+    VIDEORC_USAGE_STATS: '0',
     VIDEORC_BACKEND_LOG_MAX_BYTES: String(BACKEND_LOG_MAX_BYTES),
     VIDEORC_BACKEND_LOG_MAX_FILES: String(BACKEND_LOG_MAX_FILES)
   }

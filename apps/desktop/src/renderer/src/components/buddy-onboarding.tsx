@@ -106,7 +106,7 @@ import {
   buddyOnboardingProgress
 } from '@/lib/buddy-onboarding-copy'
 import { cn } from '@/lib/utils'
-import { userErrorMessage } from '@/lib/user-error'
+import { inlineUserError } from '@/lib/user-error'
 import {
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
   BUDDY_LIBRARY_DESCRIPTION_MAX_CHARS,
@@ -281,9 +281,9 @@ export function BuddyOnboarding({
       // The provider's copy of the persona follows the backend's.
       await patchCohostSettings({ persona: settings.persona })
     } catch (error) {
-      const copy = userErrorMessage(error, { action: 'save', object: 'your Buddy' })
-      console.warn(`[buddy-onboarding] ${copy.title}:`, copy.raw || error)
-      setActionError(copy.text)
+      setActionError(
+        inlineUserError(error, { action: 'save', object: 'your Buddy' }, 'buddy-onboarding')
+      )
       return
     }
     void libraryController?.refresh()

@@ -94,6 +94,14 @@ Assets → Takeovers manages them; Studio's Takeover section puts one on
 stream.
 _Avoid_: screen, takeover screen
 
+**Banner**:
+An image the streamer places anywhere on the picture: a sponsor, their
+socials, a logo, a frame. Assets → Banners imports and manages them; the
+Scene page places them and shows or hides them ("Show", "Hide"). A banner
+stays over a takeover and under captions, Buddy and the highlight card.
+_Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
+name)
+
 **Off**:
 A source or a feature the streamer turned off ("Camera: Off"). When there
 is nothing to pick, say so: "No camera found"; while looking, "Finding

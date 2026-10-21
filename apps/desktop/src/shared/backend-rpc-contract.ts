@@ -44,6 +44,12 @@ import type {
   BuddyReactionTable,
   MigrateHighlightAnchorParams,
   OverlayLayout,
+  Banner,
+  BannerHideParams,
+  BannerIdParams,
+  BannerImportImageParams,
+  BannerReorderParams,
+  BannerUpdateParams,
   BuddyOverlaySnapshot,
   OverlayTargetsInfo,
   SetBuddyOverlayParams,
@@ -113,6 +119,8 @@ import type {
   EncoderPreferenceState,
   MetricsJournalSetParams,
   MetricsJournalState,
+  UsageStatsSetParams,
+  UsageStatsState,
   PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
@@ -143,7 +151,13 @@ import {
 } from './session-markers'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
-import { LAYOUT_PRESET_VALUES } from './backend'
+import {
+  BANNER_MAX_COUNT,
+  BANNER_OPACITY_MAX,
+  BANNER_OPACITY_MIN,
+  LAYOUT_PRESET_VALUES
+} from './backend'
+import { isBannerFileName } from './banner-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
 import { isBuddyPackId, parseBuddyDraftPath } from './buddy-assets'
 import {
@@ -326,6 +340,8 @@ export interface BackendRpcMethodMap {
     MetricsJournalSetParams,
     MetricsJournalState
   >
+  'usageStats.get': BackendRpcDefinition<undefined, UsageStatsState>
+  'usageStats.set': BackendRpcDefinition<UsageStatsSetParams, UsageStatsState>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
@@ -413,6 +429,17 @@ export interface BackendRpcMethodMap {
     OverlayLayout
   >
   // --- end overlay layout (plan 164) ---
+  // --- Banners (plan 186) ---
+  'banners.list': BackendRpcDefinition<undefined, Banner[]>
+  'banners.importImage': BackendRpcDefinition<BannerImportImageParams, Banner>
+  'banners.update': BackendRpcDefinition<BannerUpdateParams, Banner>
+  'banners.reorder': BackendRpcDefinition<BannerReorderParams, Banner[]>
+  /** The remaining list. */
+  'banners.delete': BackendRpcDefinition<BannerIdParams, Banner[]>
+  'banners.show': BackendRpcDefinition<BannerIdParams, Banner>
+  /** No `id` hides every banner. */
+  'banners.hide': BackendRpcDefinition<BannerHideParams, Banner[]>
+  // --- end banners (plan 186) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': BackendRpcDefinition<CohostAvatarCreateParams, CohostAvatarAccepted>
   'cohost.avatar.redo': BackendRpcDefinition<CohostAvatarRedoParams, CohostAvatarAccepted>
@@ -515,6 +542,8 @@ export interface BackendEventMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
+  // --- Banners (plan 186): the full list, to every window ---
+  'banners.changed': Banner[]
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
   'cohost.avatar.draft': CohostAvatarDraft
@@ -773,6 +802,14 @@ const metricsJournalSetParamsSchema = objectSchema(
   { enabled: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<MetricsJournalSetParams>
+const usageStatsStateSchema = objectSchema(
+  { enabled: booleanSchema, envDisabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<UsageStatsState>
+const usageStatsSetParamsSchema = objectSchema(
+  { enabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<UsageStatsSetParams>
 const streamOutputTopologyProbeStateSchema = enumSchema([
   'not-required',
   'passed',
@@ -2769,6 +2806,81 @@ const migrateHighlightAnchorParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<MigrateHighlightAnchorParams>
 // --- end overlay layout (plan 164) ---
+// --- Banners (plan 186) ---
+// Exact: the pinned `banner` fixture. The only optional fields are the Phase 2
+// timer, omitted when off (`skip_serializing_if`); a `null` is refused, the
+// serde null trap. Ids are opaque tokens that also name the image files.
+const bannerIdSchema = runtimeSchema<string>('a banner id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a banner id')
+  }
+  return value
+})
+const bannerFileNameSchema = runtimeSchema<string>('a banner file basename', (value, path) => {
+  if (!isBannerFileName(value)) throw new RuntimeSchemaError(path, 'a banner file basename')
+  return value
+})
+const bannerNameSchema = stringSchema({ minLength: 1, maxLength: 256 })
+const bannerPixelSizeSchema = numberSchema({ integer: true, min: 1, max: 65_536 })
+const bannerTimestampSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const bannerSchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    name: bannerNameSchema,
+    imageFile: bannerFileNameSchema,
+    thumbnailFile: bannerFileNameSchema,
+    width: bannerPixelSizeSchema,
+    height: bannerPixelSizeSchema,
+    hasAlpha: booleanSchema,
+    sortOrder: numberSchema({ integer: true }),
+    shown: booleanSchema,
+    horizontal: overlayRectSchema,
+    vertical: overlayRectSchema,
+    showOnStream: booleanSchema,
+    showInRecording: booleanSchema,
+    opacity: numberSchema({ min: 0, max: BANNER_OPACITY_MAX }),
+    hideAfterSec: optionalSchema(numberSchema({ integer: true, min: 1, max: 86_400 })),
+    repeatEveryMin: optionalSchema(numberSchema({ integer: true, min: 1, max: 1_440 })),
+    createdAt: bannerTimestampSchema,
+    updatedAt: bannerTimestampSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<Banner>
+const bannerListSchema = arraySchema(bannerSchema, {
+  maxLength: BANNER_MAX_COUNT
+}) as RuntimeSchema<Banner[]>
+const bannerImportImageParamsSchema = objectSchema(
+  { sourceCapability: stringSchema({ minLength: 1, maxLength: 1024 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerImportImageParams>
+const bannerUpdateParamsSchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    name: optionalSchema(bannerNameSchema),
+    horizontal: optionalSchema(overlayRectSchema),
+    vertical: optionalSchema(overlayRectSchema),
+    showOnStream: optionalSchema(booleanSchema),
+    showInRecording: optionalSchema(booleanSchema),
+    opacity: optionalSchema(numberSchema({ min: BANNER_OPACITY_MIN, max: BANNER_OPACITY_MAX })),
+    // `0` turns a timer off.
+    hideAfterSec: optionalSchema(numberSchema({ integer: true, min: 0, max: 86_400 })),
+    repeatEveryMin: optionalSchema(numberSchema({ integer: true, min: 0, max: 1_440 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerUpdateParams>
+const bannerReorderParamsSchema = objectSchema(
+  { ids: arraySchema(bannerIdSchema, { maxLength: BANNER_MAX_COUNT }) },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerReorderParams>
+const bannerIdParamsSchema = objectSchema(
+  { id: bannerIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerIdParams>
+const bannerHideParamsSchema = objectSchema(
+  { id: optionalSchema(bannerIdSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerHideParams>
+// --- end banners (plan 186) ---
 // Plan 089: Settings → General → "Show 7TV emotes in chat".
 const sevenTvStatusSchema = objectSchema(
   {
@@ -3030,7 +3142,17 @@ const cohostCommandSchema = objectSchema(
   {
     id: boundedString,
     heard: stringSchema({ maxLength: 1000 }),
-    kind: enumSchema(['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']),
+    kind: enumSchema([
+      'highlight',
+      'clear',
+      'remove',
+      'confirm',
+      'cancel',
+      'unknown',
+      'show-banner',
+      'hide-banner',
+      'hide-banners'
+    ]),
     status: enumSchema([
       'done',
       'not-found',
@@ -4043,6 +4165,8 @@ const runtimeContracts = {
     params: metricsJournalSetParamsSchema,
     result: metricsJournalStateSchema
   },
+  'usageStats.get': { params: undefinedSchema, result: usageStatsStateSchema },
+  'usageStats.set': { params: usageStatsSetParamsSchema, result: usageStatsStateSchema },
   'stream.targets.snapshot': {
     params: undefinedSchema,
     result: streamTargetsSnapshotSchema
@@ -4262,6 +4386,15 @@ const runtimeContracts = {
     result: overlayLayoutSchema
   },
   // --- end overlay layout (plan 164) ---
+  // --- Banners (plan 186) ---
+  'banners.list': { params: undefinedSchema, result: bannerListSchema },
+  'banners.importImage': { params: bannerImportImageParamsSchema, result: bannerSchema },
+  'banners.update': { params: bannerUpdateParamsSchema, result: bannerSchema },
+  'banners.reorder': { params: bannerReorderParamsSchema, result: bannerListSchema },
+  'banners.delete': { params: bannerIdParamsSchema, result: bannerListSchema },
+  'banners.show': { params: bannerIdParamsSchema, result: bannerSchema },
+  'banners.hide': { params: bannerHideParamsSchema, result: bannerListSchema },
+  // --- end banners (plan 186) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': {
     params: cohostAvatarCreateParamsSchema,
@@ -4436,6 +4569,7 @@ const runtimeEventSchemas = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
+  'banners.changed': bannerListSchema,
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,
   'cohost.avatar.draft': cohostAvatarDraftSchema,

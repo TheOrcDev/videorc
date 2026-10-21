@@ -43,6 +43,7 @@ import {
   isBuddyShippedPack
 } from '@/lib/buddy-pet-view'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
+import { inlineUserError } from '@/lib/user-error'
 import type { BuddyMotionSettings } from '../../../shared/buddy-pet'
 
 export type BuddyAvatarView = 'still' | 'alive'
@@ -153,6 +154,8 @@ export function BuddyAvatarSection({
       await pets.refresh()
       await onWear(imported.pack.packId)
     } catch (failure: unknown) {
+      // The backend already writes the refusal (plan 168 / #701). Strip the
+      // IPC wrapper and keep those words — the generic mapper would hide them.
       setImportError(ipcErrorMessage(failure))
     } finally {
       setImporting(false)
@@ -165,7 +168,9 @@ export function BuddyAvatarSection({
     setImportError(null)
     setActionError(null)
     onWear(pack.packId).catch((failure: unknown) =>
-      setActionError(failure instanceof Error ? failure.message : `Couldn't wear ${pack.name}.`)
+      setActionError(
+        inlineUserError(failure, { action: 'wear', object: pack.name }, 'buddy-avatar')
+      )
     )
   }
 
@@ -178,7 +183,7 @@ export function BuddyAvatarSection({
       await pets.remove(pack.packId)
     } catch (failure: unknown) {
       setActionError(
-        `Couldn't remove ${pack.name}: ${failure instanceof Error ? failure.message : String(failure)}`
+        inlineUserError(failure, { action: 'remove', object: pack.name }, 'buddy-avatar')
       )
     }
   }
@@ -187,7 +192,9 @@ export function BuddyAvatarSection({
     setImportError(null)
     setActionError(null)
     onViewChange(next).catch((failure: unknown) =>
-      setActionError(failure instanceof Error ? failure.message : "Couldn't switch the avatar.")
+      setActionError(
+        inlineUserError(failure, { action: 'switch', object: 'the avatar' }, 'buddy-avatar')
+      )
     )
   }
 

@@ -124,11 +124,31 @@ export function captionRuntimeStartBlocked(input: {
   return input.captureActive && !input.outputReadiness.ready
 }
 
+/**
+ * Live captions transcribe the microphone after gain and mute, which needs
+ * the native microphone path (CoreAudio). Linux feeds its microphone straight
+ * to FFmpeg, so the backend refuses every captioned session there and tells
+ * the streamer to pick "a supported microphone" Linux doesn't have (ogre,
+ * 2026-10-13). On Linux, sessions start without captions and say why; the
+ * saved setting is kept for when the path exists.
+ */
+export const CAPTIONS_LINUX_TITLE = "Live captions aren't available on Linux yet"
+export const CAPTIONS_LINUX_DETAIL =
+  "Videorc can't pass the microphone to captions here. Recordings and livestreams start without them, and your setting is kept."
+export const CAPTIONS_UNAVAILABLE_ON_LINUX = `${CAPTIONS_LINUX_TITLE}. ${CAPTIONS_LINUX_DETAIL}`
+
+/** Why live captions can't run on this platform at all, or null. */
+export function captionsPlatformUnavailableReason(platform: string | undefined): string | null {
+  return platform === 'linux' ? CAPTIONS_UNAVAILABLE_ON_LINUX : null
+}
+
 export function decideGoLiveCaptionsReadiness(input: {
   persistedEnabled: boolean
   suppressForSession: boolean
   capabilities: AiCapabilities | null
   outputReadiness?: CaptionSessionOutputReadiness
+  /** `captionsPlatformUnavailableReason`: this computer can't caption at all. */
+  platformUnavailable?: string | null
 }): GoLiveCaptionsReadiness {
   if (!input.persistedEnabled) {
     return {
@@ -136,6 +156,15 @@ export function decideGoLiveCaptionsReadiness(input: {
       blocksStart: false,
       title: 'Captions off',
       description: "Live captions aren't enabled for this session.",
+      transport: null
+    }
+  }
+  if (input.platformUnavailable) {
+    return {
+      kind: 'skipped',
+      blocksStart: false,
+      title: 'Captions unavailable',
+      description: input.platformUnavailable,
       transport: null
     }
   }

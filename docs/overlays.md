@@ -119,6 +119,18 @@ Sentences are built from the item's mid-sentence label: `highlights`,
 backend (`overlay_layout.rs`) build them byte for byte the same; a test on
 each side pins them.
 
+## Banners (plan 186)
+
+Banners ([banners.md](banners.md)) reuse this model: each banner has a
+horizontal and a vertical rect and the two switches (labelled **Appears
+in: Stream / Recording** on a banner, because a banner also has Show and
+Hide), and each banner's legs come from the same `overlay_leg_plan` with
+the same shared-leg fallback as the highlight card and the Buddy. Unlike
+the three items, a banner also draws on the idle preview, and it is a list,
+stored in its own `banners` table rather than in `overlayLayout`. All
+showing banners count as one item in the Go Live sheet, labelled
+`banners` ("Recording will include banners while streaming vertical.").
+
 ## Weak Windows (plan 090)
 
 When the output check proves a machine cannot run two encodes (the probe's
@@ -186,7 +198,8 @@ pixel position. `safe_inset` lets a yielding overlay step inside its rect
   normalized transform and crop. The direct D3D11 recording path (no
   overlays) is never chosen when an overlay burns.
 
-Z order on every path: captions, then the Buddy (its pet, then its bubble),
+Z order on every path: banners (over the scene and any takeover; plan 186),
+then captions, then the Buddy (its pet, then its bubble),
 then the highlight card. The pet is one turned, linearly sampled quad per
 leg: a bilinear inverse-affine blit on the CPU, a key-addressed texture
 (namespace 7) with corner vertices on Metal, and a `BuddySprite` layer

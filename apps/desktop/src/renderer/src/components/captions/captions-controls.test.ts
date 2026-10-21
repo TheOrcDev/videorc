@@ -28,7 +28,8 @@ function render({
   enabled = false,
   status = { state: 'idle' } as CaptionsStatus,
   microphoneId = 'mic-1' as string | null,
-  overlayCaptions = { showOnStream: true, showInRecording: false }
+  overlayCaptions = { showOnStream: true, showInRecording: false },
+  platform = 'darwin'
 } = {}): string {
   const captureConfig: CaptureConfig = {
     ...defaultCaptureConfig,
@@ -51,7 +52,7 @@ function render({
       ...DEFAULT_OVERLAY_LAYOUT,
       captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, ...overlayCaptions }
     },
-    runtimeInfo: { platform: 'darwin' },
+    runtimeInfo: { platform },
     selectedMicrophone: undefined,
     setCaptureConfig: vi.fn(),
     startCaptions: vi.fn(),
@@ -95,6 +96,20 @@ describe('Captions page (plan 174 S3.7)', () => {
     expect(styleItemsDisabled(markup).length).toBeGreaterThan(0)
     expect(disabledAttr(markup, 'aria-label="Caption text size"')).toBe(true)
     expect(disabledAttr(markup, 'id="caption-language"')).toBe(true)
+  })
+
+  it('says live captions are not on Linux yet, and has nothing to turn on there', () => {
+    // ogre 2026-10-13: the backend refuses any captioned session without the
+    // native microphone path, which Linux doesn't have.
+    const off = render({ platform: 'linux' })
+    expect(off).toContain('data-testid="captions-platform-unavailable"')
+    expect(off).toContain('available on Linux yet')
+    expect(disabledAttr(off, 'role="switch"')).toBe(true)
+    // Someone who had them on can still turn them off; no livestream rule is shown.
+    const on = render({ platform: 'linux', enabled: true })
+    expect(disabledAttr(on, 'role="switch"')).toBe(false)
+    expect(on).not.toContain('data-testid="captions-livestream-blocker"')
+    expect(render()).not.toContain('captions-platform-unavailable')
   })
 
   it('keeps everything usable when captions are part of the plan', () => {

@@ -100,7 +100,10 @@ const refreshDevices = () =>
   }
   if (!button || button.disabled) throw new Error('Device refresh unavailable.');
   button.click();
-  await new Promise(requestAnimationFrame);
+  // A frame, or 100 ms when none comes: a window that isn't painting (screen
+  // off, hidden) never runs requestAnimationFrame, and this whole eval hung
+  // for its 120 s timeout (ogre, DPMS off, 2026-10-13).
+  await new Promise((resolve) => { requestAnimationFrame(() => resolve()); setTimeout(resolve, 100); });
   const deadline = Date.now() + ${timeoutMs};
   while (Date.now() < deadline) {
     const refreshed = [...sourcesPage().querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
@@ -196,7 +199,7 @@ try {
     )
     for (let pass = 0; pass < 2; pass++) {
       const theme = await evaluate(
-        `await waitFor('button[aria-label="Actions for Smoke A"]'); const card = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.includes('Smoke A')); card?.scrollIntoView({block: 'center'}); await new Promise(requestAnimationFrame); return document.documentElement.classList.contains('dark') ? 'dark' : 'light'`
+        `await waitFor('button[aria-label="Actions for Smoke A"]'); const card = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.includes('Smoke A')); card?.scrollIntoView({block: 'center'}); await new Promise((resolve) => { requestAnimationFrame(() => resolve()); setTimeout(resolve, 100); }); return document.documentElement.classList.contains('dark') ? 'dark' : 'light'`
       )
       const capture = await requestSmokeCommand(
         smoke,
@@ -439,7 +442,34 @@ try {
   assert.equal(hiddenRestart.visual.sources.cameraId, selectedCameraId)
   assert.equal(hiddenRestart.visual.sources.cameraOff, false)
 
+  // Preview smoke mode (VIDEORC_SMOKE_PREVIEW_MOTION, needed for the command
+  // server) makes the renderer stop the preview camera whenever its camera
+  // effect runs, which an apply triggers. On Linux a recording needs live
+  // camera preview frames to start, so the stop ~0.8 s after an apply
+  // refused the take ("the camera preview source(s) produced no frames";
+  // ogre 2026-10-13). Let the apply settle, then make sure the camera is live
+  // with fresh frames before starting.
+  const ensureCameraPreviewLive = async (visual) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const deadline = Date.now() + timeoutMs
+    let status = null
+    while (Date.now() < deadline) {
+      status = await request(ws, timeoutMs, 'preview.camera.status')
+      if (status.state === 'live' && status.framesCaptured > 0 && (status.frameAgeMs ?? 0) < 1000)
+        return status
+      if (status.state !== 'starting') {
+        await request(ws, timeoutMs, 'preview.camera.start', {
+          sources: visual.sources,
+          layout: visual.layout,
+          video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 }
+        })
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    throw new Error(`Camera preview never went live before recording: ${JSON.stringify(status)}`)
+  }
   const recordCameraVisibility = async (visual, liveTargetId) => {
+    await ensureCameraPreviewLive(visual)
     const recordingDirectory = await requestSmokeCommand(
       smoke,
       'authorize-smoke-resource',

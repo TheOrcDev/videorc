@@ -3,6 +3,7 @@ import {
   screenImportAuthorizationError,
   type TakeoverImportPhase
 } from '@/lib/takeover-import'
+import { createBannerImporter, type BannerImportPhase } from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
@@ -321,6 +322,8 @@ import type {
   AudioMeterResult,
   AudioProcessingUpdateResult,
   BackendConnection,
+  Banner,
+  BannerUpdateParams,
   BackendHealth,
   BackendLifecycleEvent,
   BackendLogEvent,
@@ -467,10 +470,12 @@ import {
 } from '@/lib/captions-ui'
 import {
   captionRuntimeStartBlocked,
+  captionsPlatformUnavailableReason,
   captionSessionOutputReadiness,
   decideGoLiveCaptionsReadiness,
   type GoLiveCaptionsReadiness
 } from '@/lib/captions-preflight'
+import { sceneVisibilityIdentity } from '@/lib/scene-visibility-identity'
 import { streamingWithoutTargets, updateGoLiveExclusions } from '@/lib/go-live-exclusions'
 import type { GoLivePhase } from '@/lib/go-live-dialog-view'
 import {
@@ -616,6 +621,11 @@ function loadSessionRuntimeRecovery() {
 
 function loadCommandFailurePolicy() {
   return import('@/lib/command-failure-policy')
+}
+
+// Banner refusal copy (plan 186): read only when a banner call fails.
+function loadBannerRules() {
+  return import('@/lib/banners')
 }
 
 function loadCaptionOverlay() {
@@ -1629,8 +1639,41 @@ interface StudioAudioContextValue {
   meterLevel: number
 }
 
+/**
+ * Banners (plan 186): the one set, backend-owned. Its own context, so a show,
+ * a hide or a move publishes nothing to core consumers. Assets manages them,
+ * the Scene page places them, and the Stream Manager relay and the remotes
+ * show and hide them through these same actions. A refusal is a warning toast
+ * with the backend's sentence; the actions resolve false (or null) after any
+ * failure, which has already said so.
+ */
+export type StudioBannersContextValue = {
+  /** Assets order, which is also the drawing order: later is on top. */
+  banners: Banner[]
+  /** `banners.list` has answered once: "No banners yet" waits for it. */
+  bannersLoaded: boolean
+  /** Videorc is reconnecting: every banner action waits for it. */
+  bannersOffline: boolean
+  bannerImportPhase: BannerImportPhase
+  /** The banner the Scene page selects (Assets → Place on Scene); null when none, or deleted. */
+  selectedBannerId: string | null
+  selectBanner: (id: string | null) => void
+  /** Assets → Import image…: the picker, then `banners.importImage`. Never shows the new banner. */
+  importBanner: () => Promise<void>
+  updateBanner: (id: string, patch: Omit<BannerUpdateParams, 'id'>) => Promise<Banner | null>
+  /** Every banner id in the new Assets order (`bannerOrderAfterMove`). */
+  reorderBanners: (ids: string[]) => Promise<boolean>
+  deleteBanner: (id: string) => Promise<boolean>
+  showBanner: (id: string) => Promise<boolean>
+  /** No id hides every banner. */
+  hideBanner: (id?: string) => Promise<boolean>
+  toggleBanner: (id: string) => Promise<boolean>
+}
+
 /** The takeover list before it loads: one stable empty array. */
 const NO_SCREENS: StreamScreen[] = []
+/** The banner list before it loads: one stable empty array. */
+const NO_BANNERS: Banner[] = []
 
 const StudioContext = createContext<StudioCoreContextValue | null>(null)
 const StudioRecordingStateContext = createContext<StudioRecordingStateContextValue | null>(null)
@@ -1639,6 +1682,7 @@ const StudioPreviewContext = createContext<StudioPreviewContextValue | null>(nul
 const StudioDiagnosticsContext = createContext<StudioDiagnosticsContextValue | null>(null)
 const StudioChatContext = createContext<StudioChatContextValue | null>(null)
 const StudioAudioContext = createContext<StudioAudioContextValue | null>(null)
+const StudioBannersContext = createContext<StudioBannersContextValue | null>(null)
 
 interface StudioShellContextValue {
   wsStatus: WsStatus
@@ -2127,6 +2171,14 @@ export function useStudioAudio(): StudioAudioContextValue {
   return value
 }
 
+export function useStudioBanners(): StudioBannersContextValue {
+  const value = useContext(StudioBannersContext)
+  if (!value) {
+    throw new Error('useStudioBanners must be used within a StudioProvider')
+  }
+  return value
+}
+
 /** Compatibility hook for consumers that genuinely span every state domain. */
 export function useStudio(): StudioContextValue {
   const core = useStudioCore()
@@ -2353,6 +2405,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const screens = screenList ?? NO_SCREENS
   const screensLoaded = screenList !== null
   const [activeScreen, setActiveScreen] = useState<StreamScreen | null>(null)
+  // Banners (plan 186): null until `banners.list` first answers (J2-8 again).
+  const [bannerList, setBanners] = useState<Banner[] | null>(null)
+  const bannerListRef = useRef(bannerList)
+  bannerListRef.current = bannerList
+  const [selectedBannerId, setSelectedBannerId] = useState<string | null>(null)
+  // The Stream Manager's read-only copy (plan 186 S7): `{id, name, shown}`.
+  useEffect(() => {
+    void window.videorc?.pushCommentsBanners?.(
+      bannerList && bannerList.map(({ id, name, shown }) => ({ id, name, shown }))
+    )
+  }, [bannerList])
   const [platformAccounts, setPlatformAccounts] = useState<PlatformAccount[]>([])
   const [platformAccountValidations, setPlatformAccountValidations] = useState<
     PlatformAccountValidation[]
@@ -2751,6 +2814,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const commitOverlayLayout = useCallback((next: OverlayLayout) => {
     setOverlayLayoutState((current) => (overlayLayoutsEqual(current, next) ? current : next))
   }, [])
+  // Whether this connection has the backend's layout yet. Until then the
+  // state holds the shipped defaults, and nothing may write a layout built
+  // from them (the captions seed below once saved the defaults over the
+  // streamer's layout at every launch, turning Buddy off the stream).
+  const [overlayLayoutLoaded, setOverlayLayoutLoaded] = useState(false)
   // The layout itself: loaded on connect, pushed on change (`overlays.layout`).
   useEffect(() => {
     if (!client || wsStatus !== 'connected') return
@@ -2763,9 +2831,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // An older backend has no such method (or answers off-contract); the
       // shipped defaults stand.
       .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setOverlayLayoutLoaded(true)
+      })
     const off = client.on('overlays.layout', commitOverlayLayout)
     return () => {
       cancelled = true
+      setOverlayLayoutLoaded(false)
       off()
     }
   }, [client, commitOverlayLayout, wsStatus])
@@ -2785,7 +2857,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const captionsBurnTargetRef = useRef(captureConfig.captions.burnTarget)
   captionsBurnTargetRef.current = captureConfig.captions.burnTarget
   useEffect(() => {
-    if (!client || wsStatus !== 'connected') return
+    if (!client || wsStatus !== 'connected' || !overlayLayoutLoaded) return
     const savedTarget = captionsBurnTargetRef.current
     const seeded =
       captionsSeedRef.current === null
@@ -2806,7 +2878,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // The layout's switches are the one home; the key keeps this effect on
     // switch changes (and a saved target arriving) only, never on a rect drag.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, wsStatus, captionsSwitchesKey, captureConfig.captions.burnTarget, setOverlayLayout])
+  }, [
+    client,
+    wsStatus,
+    overlayLayoutLoaded,
+    captionsSwitchesKey,
+    captureConfig.captions.burnTarget,
+    setOverlayLayout
+  ])
   // The streamer's corner pick lives in main (it must survive the Chat window
   // being closed). A ref, not state, feeds the highlight RPC so a pick applies
   // to the very next highlight without re-creating the relay listeners.
@@ -2941,11 +3020,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         })
     })
+    // Banners from the Stream Manager (plan 186 S7): by id, quietly here; a
+    // refusal's sentence goes back to the window that asked.
+    const offBanner = window.videorc?.onBannerRequest?.(({ requestId, ...action }) => {
+      void (async () => {
+        if (!client) throw offlineError()
+        const { runBannerAction } = await loadBannerRules()
+        return runBannerAction(client, action, bannerListRef.current ?? NO_BANNERS)
+      })()
+        .catch((error: unknown) => ({ ok: false, message: ipcErrorMessage(error) }))
+        .then(({ ok, message }) =>
+          window.videorc?.pushBannerResult?.(
+            ok
+              ? { requestId, ok, value: true }
+              : { requestId, ok, error: message || "Couldn't change the banner." }
+          )
+        )
+    })
     return () => {
       cancelled = true
       offState?.()
       offClear?.()
       offClipMark?.()
+      offBanner?.()
       offMarker?.()
       offMarkerCreated?.()
       offMarkerRefused?.()
@@ -3465,7 +3562,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
-  const [suppressCaptionsForSession, setSuppressCaptionsForSession] = useState(false)
+  const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
+  const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
+  // Linux can't caption at all (no native microphone path): every session
+  // skips captions there, as if "Continue without captions" were chosen.
+  const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
+  const suppressCaptionsForSession = suppressCaptionsChoice || captionsPlatformUnavailable !== null
   // "Go live without …" for this attempt only (plan 174 S3.4, B-8).
   const [goLiveExcludedTargetIds, setGoLiveExcludedTargetIds] = useState<readonly string[]>([])
   const goLiveExcludedTargetIdsRef = useRef<readonly string[]>([])
@@ -3516,13 +3618,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         persistedEnabled: captureConfig.captions.enabled,
         suppressForSession: suppressCaptionsForSession,
         capabilities: aiCapabilities,
-        outputReadiness: goLiveCaptionOutputReadiness
+        outputReadiness: goLiveCaptionOutputReadiness,
+        platformUnavailable: captionsPlatformUnavailable
       }),
     [
       aiCapabilities,
       goLiveCaptionOutputReadiness,
       captureConfig.captions.enabled,
-      suppressCaptionsForSession
+      suppressCaptionsForSession,
+      captionsPlatformUnavailable
     ]
   )
   const continueGoLiveWithoutCaptions = useCallback(() => setSuppressCaptionsForSession(true), [])
@@ -3601,12 +3705,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const screenImporter = useRef(createTakeoverImporter())
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
+  const [bannerImportPhase, setBannerImportPhase] = useState<BannerImportPhase>('idle')
+  const bannerImporter = useRef(createBannerImporter())
+  // Bumped by every `banners.changed`: the reliable full list wins over a
+  // late reply, the way the takeover list does.
+  const bannerListEventRevision = useRef(0)
   useEffect(() => {
     screenImporter.current.reset()
     setScreenImportPhase('idle')
     setPendingScreenImports([])
+    bannerImporter.current.reset()
+    setBannerImportPhase('idle')
     const importer = screenImporter.current
-    return () => importer.reset()
+    const bannerImport = bannerImporter.current
+    return () => {
+      importer.reset()
+      bannerImport.reset()
+    }
   }, [client, wsStatus])
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
@@ -3836,7 +3951,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [lastError, setLastError] = useState<string | null>(null)
   const lastErrorRef = useRef(lastError)
   lastErrorRef.current = lastError
-  const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const previewSurfaceStatusRef = useRef<PreviewSurfaceStatus>(idlePreviewSurfaceStatus())
@@ -7285,6 +7399,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bootstrapGuard.mark('activeScreen')
         commitActiveScreen(payload as StreamScreen | null)
       }),
+      // Plan 186: every banner change carries the full list to every window.
+      nextClient.on('banners.changed', (payload) => {
+        bannerListEventRevision.current += 1
+        setBanners(payload)
+      }),
       nextClient.on('platformAccounts.changed', (payload) => {
         // The authorization link toast is persistent; retire it as soon
         // as the connection resolves.
@@ -7608,6 +7727,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           },
           () => undefined
+        )
+        // Banners (plan 186) load outside the batch: nothing on startup waits
+        // for them, and a failed read must never fail the batch. Until a list
+        // arrives (this read or the next `banners.changed`), Assets says
+        // "Loading banners…", never "No banners yet".
+        const bannerListRevision = bannerListEventRevision.current
+        void bootstrapRequest<Banner[]>('banners.list').then(
+          (nextBanners) => {
+            if (generationIsCurrent() && bannerListEventRevision.current === bannerListRevision)
+              setBanners(nextBanners)
+          },
+          (error: unknown) => console.warn('[banners] list read failed:', error)
         )
         const [
           nextHealth,
@@ -8617,14 +8748,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // The request's own scene.changed echo may arrive before its ACK. Only
       // that source's visibility is allowed to differ; other scene edits retire it.
       const visibilityIdentity = (candidate: Scene | null): string =>
-        JSON.stringify(
-          candidate && {
-            ...candidate,
-            sources: candidate.sources.map((source) =>
-              source.id === sourceId ? { ...source, visible: undefined } : source
-            )
-          }
-        )
+        sceneVisibilityIdentity(candidate, sourceId)
       const identity = visibilityIdentity(requestedScene)
       const layoutIntent = transformLayoutIntent({ ...captureConfigRef.current.layout })
       setSceneVisibilityPending(true)
@@ -10560,6 +10684,164 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const importDroppedScreenImages = useCallback(
     (files: File[]) => importScreenSelections((api) => api.authorizeDroppedScreenImages(files)),
     [importScreenSelections]
+  )
+
+  // Banners (plan 186). A refusal ("Four banners are showing. Hide one
+  // first.") is a warning with the backend's sentence; anything else is the
+  // usual failure. Show, hide and a place never toast success: the picture
+  // is the confirmation.
+  const reportBannerError = useCallback(
+    (error: unknown, context: UserErrorContext) => {
+      void loadBannerRules().then(
+        ({ bannerRefusalError }) => {
+          const refusal = bannerRefusalError(error)
+          if (refusal) toastUserError(refusal, context, { id: 'banner-refusal' })
+          else reportError(error, context)
+        },
+        () => reportError(error, context)
+      )
+    },
+    [reportError]
+  )
+
+  /**
+   * One banner call on the live connection. Its reply commits unless a
+   * `banners.changed` overtook it; null after a failure, which has said so.
+   */
+  const runBannerCommand = useCallback(
+    async <T,>(
+      context: UserErrorContext,
+      command: (active: BackendClient) => Promise<T>,
+      commit: (result: T) => void
+    ): Promise<T | null> => {
+      if (!client || wsStatus !== 'connected') {
+        toastOffline(context)
+        return null
+      }
+      const revision = bannerListEventRevision.current
+      try {
+        setLastError(null)
+        const result = await command(client)
+        if (clientRef.current === client && bannerListEventRevision.current === revision)
+          commit(result)
+        return result
+      } catch (error) {
+        if (clientRef.current === client) reportBannerError(error, context)
+        return null
+      }
+    },
+    [client, reportBannerError, wsStatus]
+  )
+
+  const commitBanner = useCallback(
+    (banner: Banner) =>
+      setBanners((current) =>
+        [...(current ?? []).filter((item) => item.id !== banner.id), banner].sort(
+          (a, b) => a.sortOrder - b.sortOrder
+        )
+      ),
+    []
+  )
+
+  const importBanner = useCallback(async () => {
+    const context = { action: 'import', object: 'the image' }
+    if (!client || wsStatus !== 'connected') {
+      toastOffline(context)
+      return
+    }
+    if (!window.videorc?.pickBannerImage) {
+      console.warn('[banners] no image picker in this renderer')
+      return
+    }
+    const revision = bannerListEventRevision.current
+    await bannerImporter.current.run({
+      pick: () => window.videorc.pickBannerImage(),
+      importImage: (selection) => {
+        setLastError(null)
+        return client.requestTyped('banners.importImage', {
+          sourceCapability: selection.capabilityId
+        })
+      },
+      isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
+      onPhase: setBannerImportPhase,
+      // The new tile is the confirmation. An import never shows the banner.
+      onImported: (banner) => {
+        if (bannerListEventRevision.current === revision) commitBanner(banner)
+      },
+      onError: (error) => reportBannerError(error, context)
+    })
+  }, [client, commitBanner, reportBannerError, wsStatus])
+
+  const updateBanner = useCallback(
+    (id: string, patch: Omit<BannerUpdateParams, 'id'>) =>
+      runBannerCommand(
+        {
+          action:
+            patch.name !== undefined
+              ? 'rename'
+              : patch.horizontal || patch.vertical
+                ? 'move'
+                : 'change',
+          object: 'the banner'
+        },
+        (active) => active.requestTyped('banners.update', { ...patch, id }),
+        commitBanner
+      ),
+    [commitBanner, runBannerCommand]
+  )
+
+  const reorderBanners = useCallback(
+    async (ids: string[]) =>
+      (await runBannerCommand(
+        { action: 'move', object: 'the banner' },
+        (active) => active.requestTyped('banners.reorder', { ids }),
+        setBanners
+      )) !== null,
+    [runBannerCommand]
+  )
+
+  const deleteBanner = useCallback(
+    async (id: string) => {
+      const name = bannerListRef.current?.find((banner) => banner.id === id)?.name ?? 'banner'
+      const remaining = await runBannerCommand(
+        { action: 'delete', object: 'the banner' },
+        (active) => active.requestTyped('banners.delete', { id }),
+        setBanners
+      )
+      if (remaining === null) return false
+      // A confirmed delete may say so, and names what went (plan 174 C-1).
+      toast.success(`Deleted “${name}”`)
+      return true
+    },
+    [runBannerCommand]
+  )
+
+  const showBanner = useCallback(
+    async (id: string) =>
+      (await runBannerCommand(
+        { action: 'show', object: 'the banner' },
+        (active) => active.requestTyped('banners.show', { id }),
+        commitBanner
+      )) !== null,
+    [commitBanner, runBannerCommand]
+  )
+
+  const hideBanner = useCallback(
+    async (id?: string) =>
+      (await runBannerCommand(
+        { action: 'hide', object: id === undefined ? 'the banners' : 'the banner' },
+        (active) => active.requestTyped('banners.hide', id === undefined ? {} : { id }),
+        setBanners
+      )) !== null,
+    [runBannerCommand]
+  )
+
+  const toggleBanner = useCallback(
+    (id: string) =>
+      bannerListRef.current?.find((banner) => banner.id === id)?.shown
+        ? hideBanner(id)
+        : showBanner(id),
+    [hideBanner, showBanner]
   )
 
   const openSystemPermissionSettings = useCallback(
@@ -15536,6 +15818,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }
       },
+      banners: bannerListRef.current ?? NO_BANNERS,
       markClip: async () => {
         try {
           const event = await client.request<ClipMarkedEvent>('clip.mark')
@@ -15597,7 +15880,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS],
     screens.map((screen) => ({ id: screen.id, name: screen.name })),
     systemAudioStatus,
-    systemAudioShown
+    systemAudioShown,
+    bannerList ?? NO_BANNERS
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on
@@ -15861,6 +16145,39 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () => ({ audioMeter, audioMeterLoading, meterLevel }),
     [audioMeter, audioMeterLoading, meterLevel]
   )
+  const bannersValue = useMemo<StudioBannersContextValue>(() => {
+    const banners = bannerList ?? NO_BANNERS
+    return {
+      banners,
+      bannersLoaded: bannerList !== null,
+      bannersOffline: wsStatus !== 'connected',
+      bannerImportPhase,
+      // A deleted banner is never the selected one.
+      selectedBannerId: banners.some((banner) => banner.id === selectedBannerId)
+        ? selectedBannerId
+        : null,
+      selectBanner: setSelectedBannerId,
+      importBanner,
+      updateBanner,
+      reorderBanners,
+      deleteBanner,
+      showBanner,
+      hideBanner,
+      toggleBanner
+    }
+  }, [
+    bannerImportPhase,
+    bannerList,
+    deleteBanner,
+    hideBanner,
+    importBanner,
+    reorderBanners,
+    selectedBannerId,
+    showBanner,
+    toggleBanner,
+    updateBanner,
+    wsStatus
+  ])
   const recordingStateValue = useMemo<StudioRecordingStateContextValue>(
     () => ({
       recording: {
@@ -16440,17 +16757,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   return (
     <StudioShellContext.Provider value={shellValue}>
-      <StudioContextProviders
-        audio={audioValue}
-        chat={chatValue}
-        core={value}
-        diagnostics={diagnosticsValue}
-        preview={previewValue}
-        recording={recordingValue}
-        recordingState={recordingStateValue}
-      >
-        {children}
-      </StudioContextProviders>
+      <StudioBannersContext.Provider value={bannersValue}>
+        <StudioContextProviders
+          audio={audioValue}
+          chat={chatValue}
+          core={value}
+          diagnostics={diagnosticsValue}
+          preview={previewValue}
+          recording={recordingValue}
+          recordingState={recordingStateValue}
+        >
+          {children}
+        </StudioContextProviders>
+      </StudioBannersContext.Provider>
     </StudioShellContext.Provider>
   )
 }

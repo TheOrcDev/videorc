@@ -369,6 +369,21 @@ function pngChunk(type, data) {
   return Buffer.concat([length, typeBytes, data, crc])
 }
 
+/**
+ * The recording the pet smoke asks for (plan 168 S-C5). Linux's raw bridge
+ * runs one encode for the recording and the stream (plan 0016): 720p record
+ * beside a 1080p30 destination is refused, so a Linux record+stream take
+ * uses the stream profile. A recording-only take stays 720p (the travel
+ * budgets are calibrated there). macOS and Windows can record 720p next
+ * to a 1080p stream.
+ */
+export function buddyPetRecordingVideo({ platform = process.platform, stream = false } = {}) {
+  if (stream && platform === 'linux') {
+    return Object.freeze({ width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 })
+  }
+  return Object.freeze({ width: 1280, height: 720, fps: 30, bitrateKbps: 4000 })
+}
+
 let crcTable
 function crc32(bytes) {
   crcTable ??= Array.from({ length: 256 }, (_, value) => {

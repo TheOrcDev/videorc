@@ -29,7 +29,36 @@ export interface RemoteState {
 export interface RemoteDescribe {
   layoutPresets?: string[]
   takeovers?: Array<{ id: string; name: string }>
+  /** Plan 186; absent from apps that predate banners. */
+  banners?: Array<{ id: string; name: string; shown: boolean }>
   windows?: string[]
+}
+
+/** Longest banner name a key title shows before it ends in "…". */
+const BANNER_TITLE_MAX_CHARS = 10
+
+/**
+ * A Banner key's title (plan 186): the banner's name, with ON while it
+ * shows. A key whose banner is gone, or not picked yet, says Banner.
+ */
+export function bannerKeyTitle(
+  describe: RemoteDescribe | null,
+  bannerId: string | undefined,
+  connected: boolean
+): string {
+  if (!connected) return 'Videorc\noffline'
+  const banner = describe?.banners?.find((candidate) => candidate.id === bannerId)
+  if (!banner) return 'Banner'
+  const name =
+    banner.name.length > BANNER_TITLE_MAX_CHARS
+      ? `${banner.name.slice(0, BANNER_TITLE_MAX_CHARS - 1).trimEnd()}…`
+      : banner.name
+  return banner.shown ? `${name}\nON` : name
+}
+
+/** A Banner key's intent: a toggle by id, or nothing until one is picked. */
+export function bannerKeyIntent(bannerId: string | undefined): Record<string, unknown> | null {
+  return bannerId ? { kind: 'bannerToggle', bannerId } : null
 }
 
 interface Discovery {
@@ -95,6 +124,9 @@ export class VideorcClient extends EventEmitter {
   private pendingRequests = new Map<string, (ok: boolean) => void>()
   /** Admitted intents awaiting the renderer's remote.ack, keyed by intentId. */
   private pendingAcks = new Map<string, (ok: boolean) => void>()
+  /** One describe read at a time; a state that lands meanwhile reads again. */
+  private describeInFlight: string | null = null
+  private describeStale = false
 
   constructor(private readonly discoveryPath: string = defaultDiscoveryPath()) {
     super()
@@ -166,8 +198,9 @@ export class VideorcClient extends EventEmitter {
     ws.on('open', () => {
       this.connected = true
       this.emit('connected')
-      this.nextRequestId += 1
-      ws.send(JSON.stringify({ id: `sd-${this.nextRequestId}`, method: 'remote.describe' }))
+      this.describeInFlight = null
+      this.describeStale = false
+      this.requestDescribe()
     })
     ws.on('message', (raw) => {
       let parsed: unknown
@@ -196,6 +229,9 @@ export class VideorcClient extends EventEmitter {
       if (message.event === 'remote.state') {
         this.state = message.payload as RemoteState
         this.emit('state', this.state)
+        // Every publish from the app arrives as remote.state, and a banner
+        // shown or hidden changes describe, not state (plan 186): read it again.
+        this.requestDescribe()
         return
       }
       // The renderer executed (or refused) an admitted intent.
@@ -221,6 +257,13 @@ export class VideorcClient extends EventEmitter {
         }
         return
       }
+      if (message.id && message.id === this.describeInFlight) {
+        this.describeInFlight = null
+        if (this.describeStale) {
+          this.describeStale = false
+          this.requestDescribe()
+        }
+      }
       if (message.payload?.describe !== undefined || message.payload?.state !== undefined) {
         if (message.payload.describe) {
           this.describe = message.payload.describe
@@ -245,6 +288,17 @@ export class VideorcClient extends EventEmitter {
     }
     ws.on('close', onGone)
     ws.on('error', onGone)
+  }
+
+  private requestDescribe(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    if (this.describeInFlight) {
+      this.describeStale = true
+      return
+    }
+    this.nextRequestId += 1
+    this.describeInFlight = `sd-${this.nextRequestId}`
+    this.ws.send(JSON.stringify({ id: this.describeInFlight, method: 'remote.describe' }))
   }
 
   private scheduleReconnect(): void {

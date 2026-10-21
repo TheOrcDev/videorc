@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostSettings } from '@/lib/backend'
 import { BUDDY_NAME_REQUIRED, buddyNameToSave } from '@/lib/buddy-persona-view'
+import { UNKNOWN_REASON } from '@/lib/user-error'
 
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
@@ -230,6 +231,18 @@ describe('BuddyPersonaSection', () => {
     expect(sample.tabIndex).toBe(-1)
     await act(async () => sample.click())
     expect(document.querySelector('[data-testid="buddy-bubble-zoom-dialog"]')).not.toBeNull()
+  })
+
+  it('maps a failed save to user copy and never the raw path', async () => {
+    const raw = 'database error: private storage path /Users/streamer/Buddy'
+    patchCohostSettings.mockRejectedValueOnce(Object.assign(new Error(raw), { code: 'failed' }))
+    await render()
+    await type(nameInput(), 'Grum')
+    await blur(nameInput())
+    const line = document.querySelector('[data-testid="buddy-save-error"]')?.textContent
+    expect(line).toBe(`Couldn't save the changes. ${UNKNOWN_REASON}`)
+    expect(line).not.toContain(raw)
+    expect(line).not.toContain('/Users/streamer')
   })
 
   it('starts over behind a confirm: removes the folder and writes a fresh persona', async () => {

@@ -12,6 +12,7 @@ import {
   offlineError,
   toastOffline,
   toastUserError,
+  inlineUserError,
   userErrorMessage
 } from './user-error'
 
@@ -107,7 +108,22 @@ describe('userErrorMessage', () => {
   it('keeps a renderer-written reason, and an unmapped code stays generic', () => {
     expect(
       userErrorMessage(new UserFacingError('The selected output folder is unavailable.'), IMPORT)
-    ).toMatchObject({ kind: 'known', description: 'The selected output folder is unavailable.' })
+    ).toMatchObject({
+      kind: 'known',
+      tone: 'error',
+      description: 'The selected output folder is unavailable.'
+    })
+    // A refusal the renderer recognized keeps its sentence, as a warning (plan 186).
+    expect(
+      userErrorMessage(
+        new UserFacingError('Hide this banner before you delete it.', 'warning'),
+        IMPORT
+      )
+    ).toMatchObject({
+      kind: 'known',
+      tone: 'warning',
+      description: 'Hide this banner before you delete it.'
+    })
     expect(
       userErrorMessage(backendError('session-duplicate-failed', 'io error: disk full'), IMPORT)
         .description
@@ -148,5 +164,19 @@ describe('toastUserError', () => {
     toastUserError(Object.assign(new Error('x'), { name: 'AbortError' }), IMPORT)
     expect(toast.error).not.toHaveBeenCalled()
     expect(toast.warning).not.toHaveBeenCalled()
+  })
+})
+
+describe('inlineUserError', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  })
+
+  it('returns the one line and never the raw path', () => {
+    const raw = 'EACCES: permission denied, open /Users/streamer/Buddy'
+    const text = inlineUserError(new Error(raw), IMPORT, 'buddy-look')
+    expect(text).toBe(`Couldn't import the image. ${UNKNOWN_REASON}`)
+    expect(text).not.toContain('/Users/streamer')
+    expect(console.warn).toHaveBeenCalledWith("[buddy-look] Couldn't import the image:", raw)
   })
 })
