@@ -3796,6 +3796,15 @@ mod tests {
             classify(502, "bad-gateway").fallback_reason(),
             Some(CloudFallbackReason::CloudNodeUnreachable)
         );
+        // The web's code for a node that answered but refused the show
+        // (lane 3 R2): still a 5xx, so the desktop streams directly.
+        assert_eq!(
+            classify(502, "cloud-node-rejected").fallback_reason(),
+            Some(CloudFallbackReason::CloudNodeUnreachable)
+        );
+        // An odd frame size the web refuses before any node is asked is the
+        // desktop's bug: an error to show, never a silent fallback.
+        assert_eq!(classify(400, "invalid-cloud-show").fallback_reason(), None);
         // Sign in and "a show is live" are errors to show, never a fallback.
         assert_eq!(classify(401, "x").fallback_reason(), None);
         assert_eq!(classify(409, "cloud-show-live").fallback_reason(), None);

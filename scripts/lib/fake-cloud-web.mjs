@@ -24,8 +24,11 @@ import { capabilitiesDocument } from './fake-transcript-service.mjs'
  *   `POST /api/cloud/shows/:id/end`, `GET /api/cloud/allowance`;
  * - node-signed calls to the real agent: `POST /v1/shows` and
  *   `POST /v1/shows/:id/end` (`X-Videorc-Node`, `X-Videorc-Timestamp`,
- *   `X-Videorc-Signature: v1=<hex HMAC-SHA256(secret, "<ts>.<body>")>`);
- * - the node's heartbeat and usage posts, signature-checked the same way;
+ *   `X-Videorc-Signature: v2=<hex HMAC-SHA256(secret, canonical)>`, the
+ *   canonical string binding direction, method, path, timestamp and body);
+ * - the node's heartbeat and usage posts, signature-checked the same way in
+ *   the other direction, with the web's replay guard and its rule that a
+ *   heartbeat no newer than the node's newest changes nothing;
  * - show tokens `vcs1.<payload>.<sig>` minted with an Ed25519 key whose public
  *   half the agent holds as `VIDEORC_CLOUD_SHOW_PUBLIC_KEY`.
  *
@@ -37,8 +40,11 @@ import { capabilitiesDocument } from './fake-transcript-service.mjs'
 export const NODE_HEADER_ID = 'x-videorc-node'
 export const NODE_HEADER_TIMESTAMP = 'x-videorc-timestamp'
 export const NODE_HEADER_SIGNATURE = 'x-videorc-signature'
-export const NODE_SIGNATURE_VERSION = 'v1'
+export const NODE_SIGNATURE_VERSION = 'v2'
 export const NODE_SIGNATURE_MAX_SKEW_MS = 300_000
+/** The two directions a v2 signature names; each side verifies only one. */
+export const NODE_DIRECTION_WEB_TO_NODE = 'web-to-node'
+export const NODE_DIRECTION_NODE_TO_WEB = 'node-to-web'
 export const NODE_SECRET_BYTES = 32
 
 export const SHOW_TOKEN_VERSION = 'vcs1'
@@ -135,18 +141,45 @@ export function decodeNodeSecret(encoded) {
   return bytes.length === NODE_SECRET_BYTES ? bytes : null
 }
 
-/** hex HMAC-SHA256(secret, "<timestamp>.<raw body>"). Pure. */
-export function nodeSignature(secret, timestamp, rawBody) {
-  return createHmac('sha256', secret).update(`${timestamp}.${rawBody}`, 'utf8').digest('hex')
+/**
+ * The v2 canonical string, fields joined by `\n`, the raw body last:
+ * `v2`, the direction, the METHOD, the URL path as sent, the timestamp, the
+ * body. Pure.
+ */
+export function nodeCanonicalString({ direction, method, path, timestamp, rawBody }) {
+  return [
+    NODE_SIGNATURE_VERSION,
+    direction,
+    String(method).toUpperCase(),
+    path,
+    timestamp,
+    rawBody
+  ].join('\n')
 }
 
-/** The three headers of a node-signed request. Pure. */
-export function signNodeRequest({ nodeId, rawBody, secret, timestampMs }) {
+/** hex HMAC-SHA256(secret, the v2 canonical string). Pure. */
+export function nodeSignature(secret, { direction, method, path, timestamp, rawBody }) {
+  return createHmac('sha256', secret)
+    .update(nodeCanonicalString({ direction, method, path, timestamp, rawBody }), 'utf8')
+    .digest('hex')
+}
+
+/** The three headers of a node-signed request; the web signs `web-to-node`. Pure. */
+export function signNodeRequest({
+  direction = NODE_DIRECTION_WEB_TO_NODE,
+  method = 'POST',
+  nodeId,
+  path,
+  rawBody,
+  secret,
+  timestampMs
+}) {
   const timestamp = String(Math.floor(timestampMs))
+  const signature = nodeSignature(secret, { direction, method, path, timestamp, rawBody })
   return {
     [NODE_HEADER_ID]: nodeId,
     [NODE_HEADER_TIMESTAMP]: timestamp,
-    [NODE_HEADER_SIGNATURE]: `${NODE_SIGNATURE_VERSION}=${nodeSignature(secret, timestamp, rawBody)}`
+    [NODE_HEADER_SIGNATURE]: `${NODE_SIGNATURE_VERSION}=${signature}`
   }
 }
 
@@ -158,11 +191,20 @@ function constantTimeEqualHex(expectedHex, providedHex) {
 }
 
 /**
- * The web's check of a node-signed request. `headers.get(name)` as on a
- * fetch `Headers`; `secretFor(nodeId)` returns the 32 bytes or null. Pure.
- * @returns {{ok:true,nodeId:string,timestampMs:number}|{ok:false,code:string}}
+ * The web's check of a node-signed request: only `node-to-web`, against the
+ * method and path it routed. `headers.get(name)` as on a fetch `Headers`;
+ * `secretFor(nodeId)` returns the 32 bytes or null. Pure.
+ * @returns {{ok:true,nodeId:string,timestampMs:number,signature:string}|{ok:false,code:string}}
  */
-export function verifyNodeRequest({ headers, nowMs, rawBody, secretFor }) {
+export function verifyNodeRequest({
+  direction = NODE_DIRECTION_NODE_TO_WEB,
+  headers,
+  method,
+  nowMs,
+  path,
+  rawBody,
+  secretFor
+}) {
   const nodeId = headers.get(NODE_HEADER_ID)?.trim()
   const timestamp = headers.get(NODE_HEADER_TIMESTAMP)?.trim()
   const signatureHeader = headers.get(NODE_HEADER_SIGNATURE)?.trim()
@@ -183,10 +225,17 @@ export function verifyNodeRequest({ headers, nowMs, rawBody, secretFor }) {
   if (version !== NODE_SIGNATURE_VERSION || !/^[0-9a-fA-F]{64}$/.test(provided)) {
     return { ok: false, code: 'node-signature-invalid' }
   }
-  if (!constantTimeEqualHex(nodeSignature(secret, timestamp, rawBody), provided)) {
+  const expected = nodeSignature(secret, {
+    direction,
+    method,
+    path,
+    timestamp,
+    rawBody
+  })
+  if (!constantTimeEqualHex(expected, provided)) {
     return { ok: false, code: 'node-signature-invalid' }
   }
-  return { ok: true, nodeId, timestampMs }
+  return { ok: true, nodeId, timestampMs, signature: provided.toLowerCase() }
 }
 
 // --- Show tokens (the web mints, the desktop carries, the node checks) --------
@@ -322,6 +371,10 @@ function parseOutput(value, index) {
   const height = integerIn(value.height, 16, 3840)
   if (width === null || height === null || Math.min(width, height) > 2160) {
     return `outputs[${index}] width and height must be whole pixels up to 3840x2160`
+  }
+  // The node's encoder takes even sizes only (lane 3 R2).
+  if (width % 2 !== 0 || height % 2 !== 0) {
+    return `outputs[${index}] width and height must be even`
   }
   const fps = integerIn(value.fps, 1, 60)
   if (fps === null) return `outputs[${index}].fps must be 1 to 60`
@@ -503,7 +556,7 @@ export async function signedAgentRequest({
     method,
     headers: {
       ...(rawBody ? { 'content-type': 'application/json' } : {}),
-      ...signNodeRequest({ nodeId, rawBody, secret, timestampMs: nowMs })
+      ...signNodeRequest({ method, nodeId, path, rawBody, secret, timestampMs: nowMs })
     },
     body: rawBody || undefined,
     signal: AbortSignal.timeout(timeoutMs)
@@ -550,14 +603,30 @@ export function parseSrtBlock(value) {
   }
 }
 
+/** A loopback `http://` agent: the only node allowed to hand out `ws://` and `rtmp://`. */
+export function isLoopbackHttpAgent(agentUrl) {
+  try {
+    const url = new URL(agentUrl)
+    return (
+      url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(url.hostname)
+    )
+  } catch {
+    return false
+  }
+}
+
 /**
  * The node's create answer as the web reads it: the pairs go to the desktop
  * as they are, `srt` blocks included. A malformed `srt` block costs that feed
- * SRT, never the show (it lands in `droppedSrt` by field name). Pure.
+ * SRT, never the show (it lands in `droppedSrt` by field name). A node reached
+ * over TLS must hand out `wss://` and `rtmps://` (lane 5 S5); only a loopback
+ * dev agent may hand out plaintext. Null for anything else. Pure.
  */
-export function parseAgentCreateResponse(value) {
+export function parseAgentCreateResponse(value, { plaintextAllowed = false } = {}) {
   if (!isRecord(value) || !Array.isArray(value.ingest) || value.ingest.length === 0) return null
-  if (typeof value.controlUrl !== 'string' || !/^wss?:\/\//.test(value.controlUrl)) return null
+  const controlPattern = plaintextAllowed ? /^wss?:\/\// : /^wss:\/\//
+  const ingestPattern = plaintextAllowed ? /^rtmps?:\/\// : /^rtmps:\/\//
+  if (typeof value.controlUrl !== 'string' || !controlPattern.test(value.controlUrl)) return null
   const ingest = []
   const droppedSrt = []
   for (const entry of value.ingest) {
@@ -565,7 +634,7 @@ export function parseAgentCreateResponse(value) {
       !isRecord(entry) ||
       (entry.orientation !== 'horizontal' && entry.orientation !== 'vertical') ||
       typeof entry.serverUrl !== 'string' ||
-      !/^rtmps?:\/\//.test(entry.serverUrl) ||
+      !ingestPattern.test(entry.serverUrl) ||
       typeof entry.streamKey !== 'string' ||
       !entry.streamKey
     ) {
@@ -588,6 +657,38 @@ export function parseAgentCreateResponse(value) {
     ingest.push(pair)
   }
   return { controlUrl: value.controlUrl, ingest, droppedSrt }
+}
+
+/**
+ * What the desktop hears when the node did not take a create (lane 3 R2): a
+ * full node, a node that could not be reached, or a node that answered but
+ * refused the show or answered nonsense, which is a bug or a misconfigured
+ * node, not an outage. Still 5xx, so the desktop streams directly. Pure.
+ * @param {{status:number|null, json:unknown}} created
+ */
+export function createFailure(created) {
+  if (created.status === 503 && created.json?.error?.code === 'node-full') {
+    return {
+      status: 503,
+      code: 'cloud-full',
+      endReason: 'node-full',
+      message: 'Videorc Cloud is full right now. Streaming directly from this computer.'
+    }
+  }
+  if (created.status === null) {
+    return {
+      status: 503,
+      code: 'cloud-node-unreachable',
+      endReason: 'node-unreachable',
+      message: 'Videorc Cloud could not be reached. Streaming directly from this computer.'
+    }
+  }
+  return {
+    status: 502,
+    code: 'cloud-node-rejected',
+    endReason: `node-${created.status}`,
+    message: 'Videorc Cloud could not start this show. Streaming directly from this computer.'
+  }
 }
 
 // --- The server -------------------------------------------------------------------
@@ -629,9 +730,19 @@ export async function startFakeCloudWeb({
     unknownRoutes: 0,
     agentCalls: [],
     /** Every token minted, in memory only: the smokes' leak scan reads it. */
-    mintedTokens: []
+    mintedTokens: [],
+    /** Node-signed requests refused as a replay, and heartbeats refused as stale. */
+    replaysRefused: 0,
+    staleHeartbeats: 0,
+    /** `VIDEORC_CLOUD_DISABLED`: the rollback switch (`setDisabled`). */
+    disabled: false
   }
-  const cloud = allowance ?? cloudAllowanceBlock({ nowMs: Date.now() })
+  const enabledCloud = allowance ?? cloudAllowanceBlock({ nowMs: Date.now() })
+  // While the switch is off the account's block says so, as the web's does.
+  const cloudBlock = () => (state.disabled ? { ...enabledCloud, enabled: false } : enabledCloud)
+  // The web's per-instance replay guard: one signature, once, for 2 x skew.
+  const seenSignatures = new Map()
+  let newestHeartbeatMs = 0
 
   const openShow = () => [...state.shows.values()].find((show) => !show.endedAt) ?? null
   const control = (show, now) => {
@@ -695,7 +806,9 @@ export async function startFakeCloudWeb({
       const rawBody = (await readRequestBody(req, 1024 * 1024)).toString('utf8')
       const verification = verifyNodeRequest({
         headers: { get: (name) => req.headers[name] ?? null },
+        method: req.method,
         nowMs: now.getTime(),
+        path,
         rawBody,
         secretFor: (nodeId) => (nodeId === node.id ? node.secret : null)
       })
@@ -703,6 +816,14 @@ export async function startFakeCloudWeb({
         state.signatureFailures += 1
         return fail(401, verification.code, 'The node signature was refused.')
       }
+      for (const [signature, expiresAtMs] of seenSignatures) {
+        if (expiresAtMs <= now.getTime()) seenSignatures.delete(signature)
+      }
+      if (seenSignatures.has(verification.signature)) {
+        state.replaysRefused += 1
+        return fail(401, 'node-request-replayed', 'The node signature was refused.')
+      }
+      seenSignatures.set(verification.signature, now.getTime() + 2 * NODE_SIGNATURE_MAX_SKEW_MS)
       let body
       try {
         body = JSON.parse(rawBody)
@@ -720,8 +841,23 @@ export async function startFakeCloudWeb({
         if (!reported) {
           return fail(400, 'invalid-heartbeat', 'each show needs a showId and a runner phase.')
         }
+        // Only a heartbeat newer than the newest one speaks for the node
+        // (lane 5 S2), and it speaks for the moment the node signed it.
+        if (verification.timestampMs <= newestHeartbeatMs) {
+          state.staleHeartbeats += 1
+          return fail(
+            409,
+            'node-heartbeat-stale',
+            'A newer heartbeat from this node was already applied.'
+          )
+        }
+        newestHeartbeatMs = verification.timestampMs
         state.heartbeats += 1
-        const outcome = applyHeartbeat(state.shows, reported, { nodeId: verification.nodeId, now })
+        const heartbeatAt = new Date(Math.min(verification.timestampMs, now.getTime()))
+        const outcome = applyHeartbeat(state.shows, reported, {
+          nodeId: verification.nodeId,
+          now: heartbeatAt
+        })
         state.endShowsSent.push(...outcome.endShows)
         return answer(200, { ok: true, endShows: outcome.endShows, drain: false })
       }
@@ -774,12 +910,14 @@ export async function startFakeCloudWeb({
     if (req.method === 'GET' && path === '/api/ai/capabilities') {
       await drain(req)
       state.capabilityRequests += 1
-      return answer(200, capabilitiesWithCloud({ cloud }))
+      return answer(200, capabilitiesWithCloud({ cloud: cloudBlock() }))
     }
     if (req.method === 'GET' && path === '/api/cloud/allowance') {
       await drain(req)
-      return answer(200, cloud)
+      return answer(200, cloudBlock())
     }
+    // `current` answers with the switch off (lane 3 R1): a relaunched desktop
+    // must still learn which show to resume or end. It creates nothing.
     if (req.method === 'GET' && path === '/api/cloud/shows/current') {
       await drain(req)
       const open = openShow()
@@ -793,6 +931,13 @@ export async function startFakeCloudWeb({
         body = JSON.parse((await readRequestBody(req, 64 * 1024)).toString('utf8'))
       } catch {
         body = undefined
+      }
+      if (state.disabled) {
+        return fail(
+          503,
+          'cloud-disabled',
+          'Videorc Cloud is off right now. Streaming directly from this computer.'
+        )
       }
       const parsed = parseCreateShowBody(body)
       if (!('kind' in parsed)) return fail(400, 'invalid-cloud-show', parsed.message)
@@ -864,37 +1009,28 @@ export async function startFakeCloudWeb({
         srtPassphrase,
         srtLatencyMs
       })
-      const value = created.status === 200 ? parseAgentCreateResponse(created.json) : null
+      const value =
+        created.status === 200
+          ? parseAgentCreateResponse(created.json, {
+              plaintextAllowed: isLoopbackHttpAgent(node.agentUrl)
+            })
+          : null
       for (const { orientation, problem } of value?.droppedSrt ?? []) {
         state.droppedSrt.push({ showId, orientation, problem })
       }
       if (!value) {
+        const failure = createFailure(created)
         show.status = 'ended'
         show.endedAt = now
-        show.endReason =
-          created.status === 503 && created.json?.error?.code === 'node-full'
-            ? 'node-full'
-            : created.status === null
-              ? 'node-unreachable'
-              : `node-${created.status}`
-        return created.status === 503 && created.json?.error?.code === 'node-full'
-          ? fail(
-              503,
-              'cloud-full',
-              'Videorc Cloud is full right now. Streaming directly from this computer.'
-            )
-          : fail(
-              503,
-              'cloud-node-unreachable',
-              'Videorc Cloud could not be reached. Streaming directly from this computer.'
-            )
+        show.endReason = failure.endReason
+        return fail(failure.status, failure.code, failure.message)
       }
       show.controlUrl = value.controlUrl
       return answer(201, {
         show: serializeShow(show),
         ingest: value.ingest,
         control: control(show, now),
-        allowance: cloud
+        allowance: cloudBlock()
       })
     }
     const endMatch = /^\/api\/cloud\/shows\/([^/]+)\/end$/.exec(path)
@@ -928,6 +1064,10 @@ export async function startFakeCloudWeb({
   return {
     httpOrigin: `http://127.0.0.1:${address.port}`,
     state,
+    /** `VIDEORC_CLOUD_DISABLED` on or off, mid-run (the rollback scenario). */
+    setDisabled(disabled) {
+      state.disabled = Boolean(disabled)
+    },
     /** The show that is open right now, serialized, or null; never a test (C6b). */
     currentShow() {
       const open = openShow()

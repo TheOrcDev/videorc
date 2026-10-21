@@ -15,8 +15,13 @@ import {
   mintShowToken,
   newIngestKey,
   newShowId,
+  createFailure,
+  isLoopbackHttpAgent,
   newShowSigningKey,
   newSrtPassphrase,
+  NODE_DIRECTION_NODE_TO_WEB,
+  NODE_DIRECTION_WEB_TO_NODE,
+  nodeCanonicalString,
   nodeSignature,
   parseAgentCreateResponse,
   parseCreateShowBody,
@@ -28,12 +33,14 @@ import {
   verifyShowToken
 } from './fake-cloud-web.mjs'
 
-// The runner repo's own vectors (crates/protocol/src/node_sig.rs): the secret
-// is the bytes 00..1f, the timestamp 1760000000000.
+// The v2 vectors both other sides pin (the web and the node agent): the
+// secret is the bytes 00..1f, the timestamp 1760000000000.
 const VECTOR_SECRET = Buffer.from(Array.from({ length: 32 }, (_, index) => index))
 const VECTOR_TS = 1_760_000_000_000
-const BODY_VECTOR = 'e85f9a39558d8e1f22bf6403701f36ad65a557b3a315ca6977e54858018a0a7d'
-const EMPTY_VECTOR = '892eea6739c0b6d49e0bdc242ea78266224268a40b518f8f71e9055c6151f6fc'
+const END_VECTOR = 'df450ce6019ed5e62568ea73ec4ae3ad5e80f17f846d0f48cb9d3739520611bb'
+const HEARTBEAT_VECTOR = 'f79136421193a07e2c2666f08c53087d75cf3cfa48a049ede606dc0c359e97e1'
+const HEARTBEAT_OK_VECTOR = 'd45deadad44429798f6fbbddec8e5bb2564c4fc59e0c0bb4219d70150379b609'
+const HEALTH_VECTOR = '7a9b7d2802fdf4addab24db89aaae13fc730cfdc50cacdf90b2b33bee2a6537c'
 // RFC 8032 test vector 1 (crates/protocol/src/show_token.rs).
 const RFC8032_SEED_HEX = '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60'
 const RFC8032_PUBLIC_HEX = 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a'
@@ -92,26 +99,64 @@ function nodeCreateAnswer(body, { serverUrl = 'rtmps://127.0.0.1:19360/live' } =
 }
 
 describe('fake cloud web: node signatures', () => {
-  it('matches the node agent vectors byte for byte', () => {
-    assert.equal(nodeSignature(VECTOR_SECRET, String(VECTOR_TS), '{"ok":true}'), BODY_VECTOR)
-    assert.equal(nodeSignature(VECTOR_SECRET, String(VECTOR_TS), ''), EMPTY_VECTOR)
+  it('matches the web and node agent v2 vectors byte for byte', () => {
+    const vector = (direction, method, path, rawBody) =>
+      nodeSignature(VECTOR_SECRET, {
+        direction,
+        method,
+        path,
+        timestamp: String(VECTOR_TS),
+        rawBody
+      })
+    assert.equal(
+      vector(NODE_DIRECTION_WEB_TO_NODE, 'POST', '/v1/shows/sh_test/end', '{}'),
+      END_VECTOR
+    )
+    assert.equal(
+      vector(
+        NODE_DIRECTION_NODE_TO_WEB,
+        'POST',
+        '/api/cloud/nodes/heartbeat',
+        '{"nodeId":"eu-hel-1"}'
+      ),
+      HEARTBEAT_VECTOR
+    )
+    assert.equal(
+      vector(NODE_DIRECTION_NODE_TO_WEB, 'POST', '/api/cloud/nodes/heartbeat', '{"ok":true}'),
+      HEARTBEAT_OK_VECTOR
+    )
+    assert.equal(vector(NODE_DIRECTION_WEB_TO_NODE, 'get', '/v1/health', ''), HEALTH_VECTOR)
+    assert.equal(
+      nodeCanonicalString({
+        direction: NODE_DIRECTION_WEB_TO_NODE,
+        method: 'post',
+        path: '/v1/shows/sh_test/end',
+        timestamp: '1760000000000',
+        rawBody: '{}'
+      }),
+      'v2\nweb-to-node\nPOST\n/v1/shows/sh_test/end\n1760000000000\n{}'
+    )
     const headers = signNodeRequest({
       nodeId: 'local-1',
-      rawBody: '{"ok":true}',
+      path: '/v1/shows/sh_test/end',
+      rawBody: '{}',
       secret: VECTOR_SECRET,
       timestampMs: VECTOR_TS
     })
     assert.deepEqual(headers, {
       'x-videorc-node': 'local-1',
       'x-videorc-timestamp': '1760000000000',
-      'x-videorc-signature': `v1=${BODY_VECTOR}`
+      'x-videorc-signature': `v2=${END_VECTOR}`
     })
   })
 
   it('verifies within the skew and refuses everything else', () => {
     const rawBody = '{"ok":true}'
+    const path = '/api/cloud/nodes/heartbeat'
     const signed = signNodeRequest({
+      direction: NODE_DIRECTION_NODE_TO_WEB,
       nodeId: 'local-1',
+      path,
       rawBody,
       secret: VECTOR_SECRET,
       timestampMs: VECTOR_TS
@@ -120,23 +165,47 @@ describe('fake cloud web: node signatures', () => {
       get: (name) => ({ ...signed, ...overrides })[name] ?? null
     })
     const secretFor = (nodeId) => (nodeId === 'local-1' ? VECTOR_SECRET : null)
-    const verify = (nowMs, overrides, body = rawBody) =>
-      verifyNodeRequest({ headers: headersOf(overrides), nowMs, rawBody: body, secretFor })
+    const verify = (nowMs, overrides, body = rawBody, routed = {}) =>
+      verifyNodeRequest({
+        headers: headersOf(overrides),
+        method: 'POST',
+        nowMs,
+        path,
+        rawBody: body,
+        secretFor,
+        ...routed
+      })
     assert.deepEqual(verify(VECTOR_TS + 299_999), {
       ok: true,
       nodeId: 'local-1',
-      timestampMs: VECTOR_TS
+      timestampMs: VECTOR_TS,
+      signature: HEARTBEAT_OK_VECTOR
     })
     assert.equal(verify(VECTOR_TS + 300_001).code, 'node-timestamp-stale')
     assert.equal(verify(VECTOR_TS, {}, '{"ok":false}').code, 'node-signature-invalid')
+    // Lane 5 S1: the signature binds the path, the method and the direction.
+    assert.equal(
+      verify(VECTOR_TS, {}, rawBody, { path: '/api/cloud/usage' }).code,
+      'node-signature-invalid'
+    )
+    assert.equal(verify(VECTOR_TS, {}, rawBody, { method: 'GET' }).code, 'node-signature-invalid')
+    assert.equal(
+      verify(VECTOR_TS, {}, rawBody, { direction: NODE_DIRECTION_WEB_TO_NODE }).code,
+      'node-signature-invalid'
+    )
+    // A v1 signature is refused outright.
+    assert.equal(
+      verify(VECTOR_TS, { 'x-videorc-signature': `v1=${HEARTBEAT_OK_VECTOR}` }).code,
+      'node-signature-invalid'
+    )
     assert.equal(verify(VECTOR_TS, { 'x-videorc-node': 'eu-hel-1' }).code, 'node-unknown')
     assert.equal(verify(VECTOR_TS, { 'x-videorc-node': 'EU-1' }).code, 'node-unknown')
     assert.equal(
-      verify(VECTOR_TS, { 'x-videorc-signature': BODY_VECTOR }).code,
+      verify(VECTOR_TS, { 'x-videorc-signature': HEARTBEAT_OK_VECTOR }).code,
       'node-signature-invalid'
     )
     assert.equal(
-      verify(VECTOR_TS, { 'x-videorc-signature': 'v1=abcd' }).code,
+      verify(VECTOR_TS, { 'x-videorc-signature': 'v2=abcd' }).code,
       'node-signature-invalid'
     )
     assert.equal(
@@ -410,9 +479,13 @@ describe('fake cloud web: the server against a fake agent', () => {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
       const rawBody = Buffer.concat(chunks).toString('utf8')
+      // The agent's own check: web-to-node, on the path it routed.
       const verification = verifyNodeRequest({
+        direction: NODE_DIRECTION_WEB_TO_NODE,
         headers: { get: (name) => req.headers[name] ?? null },
+        method: req.method,
         nowMs: Date.now(),
+        path: req.url,
         rawBody,
         secretFor: (nodeId) => (nodeId === 'local-1' ? secret : null)
       })
@@ -546,6 +619,7 @@ describe('fake cloud web: the server against a fake agent', () => {
       assert.equal(current.control.url, created.control.url)
 
       // The node reports: a heartbeat with the right signature, then a wrong one.
+      const heartbeatSignedAt = Date.now()
       const heartbeat = JSON.stringify({
         nodeId: 'local-1',
         version: '0.1.0',
@@ -558,10 +632,12 @@ describe('fake cloud web: the server against a fake agent', () => {
         headers: {
           'content-type': 'application/json',
           ...signNodeRequest({
+            direction: NODE_DIRECTION_NODE_TO_WEB,
             nodeId: 'local-1',
+            path: '/api/cloud/nodes/heartbeat',
             rawBody: heartbeat,
             secret,
-            timestampMs: Date.now()
+            timestampMs: heartbeatSignedAt
           })
         },
         body: heartbeat
@@ -574,7 +650,9 @@ describe('fake cloud web: the server against a fake agent', () => {
         headers: {
           'content-type': 'application/json',
           ...signNodeRequest({
+            direction: NODE_DIRECTION_NODE_TO_WEB,
             nodeId: 'local-1',
+            path: '/api/cloud/nodes/heartbeat',
             rawBody: heartbeat,
             secret: Buffer.alloc(32, 9),
             timestampMs: Date.now()
@@ -584,6 +662,48 @@ describe('fake cloud web: the server against a fake agent', () => {
       })
       assert.equal(forged.status, 401)
       assert.equal(web.state.signatureFailures, 1)
+      // The same signed heartbeat again is a replay; a newer one signed no
+      // later than the applied one is stale and changes nothing (lane 5 S2).
+      const resend = (timestampMs) =>
+        fetch(`${web.httpOrigin}/api/cloud/nodes/heartbeat`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...signNodeRequest({
+              direction: NODE_DIRECTION_NODE_TO_WEB,
+              nodeId: 'local-1',
+              path: '/api/cloud/nodes/heartbeat',
+              rawBody: heartbeat,
+              secret,
+              timestampMs
+            })
+          },
+          body: heartbeat
+        })
+      const replayed = await resend(heartbeatSignedAt)
+      assert.equal(replayed.status, 401)
+      assert.equal((await replayed.json()).error.code, 'node-request-replayed')
+      const older = await resend(heartbeatSignedAt - 1_000)
+      assert.equal(older.status, 409)
+      assert.equal((await older.json()).error.code, 'node-heartbeat-stale')
+      assert.equal(web.state.heartbeats, 1)
+      // A heartbeat signed for the usage route never counts as usage.
+      const moved = await fetch(`${web.httpOrigin}/api/cloud/usage`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...signNodeRequest({
+            direction: NODE_DIRECTION_NODE_TO_WEB,
+            nodeId: 'local-1',
+            path: '/api/cloud/nodes/heartbeat',
+            rawBody: heartbeat,
+            secret,
+            timestampMs: Date.now()
+          })
+        },
+        body: heartbeat
+      })
+      assert.equal(moved.status, 401)
 
       const usage = JSON.stringify({
         nodeId: 'local-1',
@@ -608,7 +728,14 @@ describe('fake cloud web: the server against a fake agent', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          ...signNodeRequest({ nodeId: 'local-1', rawBody: usage, secret, timestampMs: Date.now() })
+          ...signNodeRequest({
+            direction: NODE_DIRECTION_NODE_TO_WEB,
+            nodeId: 'local-1',
+            path: '/api/cloud/usage',
+            rawBody: usage,
+            secret,
+            timestampMs: Date.now()
+          })
         },
         body: usage
       })
@@ -753,7 +880,14 @@ describe('fake cloud web: the server against a fake agent', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          ...signNodeRequest({ nodeId: 'local-1', rawBody: usage, secret, timestampMs: Date.now() })
+          ...signNodeRequest({
+            direction: NODE_DIRECTION_NODE_TO_WEB,
+            nodeId: 'local-1',
+            path: '/api/cloud/usage',
+            rawBody: usage,
+            secret,
+            timestampMs: Date.now()
+          })
         },
         body: usage
       })
@@ -778,6 +912,130 @@ describe('fake cloud web: the server against a fake agent', () => {
       assert.ok(Date.parse(refused.resetAt) > Date.now())
       // A show is not rate limited by the tests.
       assert.equal((await create('solo')).status, 201)
+    } finally {
+      await web.close()
+      await new Promise((resolveClose) => agent.close(resolveClose))
+    }
+  })
+})
+
+describe('fake cloud web: what the web changed after the cloud test (plan 184)', () => {
+  const output = (overrides = {}) => ({
+    orientation: 'horizontal',
+    width: 1280,
+    height: 720,
+    fps: 30,
+    videoKbps: 4000,
+    audioKbps: 160,
+    ...overrides
+  })
+
+  it('refuses odd frame sizes before any node is asked (lane 3 R2)', () => {
+    const parse = (overrides) => parseCreateShowBody({ kind: 'solo', outputs: [output(overrides)] })
+    assert.ok('kind' in parse({}))
+    assert.match(parse({ width: 1281 }).message, /even/)
+    assert.match(parse({ height: 719 }).message, /even/)
+  })
+
+  it('names a node that refused the show apart from one that could not be reached', () => {
+    assert.equal(createFailure({ status: null, json: null }).code, 'cloud-node-unreachable')
+    assert.equal(createFailure({ status: null, json: null }).status, 503)
+    assert.equal(
+      createFailure({ status: 503, json: { error: { code: 'node-full' } } }).code,
+      'cloud-full'
+    )
+    for (const status of [400, 409, 500, 200]) {
+      const failure = createFailure({ status, json: { error: { code: 'bad-request' } } })
+      assert.equal(failure.code, 'cloud-node-rejected', String(status))
+      // Still 5xx: a desktop that doesn't know the code streams directly.
+      assert.equal(failure.status, 502)
+    }
+  })
+
+  it('takes plaintext control and ingest only from a loopback dev agent (lane 5 S5)', () => {
+    const answer = (controlUrl, serverUrl) => ({
+      controlUrl,
+      ingest: [{ orientation: 'horizontal', serverUrl, streamKey: 'sh_x-h.key' }]
+    })
+    assert.ok(isLoopbackHttpAgent('http://127.0.0.1:9443'))
+    assert.ok(isLoopbackHttpAgent('http://localhost:9443'))
+    assert.ok(!isLoopbackHttpAgent('https://127.0.0.1:9443'))
+    assert.ok(!isLoopbackHttpAgent('http://eu-hel-1.live.videorc.com:9443'))
+    const tls = answer('wss://n.example/v1/shows/x/control', 'rtmps://n.example:1936/live')
+    const plain = answer('ws://127.0.0.1:9443/v1/shows/x/control', 'rtmp://127.0.0.1:1935/live')
+    assert.ok(parseAgentCreateResponse(tls))
+    assert.equal(parseAgentCreateResponse(plain), null)
+    assert.equal(
+      parseAgentCreateResponse(answer('ws://n.example/c', 'rtmps://n.example:1936/live')),
+      null
+    )
+    assert.equal(
+      parseAgentCreateResponse(answer('wss://n.example/c', 'rtmp://n.example:1935/live')),
+      null
+    )
+    assert.ok(parseAgentCreateResponse(plain, { plaintextAllowed: true }))
+  })
+
+  it('answers current during a rollback but creates nothing (lane 3 R1)', async () => {
+    const secret = Buffer.alloc(32, 7)
+    const { privateKey } = newShowSigningKey()
+    const agent = createServer(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify(
+          req.url === '/v1/shows'
+            ? {
+                ingest: [
+                  {
+                    orientation: 'horizontal',
+                    serverUrl: 'rtmps://localhost:19360/live',
+                    streamKey: `${body.showId}-h.${body.ingestKey}`
+                  }
+                ],
+                controlUrl: `ws://127.0.0.1:9443/v1/shows/${body.showId}/control`
+              }
+            : { ok: true }
+        )
+      )
+    })
+    await new Promise((resolveListen) => agent.listen(0, '127.0.0.1', resolveListen))
+    const web = await startFakeCloudWeb({
+      sessionToken: 'session-token',
+      node: { id: 'local-1', secret, agentUrl: `http://127.0.0.1:${agent.address().port}` },
+      signingKey: privateKey
+    })
+    const bearer = { authorization: 'Bearer session-token', 'content-type': 'application/json' }
+    const create = () =>
+      fetch(`${web.httpOrigin}/api/cloud/shows`, {
+        method: 'POST',
+        headers: bearer,
+        body: JSON.stringify({ kind: 'solo', outputs: [output()] })
+      })
+    try {
+      const created = await (await create()).json()
+      web.setDisabled(true)
+      const refused = await create()
+      assert.equal(refused.status, 503)
+      assert.equal((await refused.json()).error.code, 'cloud-disabled')
+      const current = await (
+        await fetch(`${web.httpOrigin}/api/cloud/shows/current`, { headers: bearer })
+      ).json()
+      assert.equal(current.show.id, created.show.id)
+      assert.ok(current.control.token.startsWith('vcs1.'))
+      const capabilities = await (
+        await fetch(`${web.httpOrigin}/api/ai/capabilities`, { headers: bearer })
+      ).json()
+      assert.equal(capabilities.cloud.enabled, false)
+      const ended = await fetch(`${web.httpOrigin}/api/cloud/shows/${created.show.id}/end`, {
+        method: 'POST',
+        headers: bearer
+      })
+      assert.equal(ended.status, 200)
+      web.setDisabled(false)
+      assert.equal((await create()).status, 201)
     } finally {
       await web.close()
       await new Promise((resolveClose) => agent.close(resolveClose))
