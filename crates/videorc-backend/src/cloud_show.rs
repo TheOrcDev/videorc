@@ -694,6 +694,63 @@ pub trait ControlConnector: Send + Sync + 'static {
     fn connect(&self, url: &str) -> impl Future<Output = Result<Self::Transport>> + Send;
 }
 
+/// The control socket carries the show token and every platform key in
+/// `destinations.set`, so a release build speaks to a node over TLS only
+/// (`wss://`). A dev build also takes `ws://`, for the local agent the smokes
+/// run. `None` when the url may be used.
+pub fn control_url_problem(url: &str, dev_build: bool) -> Option<String> {
+    let scheme = reqwest::Url::parse(url)
+        .map(|parsed| parsed.scheme().to_string())
+        .unwrap_or_default();
+    match scheme.as_str() {
+        "wss" => None,
+        "ws" if dev_build => {
+            tracing::warn!("The Videorc Cloud control socket is not encrypted (dev build).");
+            None
+        }
+        _ => Some(
+            "Videorc Cloud gave a control address without TLS, so this computer won't send it your stream keys."
+                .to_string(),
+        ),
+    }
+}
+
+/// The feed, before any key is handed over: a release build sends video
+/// only over RTMPS to a node it can check by name (C1c). FFmpeg's OpenSSL
+/// backend binds the name only for a DNS host, so an IP literal is refused
+/// too. A dev build allows both for a local MediaMTX, and says so.
+pub fn ingest_url_problem(server_url: &str, dev_build: bool) -> Option<String> {
+    let Ok(parsed) = reqwest::Url::parse(server_url) else {
+        return Some("Videorc Cloud gave an ingest address this computer can't read.".to_string());
+    };
+    let by_ip = parsed.host_str().is_some_and(|host| {
+        host.trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+    });
+    if parsed.scheme() != "rtmps" {
+        if !dev_build {
+            return Some(
+                "Videorc Cloud gave an ingest address without TLS, so this computer won't send video to it."
+                    .to_string(),
+            );
+        }
+        tracing::warn!("The cloud feed is not encrypted (dev build).");
+    }
+    if by_ip {
+        if !dev_build {
+            return Some(
+                "Videorc Cloud gave an ingest address by IP, whose certificate this computer can't check by name."
+                    .to_string(),
+            );
+        }
+        tracing::warn!(
+            "The cloud feed's host is an IP address: FFmpeg checks its certificate chain but not its name (dev build)."
+        );
+    }
+    None
+}
+
 /// `tokio-tungstenite` over TLS, the production transport.
 pub struct WsConnector;
 
@@ -707,6 +764,9 @@ impl ControlConnector for WsConnector {
     type Transport = WsTransport;
 
     async fn connect(&self, url: &str) -> Result<WsTransport> {
+        if let Some(problem) = control_url_problem(url, cfg!(debug_assertions)) {
+            bail!(problem);
+        }
         let (ws, _) = tokio::time::timeout(
             CONTROL_CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async(url),
@@ -1981,6 +2041,20 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         if ingest.is_empty() {
             let _ = self.web.end_show(&bearer, &show_id).await;
             bail!("Videorc Cloud created a show without an ingest address.");
+        }
+        // Nothing crosses to a node this computer can't feed securely: no
+        // key has left yet, so direct is safe (D11).
+        if let Some(problem) = ingest
+            .iter()
+            .find_map(|entry| ingest_url_problem(&entry.server_url, cfg!(debug_assertions)))
+        {
+            let _ = self.web.end_show(&bearer, &show_id).await;
+            self.record_fallback(
+                session_id,
+                CloudFallbackReason::CloudNodeUnreachable,
+                Some(problem),
+            );
+            return Ok(PrepareOutcome::Direct);
         }
 
         // Nothing is handed over until the node says welcome. A node that
@@ -3764,6 +3838,67 @@ mod tests {
         let state: RunnerState =
             serde_json::from_str(r#"{"phase":"warming","newField":1}"#).unwrap();
         assert_eq!(state.phase, "warming");
+    }
+
+    // Lane 5 S5: the control socket carries the token and every key, so a
+    // release build refuses a node without TLS. Dev builds keep `ws://` for
+    // the local agent the smokes run.
+    #[test]
+    fn a_release_build_speaks_to_a_node_over_tls_only() {
+        let wss = "wss://eu-hel-1.live.videorc.com:9443/v1/shows/sh_abc/control";
+        assert_eq!(control_url_problem(wss, false), None);
+        assert_eq!(control_url_problem(wss, true), None);
+        for refused in [
+            "ws://eu-hel-1.live.videorc.com:9443/v1/shows/sh_abc/control",
+            "ws://127.0.0.1:9443/v1/shows/sh_abc/control",
+            "https://eu-hel-1.live.videorc.com/v1/shows/sh_abc/control",
+            "not a url",
+        ] {
+            assert!(control_url_problem(refused, false).is_some(), "{refused}");
+        }
+        assert_eq!(
+            control_url_problem("ws://127.0.0.1:9443/v1/shows/sh_abc/control", true),
+            None
+        );
+        assert!(control_url_problem("http://127.0.0.1:9443/x", true).is_some());
+        assert!(
+            !control_url_problem("ws://x/y", false)
+                .unwrap()
+                .contains("ws://")
+        );
+    }
+
+    // The ingest is checked before the socket opens: a node this computer
+    // can't feed securely never receives a key, so direct is safe.
+    #[tokio::test(start_paused = true)]
+    async fn an_ingest_this_computer_cannot_feed_streams_directly_before_any_key_leaves() {
+        let harness = harness(true);
+        let mut bad = created();
+        bad.ingest[0].server_url = "not a url".to_string();
+        *harness.context.web.create.lock().unwrap() = Some(Ok(bad));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                Vec::new(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.context.connector.sent.lock().unwrap().is_empty());
+        assert_eq!(
+            *harness.context.web.end_calls.lock().unwrap(),
+            vec!["sh_abc".to_string()]
+        );
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(
+            status.fallback.map(|fallback| fallback.reason),
+            Some(CloudFallbackReason::CloudNodeUnreachable)
+        );
     }
 
     #[tokio::test(start_paused = true)]

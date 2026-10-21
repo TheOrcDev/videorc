@@ -22021,7 +22021,8 @@ fn cloud_feed_targets(
 /// the node's certificate (C1c). FFmpeg's OpenSSL backend binds the host name
 /// only for a DNS name: an IP literal is `numerichost` and skips that check,
 /// so the chain alone would not prove the node. A release build refuses an
-/// ingest by IP; a dev build allows one, for a local MediaMTX, and says so.
+/// ingest by IP or without TLS (`cloud_show::ingest_url_problem`); a dev
+/// build allows both, for a local MediaMTX, and says so.
 fn cloud_feed_target(
     entry: &crate::cloud_show::ShowIngest,
     output_video: Option<VideoSettings>,
@@ -22034,16 +22035,10 @@ fn cloud_feed_target(
     );
     validate_stream_publish_url(&url)
         .context("Videorc Cloud gave an ingest address this computer can't stream to.")?;
-    if cloud_feed_host_is_ip_literal(&url) {
-        if cfg!(debug_assertions) {
-            tracing::warn!(
-                "The cloud feed's host is an IP address: FFmpeg checks its certificate chain but not its name (dev build)."
-            );
-        } else {
-            bail!(
-                "Videorc Cloud gave an ingest address by IP, whose certificate this computer can't check by name."
-            );
-        }
+    if let Some(problem) =
+        crate::cloud_show::ingest_url_problem(&entry.server_url, cfg!(debug_assertions))
+    {
+        bail!(problem);
     }
     Ok(StreamTarget {
         redacted_url: redact_stream_url(&url),
@@ -22058,17 +22053,6 @@ fn cloud_feed_target(
         output_orientation: entry.orientation,
         tls_verification: Some(tls.clone()),
     })
-}
-
-fn cloud_feed_host_is_ip_literal(url: &str) -> bool {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_string))
-        .is_some_and(|host| {
-            host.trim_matches(['[', ']'])
-                .parse::<std::net::IpAddr>()
-                .is_ok()
-        })
 }
 
 /// Dev builds may trust one extra CA, so `smoke:cloud-solo` publishes to its
@@ -23093,20 +23077,33 @@ mod cloud_seam_tests {
 
     #[test]
     fn an_ip_ingest_cannot_be_checked_by_name_and_a_roots_path_must_be_plain() {
-        assert!(cloud_feed_host_is_ip_literal(
-            "rtmps://127.0.0.1:1936/live/sh_x-h.k"
-        ));
-        assert!(cloud_feed_host_is_ip_literal(
-            "rtmps://[::1]:1936/live/sh_x-h.k"
-        ));
-        assert!(!cloud_feed_host_is_ip_literal(
-            "rtmps://localhost:1936/live/sh_x-h.k"
-        ));
-        assert!(!cloud_feed_host_is_ip_literal(
-            "rtmps://eu-hel-1.live.videorc.com:1936/live/sh_x-h.k"
-        ));
-        // A dev build warns and allows an IP; a release build refuses it. Both
-        // paths build the same target otherwise.
+        use crate::cloud_show::ingest_url_problem;
+        // Release (Lane 5 S5): RTMPS to a DNS name only.
+        for refused in [
+            "rtmps://127.0.0.1:1936/live",
+            "rtmps://[::1]:1936/live",
+            "rtmp://eu-hel-1.live.videorc.com:1935/live",
+            "rtmp://127.0.0.1:1935/live",
+            "srt://eu-hel-1.live.videorc.com:9000",
+            "not a url",
+        ] {
+            assert!(ingest_url_problem(refused, false).is_some(), "{refused}");
+        }
+        for allowed in [
+            "rtmps://localhost:1936/live",
+            "rtmps://eu-hel-1.live.videorc.com:1936/live",
+        ] {
+            assert_eq!(ingest_url_problem(allowed, false), None, "{allowed}");
+        }
+        // A dev build warns and allows an IP or plain RTMP, for a local
+        // MediaMTX; it still refuses what it can't read.
+        assert_eq!(
+            ingest_url_problem("rtmps://127.0.0.1:1936/live", true),
+            None
+        );
+        assert_eq!(ingest_url_problem("rtmp://localhost:1935/live", true), None);
+        assert!(ingest_url_problem("not a url", true).is_some());
+        // The build's own branch: both paths build the same target otherwise.
         let mut by_ip = ingest(Horizontal, INGEST_KEY);
         by_ip.server_url = "rtmps://127.0.0.1:1936/live".to_string();
         let built = cloud_feed_target(&by_ip, None, &roots());
