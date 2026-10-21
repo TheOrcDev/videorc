@@ -1488,7 +1488,7 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(files, BANNER_MAX_COUNT * 2);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1532,7 +1532,7 @@ mod tests {
         );
         assert!(!banner.has_alpha);
         assert_eq!(banner.name, "photo");
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1565,7 +1565,7 @@ mod tests {
             .unwrap()
             .into_rgba8();
         assert_eq!(thumbnail.dimensions(), (32, 32), "never upscaled");
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1613,7 +1613,7 @@ mod tests {
         let thumbnail =
             image::open(database.banner_assets_dir().join(&banner.thumbnail_file)).unwrap();
         assert_eq!(thumbnail.width(), 480);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1629,7 +1629,7 @@ mod tests {
         assert_eq!(listed[0].id, first.id);
         assert_eq!(listed[1].id, second.id);
         assert!(shown_banners_for_compositor(&database).unwrap().is_empty());
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2103,7 +2103,7 @@ mod tests {
                 .iter()
                 .all(|banner| !banner.shown)
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2119,7 +2119,7 @@ mod tests {
         let shown = shown_banners_for_compositor(&reopened).unwrap();
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].id, id);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2154,7 +2154,7 @@ mod tests {
         database.show_banner(&banner.id, BANNER_MAX_SHOWN).unwrap();
         delete_banner(&database, &banner.id, false).unwrap();
         assert!(database.list_banners().unwrap().is_empty());
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2250,7 +2250,7 @@ mod tests {
             );
             assert!(escape.exists());
         }
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // --- The compositor's set (S3) ------------------------------------------
@@ -2554,7 +2554,7 @@ mod tests {
                 2
             ]
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Plan 186 S4: a session that cannot draw a banner added after its start
@@ -2592,6 +2592,6 @@ mod tests {
         );
         // No session, or one that draws the set: shown.
         assert!(show_banner(&database, &second.id, &[], None).unwrap().shown);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -1086,6 +1086,16 @@ before either track started (`73482c69`).
     crates). Those advisories were published after main's last green run.
     This branch does not touch `Cargo.lock`, so the red is inherited. A
     separate dependency PR is owed.
+  - The first full Windows source-gates run failed 14 banner tests, all on
+    the last line: `remove_dir_all(dir).unwrap()` hit "The process cannot
+    access the file" because the test's SQLite database was still open.
+    The banner assertions themselves passed on Windows. The cleanup is now
+    best-effort, the same idiom the `noise_cleanup` tests use.
+  - "Windows startup incident diagnostics" is red at the controlled-audio
+    and independent FFmpeg-tone matrices (A/V tail over 100 ms). Main's
+    last Windows run (`dacbec26`) is red at the same two steps, and the
+    FFmpeg-tone control never runs Videorc's pipeline, so the red is
+    inherited.
 
 **Owed**
 

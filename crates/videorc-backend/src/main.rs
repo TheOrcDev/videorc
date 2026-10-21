@@ -16871,7 +16871,7 @@ mod tests {
                 .is_empty()
         );
 
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -16902,7 +16902,7 @@ mod tests {
                     .is_none(),
             "a refused import publishes nothing"
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

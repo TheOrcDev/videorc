@@ -18790,7 +18790,7 @@ mod banner_tests {
         assert_eq!(banner_session_shape_for_test(&state).await, Some(shape));
         set_banner_session_shape(&state, None).await;
         assert_eq!(banner_session_shape_for_test(&state).await, None);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// `composite_overlay_at` at opacity 1.0 is the plain blit, byte for
