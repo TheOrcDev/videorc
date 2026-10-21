@@ -92,6 +92,24 @@ export function cloudRestartToast(previous: CloudStatus | null, next: CloudStatu
     : unrecovered
 }
 
+/** D18: any single show ends after 12 hours on air, with a warning at 11. */
+export const CLOUD_SHOW_MAX_SECONDS = 12 * 60 * 60
+export const CLOUD_SHOW_WARN_SECONDS = 11 * 60 * 60
+
+/**
+ * The once-per-show warning an hour before the 12-hour cap (D18). The cap is
+ * the runner's on-air clock, which `liveSeconds` reports.
+ */
+export function cloudShowCapToast(previous: CloudStatus | null, next: CloudStatus): string | null {
+  const showId = next.show?.id
+  if (!showId || (next.liveSeconds ?? 0) < CLOUD_SHOW_WARN_SECONDS) return null
+  if (previous?.show?.id === showId && (previous.liveSeconds ?? 0) >= CLOUD_SHOW_WARN_SECONDS) {
+    return null
+  }
+  const left = Math.max(0, CLOUD_SHOW_MAX_SECONDS - (next.liveSeconds ?? 0))
+  return `Your livestream ends in ${formatCloudCountdown(left)}. A Videorc Cloud show runs 12 hours at most.`
+}
+
 function hoursOrMinutes(seconds: number): string {
   if (seconds >= 3600) {
     const hours = Math.floor(seconds / 3600)

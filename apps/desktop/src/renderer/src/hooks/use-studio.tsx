@@ -78,7 +78,8 @@ import {
   CLOUD_TOAST_ID,
   cloudFallbackToast,
   cloudLostToast,
-  cloudRestartToast
+  cloudRestartToast,
+  cloudShowCapToast
 } from '@/lib/cloud-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -4421,7 +4422,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // `cloud.state` and asks for three things. Toast discipline: a Go Live that
   // streamed directly says why once (the fallback names its session), a
   // show the cloud lost while this computer fed it warns once, and so does a
-  // runner restart (its platforms reconnect, or they could not). Nothing else
+  // runner restart (its platforms reconnect, or they could not), and so
+  // does the hour before a show's 12-hour cap (D18). Nothing else
   // here is news: the Livestream page and the Stream health stat show the rest.
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
   const cloudStatusRef = useRef<CloudStatus | null>(null)
@@ -4435,6 +4437,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
     const restarted = cloudRestartToast(previous, next)
     if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
+    const cap = cloudShowCapToast(previous, next)
+    if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
   }, [])
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------

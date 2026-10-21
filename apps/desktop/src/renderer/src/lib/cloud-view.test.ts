@@ -9,6 +9,7 @@ import {
   cloudLostToast,
   cloudRestartToast,
   cloudResumeNotice,
+  cloudShowCapToast,
   cloudSectionState,
   cloudTestBlockedReason,
   cloudTestLine,
@@ -75,6 +76,28 @@ describe('cloud copy (plan 184)', () => {
     const lost = status({ directFallbackAvailable: true, phase: 'failed' })
     expect(cloudLostToast(status(), lost)).toMatch(/Stop, then go live again/)
     expect(cloudLostToast(lost, lost)).toBeNull()
+  })
+
+  it('warns once an hour before the 12-hour cap (D18)', () => {
+    const show = {
+      id: 'sh_0123456789abcdefghijkl',
+      nodeId: 'eu-hel-1',
+      resumable: false
+    }
+    const at = (liveSeconds: number, id = show.id) =>
+      status({ phase: 'live', show: { ...show, id }, liveSeconds })
+    expect(cloudShowCapToast(null, at(10 * 3600))).toBeNull()
+    expect(cloudShowCapToast(at(39_599), at(39_600))).toBe(
+      'Your livestream ends in 60 min. A Videorc Cloud show runs 12 hours at most.'
+    )
+    expect(cloudShowCapToast(at(39_600), at(40_000))).toBeNull()
+    // A relaunch that meets a show already past 11 hours says it once.
+    expect(cloudShowCapToast(null, at(42_000))).toBe(
+      'Your livestream ends in 20 min. A Videorc Cloud show runs 12 hours at most.'
+    )
+    // A new show is news again; no show, no warning.
+    expect(cloudShowCapToast(at(40_000), at(40_000, 'sh_zzzzzzzzzzzzzzzzzzzzzz'))).not.toBeNull()
+    expect(cloudShowCapToast(null, status({ liveSeconds: 40_000 }))).toBeNull()
   })
 
   it('says a runner restart once, and again only if the platforms stay dark', () => {
