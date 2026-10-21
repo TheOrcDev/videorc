@@ -5855,6 +5855,10 @@ export type CohostCommandKind =
   | 'show-banner'
   | 'hide-banner'
   | 'hide-banners'
+  // "Buddy, show up" / "Buddy, go away": the Buddy itself on or off the
+  // stream (`overlayLayout.buddy.showOnStream`), finished at once.
+  | 'show-buddy'
+  | 'hide-buddy'
 
 /**
  * Where the latest voice command stands:
@@ -5969,6 +5973,13 @@ export interface CohostState {
    * at anchor + 20 s, pushed back by a backoff/quota window).
    */
   nextTickAt?: string | null
+  /**
+   * ISO-8601 instant of the next tick attempt after a failed one; present only
+   * while `status` is `error` and the backoff is still climbing (the presence
+   * reads "Retrying"). Omitted at the backoff ceiling, where Buddy reads as
+   * stopped, and on every other status.
+   */
+  retryAt?: string | null
   /** Session total of chat messages the engine noted for ticks. */
   messagesSeen?: number
   /** Distinct question ids surfaced this session — lifetime, not open count. */
@@ -6392,6 +6403,9 @@ export interface CohostWindowBuddy {
   bubble: string | null
   /** `overlayLayout.buddy.showOnStream`. */
   showOnStream: boolean
+  /** `overlayLayout.buddy.showInRecording`; optional so a window seeded by
+   * an older Studio still renders (read as off). */
+  showInRecording?: boolean
 }
 
 /**

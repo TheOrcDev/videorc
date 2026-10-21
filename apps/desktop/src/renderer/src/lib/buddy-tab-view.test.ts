@@ -298,10 +298,13 @@ describe('Voice commands (plan 140, S6 part A)', () => {
       'Remove',
       'Answer',
       'Banners',
+      'On stream',
       'Marker'
     ])
     const phrases = BUDDY_VOICE_COMMANDS.flatMap((command) => command.phrases)
     for (const phrase of [
+      'Buddy, show up',
+      'Buddy, go away',
       'Buddy, highlight the comment from coders X',
       'Buddy, put this one up',
       'Buddy, take it down',

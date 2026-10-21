@@ -151,6 +151,16 @@ export function cohostReasonLabel(reason: CohostReason | null): string | null {
   return reason ? REASON_LABELS[reason] : null
 }
 
+/**
+ * Why a tick failed, as the words after "Retrying:" while the next attempt is
+ * scheduled (`retryAt`). A gateway answer that never came is said as such, not
+ * as an "error": Buddy is still there, trying again.
+ */
+export function cohostRetryReasonLabel(reason: CohostReason | null): string | null {
+  if (reason === 'gateway-error') return "Videorc AI didn't answer"
+  return cohostReasonLabel(reason)
+}
+
 // --- Pane mode -------------------------------------------------------------
 
 /**

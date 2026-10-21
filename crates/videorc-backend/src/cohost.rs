@@ -1190,6 +1190,10 @@ pub enum CohostCommandKind {
     ShowBanner,
     HideBanner,
     HideBanners,
+    /// "show up", "come on screen": the Buddy itself goes on the stream.
+    ShowBuddy,
+    /// "hide", "go away": the Buddy itself leaves the stream.
+    HideBuddy,
 }
 
 /// Where the latest voice command stands.
@@ -1418,6 +1422,13 @@ pub struct CohostState {
     /// backoff/quota window pushes both back.
     #[serde(default)]
     pub next_tick_at: Option<String>,
+    /// ISO-8601 instant of the next tick attempt after a failed one, present
+    /// only while `status` is `error` and the backoff is still climbing: the
+    /// renderer reads "Retrying" from it. Omitted once the backoff reached its
+    /// ceiling (Buddy reads as stopped, though the engine keeps trying) and on
+    /// every other status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
     /// Session total of chat messages noted to the engine (entered a delta).
     #[serde(default)]
     pub messages_seen: u64,
@@ -1505,6 +1516,7 @@ impl CohostState {
             tick_in_flight: false,
             pending_messages: 0,
             next_tick_at: None,
+            retry_at: None,
             messages_seen: 0,
             questions_total: 0,
             highlights: Vec::new(),
@@ -3013,6 +3025,17 @@ impl CohostSession {
         self.abandon_command(COMMAND_SIGNED_OUT, &chrono::Utc::now().to_rfc3339())
     }
 
+    /// The next attempt after a failed tick, while the backoff still climbs:
+    /// a transient failure reads as "Retrying", never as stopped. At the
+    /// ceiling (the fourth failure in a row and beyond) nothing is promised.
+    fn retry_at(&self, now: Instant) -> Option<String> {
+        if self.status != CohostStatus::Error || self.backoff_index >= BACKOFF_STEPS_SECS.len() - 1
+        {
+            return None;
+        }
+        self.next_attempt_at.map(|at| iso_after(now, at))
+    }
+
     fn snapshot_at(&self, now: Instant) -> CohostState {
         let next_tick_at = next_tick_due_at(
             self.cadence_pending(),
@@ -3036,6 +3059,7 @@ impl CohostSession {
             tick_in_flight: self.in_flight,
             pending_messages: u32::try_from(self.pending.len()).unwrap_or(u32::MAX),
             next_tick_at,
+            retry_at: self.retry_at(now),
             messages_seen: self.messages_seen,
             questions_total: self.questions_total,
             highlights: self.highlights.clone(),
@@ -4785,7 +4809,9 @@ impl CohostSession {
     /// for every command: the open card closes (a pending removal is
     /// cancelled after the lock). A banner that was not found counts like a
     /// comment that was not found.
-    fn note_banner_command(
+    /// A command that finished the moment it was heard (a banner, the
+    /// Buddy's presence): the card carries its outcome, nothing waits.
+    fn note_instant_command(
         &mut self,
         kind: CohostCommandKind,
         heard: &str,
@@ -7850,6 +7876,9 @@ async fn run_detected_command(
         CommandKind::ShowBanner | CommandKind::HideBanner | CommandKind::HideBanners => {
             return run_banner_command(state, scope, command, premium).await;
         }
+        CommandKind::ShowBuddy | CommandKind::HideBuddy => {
+            return run_buddy_presence_command(state, scope, command, premium).await;
+        }
         CommandKind::Highlight => CommandIntent::Highlight,
         CommandKind::Clear => CommandIntent::Clear,
         CommandKind::Remove => CommandIntent::Remove,
@@ -7895,7 +7924,9 @@ async fn run_banner_command(
         | CommandKind::Confirm
         | CommandKind::Cancel
         | CommandKind::Choose(_)
-        | CommandKind::Unknown => return,
+        | CommandKind::Unknown
+        | CommandKind::ShowBuddy
+        | CommandKind::HideBuddy => return,
     };
     let ctx = command_context(state, premium).await;
     let (status, message) = match command_gate(&ctx, None) {
@@ -7910,20 +7941,124 @@ async fn run_banner_command(
             banner_command_outcome(state, &command).await
         }
     };
+    record_instant_command(state, scope, kind, &command.heard, status, message, &ctx).await;
+}
+
+/// "Buddy, show up" / "Buddy, go away": the Buddy itself goes on or off the
+/// stream, at once, through the one switch the Stream Manager's footer
+/// operates (`overlayLayout.buddy.showOnStream`). `overlays.layout.set`'s
+/// path does the rest: a live session swaps its compositor flags and warms
+/// the pet's atlases, and every window learns the layout. The card says what
+/// happened, like a banner command's.
+async fn run_buddy_presence_command(
+    state: &AppState,
+    scope: &CommandSession,
+    command: DetectedCommand,
+    premium: bool,
+) {
+    let (kind, show) = match command.kind {
+        CommandKind::ShowBuddy => (CohostCommandKind::ShowBuddy, true),
+        CommandKind::HideBuddy => (CohostCommandKind::HideBuddy, false),
+        _ => return,
+    };
+    let ctx = command_context(state, premium).await;
+    let (status, message) = match command_gate(&ctx, None) {
+        Some(message) => (CohostCommandStatus::Unavailable, message.to_string()),
+        None => {
+            if !state.cohost.lock().await.command_session_current(scope) {
+                tracing::info!("Buddy dropped a presence command: its session changed.");
+                return;
+            }
+            buddy_presence_outcome(state, show).await
+        }
+    };
+    record_instant_command(state, scope, kind, &command.heard, status, message, &ctx).await;
+}
+
+/// Flip `overlayLayout.buddy.showOnStream` and say so in the Buddy's name.
+async fn buddy_presence_outcome(state: &AppState, show: bool) -> (CohostCommandStatus, String) {
+    let name = get_cohost_settings(state).await.persona.name;
+    let name = match name.trim() {
+        "" => COHOST_DEFAULT_PERSONA_NAME,
+        name => name,
+    }
+    .to_string();
+    let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+    if layout.buddy.show_on_stream == show {
+        return (
+            CohostCommandStatus::Done,
+            if show {
+                format!("{name} is already on stream.")
+            } else {
+                format!("{name} is already off the stream.")
+            },
+        );
+    }
+    layout.buddy.show_on_stream = show;
+    match crate::overlay_layout::set_overlay_layout(state, layout).await {
+        Ok(_) => (
+            CohostCommandStatus::Done,
+            if show {
+                format!("{name} is on stream.")
+            } else {
+                format!("{name} is off the stream.")
+            },
+        ),
+        Err(error) => {
+            tracing::warn!(
+                "Buddy could not change the overlay layout for a voice command: {error:#}"
+            );
+            (
+                CohostCommandStatus::Refused,
+                format!("Buddy couldn't put {name} on stream: {error}."),
+            )
+        }
+    }
+}
+
+/// A command that finished the moment it was heard (a banner, the Buddy's
+/// presence): one card with its outcome, for the session that heard it.
+async fn record_instant_command(
+    state: &AppState,
+    scope: &CommandSession,
+    kind: CohostCommandKind,
+    heard: &str,
+    status: CohostCommandStatus,
+    message: String,
+    ctx: &CommandContext,
+) {
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let (effects, snapshot) = {
         let mut engine = state.cohost.lock().await;
         engine.set_command_availability(ctx.availability());
         let Some(session) = engine.command_session_mut(scope) else {
-            tracing::info!("Buddy dropped a banner command's card: its session changed.");
+            tracing::info!(
+                "Buddy dropped a {} command's card: its session changed.",
+                kind_label(kind)
+            );
             return;
         };
-        let effects = session.note_banner_command(kind, &command.heard, status, message, &ctx);
+        let effects = session.note_instant_command(kind, heard, status, message, ctx);
         mirror_command_slot(state, &engine);
         (effects, engine.snapshot())
     };
     emit_state(state, &snapshot, &lifecycle_delivery);
     run_command_effects(state, scope, effects, false).await;
+}
+
+/// Plain words for a log line about a command kind.
+fn kind_label(kind: CohostCommandKind) -> &'static str {
+    match kind {
+        CohostCommandKind::Highlight => "highlight",
+        CohostCommandKind::Clear => "clear",
+        CohostCommandKind::Remove => "remove",
+        CohostCommandKind::Confirm => "confirm",
+        CohostCommandKind::Cancel => "cancel",
+        CohostCommandKind::Unknown => "unknown",
+        CohostCommandKind::ShowBanner | CohostCommandKind::HideBanner => "banner",
+        CohostCommandKind::HideBanners => "banners",
+        CohostCommandKind::ShowBuddy | CohostCommandKind::HideBuddy => "presence",
+    }
 }
 
 /// What a banner command did, and the sentence its card shows. A spoken
@@ -8049,7 +8184,9 @@ async fn banner_command_outcome(
         | CommandKind::Confirm
         | CommandKind::Cancel
         | CommandKind::Choose(_)
-        | CommandKind::Unknown => (
+        | CommandKind::Unknown
+        | CommandKind::ShowBuddy
+        | CommandKind::HideBuddy => (
             CohostCommandStatus::NotFound,
             "Buddy didn't catch that.".to_string(),
         ),
@@ -8293,14 +8430,17 @@ pub(crate) async fn execute_resolved_command(
         CommandKind::Highlight => CommandIntent::Highlight,
         CommandKind::Clear => CommandIntent::Clear,
         CommandKind::Remove => CommandIntent::Remove,
-        // The cloud parser knows comments only; it never picks a banner.
+        // The cloud parser knows comments only; it never picks a banner or
+        // the Buddy itself.
         CommandKind::Confirm
         | CommandKind::Cancel
         | CommandKind::Choose(_)
         | CommandKind::Unknown
         | CommandKind::ShowBanner
         | CommandKind::HideBanner
-        | CommandKind::HideBanners => {
+        | CommandKind::HideBanners
+        | CommandKind::ShowBuddy
+        | CommandKind::HideBuddy => {
             return;
         }
     };
@@ -18878,6 +19018,101 @@ mod tests {
             .into_iter()
             .map(|banner| banner.name)
             .collect()
+    }
+
+    /// "Buddy, show up" flips the one on-stream switch and tells every
+    /// window; "go away" flips it back; a repeat says so and moves nothing.
+    #[tokio::test]
+    async fn a_presence_command_puts_the_buddy_on_stream_and_takes_it_off() {
+        let (state, scope) = command_state(&[], None).await;
+        let mut events = state.events.subscribe();
+        let layout =
+            |state: &AppState| crate::overlay_layout::load_overlay_layout(&state.database).buddy;
+        assert!(!layout(&state).show_on_stream);
+        assert!(!layout(&state).show_in_recording);
+
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::ShowBuddy,
+                CommandTarget::None,
+                "buddy show up",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let shown = state_command(&state).await;
+        assert_eq!(
+            (shown.kind, shown.status, shown.message.as_str()),
+            (
+                CohostCommandKind::ShowBuddy,
+                CohostCommandStatus::Done,
+                "Buddy is on stream."
+            )
+        );
+        assert_eq!(shown.heard, "buddy show up");
+        assert!(layout(&state).show_on_stream);
+        // The recording switch is the streamer's own.
+        assert!(!layout(&state).show_in_recording);
+        // Every window learns the layout (`overlays.layout`).
+        let mut layouts = 0;
+        loop {
+            match events.try_recv() {
+                Ok(event) => {
+                    if event.event == crate::overlay_layout::OVERLAY_LAYOUT_EVENT {
+                        layouts += 1;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(layouts, 1);
+
+        // Again: already on, nothing moves and no layout is sent.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::ShowBuddy,
+                CommandTarget::None,
+                "buddy come on screen",
+                None,
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(
+            state_command(&state).await.message,
+            "Buddy is already on stream."
+        );
+        assert!(layout(&state).show_on_stream);
+
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::HideBuddy,
+                CommandTarget::None,
+                "buddy go away",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let hidden = state_command(&state).await;
+        assert_eq!(
+            (hidden.kind, hidden.status, hidden.message.as_str()),
+            (
+                CohostCommandKind::HideBuddy,
+                CohostCommandStatus::Done,
+                "Buddy is off the stream."
+            )
+        );
+        assert!(!layout(&state).show_on_stream);
+        assert_eq!(state_counts(&state).await.not_found, 0);
     }
 
     #[tokio::test]

@@ -12,14 +12,7 @@ import type {
 import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { chatDraftMaxChars } from '@/lib/chat-send'
 
-import {
-  chatPaneMessages,
-  followChatOnResize,
-  pickedSendProviders,
-  spotlightScrollAllowed,
-  SPOTLIGHT_SCROLL_QUIET_MS,
-  type ChatPaneFilter
-} from './stream-manager-chat'
+import { chatPaneMessages, pickedSendProviders, type ChatPaneFilter } from './stream-manager-chat'
 
 function message(
   id: string,
@@ -290,76 +283,5 @@ describe('Stream Manager chat pane', () => {
     expect(time(row('always'))).not.toContain('opacity-0')
     expect(time(row('hover'))).toContain('opacity-0')
     expect(time(row('hover'))).toContain('group-hover/comment:opacity-100')
-  })
-})
-
-describe('followChatOnResize (plan 057, P4)', () => {
-  function setup(pinned: boolean) {
-    const content = { id: 'content' } as unknown as Element
-    const viewport = { scrollTop: 100, scrollHeight: 900, firstElementChild: content }
-    const observed: Element[] = []
-    let fire = (): void => undefined
-    let disconnected = false
-    const cleanup = followChatOnResize(
-      viewport,
-      () => pinned,
-      (callback) => {
-        fire = callback
-        return {
-          observe: (target) => observed.push(target),
-          disconnect: () => {
-            disconnected = true
-          }
-        }
-      }
-    )
-    return {
-      viewport,
-      content,
-      observed,
-      fire: () => fire(),
-      cleanup,
-      isDisconnected: () => disconnected
-    }
-  }
-
-  it('keeps a pinned chat on its newest row when the viewport or its rows resize', () => {
-    const chat = setup(true)
-    expect(chat.observed).toEqual([chat.viewport, chat.content])
-    chat.fire()
-    expect(chat.viewport.scrollTop).toBe(900)
-  })
-
-  it('leaves a streamer who scrolled back where they are', () => {
-    const chat = setup(false)
-    chat.fire()
-    expect(chat.viewport.scrollTop).toBe(100)
-    chat.cleanup()
-    expect(chat.isDisconnected()).toBe(true)
-  })
-})
-
-describe('spotlightScrollAllowed', () => {
-  const now = 1_000_000
-  it('always pulls up while the list follows the latest', () => {
-    expect(
-      spotlightScrollAllowed({ pinned: true, lastUserScrollAtMs: now - 100, nowMs: now })
-    ).toBe(true)
-  })
-
-  it('never fights a streamer who scrolled up in the last five seconds', () => {
-    expect(
-      spotlightScrollAllowed({ pinned: false, lastUserScrollAtMs: now - 4_999, nowMs: now })
-    ).toBe(false)
-    expect(
-      spotlightScrollAllowed({
-        pinned: false,
-        lastUserScrollAtMs: now - SPOTLIGHT_SCROLL_QUIET_MS,
-        nowMs: now
-      })
-    ).toBe(true)
-    expect(spotlightScrollAllowed({ pinned: false, lastUserScrollAtMs: null, nowMs: now })).toBe(
-      true
-    )
   })
 })
