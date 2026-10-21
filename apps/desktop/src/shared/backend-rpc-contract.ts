@@ -3993,6 +3993,7 @@ const cloudStatusSchema = objectSchema(
             'cloud-full',
             'cloud-hours-used-up',
             'cloud-node-unreachable',
+            'cloud-show-limit',
             'not-entitled'
           ]),
           at: timestamp,

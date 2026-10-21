@@ -235,6 +235,8 @@ pub enum CloudFallbackReason {
     CloudFull,
     CloudHoursUsedUp,
     CloudNodeUnreachable,
+    /// The web's create rate limit: an account's shows in the last hour.
+    CloudShowLimit,
     NotEntitled,
 }
 
@@ -564,6 +566,11 @@ pub enum CloudApiError {
     TestLimit {
         reset_at: Option<String>,
     },
+    /// 429 on a show: the account started too many this hour (cloud test
+    /// lane 5 S8, the web's create rate limit).
+    ShowLimit {
+        reset_at: Option<String>,
+    },
     Disabled,
     Full,
     NodeUnreachable,
@@ -583,6 +590,7 @@ impl std::fmt::Display for CloudApiError {
             Self::ShowLive(_) => write!(f, "A show is already live through Videorc Cloud."),
             Self::HoursUsedUp { .. } => write!(f, "This month's cloud hours are used up."),
             Self::TestLimit { .. } => write!(f, "This hour's Videorc Cloud tests are used up."),
+            Self::ShowLimit { .. } => write!(f, "This hour's Videorc Cloud shows are used up."),
             Self::Disabled => write!(f, "Videorc Cloud is switched off right now."),
             Self::Full => write!(f, "Videorc Cloud is full right now."),
             Self::NodeUnreachable => write!(f, "Videorc Cloud could not be reached."),
@@ -608,6 +616,7 @@ impl CloudApiError {
         match self {
             Self::NotEntitled => Some(CloudFallbackReason::NotEntitled),
             Self::HoursUsedUp { .. } => Some(CloudFallbackReason::CloudHoursUsedUp),
+            Self::ShowLimit { .. } => Some(CloudFallbackReason::CloudShowLimit),
             Self::Disabled => Some(CloudFallbackReason::CloudDisabled),
             Self::Full => Some(CloudFallbackReason::CloudFull),
             Self::NodeUnreachable | Self::Transport(_) => {
@@ -638,6 +647,7 @@ pub fn classify_cloud_failure(
         (409, "cloud-show-live") => CloudApiError::ShowLive(live_show.map(Box::new)),
         (429, "cloud-hours-used-up") => CloudApiError::HoursUsedUp { reset_at },
         (429, "cloud-test-limit") => CloudApiError::TestLimit { reset_at },
+        (429, "cloud-show-limit") => CloudApiError::ShowLimit { reset_at },
         (503, "cloud-disabled") => CloudApiError::Disabled,
         (503, "cloud-full") => CloudApiError::Full,
         (503, "cloud-node-unreachable") => CloudApiError::NodeUnreachable,
@@ -2673,7 +2683,9 @@ fn test_result_from_api_error(
         CloudApiError::NotEntitled => (CloudTestReason::NotEntitled, None),
         CloudApiError::ShowLive(_) => (CloudTestReason::ShowLive, None),
         CloudApiError::HoursUsedUp { reset_at } => (CloudTestReason::NoHours, reset_at.clone()),
-        CloudApiError::TestLimit { reset_at } => (CloudTestReason::Limit, reset_at.clone()),
+        CloudApiError::TestLimit { reset_at } | CloudApiError::ShowLimit { reset_at } => {
+            (CloudTestReason::Limit, reset_at.clone())
+        }
         CloudApiError::Disabled => (CloudTestReason::Off, None),
         CloudApiError::Full => (CloudTestReason::Full, None),
         CloudApiError::NodeUnreachable | CloudApiError::Transport(_) => {
@@ -3805,6 +3817,24 @@ mod tests {
         // An odd frame size the web refuses before any node is asked is the
         // desktop's bug: an error to show, never a silent fallback.
         assert_eq!(classify(400, "invalid-cloud-show").fallback_reason(), None);
+        // The web's create rate limit (C-W6): stream directly and say why,
+        // never fail the start.
+        assert_eq!(
+            classify_cloud_failure(
+                429,
+                "cloud-show-limit",
+                "m".to_string(),
+                None,
+                Some("2026-10-21T11:00:00Z".to_string())
+            ),
+            CloudApiError::ShowLimit {
+                reset_at: Some("2026-10-21T11:00:00Z".to_string())
+            }
+        );
+        assert_eq!(
+            classify(429, "cloud-show-limit").fallback_reason(),
+            Some(CloudFallbackReason::CloudShowLimit)
+        );
         // Sign in and "a show is live" are errors to show, never a fallback.
         assert_eq!(classify(401, "x").fallback_reason(), None);
         assert_eq!(classify(409, "cloud-show-live").fallback_reason(), None);
@@ -3814,6 +3844,7 @@ mod tests {
             CloudFallbackReason::CloudFull,
             CloudFallbackReason::CloudHoursUsedUp,
             CloudFallbackReason::CloudNodeUnreachable,
+            CloudFallbackReason::CloudShowLimit,
             CloudFallbackReason::NotEntitled,
         ] {
             let wire = serde_json::to_value(reason).unwrap();
@@ -3825,6 +3856,7 @@ mod tests {
                             | "cloud-full"
                             | "cloud-hours-used-up"
                             | "cloud-node-unreachable"
+                            | "cloud-show-limit"
                             | "not-entitled"
                     )
                 ),

@@ -1042,3 +1042,62 @@ describe('fake cloud web: what the web changed after the cloud test (plan 184)',
     }
   })
 })
+
+describe('fake cloud web: the create rate limit (C-W6)', () => {
+  it('refuses the 13th show an hour, failed creates included, after the open-show check', async () => {
+    const secret = Buffer.alloc(32, 7)
+    const { privateKey } = newShowSigningKey()
+    let refuse = true
+    const agent = createServer(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      // Every create fails on the node, so no show stays open.
+      res.writeHead(refuse && req.url === '/v1/shows' ? 400 : 200, {
+        'content-type': 'application/json'
+      })
+      res.end(JSON.stringify({ ok: true }))
+    })
+    await new Promise((resolveListen) => agent.listen(0, '127.0.0.1', resolveListen))
+    const web = await startFakeCloudWeb({
+      sessionToken: 'session-token',
+      node: { id: 'local-1', secret, agentUrl: `http://127.0.0.1:${agent.address().port}` },
+      signingKey: privateKey
+    })
+    const create = (kind = 'solo') =>
+      fetch(`${web.httpOrigin}/api/cloud/shows`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer session-token', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          kind,
+          outputs: [
+            {
+              orientation: 'horizontal',
+              width: 1280,
+              height: 720,
+              fps: 30,
+              videoKbps: 4000,
+              audioKbps: 160
+            }
+          ]
+        })
+      })
+    try {
+      for (let index = 0; index < 12; index += 1) {
+        const failed = await create()
+        assert.equal(failed.status, 502)
+        assert.equal((await failed.json()).error.code, 'cloud-node-rejected')
+      }
+      const thirteenth = await create()
+      assert.equal(thirteenth.status, 429)
+      const body = await thirteenth.json()
+      assert.equal(body.error.code, 'cloud-show-limit')
+      assert.ok(Date.parse(body.resetAt) > Date.now())
+      // A test keeps its own limit and still runs.
+      refuse = false
+      assert.notEqual((await create('test')).status, 429)
+    } finally {
+      await web.close()
+      await new Promise((resolveClose) => agent.close(resolveClose))
+    }
+  })
+})

@@ -61,6 +61,9 @@ export const TEST_SHOW_MAX_SECONDS = 30
 export const TEST_SHOW_EXPIRES_SECONDS = 120
 export const TEST_SHOWS_PER_HOUR = 6
 export const TEST_SHOW_WINDOW_MS = 60 * 60 * 1000
+/** The web's create rate limit: the 13th show an hour is refused (C-W6). */
+export const SHOWS_PER_HOUR = 12
+export const SHOW_WINDOW_MS = 60 * 60 * 1000
 /** A show the node stops reporting ends at the next heartbeat once this old. */
 export const FORGOTTEN_SHOW_GRACE_MS = 30_000
 export const AGENT_TIMEOUT_MS = 8_000
@@ -964,6 +967,23 @@ export async function startFakeCloudWeb({
         return fail(409, 'cloud-show-live', 'You already have a live show through Videorc Cloud.', {
           show: serializeShow(open)
         })
+      }
+      // The web's create rate limit (lane 5 S8): after the one-open-show
+      // check, failed creates included; a test keeps its own limit.
+      if (!isTest) {
+        const limit = evaluateTestShowLimit({
+          now,
+          recentCreatedAt: [...state.shows.values()]
+            .filter((show) => show.userId === userId && !isTestShow(show))
+            .map((show) => show.createdAt),
+          limit: SHOWS_PER_HOUR,
+          windowMs: SHOW_WINDOW_MS
+        })
+        if (!limit.ok) {
+          return fail(429, 'cloud-show-limit', "You've started this hour's Videorc Cloud shows.", {
+            resetAt: limit.resetAt
+          })
+        }
       }
       const showId = newShowId()
       const ingestKey = newIngestKey()

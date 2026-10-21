@@ -4294,6 +4294,7 @@ export type CloudFallbackReason =
   | 'cloud-full'
   | 'cloud-hours-used-up'
   | 'cloud-node-unreachable'
+  | 'cloud-show-limit'
   | 'not-entitled'
 
 /**

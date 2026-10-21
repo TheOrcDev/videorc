@@ -53,6 +53,8 @@ export function cloudFallbackMessage(
     }
     case 'cloud-node-unreachable':
       return `Videorc Cloud couldn't be reached. ${direct}.`
+    case 'cloud-show-limit':
+      return `You've started this hour's Videorc Cloud shows. ${direct} for now.`
     case 'cloud-disabled':
       return `Videorc Cloud is off right now. ${direct}.`
     case 'not-entitled':

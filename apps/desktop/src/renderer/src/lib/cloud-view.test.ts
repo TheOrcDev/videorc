@@ -70,6 +70,10 @@ describe('cloud copy (plan 184)', () => {
     for (const reason of ['cloud-disabled', 'cloud-node-unreachable', 'not-entitled'] as const) {
       expect(cloudFallbackMessage(reason)).toMatch(/streaming directly from this computer\.$/)
     }
+    // The web's create rate limit (cloud test lane 5 S8).
+    expect(cloudFallbackMessage('cloud-show-limit')).toBe(
+      "You've started this hour's Videorc Cloud shows. You're streaming directly from this computer for now."
+    )
   })
 
   it('warns once when the cloud loses a show this computer fed', () => {
