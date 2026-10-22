@@ -2,7 +2,15 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
-import { OVERLAY_ITEMS, type OverlayLayout } from '../../../shared/backend'
+import {
+  DEFAULT_POLL_OVERLAY_ITEM,
+  OVERLAY_ITEMS,
+  type OverlayLayout
+} from '../../../shared/backend'
+import {
+  validateBackendEventPayload,
+  validateBackendRpcResult
+} from '../../../shared/backend-rpc-contract'
 import {
   DEFAULT_OVERLAY_LAYOUT,
   clampOverlayRect,
@@ -15,6 +23,8 @@ import {
   overlayRectValid,
   overlaySnapRect,
   overlayStartNotices,
+  OVERLAY_ITEM_LABELS,
+  OVERLAY_SNAP_LABELS,
   type OverlayAuxLeg
 } from './overlay-layout'
 import {
@@ -28,7 +38,13 @@ const fixtures = JSON.parse(
     new URL('../../../../../../protocol-fixtures/high-risk-contracts.json', import.meta.url),
     'utf8'
   )
-) as { overlayLayout: { defaults: OverlayLayout; placed: OverlayLayout } }
+) as {
+  // Plan 188 S3: written before the poll, the fixture may not carry it yet.
+  overlayLayout: {
+    defaults: Omit<OverlayLayout, 'poll'> & Partial<Pick<OverlayLayout, 'poll'>>
+    placed: Omit<OverlayLayout, 'poll'> & Partial<Pick<OverlayLayout, 'poll'>>
+  }
+}
 
 function withSwitches(
   layout: OverlayLayout,
@@ -41,9 +57,54 @@ function withSwitches(
 
 describe('overlay layout defaults and snaps', () => {
   it('mirrors the Rust defaults pinned by the shared fixture', () => {
-    expect(DEFAULT_OVERLAY_LAYOUT).toStrictEqual(fixtures.overlayLayout.defaults)
-    expect(overlayLayoutsEqual(DEFAULT_OVERLAY_LAYOUT, fixtures.overlayLayout.defaults)).toBe(true)
-    expect(overlayLayoutsEqual(DEFAULT_OVERLAY_LAYOUT, fixtures.overlayLayout.placed)).toBe(false)
+    // Read the way the Studio reads the backend: a fixture without `poll`
+    // takes the poll's default place (plan 188 S3).
+    const defaults = validateBackendRpcResult(
+      'overlays.layout.get',
+      fixtures.overlayLayout.defaults
+    ) as OverlayLayout
+    const placed = validateBackendRpcResult(
+      'overlays.layout.get',
+      fixtures.overlayLayout.placed
+    ) as OverlayLayout
+    expect(DEFAULT_OVERLAY_LAYOUT).toStrictEqual(defaults)
+    expect(overlayLayoutsEqual(DEFAULT_OVERLAY_LAYOUT, defaults)).toBe(true)
+    expect(overlayLayoutsEqual(DEFAULT_OVERLAY_LAYOUT, placed)).toBe(false)
+  })
+
+  it('places the poll top left on landscape and top centre in the portrait safe area (plan 188 D12)', () => {
+    const { poll } = DEFAULT_OVERLAY_LAYOUT
+    expect(poll).toStrictEqual(DEFAULT_POLL_OVERLAY_ITEM)
+    expect(poll.horizontal).toStrictEqual(overlaySnapRect('poll', 'horizontal', 'top-left'))
+    expect(poll.horizontal).toStrictEqual({ x: 0.0225, y: 0.04, w: 0.3, h: 0.4 })
+    expect(poll.vertical).toStrictEqual(overlaySnapRect('poll', 'vertical', 'top-center'))
+    expect(poll.vertical.x + poll.vertical.w / 2).toBeCloseTo(0.5, 6)
+    // Inside the portrait safe area: 8% top, 22% bottom (plan 077).
+    expect(poll.vertical.y).toBeCloseTo(0.08, 6)
+    expect(poll.vertical.y + poll.vertical.h).toBeLessThanOrEqual(1 - 0.22)
+    expect(poll.showOnStream && poll.showInRecording).toBe(true)
+    // The one free landscape corner: off the highlight (bottom left) and the
+    // Buddy (bottom right).
+    for (const other of ['highlight', 'buddy'] as const) {
+      const rect = DEFAULT_OVERLAY_LAYOUT[other].horizontal
+      expect(poll.horizontal.y + poll.horizontal.h).toBeLessThanOrEqual(rect.y)
+    }
+    expect(OVERLAY_ITEM_LABELS.poll).toBe('Poll')
+    expect(OVERLAY_SNAP_LABELS['top-center']).toBe('Top center')
+  })
+
+  it('keeps the three placements of a layout stored before the poll (plan 188 S3)', () => {
+    const { poll: _none, ...legacy } = fixtures.overlayLayout.placed
+    for (const read of [
+      validateBackendRpcResult('overlays.layout.get', legacy),
+      validateBackendEventPayload('overlays.layout', legacy)
+    ] as OverlayLayout[]) {
+      expect(read.highlight).toStrictEqual(legacy.highlight)
+      expect(read.captions).toStrictEqual(legacy.captions)
+      expect(read.buddy).toStrictEqual(legacy.buddy)
+      expect(read.poll).toStrictEqual(DEFAULT_OVERLAY_LAYOUT.poll)
+      expect(overlayLayoutsEqual(read, { ...legacy, poll: DEFAULT_POLL_OVERLAY_ITEM })).toBe(true)
+    }
   })
 
   it('snaps every item to every corner inside the canvas', () => {
@@ -54,7 +115,8 @@ describe('overlay layout defaults and snaps', () => {
         const bottomLeft = overlaySnapRect(item, orientation, 'bottom-left')
         const bottomRight = overlaySnapRect(item, orientation, 'bottom-right')
         const bottomCenter = overlaySnapRect(item, orientation, 'bottom-center')
-        for (const rect of [topLeft, topRight, bottomLeft, bottomRight, bottomCenter]) {
+        const topCenter = overlaySnapRect(item, orientation, 'top-center')
+        for (const rect of [topLeft, topRight, bottomLeft, bottomRight, bottomCenter, topCenter]) {
           expect(overlayRectValid(rect)).toBe(true)
           expect(rect.w).toBe(topLeft.w)
           expect(rect.h).toBe(topLeft.h)
@@ -62,6 +124,8 @@ describe('overlay layout defaults and snaps', () => {
         expect(topLeft.x).toBe(bottomLeft.x)
         expect(topRight.x + topRight.w).toBeCloseTo(1 - topLeft.x, 6)
         expect(bottomCenter.x + bottomCenter.w / 2).toBeCloseTo(0.5, 6)
+        expect(topCenter.x).toBe(bottomCenter.x)
+        expect(topCenter.y).toBe(topLeft.y)
         expect(overlayRectBottomGravity(topLeft)).toBe(false)
         expect(overlayRectBottomGravity(bottomRight)).toBe(true)
       }

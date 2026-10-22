@@ -73,6 +73,7 @@ type _RegistryIconProps = _AssertIconProps<
     | 'CaretDown'
     | 'CaretRight'
     | 'CaretUpIcon'
+    | 'ChartBarHorizontal'
     | 'ChatCircle'
     | 'Check'
     | 'CheckCircle'
@@ -273,6 +274,8 @@ export {
   TerminalWindow as TerminalIcon,
   TextAa as TextIcon,
   ChatCircle as ChatIcon,
+  // A poll: one question, answers voted in chat (plan 188).
+  ChartBarHorizontal as PollIcon,
   PaperPlaneRight as SendIcon,
   PushPin as PinIcon,
   Sun as LightModeIcon,

@@ -26,14 +26,16 @@ const PORTRAIT_BOTTOM_MARGIN = 0.22
 export const OVERLAY_ITEM_LABELS: Record<OverlayItem, string> = {
   highlight: 'Highlight',
   captions: 'Captions',
-  buddy: 'Buddy'
+  buddy: 'Buddy',
+  poll: 'Poll'
 }
 
 /** How a Go Live sentence names the item mid-sentence (mirrors Rust). */
 const OVERLAY_ITEM_SENTENCE_LABELS: Record<OverlayItem, string> = {
   highlight: 'highlights',
   captions: 'captions',
-  buddy: 'the Buddy'
+  buddy: 'the Buddy',
+  poll: 'polls'
 }
 
 export const OVERLAY_SNAPS: readonly OverlaySnap[] = [
@@ -49,7 +51,8 @@ export const OVERLAY_SNAP_LABELS: Record<OverlaySnap, string> = {
   'top-right': 'Top right',
   'bottom-left': 'Bottom left',
   'bottom-right': 'Bottom right',
-  'bottom-center': 'Bottom center'
+  'bottom-center': 'Bottom center',
+  'top-center': 'Top center'
 }
 
 function round6(value: number): number {
@@ -69,6 +72,9 @@ export function overlayDefaultSize(
       return portrait ? [0.76, 0.14] : [0.92, 0.16]
     case 'buddy':
       return portrait ? [0.32, (0.32 * 9) / 16] : [0.18, (0.18 * 16) / 9]
+    // Plan 188 D12: up to seven rows (question, five answers, footer).
+    case 'poll':
+      return portrait ? [0.78, 0.3] : [0.3, 0.4]
   }
 }
 
@@ -89,7 +95,8 @@ export function overlaySnapRect(
       : snap === 'top-right' || snap === 'bottom-right'
         ? 1 - side - w
         : (1 - w) / 2
-  const y = snap === 'top-left' || snap === 'top-right' ? top : 1 - bottom - h
+  const y =
+    snap === 'top-left' || snap === 'top-right' || snap === 'top-center' ? top : 1 - bottom - h
   return { x: round6(Math.max(0, x)), y: round6(Math.max(0, y)), w: round6(w), h: round6(h) }
 }
 
@@ -112,18 +119,27 @@ function snappedItem(
   }
 }
 
-/** Mirrors `OverlayLayout::default()`; pinned by the shared fixture. */
+/** Mirrors `OverlayLayout::default()`; pinned by the shared fixture. The
+ * poll (plan 188 D12) is the one item whose orientations snap differently:
+ * top left on landscape, top centre inside the portrait safe area. */
 export const DEFAULT_OVERLAY_LAYOUT: OverlayLayout = {
   highlight: snappedItem('highlight', 'bottom-left', true, true),
   captions: snappedItem('captions', 'bottom-center', false, false),
-  buddy: snappedItem('buddy', 'bottom-right', false, false)
+  buddy: snappedItem('buddy', 'bottom-right', false, false),
+  poll: {
+    horizontal: overlaySnapRect('poll', 'horizontal', 'top-left'),
+    vertical: overlaySnapRect('poll', 'vertical', 'top-center'),
+    showOnStream: true,
+    showInRecording: true
+  }
 }
 
 export function cloneOverlayLayout(layout: OverlayLayout): OverlayLayout {
   return {
     highlight: { ...layout.highlight },
     captions: { ...layout.captions },
-    buddy: { ...layout.buddy }
+    buddy: { ...layout.buddy },
+    poll: { ...layout.poll }
   }
 }
 

@@ -161,6 +161,7 @@ import {
   BANNER_MAX_COUNT,
   BANNER_OPACITY_MAX,
   BANNER_OPACITY_MIN,
+  DEFAULT_POLL_OVERLAY_ITEM,
   LAYOUT_PRESET_VALUES
 } from './backend'
 import { isBannerFileName } from './banner-assets'
@@ -2834,10 +2835,28 @@ const overlayLayoutSchema = objectSchema(
   {
     highlight: overlayItemLayoutSchema,
     captions: overlayItemLayoutSchema,
-    buddy: overlayItemLayoutSchema
+    buddy: overlayItemLayoutSchema,
+    poll: overlayItemLayoutSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<OverlayLayout>
+/**
+ * What the backend serves (plan 188 S3): a layout from before the poll (an
+ * older backend's reply or event) keeps the streamer's three placements and
+ * takes the poll's default place. Otherwise as strict as the `set` params,
+ * which always carry every item.
+ */
+const overlayLayoutReplySchema = runtimeSchema<OverlayLayout>(
+  'an overlay layout',
+  (value, path) => {
+    const legacy =
+      typeof value === 'object' && value !== null && !Array.isArray(value) && !('poll' in value)
+    return overlayLayoutSchema.parse(
+      legacy ? { ...value, poll: DEFAULT_POLL_OVERLAY_ITEM } : value,
+      path
+    )
+  }
+)
 const migrateHighlightAnchorParamsSchema = objectSchema(
   { anchor: enumSchema(['top-left', 'top-right', 'bottom-left', 'bottom-right']) },
   { allowUnknown: false }
@@ -4436,11 +4455,11 @@ const runtimeContracts = {
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
   // --- Overlay layout (plan 164) ---
-  'overlays.layout.get': { params: undefinedSchema, result: overlayLayoutSchema },
-  'overlays.layout.set': { params: overlayLayoutSchema, result: overlayLayoutSchema },
+  'overlays.layout.get': { params: undefinedSchema, result: overlayLayoutReplySchema },
+  'overlays.layout.set': { params: overlayLayoutSchema, result: overlayLayoutReplySchema },
   'overlays.layout.migrate_highlight_anchor': {
     params: migrateHighlightAnchorParamsSchema,
-    result: overlayLayoutSchema
+    result: overlayLayoutReplySchema
   },
   // --- end overlay layout (plan 164) ---
   // --- Banners (plan 186) ---
@@ -4648,7 +4667,7 @@ const runtimeEventSchemas = {
   'cohost.state': cohostStateSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   // --- Overlay layout (plan 164) ---
-  'overlays.layout': overlayLayoutSchema,
+  'overlays.layout': overlayLayoutReplySchema,
   // --- end overlay layout (plan 164) ---
   'banners.changed': bannerListSchema,
   'polls.status': pollStatusEventSchema as RuntimeSchema<PollStatusEvent>,

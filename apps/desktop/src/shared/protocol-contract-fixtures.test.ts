@@ -66,7 +66,7 @@ import type {
   BuddyPetIdentityReadEvent,
   BuddyPetSheetGeneratedEvent
 } from './buddy-pet-creator'
-import { normalizeSessionCommentsListParams } from './backend'
+import { DEFAULT_POLL_OVERLAY_ITEM, normalizeSessionCommentsListParams } from './backend'
 import type {
   CohostAvatarAccepted,
   CohostAvatarCreateParams,
@@ -134,9 +134,10 @@ interface HighRiskContractFixtures {
     deletionOperation: SessionDeletionOperation
     eventMessages: LiveChatMessage[]
   }
+  // Plan 188 S3: a fixture written before the poll has no `poll` key.
   overlayLayout: {
-    defaults: OverlayLayout
-    placed: OverlayLayout
+    defaults: Omit<OverlayLayout, 'poll'> & Partial<Pick<OverlayLayout, 'poll'>>
+    placed: Omit<OverlayLayout, 'poll'> & Partial<Pick<OverlayLayout, 'poll'>>
   }
   banner: {
     minimal: Banner
@@ -714,10 +715,13 @@ describe('shared high-risk protocol fixture', () => {
   })
 
   it('keeps the overlay layout wire shape identical across languages (plan 164)', () => {
-    for (const layout of [fixtures.overlayLayout.defaults, fixtures.overlayLayout.placed]) {
+    for (const fixture of [fixtures.overlayLayout.defaults, fixtures.overlayLayout.placed]) {
+      // Plan 188 S3: a fixture from before the poll reads with its default.
+      const layout = { ...fixture, poll: fixture.poll ?? DEFAULT_POLL_OVERLAY_ITEM }
       expect(validateBackendRpcResult('overlays.layout.get', layout)).toStrictEqual(layout)
       expect(validateBackendRpcParams('overlays.layout.set', layout)).toStrictEqual(layout)
       expect(validateBackendRpcResult('overlays.layout.set', layout)).toStrictEqual(layout)
+      expect(validateBackendEventPayload('overlays.layout', layout)).toStrictEqual(layout)
     }
     expect(
       validateBackendRpcParams('overlays.layout.migrate_highlight_anchor', { anchor: 'top-right' })
@@ -739,6 +743,42 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
     expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
     expect(fixtures.overlayLayout.defaults.buddy.horizontal.x).toBeCloseTo(0.7975, 6)
+  })
+
+  it('reads a layout from before the poll with the three placements kept (plan 188 S3)', () => {
+    // An older backend's reply (or a layout it stored) has no `poll`: the
+    // streamer's placements stay exactly, the poll takes its default place.
+    const { poll: _none, ...legacy } = fixtures.overlayLayout.placed
+    for (const read of [
+      validateBackendRpcResult('overlays.layout.get', legacy),
+      validateBackendRpcResult('overlays.layout.set', legacy),
+      validateBackendRpcResult('overlays.layout.migrate_highlight_anchor', legacy),
+      validateBackendEventPayload('overlays.layout', legacy)
+    ]) {
+      expect(read).toStrictEqual({ ...legacy, poll: DEFAULT_POLL_OVERLAY_ITEM })
+    }
+    // A placed poll is never replaced by the default.
+    const placedPoll = {
+      ...DEFAULT_POLL_OVERLAY_ITEM,
+      horizontal: { x: 0.6, y: 0.1, w: 0.3, h: 0.4 },
+      showInRecording: false
+    }
+    expect(
+      validateBackendRpcResult('overlays.layout.get', { ...legacy, poll: placedPoll })
+    ).toStrictEqual({ ...legacy, poll: placedPoll })
+    // The renderer always sends every item, so `set` stays strict; a broken
+    // poll is refused, never swapped for the default.
+    expect(() => validateBackendRpcParams('overlays.layout.set', legacy)).toThrow('poll')
+    expect(() =>
+      validateBackendRpcResult('overlays.layout.get', { ...legacy, poll: null })
+    ).toThrow('poll')
+    expect(() =>
+      validateBackendRpcResult('overlays.layout.get', {
+        ...legacy,
+        poll: { ...placedPoll, horizontal: { x: 2, y: 0, w: 1, h: 1 } }
+      })
+    ).toThrow()
+    expect(() => validateBackendRpcResult('overlays.layout.get', { ...legacy, extra: 1 })).toThrow()
   })
 
   it('keeps the banner wire shape identical across languages, timer off or on (plan 186)', () => {

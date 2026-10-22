@@ -5428,20 +5428,37 @@ export interface OverlayItemLayout {
   showInRecording: boolean
 }
 
-export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy'] as const
+export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy', 'poll'] as const
 export type OverlayItem = (typeof OVERLAY_ITEMS)[number]
 
 export type OverlayLayout = Record<OverlayItem, OverlayItemLayout>
 
+/**
+ * The poll card's default place (plan 188 D12), mirroring Rust's
+ * `OverlayLayout::default()`: top left on landscape (the one free corner),
+ * top centre inside the portrait safe area, on the stream and the recording.
+ * A layout stored or served before the poll existed gets exactly this, so
+ * the streamer's three placements are kept (`overlay-layout.ts` derives the
+ * same rects from the snap rules; a test pins them equal).
+ */
+export const DEFAULT_POLL_OVERLAY_ITEM: OverlayItemLayout = {
+  horizontal: { x: 0.0225, y: 0.04, w: 0.3, h: 0.4 },
+  vertical: { x: 0.11, y: 0.08, w: 0.78, h: 0.3 },
+  showOnStream: true,
+  showInRecording: true
+}
+
 export type OverlayOrientation = 'horizontal' | 'vertical'
 
-/** Snap presets: the four corners plus the centred bottom bar captions use. */
+/** Snap presets: the four corners, the centred bottom bar captions use and
+ * the centred top place the poll takes on portrait (plan 188 D12). */
 export type OverlaySnap =
   | 'top-left'
   | 'top-right'
   | 'bottom-left'
   | 'bottom-right'
   | 'bottom-center'
+  | 'top-center'
 
 /** Smallest side a placed rect may have (canvas units); mirrors Rust. */
 export const OVERLAY_RECT_MIN_SIZE = 0.02

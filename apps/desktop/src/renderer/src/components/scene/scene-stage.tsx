@@ -6,6 +6,7 @@ import {
   ExternalLinkIcon,
   BuddyIcon,
   ImageIcon,
+  PollIcon,
   PreviewIcon
 } from '@/components/icons'
 import {
@@ -128,7 +129,8 @@ export interface StageOverlays {
 const OVERLAY_ICONS: Record<OverlayItem, ElementType> = {
   highlight: ChatIcon,
   captions: CaptionsIcon,
-  buddy: BuddyIcon
+  buddy: BuddyIcon,
+  poll: PollIcon
 }
 const stageItemIcon = (entry: OverlayStageItem): ElementType =>
   entry.kind === 'overlay' ? OVERLAY_ICONS[entry.item] : ImageIcon

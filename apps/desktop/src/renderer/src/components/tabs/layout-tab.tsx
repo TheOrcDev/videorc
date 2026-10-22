@@ -1467,7 +1467,8 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
   captions:
     'The caption bar. Drag its edges to set its width; style and text size live in Captions.',
-  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.'
+  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.',
+  poll: 'The poll card while a poll runs. Drag it on the stage or snap it to a corner.'
 }
 
 /** Exported for its test: the overlay controls, off with one reason while
