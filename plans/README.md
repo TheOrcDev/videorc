@@ -1,5 +1,19 @@
 # Implementation Plans
 
+- 2026-10-22: [Plan 188](188-cross-platform-chat-polls.md), Polls across
+  every chat. The streamer asks a question with 2–5 answers from the Stream
+  Manager (Poll button) or `/poll Question? A | B`; viewers vote by typing
+  the number in any platform's chat (YouTube, Twitch, Kick, X) and every
+  vote lands in one tally, which the platforms' own polls can't do. Votes
+  are counted in the backend chat funnel (`try_deliver_messages`), one per
+  viewer per platform, last vote wins, the streamer's own rows ignored;
+  vote-only messages fold out of the chat list. Videorc posts the poll and
+  the result in every chat, and a card with live bars shows on stream
+  through a fourth overlay slot (between the Buddy and the highlight card;
+  Metal namespace 10, CPU, D3D11). A 15 s grace keeps YouTube's delayed
+  viewers in. Phase 2 in the same PR: Buddy voice (Premium), ⌘K, Stream
+  Deck, phone. Free. 14 decisions (D1–D14), owner answered D2–D9.
+  **PLANNED**.
 - 2026-10-20: [Plan 186](186-banners-on-the-picture.md), Banners. The
   owner wants their own images (a sponsor strip, "Follow me", a logo, a
   full-frame frame) placed anywhere on the picture, with recommended sizes.
