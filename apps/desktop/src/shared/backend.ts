@@ -5515,6 +5515,104 @@ export interface BannerHideParams {
 }
 // --- end banners (plan 186) -------------------------------------------------
 
+// --- polls (plan 188) -------------------------------------------------------
+// One question, 2–5 answers; viewers vote by typing the answer's number in any
+// platform's chat and every vote lands in one backend-owned tally. Pinned by
+// `protocol-fixtures/high-risk-contracts.json` → `poll` (wire) and
+// `protocol-fixtures/poll-votes.json` (what counts as a vote).
+
+export const POLL_MIN_OPTIONS = 2
+export const POLL_MAX_OPTIONS = 5
+/** Characters (Unicode code points) after trimming (D10). */
+export const POLL_QUESTION_MAX_CHARS = 60
+export const POLL_OPTION_MAX_CHARS = 25
+
+/** `polls.start`. `durationSeconds: null` is No timer (ends on End now). */
+export interface PollStartParams {
+  question: string
+  options: string[]
+  durationSeconds: number | null
+  postInChat: boolean
+}
+
+/** `polls.end`, `polls.cancel`, `polls.reshow`. */
+export interface PollIdParams {
+  pollId: string
+}
+
+export type PollState = 'open' | 'counting' | 'final' | 'cancelled'
+
+/** Whether the card should be on the picture; the backend owns it (D7). */
+export type PollCardVisibility = 'shown' | 'hidden'
+
+export interface PollOptionTally {
+  label: string
+  votes: number
+}
+
+export interface PollPlatformTally {
+  platform: StreamPlatform
+  votes: number
+}
+
+/** D13: the primary canvas always; the auxiliary leg only when one of its
+ * destinations has a chat Videorc counts. */
+export interface PollCardLegs {
+  primary: boolean
+  auxiliary: boolean
+}
+
+export type PollPostPhase = 'sending' | 'sent' | 'partial' | 'failed'
+
+export interface PollPostSummary {
+  phase: PollPostPhase
+  failedPlatforms: StreamPlatform[]
+}
+
+/** `polls.status` (event), `polls.current` and the start/end/cancel/reshow
+ * results. Optional fields are omitted when absent, never `null`. */
+export interface PollStatus {
+  pollId: string
+  sessionId: string
+  question: string
+  options: PollOptionTally[]
+  totalVotes: number
+  /** Platforms with at least one vote. */
+  byPlatform: PollPlatformTally[]
+  state: PollState
+  /** RFC 3339, the backend's clock. */
+  openedAt: string
+  /** When the timer runs out; absent with No timer. */
+  closesAt?: string
+  /** When the poll stopped taking new votes (timer, End now, session end). */
+  endedAt?: string
+  /** Latest platform time a vote may carry: `endedAt` + the 15 s grace (D8). */
+  acceptUntil?: string
+  finalAt?: string
+  durationSeconds?: number
+  postInChat: boolean
+  card: PollCardVisibility
+  cardLegs: PollCardLegs
+  /** False where the picture has no live text slot (4K60 legacy, direct
+   * D3D11 recording): the poll still runs (D14). */
+  cardAvailable: boolean
+  /** 0-based indexes of the leading option(s); empty with zero votes. */
+  winners: number[]
+  /** Platforms whose chat is being read, so their votes count. */
+  countingPlatforms: StreamPlatform[]
+  /** Connected but not reading right now (e.g. YouTube under the quota
+   * breaker): their votes aren't counting. */
+  pausedPlatforms: StreamPlatform[]
+  startPost?: PollPostSummary
+  resultPost?: PollPostSummary
+}
+
+/** `polls.status` event; `poll: null` is the one deliberate null. */
+export interface PollStatusEvent {
+  poll: PollStatus | null
+}
+// --- end polls (plan 188) ---------------------------------------------------
+
 // --- Buddy overlay (plan 164) ---------------------------------------------
 // The Buddy on stream (Phase C): the backend owns which avatar state shows
 // and the bubble that is up; the renderer rasterizes the avatar per output

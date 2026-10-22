@@ -1998,5 +1998,101 @@
       "createdAt": "2026-10-20T18:00:00Z",
       "updatedAt": "2026-10-20T18:05:00Z"
     }
+  },
+  "poll": {
+    "startParams": {
+      "question": "Tabs or spaces?",
+      "options": ["Tabs", "Spaces"],
+      "durationSeconds": 60,
+      "postInChat": true
+    },
+    "startParamsNoTimer": {
+      "question": "Which language next stream?",
+      "options": ["Rust", "Go", "Zig"],
+      "durationSeconds": null,
+      "postInChat": false
+    },
+    "idParams": { "pollId": "7b0e6c1a-3f2d-4c8e-9a51-2d6f0b8c4e17" },
+    "open": {
+      "pollId": "7b0e6c1a-3f2d-4c8e-9a51-2d6f0b8c4e17",
+      "sessionId": "session-188",
+      "question": "Tabs or spaces?",
+      "options": [
+        { "label": "Tabs", "votes": 31 },
+        { "label": "Spaces", "votes": 19 }
+      ],
+      "totalVotes": 50,
+      "byPlatform": [
+        { "platform": "youtube", "votes": 28 },
+        { "platform": "twitch", "votes": 15 },
+        { "platform": "kick", "votes": 7 }
+      ],
+      "state": "open",
+      "openedAt": "2026-10-22T18:00:00Z",
+      "closesAt": "2026-10-22T18:01:00Z",
+      "durationSeconds": 60,
+      "postInChat": true,
+      "card": "shown",
+      "cardLegs": { "primary": true, "auxiliary": false },
+      "cardAvailable": true,
+      "winners": [0],
+      "countingPlatforms": ["youtube", "twitch", "kick", "x"],
+      "pausedPlatforms": [],
+      "startPost": { "phase": "partial", "failedPlatforms": ["x"] }
+    },
+    "final": {
+      "pollId": "7b0e6c1a-3f2d-4c8e-9a51-2d6f0b8c4e17",
+      "sessionId": "session-188",
+      "question": "Tabs or spaces?",
+      "options": [
+        { "label": "Tabs", "votes": 52 },
+        { "label": "Spaces", "votes": 32 }
+      ],
+      "totalVotes": 84,
+      "byPlatform": [
+        { "platform": "youtube", "votes": 45 },
+        { "platform": "twitch", "votes": 27 },
+        { "platform": "kick", "votes": 9 },
+        { "platform": "x", "votes": 3 }
+      ],
+      "state": "final",
+      "openedAt": "2026-10-22T18:00:00Z",
+      "closesAt": "2026-10-22T18:01:00Z",
+      "endedAt": "2026-10-22T18:01:00Z",
+      "acceptUntil": "2026-10-22T18:01:15Z",
+      "finalAt": "2026-10-22T18:01:25Z",
+      "durationSeconds": 60,
+      "postInChat": true,
+      "card": "shown",
+      "cardLegs": { "primary": true, "auxiliary": false },
+      "cardAvailable": true,
+      "winners": [0],
+      "countingPlatforms": ["youtube", "twitch", "kick", "x"],
+      "pausedPlatforms": [],
+      "startPost": { "phase": "partial", "failedPlatforms": ["x"] },
+      "resultPost": { "phase": "sent", "failedPlatforms": [] }
+    },
+    "untimed": {
+      "pollId": "0c4f9e2b-8a71-4d36-b5e0-6f1a2c9d7e83",
+      "sessionId": "session-188",
+      "question": "Which language next stream?",
+      "options": [
+        { "label": "Rust", "votes": 0 },
+        { "label": "Go", "votes": 0 },
+        { "label": "Zig", "votes": 0 }
+      ],
+      "totalVotes": 0,
+      "byPlatform": [],
+      "state": "open",
+      "openedAt": "2026-10-22T18:10:00Z",
+      "postInChat": false,
+      "card": "shown",
+      "cardLegs": { "primary": true, "auxiliary": true },
+      "cardAvailable": false,
+      "winners": [],
+      "countingPlatforms": ["twitch"],
+      "pausedPlatforms": ["youtube"]
+    },
+    "eventNone": { "poll": null }
   }
 }

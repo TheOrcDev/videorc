@@ -1162,6 +1162,10 @@ pub struct AppState {
     /// The Buddy avatar overlay (plan 164 Phase C): one raster per output
     /// target, pushed by the renderer through `buddy.overlay.set`.
     pub buddy_overlay: crate::captions::CaptionOverlaySlots,
+    /// The poll card (plan 188): one raster per output target, pushed by the
+    /// renderer through `polls.overlay.set` and cleared by the poll engine
+    /// when the card hides, the poll is cancelled or the session ends.
+    pub poll_overlay: crate::captions::CaptionOverlaySlots,
     /// Which avatar state shows and the bubble that is up (`cohost.buddy.state`).
     pub buddy_overlay_state: crate::buddy_overlay::BuddyOverlayStateSlot,
     /// The Buddy's pet on stream (plan 168 Phase B): pre-scaled atlases per
@@ -1405,6 +1409,7 @@ impl AppState {
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             simulcast_highlight_overlay: crate::captions::new_caption_overlay_slot(),
             buddy_overlay: crate::captions::new_caption_overlay_slots(),
+            poll_overlay: crate::captions::new_caption_overlay_slots(),
             buddy_overlay_state: crate::buddy_overlay::new_buddy_overlay_state_slot(
                 cohost_settings.persona.id.clone(),
             ),
