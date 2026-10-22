@@ -1117,6 +1117,8 @@ pub struct AppState {
     /// Anonymous usage stats (Settings → General → Privacy): the switch and
     /// the delivery queue's lock. Off until boot reads the setting.
     pub usage_stats: Arc<crate::usage_stats::UsageStatsRuntime>,
+    /// Plan 187: the Discord go-live announcer's fact channel and settings lock.
+    pub discord_announce: Arc<crate::discord_announce::DiscordAnnounceRuntime>,
     /// Microphone kept open while Studio is visible (instant-record P5);
     /// `session.start` takes it instead of opening the device.
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
@@ -1391,6 +1393,7 @@ impl AppState {
             ),
             performance_check: Arc::default(),
             usage_stats: Arc::default(),
+            discord_announce: Arc::default(),
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),
