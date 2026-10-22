@@ -45,6 +45,12 @@ export interface LiveDashboardCloud {
   phase: LiveDashboardCloudPhase
   /** While viewers see Be right back: seconds before the stream ends (D12). */
   holdRemainingSeconds?: number
+  /**
+   * The upload as the cloud measures it, summed over the connected feeds. The
+   * bitrate when this computer's FFmpeg can't count one (the raw path's tee
+   * reports `bitrate=N/A`).
+   */
+  feedKbps?: number
 }
 
 export type LiveDashboardSessionState = 'off-air' | 'recording' | 'live'
@@ -296,16 +302,21 @@ export function reduceDashboardCloud(
     status.sessionId === state.sessionId &&
     CLOUD_PHASES.has(status.phase)
   const remaining = status.hold?.active ? status.hold.remainingSeconds : undefined
+  const feedKbps = (status.feeds ?? [])
+    .filter((feed) => feed.connected)
+    .reduce((sum, feed) => sum + (feed.kbps ?? 0), 0)
   const cloud: LiveDashboardCloud | null = carries
     ? {
         phase: status.phase as LiveDashboardCloudPhase,
-        ...(typeof remaining === 'number' ? { holdRemainingSeconds: remaining } : {})
+        ...(typeof remaining === 'number' ? { holdRemainingSeconds: remaining } : {}),
+        ...(feedKbps > 0 ? { feedKbps } : {})
       }
     : null
   const previous = state.cloud ?? null
   if (
     previous?.phase === cloud?.phase &&
-    previous?.holdRemainingSeconds === cloud?.holdRemainingSeconds
+    previous?.holdRemainingSeconds === cloud?.holdRemainingSeconds &&
+    previous?.feedKbps === cloud?.feedKbps
   )
     return state
   return { ...state, cloud, updatedAt: now }
@@ -437,7 +448,9 @@ export function normalizeLiveDashboardState(value: unknown): LiveDashboardState 
       !CLOUD_PHASES.has(cloud.phase) ||
       (cloud.holdRemainingSeconds !== undefined &&
         (typeof cloud.holdRemainingSeconds !== 'number' ||
-          !Number.isFinite(cloud.holdRemainingSeconds)))
+          !Number.isFinite(cloud.holdRemainingSeconds))) ||
+      (cloud.feedKbps !== undefined &&
+        (typeof cloud.feedKbps !== 'number' || !Number.isFinite(cloud.feedKbps)))
     )
       return null
   }

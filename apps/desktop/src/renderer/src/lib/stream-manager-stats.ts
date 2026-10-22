@@ -353,12 +353,14 @@ function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatIt
   const typical = recent.length
     ? [...recent].sort((a, b) => a - b)[Math.floor(recent.length / 2)]
     : 0
-  const kbps = latest?.bitrateKbps
+  const cloud = dashboard.cloud ?? null
+  // Through the cloud, the cloud's own measure of the upload when FFmpeg
+  // can't count one (the raw path's tee says `bitrate=N/A`).
+  const kbps = latest?.bitrateKbps ?? cloud?.feedKbps
   const sagging = typeof kbps === 'number' && typical > 0 && kbps < typical * 0.7
   // One bitrate spelling (plan 174 S1.4), and a placeholder that says why (H-10).
   const bitrate = formatBitrate(kbps) || NO_VALUE
   const bitrateReason = bitrate === NO_VALUE ? 'Not reported yet' : undefined
-  const cloud = dashboard.cloud ?? null
   const reading = healthReading(dashboard.targets, droppedLastMinute, sagging, bitrate, cloud)
   const fps = typeof latest?.fps === 'number' ? `${Math.round(latest.fps)} fps` : null
   const dropped = droppedLastMinute > 0 ? `${droppedLastMinute} in the last minute` : 'None'

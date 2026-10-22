@@ -370,6 +370,39 @@ describe('stats bar items (plan 057)', () => {
     ).toMatchObject({ value: 'Cloud resuming', tone: 'warning' })
     // A direct session reads exactly as before.
     expect(reading(healthy())).toMatchObject({ value: '6 Mbps' })
+
+    // The raw path's tee never counts its upload (`bitrate=N/A`): through the
+    // cloud, the cloud's own measure of the feed stands in.
+    const uncounted = withTargets(
+      reduceDashboardHealth(live(), { sessionId: 's', fps: 30, createdAt: at(30) }, at(30)),
+      [
+        {
+          targetId: 'videorc-cloud-horizontal',
+          platform: 'custom',
+          label: 'Videorc Cloud',
+          state: 'live'
+        }
+      ]
+    )
+    expect(reading(reduceDashboardCloud(uncounted, cloudStatus({}), at(31)))).toMatchObject({
+      value: 'Cloud'
+    })
+    const measured = reduceDashboardCloud(
+      uncounted,
+      cloudStatus({ feeds: [{ orientation: 'horizontal', connected: true, kbps: 4150 }] }),
+      at(31)
+    )
+    expect(reading(measured)).toMatchObject({ value: 'Cloud · 4.2 Mbps', tone: 'good' })
+    // FFmpeg's own count wins when there is one.
+    expect(
+      reading(
+        reduceDashboardCloud(
+          throughCloud,
+          cloudStatus({ feeds: [{ orientation: 'horizontal', connected: true, kbps: 4150 }] }),
+          at(31)
+        )
+      )
+    ).toMatchObject({ value: 'Cloud · 6 Mbps' })
   })
 
   it('names the most urgent problem instead of the bitrate', () => {

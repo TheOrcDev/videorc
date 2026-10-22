@@ -220,6 +220,25 @@ describe('live dashboard state', () => {
     expect(
       reduceDashboardCloud(holding, status({ phase: 'live', hold: undefined }), at(7)).cloud
     ).toEqual({ phase: 'live' })
+    // The cloud's measure of the upload: connected feeds only, summed.
+    const measured = reduceDashboardCloud(
+      holding,
+      status({
+        phase: 'live',
+        hold: undefined,
+        feeds: [
+          { orientation: 'horizontal', connected: true, kbps: 4000 },
+          { orientation: 'vertical', connected: true, kbps: 2000 },
+          { orientation: 'horizontal', connected: false, kbps: 900 }
+        ]
+      }),
+      at(7)
+    )
+    expect(measured.cloud).toEqual({ phase: 'live', feedKbps: 6000 })
+    expect(normalizeLiveDashboardState(measured)).not.toBeNull()
+    expect(
+      normalizeLiveDashboardState({ ...measured, cloud: { phase: 'live', feedKbps: Number.NaN } })
+    ).toBeNull()
     // A new session drops the last one's show.
     const next = reduceDashboardRecording(
       holding,
