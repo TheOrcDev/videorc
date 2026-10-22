@@ -3311,6 +3311,7 @@ export interface ClipMoment {
 /** Who placed a clip mark: a spoken "clip that" or the Mark clip control. */
 import type { MarkerContext, MarkerRelayCommand, MarkerRelayResult } from './session-markers'
 import type { BannerRelayCommand, BannerSummary } from './banner-commands'
+import type { PollRelayCommand } from './poll-relay'
 export type * from './session-markers'
 
 export type ClipMarkSource = 'voice' | 'manual'
@@ -4493,6 +4494,22 @@ export interface VideorcApi {
   bannerFromCommentsWindow: (command: BannerRelayCommand) => Promise<boolean>
   onBannerRequest: (callback: (command: BannerRelayCommand) => void) => () => void
   pushBannerResult: (resolution: CommentsCommandResolution<boolean>) => Promise<boolean>
+  /** Polls in the Stream Manager (plan 188 S2): the Studio renderer pushes the
+   * current poll (null: none this session); the window seeds from main's copy
+   * and follows. */
+  getCommentsPoll: () => Promise<PollStatus | null>
+  pushCommentsPoll: (poll: PollStatus | null) => Promise<boolean>
+  onCommentsPoll: (callback: (poll: PollStatus | null) => void) => () => void
+  /** Start, end, cancel or show again from the Stream Manager: relayed to the
+   * MAIN renderer, which owns the `polls.*` RPCs; a refusal comes back as the
+   * reply's error, the backend's sentence as it is. */
+  pollFromCommentsWindow: (command: PollRelayCommand) => Promise<boolean>
+  onPollRequest: (callback: (command: PollRelayCommand) => void) => () => void
+  pushPollResult: (resolution: CommentsCommandResolution<boolean>) => Promise<boolean>
+  /** ⌘K "New poll…" (plan 188 S9): main shows the Stream Manager, then asks
+   * it to open the Poll popover (`onCommentsPollOpen`). Resolves once asked. */
+  openPollInCommentsWindow: () => Promise<boolean>
+  onCommentsPollOpen: (callback: () => void) => () => void
   /** Show who followed from the Stream Manager (plan 071, S2): Electron main
    * starts the Twitch reconnect with the follow permission over its admin
    * socket and opens the browser, so the main window's eager bundle carries
@@ -5612,6 +5629,25 @@ export interface PollStatusEvent {
   poll: PollStatus | null
 }
 // --- end polls (plan 188) ---------------------------------------------------
+
+// --- Poll card on the picture (plan 188 S4) ----------------------------------
+// The Studio renderer rasterizes the card per output canvas and pushes it like
+// the Buddy bubble. The backend refuses a push for a poll whose card isn't up
+// ("This poll's card isn't showing."), a normal race at hide time.
+
+/** `polls.overlay.set`: one target's card raster, at the poll item's rect. */
+export interface SetPollOverlayParams {
+  pollId: string
+  pngBase64: string
+  target?: OverlayTarget
+  rect?: OverlayRect
+}
+
+/** `polls.overlay.clear`: one target, or both without one. */
+export interface ClearPollOverlayParams {
+  target?: OverlayTarget
+}
+// --- end poll card (plan 188 S4) ---------------------------------------------
 
 // --- Buddy overlay (plan 164) ---------------------------------------------
 // The Buddy on stream (Phase C): the backend owns which avatar state shows

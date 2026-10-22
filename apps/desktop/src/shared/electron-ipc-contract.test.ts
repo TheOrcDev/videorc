@@ -61,8 +61,10 @@ describe('Electron IPC contract', () => {
     // 134: plan 186 adds banners:pick-image (Assets → Banners → Import image…).
     // 138: plan 186 S7 adds the Stream Manager's banner list (get, push) and
     // its show or hide relay pair.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(138)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(138)
+    // 143: plan 188 adds the Stream Manager's poll (get, push), its action
+    // relay pair, and ⌘K's New poll… (open-poll).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(143)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(143)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -1208,6 +1210,138 @@ describe('Stream Manager banner IPC (plan 186 S7)', () => {
       ])
     ).toThrow()
     expect(() => validateElectronInvokeResult('comments-window:banner', false)).toThrow()
+    expect(broker.pendingCount).toBe(0)
+  })
+})
+
+describe('Stream Manager poll IPC (plan 188 S2)', () => {
+  const fixtures = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/high-risk-contracts.json', import.meta.url),
+      'utf8'
+    )
+  ) as { poll: Record<string, Record<string, unknown>> }
+  const { open, final, untimed, startParams, startParamsNoTimer } = fixtures.poll
+
+  it('pushes the whole poll from Studio, or null, and nothing else', () => {
+    for (const poll of [open, final, untimed, null]) {
+      expect(validateElectronInvokeArgs('comments-window:poll-state-push', [poll])).toEqual([poll])
+      expect(validateElectronInvokeResult('comments-window:poll-state-get', poll)).toEqual(poll)
+      expect(validateElectronEventPayload('comments-window:poll-state', poll)).toEqual(poll)
+    }
+    for (const forged of [
+      { ...open, voters: [{ platform: 'twitch', authorId: '123' }] },
+      { ...open, closesAt: null },
+      { ...open, state: 'paused' },
+      { poll: open },
+      undefined
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:poll-state-push', [forged])
+      ).toThrow()
+      expect(() => validateElectronEventPayload('comments-window:poll-state', forged)).toThrow()
+      expect(() => validateElectronInvokeResult('comments-window:poll-state-get', forged)).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('comments-window:poll-state-get', [true])).toThrow()
+  })
+
+  it('accepts one explicit start, end, cancel or show-again, and answers done or the sentence why not', () => {
+    const pollId = String(open.pollId)
+    for (const command of [
+      { requestId: 'r1', action: 'start', params: startParams },
+      { requestId: 'r2', action: 'start', params: startParamsNoTimer },
+      { requestId: 'r3', action: 'end', pollId },
+      { requestId: 'r4', action: 'cancel', pollId },
+      { requestId: 'r5', action: 'reshow', pollId }
+    ]) {
+      expect(validateElectronInvokeArgs('comments-window:poll', [command])).toEqual([command])
+      expect(validateElectronEventPayload('comments-window:poll-request', command)).toEqual(command)
+    }
+    for (const command of [
+      { requestId: 'r1', action: 'start' },
+      { requestId: 'r1', action: 'start', params: { ...startParams, durationSeconds: undefined } },
+      { requestId: 'r1', action: 'start', params: { ...startParams, extra: true } },
+      { requestId: 'r1', action: 'end' },
+      { requestId: 'r1', action: 'end', pollId: '' },
+      { requestId: 'r1', action: 'pause', pollId },
+      { requestId: '', action: 'end', pollId },
+      { requestId: 'r1', action: 'end', pollId, params: startParams }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:poll', [command])).toThrow()
+    }
+    const refused = { requestId: 'r1', ok: false, error: 'Go live to start a poll.' }
+    for (const resolution of [{ requestId: 'r1', ok: true, value: true }, refused]) {
+      expect(validateElectronInvokeArgs('comments-window:poll-result-push', [resolution])).toEqual([
+        resolution
+      ])
+    }
+    for (const resolution of [
+      { requestId: 'r1', ok: true },
+      { requestId: 'r1', ok: true, value: open },
+      { requestId: 'r1', ok: false, error: '' },
+      { requestId: 'r1', ok: true, value: true, error: 'x' }
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:poll-result-push', [resolution])
+      ).toThrow()
+    }
+    expect(() => validateElectronInvokeResult('comments-window:poll', false)).toThrow()
+  })
+
+  it('opens the Poll popover from ⌘K with no arguments either way', () => {
+    expect(validateElectronInvokeArgs('comments-window:open-poll', [])).toEqual([])
+    expect(() => validateElectronInvokeArgs('comments-window:open-poll', ['poll'])).toThrow()
+    expect(validateElectronInvokeResult('comments-window:open-poll', true)).toBe(true)
+    expect(validateElectronEventPayload('comments-window:poll-open', undefined)).toBeUndefined()
+    expect(() => validateElectronEventPayload('comments-window:poll-open', 1)).toThrow()
+  })
+
+  it('lets the Stream Manager read and ask, and only Studio push, answer and open', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:poll-state-get')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:poll')).toBe(true)
+    for (const channel of [
+      'comments-window:poll-state-push',
+      'comments-window:poll-result-push',
+      'comments-window:open-poll'
+    ]) {
+      expect(roleCanInvokeChannel('comments', channel)).toBe(false)
+      expect(roleCanInvokeChannel('main', channel)).toBe(true)
+    }
+    for (const role of ['notes', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'comments-window:poll')).toBe(false)
+      expect(roleCanInvokeChannel(role, 'comments-window:poll-state-get')).toBe(false)
+    }
+  })
+
+  it('relays an action to Studio and the refusal back, through every validated hop', async () => {
+    const broker = new CommentsCommandBroker(1_000)
+    const studio: unknown[] = []
+    const ask = (command: unknown): Promise<unknown> => {
+      const [validated] = validateElectronInvokeArgs('comments-window:poll', [command])
+      return broker
+        .request<true>(validated.requestId, () => {
+          studio.push(validateElectronEventPayload('comments-window:poll-request', validated))
+          return true
+        })
+        .then((result) => validateElectronInvokeResult('comments-window:poll', result))
+    }
+    const answer = (resolution: unknown): boolean => {
+      const [validated] = validateElectronInvokeArgs('comments-window:poll-result-push', [
+        resolution
+      ])
+      return broker.resolve(validated)
+    }
+
+    const started = ask({ requestId: 'r-start', action: 'start', params: startParams })
+    expect(studio).toEqual([{ requestId: 'r-start', action: 'start', params: startParams }])
+    expect(answer({ requestId: 'r-start', ok: true, value: true })).toBe(true)
+    await expect(started).resolves.toBe(true)
+
+    const refused = ask({ requestId: 'r-again', action: 'start', params: startParams })
+    expect(answer({ requestId: 'r-again', ok: false, error: 'End the current poll first.' })).toBe(
+      true
+    )
+    await expect(refused).rejects.toThrow('End the current poll first.')
     expect(broker.pendingCount).toBe(0)
   })
 })

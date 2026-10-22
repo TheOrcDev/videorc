@@ -442,6 +442,7 @@ import {
   scrubReleaseAuthorityEnvironment
 } from './release-authority-env'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import { pollStatusOrNoneSchema } from '../shared/poll-schema'
 import type { ElectronEventChannel, ElectronIpcEventMap } from '../shared/electron-ipc-contract'
 import {
   installRendererSessionPermissions,
@@ -719,6 +720,14 @@ let markerContext: import('../shared/session-markers').MarkerContext | null = nu
 /** The banner list the Stream Manager shows (plan 186 S7): `{id, name, shown}`
  * from the Studio renderer, null until it has read the list. */
 let latestCommentsBanners: import('../shared/banner-commands').BannerSummary[] | null = null
+/** The poll the Stream Manager shows (plan 188 S2), as Studio last pushed it;
+ * null when this session has none. */
+let latestCommentsPoll: import('../shared/backend').PollStatus | null = null
+/** The Stream Manager that has seeded its poll, so it hears `poll-open`. */
+let commentsPollListenerId: number | null = null
+/** ⌘K "New poll…" (plan 188 S9) waiting for a Stream Manager that is still
+ * loading: sent once it seeds its poll (it subscribes first). */
+let commentsPollOpenPending = false
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -759,6 +768,8 @@ let commentsSmokeSnapshotOverride = false
 let commentsSmokeViewerOverride = false
 let commentsSmokeDashboardOverride = false
 let commentsSmokeCohostOverride = false
+// Plan 188: a seeded poll holds until the next seed; Studio's pushes wait.
+let commentsSmokePollOverride = false
 let captionsWindow: BrowserWindow | null = null
 let captionsWindowLastFrame: Electron.Rectangle | null = null
 let captionsWindowAlwaysOnTop = false
@@ -3755,8 +3766,16 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
       commentsWindow = null
       commentsWindowClosing = false
       commentsWindowContentProtected = false
+      commentsPollListenerId = null
+      commentsPollOpenPending = false
       emitCommentsWindowState()
     }
+  })
+  // A reload drops the page's listeners: it hears `poll-open` again only
+  // after it re-seeds its poll (plan 188 S9).
+  const commentsContentsId = window.webContents.id
+  window.webContents.on('did-start-loading', () => {
+    if (commentsPollListenerId === commentsContentsId) commentsPollListenerId = null
   })
 
   const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
@@ -11437,6 +11456,17 @@ async function runSmokePreviewMotionCommand(
     return { viewers: latestViewerSample }
   }
 
+  // Plan 188: the Poll popover's live and final states without a live
+  // backend poll (`probe:comments-window`). Validated like a Studio push.
+  if (command === 'comments-window-seed-poll') {
+    const poll = pollStatusOrNoneSchema.parse(params.poll ?? null, 'comments-window-seed-poll.poll')
+    commentsSmokePollOverride = true
+    latestCommentsPoll = poll
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:poll-state', poll)
+    return { poll: latestCommentsPoll }
+  }
+
   if (command === 'comments-window-seed-cohost') {
     const state = params.state
     if (!state || typeof state !== 'object' || !('state' in state)) {
@@ -15541,6 +15571,59 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:banner-result-push', (event, resolution) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
     return commentsCommandBroker.resolve(resolution)
+  })
+  // Polls (plan 188 S2): the Studio renderer pushes the whole poll (or null)
+  // and main keeps the latest for a window that opens mid-poll; a start, end,
+  // cancel or show-again from the window relays to the MAIN renderer, which
+  // owns the `polls.*` RPCs, like banners. The refusal is the backend's own
+  // sentence, which the window shows as it is.
+  secureIpcHandle('comments-window:poll-state-get', (event) => {
+    if (commentsWindow && event.sender.id === commentsWindow.webContents.id) {
+      // The window subscribes before it seeds, so a pending ⌘K "New poll…"
+      // can go now (plan 188 S9).
+      commentsPollListenerId = event.sender.id
+      if (commentsPollOpenPending) {
+        commentsPollOpenPending = false
+        sendElectronEvent(commentsWindow.webContents, 'comments-window:poll-open', undefined)
+      }
+    }
+    return latestCommentsPoll
+  })
+  secureIpcHandle('comments-window:poll-state-push', (event, poll) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    if (commentsSmokePollOverride) return true
+    latestCommentsPoll = poll
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:poll-state', poll)
+    return true
+  })
+  secureIpcHandle('comments-window:poll', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can run a poll here.'))
+    }
+    return commentsCommandBroker.request<true>(command.requestId, () => {
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      sendElectronEvent(mainWindow.webContents, 'comments-window:poll-request', command)
+      return true
+    })
+  })
+  secureIpcHandle('comments-window:poll-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
+  // ⌘K "New poll…" (plan 188 S9): show the Stream Manager, then ask it to
+  // open the Poll popover. A window still loading hears it once it seeds.
+  secureIpcHandle('comments-window:open-poll', async (event) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    await openCommentsWindow()
+    const window = commentsWindow
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return false
+    if (commentsPollListenerId === window.webContents.id) {
+      sendElectronEvent(window.webContents, 'comments-window:poll-open', undefined)
+    } else {
+      commentsPollOpenPending = true
+    }
+    return true
   })
   // Chat removal relay (plan 140, S6): the Stream Manager asks, the MAIN
   // renderer owns the backend socket and makes the liveChat.moderation.* call,

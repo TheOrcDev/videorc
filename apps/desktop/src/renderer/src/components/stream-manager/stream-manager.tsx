@@ -126,6 +126,8 @@ import {
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
+import type { PollStatus } from '../../../../shared/backend'
+import type { PollRelayAction } from '../../../../shared/poll-relay'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
@@ -292,6 +294,13 @@ export interface StreamManagerProps {
    */
   banners?: readonly BannerSummary[] | null
   onBanner?: (action: BannerRelayAction) => Promise<boolean>
+  /** Plan 188: the poll Studio pushed (null: none this session). */
+  poll?: PollStatus | null
+  /** One poll action relayed to Studio. Resolves false when it didn't
+   * happen; the refusal was already said (toastUserError, id 'poll-refusal'). */
+  onPoll?: (action: PollRelayAction) => Promise<boolean>
+  /** Bumped by ⌘K "New poll…" (and `/poll` with no arguments) to open the Poll popover. */
+  pollOpenRequest?: number
   onOpenPreview?: () => void
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */

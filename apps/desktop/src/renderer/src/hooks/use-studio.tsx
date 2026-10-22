@@ -320,6 +320,7 @@ import type {
   BackendConnection,
   Banner,
   BannerUpdateParams,
+  PollStatus,
   BackendHealth,
   BackendLifecycleEvent,
   BackendLogEvent,
@@ -620,6 +621,11 @@ function loadCommandFailurePolicy() {
 // Banner refusal copy (plan 186): read only when a banner call fails.
 function loadBannerRules() {
   return import('@/lib/banners')
+}
+
+// Poll actions and refusal copy (plan 188): read only when a poll action runs.
+function loadPollActions() {
+  return import('@/lib/poll-actions')
 }
 
 function loadCaptionOverlay() {
@@ -2408,6 +2414,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       bannerList && bannerList.map(({ id, name, shown }) => ({ id, name, shown }))
     )
   }, [bannerList])
+  // Polls (plan 188): the backend owns the one poll; `polls.status` keeps it
+  // here and the Stream Manager gets the same value through main.
+  const [poll, setPoll] = useState<PollStatus | null>(null)
+  const pollRef = useRef(poll)
+  pollRef.current = poll
+  useEffect(() => {
+    void window.videorc?.pushCommentsPoll?.(poll)
+  }, [poll])
+  // Follow `polls.status` and hydrate with `polls.current` on every (re)connect;
+  // an event that lands before the read answers is newer, so it wins.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    let cancelled = false
+    let evented = false
+    const off = client.on('polls.status', (event) => {
+      evented = true
+      setPoll(event.poll)
+    })
+    void client.requestTyped('polls.current', {}).then(
+      (current) => {
+        if (!cancelled && !evented) setPoll(current)
+      },
+      // An older backend has no polls; nothing to show.
+      (error: unknown) => console.warn('[polls] current read failed:', error)
+    )
+    return () => {
+      cancelled = true
+      off()
+    }
+  }, [client, wsStatus])
   const [platformAccounts, setPlatformAccounts] = useState<PlatformAccount[]>([])
   const [platformAccountValidations, setPlatformAccountValidations] = useState<
     PlatformAccountValidation[]
@@ -3012,6 +3048,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         })
     })
+    // Polls from the Stream Manager (plan 188 S2): one action, quietly here;
+    // a refusal's sentence goes back to the window that asked, verbatim.
+    const offPoll = window.videorc?.onPollRequest?.(({ requestId, ...action }) => {
+      void (async () => {
+        if (!client) throw offlineError()
+        const { runPollAction, pollAfterReply } = await loadPollActions()
+        const reply = await runPollAction(client, action)
+        setPoll((current) => pollAfterReply(current, reply))
+      })()
+        .then(() => window.videorc?.pushPollResult?.({ requestId, ok: true, value: true }))
+        .catch((error: unknown) => {
+          console.warn('[polls] action failed:', action.action, error)
+          return window.videorc?.pushPollResult?.({
+            requestId,
+            ok: false,
+            error: (ipcErrorMessage(error) || "Couldn't change the poll.").slice(0, 2000)
+          })
+        })
+    })
     // Banners from the Stream Manager (plan 186 S7): by id, quietly here; a
     // refusal's sentence goes back to the window that asked.
     const offBanner = window.videorc?.onBannerRequest?.(({ requestId, ...action }) => {
@@ -3035,6 +3090,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       offClear?.()
       offClipMark?.()
       offBanner?.()
+      offPoll?.()
       offMarker?.()
       offMarkerCreated?.()
       offMarkerRefused?.()

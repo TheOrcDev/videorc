@@ -54,6 +54,12 @@ import type {
   OverlayTargetsInfo,
   SetBuddyOverlayParams,
   ClearBuddyOverlayParams,
+  PollIdParams,
+  PollStartParams,
+  PollStatus,
+  PollStatusEvent,
+  SetPollOverlayParams,
+  ClearPollOverlayParams,
   CohostStartParams,
   CohostState,
   CohostReportGetParams,
@@ -158,6 +164,14 @@ import {
   LAYOUT_PRESET_VALUES
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import {
+  pollIdParamsSchema,
+  pollIdSchema,
+  pollStartParamsSchema,
+  pollStatusEventSchema,
+  pollStatusOrNoneSchema,
+  pollStatusSchema
+} from './poll-schema'
 import { TWITCH_GIF_MODES } from './chat-gif'
 import { isBuddyPackId, parseBuddyDraftPath } from './buddy-assets'
 import {
@@ -440,6 +454,18 @@ export interface BackendRpcMethodMap {
   /** No `id` hides every banner. */
   'banners.hide': BackendRpcDefinition<BannerHideParams, Banner[]>
   // --- end banners (plan 186) ---
+  // --- Polls (plan 188) ---
+  'polls.start': BackendRpcDefinition<PollStartParams, PollStatus>
+  /** Stops new votes: the poll enters `counting`. */
+  'polls.end': BackendRpcDefinition<PollIdParams, PollStatus>
+  'polls.cancel': BackendRpcDefinition<PollIdParams, PollStatus>
+  /** Final only: the result card shows again for `RESULT_HOLD`. */
+  'polls.reshow': BackendRpcDefinition<PollIdParams, PollStatus>
+  /** Hydrate on (re)connect: null when this session has no poll. */
+  'polls.current': BackendRpcDefinition<Record<string, never>, PollStatus | null>
+  'polls.overlay.set': BackendRpcDefinition<SetPollOverlayParams, OverlayTargetsInfo>
+  'polls.overlay.clear': BackendRpcDefinition<ClearPollOverlayParams, OverlayTargetsInfo>
+  // --- end polls (plan 188) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': BackendRpcDefinition<CohostAvatarCreateParams, CohostAvatarAccepted>
   'cohost.avatar.redo': BackendRpcDefinition<CohostAvatarRedoParams, CohostAvatarAccepted>
@@ -544,6 +570,8 @@ export interface BackendEventMap {
   // --- end overlay layout (plan 164) ---
   // --- Banners (plan 186): the full list, to every window ---
   'banners.changed': Banner[]
+  // --- Polls (plan 188): the whole poll, or null when there is none ---
+  'polls.status': PollStatusEvent
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
   'cohost.avatar.draft': CohostAvatarDraft
@@ -3894,6 +3922,23 @@ const clearBuddyOverlayParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClearBuddyOverlayParams>
 // --- end Buddy pets (plan 168, Phase B) ---
+// --- Poll card (plan 188 S4) ---
+// The Buddy bubble's shape plus the poll it belongs to: the backend refuses a
+// raster for any poll whose card isn't up. Same 4 MB PNG cap.
+const setPollOverlayParamsSchema = objectSchema(
+  {
+    pollId: pollIdSchema,
+    pngBase64: stringSchema({ minLength: 4, maxLength: 5_600_000 }),
+    target: optionalSchema(enumSchema(['primary', 'auxiliary'])),
+    rect: optionalSchema(overlayRectSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SetPollOverlayParams>
+const clearPollOverlayParamsSchema = objectSchema(
+  { target: optionalSchema(enumSchema(['primary', 'auxiliary'])) },
+  { allowUnknown: false }
+) as RuntimeSchema<ClearPollOverlayParams>
+// --- end poll card (plan 188 S4) ---
 
 const scheduledMutationSchema = objectSchema(
   {
@@ -4407,6 +4452,30 @@ const runtimeContracts = {
   'banners.show': { params: bannerIdParamsSchema, result: bannerSchema },
   'banners.hide': { params: bannerHideParamsSchema, result: bannerListSchema },
   // --- end banners (plan 186) ---
+  // --- Polls (plan 188) ---
+  'polls.start': {
+    params: pollStartParamsSchema as RuntimeSchema<PollStartParams>,
+    result: pollStatusSchema
+  },
+  'polls.end': {
+    params: pollIdParamsSchema as RuntimeSchema<PollIdParams>,
+    result: pollStatusSchema
+  },
+  'polls.cancel': {
+    params: pollIdParamsSchema as RuntimeSchema<PollIdParams>,
+    result: pollStatusSchema
+  },
+  'polls.reshow': {
+    params: pollIdParamsSchema as RuntimeSchema<PollIdParams>,
+    result: pollStatusSchema
+  },
+  'polls.current': {
+    params: objectSchema({}, { allowUnknown: false }) as RuntimeSchema<Record<string, never>>,
+    result: pollStatusOrNoneSchema
+  },
+  'polls.overlay.set': { params: setPollOverlayParamsSchema, result: overlayTargetsInfoSchema },
+  'polls.overlay.clear': { params: clearPollOverlayParamsSchema, result: overlayTargetsInfoSchema },
+  // --- end polls (plan 188) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': {
     params: cohostAvatarCreateParamsSchema,
@@ -4582,6 +4651,7 @@ const runtimeEventSchemas = {
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
   'banners.changed': bannerListSchema,
+  'polls.status': pollStatusEventSchema as RuntimeSchema<PollStatusEvent>,
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,
   'cohost.avatar.draft': cohostAvatarDraftSchema,

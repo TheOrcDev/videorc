@@ -152,6 +152,14 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:banners-push': MAIN_ONLY,
   'comments-window:banner': MAIN_AND_COMMENTS,
   'comments-window:banner-result-push': MAIN_ONLY,
+  // Polls (plan 188 S2): the Stream Manager reads the poll Studio pushes and
+  // asks for one action (its handler refuses any other sender); Studio
+  // replies. ⌘K "New poll…" is Studio's alone.
+  'comments-window:poll-state-get': MAIN_AND_COMMENTS,
+  'comments-window:poll-state-push': MAIN_ONLY,
+  'comments-window:poll': MAIN_AND_COMMENTS,
+  'comments-window:poll-result-push': MAIN_ONLY,
+  'comments-window:open-poll': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
   'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
   // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):

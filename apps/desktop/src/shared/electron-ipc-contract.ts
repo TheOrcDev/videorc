@@ -31,6 +31,7 @@ import type {
   NotesDocument,
   NotesWindowState,
   OAuthCallbackEnvelope,
+  PollStatus,
   PreviewWindowState,
   UpdateStatus,
   VideorcApi,
@@ -44,6 +45,12 @@ import {
   markerRelayResultSchema
 } from './session-markers'
 import type { BannerRelayCommand, BannerSummary } from './banner-commands'
+import type { PollRelayCommand } from './poll-relay'
+import {
+  pollRelayCommandSchema,
+  pollRelayResolutionSchema,
+  pollStatusOrNoneSchema
+} from './poll-schema'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
 import { sessionChatTotalsSchema } from './session-chat-totals'
@@ -187,6 +194,11 @@ export const electronInvokeApiMethods = {
   'comments-window:banners-push': 'pushCommentsBanners',
   'comments-window:banner': 'bannerFromCommentsWindow',
   'comments-window:banner-result-push': 'pushBannerResult',
+  'comments-window:poll-state-get': 'getCommentsPoll',
+  'comments-window:poll-state-push': 'pushCommentsPoll',
+  'comments-window:poll': 'pollFromCommentsWindow',
+  'comments-window:poll-result-push': 'pushPollResult',
+  'comments-window:open-poll': 'openPollInCommentsWindow',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
@@ -285,6 +297,10 @@ export interface ElectronIpcEventMap {
   'comments-window:clip-mark-request': ClipMarkCommand
   'comments-window:banners': BannerSummary[] | null
   'comments-window:banner-request': BannerRelayCommand
+  'comments-window:poll-state': PollStatus | null
+  'comments-window:poll-request': PollRelayCommand
+  /** Plan 188 S9: ⌘K "New poll…" asks the Stream Manager to open the Poll popover. */
+  'comments-window:poll-open': undefined
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
@@ -334,6 +350,9 @@ export const electronEventChannels = [
   'comments-window:clip-mark-request',
   'comments-window:banners',
   'comments-window:banner-request',
+  'comments-window:poll-state',
+  'comments-window:poll-request',
+  'comments-window:poll-open',
   'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
@@ -1366,6 +1385,24 @@ const specificRuntimeInvokeContracts = {
     tupleSchema([bannerRelayResolutionSchema]),
     booleanSchema
   ),
+  // Polls in the Stream Manager (plan 188 S2): the whole poll one way (main
+  // caches the latest), one explicit action the other. The window can start a
+  // poll or act on one by id; it never pushes state or answers for Studio.
+  'comments-window:poll-state-get': invokeContract(noArgs, pollStatusOrNoneSchema),
+  'comments-window:poll-state-push': invokeContract(
+    tupleSchema([pollStatusOrNoneSchema]),
+    booleanSchema
+  ),
+  'comments-window:poll': invokeContract(
+    tupleSchema([pollRelayCommandSchema]),
+    literalSchema(true)
+  ),
+  'comments-window:poll-result-push': invokeContract(
+    tupleSchema([pollRelayResolutionSchema]),
+    booleanSchema
+  ),
+  // Plan 188 S9: ⌘K "New poll…"; no arguments, main picks the window.
+  'comments-window:open-poll': invokeContract(noArgs, booleanSchema),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
   'comments-window:dashboard-get': invokeContract(noArgs, dashboardSchema),
   'comments-window:push-snapshot': invokeContract(tupleSchema([commentsViewSchema])),
@@ -1709,6 +1746,9 @@ const specificRuntimeEventSchemas = {
   'comments-window:dashboard': dashboardSchema,
   'comments-window:banners': bannerSummariesSchema,
   'comments-window:banner-request': bannerRelayCommandSchema,
+  'comments-window:poll-state': pollStatusOrNoneSchema,
+  'comments-window:poll-request': pollRelayCommandSchema,
+  'comments-window:poll-open': undefinedSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,

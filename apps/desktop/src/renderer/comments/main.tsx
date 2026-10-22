@@ -23,6 +23,7 @@ import type {
   CommentsViewSnapshot,
   LiveChatMessage,
   ModerationOperation,
+  PollStatus,
   ViewerSample
 } from '@/lib/backend'
 import {
@@ -77,6 +78,7 @@ import {
 } from '../../shared/comments-snapshot-delta'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
+import type { PollRelayAction } from '../../shared/poll-relay'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -163,6 +165,50 @@ function CommentsWindowApp(): ReactElement {
         ({ bannerActionContext, bannerActionError }) =>
           toastUserError(bannerActionError(error), bannerActionContext(action.action), options),
         () => toastUserError(error, { action: 'change', object: 'the banner' }, options)
+      )
+      return false
+    }
+  }, [])
+  // Polls (plan 188 S2): the poll Studio pushes through main (null: none
+  // this session). The window subscribes before it seeds: main sends a
+  // pending ⌘K "New poll…" once the seed is asked (plan 188 S9), and a push
+  // that lands before the seed answers wins over the seed.
+  const [poll, setPoll] = useState<PollStatus | null>(null)
+  const [pollOpenRequest, setPollOpenRequest] = useState(0)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const offOpen = window.videorc?.onCommentsPollOpen?.(() =>
+      setPollOpenRequest((current) => current + 1)
+    )
+    const off = window.videorc?.onCommentsPoll?.((next) => {
+      pushed = true
+      setPoll(next)
+    })
+    void window.videorc?.getCommentsPoll?.().then((current) => {
+      if (!disposed && !pushed) setPoll(current)
+    })
+    return () => {
+      disposed = true
+      off?.()
+      offOpen?.()
+    }
+  }, [])
+  // One poll action, relayed to Studio. Nothing says so when it works (the
+  // popover and the card are the confirmation); a refusal is a warning with
+  // the backend's own sentence. The poll rules load only then.
+  const runPoll = useCallback(async (action: PollRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.pollFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.pollFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'poll-refusal' }
+      await import('@/lib/poll-actions').then(
+        ({ pollActionContext, pollActionError }) =>
+          toastUserError(pollActionError(error), pollActionContext(action.action), options),
+        () => toastUserError(error, { action: 'change', object: 'the poll' }, options)
       )
       return false
     }
@@ -792,6 +838,9 @@ function CommentsWindowApp(): ReactElement {
           }
           banners={banners}
           onBanner={runBanner}
+          poll={poll}
+          onPoll={runPoll}
+          pollOpenRequest={pollOpenRequest}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onShowFollowNames={() => {
             void window.videorc

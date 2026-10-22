@@ -37,6 +37,12 @@ export const AUXILIARY_API_KEYS = {
     'getCommentsBanners',
     'onCommentsBanners',
     'bannerFromCommentsWindow',
+    // Polls (plan 188 S2): read the poll, ask for one action, and open the
+    // Poll popover when ⌘K asks; never push.
+    'getCommentsPoll',
+    'onCommentsPoll',
+    'pollFromCommentsWindow',
+    'onCommentsPollOpen',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
     // Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5).

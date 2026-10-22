@@ -36,6 +36,10 @@ import type {
   ModerationOperationParams,
   ModerationRequestParams,
   OverlayLayout,
+  PollIdParams,
+  PollStartParams,
+  PollStatus,
+  PollStatusEvent,
   PreviewSurfaceBounds,
   RecordingStatus,
   Scene,
@@ -137,6 +141,15 @@ interface HighRiskContractFixtures {
   banner: {
     minimal: Banner
     withTimer: Banner
+  }
+  poll: {
+    startParams: PollStartParams
+    startParamsNoTimer: PollStartParams
+    idParams: PollIdParams
+    open: PollStatus
+    final: PollStatus
+    untimed: PollStatus
+    eventNone: PollStatusEvent
   }
   buddyPets: {
     summary: BuddyPetSummary
@@ -751,6 +764,105 @@ describe('shared high-risk protocol fixture', () => {
       ).toThrow(field)
     }
     expect(() => validateBackendRpcResult('banners.show', { ...minimal, extra: true })).toThrow()
+  })
+
+  it('keeps the poll wire shape identical across languages, optional fields absent (plan 188)', () => {
+    const { startParams, startParamsNoTimer, idParams, open, final, untimed, eventNone } =
+      fixtures.poll
+    for (const poll of [open, final, untimed]) {
+      for (const method of [
+        'polls.start',
+        'polls.end',
+        'polls.cancel',
+        'polls.reshow',
+        'polls.current'
+      ] as const) {
+        expect(validateBackendRpcResult(method, poll)).toStrictEqual(poll)
+      }
+      expect(validateBackendEventPayload('polls.status', { poll })).toStrictEqual({ poll })
+    }
+    // No poll: the one deliberate null, on the event and the hydrate read.
+    expect(validateBackendEventPayload('polls.status', eventNone)).toStrictEqual({ poll: null })
+    expect(validateBackendRpcResult('polls.current', null)).toBeNull()
+    expect(() => validateBackendEventPayload('polls.status', {})).toThrow()
+    // The untimed poll omits every optional field (skip_serializing_if).
+    for (const field of [
+      'closesAt',
+      'endedAt',
+      'acceptUntil',
+      'finalAt',
+      'durationSeconds',
+      'startPost',
+      'resultPost'
+    ] as const) {
+      expect(field in untimed).toBe(false)
+      // A null in any optional field is the serde null trap: refused.
+      expect(() => validateBackendRpcResult('polls.current', { ...final, [field]: null })).toThrow(
+        field
+      )
+      expect(() =>
+        validateBackendEventPayload('polls.status', { poll: { ...open, [field]: null } })
+      ).toThrow(field)
+    }
+    expect(() => validateBackendRpcResult('polls.current', { ...open, extra: true })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('polls.current', {
+        ...open,
+        options: [{ label: 'Tabs', votes: 1, voters: ['a'] }]
+      })
+    ).toThrow()
+    expect(() => validateBackendEventPayload('polls.status', { poll: open, extra: true })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('polls.current', {
+        ...open,
+        startPost: { phase: 'sent', failedPlatforms: [], extra: 1 }
+      })
+    ).toThrow()
+
+    // Params: No timer is an explicit null, never absent.
+    expect(validateBackendRpcParams('polls.start', startParams)).toStrictEqual(startParams)
+    expect(validateBackendRpcParams('polls.start', startParamsNoTimer)).toStrictEqual(
+      startParamsNoTimer
+    )
+    expect(startParamsNoTimer.durationSeconds).toBeNull()
+    const { durationSeconds: _omitted, ...noDuration } = startParams
+    expect(() => validateBackendRpcParams('polls.start', noDuration)).toThrow()
+    expect(() => validateBackendRpcParams('polls.start', { ...startParams, extra: 1 })).toThrow()
+    for (const method of ['polls.end', 'polls.cancel', 'polls.reshow'] as const) {
+      expect(validateBackendRpcParams(method, idParams)).toStrictEqual(idParams)
+      expect(() => validateBackendRpcParams(method, { ...idParams, extra: 1 })).toThrow()
+      expect(() => validateBackendRpcParams(method, {})).toThrow()
+    }
+    expect(validateBackendRpcParams('polls.current', {})).toStrictEqual({})
+    expect(() => validateBackendRpcParams('polls.current', { pollId: 'x' })).toThrow()
+
+    // The card raster, like the Buddy bubble's plus the poll it belongs to.
+    const set = {
+      pollId: idParams.pollId,
+      pngBase64: 'iVBORw0KGgo=',
+      target: 'primary',
+      rect: { x: 0.0225, y: 0.04, w: 0.3, h: 0.4 }
+    }
+    expect(validateBackendRpcParams('polls.overlay.set', set)).toStrictEqual(set)
+    const { target: _target, rect: _rect, ...bare } = set
+    expect(validateBackendRpcParams('polls.overlay.set', bare)).toStrictEqual(bare)
+    expect(() => validateBackendRpcParams('polls.overlay.set', { ...set, pollId: '' })).toThrow()
+    expect(() => validateBackendRpcParams('polls.overlay.set', { ...set, extra: 1 })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('polls.overlay.set', { ...set, target: 'vertical' })
+    ).toThrow()
+    expect(validateBackendRpcParams('polls.overlay.clear', {})).toStrictEqual({})
+    expect(validateBackendRpcParams('polls.overlay.clear', { target: 'auxiliary' })).toStrictEqual({
+      target: 'auxiliary'
+    })
+    const info = {
+      active: true,
+      primary: { active: true, width: 576, height: 432, revision: 2, styleRevision: 0 },
+      auxiliary: { active: false, width: 0, height: 0, revision: 0, styleRevision: 0 }
+    }
+    for (const method of ['polls.overlay.set', 'polls.overlay.clear'] as const) {
+      expect(validateBackendRpcResult(method, info)).toStrictEqual(info)
+    }
   })
 
   it('keeps the Buddy overlay wire shapes strict (plan 164 Phase C)', () => {

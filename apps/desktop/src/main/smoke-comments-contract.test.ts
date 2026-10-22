@@ -454,6 +454,40 @@ describe('maintained Comments probe HTTP contract', () => {
     ).toBeNull()
   })
 
+  it('routes a seeded poll to the Stream Manager intact, dev builds only (plan 188)', async () => {
+    const poll = {
+      pollId: 'poll-contract',
+      sessionId: 'comments-contract',
+      question: 'Tabs or spaces?',
+      options: [
+        { label: 'Tabs', votes: 31 },
+        { label: 'Spaces', votes: 19 }
+      ],
+      totalVotes: 50,
+      byPlatform: [{ platform: 'twitch', votes: 50 }],
+      state: 'open',
+      openedAt: '2026-10-22T18:00:00Z',
+      closesAt: '2026-10-22T18:01:00Z',
+      durationSeconds: 60,
+      postInChat: true,
+      card: 'shown',
+      cardLegs: { primary: true, auxiliary: false },
+      cardAvailable: true,
+      winners: [0],
+      countingPlatforms: ['twitch'],
+      pausedPlatforms: []
+    }
+    await httpFixture(async ({ post, calls }) => {
+      for (const params of [{ poll }, { poll: null }]) {
+        const response = await post('comments-window-seed-poll', params)
+        expect(response.status).toBe(200)
+        await response.arrayBuffer()
+      }
+      expect(calls.map((call) => call.params)).toEqual([{ poll }, { poll: null }])
+    })
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('comments-window-seed-poll')).toBe(false)
+  })
+
   it('retains the 1 MiB HTTP body ceiling before any route executes', async () => {
     await httpFixture(async ({ post, calls }) => {
       const response = await post('comments-window-push-snapshot', {

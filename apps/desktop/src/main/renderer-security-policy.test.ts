@@ -450,6 +450,55 @@ describe('renderer security policy', () => {
     expect(result.slice(0, 400)).toContain('event.sender.id !== mainWindow.webContents.id')
   })
 
+  it('lets only the Stream Manager ask for a poll action, and only Studio push and answer (plan 188)', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:poll')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:poll-state-get')).toBe(true)
+    for (const channel of [
+      'comments-window:poll-state-push',
+      'comments-window:poll-result-push',
+      'comments-window:open-poll'
+    ]) {
+      expect(roleCanInvokeChannel('comments', channel), channel).toBe(false)
+      expect(roleCanInvokeChannel('main', channel), channel).toBe(true)
+    }
+    for (const role of ['notes', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'comments-window:poll')).toBe(false)
+      expect(roleCanInvokeChannel(role, 'comments-window:poll-state-get')).toBe(false)
+    }
+    for (const key of [
+      'getCommentsPoll',
+      'onCommentsPoll',
+      'pollFromCommentsWindow',
+      'onCommentsPollOpen'
+    ] as const) {
+      expect(AUXILIARY_API_KEYS.comments).toContain(key)
+    }
+    for (const key of [
+      'pushCommentsPoll',
+      'onPollRequest',
+      'pushPollResult',
+      'openPollInCommentsWindow'
+    ] as const) {
+      expect(AUXILIARY_API_KEYS.comments).not.toContain(key)
+    }
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('pollFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('pollFromCommentsWindow')
+    // The handlers check the sender too: the window asks, Studio pushes and answers.
+    const mainSource = source('./index.ts')
+    const ask = mainSource.split("secureIpcHandle('comments-window:poll',")[1] ?? ''
+    expect(ask.slice(0, 400)).toContain('event.sender.id !== commentsWindow.webContents.id')
+    for (const channel of [
+      'comments-window:poll-state-push',
+      'comments-window:poll-result-push',
+      'comments-window:open-poll'
+    ]) {
+      const handler = mainSource.split(`secureIpcHandle('${channel}',`)[1] ?? ''
+      expect(handler.slice(0, 400), channel).toContain(
+        'event.sender.id !== mainWindow.webContents.id'
+      )
+    }
+  })
+
   it('exposes an invoke to an auxiliary preload only when the channel policy admits that role', () => {
     const channelByApiMethod = new Map<string, string>(
       Object.entries(electronInvokeApiMethods).map(([channel, method]) => [method, channel])
