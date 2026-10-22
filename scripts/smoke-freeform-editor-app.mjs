@@ -165,9 +165,19 @@ try {
   report.display = await cdp.eval(
     `({width:screen.width,height:screen.height,dpr:devicePixelRatio,userAgent:navigator.userAgent})`
   )
-  report.refreshIntervalMs = await cdp.eval(
-    `new Promise(resolve => {const times=[];const tick=t=>{times.push(t);if(times.length===31)resolve((times.at(-1)-times[0])/30);else requestAnimationFrame(tick)};requestAnimationFrame(tick)})`
-  )
+  // Every gesture is timed to animation frames, so a window the compositor
+  // never presents (a blanked or switched-off display: ogre blanks its panel
+  // when the lid closes) can't be measured. Say so instead of a bare timeout.
+  report.refreshIntervalMs = await cdp
+    .eval(
+      `new Promise(resolve => {const times=[];const tick=t=>{times.push(t);if(times.length===31)resolve((times.at(-1)-times[0])/30);else requestAnimationFrame(tick)};requestAnimationFrame(tick)})`
+    )
+    .catch((error) => {
+      throw new Error(
+        `The renderer got no animation frames (${error.message}): the window is not being presented, ` +
+          'e.g. the display is blanked or off. This smoke needs a lit display.'
+      )
+    })
 
   for (const orientation of ['landscape', 'portrait']) {
     console.log(`Freeform: ${orientation} pointer matrix`)

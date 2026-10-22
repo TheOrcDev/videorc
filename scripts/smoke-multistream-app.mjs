@@ -7,7 +7,11 @@ import { launchDevApp } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
 import { assessVerticalLegStream } from './lib/vertical-leg-geometry.mjs'
-import { connectBackend, request } from './smoke-recording-session.mjs'
+import {
+  connectBackend,
+  request,
+  startSessionWhenScreenSettles
+} from './smoke-recording-session.mjs'
 
 // End-to-end proof of the multi-platform `tee` fan-out. Stands up one local
 // FFmpeg RTMP listener per destination, drives a real record + simulcast
@@ -185,18 +189,15 @@ try {
     }
     console.log(`Multistream smoke using FFmpeg: ${ffmpegPath}`)
 
-    const recordingDirectory = await requestSmokeCommand(
-      smoke,
-      'authorize-smoke-resource',
-      { kind: 'output-directory', path: outputDirectory },
-      { timeoutMs }
-    )
-    const started = await request(
-      ws,
-      timeoutMs,
-      'session.start',
-      multistreamParams(recordingDirectory.capabilityId)
-    )
+    const started = await startSessionWhenScreenSettles(ws, timeoutMs, async () => {
+      const directory = await requestSmokeCommand(
+        smoke,
+        'authorize-smoke-resource',
+        { kind: 'output-directory', path: outputDirectory },
+        { timeoutMs }
+      )
+      return multistreamParams(directory.capabilityId)
+    })
     if (started.state !== 'recording') {
       throw new Error(`Expected recording state after start, got ${started.state}.`)
     }

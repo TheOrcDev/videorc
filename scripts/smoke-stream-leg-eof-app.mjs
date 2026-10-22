@@ -5,7 +5,11 @@ import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { connectBackend, request } from './smoke-recording-session.mjs'
+import {
+  connectBackend,
+  request,
+  startSessionWhenScreenSettles
+} from './smoke-recording-session.mjs'
 
 // Plan 161: one stream destination's ingest closes the connection mid-stream.
 //
@@ -119,24 +123,20 @@ try {
     if (!health?.ffmpeg?.available) {
       throw new Error(health?.ffmpeg?.message ?? 'FFmpeg is unavailable for the leg EOF smoke.')
     }
-    const recordingDirectory = await requestSmokeCommand(
-      smoke,
-      'authorize-smoke-resource',
-      { kind: 'output-directory', path: outputDirectory },
-      { timeoutMs }
-    )
-
     for (const target of targets) {
       listeners.set(target.id, spawnListener(target, target.recvPath))
     }
     await sleep(listenerBindMs)
 
-    const started = await request(
-      ws,
-      timeoutMs,
-      'session.start',
-      sessionParams(recordingDirectory.capabilityId)
-    )
+    const started = await startSessionWhenScreenSettles(ws, timeoutMs, async () => {
+      const directory = await requestSmokeCommand(
+        smoke,
+        'authorize-smoke-resource',
+        { kind: 'output-directory', path: outputDirectory },
+        { timeoutMs }
+      )
+      return sessionParams(directory.capabilityId)
+    })
     if (started.state !== 'recording') {
       throw new Error(`Expected recording state after start, got ${started.state}.`)
     }
