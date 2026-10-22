@@ -12,11 +12,11 @@ import type {
   StreamTargetSettings,
   VideoSettings
 } from '@/lib/backend'
-import { videoPresets, type ProviderStreamOutputPlan } from '@/lib/capture'
+import { defaultCaptureConfig, videoPresets, type ProviderStreamOutputPlan } from '@/lib/capture'
 
 import {
   encoderLabel,
-  formatQuality,
+  goLiveProviderPlan,
   qualitySummary,
   ReadyToGoLive,
   TECHNICAL_DETAILS_STORAGE_KEY,
@@ -157,8 +157,10 @@ describe('Ready to go live', () => {
     expect(markup).toContain('Couldn&#x27;t check')
     expect(markup).toContain('Go Live checks again when you start.')
     expect(markup).toContain('Retry')
-    // The raw probe message is one hover away, not inline.
-    expect(markup).toContain('title="ffmpeg probe exited 1"')
+    // The raw probe message is one hover or focus away, not inline, and never
+    // a native title (plan 174 S1.10).
+    expect(markup).toMatch(/data-slot="info-tooltip-text"[^>]*>ffmpeg probe exited 1</)
+    expect(markup).not.toContain('title=')
   })
 
   it('says the quality once when every destination streams the same thing', () => {
@@ -183,16 +185,9 @@ describe('qualitySummary', () => {
       { target: target('instagram', 'Instagram'), video: vertical }
     ])
     expect(summary.text).toBe('Varies by destination')
-    expect(summary.title).toContain('TikTok: 1080×1920 · 30 fps · 6 Mbps')
-    expect(summary.title).toContain('Instagram: 1080×1920')
-    expect(summary.title).not.toContain('Custom')
-  })
-
-  it('formats landscape as NNNp and keeps portrait dimensions', () => {
-    expect(formatQuality(stream1080)).toBe('1080p · 30 fps · 6 Mbps')
-    expect(formatQuality({ ...stream1080, width: 1080, height: 1920, bitrateKbps: 4500 })).toBe(
-      '1080×1920 · 30 fps · 4.5 Mbps'
-    )
+    expect(summary.lines).toContain('TikTok: 1080 × 1920 · 30 fps · 6 Mbps')
+    expect(summary.lines?.some((line) => line.startsWith('Instagram: 1080 × 1920'))).toBe(true)
+    expect(summary.lines?.join('\n')).not.toContain('Custom')
   })
 })
 
@@ -274,5 +269,69 @@ describe('Technical details', () => {
     })
     await act(async () => root.render(details()))
     expect(container.textContent).not.toContain('Keyframe interval')
+  })
+})
+
+describe('Ready to go live: captions (plan 174 S3.4, D-9)', () => {
+  const youtube = [target('youtube', 'YouTube')]
+
+  it('has no Captions row while captions are off', () => {
+    expect(renderToStaticMarkup(readiness({ targets: youtube }))).not.toContain('>Captions<')
+  })
+
+  it('says the caption rule before Go Live, in short words and a sentence', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ReadyToGoLive, {
+        ...(readiness({ targets: youtube }).props as Parameters<typeof ReadyToGoLive>[0]),
+        captions: {
+          blocker: {
+            rule: 'frame-rate',
+            description: 'Captions on a livestream work up to 30 fps.'
+          }
+        }
+      })
+    )
+    expect(markup).toContain('>Captions<')
+    expect(markup).toContain('Need 30 fps or less')
+    expect(markup).toContain('data-slot="captions-not-ready"')
+    expect(markup).toContain('Captions on a livestream work up to 30 fps.')
+  })
+
+  it('reads On when the output fits', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ReadyToGoLive, {
+        ...(readiness({ targets: youtube }).props as Parameters<typeof ReadyToGoLive>[0]),
+        captions: { blocker: null }
+      })
+    )
+    expect(markup).toContain('>Captions<')
+    expect(markup).not.toContain('captions-not-ready')
+  })
+})
+
+describe('goLiveProviderPlan (plan 0016)', () => {
+  it('describes the stream Go Live will send, even when the saved mode is Record', () => {
+    const streaming = {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      defaultOutputPreset: stream1080.preset,
+      defaultBitrateKbps: stream1080.bitrateKbps,
+      targets: [target('custom', 'Custom RTMP')],
+      enabledTargetIds: ['custom-rtmp']
+    }
+    const recording = videoPresets['tutorial-720p30']
+    const config = { ...defaultCaptureConfig, recordEnabled: true, streamEnabled: false, streaming }
+    // A host that runs a separate stream encode: the stream keeps its own profile.
+    expect(goLiveProviderPlan(config, recording, true).streamVideo).toMatchObject({
+      width: 1920,
+      height: 1080,
+      bitrateKbps: 6000
+    })
+    // One shared encode: the panel is handed the shared-fallback profile (the
+    // recording follows the stream) and shows exactly that.
+    expect(goLiveProviderPlan(config, stream1080, false).streamVideo).toMatchObject({
+      width: 1920,
+      bitrateKbps: 6000
+    })
   })
 })

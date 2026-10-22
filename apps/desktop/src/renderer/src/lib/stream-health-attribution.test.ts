@@ -3,8 +3,31 @@ import { describe, expect, it } from 'vitest'
 import type { DiagnosticStats, StreamHealth, StreamTargetRuntime } from '@/lib/backend'
 import {
   classifyStreamHealthAttribution,
+  liveProblemLabel,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
+
+// Plan 174 S3.2: one wording per stage, shared by the Livestream page and
+// the Studio's Stream fact; nothing a streamer cannot act on reads as jargon.
+describe('liveProblemLabel', () => {
+  it('names each stage in a few words, and never a raw attribution', () => {
+    const labels: Record<StreamHealthAttribution, string> = {
+      device: 'Capture device lost',
+      audio: 'Audio dropping',
+      capture: 'Capture running slow',
+      render: 'Rendering slow',
+      encoder: 'Encoder dropping frames',
+      fallback: 'Encoder fallback',
+      network: 'Delivery degraded',
+      preview: 'Preview degraded',
+      healthy: 'Healthy',
+      unknown: 'Checking…'
+    }
+    for (const [attribution, label] of Object.entries(labels)) {
+      expect(liveProblemLabel(attribution as StreamHealthAttribution)).toBe(label)
+    }
+  })
+})
 
 type ClassifierInput = {
   diagnosticStats: DiagnosticStats

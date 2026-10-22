@@ -1,0 +1,8 @@
+{"id":"card-up","status":"pass","startedAt":"2026-10-12T06:00:05.000Z","endedAt":"2026-10-12T06:00:06.200Z","durationMs":1200}
+{"id":"open-go-live","status":"pass","startedAt":"2026-10-12T06:00:06.700Z","endedAt":"2026-10-12T06:00:09.000Z","durationMs":2300}
+{"id":"fill-details","status":"pass","startedAt":"2026-10-12T06:00:09.500Z","endedAt":"2026-10-12T06:00:10.400Z","durationMs":900}
+{"id":"destinations","status":"pass","startedAt":"2026-10-12T06:00:10.900Z","endedAt":"2026-10-12T06:00:11.300Z","durationMs":400}
+{"id":"go-live","status":"pass","startedAt":"2026-10-12T06:00:11.800Z","endedAt":"2026-10-12T06:00:18.200Z","durationMs":6400,"evidence":{"outcome":"live","liveAfterMs":5800}}
+{"id":"live-sample","status":"pass","startedAt":"2026-10-12T06:00:18.700Z","endedAt":"2026-10-12T06:00:23.800Z","durationMs":5100}
+{"id":"youtube-health","status":"pass","startedAt":"2026-10-12T06:00:24.300Z","endedAt":"2026-10-12T06:00:27.300Z","durationMs":3000,"evidence":{"ok":true,"problems":[],"matches":{},"healthStatus":"good"}}
+{"id":"marathon","status":"fail","startedAt":"2026-10-12T06:00:27.800Z","endedAt":"2026-10-12T06:05:27.800Z","durationMs":300000,"reason":"marathon: the app left the live state? no: stream dead while On air"}

@@ -1,0 +1,55 @@
+# Plan 178 U13: network fault injection on the lab machine. EXAMPLE ONLY.
+#
+# The lab user never gets a general sudo. This file allows the exact dummynet
+# and pf commands the faults scenario runs (30 s of loss, 30 s at 1 Mbit/s on
+# the RTMP leg, then clean up, plus the read-backs the doctor uses) and
+# nothing else. It is only installed when the owner sets `faults.network` to
+# true in policy.json; with it false the harness never calls sudo at all.
+#
+# The command lines below are generated from ALLOWED_COMMANDS in
+# scripts/live-lab/lib/net-fault.mjs and a unit test (net-fault.test.mjs)
+# fails when this file and that list differ, in either direction. Edit the
+# code first, then this file.
+#
+# The owner installs it as root, from the admin account, after the pf anchor
+# file (config/live-lab/pf.anchor.example, root-owned at
+# /Library/Application Support/VideorcLab/pf.anchor):
+#
+#   sudo visudo -cf /path/to/this/file            # syntax check first
+#   sudo install -o root -g wheel -m 0440 /path/to/this/file /etc/sudoers.d/videorc-live-lab
+#
+# Why each line is safe:
+#   pfctl -E                          enables pf (reference counted); never -d
+#   pfctl -a <anchor> -f <file>       loads a root-owned file into the lab anchor only
+#   pfctl -a <anchor> -F all          flushes the lab anchor only
+#   pfctl -a <anchor> -s rules        read-back: what the anchor holds
+#   pfctl -a <anchor> -t ... -T show  read-back: the resolved ingest addresses
+#   pfctl -s info                     read-back: pf status
+#   dnctl pipe 2178 config plr 1      the loss pipe, fixed number, fixed value
+#   dnctl pipe 2178 config bw 1000Kbit/s  the throttle pipe, fixed value
+#   dnctl pipe 2178 delete            removes the lab pipe only
+#   dnctl list                        read-back: which pipes exist
+#
+# Wildcards are deliberately absent: a `dnctl *` rule would let a compromised
+# harness shape any interface, and a `pfctl -a <anchor> -f *` rule would let
+# it load any rules file. Not allowed on purpose: `pfctl -d` (would drop the
+# firewall), `pfctl -f /etc/pf.conf` (would reload system rules), `dnctl -q
+# flush` (would remove every pipe on the Mac), and any other binary.
+#
+# Removal of a rule that outlived the harness: `pnpm live:doctor` reports a
+# leftover anchor rule or pipe as FAIL with the two cleanup commands, and when
+# it can it runs them itself.
+
+Cmnd_Alias LIVE_LAB_FAULTS = \
+  /sbin/pfctl -E, \
+  /sbin/pfctl -a com.videorc.live-lab -f /Library/Application\ Support/VideorcLab/pf.anchor, \
+  /sbin/pfctl -a com.videorc.live-lab -F all, \
+  /sbin/pfctl -a com.videorc.live-lab -s rules, \
+  /sbin/pfctl -a com.videorc.live-lab -t videorc_lab_ingest -T show, \
+  /sbin/pfctl -s info, \
+  /usr/sbin/dnctl pipe 2178 config plr 1, \
+  /usr/sbin/dnctl pipe 2178 config bw 1000Kbit/s, \
+  /usr/sbin/dnctl pipe 2178 delete, \
+  /usr/sbin/dnctl list
+
+videorc-lab ALL=(root) NOPASSWD: LIVE_LAB_FAULTS

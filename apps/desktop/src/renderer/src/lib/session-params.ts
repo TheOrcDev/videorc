@@ -7,6 +7,7 @@ import {
 import {
   buildSimulcastParams,
   providerStreamOutputPlanOptions,
+  separateSourceRecordingsForSession,
   streamOutputVideosForTargets,
   type CaptureConfig,
   type SettingsState
@@ -55,6 +56,9 @@ export function buildStartSessionParams(input: {
       recordEnabled: captureConfig.recordEnabled,
       streamEnabled: captureConfig.streamEnabled,
       keepOriginalMkv: settings.keepOriginalRecording,
+      // Only sent when armed, so an ISO-off session's params stay byte-identical
+      // to pre-157 renderers.
+      separateSourceRecordings: separateSourceRecordingsForSession(captureConfig),
       video: captureConfig.video,
       rtmp: {
         preset: captureConfig.rtmpPreset,

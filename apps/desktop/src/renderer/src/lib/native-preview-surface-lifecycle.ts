@@ -112,7 +112,7 @@ export function previewSurfaceStatusWithoutMainAuthority(
     firstFrameReason: undefined,
     message:
       state === 'unavailable' && status.state === 'live'
-        ? 'Preview is unavailable until Electron main validates the presentation host.'
+        ? "The preview isn't available until Videorc checks its window."
         : status.message
   }
 }

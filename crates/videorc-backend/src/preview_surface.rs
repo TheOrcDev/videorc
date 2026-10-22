@@ -1799,10 +1799,13 @@ async fn reconcile_live_preview_compositor_with_hook(
                 height: status.height,
                 frame_consumer: CompositorFrameConsumer::NativePreview,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await
@@ -1875,10 +1878,13 @@ pub(crate) async fn ensure_preview_compositor_after_scene_commit(state: &AppStat
             height,
             frame_consumer: CompositorFrameConsumer::NativePreview,
             stream_output: None,
+            source_iso_output: None,
             caption_overlay_on_primary: false,
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         },
     )
     .await;
@@ -3360,10 +3366,13 @@ mod tests {
                 height: 360,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -3800,10 +3809,13 @@ mod tests {
                 height: 360,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -3939,10 +3951,13 @@ mod tests {
                 height: 90,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -4025,6 +4040,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await
@@ -4119,10 +4136,13 @@ mod tests {
                 height: 360,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;

@@ -581,6 +581,8 @@ const CHAT_MESSAGE_FIELDS: &[&str] = &[
     "authorName",
     "authorBadges",
     "authorRoles",
+    // A word (`blue`/`business`/`government`), never an id or a URL (plan 167).
+    "authorVerified",
     "publishedAt",
     "messageText",
     "eventType",
@@ -1023,6 +1025,7 @@ mod tests {
             "authorAvatarUrl": "https://yt3.ggpht.com/avatar.png",
             "authorBadges": ["member"],
             "authorRoles": ["moderator"],
+            "authorVerified": "blue",
             "publishedAt": "2026-09-18T10:00:00Z",
             "receivedAt": "2026-09-18T10:00:01Z",
             "messageText": "hello",
@@ -1057,8 +1060,25 @@ mod tests {
         }
         assert_eq!(projected["id"], "youtube:abc");
         assert_eq!(projected["authorName"], "Viewer");
+        assert_eq!(projected["authorVerified"], "blue");
         assert_eq!(projected["amountText"], "$5.00");
         assert_eq!(projected["fragments"][1]["text"], ":wave:");
+    }
+
+    #[test]
+    fn chat_projection_keeps_a_gif_as_its_title_text_only() {
+        // Plan 155: a Twitch GIF Keyboard fragment reaches the phone as
+        // `type` + `text`; the GIPHY URL never does.
+        let mut message = full_message();
+        message["fragments"] = serde_json::json!([
+            { "type": "gif", "text": "[Y A Y Yes GIF]", "imageUrl": "https://media2.giphy.com/media/a/giphy.gif" }
+        ]);
+        let projected = project_chat_message(&message).unwrap();
+        assert_eq!(
+            projected["fragments"],
+            serde_json::json!([{ "type": "gif", "text": "[Y A Y Yes GIF]" }])
+        );
+        assert!(!projected.to_string().contains("giphy"));
     }
 
     #[test]

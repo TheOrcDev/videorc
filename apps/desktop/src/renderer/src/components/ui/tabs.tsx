@@ -1,8 +1,10 @@
 import * as React from 'react'
-import { cva, type VariantProps } from 'class-variance-authority'
+import { type VariantProps } from 'class-variance-authority'
 import { Tabs as TabsPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
+import { useFieldLabelledBy } from '@/components/ui/field-context'
+import { tabsListVariants, tabsTriggerBaseClassName } from '@/components/ui/tabs-variants'
 
 function Tabs({
   className,
@@ -19,29 +21,18 @@ function Tabs({
   )
 }
 
-const tabsListVariants = cva(
-  'group/tabs-list inline-flex w-fit items-center justify-center rounded-row p-0.5 text-muted-foreground group-data-horizontal/tabs:h-control group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col group-data-vertical/tabs:p-1 data-[variant=line]:rounded-none',
-  {
-    variants: {
-      variant: {
-        // A glass segmented control (plan 050, D9): a recessed track.
-        default: 'bg-foreground/[0.05] ring-1 ring-border ring-inset',
-        line: 'gap-1 bg-transparent'
-      }
-    },
-    defaultVariants: {
-      variant: 'default'
-    }
-  }
-)
-
+// Tabs switch a view (a page or a pane). Choosing a value among 2–4 options is
+// `SegmentedControl`, which shares this look (plan 174 S1.7, D13).
 function TabsList({
   className,
   variant = 'default',
+  'aria-labelledby': ariaLabelledBy,
   ...props
 }: React.ComponentProps<typeof TabsPrimitive.List> & VariantProps<typeof tabsListVariants>) {
+  const labelledBy = useFieldLabelledBy(ariaLabelledBy, props['aria-label'])
   return (
     <TabsPrimitive.List
+      aria-labelledby={labelledBy}
       data-slot="tabs-list"
       data-variant={variant}
       className={cn(tabsListVariants({ variant }), className)}
@@ -55,13 +46,11 @@ function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPr
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        "relative inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-chip border border-transparent px-3 text-[13px] font-medium whitespace-nowrap text-muted-foreground group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:px-3 group-data-vertical/tabs:py-1 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        tabsTriggerBaseClassName,
         // Selected = a raised glass chip with primary text, keyed off Radix's
         // data-state="active" (#392: a data-active variant never matches), so
         // the choice reads at a glance without leaning on the focus ring.
         'data-[state=active]:text-foreground group-data-[variant=default]/tabs-list:data-[state=active]:glass-chip',
-        // The line variant underlines the selection instead.
-        'after:absolute after:bg-foreground after:opacity-0 group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-[state=active]:after:opacity-100',
         className
       )}
       {...props}
@@ -73,7 +62,11 @@ function TabsContent({ className, ...props }: React.ComponentProps<typeof TabsPr
   return (
     <TabsPrimitive.Content
       data-slot="tabs-content"
-      className={cn('flex-1 text-sm outline-none', className)}
+      className={cn(
+        // Radix makes a panel a tab stop: it shows when it has focus (J1-9).
+        'flex-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset',
+        className
+      )}
       {...props}
     />
   )

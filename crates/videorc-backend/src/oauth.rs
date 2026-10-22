@@ -117,6 +117,15 @@ pub const TWITCH_SUBSCRIPTIONS_SCOPE: &str = "channel:read:subscriptions";
 /// What follow alerts and the sub count need. Not every optional Twitch scope:
 /// the moderation scope has nothing to do with Activity.
 pub const TWITCH_AUDIENCE_SCOPES: &[&str] = &[TWITCH_FOLLOWERS_SCOPE, TWITCH_SUBSCRIPTIONS_SCOPE];
+/// Twitch `channel.bits.use`: Power-ups paid with bits for Activity (plan 162).
+pub const TWITCH_BITS_SCOPE: &str = "bits:read";
+/// Twitch channel point redemptions (custom and automatic rewards) for
+/// Activity (plan 162). Read only: Videorc never fulfils or refunds them.
+pub const TWITCH_REDEMPTIONS_SCOPE: &str = "channel:read:redemptions";
+/// What Activity's Power-ups and channel point rows need (plan 162). Apart
+/// from the audience scopes, so an account without them still names
+/// followers.
+pub const TWITCH_BITS_POINTS_SCOPES: &[&str] = &[TWITCH_BITS_SCOPE, TWITCH_REDEMPTIONS_SCOPE];
 /// Twitch `DELETE /helix/moderation/chat`: remove one chat message (plan 140).
 pub const TWITCH_MODERATION_SCOPE: &str = "moderator:manage:chat_messages";
 /// Kick `DELETE /public/v1/chat/{message_id}`: remove one chat message (plan 140).
@@ -135,6 +144,8 @@ pub fn optional_scopes_for(platform: StreamPlatform) -> &'static [&'static str] 
             TWITCH_FOLLOWERS_SCOPE,
             TWITCH_SUBSCRIPTIONS_SCOPE,
             TWITCH_MODERATION_SCOPE,
+            TWITCH_BITS_SCOPE,
+            TWITCH_REDEMPTIONS_SCOPE,
         ],
         StreamPlatform::Kick => &[KICK_MODERATION_SCOPE],
         _ => &[],
@@ -6058,6 +6069,8 @@ mod tests {
                 "moderator:read:followers",
                 "channel:read:subscriptions",
                 "moderator:manage:chat_messages",
+                "bits:read",
+                "channel:read:redemptions",
             ]
         );
         assert_eq!(
@@ -6084,6 +6097,10 @@ mod tests {
             "user:write:chat",
         ];
         assert!(!twitch_base.contains(&TWITCH_MODERATION_SCOPE));
+        for scope in TWITCH_BITS_POINTS_SCOPES {
+            assert!(!twitch_base.contains(scope));
+            assert!(optional_scopes_for(StreamPlatform::Twitch).contains(scope));
+        }
         assert!(!KICK_OAUTH_SCOPES.contains(&KICK_MODERATION_SCOPE));
     }
 

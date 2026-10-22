@@ -1,13 +1,19 @@
-import { AlertIcon, SaveIcon, SearchIcon, TextIcon } from '@/components/icons'
-import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from 'react'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { AlertIcon, SaveIcon, TextIcon } from '@/components/icons'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
+import { PageTabs } from '@/components/page-tabs'
+import { TabsContent } from '@/components/ui/tabs'
+import { LIVESTREAM_VIEWS, type LivestreamViewId } from '@/lib/livestream-tabs'
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
 
 import { GroupedList } from '@/components/list-row'
+import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { PanelSection } from '@/components/panel-section'
+import { StatusBadge } from '@/components/status-badge'
+import { BroadcastInfoFields } from '@/components/streaming/broadcast-info-fields'
+import { CategoryCombobox } from '@/components/streaming/category-combobox'
 import { DestinationCard } from '@/components/streaming/destination-card'
 import { youtubeQuotaPausedUntil } from '@/lib/youtube-quota'
 import { GoLivePanel } from '@/components/streaming/go-live-panel'
@@ -19,10 +25,20 @@ import {
   AccordionTrigger
 } from '@/components/ui/accordion'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
-import { metadataOverrideSummary, visibleMetadataOverrides } from '@/lib/stream-metadata-summary'
+import {
+  metadataOverrideSummary,
+  streamDetailsStatus,
+  visibleMetadataOverrides
+} from '@/lib/stream-metadata-summary'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldError,
+  FieldLabel
+} from '@/components/ui/field'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -33,11 +49,11 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useStudioCore } from '@/hooks/use-studio'
 import type {
   PlatformAccount,
   PlatformAccountValidation,
+  PlatformConnectOptions,
   OAuthProviderCredentialStatus,
   StreamMetadataDraft,
   StreamMetadataValidation,
@@ -48,29 +64,37 @@ import type {
   TwitchCategory,
   KickCategory
 } from '@/lib/backend'
-import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'
+import { streamingDestinationCap, streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
+import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
+import { unlockActionForReason } from '@/lib/lock-view'
+import { destinationSetup } from '@/lib/destination-readiness'
+import { destinationLabel } from '@/lib/platform-copy'
+import { otherDestinationsLine } from '@/lib/stream-target-notices'
+import { destinationStateLabel } from '@/lib/state-labels'
+import { broadcastThumbnailHint } from '@/lib/broadcast-info'
+import { streamLanguageOptions } from '@/lib/stream-languages'
 
-export function StreamingTab(): ReactElement {
-  const [view, setView] = useState(() =>
-    sessionStorage.getItem('videorc-scheduling-view') === 'upcoming' ? 'upcoming' : 'setup'
-  )
-  useEffect(() => {
-    const open = () => setView('upcoming')
-    window.addEventListener('videorc:upcoming', open)
-    sessionStorage.removeItem('videorc-scheduling-view')
-    return () => window.removeEventListener('videorc:upcoming', open)
-  }, [])
+/**
+ * Livestream (plan 174 S1.6b, A-14): Setup and Upcoming in a strip pinned
+ * under the toolbar, like Settings; only the view under it scrolls. The view
+ * lives in the shell, so the page reopens on the one used last and ⌘K can
+ * open Upcoming by name.
+ */
+export function StreamingTab({
+  view,
+  onViewChange
+}: {
+  view: LivestreamViewId
+  onViewChange: (view: LivestreamViewId) => void
+}): ReactElement {
   return (
-    <Tabs className="gap-0" value={view} onValueChange={setView}>
-      {/* Setup / Upcoming leads the page body; the toolbar carries only the
-          title (owner call, 2026-09-23: no buttons in its top-right corner). */}
-      <div className="border-b border-border px-gutter py-2">
-        <TabsList aria-label="Livestream view">
-          <TabsTrigger value="setup">Setup</TabsTrigger>
-          <TabsTrigger value="upcoming">Upcoming</TabsTrigger>
-        </TabsList>
-      </div>
+    <PageTabs
+      label="Livestream view"
+      tabs={LIVESTREAM_VIEWS}
+      value={view}
+      onValueChange={onViewChange}
+    >
       <TabsContent value="setup">
         <StreamingSetup />
       </TabsContent>
@@ -79,7 +103,7 @@ export function StreamingTab(): ReactElement {
           <ScheduledStreams />
         </Suspense>
       </TabsContent>
-    </Tabs>
+    </PageTabs>
   )
 }
 
@@ -119,7 +143,7 @@ function StreamingSetup(): ReactElement {
     xNativeCapabilityLoading,
     refreshXNativeCapability,
     authorizeXLive,
-    stopSession,
+    requestStopSession,
     youtubeQuota
   } = useStudioCore()
   const youtubeQuotaPaused = youtubeQuotaPausedUntil(youtubeQuota)
@@ -163,30 +187,49 @@ function StreamingSetup(): ReactElement {
     return map
   }, [oauthProviderCredentials])
 
-  // A destination is "in trouble" while live if its leg dropped (failed) or it was
-  // skipped this session for incomplete credentials (not-configured).
-  const problems = streamTargets.filter(
-    (runtime) => runtime.state === 'failed' || runtime.state === 'not-configured'
-  )
+  // A destination is "in trouble" while live if its leg dropped (failed), is
+  // reconnecting, its platform says it isn't receiving the stream (warning,
+  // plan 161), or it was skipped this session for incomplete credentials.
+  const problems = streamTargets.filter((runtime) => DESTINATION_PROBLEM_STATES.has(runtime.state))
+  // "Continue streaming" dismisses THIS set of problems. A destination that
+  // drops later is new news and brings the banner back (plan 161).
+  const problemsKey = problems.map((target) => `${target.targetId}:${target.state}`).join('|')
 
-  const [dismissed, setDismissed] = useState(false)
+  const [dismissedKey, setDismissedKey] = useState<string | null>(null)
   useEffect(() => {
     if (!isSessionActive) {
-      setDismissed(false)
+      setDismissedKey(null)
     }
   }, [isSessionActive])
+  const dismissed = dismissedKey === problemsKey
 
   // Plan 080 S7: the readiness list opens the card that needs attention.
   // Cards keep their own default until the user (or the list) toggles one.
+  // The list moves focus to the destination's row too (plan 174 S3.5a,
+  // D-24), so the keyboard lands where the eye goes.
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
   const openDestination = (targetId: string): void => {
     setExpandedOverrides((current) => ({ ...current, [targetId]: true }))
-    requestAnimationFrame(() =>
-      document
-        .getElementById(`destination-${targetId}`)
-        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    )
+    requestAnimationFrame(() => {
+      const card = document.getElementById(`destination-${targetId}`)
+      card?.scrollIntoView({ behavior: smoothScrollBehavior(), block: 'nearest' })
+      card
+        ?.querySelector<HTMLElement>('[data-slot="list-row-button"]')
+        ?.focus({ preventScroll: true })
+    })
   }
+  // Only the first destination that needs setup opens on its own (D-14).
+  const firstNeedsSetupId = streaming.targets.find(
+    (target) =>
+      target.enabled && !destinationSetup(target, accountByPlatform.get(target.platform)).ready
+  )?.id
+  const destinationCap = streamingDestinationCap(entitlements, streaming)
+  // The card shows the browser step itself (D-16), so the toast stays quiet.
+  const connectFromCard = useCallback(
+    (platform: StreamPlatform, options?: PlatformConnectOptions) =>
+      connectPlatformAccount(platform, options, { showsBrowserStep: true }),
+    [connectPlatformAccount]
+  )
 
   const scheduledTargets = streaming.targets.filter((target) => target.scheduledEventId)
   const showNotices =
@@ -201,31 +244,27 @@ function StreamingSetup(): ReactElement {
         {showNotices ? (
           <div className="flex flex-col gap-2 border-b border-border p-gutter">
             {livestreamingEntitlementReason && !isSessionActive ? (
-              <Alert variant="warning">
-                <AlertIcon weight="fill" />
-                <AlertDescription>{livestreamingEntitlementReason}</AlertDescription>
-              </Alert>
+              <LockAlert
+                action={unlockActionForReason(livestreamingEntitlementReason)}
+                reason={livestreamingEntitlementReason}
+              />
             ) : null}
             {isSessionActive && problems.length > 0 && !dismissed ? (
               <StreamFailureBanner
+                onAir={streamTargets.filter((runtime) => runtime.state === 'live').length}
                 problems={problems}
-                onDismiss={() => setDismissed(true)}
-                onStopAll={() => void stopSession()}
+                onDismiss={() => setDismissedKey(problemsKey)}
+                onEndLivestream={() => void requestStopSession('failure-banner')}
               />
             ) : null}
-            {isSessionActive ? (
-              <p className="text-xs text-muted-foreground">
-                Destination credentials are locked while a session is live.
-              </p>
-            ) : null}
+            {isSessionActive ? <SessionLockAlert locks={LIVESTREAM_SETUP_LOCKS} /> : null}
             {scheduledTargets.map((target) => (
               <Alert key={`scheduled-${target.id}`}>
                 <AlertDescription className="flex flex-wrap items-center justify-between gap-2 text-foreground">
                   <span className="min-w-0 truncate">
-                    {target.label}: {target.scheduledEventTitle}
+                    {destinationLabel(target.label)}: {target.scheduledEventTitle}
                   </span>
                   <Button
-                    size="sm"
                     variant="ghost"
                     disabled={
                       isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
@@ -247,15 +286,22 @@ function StreamingSetup(): ReactElement {
           </div>
         ) : null}
         <PanelSection
-          description="Where the stream goes. Expand a destination for its account or key."
+          description={`Where the stream goes. ${destinationCap.rule} Open a destination for its account or key.`}
           title="Destinations"
         >
+          {destinationCap.notice && !streamingControlsDisabled ? (
+            <Alert id={DESTINATION_CAP_NOTICE_ID}>
+              <AlertTitle>{destinationCap.notice}</AlertTitle>
+            </Alert>
+          ) : null}
           <GroupedList>
             {streaming.targets.map((target) => (
               <DestinationCard
                 account={accountByPlatform.get(target.platform)}
                 credentials={credentialsByPlatform.get(target.platform)}
+                defaultExpanded={target.id === firstNeedsSetupId}
                 disabled={streamingControlsDisabled}
+                enableLockDescriptionId={DESTINATION_CAP_NOTICE_ID}
                 expanded={expandedOverrides[target.id]}
                 onExpandedChange={(expanded) =>
                   setExpandedOverrides((current) => ({ ...current, [target.id]: expanded }))
@@ -274,7 +320,7 @@ function StreamingSetup(): ReactElement {
                 xNativeCapabilityLoading={xNativeCapabilityLoading}
                 youtubeChannels={youtubeChannels}
                 youtubeChannelsLoading={youtubeChannelsLoading}
-                onConnect={connectPlatformAccount}
+                onConnect={connectFromCard}
                 onDisconnect={disconnectPlatformAccount}
                 onPatch={patchStreamingTarget}
                 onSaveManualStreamKey={saveManualStreamKey}
@@ -288,9 +334,9 @@ function StreamingSetup(): ReactElement {
             ))}
           </GroupedList>
         </PanelSection>
-        {/* Broadcast info: its own section below the destinations; the rows
-            own auth/credentials, this owns what the stream says (ux-ia plan,
-            slice 7). */}
+        {/* Stream details: its own section below the destinations; the rows
+            own accounts and keys, this owns what the stream says (ux-ia plan,
+            slice 7; plan 174 S3.5b). */}
         <MetadataEditor
           disabled={streamingControlsDisabled}
           draft={streamMetadataDraft}
@@ -334,45 +380,84 @@ function sharedAccountLabel(
   return owner?.label
 }
 
-function StreamFailureBanner({
+/** What the session lock covers on Setup, named in its one notice (D-15). */
+const LIVESTREAM_SETUP_LOCKS = 'Destinations, stream quality and stream details'
+
+/** The one cap notice; a switch held off by the cap points at it (D-14). */
+const DESTINATION_CAP_NOTICE_ID = 'livestream-destination-cap'
+
+const DESTINATION_PROBLEM_STATES: ReadonlySet<StreamTargetRuntime['state']> = new Set([
+  'failed',
+  'reconnecting',
+  'warning',
+  'not-configured'
+])
+
+/**
+ * Destinations in trouble mid-stream. Its one destructive action ends the
+ * whole livestream (every destination and the recording), so it says so and
+ * asks through the End livestream dialog (plan 174 S0.1, D-4).
+ */
+export function StreamFailureBanner({
   problems,
-  onStopAll,
+  onAir = 0,
+  onEndLivestream,
   onDismiss
 }: {
   problems: StreamTargetRuntime[]
-  onStopAll: () => void
+  /** How many destinations are on air beside the problems (J2-19). */
+  onAir?: number
+  onEndLivestream: () => void
   onDismiss: () => void
 }): ReactElement {
   const failed = problems.filter((target) => target.state === 'failed')
+  const reconnecting = problems.filter((target) => target.state === 'reconnecting')
+  const notReceiving = problems.filter((target) => target.state === 'warning')
   const skipped = problems.filter((target) => target.state === 'not-configured')
+  const names = (targets: StreamTargetRuntime[]): string =>
+    targets.map((target) => destinationLabel(target.label)).join(', ')
+  // Count-aware (plan 174 J2-19): "keep streaming" only when another one is on air.
+  const stillOnAir =
+    otherDestinationsLine(onAir) ?? 'No other destination is streaming, so viewers see nothing.'
 
   return (
     <Alert variant="warning">
-      <AlertIcon weight="fill" />
-      <AlertTitle>Some destinations aren’t live</AlertTitle>
+      <AlertTitle>Some destinations aren’t on air</AlertTitle>
       <AlertDescription className="flex flex-col gap-1">
         {failed.length ? (
           <span>
-            Stopped: {failed.map((target) => target.label).join(', ')}. The other destinations keep
-            streaming.
+            {destinationStateLabel('failed')}: {names(failed)}. {stillOnAir}
+          </span>
+        ) : null}
+        {reconnecting.length ? (
+          <span>
+            Reconnecting: {names(reconnecting)}. Viewers there see nothing until it’s back.
+          </span>
+        ) : null}
+        {notReceiving.length ? (
+          <span>
+            {destinationStateLabel('warning')}: {names(notReceiving)}. Videorc is still sending;
+            check the platform’s live dashboard.
           </span>
         ) : null}
         {skipped.length ? (
           <span>
-            Skipped:{' '}
+            {destinationStateLabel('not-configured')}:{' '}
             {skipped
               .map((target) =>
-                target.message ? `${target.label} (${target.message})` : target.label
+                target.message
+                  ? `${destinationLabel(target.label)} (${target.message})`
+                  : destinationLabel(target.label)
               )
               .join(', ')}
             .
           </span>
         ) : null}
         <span className="flex gap-2 pt-1.5">
-          <Button size="sm" variant="destructive" onClick={onStopAll}>
-            Stop all
+          <Button variant="destructive" onClick={onEndLivestream}>
+            End livestream
           </Button>
-          <Button size="sm" variant="outline" onClick={onDismiss}>
+          <Button variant="outline" onClick={onDismiss}>
             Continue streaming
           </Button>
         </span>
@@ -415,9 +500,23 @@ export function MetadataEditor({
   kickCategorySearchPending?: boolean
   onSearchKickCategories?: (query: string) => Promise<void>
 }): ReactElement {
-  const globalTitleIssue = metadataIssue(validation, 'title')
-  // One row per connected native destination, in Destinations order. The
-  // rows are accordions: closed, each is a label and a one-line summary.
+  // Unsaved edits (plan 174 S3.5b, D-5): an edit marks the draft as it was
+  // loaded; a save or a reload brings a new `updatedAt`, which ends it.
+  const [editedAt, setEditedAt] = useState<string | null>(null)
+  const dirty = Boolean(draft) && editedAt === draft?.updatedAt
+  // No error before the streamer has touched the title or saved (V-3).
+  const [titleChecked, setTitleChecked] = useState(false)
+  const markEdited = (): void => setEditedAt(draft?.updatedAt ?? null)
+  const patchDraft = (patch: Partial<StreamMetadataDraft>): void => {
+    markEdited()
+    onPatchDraft(patch)
+  }
+  const patchTarget: typeof onPatchTarget = (platform, patch) => {
+    markEdited()
+    onPatchTarget(platform, patch)
+  }
+  // One row per native destination in use, in Destinations order. The rows
+  // are accordions: closed, each is a label and a one-line summary.
   const visibleOverrides = visibleMetadataOverrides(targets, draft?.targetOverrides ?? [])
   const [openPlatforms, setOpenPlatforms] = useState<string[]>([])
   // A row with a validation issue stays open until the issue is gone, so the
@@ -426,97 +525,80 @@ export function MetadataEditor({
     .filter(({ override }) => metadataIssue(validation, 'title', override.platform))
     .map(({ override }) => override.platform)
   const accordionValue = Array.from(new Set([...openPlatforms, ...issuePlatforms]))
-  // The thumbnail is YouTube-only: drawn when a YouTube destination exists.
-  const youtubeTargets = targets.filter((target) => target.platform === 'youtube')
+  // Privacy and the thumbnail are YouTube's: drawn while a YouTube
+  // destination is on, and the thumbnail says why it can't be used when only
+  // a stream key reaches YouTube (D-18).
+  const youtubeTargets = targets.filter((target) => target.enabled && target.platform === 'youtube')
+  const youtubeSignedIn = youtubeTargets.some((target) => target.authMode === 'oauth')
+  const status = streamDetailsStatus({ dirty, validation })
 
   return (
     <PanelSection
       action={
-        <Button
-          disabled={disabled || !draft || pending}
-          size="sm"
-          variant="secondary"
-          onClick={onSave}
-        >
-          <SaveIcon data-icon="inline-start" weight="bold" />
-          {pending ? 'Saving' : 'Save'}
-        </Button>
+        <span className="flex items-center gap-2">
+          {status ? (
+            <span data-testid="stream-details-status">
+              <StatusBadge tone={status.tone} value={status.label} />
+            </span>
+          ) : null}
+          <Button
+            disabled={disabled || !draft || pending}
+            variant="secondary"
+            onClick={() => {
+              setTitleChecked(true)
+              onSave()
+            }}
+          >
+            <SaveIcon data-icon="inline-start" weight="bold" />
+            {pending ? 'Saving…' : 'Save'}
+          </Button>
+        </span>
       }
       icon={TextIcon}
-      title="Broadcast info"
+      title="Stream details"
     >
       {!draft ? (
-        <p className="text-sm text-muted-foreground">Loading metadata draft.</p>
+        <p className="text-sm text-muted-foreground" role="status">
+          Loading stream details…
+        </p>
       ) : (
         <>
-          <Field>
-            <FieldLabel htmlFor="stream-title">Title</FieldLabel>
-            <Input
-              aria-invalid={Boolean(globalTitleIssue)}
-              disabled={disabled}
-              id="stream-title"
-              placeholder="Untitled livestream"
-              value={draft.title}
-              onChange={(event) => onPatchDraft({ title: event.target.value })}
-            />
-            {globalTitleIssue ? (
-              <FieldDescription>{globalTitleIssue.message}</FieldDescription>
-            ) : null}
-          </Field>
-
-          <Field>
-            <FieldLabel htmlFor="stream-description">Description</FieldLabel>
-            <Textarea
-              className="min-h-24 resize-y"
-              disabled={disabled}
-              id="stream-description"
-              placeholder="Optional"
-              value={draft.description}
-              onChange={(event) => onPatchDraft({ description: event.target.value })}
-            />
-          </Field>
-
-          {youtubeTargets.length ? (
-            <ThumbnailField
-              alt="Livestream thumbnail"
-              assetId={draft.thumbnailAssetId}
-              disabled={disabled}
-              hint={
-                youtubeTargets.some((target) => target.authMode === 'oauth')
-                  ? 'Shown on YouTube. JPEG or PNG, 16:9, 1280 × 720 or larger.'
-                  : "Stream key destinations can't receive a thumbnail. Connect the YouTube account, or set it in YouTube Studio."
-              }
-              onChange={(thumbnailAssetId) =>
-                onPatchDraft({ thumbnailAssetId: thumbnailAssetId ?? undefined })
-              }
-            />
-          ) : null}
-
-          <Field>
-            <FieldLabel>Default privacy</FieldLabel>
-            <Select
-              disabled={disabled}
-              value={draft.defaultPrivacy}
-              onValueChange={(value) => onPatchDraft({ defaultPrivacy: value as StreamPrivacy })}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="private">Private</SelectItem>
-                <SelectItem value="unlisted">Unlisted</SelectItem>
-                <SelectItem value="public">Public</SelectItem>
-              </SelectContent>
-            </Select>
-            <FieldDescription>
-              Applies to YouTube. Twitch channels are always public; X broadcasts are always public.
-              Use the Announce switch in the X row below to control the announcement post.
-            </FieldDescription>
-          </Field>
+          <BroadcastInfoFields
+            disabled={disabled}
+            idPrefix="stream"
+            privacyNote="Twitch, Kick and X are always public."
+            thumbnail={
+              youtubeTargets.length ? (
+                <ThumbnailField
+                  alt="Livestream thumbnail"
+                  assetId={draft.thumbnailAssetId}
+                  disabled={disabled || !youtubeSignedIn}
+                  hint={broadcastThumbnailHint({ youtubeSignedIn })}
+                  onChange={(thumbnailAssetId) =>
+                    patchDraft({ thumbnailAssetId: thumbnailAssetId ?? undefined })
+                  }
+                />
+              ) : undefined
+            }
+            titleRequired={titleChecked}
+            value={{
+              title: draft.title,
+              description: draft.description,
+              privacy: youtubeTargets.length ? draft.defaultPrivacy : undefined
+            }}
+            onChange={(patch) => {
+              if (patch.title !== undefined) setTitleChecked(true)
+              patchDraft({
+                ...(patch.title !== undefined ? { title: patch.title } : {}),
+                ...(patch.description !== undefined ? { description: patch.description } : {}),
+                ...(patch.privacy !== undefined ? { defaultPrivacy: patch.privacy } : {})
+              })
+            }}
+          />
 
           {visibleOverrides.length ? (
             <Accordion
-              aria-label="Per-destination details"
+              aria-label="Details for each destination"
               type="multiple"
               value={accordionValue}
               onValueChange={setOpenPlatforms}
@@ -552,7 +634,7 @@ export function MetadataEditor({
                         kickCategories={kickCategories}
                         kickCategorySearchPending={kickCategorySearchPending}
                         validation={validation}
-                        onPatch={(patch) => onPatchTarget(override.platform, patch)}
+                        onPatch={(patch) => patchTarget(override.platform, patch)}
                         onSearchTwitchCategories={onSearchTwitchCategories}
                         onSearchKickCategories={onSearchKickCategories}
                       />
@@ -563,110 +645,12 @@ export function MetadataEditor({
             </Accordion>
           ) : (
             <p className="text-xs text-muted-foreground">
-              Connect YouTube, Twitch, Kick or X to set per-destination details.
+              Turn on YouTube, Twitch, Kick or X in Destinations to set details for each.
             </p>
-          )}
-
-          {validation && !validation.valid ? (
-            <Alert variant="warning">
-              <AlertIcon weight="fill" />
-              <AlertDescription>
-                {validation.issues.length} metadata warning
-                {validation.issues.length === 1 ? '' : 's'} before Go Live.
-              </AlertDescription>
-            </Alert>
-          ) : (
-            <Badge className="w-fit" variant="success">
-              Metadata ready
-            </Badge>
           )}
         </>
       )}
     </PanelSection>
-  )
-}
-
-/**
- * Kick category: search, then pick. Kick needs the numeric id, so a typed name
- * alone sets nothing; clearing the field clears the category.
- */
-function KickCategoryField({
-  override,
-  categories,
-  pending,
-  disabled,
-  onPatch,
-  onSearch
-}: {
-  override: StreamMetadataDraft['targetOverrides'][number]
-  categories: KickCategory[]
-  pending: boolean
-  disabled: boolean
-  onPatch: (patch: Partial<StreamMetadataDraft['targetOverrides'][number]>) => void
-  onSearch?: (query: string) => Promise<void>
-}): ReactElement {
-  const [query, setQuery] = useState(override.kickCategoryName ?? '')
-  const selected =
-    override.kickCategoryId !== undefined
-      ? { id: override.kickCategoryId, name: override.kickCategoryName ?? '' }
-      : null
-  const options =
-    selected && !categories.some((category) => category.id === selected.id)
-      ? [selected, ...categories]
-      : categories
-
-  return (
-    <Field>
-      <FieldLabel htmlFor="kick-category">Category</FieldLabel>
-      <div className="flex gap-2">
-        <Input
-          disabled={disabled}
-          id="kick-category"
-          placeholder="Just Chatting"
-          value={query}
-          onChange={(event) => {
-            setQuery(event.target.value)
-            if (!event.target.value.trim()) {
-              onPatch({ kickCategoryId: undefined, kickCategoryName: undefined })
-            }
-          }}
-        />
-        <Button
-          disabled={disabled || pending || !onSearch || query.trim().length < 2}
-          size="sm"
-          variant="outline"
-          onClick={() => void onSearch?.(query)}
-        >
-          <SearchIcon data-icon="inline-start" weight="bold" />
-          {pending ? 'Searching' : 'Search'}
-        </Button>
-      </div>
-      {options.length ? (
-        <Select
-          disabled={disabled || pending}
-          value={override.kickCategoryId !== undefined ? String(override.kickCategoryId) : ''}
-          onValueChange={(value) => {
-            const category = options.find((item) => String(item.id) === value)
-            if (category) {
-              setQuery(category.name)
-              onPatch({ kickCategoryId: category.id, kickCategoryName: category.name })
-            }
-          }}
-        >
-          <SelectTrigger className="w-full">
-            <SelectValue placeholder="Select category" />
-          </SelectTrigger>
-          <SelectContent>
-            {options.map((category) => (
-              <SelectItem key={category.id} value={String(category.id)}>
-                {category.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      ) : null}
-      <FieldDescription>Search, then pick one. Kick needs a listed category.</FieldDescription>
-    </Field>
   )
 }
 
@@ -701,48 +685,34 @@ function MetadataOverride({
   const twitch = override.platform === 'twitch'
   const youtube = override.platform === 'youtube'
   const x = override.platform === 'x'
-  const [twitchCategoryQuery, setTwitchCategoryQuery] = useState(override.twitchCategoryName ?? '')
-  const twitchCategoryOptions =
-    twitch &&
-    override.twitchCategoryId &&
-    !twitchCategories.some((category) => category.id === override.twitchCategoryId)
-      ? [
-          {
-            id: override.twitchCategoryId,
-            name: override.twitchCategoryName ?? override.twitchCategoryId
-          },
-          ...twitchCategories
-        ]
-      : twitchCategories
-
-  useEffect(() => {
-    setTwitchCategoryQuery(override.twitchCategoryName ?? '')
-  }, [override.twitchCategoryName])
 
   // The switch gates custom TEXT only. Platform settings below it (made for
   // kids, category, language, announce) always apply, on or off.
   const customTextHint = override.customize
     ? youtube
-      ? `Replaces the global title, description and privacy for ${label}.`
-      : `Replaces the global title for ${label}.`
+      ? `Replaces the title, description and privacy above for ${label}.`
+      : `Replaces the title above for ${label}.`
     : youtube
-      ? 'Uses the global title, description and privacy.'
-      : 'Uses the global title.'
+      ? 'Uses the title, description and privacy above.'
+      : 'Uses the title above.'
 
   return (
     <>
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-col">
-          <span className="text-sm font-medium">Custom title and description</span>
-          <span className="text-xs text-muted-foreground">{customTextHint}</span>
-        </div>
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel htmlFor={`${override.platform}-metadata-customize`}>
+            Custom title and description
+          </FieldLabel>
+          <FieldDescription>{customTextHint}</FieldDescription>
+        </FieldContent>
         <Switch
           aria-label={`Custom title and description for ${label}`}
           checked={override.customize}
           disabled={disabled}
+          id={`${override.platform}-metadata-customize`}
           onCheckedChange={(customize) => onPatch({ customize })}
         />
-      </div>
+      </Field>
 
       {override.customize ? (
         <>
@@ -756,7 +726,7 @@ function MetadataOverride({
               value={override.title}
               onChange={(event) => onPatch({ title: event.target.value })}
             />
-            {titleIssue ? <FieldDescription>{titleIssue.message}</FieldDescription> : null}
+            {titleIssue ? <FieldError>{titleIssue.message}</FieldError> : null}
             {twitch ? (
               <FieldDescription>Twitch supports title, category, and language.</FieldDescription>
             ) : null}
@@ -782,20 +752,13 @@ function MetadataOverride({
               </Field>
               <Field>
                 <FieldLabel>Privacy</FieldLabel>
-                <Select
+                <SegmentedControl
                   disabled={disabled}
+                  id="youtube-metadata-privacy"
+                  options={PRIVACY_OPTIONS}
                   value={override.privacy}
-                  onValueChange={(value) => onPatch({ privacy: value as StreamPrivacy })}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="private">Private</SelectItem>
-                    <SelectItem value="unlisted">Unlisted</SelectItem>
-                    <SelectItem value="public">Public</SelectItem>
-                  </SelectContent>
-                </Select>
+                  onValueChange={(privacy) => onPatch({ privacy })}
+                />
               </Field>
             </>
           ) : null}
@@ -803,19 +766,15 @@ function MetadataOverride({
       ) : null}
 
       {youtube ? (
-        <Field>
-          <FieldLabel>Made for kids</FieldLabel>
-          <ToggleGroup
-            className="w-full"
+        // A boolean is a Switch, not a No/Yes pair (plan 174 S1.7).
+        <Field orientation="horizontal">
+          <FieldLabel htmlFor="youtube-metadata-made-for-kids">Made for kids</FieldLabel>
+          <Switch
+            checked={Boolean(override.youtubeMadeForKids)}
             disabled={disabled}
-            type="single"
-            value={override.youtubeMadeForKids ? 'yes' : 'no'}
-            variant="outline"
-            onValueChange={(value) => value && onPatch({ youtubeMadeForKids: value === 'yes' })}
-          >
-            <ToggleGroupItem value="no">No</ToggleGroupItem>
-            <ToggleGroupItem value="yes">Yes</ToggleGroupItem>
-          </ToggleGroup>
+            id="youtube-metadata-made-for-kids"
+            onCheckedChange={(youtubeMadeForKids) => onPatch({ youtubeMadeForKids })}
+          />
         </Field>
       ) : null}
 
@@ -823,97 +782,106 @@ function MetadataOverride({
         <div className="grid gap-3 sm:grid-cols-2">
           <Field>
             <FieldLabel htmlFor="twitch-category">Category</FieldLabel>
-            <div className="flex gap-2">
-              <Input
-                disabled={disabled}
-                id="twitch-category"
-                placeholder="Just Chatting"
-                value={twitchCategoryQuery}
-                onChange={(event) => {
-                  setTwitchCategoryQuery(event.target.value)
-                  onPatch({ twitchCategoryId: undefined, twitchCategoryName: event.target.value })
-                }}
-              />
-              <Button
-                disabled={
-                  disabled || twitchCategorySearchPending || twitchCategoryQuery.trim().length < 2
-                }
-                size="sm"
-                variant="outline"
-                onClick={() => void onSearchTwitchCategories(twitchCategoryQuery)}
-              >
-                <SearchIcon data-icon="inline-start" weight="bold" />
-                {twitchCategorySearchPending ? 'Searching' : 'Search'}
-              </Button>
-            </div>
-            {twitchCategoryOptions.length ? (
-              <Select
-                disabled={disabled || twitchCategorySearchPending}
-                value={override.twitchCategoryId ?? ''}
-                onValueChange={(categoryId) => {
-                  const category = twitchCategoryOptions.find((item) => item.id === categoryId)
-                  if (category) {
-                    setTwitchCategoryQuery(category.name)
-                    onPatch({ twitchCategoryId: category.id, twitchCategoryName: category.name })
-                  }
-                }}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Select category" />
-                </SelectTrigger>
-                <SelectContent>
-                  {twitchCategoryOptions.map((category) => (
-                    <SelectItem key={category.id} value={category.id}>
-                      {category.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : null}
+            <CategoryCombobox
+              disabled={disabled}
+              id="twitch-category"
+              label="Twitch category"
+              pending={twitchCategorySearchPending}
+              results={twitchCategories}
+              value={
+                override.twitchCategoryId
+                  ? {
+                      id: override.twitchCategoryId,
+                      name: override.twitchCategoryName ?? override.twitchCategoryId
+                    }
+                  : null
+              }
+              onChange={(category) =>
+                onPatch({ twitchCategoryId: category?.id, twitchCategoryName: category?.name })
+              }
+              onSearch={(query) => void onSearchTwitchCategories(query)}
+            />
           </Field>
           <Field>
             <FieldLabel htmlFor="twitch-language">Language</FieldLabel>
-            <Input
+            <Select
               disabled={disabled}
-              id="twitch-language"
-              placeholder="en"
-              value={override.twitchLanguage ?? ''}
-              onChange={(event) => onPatch({ twitchLanguage: event.target.value })}
-            />
+              value={override.twitchLanguage?.trim().toLowerCase() ?? ''}
+              onValueChange={(twitchLanguage) => onPatch({ twitchLanguage })}
+            >
+              <SelectTrigger className="w-full" id="twitch-language">
+                <SelectValue placeholder="Choose a language" />
+              </SelectTrigger>
+              <SelectContent>
+                {streamLanguageOptions(override.twitchLanguage).map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
         </div>
       ) : null}
 
       {override.platform === 'kick' ? (
-        <KickCategoryField
-          categories={kickCategories}
-          disabled={disabled}
-          override={override}
-          pending={kickCategorySearchPending}
-          onPatch={onPatch}
-          onSearch={onSearchKickCategories}
-        />
+        <Field>
+          <FieldLabel htmlFor="kick-category">Category</FieldLabel>
+          <CategoryCombobox
+            disabled={disabled || !onSearchKickCategories}
+            id="kick-category"
+            label="Kick category"
+            pending={kickCategorySearchPending}
+            results={kickCategories.map((category) => ({
+              id: String(category.id),
+              name: category.name
+            }))}
+            value={
+              override.kickCategoryId !== undefined
+                ? {
+                    id: String(override.kickCategoryId),
+                    name: override.kickCategoryName ?? String(override.kickCategoryId)
+                  }
+                : null
+            }
+            onChange={(category) =>
+              onPatch({
+                kickCategoryId: category ? Number(category.id) : undefined,
+                kickCategoryName: category?.name
+              })
+            }
+            onSearch={(query) => void onSearchKickCategories?.(query)}
+          />
+          <FieldDescription>Kick needs a category from its list.</FieldDescription>
+        </Field>
       ) : null}
 
       {x ? (
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-col">
-            <span className="text-sm font-medium">Announce on X timeline</span>
-            <span className="text-xs text-muted-foreground">
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="x-metadata-announce">Announce on X timeline</FieldLabel>
+            <FieldDescription>
               X broadcasts are always public. Off skips the announcement post.
-            </span>
-          </div>
+            </FieldDescription>
+          </FieldContent>
           <Switch
             aria-label="Announce on X timeline"
             checked={override.xAnnounce ?? true}
             disabled={disabled}
+            id="x-metadata-announce"
             onCheckedChange={(xAnnounce) => onPatch({ xAnnounce })}
           />
-        </div>
+        </Field>
       ) : null}
     </>
   )
 }
+
+const PRIVACY_OPTIONS: SegmentedControlOption<StreamPrivacy>[] = [
+  { value: 'private', label: 'Private' },
+  { value: 'unlisted', label: 'Unlisted' },
+  { value: 'public', label: 'Public' }
+]
 
 function metadataIssue(
   validation: StreamMetadataValidation | null,

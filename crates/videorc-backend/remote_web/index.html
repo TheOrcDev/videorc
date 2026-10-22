@@ -2,10 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
-    />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
     <meta name="theme-color" content="#0d0d0f" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -20,23 +17,45 @@
   <body>
     <header class="bar">
       <h1>Videorc</h1>
-      <span id="live" class="live" hidden>LIVE</span>
+      <span id="live" class="live" hidden>ON AIR</span>
+      <span id="rec" class="rec" hidden>REC</span>
       <span class="spring"></span>
       <span id="status" class="pill" data-status="connecting">Connecting…</span>
     </header>
+
+    <div id="offline" class="banner" role="status" hidden>
+      <p id="offline-text"></p>
+      <div class="banner-actions">
+        <button type="button" data-action="retry">Try again</button>
+        <button type="button" data-action="forget">Forget this computer…</button>
+      </div>
+    </div>
+
+    <div id="tip" class="banner" role="status" hidden>
+      <p id="tip-text"></p>
+      <div class="banner-actions">
+        <button id="tip-dismiss" type="button">Got it</button>
+      </div>
+    </div>
 
     <main>
       <section id="view-gate" class="gate" hidden>
         <h2 id="gate-title">Pair this phone</h2>
         <p id="gate-text">
-          In Videorc on your computer, open Settings → Phone remote → Pair a phone, then scan the
-          code with this phone's camera.
+          In Videorc on your computer, open Settings → Remote and click “Pair a phone…”. Then scan
+          the code with this phone’s camera.
         </p>
+        <div id="gate-actions" class="gate-actions" hidden>
+          <button type="button" class="action" data-action="retry">Try again</button>
+          <button type="button" data-action="forget">Forget this computer…</button>
+        </div>
       </section>
 
       <section id="view-comments" class="view" hidden>
-        <div id="comments" class="comments" role="list"></div>
-        <p id="comments-empty" class="empty">Comments appear here when you are live.</p>
+        <p class="hint-line">Tap a message to put it on stream. Tap it again to take it off.</p>
+        <!-- role="list" keeps list semantics in Safari, which drops them with list-style: none. -->
+        <ul id="comments" class="comments" role="list"></ul>
+        <p id="comments-empty" class="empty">Chat appears here when you go live.</p>
         <button id="jump" class="jump" type="button" hidden></button>
       </section>
 
@@ -46,14 +65,19 @@
         <div id="deck-scenes" class="keys"></div>
         <h2 class="label" id="takeovers-label" hidden>Takeovers</h2>
         <div id="deck-takeovers" class="keys"></div>
+        <h2 class="label" id="banners-label" hidden>Banners</h2>
+        <div id="deck-banners" class="keys"></div>
+        <div class="deck-footer">
+          <button type="button" data-action="forget">Forget this computer…</button>
+        </div>
       </section>
     </main>
 
     <div id="snack" class="snack" role="status" hidden></div>
 
     <nav id="tabs" class="tabs" hidden>
-      <button type="button" data-view="comments" aria-pressed="true">Comments</button>
-      <button type="button" data-view="deck" aria-pressed="false">Deck</button>
+      <button type="button" data-view="comments" aria-pressed="true">Chat</button>
+      <button type="button" data-view="deck" aria-pressed="false">Controls</button>
     </nav>
 
     <noscript>Videorc Remote needs JavaScript.</noscript>

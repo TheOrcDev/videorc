@@ -17,6 +17,10 @@ export const AUXILIARY_API_KEYS = {
   comments: [
     'cacheChatAvatar',
     'readChatAvatar',
+    // Twitch GIFs in chat rows (plan 155).
+    'cacheChatGif',
+    'getChatGifMode',
+    'onChatGifMode',
     // Open link on a chat row (plan 151).
     'openChatLink',
     'sendCommentHighlight',
@@ -29,15 +33,22 @@ export const AUXILIARY_API_KEYS = {
     'onMarkerContext',
     'markerFromCommentsWindow',
     'markClipFromCommentsWindow',
+    // Banners (plan 186 S7): read the list, ask for a show or hide; never push.
+    'getCommentsBanners',
+    'onCommentsBanners',
+    'bannerFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
-    // Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5).
+    // Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5).
     'reconnectScopesFromCommentsWindow',
-    // Remove from chat and Orcle's removal cards (plan 140, S6): relayed.
+    // The behaviour chips open Buddy → Chat in the main window (plan 174 S3.14a).
+    'openBuddyTabFromCommentsWindow',
+    // Remove from chat and Buddy's removal cards (plan 140, S6): relayed.
     'moderateFromCommentsWindow',
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
     'setCommentsWindowHighlightAnchor',
+    'setCommentsWindowAutoShowActivity',
     'onCommentsWindowState',
     'getCommentsSnapshot',
     'setCommentsViewMode',
@@ -56,9 +67,11 @@ export const AUXILIARY_API_KEYS = {
     'getCohostWindowState',
     'onCohostWindowState',
     'sendCohostAction',
-    // Answers to Orcle's voice command cards (plan 140, S6 part B).
+    // Answers to Buddy's voice command cards (plan 140, S6 part B).
     'sendCohostCommand',
-    'sendCohostEnable'
+    'sendCohostEnable',
+    // The Buddy pane's living preview reads its pet pack (plan 168 Phase D).
+    'readBuddyPetFile'
   ],
   captions: [
     'getCaptionsWindowState',

@@ -174,6 +174,7 @@ async function main() {
   let state = await waitForSurfaceAtContentRect(
     'open: surface covers the preview window content rect'
   )
+  assertPreviewWindowShadow(state, true, 'open: the floating preview window casts its shadow')
 
   // --- Move: surface follows -----------------------------------------------------
   await smokeCommand('preview-window-set-bounds', { x: 364, y: 246 })
@@ -246,7 +247,9 @@ async function main() {
   const dismissed = await smokeCommand('eval-js', {
     code: `
       for (let i = 0; i < 25; i++) {
-        const scrim = document.querySelector('[data-slot="dialog-overlay"][data-state="open"]')
+        const scrim = document.querySelector(
+          '[data-slot="dialog-overlay"][data-state="open"], [data-slot="alert-dialog-overlay"][data-state="open"]'
+        )
         if (!scrim) return { dismissed: true }
         document.querySelectorAll('[data-slot="dialog-close"]').forEach((button) => button.click())
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -268,6 +271,11 @@ async function main() {
     JSON.stringify(docked)
   )
   await waitForDockedSurfaceAtSlot('dock: surface covers the Studio slot rect')
+  assertPreviewWindowShadow(
+    await smokeCommand('preview-window-state'),
+    false,
+    'dock: the docked window casts no shadow (no rim over the video edge)'
+  )
 
   // Drawable-resolution regression gate: the surface's Metal drawable must be
   // the slot rect in PHYSICAL pixels (points × the display's scale factor) —
@@ -375,58 +383,152 @@ async function main() {
   await smokeCommand('preview-window-set-dock-overlay', { open: false })
   await waitForDockedSurfaceAtSlot('dock-overlay-close: surface returns when the overlay closes')
 
+  // The REAL watcher, per overlay kind (owner, 2026-10-21): the End
+  // livestream question is an ALERT dialog, and it once opened under the
+  // surface because the watcher knew only the plain dialog's scrim. Each
+  // stand-in carries the slot and state its ui primitive renders.
+  for (const [kind, markup] of [
+    ['alert-dialog', '<div data-slot="alert-dialog-overlay" data-state="open"></div>'],
+    ['dialog', '<div data-slot="dialog-overlay" data-state="open"></div>']
+  ]) {
+    await smokeCommand('eval-js', {
+      code: `
+        const host = document.createElement('div')
+        host.setAttribute('data-videorc-probe-overlay', '')
+        host.innerHTML = ${JSON.stringify(markup)}
+        document.body.appendChild(host)
+        return { injected: true }
+      `
+    })
+    const realOverlayHidden = await waitFor(
+      async () => smokeCommand('preview-window-state'),
+      (s) => s.visible === false && s.dockHiddenReason === 'overlay-open',
+      8000
+    )
+    assertProbe(
+      realOverlayHidden.ok,
+      `dock-overlay-${kind}: the renderer watcher hides the surface under an open ${kind}`,
+      JSON.stringify(realOverlayHidden.last)
+    )
+    await smokeCommand('eval-js', {
+      code: `
+        document.querySelectorAll('[data-videorc-probe-overlay]').forEach((node) => node.remove())
+        return { removed: true }
+      `
+    })
+    await waitForDockedSurfaceAtSlot(
+      `dock-overlay-${kind}-close: surface returns when the ${kind} closes`
+    )
+  }
+
   // Scrolled-away slots hide with a stated reason instead of clipping. Drive
-  // the REAL reporter — actually scroll the slot's container out of view —
-  // rather than injecting a fraction, which the live reporter would overwrite
-  // with the true (fully visible) value within a frame.
-  const scrolled = await smokeCommand('eval-js', {
-    code: `
-      const slot = document.querySelector('[data-videorc-dock-slot]')
-      if (!slot) return { scrolled: false }
-      let node = slot.parentElement
-      while (node) {
-        const style = getComputedStyle(node)
-        if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) break
-        node = node.parentElement
-      }
-      const scroller = node ?? document.scrollingElement ?? document.documentElement
-      scroller.scrollTop = scroller.scrollHeight
-      await sleep(120)
-      return { scrolled: true, top: scroller.scrollTop }
-    `
-  })
-  if (scrolled.result?.scrolled && scrolled.result.top > 0) {
-    const scrolledHidden = await waitFor(
+  // the REAL reporter — actually scroll the slot's pane — rather than
+  // injecting a fraction, which the live reporter would overwrite with the
+  // true value within a frame. Two scrolls, both against the pane's own
+  // geometry (the page's overflow is whatever the Studio inspector adds up to
+  // on this build, never a stand-in for "far enough"):
+  //   edge  the slot slips a little under the pane's top edge while it is
+  //         still inside the window. The native surface is clipped by no
+  //         DOM, so a viewport-only measurement would paint it over the
+  //         toolbar (found when plan 174 S3.3 made Studio overflow at this
+  //         size by 21 px: the surface stayed, 5 px over the toolbar).
+  //   away  the pane scrolled as far as it goes.
+  // When the page does not overflow enough for the edge scroll, the main
+  // window shrinks to its minimum height for the step and grows back after.
+  const SLOT_PANE_JS = `
+    const slot = document.querySelector('[data-videorc-dock-slot="studio"]')
+    if (!slot) return null
+    let node = slot.parentElement
+    while (node && !/(auto|scroll)/.test(getComputedStyle(node).overflowY)) node = node.parentElement
+    const pane = node ?? document.scrollingElement ?? document.documentElement
+  `
+  const measureSlotPane = async () => {
+    const measured = await smokeCommand('eval-js', {
+      code: `
+        ${SLOT_PANE_JS}
+        const slotRect = slot.getBoundingClientRect()
+        return {
+          top: pane.scrollTop,
+          maxScroll: Math.max(0, pane.scrollHeight - pane.clientHeight),
+          clipTop: node ? node.getBoundingClientRect().top : 0,
+          slotTop: slotRect.top,
+          slotHeight: slotRect.height
+        }
+      `
+    })
+    return measured.result
+  }
+  const scrollSlotPane = async (top) => {
+    await smokeCommand('eval-js', {
+      code: `
+        ${SLOT_PANE_JS}
+        pane.scrollTop = ${Number(top)}
+        await sleep(120)
+        return { top: pane.scrollTop }
+      `
+    })
+  }
+  const expectScrolledAway = async (label, geometry) => {
+    const hidden = await waitFor(
       async () => smokeCommand('preview-window-state'),
       (s) => s.visible === false && s.dockHiddenReason === 'scrolled-away',
       8000
     )
-    assertProbe(
-      scrolledHidden.ok,
-      'dock-scroll: surface hides when the slot scrolls mostly away',
-      JSON.stringify(scrolledHidden.last)
+    assertProbe(hidden.ok, label, JSON.stringify({ geometry, last: hidden.last }))
+  }
+  let pane = await measureSlotPane()
+  // The edge scroll clips 8 % of the slot under the pane's top edge (the
+  // 0.98 show/hide threshold needs more than 2 %), capped so the slot's top
+  // stays inside the window: that is the case a viewport-only measure misses.
+  const edgeScrollFor = (geometry) =>
+    Math.min(
+      geometry.slotTop,
+      Math.ceil(geometry.slotTop - geometry.clipTop + geometry.slotHeight * 0.08)
     )
-    await smokeCommand('eval-js', {
-      code: `
-        const slot = document.querySelector('[data-videorc-dock-slot]')
-        let node = slot?.parentElement ?? null
-        while (node) {
-          const style = getComputedStyle(node)
-          if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) break
-          node = node.parentElement
-        }
-        ;(node ?? document.scrollingElement ?? document.documentElement).scrollTop = 0
-        await sleep(120)
-        return { restored: true }
-      `
+  let windowShrunk = false
+  if (pane && pane.maxScroll < edgeScrollFor(pane)) {
+    await smokeCommand('main-window-set-bounds', { height: 660 })
+    windowShrunk = true
+    await waitForDockedSurfaceAtSlot(
+      'dock-scroll-setup: surface at the slot in the minimum-height window'
+    )
+    pane = await measureSlotPane()
+  }
+  if (pane && pane.maxScroll >= edgeScrollFor(pane) && pane.clipTop > 0) {
+    const edge = edgeScrollFor(pane)
+    await scrollSlotPane(edge)
+    await expectScrolledAway(
+      'dock-scroll-edge: surface hides when the slot slips under the pane edge (still inside the window)',
+      { ...pane, scrolledTo: edge }
+    )
+    await scrollSlotPane(0)
+    await waitForDockedSurfaceAtSlot(
+      'dock-scroll-edge-back: surface returns when the slot is whole again'
+    )
+    await scrollSlotPane(pane.maxScroll)
+    await expectScrolledAway('dock-scroll: surface hides when the slot scrolls away', {
+      ...pane,
+      scrolledTo: pane.maxScroll
     })
+    await scrollSlotPane(0)
     await waitForDockedSurfaceAtSlot(
       'dock-scroll-back: surface returns when the slot is visible again'
     )
   } else {
-    // The Studio page fit without scrolling on this run (short content / tall
-    // window) — the scrolled-away decision is covered by dock-slot unit tests.
-    assertProbe(true, 'dock-scroll: skipped — Studio page did not overflow', '')
+    // Even the minimum-height window did not make the Studio page overflow
+    // past the slot's edge on this run: say so (the decision itself is
+    // covered by dock-slot unit tests), never pass a scroll that moved nothing.
+    assertProbe(
+      true,
+      'dock-scroll: skipped — Studio page does not overflow past the slot edge',
+      JSON.stringify(pane)
+    )
+  }
+  if (windowShrunk) {
+    await smokeCommand('main-window-set-bounds', { height: 780 })
+    await waitForDockedSurfaceAtSlot(
+      'dock-scroll-restore: surface at the slot once the window grows back'
+    )
   }
 
   // Tab switch: the docked preview must FULLY leave the screen — including
@@ -475,7 +577,10 @@ async function main() {
     'undock: preview window reports floating mode',
     JSON.stringify(floated)
   )
-  await waitForSurfaceAtContentRect('undock: surface returns to the floating window rect')
+  const undocked = await waitForSurfaceAtContentRect(
+    'undock: surface returns to the floating window rect'
+  )
+  assertPreviewWindowShadow(undocked, true, 'undock: the floating window gets its shadow back')
 
   console.log('\n=== Preview window probe summary ===')
   if (failures.length === 0) {
@@ -589,7 +694,7 @@ async function runSceneSlotScenarios() {
   })
   assertProbe(
     footer.result?.popOut === true && footer.result?.showLive === false,
-    'scene-dock: footer offers Pop out (not Show live here) while docked here',
+    'scene-dock: footer offers Pop out (not Show preview here) while docked here',
     JSON.stringify(footer.result)
   )
 
@@ -707,7 +812,8 @@ async function runPassThroughScenario() {
       return {
         sourceId: chosen.getAttribute('data-videorc-stage-source'),
         index,
-        sourceName: toggles[index]?.getAttribute('title') ?? null,
+        // The chip's visible name (plan 174 S1.10 dropped its native title).
+        sourceName: toggles[index]?.textContent?.trim() || null,
         sourceCount: sources.length,
         center: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
         selectedBefore
@@ -1369,6 +1475,13 @@ for w in list {
       }
     })
   return lastWindowDump
+}
+
+// macOS draws a window shadow's dark outline and light rim over the window
+// edge: docked, that framed the video in a grey gap (owner report, 2026-10-10).
+function assertPreviewWindowShadow(state, expected, label) {
+  if (process.platform !== 'darwin') return
+  assertProbe(state?.hasShadow === expected, label, JSON.stringify({ hasShadow: state?.hasShadow }))
 }
 
 function assertProbe(condition, label, detail) {

@@ -7,7 +7,8 @@ import {
   activityCapabilityNote,
   activityHighlight,
   activityRowActions,
-  activityRowShowsPerson
+  activityRowShowsPerson,
+  activityRowTint
 } from '@/components/stream-manager/activity-pane'
 import type { CommentHighlightState, LiveChatProviderState } from '@/lib/backend'
 import type { ActivityItem } from '@/lib/stream-activity'
@@ -57,7 +58,9 @@ describe('ActivityPane', () => {
 
   it('shows the short fact beside the name, with the sentence on hover', () => {
     expect(markup).toContain('>Resub · 14 months<')
-    expect(markup).toContain('title="Resubscribed for 14 months at Tier 1"')
+    // The sentence is the fact's tooltip and what a screen reader hears.
+    expect(markup).not.toContain('title=')
+    expect(markup).toContain('data-slot="activity-sentence">Resubscribed for 14 months at Tier 1<')
     expect(markup).toContain('that transition was clean')
   })
 
@@ -68,6 +71,32 @@ describe('ActivityPane', () => {
     expect(markup).not.toContain('Follows')
     expect(markup).not.toContain('Raids')
     expect(markup).not.toContain('Destinations')
+  })
+
+  it('renders no Auto-show switch without a handler', () => {
+    expect(markup).not.toContain('data-testid="activity-auto-show"')
+  })
+})
+
+// Plan 156: the one switch that auto-shows celebrations on stream.
+describe('ActivityPane Auto-show switch', () => {
+  const render = (autoShow: boolean): string =>
+    renderToStaticMarkup(
+      createElement(ActivityPane, {
+        items,
+        providers: [provider('twitch')],
+        nowMs: Date.parse('2026-09-24T10:01:00Z'),
+        autoShow,
+        onAutoShowChange: () => {}
+      })
+    )
+
+  it('renders in the header and reflects the setting', () => {
+    const off = render(false)
+    expect(off).toContain('data-testid="activity-auto-show"')
+    expect(off).toContain('Auto-show')
+    expect(off).toContain('data-state="unchecked"')
+    expect(render(true)).toContain('data-state="checked"')
   })
 })
 
@@ -174,7 +203,7 @@ describe('ActivityPane Show who followed', () => {
 
   it('offers the reconnect while Twitch lacks the follow permission', () => {
     const markup = render(false, true)
-    expect(markup).toContain('data-slot="activity-follow-names"')
+    expect(markup).toContain('data-testid="activity-follow-names"')
     expect(markup).toContain('Twitch names each follower once you allow it.')
     expect(markup).not.toContain('Livestream → Setup')
   })
@@ -182,6 +211,46 @@ describe('ActivityPane Show who followed', () => {
   it('hides it once the permission is granted, or when the window cannot act', () => {
     expect(render(true, true)).not.toContain('activity-follow-names')
     expect(render(false, false)).not.toContain('activity-follow-names')
+  })
+})
+
+// Plan 162: Power-ups and channel points ask once, above the rows.
+describe('ActivityPane Power-ups and channel points permission', () => {
+  const render = (bitsPointsScopes: boolean | undefined, withAction: boolean) =>
+    renderToStaticMarkup(
+      createElement(ActivityPane, {
+        items: [],
+        providers: [provider('twitch')],
+        nowMs: Date.parse('2026-09-24T10:01:00Z'),
+        audience: {
+          sessionId: 's',
+          updatedAt: '2026-09-24T10:00:00Z',
+          platforms: [
+            {
+              platform: 'twitch',
+              metric: 'followers',
+              capability: 'available',
+              audienceScopes: true,
+              ...(bitsPointsScopes === undefined ? {} : { bitsPointsScopes })
+            }
+          ]
+        },
+        ...(withAction ? { onShowFollowNames: () => undefined } : {})
+      })
+    )
+
+  it('asks for the permission while Twitch lacks it', () => {
+    const markup = render(false, true)
+    expect(markup).toContain('data-slot="activity-bits-points"')
+    expect(markup).toContain('Power-ups and channel points need one more Twitch permission.')
+    expect(markup).toContain('Reconnect Twitch')
+    expect(markup).not.toContain('bits:read')
+  })
+
+  it('stays quiet once granted, before the backend knows, or when the window cannot act', () => {
+    expect(render(true, true)).not.toContain('activity-bits-points')
+    expect(render(undefined, true)).not.toContain('activity-bits-points')
+    expect(render(false, false)).not.toContain('activity-bits-points')
   })
 })
 
@@ -289,15 +358,17 @@ describe('ActivityPane on stream', () => {
   it('shows Applying… and Failed (with the reason on hover) on the matching row', () => {
     const applying = render({ highlightApplyingId: 'm-sub' })
     expect(rowOf(applying, 'sub')).toContain('data-highlight-phase="applying"')
-    expect(rowOf(applying, 'sub')).toMatch(/data-variant="secondary"[^>]*>Applying…</)
+    expect(rowOf(applying, 'sub')).toMatch(/data-variant="default"[^>]*>Applying…</)
     expect(rowOf(applying, 'follow')).not.toContain('Applying')
 
     const failed = render({
       highlightFailure: { messageId: 'm-follow', reason: 'The stream is not live.' }
     })
     expect(rowOf(failed, 'follow')).toContain('data-highlight-phase="failed"')
-    expect(rowOf(failed, 'follow')).toMatch(
-      /data-variant="destructive"[^>]*title="The stream is not live\."[^>]*>Failed</
+    expect(rowOf(failed, 'follow')).toMatch(/data-variant="destructive"[^>]*>Failed</)
+    // The reason is the row's own line, never hover text (plan 174 H-16).
+    expect(rowOf(failed, 'follow')).toContain(
+      'data-testid="highlight-failed-reason">The stream is not live.<'
     )
     expect(rowOf(failed, 'sub')).not.toContain('Failed<')
     // A failed row is not a selected row.
@@ -348,5 +419,84 @@ describe('ActivityPane on stream', () => {
     expect(activityRowActions(rows[0]!, { phase: 'live' }, {}).map(({ id }) => id)).toEqual([
       'copy'
     ])
+  })
+})
+
+// Plan 177: a channel point reward reads as a reward at a glance, and a long
+// one never pushes a row's ⋯ out of the pane.
+describe('ActivityPane reward rows', () => {
+  const reward: ActivityItem = {
+    id: 'reward',
+    kind: 'redemption',
+    filter: 'rewards',
+    platform: 'twitch',
+    name: 'radiumcoders',
+    line: 'Redeemed Hydrate the Orc before the raid · 1,000 Orc Gold',
+    short: 'Hydrate the Orc before the raid · 1,000 Orc Gold',
+    at: '2026-09-24T10:00:00Z',
+    messageId: 'm-reward'
+  }
+  const render = (props: Partial<Parameters<typeof ActivityPane>[0]> = {}): string =>
+    renderToStaticMarkup(
+      createElement(ActivityPane, {
+        items: [reward, ...items],
+        providers: [provider('twitch')],
+        nowMs: Date.parse('2026-09-24T10:01:00Z'),
+        ...props
+      })
+    )
+  const rowClasses = (markup: string, id: string): string[] => {
+    const at = markup.indexOf(`data-activity-id="${id}"`)
+    expect(at).toBeGreaterThan(-1)
+    const row = markup.slice(markup.lastIndexOf('<li', at), at)
+    return (row.match(/class="([^"]*)"/)?.[1] ?? '').split(' ')
+  }
+
+  it('paints the reward tint on reward rows only', () => {
+    const markup = render()
+    expect(rowClasses(markup, 'reward')).toContain('bg-reward/8')
+    expect(markup).toContain('data-row-tint="reward"')
+    expect(rowClasses(markup, 'a')).not.toContain('bg-reward/8')
+    expect(rowClasses(markup, 'b')).not.toContain('bg-reward/8')
+    expect(markup.match(/data-row-tint="reward"/g)).toHaveLength(1)
+  })
+
+  it('keeps hover, and gives way to the on-stream fill', () => {
+    const idle = rowClasses(render(), 'reward')
+    expect(idle).toContain('hover:bg-accent')
+    expect(idle).not.toContain('bg-accent')
+    const live = rowClasses(
+      render({
+        highlightState: { generation: 1, phase: 'live', messageId: 'm-reward' },
+        liveHighlightId: 'm-reward'
+      }),
+      'reward'
+    )
+    expect(live).toContain('bg-accent')
+    expect(live).not.toContain('bg-reward/8')
+  })
+
+  it('tints by kind and highlight phase', () => {
+    expect(activityRowTint(reward, { phase: 'idle' })).toBe('reward')
+    expect(activityRowTint(reward, { phase: 'applying' })).toBe('reward')
+    expect(activityRowTint(reward, { phase: 'live' })).toBeNull()
+    // A sub is support, never a tip: no tint.
+    expect(activityRowTint(items[0]!, { phase: 'idle' })).toBeNull()
+    expect(activityRowTint(items[1]!, { phase: 'idle' })).toBe('paid')
+    expect(activityRowTint(items[1]!, { phase: 'live' })).toBeNull()
+  })
+
+  it('lays rows out as a block, so a long reward truncates instead of widening every row', () => {
+    // The shared ScrollArea's viewport overrides Radix's table layout.
+    expect(render()).toMatch(/data-slot="scroll-area-viewport"[^>]*\[&amp;&gt;div\]:block!/)
+  })
+
+  it("paints chat's paid tint on tips, without its ring", () => {
+    const markup = render()
+    expect(rowClasses(markup, 'b')).toContain('bg-warning/10')
+    expect(rowClasses(markup, 'b')).not.toContain('ring-1')
+    expect(rowClasses(markup, 'a')).not.toContain('bg-warning/10')
+    expect(rowClasses(markup, 'reward')).not.toContain('bg-warning/10')
+    expect(markup).toContain('data-row-tint="paid"')
   })
 })

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import { CHAT_AVATAR_MAX_BYTES } from '../shared/chat-avatar-bytes'
+import { twitchGifAssetUrl } from '../shared/chat-gif'
 import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../shared/comments-command-timing'
 
 // Chat avatar caching policy (Comments window upgrade S1). Renderers never
@@ -42,6 +43,44 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
  * Emotes share it with avatars, so it holds a busy stream's worth of both;
  * 7TV chats are emote-dense, hence 1000 rather than 500 (plan 089). */
 export const AVATAR_CACHE_MAX_FILES = 1000
+
+/** The cache's byte budget (plan 155). A thousand 50 KB emotes is nothing;
+ * a thousand multi-megabyte GIFs is not, so the prune also walks oldest-first
+ * until the directory fits. */
+export const AVATAR_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+export interface AvatarCacheEntry {
+  filePath: string
+  mtimeMs: number
+  bytes: number
+}
+
+/**
+ * Which cache files to remove so the directory fits both limits: the newest
+ * files are kept, and files are dropped oldest-first while either the count
+ * or the total bytes is over its cap. Pure, so the prune is testable without
+ * a filesystem.
+ */
+export function avatarPrunePlan(
+  entries: readonly AvatarCacheEntry[],
+  limits: { maxFiles: number; maxBytes: number } = {
+    maxFiles: AVATAR_CACHE_MAX_FILES,
+    maxBytes: AVATAR_CACHE_MAX_BYTES
+  }
+): string[] {
+  const newestFirst = [...entries].sort((left, right) => right.mtimeMs - left.mtimeMs)
+  let kept = 0
+  let keptBytes = 0
+  for (const [index, entry] of newestFirst.entries()) {
+    if (kept >= limits.maxFiles || keptBytes + entry.bytes > limits.maxBytes) {
+      // This file and everything older than it goes.
+      return newestFirst.slice(index).map((stale) => stale.filePath)
+    }
+    kept += 1
+    keptBytes += entry.bytes
+  }
+  return []
+}
 
 /** Prune at most this often. A chat flooding new emotes otherwise re-lists
  * and stats the whole cache directory on the main process for every new
@@ -111,7 +150,8 @@ export type AvatarCacheRejection =
   | { kind: 'host'; scheme: string; host: string }
   | { kind: 'http-status'; host: string; statusClass: string }
   | { kind: 'empty-body'; host: string }
-  | { kind: 'too-large'; host: string; bytes: number }
+  | { kind: 'too-large'; host: string; bytes: number; cap: number }
+  | { kind: 'not-an-image'; host: string }
   | { kind: 'fetch-error'; host: string; message: string }
 
 export type AvatarUrlDecision =
@@ -143,6 +183,32 @@ export function avatarUrlDecision(rawUrl: unknown): AvatarUrlDecision {
 
 export function avatarHostAllowed(rawUrl: string): boolean {
   return avatarUrlDecision(rawUrl).allowed
+}
+
+/**
+ * The gate for a Twitch GIF Keyboard asset (plan 155): the shared rule in
+ * `shared/chat-gif.ts`, which the backend and the IPC contract also apply.
+ * GIPHY hosts pass here and nowhere else: an avatar never comes from GIPHY,
+ * and a GIF never comes from an avatar CDN other than Twitch's own.
+ */
+export function chatGifUrlDecision(rawUrl: unknown): AvatarUrlDecision {
+  if (typeof rawUrl !== 'string') {
+    return { allowed: false, rejection: { kind: 'not-a-url' } }
+  }
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return { allowed: false, rejection: { kind: 'not-a-url' } }
+  }
+  const host = url.hostname.toLowerCase()
+  const scheme = url.protocol.replace(/:$/, '')
+  if (url.protocol !== 'https:') {
+    return { allowed: false, rejection: { kind: 'scheme', scheme, host } }
+  }
+  return twitchGifAssetUrl(rawUrl) !== null
+    ? { allowed: true, host }
+    : { allowed: false, rejection: { kind: 'host', scheme, host } }
 }
 
 /** `2xx` / `4xx` / `5xx` style class; enough to tell auth from outage. */
@@ -178,13 +244,18 @@ export function avatarCacheRejectionKey(rejection: AvatarCacheRejection): string
       return `empty-body:${rejection.host}`
     case 'too-large':
       return `too-large:${rejection.host}`
+    case 'not-an-image':
+      return `not-an-image:${rejection.host}`
     case 'fetch-error':
       return `fetch-error:${rejection.host}`
   }
 }
 
-export function avatarCacheRejectionMessage(rejection: AvatarCacheRejection): string {
-  const prefix = 'Chat avatar not cached:'
+export function avatarCacheRejectionMessage(
+  rejection: AvatarCacheRejection,
+  subject: 'Chat avatar' | 'Chat GIF' = 'Chat avatar'
+): string {
+  const prefix = `${subject} not cached:`
   switch (rejection.kind) {
     case 'not-a-url':
       return `${prefix} value is not a URL.`
@@ -197,7 +268,9 @@ export function avatarCacheRejectionMessage(rejection: AvatarCacheRejection): st
     case 'empty-body':
       return `${prefix} ${rejection.host} returned an empty body.`
     case 'too-large':
-      return `${prefix} ${rejection.host} returned ${rejection.bytes} bytes (cap ${AVATAR_MAX_BYTES}).`
+      return `${prefix} ${rejection.host} returned ${rejection.bytes} bytes (cap ${rejection.cap}).`
+    case 'not-an-image':
+      return `${prefix} ${rejection.host} returned a body that is not a GIF, WebP or PNG.`
     case 'fetch-error':
       return `${prefix} fetching from ${rejection.host} failed (${rejection.message}).`
   }

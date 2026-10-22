@@ -47,12 +47,11 @@ function SessionMicSliverBars({
   source?: FrameSource<VisualFrame>
 }): ReactElement {
   return (
-    <span
-      className="flex w-9 shrink-0 items-center"
-      data-videorc-session-mic-sliver
-      title={muted ? 'Microphone muted' : 'Live microphone signal'}
-    >
+    // A passive picture with its name for assistive tech; the Microphone
+    // section says "Muted" in words (plan 174 S1.10).
+    <span className="flex w-9 shrink-0 items-center" data-videorc-session-mic-sliver>
       <BarVisualizer
+        aria-label={muted ? 'Microphone muted' : 'Live microphone signal'}
         align="center"
         barCount={SLIVER_BAR_COUNT}
         className={cn(

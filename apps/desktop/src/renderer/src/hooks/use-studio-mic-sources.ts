@@ -16,7 +16,8 @@ import {
 } from '@/lib/mic-frame-sources'
 import { meterHasNoReading, micMeterInput, type MeterInput } from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
-import { audioMixerMonitorLabel, type AudioMixerMonitorLabel } from '@/lib/mic-visual-gate'
+import { audioMixerMonitorState } from '@/lib/mic-visual-gate'
+import type { MicMonitorState } from '@/lib/state-labels'
 
 // Plan 092: audiocn frame sources over the workspace's visual mic pipeline.
 // Only lazy chunks (the Studio dashboard, the Studio tab, Sources) import this
@@ -67,7 +68,7 @@ function finiteOrNull(value: number | null | undefined): number | null {
 
 export type MicrophoneMeter = Readonly<{
   meter: MeterInput
-  monitorLabel: AudioMixerMonitorLabel
+  monitorState: MicMonitorState
   /**
    * Why no live level reads (plan 080 S3): set only when nothing else drives
    * the meter and the renderer analyser, the last live input, failed.
@@ -109,7 +110,7 @@ export function useMicrophoneMeter(): MicrophoneMeter {
   const signalLive = !muted && (backendLevelsLive || micVisual.active || liveLevel !== null)
   return {
     meter,
-    monitorLabel: audioMixerMonitorLabel({
+    monitorState: audioMixerMonitorState({
       sessionActive: isSessionActive,
       signalLive,
       muted: muted && microphoneSelected

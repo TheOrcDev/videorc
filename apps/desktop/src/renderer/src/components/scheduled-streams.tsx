@@ -1,16 +1,33 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
-import { toast } from '@/lib/toast'
-import { CopyIcon, DeleteIcon, EditIcon, ExternalLinkIcon, LinkIcon } from '@/components/icons'
+import { lastCheckedLabel } from '@/hooks/use-scheduled-streams'
+import { openLivestreamView } from '@/lib/livestream-tabs'
+import { SESSION_LOCK_REASON } from '@/lib/lock-view'
+import { DisabledReason } from '@/components/ui/disabled-reason'
+import { Spinner } from '@/components/ui/spinner'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { copyText } from '@/lib/copy-text'
+import { toastUserError } from '@/lib/user-error'
+import {
+  CopyIcon,
+  DeleteIcon,
+  EditIcon,
+  ExternalLinkIcon,
+  LinkIcon,
+  RefreshIcon
+} from '@/components/icons'
 import { useScheduledStreams } from '@/hooks/use-scheduled-streams'
 import { useStudioCore } from '@/hooks/use-studio'
+import { GO_LIVE_LABEL, USE_FOR_GO_LIVE_LABEL } from '@/lib/go-live-copy'
 import { ScheduleStreamDialog } from '@/components/schedule-stream-dialog'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { PageHeader } from '@/components/page'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
   Dialog,
   DialogContent,
@@ -60,7 +77,10 @@ export function ScheduledStreams(): ReactElement {
   const formTrigger = useRef<HTMLElement | null>(null)
   const [editing, setEditing] = useState<Editing | null>(null)
   const [canceling, setCanceling] = useState<ScheduledStreamEvent | null>(null)
-  const [history, setHistory] = useState(false)
+  // Upcoming and Past are two views of one list (plan 174 S3.5b, D-34).
+  const [view, setView] = useState<'upcoming' | 'past'>('upcoming')
+  const history = view === 'past'
+  const [refreshing, setRefreshing] = useState(false)
   const [recovering, setRecovering] = useState<ScheduledStreamEvent | null>(null)
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [candidateId, setCandidateId] = useState('')
@@ -75,7 +95,12 @@ export function ScheduledStreams(): ReactElement {
     }
   }
   const refresh = async () => {
-    await state.reload(true)
+    setRefreshing(true)
+    try {
+      await state.reload(true)
+    } finally {
+      setRefreshing(false)
+    }
   }
   const edit = async (event: ScheduledStreamEvent) => {
     if (event.providerEventId && !(await perform('refresh', event))) return
@@ -94,87 +119,112 @@ export function ScheduledStreams(): ReactElement {
       setRecovering(event)
       setCandidateId('')
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error))
+      toastUserError(error, { action: 'recover', object: 'the event' })
     }
   }
   const sections = scheduledProviderSections(state.events, state.capabilities, history)
+  const startTargets = captureConfig.streaming.targets.filter(
+    (target) =>
+      target.platform === (starting?.provider ?? 'youtube') &&
+      target.authMode === 'oauth' &&
+      target.accountId === starting?.accountId
+  )
+  const checked = lastCheckedLabel(state.lastCheckedAt, Date.now())
+  const body = (
+    <div className="flex flex-col gap-6 p-gutter">
+      {state.error && (
+        <Alert variant="destructive">
+          <AlertDescription>{state.error}</AlertDescription>
+        </Alert>
+      )}
+      {state.loading ? (
+        <Skeleton className="h-20 w-full" />
+      ) : (
+        sections.map((section) => (
+          <ProviderSection
+            key={section.provider}
+            history={history}
+            section={section}
+            onSchedule={(trigger) => {
+              formTrigger.current = trigger
+              setEditing({ event: null, provider: section.provider })
+            }}
+          >
+            {section.events.map((event) => (
+              <EventRow
+                key={event.id}
+                event={event}
+                pending={state.pendingIds.includes(event.id)}
+                providerAvailable={section.available}
+                sessionActive={isSessionActive}
+                onCancel={() => setCanceling(event)}
+                onDuplicate={() => {
+                  void perform('duplicate', event)
+                }}
+                onEdit={(trigger) => {
+                  formTrigger.current = trigger
+                  void edit(event).catch(() => undefined)
+                }}
+                onGoLive={() => {
+                  setStarting(event)
+                  setTargetId('')
+                }}
+                onRecover={() => {
+                  void recover(event)
+                }}
+                onSchedule={() => {
+                  void perform('schedule', event)
+                }}
+              />
+            ))}
+          </ProviderSection>
+        ))
+      )}
+    </div>
+  )
   return (
-    <div className="flex flex-col">
+    <Tabs
+      className="flex flex-col gap-0"
+      value={view}
+      onValueChange={(next) => setView(next === 'past' ? 'past' : 'upcoming')}
+    >
       <PageHeader
         action={
           <>
+            {checked ? (
+              <span className="text-meta text-muted-foreground" data-testid="upcoming-last-checked">
+                {checked}
+              </span>
+            ) : null}
             <Button
-              size="sm"
               variant="ghost"
-              disabled={state.busy}
+              disabled={state.busy || refreshing}
               onClick={() => {
                 void refresh().catch(() => undefined)
               }}
             >
-              Refresh
+              {refreshing ? (
+                <Spinner aria-hidden data-icon="inline-start" />
+              ) : (
+                <RefreshIcon data-icon="inline-start" />
+              )}
+              {refreshing ? 'Refreshing…' : 'Refresh'}
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setHistory(!history)}>
-              {history ? 'Upcoming' : 'History'}
-            </Button>
+            <TabsList aria-label="Which streams">
+              <TabsTrigger value="upcoming">Upcoming</TabsTrigger>
+              <TabsTrigger value="past">Past</TabsTrigger>
+            </TabsList>
           </>
         }
         description={
           history
-            ? 'Streams that ended or were canceled.'
+            ? 'Streams that ended, were canceled, or drafts you moved here.'
             : 'You choose when each stream goes live. Nothing starts on its own.'
         }
         title={history ? 'Past streams' : 'Upcoming streams'}
       />
-      <div className="flex flex-col gap-6 p-gutter">
-        {state.error && (
-          <Alert variant="destructive">
-            <AlertDescription>{state.error}</AlertDescription>
-          </Alert>
-        )}
-        {state.loading ? (
-          <Skeleton className="h-20 w-full" />
-        ) : (
-          sections.map((section) => (
-            <ProviderSection
-              key={section.provider}
-              history={history}
-              section={section}
-              onSchedule={(trigger) => {
-                formTrigger.current = trigger
-                setEditing({ event: null, provider: section.provider })
-              }}
-            >
-              {section.events.map((event) => (
-                <EventRow
-                  key={event.id}
-                  event={event}
-                  pending={state.pendingIds.includes(event.id)}
-                  providerAvailable={section.available}
-                  sessionActive={isSessionActive}
-                  onCancel={() => setCanceling(event)}
-                  onDuplicate={() => {
-                    void perform('duplicate', event)
-                  }}
-                  onEdit={(trigger) => {
-                    formTrigger.current = trigger
-                    void edit(event).catch(() => undefined)
-                  }}
-                  onGoLive={() => {
-                    setStarting(event)
-                    setTargetId('')
-                  }}
-                  onRecover={() => {
-                    void recover(event)
-                  }}
-                  onSchedule={() => {
-                    void perform('schedule', event)
-                  }}
-                />
-              ))}
-            </ProviderSection>
-          ))
-        )}
-      </div>
+      <TabsContent value="upcoming">{history ? null : body}</TabsContent>
+      <TabsContent value="past">{history ? body : null}</TabsContent>
       {editing && (
         <ScheduleStreamDialog
           key={editing.event?.id ?? `new-${editing.provider}`}
@@ -187,44 +237,30 @@ export function ScheduledStreams(): ReactElement {
           }}
         />
       )}
-      <Dialog
+      <ConfirmDialog
+        cancelLabel={canceling?.providerEventId ? 'Keep event' : 'Keep draft'}
+        confirmDisabled={state.busy}
+        confirmLabel={canceling?.providerEventId ? 'Cancel event' : 'Move to Past'}
+        description={
+          canceling?.providerEventId
+            ? `The upcoming broadcast will be deleted from ${scheduledProviderLabel(canceling.provider)} and its link will stop working.`
+            : `The draft moves to Past. Nothing on ${scheduledProviderLabel(canceling?.provider ?? 'youtube')} is deleted.`
+        }
         open={Boolean(canceling)}
-        onOpenChange={(open) => {
-          if (!open) setCanceling(null)
+        testId="scheduled-cancel"
+        title={
+          canceling?.providerEventId
+            ? `Cancel this ${scheduledProviderLabel(canceling.provider)} ${scheduledProviderNoun(canceling.provider)}?`
+            : 'Move draft to Past?'
+        }
+        onCancel={() => setCanceling(null)}
+        onConfirm={() => {
+          if (canceling)
+            void perform('cancel', canceling).then((ok) => {
+              if (ok) setCanceling(null)
+            })
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {canceling?.providerEventId
-                ? `Cancel this ${scheduledProviderLabel(canceling.provider)} ${scheduledProviderNoun(canceling.provider)}?`
-                : 'Delete local draft?'}
-            </DialogTitle>
-            <DialogDescription>
-              {canceling?.providerEventId
-                ? `The upcoming broadcast will be deleted from ${scheduledProviderLabel(canceling.provider)} and its link will stop working.`
-                : 'This draft moves to history. No platform event is deleted.'}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setCanceling(null)}>
-              Keep event
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={state.busy}
-              onClick={() => {
-                if (canceling)
-                  void perform('cancel', canceling).then((ok) => {
-                    if (ok) setCanceling(null)
-                  })
-              }}
-            >
-              Confirm cancellation
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      />
       <Dialog
         open={Boolean(recovering)}
         onOpenChange={(open) => {
@@ -235,16 +271,20 @@ export function ScheduledStreams(): ReactElement {
           <DialogHeader>
             <DialogTitle>
               {recovering?.preparation?.phase === 'creating-stream'
-                ? 'Recover an unknown ingest stream'
-                : 'Recover an unknown create'}
+                ? `Find the stream ${scheduledProviderLabel(recovering.provider ?? 'youtube')} created`
+                : `Find the ${scheduledProviderNoun(recovering?.provider ?? 'youtube')} ${scheduledProviderLabel(recovering?.provider ?? 'youtube')} created`}
             </DialogTitle>
             <DialogDescription>
               {recovering?.preparation?.phase === 'creating-stream'
-                ? 'Choose the exact inactive encoder stream after checking it in YouTube Studio. Only compatible streams owned by this channel are listed. Your saved event keeps its link.'
-                : `${scheduledProviderLabel(recovering?.provider ?? 'youtube')} may already have created the event. Choose the exact owned upcoming event after checking it on ${scheduledProviderSite(recovering?.provider ?? 'youtube')}. No new event will be created.`}
+                ? 'YouTube may already have made the stream this event uses. Check it in YouTube Studio, then choose it. Only unused streams on this channel are listed, and your saved event keeps its link.'
+                : `${scheduledProviderLabel(recovering?.provider ?? 'youtube')} may already have created it. Check on ${scheduledProviderSite(recovering?.provider ?? 'youtube')}, then choose it. Videorc doesn't create another.`}
             </DialogDescription>
           </DialogHeader>
-          <Select value={candidateId} onValueChange={setCandidateId}>
+          <Select
+            disabled={candidates.length === 0}
+            value={candidateId}
+            onValueChange={setCandidateId}
+          >
             <SelectTrigger
               aria-label={
                 recovering?.preparation?.phase === 'creating-stream'
@@ -252,7 +292,9 @@ export function ScheduledStreams(): ReactElement {
                   : 'Event to recover'
               }
             >
-              <SelectValue placeholder="Select matching candidate" />
+              <SelectValue
+                placeholder={candidates.length ? 'Choose the matching one' : 'Nothing matches yet'}
+              />
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
@@ -299,37 +341,56 @@ export function ScheduledStreams(): ReactElement {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              Go live with this {scheduledProviderLabel(starting?.provider ?? 'youtube')}{' '}
-              {scheduledProviderNoun(starting?.provider ?? 'youtube')}
+              Use this {scheduledProviderLabel(starting?.provider ?? 'youtube')}{' '}
+              {scheduledProviderNoun(starting?.provider ?? 'youtube')} for Go Live
             </DialogTitle>
             <DialogDescription>
-              {starting?.requested.title} · {starting?.accountLabel}. Choose its destination, then
-              click Go Live in Studio to review every enabled destination and start manually.
+              {starting?.requested.title} · {starting?.accountLabel}. Choose its destination. When
+              you&apos;re ready, click {GO_LIVE_LABEL} in Studio to check every destination and
+              start.
             </DialogDescription>
           </DialogHeader>
-          <Select value={targetId} onValueChange={setTargetId}>
-            <SelectTrigger aria-label="Livestream destination">
-              <SelectValue
-                placeholder={`Choose ${scheduledProviderLabel(starting?.provider ?? 'youtube')} destination`}
-              />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {captureConfig.streaming.targets
-                  .filter(
-                    (target) =>
-                      target.platform === (starting?.provider ?? 'youtube') &&
-                      target.authMode === 'oauth' &&
-                      target.accountId === starting?.accountId
-                  )
-                  .map((target) => (
+          {startTargets.length ? (
+            <Select value={targetId} onValueChange={setTargetId}>
+              <SelectTrigger aria-label="Livestream destination">
+                <SelectValue
+                  placeholder={`Choose ${scheduledProviderLabel(starting?.provider ?? 'youtube')} destination`}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {startTargets.map((target) => (
                     <SelectItem key={target.id} value={target.id}>
                       {target.label}
                     </SelectItem>
                   ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          ) : (
+            // The select used to open empty and say nothing (D-32).
+            <Alert data-testid="upcoming-no-destination" variant="quiet">
+              <AlertTitle>
+                {`No ${scheduledProviderLabel(starting?.provider ?? 'youtube')} destination signs in as ${starting?.accountLabel ?? 'this account'}`}
+              </AlertTitle>
+              <AlertDescription>
+                In Livestream → Setup, set a destination to Sign in with this account, then come
+                back.
+              </AlertDescription>
+              <AlertAction>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => {
+                    setStarting(null)
+                    openLivestreamView('setup')
+                  }}
+                >
+                  Open Setup
+                </Button>
+              </AlertAction>
+            </Alert>
+          )}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setStarting(null)}>
               Cancel
@@ -341,8 +402,8 @@ export function ScheduledStreams(): ReactElement {
                   setCaptureConfig((current) =>
                     selectScheduledStreamForTarget(current, targetId, starting)
                   )
+                  // The Livestream alert shows the chosen event (plan 174 J2-11).
                   setStarting(null)
-                  toast.success('Saved event selected. Click Go Live in Studio when ready.')
                 }
               }}
             >
@@ -351,7 +412,7 @@ export function ScheduledStreams(): ReactElement {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </Tabs>
   )
 }
 
@@ -377,7 +438,7 @@ function ProviderSection({
     <section aria-labelledby={headingId} className="flex flex-col gap-2">
       <div className="flex min-h-7 items-center gap-2">
         <PlatformGlyph platform={section.provider} />
-        <h3 className="text-[13px] font-semibold text-foreground" id={headingId}>
+        <h3 className="text-section font-semibold text-foreground" id={headingId}>
           {label}
         </h3>
         {section.events.length > 0 ? (
@@ -386,7 +447,6 @@ function ProviderSection({
         {history ? null : (
           <Button
             className="ml-auto"
-            size="sm"
             variant="outline"
             onClick={(event) => onSchedule(event.currentTarget)}
           >
@@ -402,7 +462,7 @@ function ProviderSection({
       {section.events.length > 0 ? (
         <GroupedList>{children}</GroupedList>
       ) : (
-        <p className="text-xs text-subtle">
+        <p className="text-xs text-muted-foreground">
           {history ? `No past ${label} ${noun}s.` : `No upcoming ${label} ${noun}s.`}
         </p>
       )}
@@ -457,7 +517,7 @@ function EventRow({
     menu.push(
       {
         id: 'edit',
-        label: 'Edit',
+        label: 'Edit…',
         icon: EditIcon,
         disabled: pending,
         onSelect: () =>
@@ -479,9 +539,8 @@ function EventRow({
         id: 'copy-link',
         label: 'Copy link',
         icon: LinkIcon,
-        onSelect: () => {
-          void navigator.clipboard.writeText(url).then(() => toast.success('Event link copied.'))
-        }
+        // The menu closing is the confirmation; a failed copy says so.
+        onSelect: () => void copyText(url, "Couldn't copy the event link.")
       },
       {
         id: 'open',
@@ -494,14 +553,19 @@ function EventRow({
     )
   }
   if (editable) {
-    menu.push({
-      id: 'cancel',
-      label: event.providerEventId ? `Cancel ${noun}` : 'Delete draft',
-      icon: DeleteIcon,
-      destructive: true,
-      disabled: pending,
-      onSelect: onCancel
-    })
+    // A draft only moves to Past (nothing is deleted), so it says so (D-32).
+    menu.push(
+      event.providerEventId
+        ? {
+            id: 'cancel',
+            label: `Cancel ${noun}`,
+            icon: DeleteIcon,
+            destructive: true,
+            disabled: pending,
+            onSelect: onCancel
+          }
+        : { id: 'cancel', label: 'Move to Past', disabled: pending, onSelect: onCancel }
+    )
   }
   return (
     <div className="flex items-center gap-3 px-3 py-2.5" data-slot="scheduled-event">
@@ -527,18 +591,13 @@ function EventRow({
           <LifecycleChip chip={scheduledLifecycleChip(event)} />
           {privacy ? <Badge variant="outline">{privacy}</Badge> : null}
         </div>
-        <span
-          className="truncate text-xs text-muted-foreground"
-          title={
-            event.lastSyncedAt
-              ? `Last checked ${new Date(event.lastSyncedAt).toLocaleString()}`
-              : undefined
-          }
-        >
-          {event.accountLabel} · {scheduledWhenLabel(event)}
-        </span>
+        {/* When Videorc last checked the platform: hover detail (plan 174 S1.10). */}
+        <ScheduledMetaLine
+          lastSyncedAt={event.lastSyncedAt}
+          text={`${event.accountLabel} · ${scheduledWhenLabel(event)}`}
+        />
         {event.error ? (
-          <Alert>
+          <Alert variant="destructive">
             <AlertDescription>
               {event.thumbnailState === 'error' ? 'Event created; thumbnail upload failed. ' : ''}
               {event.error.message}
@@ -553,28 +612,29 @@ function EventRow({
       </div>
       <div className="flex shrink-0 items-center gap-1" ref={menuAnchor}>
         {event.thumbnailState === 'error' ? (
-          <Button disabled={pending} size="sm" variant="ghost" onClick={onSchedule}>
+          <Button disabled={pending} variant="ghost" onClick={onSchedule}>
             Retry thumbnail
           </Button>
         ) : null}
         {needsRecovery ? (
-          <Button disabled={pending} size="sm" variant="outline" onClick={onRecover}>
+          <Button disabled={pending} variant="outline" onClick={onRecover}>
             Recover
           </Button>
         ) : event.lifecycle === 'scheduled' ? (
-          <Button
-            disabled={sessionActive || pending || Boolean(event.preparation)}
-            size="sm"
-            variant="secondary"
-            onClick={onGoLive}
-          >
-            Go Live…
-          </Button>
+          // The session lock covers Upcoming too (D-13), and says so.
+          <DisabledReason reason={sessionActive ? SESSION_LOCK_REASON : null}>
+            <Button
+              disabled={sessionActive || pending || Boolean(event.preparation)}
+              variant="secondary"
+              onClick={onGoLive}
+            >
+              {USE_FOR_GO_LIVE_LABEL}
+            </Button>
+          </DisabledReason>
         ) : event.lifecycle === 'draft' ? (
           <Button
             aria-label={`Schedule this draft on ${label}`}
             disabled={!providerAvailable || pending}
-            size="sm"
             variant="outline"
             onClick={onSchedule}
           >
@@ -586,5 +646,25 @@ function EventRow({
         ) : null}
       </div>
     </div>
+  )
+}
+
+/** The account and the time, with the last platform check on hover. */
+function ScheduledMetaLine({
+  text,
+  lastSyncedAt
+}: {
+  text: string
+  lastSyncedAt?: string | null
+}): ReactElement {
+  const line = <span className="truncate text-xs text-muted-foreground">{text}</span>
+  if (!lastSyncedAt) return line
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{line}</TooltipTrigger>
+      <TooltipContent align="start">
+        Last checked {new Date(lastSyncedAt).toLocaleString()}
+      </TooltipContent>
+    </Tooltip>
   )
 }

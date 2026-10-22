@@ -73,15 +73,27 @@ impl PortalGrant {
 async fn close_session(session: &Session<Screencast>) {
     match tokio::time::timeout(PORTAL_CALL_TIMEOUT, session.close()).await {
         Ok(Ok(())) => {}
+        // A cancelled or revoked share is already gone on the portal side;
+        // closing it again is expected to fail and is not a problem.
+        Ok(Err(error)) if session_already_gone(&error.to_string()) => {
+            tracing::debug!(error = %error, "portal session was already closed")
+        }
         Ok(Err(error)) => tracing::warn!(error = %error, "portal session Close failed"),
         Err(_) => tracing::warn!("portal session Close timed out"),
     }
+}
+
+fn session_already_gone(error: &str) -> bool {
+    error.contains("UnknownObject") || error.contains("does not exist")
 }
 
 pub enum PortalStart {
     Granted(PortalGrant),
     /// The state that explains why there is no stream.
     Denied(PortalCaptureState),
+    /// Videorc stopped waiting (the source was stopped or replaced while the
+    /// share dialog was open). The session is closed; nobody waits for this.
+    Abandoned,
 }
 
 fn denied(reason: impl std::fmt::Display) -> PortalStart {
@@ -101,10 +113,13 @@ fn is_cancelled(error: &ashpd::Error) -> bool {
 /// A refused restore token falls back to the picker once (the caller
 /// forgets the token when `restore_token_refused` is set on the outcome).
 /// Run it on [`portal_runtime`]; a session that is not granted is closed.
+/// `cancelled` ends the negotiation (the picker steps can wait on a person
+/// indefinitely); closing the session then lets the portal dismiss its dialog.
 pub async fn start_portal_session(
     source: PortalSourceType,
     restore_token: Option<String>,
     include_cursor: bool,
+    cancelled: impl std::future::Future<Output = ()>,
 ) -> PortalStart {
     let proxy = match tokio::time::timeout(PORTAL_CALL_TIMEOUT, Screencast::new()).await {
         Ok(Ok(proxy)) => proxy,
@@ -122,9 +137,21 @@ pub async fn start_portal_session(
         Err(_) => return denied("CreateSession did not answer within 10s"),
     };
     let session = Arc::new(session);
-    let outcome = negotiate_stream(&proxy, &session, source, restore_token, include_cursor).await;
-    if !matches!(outcome, PortalStart::Granted(_)) {
-        close_session(&session).await;
+    let outcome = tokio::select! {
+        outcome = negotiate_stream(&proxy, &session, source, restore_token, include_cursor) => outcome,
+        () = cancelled => PortalStart::Abandoned,
+    };
+    match outcome {
+        PortalStart::Granted(_) => {}
+        // The portal answers Close only after its share dialog is gone, so
+        // waiting here held the next transition (and Record) for the whole
+        // 10 s call bound (ogre, 2026-10-12). Close on the persistent portal
+        // runtime instead; nothing waits for the answer.
+        PortalStart::Abandoned => {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move { close_session(&session).await });
+        }
+        PortalStart::Denied(_) => close_session(&session).await,
     }
     outcome
 }
@@ -219,6 +246,16 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     use super::*;
+
+    #[test]
+    fn closing_a_session_the_portal_already_ended_is_not_a_warning() {
+        assert!(session_already_gone(
+            "org.freedesktop.DBus.Error.UnknownObject: Object does not exist at path"
+        ));
+        assert!(!session_already_gone(
+            "org.freedesktop.DBus.Error.AccessDenied"
+        ));
+    }
 
     /// The zbus socket reader is spawned by whichever capture thread opens
     /// the connection first. It must keep running after that thread (and its

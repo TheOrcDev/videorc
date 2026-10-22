@@ -3,9 +3,10 @@ import { useEffect, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useStudioCore } from '@/hooks/use-studio'
 import { renderCaptionCueFramePng } from '@/lib/caption-overlay'
+import { formatResolution } from '@/lib/format-video'
 import { cn } from '@/lib/utils'
 
 type PreviewBackdrop = 'dark' | 'light' | 'motion'
@@ -49,7 +50,8 @@ export function CaptionPreview(): ReactElement {
   return (
     <PanelSection
       action={
-        <Badge variant={isSample ? 'secondary' : 'success'}>{isSample ? 'Sample' : 'Live'}</Badge>
+        // Which text the preview shows, not a status (plan 174 D-26): never a green "Live".
+        <Badge>{isSample ? 'Sample' : 'Latest caption'}</Badge>
       }
       className="lg:sticky lg:top-0"
       description="The selected style at your current video aspect ratio."
@@ -81,28 +83,27 @@ export function CaptionPreview(): ReactElement {
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{text}</p>
           <p className="text-xs text-muted-foreground">
-            {captureConfig.video.width} × {captureConfig.video.height} ·{' '}
+            {formatResolution(captureConfig.video)} ·{' '}
             {captureConfig.captions.position === 'top' ? 'Top' : 'Bottom'}
           </p>
         </div>
-        <ToggleGroup
+        <SegmentedControl
           aria-label="Preview background"
+          options={PREVIEW_BACKDROP_OPTIONS}
           size="sm"
-          type="single"
           value={backdrop}
-          variant="outline"
-          onValueChange={(value) => {
-            if (value === 'dark' || value === 'light' || value === 'motion') setBackdrop(value)
-          }}
-        >
-          <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
-          <ToggleGroupItem value="light">Light</ToggleGroupItem>
-          <ToggleGroupItem value="motion">Mixed</ToggleGroupItem>
-        </ToggleGroup>
+          onValueChange={setBackdrop}
+        />
       </div>
     </PanelSection>
   )
 }
+
+const PREVIEW_BACKDROP_OPTIONS: SegmentedControlOption<PreviewBackdrop>[] = [
+  { value: 'dark', label: 'Dark' },
+  { value: 'light', label: 'Light' },
+  { value: 'motion', label: 'Mixed' }
+]
 
 // The preview shows captions over stand-in VIDEO, so these backdrops are
 // content, not chrome: fixed colours in both themes (plan 050 S15; the style

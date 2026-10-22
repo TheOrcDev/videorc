@@ -1,17 +1,18 @@
 import { StreamQualityControl } from './stream-quality-control'
 import { streamQualityOverride } from '@/lib/output-quality'
 import {
-  AlertIcon,
   ChevronDownIcon,
+  CopyIcon,
+  ExternalLinkIcon,
   LinkIcon,
   ResetIcon,
   SignOutIcon,
-  SyncIcon,
-  WarningIcon
+  SyncIcon
 } from '@/components/icons'
-import { useEffect, useState, type KeyboardEvent, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
-import { ListRow } from '@/components/list-row'
+import { ConfirmDialog } from '@/components/confirm-dialog'
+import { ListRow, ListRowButton } from '@/components/list-row'
 import {
   YOUTUBE_STREAM_KEY_LINK_LABEL,
   YOUTUBE_STREAM_KEY_URL,
@@ -32,7 +33,8 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldError, FieldLabel } from '@/components/ui/field'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -41,8 +43,10 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type {
   OAuthProviderCredentialStatus,
   PlatformAccount,
@@ -57,8 +61,12 @@ import type {
   YouTubeChannel
 } from '@/lib/backend'
 import { AvatarCircle } from '@/lib/chat-avatar'
-import { oauthUnavailableReason } from '@/lib/capture'
+import { oauthUnavailableReason, streamServerUrlIssue, videoPresets } from '@/lib/capture'
+import { useCopyText } from '@/lib/copy-text'
 import { destinationSetup } from '@/lib/destination-readiness'
+import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
+import { destinationLabel } from '@/lib/platform-copy'
+import { destinationStateLabel } from '@/lib/state-labels'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { streamKeyPlatformMismatch, streamKeyTailHint } from '@/lib/stream-key-format'
 import { metadataPlatformLabel } from '@/lib/stream-metadata-summary'
@@ -70,7 +78,8 @@ import {
   platformConnectOptions,
   removeMessagesReadiness,
   removeMessagesReconnectCopy,
-  TWITCH_AUDIENCE_SCOPES
+  TWITCH_AUDIENCE_SCOPES,
+  TWITCH_BITS_POINTS_SCOPES
 } from '../../../../shared/platform-scopes'
 
 // One destination (plan 080 S5/S6). The owner's brief: "make it good and
@@ -81,20 +90,32 @@ import {
 
 type BadgeTone = 'success' | 'warning' | 'destructive' | 'live' | 'outline'
 
+const URL_MODE_OPTIONS: SegmentedControlOption<StreamUrlMode>[] = [
+  { value: 'server-and-key', label: 'Server + key' },
+  { value: 'full-url', label: 'Full URL' }
+]
+
+const AUTH_MODE_OPTIONS: SegmentedControlOption<StreamAuthMode>[] = [
+  { value: 'oauth', label: 'Sign in' },
+  { value: 'manual-rtmp', label: 'Stream key' }
+]
+
+const RUNTIME_BADGE_TONES: Record<StreamTargetRuntime['state'], BadgeTone> = {
+  live: 'live',
+  connecting: 'warning',
+  reconnecting: 'warning',
+  warning: 'warning',
+  failed: 'destructive',
+  'not-configured': 'warning',
+  ready: 'outline',
+  stopped: 'outline'
+}
+
+/** The running destination's badge: the one destination vocabulary (plan 174 J2-4). */
 function runtimeBadge(runtime: StreamTargetRuntime): { tone: BadgeTone; label: string } {
-  switch (runtime.state) {
-    case 'live':
-      return { tone: 'live', label: 'On air' }
-    case 'connecting':
-      return { tone: 'warning', label: 'Connecting' }
-    case 'failed':
-      return { tone: 'destructive', label: 'Stopped' }
-    case 'not-configured':
-      return { tone: 'warning', label: 'Skipped' }
-    case 'stopped':
-      return { tone: 'outline', label: 'Ended' }
-    default:
-      return { tone: 'outline', label: 'Idle' }
+  return {
+    tone: RUNTIME_BADGE_TONES[runtime.state] ?? 'outline',
+    label: destinationStateLabel(runtime.state)
   }
 }
 
@@ -115,12 +136,28 @@ export function idleDestinationBadge(
   return null
 }
 
+/**
+ * The quality a destination streams at when it overrides the default (plan
+ * 174 S3.5a, D-17): the row's tag names it on every row that has one, and
+ * says nothing when the destination uses the default.
+ */
+export function destinationQualityTag(
+  target: Pick<StreamTargetSettings, 'outputPreset' | 'outputBitrateKbps'>
+): string | null {
+  const preset = target.outputPreset ? videoPresets[target.outputPreset] : undefined
+  if (preset) return formatVideoQuality(preset)
+  if (target.outputBitrateKbps) return formatBitrate(target.outputBitrateKbps) || null
+  return null
+}
+
 export function DestinationCard({
   target,
   account,
   credentials,
   disabled,
+  defaultExpanded = false,
   enableGate,
+  enableLockDescriptionId,
   runtime,
   validation,
   sharedAccountWith,
@@ -147,7 +184,14 @@ export function DestinationCard({
   youtubeQuotaPausedUntil?: Date | null
   credentials?: OAuthProviderCredentialStatus
   disabled: boolean
+  /**
+   * Opens on mount. The page passes it to the first destination that needs
+   * setup only, so one form is open, not every incomplete one (D-14).
+   */
+  defaultExpanded?: boolean
   enableGate: EntitlementUiGate
+  /** The page's one cap notice, which says why the switch is off (D-14). */
+  enableLockDescriptionId?: string
   runtime?: StreamTargetRuntime
   validation?: PlatformAccountValidation
   /**
@@ -162,7 +206,14 @@ export function DestinationCard({
   xNativeCapabilityLoading: boolean
   youtubeChannels: YouTubeChannel[]
   youtubeChannelsLoading: boolean
-  onConnect: (platform: StreamPlatform, options?: PlatformConnectOptions) => void
+  /**
+   * Starts a sign-in. A promise of the sign-in link turns on the waiting
+   * state with Copy link (D-16); null means it never reached the browser.
+   */
+  onConnect: (
+    platform: StreamPlatform,
+    options?: PlatformConnectOptions
+  ) => void | Promise<string | null | void>
   onDisconnect: (platform: StreamPlatform) => void
   onPatch: (targetId: string, patch: Partial<StreamTargetSettings>) => void
   onSaveManualStreamKey: (targetId: string, streamKey: string) => Promise<boolean>
@@ -181,7 +232,6 @@ export function DestinationCard({
     oauthUnavailableReason(target.platform) ??
     (credentials?.ready === false ? credentials.message : null)
   const oauthMode = nativeDestination && target.authMode === 'oauth' && !oauthUnavailableMessage
-  const setup = destinationSetup(target, account)
   // While a session is live the runtime status (on air / stopped / skipped)
   // takes over the badge; otherwise only something worth reading shows.
   // Plan 094: YouTube's API is paused (shared quota). The OAuth path can't
@@ -198,12 +248,23 @@ export function DestinationCard({
   const statusMessage = runtime?.message ?? target.status?.message
   // Multistreaming is free for every plan: the only enable gate left is the
   // shared destination cap (or a disabled livestreaming feature), so the
-  // switch is always rendered and the strip below explains why it is off.
+  // switch is always rendered and the page's one cap notice says why it is
+  // off (plan 174 S3.5a, D-14), instead of a strip under every row.
   const enableLockGate = !disabled && !target.enabled && !enableGate.allowed ? enableGate : null
   const enableSwitchDisabled = disabled || Boolean(enableLockGate)
-  const enableLockId = `${target.id}-enable-lock`
   const [manualStreamKeyDraft, setManualStreamKeyDraft] = useState(target.streamKey)
   const [fullUrlDraft, setFullUrlDraft] = useState(target.serverUrl)
+  // Server URL rules (D-19): a saved bad URL says so at once; a typed one
+  // after the field is left, so typing never starts with an error.
+  const [serverUrlChecked, setServerUrlChecked] = useState(() =>
+    Boolean(streamServerUrlIssue(target.serverUrl))
+  )
+  const [fullUrlIssue, setFullUrlIssue] = useState<string | null>(null)
+  const serverUrlIssue = fullUrl
+    ? fullUrlIssue
+    : serverUrlChecked
+      ? streamServerUrlIssue(target.serverUrl)
+      : null
   // A pending save that needs the user's explicit OK: replacing a saved key,
   // or a paste whose shape matches a DIFFERENT platform's key format.
   const [pendingKeySave, setPendingKeySave] = useState<{
@@ -227,25 +288,25 @@ export function DestinationCard({
 
   const credentialLabel = fullUrl ? 'RTMP URL' : 'stream key'
   const guidance = oauthMode ? null : manualKeyGuidance(target.platform)
+  // The row's inline context (V-2): the vertical twin says 9:16 in words
+  // beside how it connects, so no tag pushes the controls out of line.
+  const rowContext =
+    [
+      target.outputOrientation === 'vertical' ? '9:16' : null,
+      oauthMode ? account?.accountLabel : 'Stream key'
+    ]
+      .filter(Boolean)
+      .join(' · ') || undefined
+  const qualityTag = destinationQualityTag(target)
 
   // Row + detail (ux-ia plan, slice 7): the row shows identity and state; the
-  // expandable detail holds ONLY the connection. Needs-setup targets start
-  // open so first-run configuration is zero extra clicks.
-  const [uncontrolledExpanded, setUncontrolledExpanded] = useState(
-    () => target.enabled && !setup.ready
-  )
+  // expandable detail holds ONLY the connection. The page opens the first
+  // destination that needs setup, so first-run setup is zero extra clicks.
+  const [uncontrolledExpanded, setUncontrolledExpanded] = useState(defaultExpanded)
   const expanded = controlledExpanded ?? uncontrolledExpanded
   const setExpanded = (next: boolean): void => {
     setUncontrolledExpanded(next)
     onExpandedChange?.(next)
-  }
-  const toggleFromKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
-    // Only the row itself: Space on the enable switch must not also toggle.
-    if (event.target !== event.currentTarget) return
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      setExpanded(!expanded)
-    }
   }
 
   const saveAndClearDraft = (value: string, mode: 'key' | 'full-url'): void => {
@@ -265,6 +326,11 @@ export function DestinationCard({
     const trimmed = value.trim()
     if (!trimmed) {
       return
+    }
+    if (mode === 'full-url') {
+      const issue = streamServerUrlIssue(trimmed, true)
+      setFullUrlIssue(issue)
+      if (issue) return
     }
     const warning = mode === 'key' ? streamKeyPlatformMismatch(target.platform, trimmed) : null
     if (target.streamKeyPresent || warning) {
@@ -298,65 +364,54 @@ export function DestinationCard({
 
   return (
     <section className="flex flex-col" data-slot="destination-card" id={`destination-${target.id}`}>
-      {/* The reference row anatomy: vivid platform tile · title · account
-          context · spring · state meta · enable switch (videorc-design).
-          Clicking the row, or Enter/Space on it, toggles the connection. */}
+      {/* The reference row anatomy: vivid platform tile · title · inline
+          context · spring · state and quality tags · the controls in a fixed
+          trailing column, so every row's switch lines up (plan 174 S3.5a,
+          V-2). The title is the row's button, stretched over the row: a
+          click anywhere, or Enter/Space on it, toggles the connection. The
+          switch is its sibling, never inside a button (S0.5, D-12). */}
       <ListRow
-        className="h-auto min-h-10 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="relative"
+        context={rowContext}
+        interactive
         icon={<PlatformGlyph platform={target.platform} />}
-        title={target.label}
-        context={oauthMode ? account?.accountLabel : 'Stream key'}
-        meta={
-          target.outputOrientation === 'vertical' || badge ? (
-            <span className="flex items-center gap-1.5">
-              {target.outputOrientation === 'vertical' ? (
-                <Badge variant="outline">9:16</Badge>
-              ) : null}
-              {badge ? <Badge variant={badge.tone}>{badge.label}</Badge> : null}
-              {target.outputPreset || target.outputBitrateKbps ? (
-                <Badge variant="outline">Quality override</Badge>
-              ) : null}
-            </span>
-          ) : undefined
+        title={
+          <ListRowButton aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+            {destinationLabel(target.label)}
+          </ListRowButton>
         }
-        role="button"
-        tabIndex={0}
-        aria-expanded={expanded}
-        onClick={() => setExpanded(!expanded)}
-        onKeyDown={toggleFromKeyboard}
       >
-        <span onClick={(event) => event.stopPropagation()}>
+        {badge ? <Badge variant={badge.tone}>{badge.label}</Badge> : null}
+        {qualityTag ? (
+          <Badge data-testid="destination-quality" variant="outline">
+            <span className="sr-only">Stream quality: </span>
+            {qualityTag}
+          </Badge>
+        ) : null}
+        <span
+          className="relative flex shrink-0 items-center gap-2"
+          data-slot="destination-controls"
+        >
           <Switch
-            aria-describedby={enableLockGate ? enableLockId : undefined}
-            aria-label={`Enable ${target.label}`}
+            aria-describedby={enableLockGate ? enableLockDescriptionId : undefined}
+            aria-label={`Enable ${destinationLabel(target.label)}`}
             checked={target.enabled}
             disabled={enableSwitchDisabled}
             onCheckedChange={patchEnabled}
           />
+          <ChevronDownIcon
+            className={cn(
+              'size-3.5 shrink-0 text-muted-foreground transition-transform',
+              expanded && 'rotate-180'
+            )}
+          />
         </span>
-        <ChevronDownIcon
-          className={cn(
-            'size-3.5 shrink-0 text-muted-foreground transition-transform',
-            expanded && 'rotate-180'
-          )}
-        />
       </ListRow>
-      {/* Status, guidance, and the expanded connection sit under the row;
-          the block collapses when it has nothing to say. */}
+      {/* Status and the expanded connection sit under the row; the block
+          collapses when it has nothing to say. */}
       <div className="flex flex-col gap-3 px-3 pb-3 empty:hidden">
         {statusMessage ? (
           <span className="text-xs text-muted-foreground">{statusMessage}</span>
-        ) : null}
-        {enableLockGate ? (
-          // Neutral limit strip: a pipeline cap, not a plan boundary, so no
-          // warning tint and no upgrade affordance.
-          <div
-            className="flex flex-wrap items-center gap-2 border-l-2 border-border pl-3 text-xs text-muted-foreground"
-            id={enableLockId}
-          >
-            <AlertIcon className="size-3.5 shrink-0" weight="fill" />
-            <span className="min-w-0 flex-1">{enableLockGate.reason}</span>
-          </div>
         ) : null}
 
         {!expanded ? null : (
@@ -371,15 +426,12 @@ export function DestinationCard({
             {target.platform === 'custom' ? (
               <Field>
                 <FieldLabel>URL mode</FieldLabel>
-                <SegmentedChoice
+                <SegmentedControl
+                  className="w-full"
                   disabled={disabled}
-                  label="URL mode"
-                  options={[
-                    { value: 'server-and-key', label: 'Server + key' },
-                    { value: 'full-url', label: 'Full URL' }
-                  ]}
+                  options={URL_MODE_OPTIONS}
                   value={target.urlMode ?? 'server-and-key'}
-                  onChange={(value) => onPatch(target.id, { urlMode: value as StreamUrlMode })}
+                  onValueChange={(urlMode) => onPatch(target.id, { urlMode })}
                 />
               </Field>
             ) : null}
@@ -387,15 +439,12 @@ export function DestinationCard({
             {nativeDestination && !oauthUnavailableMessage ? (
               <Field>
                 <FieldLabel>Connect with</FieldLabel>
-                <SegmentedChoice
+                <SegmentedControl
+                  className="w-full"
                   disabled={disabled}
-                  label="Connect with"
-                  options={[
-                    { value: 'oauth', label: 'Sign in' },
-                    { value: 'manual-rtmp', label: 'Stream key' }
-                  ]}
+                  options={AUTH_MODE_OPTIONS}
                   value={target.authMode}
-                  onChange={(value) => onPatch(target.id, { authMode: value as StreamAuthMode })}
+                  onValueChange={(authMode) => onPatch(target.id, { authMode })}
                 />
               </Field>
             ) : null}
@@ -409,41 +458,34 @@ export function DestinationCard({
             ) : null}
 
             {guidance ? (
-              <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                <span className="min-w-0">{guidance.copy}</span>
-                <Button
-                  className="h-auto px-0 text-xs"
-                  size="xs"
-                  variant="link"
-                  onClick={() => openExternalUrl(guidance.url)}
-                >
-                  {guidance.linkLabel}
-                </Button>
-              </div>
+              <p className="text-xs text-muted-foreground" data-slot="destination-key-guidance">
+                {guidance.copy}
+                {guidance.link ? (
+                  <>
+                    {' '}
+                    <ExternalLinkButton url={guidance.link.url}>
+                      {guidance.link.label}
+                    </ExternalLinkButton>
+                  </>
+                ) : null}
+              </p>
             ) : null}
 
             {youtubePaused ? (
-              <Alert data-slot="youtube-quota-paused" variant="warning">
-                <WarningIcon />
+              <Alert data-testid="youtube-quota-paused" variant="warning">
                 <AlertDescription className="flex flex-col gap-2">
                   <span>{youtubeDestinationPausedMessage(youtubePaused)}</span>
                   <span className="flex flex-wrap items-center gap-2">
                     <Button
                       disabled={disabled}
-                      size="sm"
                       variant="outline"
                       onClick={() => onPatch(target.id, { authMode: 'manual-rtmp' })}
                     >
                       Use stream key
                     </Button>
-                    <Button
-                      className="h-auto p-0 text-xs"
-                      size="sm"
-                      variant="link"
-                      onClick={() => openExternalUrl(YOUTUBE_STREAM_KEY_URL)}
-                    >
+                    <ExternalLinkButton url={YOUTUBE_STREAM_KEY_URL}>
                       {YOUTUBE_STREAM_KEY_LINK_LABEL}
-                    </Button>
+                    </ExternalLinkButton>
                   </span>
                 </AlertDescription>
               </Alert>
@@ -470,43 +512,52 @@ export function DestinationCard({
               />
             ) : (
               <>
-                <Field>
+                <Field data-invalid={serverUrlIssue ? true : undefined}>
                   <FieldLabel htmlFor={`${target.id}-server`}>
                     {fullUrl ? 'Full RTMP URL' : 'Server URL'}
                   </FieldLabel>
                   <div className="flex gap-2">
                     <Input
+                      aria-invalid={serverUrlIssue ? true : undefined}
                       disabled={disabled}
                       id={`${target.id}-server`}
                       placeholder={
                         fullUrl
                           ? target.streamKeyPresent
-                            ? `URL saved · ends ${target.streamKeyHint ?? '••••'}. Paste to replace`
+                            ? 'Paste a new URL to replace it'
                             : 'rtmp://server/app/key'
                           : 'rtmp://server/app'
                       }
                       type={fullUrl ? 'password' : 'text'}
                       value={fullUrl ? fullUrlDraft : target.serverUrl}
                       onBlur={() => {
+                        if (!fullUrl) setServerUrlChecked(true)
+                      }}
+                      onChange={(event) => {
                         if (fullUrl) {
-                          requestManualKeySave(fullUrlDraft, 'full-url')
+                          setFullUrlDraft(event.target.value)
+                          setFullUrlIssue(null)
+                        } else {
+                          onPatch(target.id, { serverUrl: event.target.value })
                         }
                       }}
-                      onChange={(event) =>
-                        fullUrl
-                          ? setFullUrlDraft(event.target.value)
-                          : onPatch(target.id, { serverUrl: event.target.value })
-                      }
                       onKeyDown={(event) => {
                         if (fullUrl && event.key === 'Enter') {
                           requestManualKeySave(fullUrlDraft, 'full-url')
                         }
                       }}
                     />
+                    {fullUrl && fullUrlDraft.trim() ? (
+                      <Button
+                        disabled={disabled}
+                        onClick={() => requestManualKeySave(fullUrlDraft, 'full-url')}
+                      >
+                        Save URL
+                      </Button>
+                    ) : null}
                     {fullUrl && target.streamKeyPresent ? (
                       <Button
                         disabled={disabled}
-                        size="sm"
                         variant="outline"
                         onClick={() => setConfirmingClear(true)}
                       >
@@ -514,6 +565,7 @@ export function DestinationCard({
                       </Button>
                     ) : null}
                   </div>
+                  {serverUrlIssue ? <FieldError>{serverUrlIssue}</FieldError> : null}
                   {fullUrl ? (
                     <FieldDescription>
                       {target.streamKeyPresent
@@ -526,6 +578,8 @@ export function DestinationCard({
                 {!fullUrl ? (
                   <Field>
                     <FieldLabel htmlFor={`${target.id}-key`}>Stream key</FieldLabel>
+                    {/* An explicit Save key (D-39): leaving the field never
+                        saves, so no confirmation pops up on a stray click. */}
                     <div className="flex gap-2">
                       <Input
                         autoComplete="off"
@@ -533,12 +587,11 @@ export function DestinationCard({
                         id={`${target.id}-key`}
                         placeholder={
                           target.streamKeyPresent
-                            ? `Key saved · ends ${target.streamKeyHint ?? '••••'}. Paste to replace`
+                            ? 'Paste a new key to replace it'
                             : 'Paste your stream key'
                         }
                         type="password"
                         value={manualStreamKeyDraft}
-                        onBlur={() => requestManualKeySave(manualStreamKeyDraft, 'key')}
                         onChange={(event) => setManualStreamKeyDraft(event.target.value)}
                         onKeyDown={(event) => {
                           if (event.key === 'Enter') {
@@ -546,10 +599,17 @@ export function DestinationCard({
                           }
                         }}
                       />
+                      {manualStreamKeyDraft.trim() ? (
+                        <Button
+                          disabled={disabled}
+                          onClick={() => requestManualKeySave(manualStreamKeyDraft, 'key')}
+                        >
+                          Save key
+                        </Button>
+                      ) : null}
                       {target.streamKeyPresent ? (
                         <Button
                           disabled={disabled}
-                          size="sm"
                           variant="outline"
                           onClick={() => setConfirmingClear(true)}
                         >
@@ -569,7 +629,6 @@ export function DestinationCard({
                   <Button
                     className="w-fit"
                     disabled={disabled}
-                    size="sm"
                     variant="ghost"
                     onClick={() => void onRestorePreviousStreamKey(target.id)}
                   >
@@ -578,118 +637,55 @@ export function DestinationCard({
                     {target.previousStreamKeyHint ? ` (ends ${target.previousStreamKeyHint})` : ''}
                   </Button>
                 ) : null}
-
-                {target.platform === 'x' ? (
-                  <p className="text-xs text-muted-foreground">
-                    Copy the server URL and key from an RTMP source in X Media Studio Producer.
-                  </p>
-                ) : null}
               </>
             )}
 
-            <Dialog
-              open={pendingKeySave !== null}
-              onOpenChange={(open) => {
-                if (!open) {
-                  setPendingKeySave(null)
-                }
-              }}
-            >
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>
-                    {target.streamKeyPresent
-                      ? `Replace the ${target.label} ${credentialLabel}?`
-                      : `Save this ${credentialLabel} to ${target.label}?`}
-                  </DialogTitle>
-                  <DialogDescription>
-                    {target.streamKeyPresent
-                      ? `The saved ${credentialLabel}${
-                          target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
-                        } will be replaced by the new one ending ${streamKeyTailHint(
-                          pendingKeySave?.value ?? ''
-                        )}. The old one is kept as your previous ${credentialLabel}, so you can restore it.`
-                      : `The key ending ${streamKeyTailHint(pendingKeySave?.value ?? '')} will be saved to ${target.label}.`}
-                  </DialogDescription>
-                </DialogHeader>
-                {pendingKeySave?.warning ? (
-                  <Alert variant="warning">
-                    <WarningIcon />
-                    <AlertDescription>{pendingKeySave.warning}</AlertDescription>
-                  </Alert>
-                ) : null}
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setPendingKeySave(null)}>
-                    Cancel
-                  </Button>
-                  <Button
-                    variant={pendingKeySave?.warning ? 'destructive' : 'default'}
-                    onClick={confirmPendingKeySave}
-                  >
-                    {target.streamKeyPresent
-                      ? `Replace ${credentialLabel}`
-                      : `Save ${credentialLabel}`}
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-
-            <Dialog open={confirmingClear} onOpenChange={setConfirmingClear}>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>{`Remove the ${target.label} ${credentialLabel}?`}</DialogTitle>
-                  <DialogDescription>
-                    {`The saved ${credentialLabel}${
+            <ConfirmDialog
+              confirmLabel={
+                target.streamKeyPresent ? `Replace ${credentialLabel}` : `Save ${credentialLabel}`
+              }
+              confirmVariant={pendingKeySave?.warning ? 'destructive' : 'default'}
+              description={
+                target.streamKeyPresent
+                  ? `The saved ${credentialLabel}${
                       target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
-                    } is kept as your previous ${credentialLabel} after removal, so you can restore it.`}
-                  </DialogDescription>
-                </DialogHeader>
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setConfirmingClear(false)}>
-                    Cancel
-                  </Button>
-                  <Button variant="destructive" onClick={confirmClearKey}>
-                    Remove {credentialLabel}
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+                    } will be replaced by the new one ending ${streamKeyTailHint(
+                      pendingKeySave?.value ?? ''
+                    )}. The old one is kept as your previous ${credentialLabel}, so you can restore it.`
+                  : `The key ending ${streamKeyTailHint(pendingKeySave?.value ?? '')} will be saved to ${destinationLabel(target.label)}.`
+              }
+              open={pendingKeySave !== null}
+              testId="stream-key-save"
+              title={
+                target.streamKeyPresent
+                  ? `Replace the ${destinationLabel(target.label)} ${credentialLabel}?`
+                  : `Save this ${credentialLabel} to ${destinationLabel(target.label)}?`
+              }
+              onCancel={() => setPendingKeySave(null)}
+              onConfirm={confirmPendingKeySave}
+            >
+              {pendingKeySave?.warning ? (
+                <Alert variant="warning">
+                  <AlertDescription>{pendingKeySave.warning}</AlertDescription>
+                </Alert>
+              ) : null}
+            </ConfirmDialog>
+
+            <ConfirmDialog
+              confirmLabel={`Remove ${credentialLabel}`}
+              description={`The saved ${credentialLabel}${
+                target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
+              } is kept as your previous ${credentialLabel} after removal, so you can restore it.`}
+              open={confirmingClear}
+              testId="stream-key-remove"
+              title={`Remove the ${destinationLabel(target.label)} ${credentialLabel}?`}
+              onCancel={() => setConfirmingClear(false)}
+              onConfirm={confirmClearKey}
+            />
           </>
         )}
       </div>
     </section>
-  )
-}
-
-/** A two-way choice as the glass segmented control (design skill: Tabs). */
-function SegmentedChoice({
-  label,
-  value,
-  options,
-  disabled,
-  onChange
-}: {
-  label: string
-  value: string
-  options: Array<{ value: string; label: string }>
-  disabled: boolean
-  onChange: (value: string) => void
-}): ReactElement {
-  return (
-    <Tabs value={value} onValueChange={(next) => next && onChange(next)}>
-      <TabsList aria-label={label} className="w-full">
-        {options.map((option) => (
-          <TabsTrigger
-            className="flex-1"
-            disabled={disabled}
-            key={option.value}
-            value={option.value}
-          >
-            {option.label}
-          </TabsTrigger>
-        ))}
-      </TabsList>
-    </Tabs>
   )
 }
 
@@ -703,33 +699,67 @@ function openExternalUrl(url: string): void {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-// Manual-key platforms rotate their key per broadcast and gate LIVE access on
-// their side — link the user to the source of truth instead of promising
-// automation Videorc cannot deliver (no public ingest APIs).
-function manualKeyGuidance(
-  platform: StreamPlatform
-): { copy: string; url: string; linkLabel: string } | null {
+/**
+ * An external page, opened in the browser (plan 174 S3.5a, D-20): one look
+ * for every link on the card, a link button with the external mark.
+ */
+function ExternalLinkButton({ url, children }: { url: string; children: ReactNode }): ReactElement {
+  return (
+    <Button
+      className="h-auto gap-1 p-0 text-xs"
+      size="xs"
+      variant="link"
+      onClick={() => openExternalUrl(url)}
+    >
+      {children}
+      <ExternalLinkIcon aria-hidden />
+    </Button>
+  )
+}
+
+/**
+ * Where to find the stream key, for every platform that takes one (plan 174
+ * S3.5a, D-20). Some platforms rotate their key per broadcast and gate live
+ * access on their side, so the card links to the source of truth instead of
+ * promising automation Videorc can't deliver (no public ingest APIs).
+ */
+export function manualKeyGuidance(platform: StreamPlatform): {
+  copy: string
+  link?: { url: string; label: string }
+} {
   switch (platform) {
-    case 'tiktok':
+    case 'youtube':
       return {
-        copy: 'TikTok keys change every broadcast and need LIVE access on your account. Paste a fresh server URL and key each time from',
-        url: 'https://livecenter.tiktok.com',
-        linkLabel: 'TikTok LIVE Center'
+        copy: 'Copy the stream key from YouTube Studio: Go live, then Stream.',
+        link: { url: YOUTUBE_STREAM_KEY_URL, label: 'YouTube Studio' }
       }
-    case 'instagram':
+    case 'twitch':
       return {
-        copy: 'Instagram keys come from Live Producer (professional accounts): start the stream here, then press "Go live" in',
-        url: 'https://www.instagram.com/live/producer/',
-        linkLabel: 'Live Producer'
+        copy: 'Copy the primary stream key from your Twitch dashboard: Settings, then Stream.',
+        link: { url: 'https://dashboard.twitch.tv/settings/stream', label: 'Twitch dashboard' }
       }
     case 'kick':
       return {
-        copy: 'Kick keys live in Creator Dashboard → Settings → Stream Key. Copy the key from',
-        url: 'https://dashboard.kick.com/channel/stream',
-        linkLabel: 'kick.com'
+        copy: 'Kick keys live in Creator Dashboard → Settings → Stream Key.',
+        link: { url: 'https://dashboard.kick.com/channel/stream', label: 'Kick dashboard' }
+      }
+    case 'x':
+      return {
+        copy: 'Copy the server URL and key from an RTMP source in X Media Studio Producer.',
+        link: { url: 'https://studio.x.com', label: 'Media Studio' }
+      }
+    case 'tiktok':
+      return {
+        copy: 'TikTok keys change every broadcast and need LIVE access on your account. Paste a fresh server URL and key each time.',
+        link: { url: 'https://livecenter.tiktok.com', label: 'TikTok LIVE Center' }
+      }
+    case 'instagram':
+      return {
+        copy: 'Instagram keys come from Live Producer (professional accounts). Start the stream here, then press "Go live" there.',
+        link: { url: 'https://www.instagram.com/live/producer/', label: 'Live Producer' }
       }
     default:
-      return null
+      return { copy: 'Your streaming server gives you its server URL and stream key.' }
   }
 }
 
@@ -743,16 +773,62 @@ function streamTargetStatusBadge(state: NonNullable<StreamTargetSettings['status
     case 'connecting':
       return { tone: 'warning', label: 'Updating' }
     case 'live':
-      return { tone: 'live', label: 'On air' }
+    case 'failed':
+    case 'stopped':
+      return { tone: RUNTIME_BADGE_TONES[state], label: destinationStateLabel(state) }
     case 'warning':
       return { tone: 'warning', label: 'Review' }
-    case 'failed':
-      return { tone: 'destructive', label: 'Failed' }
-    case 'stopped':
-      return { tone: 'outline', label: 'Ended' }
     default:
       return { tone: 'outline', label: 'Idle' }
   }
+}
+
+/**
+ * A sign-in waiting in the browser (plan 174 S3.5a, D-16): what Videorc is
+ * waiting for, the link to open in another browser, and a way back to
+ * Connect. The browser approves or refuses; Videorc only stops waiting.
+ */
+function SignInPending({
+  platformName,
+  url,
+  onCancel
+}: {
+  platformName: string
+  url: string | null
+  onCancel: () => void
+}): ReactElement {
+  const { copied, copy } = useCopyText()
+  return (
+    <div className="flex flex-col gap-1.5" data-slot="destination-sign-in-pending">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="flex items-center gap-2 text-sm" role="status">
+          <Spinner aria-hidden className="size-3.5 text-muted-foreground" />
+          Waiting for your browser…
+        </span>
+        {url ? (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() =>
+              void copy(url, {
+                title: "Couldn't copy the link",
+                description: 'The page is already open in your default browser.'
+              })
+            }
+          >
+            <CopyIcon data-icon="inline-start" />
+            {copied ? 'Copied' : 'Copy link'}
+          </Button>
+        ) : null}
+        <Button size="xs" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {`Signed in to ${platformName} in another browser? Copy the link and open it there.`}
+      </p>
+    </div>
+  )
 }
 
 /**
@@ -774,30 +850,43 @@ export function accountStatus(
  * The signed-in account's one permission row (plan 140, S5): what a reconnect
  * would add, or null when nothing is missing. One row and one button, since
  * its reconnect asks for all of a platform's optional permissions. Removing
- * messages leads; Twitch's follow alerts ride along when they are missing too.
+ * messages leads; Twitch's Activity permissions (follow alerts, the sub count,
+ * Power-ups and channel points, plan 162) ride along when they are missing.
  */
 export function missingPermissionsRow(
   platform: StreamPlatform,
   account: Pick<PlatformAccount, 'scopes' | 'status'>
 ): { message: string; action: string } | null {
-  const audienceMissing =
-    platform === 'twitch' &&
-    !TWITCH_AUDIENCE_SCOPES.every((scope) => account.scopes.includes(scope))
+  const lacks = (scopes: readonly string[]): boolean =>
+    platform === 'twitch' && !scopes.every((scope) => account.scopes.includes(scope))
+  const audienceMissing = lacks(TWITCH_AUDIENCE_SCOPES)
+  const bitsPointsMissing = lacks(TWITCH_BITS_POINTS_SCOPES)
+  const activityMissing = audienceMissing || bitsPointsMissing
   if (
     isScopeReconnectPlatform(platform) &&
     removeMessagesReadiness(platform, account) === 'missing-scope'
   ) {
     const removeMessages = removeMessagesReconnectCopy(platform)
+    const alongside =
+      audienceMissing && bitsPointsMissing
+        ? 'Follow alerts, the sub count, Power-ups and channel points'
+        : audienceMissing
+          ? 'Follow alerts and the sub count'
+          : 'Power-ups and channel points'
     return {
-      message: audienceMissing
-        ? `${removeMessages} Follow alerts and the sub count need it too.`
-        : removeMessages,
+      message: activityMissing ? `${removeMessages} ${alongside} need it too.` : removeMessages,
       action: 'Reconnect'
     }
   }
-  if (audienceMissing) {
+  if (activityMissing) {
+    const what =
+      audienceMissing && bitsPointsMissing
+        ? 'Follow alerts, sub count, Power-ups and channel points'
+        : audienceMissing
+          ? 'Follow alerts and sub count'
+          : 'Power-ups and channel points'
     return {
-      message: 'Follow alerts and sub count need one more Twitch permission.',
+      message: `${what} need one more Twitch permission.`,
       action: 'Reconnect Twitch'
     }
   }
@@ -833,7 +922,10 @@ function OAuthAccountPanel({
   xNativeCapabilityLoading: boolean
   youtubeChannels: YouTubeChannel[]
   youtubeChannelsLoading: boolean
-  onConnect: (platform: StreamPlatform, options?: PlatformConnectOptions) => void
+  onConnect: (
+    platform: StreamPlatform,
+    options?: PlatformConnectOptions
+  ) => void | Promise<string | null | void>
   onDisconnect: (platform: StreamPlatform) => void
   onRefreshYouTubeChannels: (accountId?: string) => Promise<void>
   onRefreshXNativeCapability: (accountId?: string) => Promise<void>
@@ -843,15 +935,40 @@ function OAuthAccountPanel({
 }): ReactElement {
   const [youtubeConsentOpen, setYoutubeConsentOpen] = useState(false)
   const [youtubeConsentAccepted, setYoutubeConsentAccepted] = useState(false)
+  // Plan 174 S0.3 (D-16): Disconnect signs the account out at once (YouTube
+  // and YouTube Vertical share one), so it asks first.
+  const [disconnectOpen, setDisconnectOpen] = useState(false)
   const platformName = metadataPlatformLabel(platform)
   // Connect and Reconnect ask for the platform's ordinary optional
   // permissions (plan 071 S2, plan 140 S5): all of Twitch's, so Activity names
-  // followers and Orcle can remove messages from the first stream. The
+  // followers and Buddy can remove messages from the first stream. The
   // permission row asks for every optional permission, which is the only
   // place Kick's moderation permission is requested.
-  const connect = (): void => onConnect(platform, platformConnectOptions(platform))
-  const reconnectForPermissions = (): void =>
-    onConnect(platform, permissionReconnectOptions(platform))
+  // The sign-in waits in the browser (plan 174 S3.5a, D-16): the card says
+  // so, with the link to copy into another browser, until the account comes
+  // back changed. The wait belongs to the account as it was at the click, so
+  // a connect or reconnect that lands ends it without an effect.
+  const accountVersion = account
+    ? `${account.status}|${account.updatedAt}|${account.scopes.join(' ')}`
+    : 'none'
+  const [signIn, setSignIn] = useState<{ url: string | null; from: string } | null>(null)
+  const waiting = signIn && signIn.from === accountVersion ? signIn : null
+  const startSignIn = (options?: PlatformConnectOptions): void => {
+    const from = accountVersion
+    setSignIn({ url: null, from })
+    void Promise.resolve(onConnect(platform, options)).then((url) => {
+      if (url === null) {
+        setSignIn(null)
+      } else if (typeof url === 'string') {
+        setSignIn((current) => (current?.from === from ? { url, from } : current))
+      }
+    })
+  }
+  const connect = (): void => startSignIn(platformConnectOptions(platform))
+  const reconnectForPermissions = (): void => startSignIn(permissionReconnectOptions(platform))
+  const pending = waiting ? (
+    <SignInPending platformName={platformName} url={waiting.url} onCancel={() => setSignIn(null)} />
+  ) : null
 
   if (!account) {
     const connectDisabled = disabled || credentials?.ready === false
@@ -861,29 +978,30 @@ function OAuthAccountPanel({
           <p className="text-xs text-muted-foreground">
             Videorc sets your title and gets the stream key for you.
           </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              className="w-fit"
-              disabled={connectDisabled}
-              size="sm"
-              onClick={() => {
-                if (platform === 'youtube') {
-                  setYoutubeConsentAccepted(false)
-                  setYoutubeConsentOpen(true)
-                } else {
-                  connect()
-                }
-              }}
-            >
-              <LinkIcon data-icon="inline-start" weight="bold" />
-              Connect {platformName}
-            </Button>
-            {/* Developer builds only: say when an env var overrides the
-                bundled OAuth client, which production users never see. */}
-            {import.meta.env.DEV && credentials?.clientIdSource === 'environment' ? (
-              <Badge variant="outline">Environment override</Badge>
-            ) : null}
-          </div>
+          {pending ?? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                className="w-fit"
+                disabled={connectDisabled}
+                onClick={() => {
+                  if (platform === 'youtube') {
+                    setYoutubeConsentAccepted(false)
+                    setYoutubeConsentOpen(true)
+                  } else {
+                    connect()
+                  }
+                }}
+              >
+                <LinkIcon data-icon="inline-start" weight="bold" />
+                Connect {platformName}
+              </Button>
+              {/* Developer builds only: say when an env var overrides the
+                  bundled OAuth client, which production users never see. */}
+              {import.meta.env.DEV && credentials?.clientIdSource === 'environment' ? (
+                <Badge variant="outline">Environment override</Badge>
+              ) : null}
+            </div>
+          )}
         </div>
 
         {platform === 'youtube' ? (
@@ -898,35 +1016,19 @@ function OAuthAccountPanel({
                 </DialogDescription>
               </DialogHeader>
               <div className="grid gap-3 text-sm">
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => openExternalUrl(VIDEORC_WEB_LINKS.privacy)}
-                  >
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  <ExternalLinkButton url={VIDEORC_WEB_LINKS.privacy}>
                     Privacy Policy
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => openExternalUrl(VIDEORC_WEB_LINKS.terms)}
-                  >
+                  </ExternalLinkButton>
+                  <ExternalLinkButton url={VIDEORC_WEB_LINKS.terms}>
                     Videorc Terms
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => openExternalUrl('https://www.youtube.com/t/terms')}
-                  >
+                  </ExternalLinkButton>
+                  <ExternalLinkButton url="https://www.youtube.com/t/terms">
                     YouTube Terms
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => openExternalUrl('https://policies.google.com/privacy')}
-                  >
+                  </ExternalLinkButton>
+                  <ExternalLinkButton url="https://policies.google.com/privacy">
                     Google Privacy
-                  </Button>
+                  </ExternalLinkButton>
                 </div>
                 <label className="flex items-start gap-3 rounded-row border bg-muted/30 p-3">
                   <Checkbox
@@ -946,7 +1048,7 @@ function OAuthAccountPanel({
                   disabled={!youtubeConsentAccepted}
                   onClick={() => {
                     setYoutubeConsentOpen(false)
-                    onConnect('youtube')
+                    startSignIn()
                   }}
                 >
                   Continue to Google
@@ -989,14 +1091,12 @@ function OAuthAccountPanel({
           <span className="flex min-w-0 items-center gap-2">
             <span className="truncate text-sm font-medium">{account.accountLabel}</span>
             {status === 'ok' ? (
-              <span
-                aria-label="Connected"
-                className="flex shrink-0"
-                role="img"
-                title={validation?.message}
-              >
-                <StatusDot tone="good" />
-              </span>
+              // The last account check, on hover and on focus (S1.10).
+              <InfoTooltip className="shrink-0" content={validation?.message}>
+                <span aria-label="Connected" className="flex shrink-0" role="img">
+                  <StatusDot tone="good" />
+                </span>
+              </InfoTooltip>
             ) : null}
           </span>
           <span className="truncate text-xs text-muted-foreground">
@@ -1004,27 +1104,41 @@ function OAuthAccountPanel({
           </span>
         </div>
         {status === 'reconnect' ? (
-          <span className="flex shrink-0" title={validation?.message}>
-            <StatusBadge tone="warn" value="Needs reconnect" />
-          </span>
+          <InfoTooltip className="shrink-0" content={validation?.message}>
+            <span className="flex shrink-0">
+              <StatusBadge tone="warn" value="Needs reconnect" />
+            </span>
+          </InfoTooltip>
         ) : null}
         {status === 'reconnect' ? (
-          <Button disabled={disabled} size="sm" variant="outline" onClick={connect}>
+          <Button disabled={disabled} variant="outline" onClick={connect}>
             Reconnect
           </Button>
         ) : null}
         {shared ? null : (
-          <Button
-            disabled={disabled}
-            size="sm"
-            variant="ghost"
-            onClick={() => onDisconnect(platform)}
-          >
+          <Button disabled={disabled} variant="ghost" onClick={() => setDisconnectOpen(true)}>
             <SignOutIcon data-icon="inline-start" weight="bold" />
             Disconnect
           </Button>
         )}
       </div>
+      {pending}
+      <ConfirmDialog
+        confirmLabel={`Disconnect ${platformName}`}
+        description={
+          platform === 'youtube'
+            ? 'Videorc signs out of YouTube and YouTube Vertical. To stream there again, connect the account again.'
+            : `Videorc signs out of ${platformName}. To stream there again, connect the account again.`
+        }
+        open={disconnectOpen}
+        testId="account-disconnect"
+        title={`Disconnect ${platformName}?`}
+        onCancel={() => setDisconnectOpen(false)}
+        onConfirm={() => {
+          setDisconnectOpen(false)
+          onDisconnect(platform)
+        }}
+      />
 
       {status === 'reconnect' ? (
         <p className="text-xs text-muted-foreground">
@@ -1041,7 +1155,6 @@ function OAuthAccountPanel({
           <Button
             className="shrink-0"
             disabled={disabled}
-            size="sm"
             variant="outline"
             onClick={reconnectForPermissions}
           >
@@ -1072,7 +1185,7 @@ function OAuthAccountPanel({
                       ? 'Loading channels…'
                       : youtubeChannelOptions.length === 0
                         ? 'Refresh to load your channels'
-                        : 'Select channel'
+                        : 'Choose a channel'
                   }
                 />
               </SelectTrigger>
@@ -1085,16 +1198,23 @@ function OAuthAccountPanel({
                 ))}
               </SelectContent>
             </Select>
-            <Button
-              aria-label="Refresh channels"
-              disabled={disabled || youtubeChannelsLoading}
-              size="icon-sm"
-              title="Refresh channels"
-              variant="outline"
-              onClick={() => void onRefreshYouTubeChannels(account.accountId)}
-            >
-              <SyncIcon className={cn(youtubeChannelsLoading && 'animate-spin')} weight="bold" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="Refresh channels"
+                  disabled={disabled || youtubeChannelsLoading}
+                  size="icon"
+                  variant="outline"
+                  onClick={() => void onRefreshYouTubeChannels(account.accountId)}
+                >
+                  <SyncIcon
+                    className={cn(youtubeChannelsLoading && 'animate-spin')}
+                    weight="bold"
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Refresh channels</TooltipContent>
+            </Tooltip>
           </div>
         </Field>
       ) : null}
@@ -1118,12 +1238,11 @@ function OAuthAccountPanel({
             </Badge>
             <Button
               disabled={disabled || xNativeCapabilityLoading}
-              size="sm"
               variant="ghost"
               onClick={() => void onRefreshXNativeCapability(account.accountId)}
             >
               <SyncIcon data-icon="inline-start" weight="bold" />
-              {xNativeCapabilityLoading ? 'Checking' : 'Check again'}
+              {xNativeCapabilityLoading ? 'Checking…' : 'Check again'}
             </Button>
           </div>
           {xNativeCapability?.message && !xNativeCapability.nativeAvailable ? (
@@ -1133,46 +1252,28 @@ function OAuthAccountPanel({
             <div className="flex flex-wrap items-center gap-2">
               {xNativeCapability.state === 'needs-authorization' ||
               xNativeCapability.state === 'account-mismatch' ? (
-                <Button
-                  disabled={disabled}
-                  size="sm"
-                  title="Opens x.com to approve live broadcasting for this account."
-                  onClick={() => void onAuthorizeXLive()}
+                <InfoTooltip
+                  content="Opens x.com to approve live broadcasting for this account."
+                  focusable={false}
                 >
-                  Authorize X Live
-                </Button>
+                  <Button disabled={disabled} onClick={() => void onAuthorizeXLive()}>
+                    Authorize X Live
+                  </Button>
+                </InfoTooltip>
               ) : null}
-              <Button disabled={disabled} size="sm" variant="outline" onClick={onUseManualRtmp}>
+              <Button disabled={disabled} variant="outline" onClick={onUseManualRtmp}>
                 Use a stream key instead
               </Button>
             </div>
           ) : null}
           {xNativeCapability ? (
-            <div className="flex flex-wrap gap-3 text-xs">
-              <a
-                className="text-primary underline-offset-4 hover:underline"
-                href={xNativeCapability.docsUrl}
-                onClick={(event) => {
-                  event.preventDefault()
-                  openExternalUrl(xNativeCapability.docsUrl)
-                }}
-                rel="noreferrer"
-                target="_blank"
-              >
+            <div className="flex flex-wrap gap-3">
+              <ExternalLinkButton url={xNativeCapability.docsUrl}>
                 X Producer docs
-              </a>
-              <a
-                className="text-primary underline-offset-4 hover:underline"
-                href={xNativeCapability.apiOverviewUrl}
-                onClick={(event) => {
-                  event.preventDefault()
-                  openExternalUrl(xNativeCapability.apiOverviewUrl)
-                }}
-                rel="noreferrer"
-                target="_blank"
-              >
+              </ExternalLinkButton>
+              <ExternalLinkButton url={xNativeCapability.apiOverviewUrl}>
                 X API overview
-              </a>
+              </ExternalLinkButton>
             </div>
           ) : null}
         </div>

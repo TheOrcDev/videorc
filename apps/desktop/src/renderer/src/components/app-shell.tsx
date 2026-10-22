@@ -3,16 +3,19 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactEle
 const CommandPalette = lazy(async () => ({
   default: (await import('@/components/command-palette')).CommandPalette
 }))
+import { AppErrorBoundary } from '@/components/error-boundary'
 import { Pane, PaneBody, Toolbar } from '@/components/pane'
+import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
-import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { StatusBarSessionState } from '@/components/status-bar-session'
+import { GoLiveDialogGate } from '@/components/go-live-dialog-gate'
 import {
-  WORKSPACE_SHORTCUTS,
   WorkspaceNavContext,
   isStudioPanel,
-  isWorkspaceTab,
+  readWorkspaceNavigation,
   workspaceTabLabel,
+  workspaceWindowTitle,
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
@@ -31,26 +34,37 @@ import {
   type CleanCutOpenRequest,
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
-import { displayKeyGlyph } from '@/lib/platform'
+import { isModalOpen } from '@/lib/modal-open'
+import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
+import { shortcutAccelerator } from '@/lib/shortcuts'
+import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
-  isOrcleTabId,
-  readLastOrcleTab,
-  writeLastOrcleTab,
-  type OrcleTabId
-} from '@/lib/orcle-tabs'
+  isBuddyTabId,
+  readLastBuddyTab,
+  writeLastBuddyTab,
+  type BuddyTabId
+} from '@/lib/buddy-tabs'
 import {
-  isSettingsTabId,
-  readLastSettingsTab,
-  writeLastSettingsTab,
-  type SettingsTabId
-} from '@/lib/settings-tabs'
+  readLastLivestreamView,
+  writeLastLivestreamView,
+  type LivestreamViewId
+} from '@/lib/livestream-tabs'
+import { readLastSettingsTab, writeLastSettingsTab, type SettingsTabId } from '@/lib/settings-tabs'
+import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 import { isActiveRecordingState } from '@/lib/format'
-import { sessionIsLive } from '../../../shared/capture-state'
+// Straight from the session view, not `state-labels`, so the other state
+// tables stay out of the eager bundle (plan 174 S2.3a).
+import {
+  sessionStatusLabel,
+  sessionStatusPulses,
+  sessionStatusTone
+} from '@/lib/studio-session-view'
 import {
   isMediaAccessSnapshotReady,
   shouldShowPermissionsOnboarding,
   systemAccessRows
 } from '@/lib/system-access'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // Workspace views are loaded only on first navigation, then retained by the
 // browser module cache. Studio remains the launch surface, but its dashboard and
@@ -72,8 +86,8 @@ const LayoutTab = lazy(async () => ({ default: (await loadLayoutTab()).LayoutTab
 const LibraryTab = lazy(async () => ({
   default: (await import('@/components/tabs/library-tab')).LibraryTab
 }))
-const OrcleTab = lazy(async () => ({
-  default: (await import('@/components/tabs/orcle-tab')).OrcleTab
+const BuddyTab = lazy(async () => ({
+  default: (await import('@/components/tabs/buddy-tab')).BuddyTab
 }))
 const RecordingTab = lazy(async () => ({
   default: (await import('@/components/tabs/recording-tab')).RecordingTab
@@ -91,6 +105,17 @@ const PermissionsOnboardingDialog = lazy(async () => ({
 const WhatsNewDialog = lazy(async () => ({
   default: (await import('@/components/whats-new-dialog')).WhatsNewDialog
 }))
+// The root panel's export button (plan 174 A-7): loaded only when the shell
+// crashed, from here rather than from the panel's own chunk, which every
+// window shares and must not reach into use-studio.
+const SupportBundleButton = lazy(async () => ({
+  default: (await import('@/components/support-bundle-button')).SupportBundleButton
+}))
+// "End livestream?" (plan 174 S0.1): hosted here so every stop path asks
+// from every page; loaded only when a livestream is asked to end.
+const EndLivestreamDialog = lazy(async () => ({
+  default: (await import('@/components/end-livestream-dialog')).EndLivestreamDialog
+}))
 
 function WorkspaceTabFallback(): ReactElement {
   return (
@@ -99,7 +124,7 @@ function WorkspaceTabFallback(): ReactElement {
       className="flex min-h-40 items-center justify-center text-xs text-muted-foreground"
       role="status"
     >
-      Loading workspace…
+      Opening Videorc…
     </div>
   )
 }
@@ -158,10 +183,28 @@ function PermissionsOnboardingGate({
   )
 }
 
+/**
+ * The main window. A crash in the shell itself shows the root panel with the
+ * support bundle still reachable (plan 174 A-7); a page's crash stays inside
+ * the page (PageErrorBoundary below).
+ */
 export function AppShell(): ReactElement {
+  return (
+    <AppErrorBoundary
+      supportBundle={
+        <Suspense fallback={null}>
+          <SupportBundleButton />
+        </Suspense>
+      }
+    >
+      <AppShellContent />
+    </AppErrorBoundary>
+  )
+}
+
+function AppShellContent(): ReactElement {
   const {
     wsStatus,
-    backendConnected,
     recordingState,
     runtimeInfo,
     entitlementTier,
@@ -174,64 +217,71 @@ export function AppShell(): ReactElement {
     openCommentsWindow,
     closeCommentsWindow,
     toggleCommentsWindow,
-    toggleCaptionsWindow
+    toggleCaptionsWindow,
+    stopConfirmation,
+    confirmStopSession,
+    cancelStopSession
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
-  // Library's "Orcle report" opens the Orcle tab on one session's report (plan
+  // Set by every way to a page except a click on its sidebar row: the page
+  // title takes the focus once the page is up (plan 174 A-18).
+  const titleFocusPendingRef = useRef(false)
+  // Library's "Buddy report" opens the Buddy tab on one session's report (plan
   // 119 S3). Any other way to a page drops that ask, so the next visit to
-  // Orcle shows the last stream again.
-  const [orcleReportSessionId, setOrcleReportSessionId] = useState<string | null>(null)
-  // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
-  // the Orcle tab, and the ready toast opens a cut's review there. The card's
-  // "Open in Library" focuses the cut copy's row. Like the report ask, any
-  // other way to a page drops them.
+  // Buddy shows the last stream again.
+  const [buddyReportSessionId, setBuddyReportSessionId] = useState<string | null>(null)
+  // Clean cut (plan 119 S14): Library's "Make a clean cut…" selects a
+  // recording in the Buddy tab, and the ready toast opens a cut's review
+  // there. The card's "Open in Library" and the review's "Back to Library"
+  // focus a row. Like the report ask, any other way to a page drops them.
   const [cleanCutRequest, setCleanCutRequest] = useState<CleanCutTabRequest | null>(null)
   const [libraryFocusSessionId, setLibraryFocusSessionId] = useState<string | null>(null)
   const cleanCutNonceRef = useRef(0)
-  // Plan 150: Orcle reopens on its tab used last, like Settings; the
+  // Plan 150: Buddy reopens on its tab used last, like Settings; the
   // Library's report and clean-cut asks select the tab that answers them.
-  const [orcleTab, setOrcleTab] = useState<OrcleTabId>(readLastOrcleTab)
-  const selectOrcleTab = useCallback((tab: OrcleTabId) => {
-    setOrcleTab(tab)
-    writeLastOrcleTab(tab)
+  const [buddyTab, setBuddyTab] = useState<BuddyTabId>(readLastBuddyTab)
+  const selectBuddyTab = useCallback((tab: BuddyTabId) => {
+    setBuddyTab(tab)
+    writeLastBuddyTab(tab)
   }, [])
-  const setActive = useCallback((tab: WorkspaceTab) => {
-    setOrcleReportSessionId(null)
+  const setActive = useCallback((tab: WorkspaceTab, options?: { focusTitle?: boolean }) => {
+    setBuddyReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(null)
+    titleFocusPendingRef.current = options?.focusTitle ?? true
     setActiveTab(tab)
   }, [])
-  const openOrcleReport = useCallback(
+  const openBuddyReport = useCallback(
     (sessionId: string) => {
       setCleanCutRequest(null)
-      setOrcleReportSessionId(sessionId)
-      selectOrcleTab('reports')
+      setBuddyReportSessionId(sessionId)
+      selectBuddyTab('reports')
       setActiveTab('ai')
     },
-    [selectOrcleTab]
+    [selectBuddyTab]
   )
   const openCleanCut = useCallback(
     (request: CleanCutOpenRequest) => {
       cleanCutNonceRef.current += 1
-      setOrcleReportSessionId(null)
+      setBuddyReportSessionId(null)
       setCleanCutRequest({ ...request, nonce: cleanCutNonceRef.current })
-      selectOrcleTab('clean-cut')
+      selectBuddyTab('clean-cut')
       setActiveTab('ai')
     },
-    [selectOrcleTab]
+    [selectBuddyTab]
   )
-  const openOrcle = useCallback(
-    (tab?: OrcleTabId) => {
+  const openBuddy = useCallback(
+    (tab?: BuddyTabId) => {
       if (tab) {
-        selectOrcleTab(tab)
+        selectBuddyTab(tab)
       }
       setActive('ai')
     },
-    [selectOrcleTab, setActive]
+    [selectBuddyTab, setActive]
   )
   const openLibrarySession = useCallback((sessionId: string) => {
-    setOrcleReportSessionId(null)
+    setBuddyReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(sessionId)
     setActiveTab('library')
@@ -239,8 +289,6 @@ export function AppShell(): ReactElement {
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const whatsNew = useWhatsNew(runtimeInfo?.version, runtimeInfo?.platform)
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
-  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
   // Keep first paint Studio-only, then warm the three most common setup pages
   // from local app assets once Chromium is idle. Navigation stays instant
@@ -257,7 +305,7 @@ export function AppShell(): ReactElement {
     return () => window.clearTimeout(timer)
   }, [])
 
-  // Studio control pages are ordinary tabs grouped under "Studio" in the sidebar.
+  // The Setup pages are ordinary tabs, listed under "Setup" in the sidebar.
   const openStudioPanel = useCallback(
     (panel: StudioPanel) => {
       setActive(panel)
@@ -286,64 +334,72 @@ export function AppShell(): ReactElement {
     [selectSettingsTab, setActive]
   )
 
+  // Plan 174 S1.6b (A-14): Livestream reopens on the view used last, like
+  // Settings; ⌘K's "Upcoming events" names its view before opening.
+  const [livestreamView, setLivestreamView] = useState<LivestreamViewId>(readLastLivestreamView)
+  const selectLivestreamView = useCallback((view: LivestreamViewId) => {
+    setLivestreamView(view)
+    writeLastLivestreamView(view)
+  }, [])
+  const openLivestream = useCallback(
+    (view?: LivestreamViewId) => {
+      if (view) {
+        selectLivestreamView(view)
+      }
+      setActive('live')
+    },
+    [selectLivestreamView, setActive]
+  )
+
   const completeOnboarding = useCallback(() => {
     localStorage.setItem(STORAGE_KEYS.onboarding, ONBOARDING_DISMISSED_VALUE)
     setOnboardingOpen(false)
   }, [])
 
-  // Settings' "Set up permissions": force-open regardless of grants or the
-  // dismissal flag — no flag clearing, closing just re-dismisses.
+  // The first-run gate opens the dialog when a grant is missing; closing it
+  // re-dismisses. Settings → Permissions shows the same rows (plan 174 S3.17).
   const openPermissionsSetup = useCallback(() => {
     setOnboardingOpen(true)
   }, [])
 
+  // The shell's chords (plan 174 S3.21): ⌘ on macOS, Ctrl elsewhere (A-17),
+  // decided in shell-shortcuts.ts, and none of them from under a dialog or a
+  // menu (A-2). ⌘J shows Stream Manager, ⇧⌘J toggles it (A-12); Comments
+  // live ONLY in that window (owner call, 2026-08-19).
+  const commandOpenRef = useRef(commandOpen)
+  commandOpenRef.current = commandOpen
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault()
-        setCommandOpen((value) => !value)
-      }
-      if (event.key.toLowerCase() === 'p' && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault()
-        void togglePreviewWindow()
-      }
-      if (
-        runtimeInfo?.notesWindowEnabled &&
-        event.key.toLowerCase() === 'n' &&
-        event.shiftKey &&
-        (event.metaKey || event.ctrlKey)
-      ) {
-        event.preventDefault()
-        if (notesWindowOpen) {
-          void closeNotesWindow()
-        } else {
-          void openNotesWindow()
-        }
-      }
-      // Comments live ONLY in the separate window now (owner call,
-      // 2026-08-19) — plain (cmd)J, which used to toggle the in-studio rail,
-      // keeps working by toggling the window, same as (cmd)shift-J.
-      if (
-        runtimeInfo?.commentsWindowEnabled &&
-        event.key.toLowerCase() === 'j' &&
-        (event.metaKey || event.ctrlKey)
-      ) {
-        event.preventDefault()
-        void toggleCommentsWindow()
-      }
-      if (event.key.toLowerCase() === 'c' && event.shiftKey && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault()
-        void toggleCaptionsWindow()
-      }
+      const action = shellShortcutAction(event, {
+        platform: runtimeInfo?.platform,
+        modalOpen: isModalOpen(document),
+        searchOpen: commandOpenRef.current,
+        notesWindowEnabled: Boolean(runtimeInfo?.notesWindowEnabled),
+        commentsWindowEnabled: Boolean(runtimeInfo?.commentsWindowEnabled)
+      })
+      if (!action) return
+      event.preventDefault()
+      if (action === 'toggle-search') setCommandOpen((value) => !value)
+      else if (action === 'close-search') setCommandOpen(false)
+      else if (action === 'toggle-preview') void togglePreviewWindow()
+      else if (action === 'toggle-notes')
+        void (notesWindowOpen ? closeNotesWindow() : openNotesWindow())
+      else if (action === 'show-stream-manager') void openCommentsWindow()
+      else if (action === 'toggle-stream-manager') void toggleCommentsWindow()
+      else if (action === 'toggle-captions') void toggleCaptionsWindow()
+      else openSettings('shortcuts')
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [
     closeNotesWindow,
     notesWindowOpen,
+    openCommentsWindow,
     openNotesWindow,
+    openSettings,
     runtimeInfo?.commentsWindowEnabled,
     runtimeInfo?.notesWindowEnabled,
+    runtimeInfo?.platform,
     toggleCommentsWindow,
     toggleCaptionsWindow,
     togglePreviewWindow
@@ -351,41 +407,54 @@ export function AppShell(): ReactElement {
 
   // ⌘1–⌘9 / ⌘, arrive from the main process (Chromium swallows ⌘+digit before
   // the renderer keydown — see main's before-input-event handler). Map the raw
-  // key to a page here, where navigation state lives. FX6: the IPC path
-  // bypasses dialog focus entirely, so navigating behind an open modal has to
-  // be gated here explicitly (ref — the subscription outlives renders).
-  const modalOpenRef = useRef(false)
-  modalOpenRef.current = onboardingOpen || whatsNew.open
+  // key to a page here, where navigation state lives. The IPC path bypasses
+  // dialog focus entirely, so it asks the same `isModalOpen` as every other
+  // key (plan 174 A-2).
   useEffect(() => {
     const off = window.videorc?.onShortcutNavigate?.((key) => {
-      if (modalOpenRef.current) {
-        return
-      }
-      const shortcut = WORKSPACE_SHORTCUTS.find((entry) => entry.digit === key)
-      if (shortcut) {
-        setActive(shortcut.tab)
-      }
+      const tab = navigationShortcutTab(key, isModalOpen(document))
+      if (tab) setActive(tab)
     })
     return off
   }, [setActive])
 
+  // The window is named after its page, and after keyboard navigation the
+  // page title takes the focus, so the new page is announced and the next
+  // Tab starts at its top (plan 174 A-18).
+  useEffect(() => {
+    document.title = workspaceWindowTitle(active)
+    if (!titleFocusPendingRef.current) return
+    titleFocusPendingRef.current = false
+    document.querySelector<HTMLElement>('[data-slot="toolbar"] h1')?.focus()
+  }, [active])
+
+  // Pages opened from outside React arrive through `openWorkspaceTab`
+  // (plan 174, I-PAT-12); a page id that does not exist is dropped here.
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
-      const detail = (
-        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; orcleTab?: unknown }>
-      ).detail
-      const tab = detail?.tab
-      if (tab === 'settings') {
-        openSettings(isSettingsTabId(detail?.settingsTab) ? detail.settingsTab : undefined)
-      } else if (tab === 'ai') {
-        openOrcle(isOrcleTabId(detail?.orcleTab) ? detail.orcleTab : undefined)
-      } else if (isWorkspaceTab(tab)) {
-        setActive(tab)
-      }
+      const navigation = readWorkspaceNavigation((event as CustomEvent<unknown>).detail)
+      if (!navigation) return
+      if (navigation.tab === 'settings') openSettings(navigation.settingsTab)
+      else if (navigation.tab === 'ai') openBuddy(navigation.buddyTab)
+      else if (navigation.tab === 'live') openLivestream(navigation.livestreamView)
+      else setActive(navigation.tab)
     }
-    window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-    return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-  }, [openOrcle, openSettings, setActive])
+    window.addEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
+    return () => window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
+  }, [openBuddy, openLivestream, openSettings, setActive])
+
+  // Plan 170 D18: `videorc://buddy` opens the Buddy tab (main focused the
+  // window and synced the library); Make it Alive also opens the creator
+  // once main saw the avatar worn. Plan 174 S3.14a: the Stream Manager's
+  // behaviour chips name a tab (Chat); an id this build does not know opens
+  // the first tab.
+  useEffect(() => {
+    const off = window.videorc?.onBuddyDeepLink?.((navigation) => {
+      openBuddy(isBuddyTabId(navigation.tab) ? navigation.tab : 'live')
+      if (navigation.openCreator) openBuddyPetCreator({ reference: 'persona-idle' })
+    })
+    return off
+  }, [openBuddy])
 
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
@@ -397,16 +466,11 @@ export function AppShell(): ReactElement {
   }, [openCleanCut])
 
   const live = isActiveRecordingState(recordingState)
-  const statusTone: StatusDotTone = live
-    ? 'error'
-    : backendConnected
-      ? 'good'
-      : wsStatus === 'failed'
-        ? 'error'
-        : 'warn'
-  // Go Live is record+stream, which the backend reports as `recording`: the
-  // stream URL is what makes it on air (plan 095 S5).
-  const statusLabel = live ? (sessionIsLive(recording) ? 'streaming' : recordingState) : wsStatus
+  // The session's own words and tone, never the socket's enum (plan 174
+  // S1.3, A-4); Go Live is record+stream, and its stream URL makes it on air.
+  const statusLabel = sessionStatusLabel(recording, wsStatus)
+  const statusTone = sessionStatusTone(recording, wsStatus)
+  const statusPulse = sessionStatusPulses(recording, wsStatus)
 
   return (
     <WorkspaceNavContext.Provider
@@ -417,7 +481,7 @@ export function AppShell(): ReactElement {
         openStudioPanel,
         closeStudioPanel,
         openSettings,
-        openOrcle
+        openBuddy
       }}
     >
       {/* The window family's shell (plan 050, D4): the sidebar sits on the
@@ -432,11 +496,15 @@ export function AppShell(): ReactElement {
           active={active}
           activeStudioPanel={isStudioPanel(active) ? active : null}
           accountTier={entitlementTier}
-          onSelect={setActive}
-          onSelectStudioPanel={openStudioPanel}
+          // A click on a row keeps the focus on the row; every other way to
+          // a page moves it to the page title.
+          onSelect={(tab) => setActive(tab, { focusTitle: false })}
+          onSelectStudioPanel={(panel) => setActive(panel, { focusTitle: false })}
           onOpenSettings={openSettings}
           statusTone={statusTone}
           statusLabel={statusLabel}
+          statusPulse={statusPulse}
+          sessionStartedAt={recording.startedAt}
           live={live}
           onOpenCommand={() => setCommandOpen(true)}
           platform={runtimeInfo?.platform}
@@ -445,60 +513,67 @@ export function AppShell(): ReactElement {
         <main className="flex min-w-0 flex-1 flex-col bg-glass-content">
           <Pane>
             <Toolbar title={workspaceTabLabel(active)} />
-            {/* Library manages its own scroll (pinned header and toolbar,
-                  only the table scrolls), and so do Settings and Orcle (their
-                  tab strips stay pinned, only the tab under it scrolls); every
-                  other tab scrolls as one. */}
-            <PaneBody scroll={active !== 'library' && active !== 'settings' && active !== 'ai'}>
-              <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
-                <Suspense fallback={<WorkspaceTabFallback />}>
-                  {active === 'studio' ? <StudioTab /> : null}
-                  {active === 'sources' ? <SourcesTab /> : null}
-                  {active === 'layouts' ? <LayoutTab /> : null}
-                  {active === 'assets' ? <AssetsTab /> : null}
-                  {active === 'live' ? <StreamingTab /> : null}
-                  {active === 'captions' ? <CaptionsTab /> : null}
-                  {active === 'recording' ? <RecordingTab /> : null}
-                  {active === 'library' ? (
-                    <LibraryTab
-                      focusSessionId={libraryFocusSessionId}
-                      onOpenCleanCut={(sessionId) => openCleanCut({ sessionId })}
-                      onOpenOrcleReport={openOrcleReport}
-                    />
-                  ) : null}
-                  {active === 'ai' ? (
-                    <OrcleTab
-                      cleanCutRequest={cleanCutRequest}
-                      reportSessionId={orcleReportSessionId}
-                      tab={orcleTab}
-                      onOpenLibrarySession={openLibrarySession}
-                      onTabChange={selectOrcleTab}
-                    />
-                  ) : null}
-                  {active === 'diagnostics' ? <DiagnosticsTab /> : null}
-                  {active === 'settings' ? (
-                    <SettingsTab
-                      tab={settingsTab}
-                      onOpenPermissionsSetup={openPermissionsSetup}
-                      onShowWhatsNew={whatsNew.showLatest}
-                      onTabChange={selectSettingsTab}
-                    />
-                  ) : null}
-                </Suspense>
-              </StudioMicVisualProvider>
+            {/* A page that owns its scroll says so on its root (pinned tab
+                  strips, Library's pinned header): PaneBody stops scrolling
+                  for it. Every other page scrolls as one. */}
+            <PaneBody>
+              {/* A page crash, or a page chunk that failed to load, stays
+                  inside the page (plan 174 A-7); keyed, so the next page
+                  starts clean. */}
+              <PageErrorBoundary key={active}>
+                <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
+                  <Suspense fallback={<WorkspaceTabFallback />}>
+                    {active === 'studio' ? <StudioTab /> : null}
+                    {active === 'sources' ? <SourcesTab /> : null}
+                    {active === 'layouts' ? <LayoutTab /> : null}
+                    {active === 'assets' ? <AssetsTab /> : null}
+                    {active === 'live' ? (
+                      <StreamingTab view={livestreamView} onViewChange={selectLivestreamView} />
+                    ) : null}
+                    {active === 'captions' ? <CaptionsTab /> : null}
+                    {active === 'recording' ? <RecordingTab /> : null}
+                    {active === 'library' ? (
+                      <LibraryTab
+                        focusSessionId={libraryFocusSessionId}
+                        onOpenCleanCut={(sessionId) =>
+                          openCleanCut({ sessionId, origin: 'library' })
+                        }
+                        onOpenBuddyReport={openBuddyReport}
+                      />
+                    ) : null}
+                    {active === 'ai' ? (
+                      <BuddyTab
+                        cleanCutRequest={cleanCutRequest}
+                        reportSessionId={buddyReportSessionId}
+                        tab={buddyTab}
+                        onOpenLibrarySession={openLibrarySession}
+                        onTabChange={selectBuddyTab}
+                      />
+                    ) : null}
+                    {active === 'diagnostics' ? <DiagnosticsTab /> : null}
+                    {active === 'settings' ? (
+                      <SettingsTab
+                        tab={settingsTab}
+                        onShowWhatsNew={whatsNew.showLatest}
+                        onTabChange={selectSettingsTab}
+                      />
+                    ) : null}
+                  </Suspense>
+                </StudioMicVisualProvider>
+              </PageErrorBoundary>
             </PaneBody>
           </Pane>
           {/* State on the left, the shell's real shortcuts on the right:
                 keyboard-first, only quieter than the old footer bar. */}
-          <StatusBar leading={<StatusDot label={statusLabel} pulse={live} tone={statusTone} />}>
+          <StatusBar leading={<StatusBarSessionState recording={recording} wsStatus={wsStatus} />}>
             <StatusBarHint
-              keys={`${modKey}K`}
+              accelerator={shortcutAccelerator('search')}
               label="Search"
               onClick={() => setCommandOpen(true)}
             />
             <StatusBarHint
-              keys={`${modKey}P`}
-              label="Preview"
+              accelerator={shortcutAccelerator('preview-window')}
+              label={WINDOW_NAMES.preview}
               pressed={previewWindowOpen}
               onClick={() => void togglePreviewWindow()}
             />
@@ -506,16 +581,16 @@ export function AppShell(): ReactElement {
                   enabled keeps the bar at its final width from the first paint. */}
             {runtimeInfo?.notesWindowEnabled !== false ? (
               <StatusBarHint
-                keys={`${shiftKey}${modKey}N`}
-                label="Notes"
+                accelerator={shortcutAccelerator('notes-window')}
+                label={WINDOW_NAMES.notes}
                 pressed={notesWindowOpen}
                 onClick={() => (notesWindowOpen ? void closeNotesWindow() : void openNotesWindow())}
               />
             ) : null}
             {runtimeInfo?.commentsWindowEnabled !== false ? (
               <StatusBarHint
-                keys={`${shiftKey}${modKey}J`}
-                label="Stream Manager"
+                accelerator={shortcutAccelerator('comments-window')}
+                label={WINDOW_NAMES.streamManager}
                 pressed={commentsWindowOpen}
                 onClick={() =>
                   commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
@@ -524,6 +599,10 @@ export function AppShell(): ReactElement {
             ) : null}
           </StatusBar>
         </main>
+
+        {/* The Go Live confirmation opens over every page, not only Studio
+            (plan 174 S0.6, B-5): Go Live can start from anywhere. */}
+        <GoLiveDialogGate />
 
         <Suspense fallback={null}>
           {commandOpen ? <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} /> : null}
@@ -537,7 +616,21 @@ export function AppShell(): ReactElement {
             (first run initializes the last-seen version silently). */}
         <Suspense fallback={null}>
           {whatsNew.open && !onboardingOpen ? (
-            <WhatsNewDialog entry={whatsNew.entry} open onClose={whatsNew.dismiss} />
+            <WhatsNewDialog
+              entry={whatsNew.entry}
+              open
+              skippedVersions={whatsNew.skippedVersions}
+              onClose={whatsNew.dismiss}
+            />
+          ) : null}
+        </Suspense>
+        <Suspense fallback={null}>
+          {stopConfirmation ? (
+            <EndLivestreamDialog
+              confirmation={stopConfirmation}
+              onCancel={cancelStopSession}
+              onConfirm={confirmStopSession}
+            />
           ) : null}
         </Suspense>
       </div>

@@ -23,6 +23,19 @@ describe('preload API policy', () => {
     expect(comments).not.toHaveProperty('pushDashboard')
   })
 
+  it('gives the Stream Manager the banner list to read and a show or hide to ask, never a push', () => {
+    const comments = apiForRendererRole(fakeApi, 'comments')
+    expect(comments).toHaveProperty('getCommentsBanners')
+    expect(comments).toHaveProperty('onCommentsBanners')
+    expect(comments).toHaveProperty('bannerFromCommentsWindow')
+    expect(comments).not.toHaveProperty('pushCommentsBanners')
+    expect(comments).not.toHaveProperty('onBannerRequest')
+    expect(comments).not.toHaveProperty('pushBannerResult')
+    for (const role of ['notes', 'captions'] as const) {
+      expect(apiForRendererRole(fakeApi, role)).not.toHaveProperty('bannerFromCommentsWindow')
+    }
+  })
+
   it('fails closed when the preload has no main-owned role argument', () => {
     expect(apiForRendererRole(fakeApi, null)).toEqual({})
     expect(Object.isFrozen(apiForRendererRole(fakeApi, null))).toBe(true)

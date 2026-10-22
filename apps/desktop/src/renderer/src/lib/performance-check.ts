@@ -6,6 +6,7 @@ import type {
   VideoSettings
 } from '../../../shared/backend'
 import { videoPresets } from './capture'
+import { formatVideoQuality } from './format-video'
 
 /** How a given output stands against what this computer measured. */
 export type OutputVerdict = 'verified' | 'too-heavy' | 'unknown'
@@ -131,17 +132,16 @@ export function shouldRunPerformanceCheck(state: PerformanceCheckState | undefin
   )
 }
 
+/** "1080p · 30 fps": the one video spelling (plan 174 S1.4). */
 export function outputLabel(video: Pick<VideoSettings, 'width' | 'height' | 'fps'>): string {
-  const short = Math.min(video.width, video.height)
-  const name = short === 2160 ? '4K' : `${short}p`
-  return `${name} ${video.fps}`
+  return formatVideoQuality(video)
 }
 
 /** Toast for a user-chosen output this computer measurably cannot hold. */
 export function performanceCheckTooHeavyToast(
   chosen: VideoSettings,
   result: PerformanceCheckResult
-): { title: string; description: string } | undefined {
+): { title: string; description: string; actionLabel: string; preset: VideoPreset } | undefined {
   // The floor is recommended even when it failed. Do not claim it held.
   if (
     result.belowFloor ||
@@ -152,6 +152,8 @@ export function performanceCheckTooHeavyToast(
   }
   return {
     title: `${outputLabel(chosen)} is too heavy for this computer`,
-    description: `Recordings will stutter. ${outputLabel(result.recommended)} held steady. Switch in Recording → Output.`
+    description: `Recordings will stutter. ${outputLabel(result.recommended)} held steady.`,
+    actionLabel: `Use ${outputLabel(result.recommended)}`,
+    preset: result.recommended.preset
   }
 }

@@ -5,6 +5,7 @@
 // eager Studio bundle (`comment-highlight.ts` is imported eagerly by
 // use-studio and stays text-only).
 
+import { gifTitle } from '../../../shared/chat-gif'
 import type { LiveChatMessageFragment, StreamPlatform } from '@/lib/backend'
 import { groupEmoteOverlays, type ChatMessagePiece } from '@/lib/chat-emotes'
 import {
@@ -17,6 +18,7 @@ import {
   type HighlightMetrics,
   type HighlightTextMeasurer
 } from '@/lib/comment-highlight'
+import { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX } from '@/lib/youtube-mark'
 
 /** An emote box is this many times the text size high: a little taller than
  * the x-height-and-ascender run of a word, like the chat row's `h-5`. */
@@ -49,17 +51,26 @@ export type HighlightEmoteSizer = (url: string) => HighlightEmoteSize | null
  * (zero-width overlays folded onto the emote before them); every other
  * fragment and plain text splits into words. `text` is used when the
  * fragments carry no image, so activity prefixes and fragment-less messages
- * lay out exactly as before.
+ * lay out exactly as before. A Twitch GIF (plan 155, D8) is never painted
+ * on stream: the card says `GIF: <title>` in its place.
  */
 export function highlightTokens(
   text: string,
   fragments: readonly LiveChatMessageFragment[] | undefined
 ): HighlightToken[] {
-  if (!fragments?.some((fragment) => fragment.imageUrl)) {
-    return words(text)
+  const hasGif = fragments?.some((fragment) => fragment.type === 'gif') ?? false
+  const drawable = hasGif
+    ? fragments!.map((fragment) =>
+        fragment.type === 'gif'
+          ? { type: 'text', text: ` GIF: ${gifTitle(fragment.text)} ` }
+          : fragment
+      )
+    : fragments
+  if (!drawable?.some((fragment) => fragment.imageUrl)) {
+    return words(hasGif ? drawable!.map((fragment) => fragment.text).join('') : text)
   }
   const tokens: HighlightToken[] = []
-  for (const piece of groupEmoteOverlays(fragments)) {
+  for (const piece of groupEmoteOverlays(drawable)) {
     if (piece.kind === 'text') {
       tokens.push(...words(piece.text))
       continue
@@ -241,6 +252,55 @@ export interface HighlightTokenLayout {
   lines: HighlightLine[]
   cardWidthPx: number
   cardHeightPx: number
+  /** YouTube's or X's mark closing the identity row on the right (plans
+   * 165, 167). */
+  platformMark: HighlightPlatformMarkSize | null
+  /** X's verified check right after the name (plan 167). */
+  verifiedMark: HighlightVerifiedMarkSize | null
+  /** The fitted name's painted width, where the verified check starts. */
+  nameWidthPx: number
+}
+
+export interface HighlightVerifiedMarkSize {
+  sizePx: number
+  /** Space between the name and the check. */
+  gapPx: number
+}
+
+/** X's verified check on the card, in output pixels: the name's size, never
+ * under 16 px (the size X's kit sets for its marks). */
+export function highlightVerifiedMarkSize(metrics: HighlightMetrics): HighlightVerifiedMarkSize {
+  return {
+    sizePx: Math.max(16, Math.round(metrics.nameFontPx)),
+    gapPx: Math.max(4, Math.round(metrics.nameFontPx * 0.25))
+  }
+}
+
+export interface HighlightPlatformMarkSize {
+  widthPx: number
+  heightPx: number
+}
+
+/** YouTube's official icon on the card's identity row, in output pixels: the
+ * name's size, never under 20 px tall (Google's ToS report, III.F.2a). Null
+ * for every other platform, which keeps its badge over the avatar. The
+ * identity gap (half the text size, at least 10 px) on each side keeps the
+ * clear space brand.youtube asks for: the triangle's width, about 0.37 of the
+ * mark's height.
+ *
+ * X's mark (plan 167) takes the same slot as a square: the kit file's 24 px
+ * grid, at least 20 px, so the visible mark (about 0.8 of the box) stays
+ * above the kit's 16 px minimum. */
+export function highlightPlatformMarkSize(
+  metrics: HighlightMetrics,
+  platform?: StreamPlatform
+): HighlightPlatformMarkSize | null {
+  const heightPx = Math.max(YOUTUBE_MARK_MIN_PX, metrics.nameFontPx)
+  if (platform === 'youtube') {
+    return { widthPx: Math.ceil(heightPx * YOUTUBE_MARK_ASPECT), heightPx }
+  }
+  if (platform === 'x') return { widthPx: Math.ceil(heightPx), heightPx: Math.ceil(heightPx) }
+  return null
 }
 
 /** The card layout with emotes: the same identity row and card sizing as
@@ -251,11 +311,17 @@ export function layoutCommentHighlightTokens(params: {
   fragments?: readonly LiveChatMessageFragment[]
   canvasWidth: number
   canvasHeight?: number
+  maxCardWidthPx?: number
   platform?: StreamPlatform
+  /** The painter has YouTube's or X's mark to draw beside the name (plans
+   * 165, 167). */
+  platformMark?: boolean
+  /** The painter has X's verified check to draw after the name (plan 167). */
+  verified?: boolean
   measure: HighlightTextMeasurer
   emoteSize: HighlightEmoteSizer
 }): HighlightTokenLayout | null {
-  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight)
+  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight, params.maxCardWidthPx)
   if (metrics.maxTextWidthPx <= 0) {
     return null
   }
@@ -265,17 +331,27 @@ export function layoutCommentHighlightTokens(params: {
     params.measure,
     params.emoteSize
   )
+  const platformMark = params.platformMark
+    ? highlightPlatformMarkSize(metrics, params.platform)
+    : null
+  // The mark and its gap (on the row's right end) come out of the name's
+  // share of the row.
+  const markLeadPx = platformMark ? platformMark.widthPx + metrics.identityGapPx : 0
+  const verifiedMark = params.verified ? highlightVerifiedMarkSize(metrics) : null
+  const verifiedLeadPx = verifiedMark ? verifiedMark.gapPx + verifiedMark.sizePx : 0
+  const maxNameWidthPx = Math.max(0, metrics.maxNameWidthPx - markLeadPx - verifiedLeadPx)
   const name = fitHighlightName(
-    commentHighlightIdentity(params.authorName, params.platform),
+    commentHighlightIdentity(params.authorName, params.platform, platformMark !== null),
     metrics.nameFontPx,
-    metrics.maxNameWidthPx,
+    maxNameWidthPx,
     params.measure
   )
   const nameWidth = Math.min(
     params.measure(name, metrics.nameFontPx, HIGHLIGHT_NAME_WEIGHT),
-    metrics.maxNameWidthPx
+    maxNameWidthPx
   )
-  const identityRowWidth = metrics.avatarPx + metrics.identityGapPx + nameWidth
+  const identityRowWidth =
+    metrics.avatarPx + metrics.identityGapPx + markLeadPx + nameWidth + verifiedLeadPx
   const widestLine = lines.reduce((widest, line) => Math.max(widest, line.widthPx), 0)
   const contentWidth = Math.min(Math.max(identityRowWidth, widestLine), metrics.maxTextWidthPx)
   const messageHeight =
@@ -285,7 +361,10 @@ export function layoutCommentHighlightTokens(params: {
     name,
     lines,
     cardWidthPx: Math.ceil(metrics.paddingPx * 2 + contentWidth),
-    cardHeightPx: Math.ceil(metrics.paddingPx * 2 + metrics.avatarPx + messageHeight)
+    cardHeightPx: Math.ceil(metrics.paddingPx * 2 + metrics.avatarPx + messageHeight),
+    platformMark,
+    verifiedMark,
+    nameWidthPx: nameWidth
   }
 }
 

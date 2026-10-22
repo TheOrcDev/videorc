@@ -1,0 +1,1958 @@
+{
+  "version": 1,
+  "anchor": "lower-body-bottom",
+  "scalePolicy": "neutral-height-and-reaction-full-height-v1",
+  "gazeScalePolicy": "neutral-height",
+  "reactionScalePolicy": "full-height",
+  "occupancy": 0.65,
+  "cellSize": 640,
+  "atlasSize": [
+    3200,
+    5120
+  ],
+  "targetAnchor": [
+    320.0,
+    576.0
+  ],
+  "referenceSha256": "ccbd771ddb9a66e986537428940d699712fe23c2a6077d1b2b37b689d52c88c7",
+  "sourceHashes": {
+    "extras": "780cda1c3feb74bdd31c9c37f99813d639711171dd3c5f772dcfaf042c2eb6ef",
+    "gaze-down1": "8239a1f9dc7cf195c44e1e5cef42fe25f5599d8540f427e8b7caaa2721c3180b",
+    "gaze-down2": "dd87a7b323b33b2db7dcde39930b9c29f6f8f7483538bb963d1a3a313ea64ac1",
+    "gaze-level": "73c92dd1548d731db9779b3af9b99013f1d83469385d92afc1d2ba15649cbc2b",
+    "gaze-up1": "c35889f41b442f4bd59e35d89133cc43418d081aca21bf26ea33d52d285cb756",
+    "gaze-up2": "4dd717023cf940625711cd24a7f151c2b1565453a76ff76bc4bfd7a302340317",
+    "pilot": "9eefc5633f36bcd0b295e726c773a3ace98532dc5365d9a280553c7a8e4b5b78",
+    "reactions-a": "da9f95746ba400a03049b79097ba1bb09c3e14830d9889b21ef4352a8a1206ca",
+    "reactions-b": "7b9cc4b419bc3494e5b0b9f069d7dc39dafc4ba886b30e8303a84c3fcc7a0a15"
+  },
+  "neutral": {
+    "id": "gaze-2-2",
+    "sheet": "gaze-level",
+    "cell": 2,
+    "sourceHeight": 761.0,
+    "baseScale": 0.546649
+  },
+  "cells": [
+    {
+      "id": "gaze-0-0",
+      "kind": "gaze",
+      "sheet": "gaze-up2",
+      "sheetSha256": "4dd717023cf940625711cd24a7f151c2b1565453a76ff76bc4bfd7a302340317",
+      "cell": 0,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        0,
+        502,
+        1024
+      ],
+      "sourceBounds": [
+        116,
+        154,
+        443,
+        899
+      ],
+      "sourceAnchor": [
+        270.705,
+        899.0
+      ],
+      "scale": 0.553191,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        234,
+        163,
+        416,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.015,
+        0.0
+      ],
+      "bodyWidth": 135,
+      "rect": [
+        0,
+        0,
+        640,
+        640
+      ],
+      "pixelSha256": "04276f47806bbf8bcd344162e87682a22ee5de77155bdff1767054a5bd91bd73"
+    },
+    {
+      "id": "gaze-1-0",
+      "kind": "gaze",
+      "sheet": "gaze-up2",
+      "sheetSha256": "4dd717023cf940625711cd24a7f151c2b1565453a76ff76bc4bfd7a302340317",
+      "cell": 1,
+      "isolated": false,
+      "sourceBox": [
+        502,
+        0,
+        1169,
+        1024
+      ],
+      "sourceBounds": [
+        60,
+        149,
+        653,
+        904
+      ],
+      "sourceAnchor": [
+        330.127,
+        904.0
+      ],
+      "scale": 0.553191,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        170,
+        158,
+        499,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.006,
+        0.0
+      ],
+      "bodyWidth": 229,
+      "rect": [
+        640,
+        0,
+        640,
+        640
+      ],
+      "pixelSha256": "498a2acc5292d0ac1da32c528cadd25e895780838ac232d21f352091a086dd03"
+    },
+    {
+      "id": "gaze-2-0",
+      "kind": "gaze",
+      "sheet": "gaze-up2",
+      "sheetSha256": "4dd717023cf940625711cd24a7f151c2b1565453a76ff76bc4bfd7a302340317",
+      "cell": 2,
+      "isolated": false,
+      "sourceBox": [
+        1169,
+        0,
+        1892,
+        1024
+      ],
+      "sourceBounds": [
+        15,
+        147,
+        709,
+        899
+      ],
+      "sourceAnchor": [
+        361.377,
+        899.0
+      ],
+      "scale": 0.553191,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        128,
+        160,
+        513,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.005,
+        0.0
+      ],
+      "bodyWidth": 266,
+      "rect": [
+        1280,
+        0,
+        640,
+        640
+      ],
+      "pixelSha256": "5cef3bf0ff7c5ed1ac57897656cc0ce25d169d38df8bc929788b0cbf00743feb"
+    },
+    {
+      "id": "gaze-3-0",
+      "kind": "gaze",
+      "sheet": "gaze-up2",
+      "sheetSha256": "4dd717023cf940625711cd24a7f151c2b1565453a76ff76bc4bfd7a302340317",
+      "cell": 3,
+      "isolated": false,
+      "sourceBox": [
+        1892,
+        0,
+        2562,
+        1024
+      ],
+      "sourceBounds": [
+        16,
+        149,
+        607,
+        905
+      ],
+      "sourceAnchor": [
+        338.009,
+        905.0
+      ],
+      "scale": 0.553191,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        142,
+        158,
+        469,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.005,
+        0.0
+      ],
+      "bodyWidth": 225,
+      "rect": [
+        1920,
+        0,
+        640,
+        640
+      ],
+      "pixelSha256": "0d6d983f0f503290c38cf44f9d79e263abf9e7bd674f15ad9a91bc3afd0d039a"
+    },
+    {
+      "id": "gaze-4-0",
+      "kind": "gaze",
+      "sheet": "gaze-up2",
+      "sheetSha256": "4dd717023cf940625711cd24a7f151c2b1565453a76ff76bc4bfd7a302340317",
+      "cell": 4,
+      "isolated": false,
+      "sourceBox": [
+        2562,
+        0,
+        3072,
+        1024
+      ],
+      "sourceBounds": [
+        64,
+        153,
+        395,
+        899
+      ],
+      "sourceAnchor": [
+        237.984,
+        899.0
+      ],
+      "scale": 0.553191,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        224,
+        163,
+        407,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.003,
+        0.0
+      ],
+      "bodyWidth": 137,
+      "rect": [
+        2560,
+        0,
+        640,
+        640
+      ],
+      "pixelSha256": "c83a45492f5f40fc5fb91c3da92472a20c84dfde5957f0d2a82e6fbf875e6faa"
+    },
+    {
+      "id": "gaze-0-1",
+      "kind": "gaze",
+      "sheet": "gaze-up1",
+      "sheetSha256": "c35889f41b442f4bd59e35d89133cc43418d081aca21bf26ea33d52d285cb756",
+      "cell": 0,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        0,
+        495,
+        1024
+      ],
+      "sourceBounds": [
+        93,
+        139,
+        446,
+        882
+      ],
+      "sourceAnchor": [
+        253.72,
+        882.0
+      ],
+      "scale": 0.55615,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        231,
+        162,
+        427,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.056,
+        0.0
+      ],
+      "bodyWidth": 130,
+      "rect": [
+        0,
+        640,
+        640,
+        640
+      ],
+      "pixelSha256": "87a561d47b9836f164957b49dc393d504bba29d4aa084b2fdd22e7102c82852c"
+    },
+    {
+      "id": "gaze-1-1",
+      "kind": "gaze",
+      "sheet": "gaze-up1",
+      "sheetSha256": "c35889f41b442f4bd59e35d89133cc43418d081aca21bf26ea33d52d285cb756",
+      "cell": 1,
+      "isolated": false,
+      "sourceBox": [
+        495,
+        0,
+        1165,
+        1024
+      ],
+      "sourceBounds": [
+        50,
+        133,
+        659,
+        883
+      ],
+      "sourceAnchor": [
+        335.113,
+        883.0
+      ],
+      "scale": 0.55615,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        161,
+        159,
+        500,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.05,
+        0.0
+      ],
+      "bodyWidth": 239,
+      "rect": [
+        640,
+        640,
+        640,
+        640
+      ],
+      "pixelSha256": "026f54763f333aa78e790e5de8490a9e1d9df2c62fbee8f72214f94159705198"
+    },
+    {
+      "id": "gaze-2-1",
+      "kind": "gaze",
+      "sheet": "gaze-up1",
+      "sheetSha256": "c35889f41b442f4bd59e35d89133cc43418d081aca21bf26ea33d52d285cb756",
+      "cell": 2,
+      "isolated": false,
+      "sourceBox": [
+        1165,
+        0,
+        1889,
+        1024
+      ],
+      "sourceBounds": [
+        12,
+        134,
+        714,
+        882
+      ],
+      "sourceAnchor": [
+        363.224,
+        882.0
+      ],
+      "scale": 0.55615,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        124,
+        160,
+        515,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.003,
+        0.0
+      ],
+      "bodyWidth": 268,
+      "rect": [
+        1280,
+        640,
+        640,
+        640
+      ],
+      "pixelSha256": "a0e9d18b7aed953a37e42244567afaa181ca8058f8f46f9219a4fb17b3a339ad"
+    },
+    {
+      "id": "gaze-3-1",
+      "kind": "gaze",
+      "sheet": "gaze-up1",
+      "sheetSha256": "c35889f41b442f4bd59e35d89133cc43418d081aca21bf26ea33d52d285cb756",
+      "cell": 3,
+      "isolated": false,
+      "sourceBox": [
+        1889,
+        0,
+        2564,
+        1024
+      ],
+      "sourceBounds": [
+        12,
+        133,
+        624,
+        882
+      ],
+      "sourceAnchor": [
+        335.627,
+        882.0
+      ],
+      "scale": 0.55615,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        140,
+        159,
+        480,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.048,
+        0.0
+      ],
+      "bodyWidth": 238,
+      "rect": [
+        1920,
+        640,
+        640,
+        640
+      ],
+      "pixelSha256": "a207b49d8ff8f39d4f3a7063c124dd8991feb175e1c425db5423f61f7c7789e8"
+    },
+    {
+      "id": "gaze-4-1",
+      "kind": "gaze",
+      "sheet": "gaze-up1",
+      "sheetSha256": "c35889f41b442f4bd59e35d89133cc43418d081aca21bf26ea33d52d285cb756",
+      "cell": 4,
+      "isolated": false,
+      "sourceBox": [
+        2564,
+        0,
+        3072,
+        1024
+      ],
+      "sourceBounds": [
+        53,
+        137,
+        406,
+        882
+      ],
+      "sourceAnchor": [
+        248.998,
+        882.0
+      ],
+      "scale": 0.55615,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        211,
+        161,
+        408,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.041,
+        0.0
+      ],
+      "bodyWidth": 128,
+      "rect": [
+        2560,
+        640,
+        640,
+        640
+      ],
+      "pixelSha256": "49a11e97018ee07a67ef28fa89474d2b4b8903884b8ffa2e9d2b878004b06499"
+    },
+    {
+      "id": "gaze-0-2",
+      "kind": "gaze",
+      "sheet": "gaze-level",
+      "sheetSha256": "73c92dd1548d731db9779b3af9b99013f1d83469385d92afc1d2ba15649cbc2b",
+      "cell": 0,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        0,
+        469,
+        1024
+      ],
+      "sourceBounds": [
+        60,
+        128,
+        416,
+        878
+      ],
+      "sourceAnchor": [
+        223.871,
+        878.0
+      ],
+      "scale": 0.546649,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        230,
+        166,
+        426,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.019,
+        0.0
+      ],
+      "bodyWidth": 142,
+      "rect": [
+        0,
+        1280,
+        640,
+        640
+      ],
+      "pixelSha256": "865da88cc07de3de0003aedb09e1bf707d5e11a6c4d8ae5ee0629c09f3a5fd05"
+    },
+    {
+      "id": "gaze-1-2",
+      "kind": "gaze",
+      "sheet": "gaze-level",
+      "sheetSha256": "73c92dd1548d731db9779b3af9b99013f1d83469385d92afc1d2ba15649cbc2b",
+      "cell": 1,
+      "isolated": false,
+      "sourceBox": [
+        469,
+        0,
+        1138,
+        1024
+      ],
+      "sourceBounds": [
+        55,
+        123,
+        658,
+        880
+      ],
+      "sourceAnchor": [
+        324.661,
+        880.0
+      ],
+      "scale": 0.546649,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        173,
+        162,
+        503,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.315,
+        0.0
+      ],
+      "bodyWidth": 230,
+      "rect": [
+        640,
+        1280,
+        640,
+        640
+      ],
+      "pixelSha256": "85ed68186eeb6431c5eca97ba42fc064adc5be988123bac33591446cd1db60d0"
+    },
+    {
+      "id": "gaze-2-2",
+      "kind": "gaze",
+      "sheet": "gaze-level",
+      "sheetSha256": "73c92dd1548d731db9779b3af9b99013f1d83469385d92afc1d2ba15649cbc2b",
+      "cell": 2,
+      "isolated": false,
+      "sourceBox": [
+        1138,
+        0,
+        1908,
+        1024
+      ],
+      "sourceBounds": [
+        12,
+        120,
+        762,
+        881
+      ],
+      "sourceAnchor": [
+        389.006,
+        881.0
+      ],
+      "scale": 0.546649,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        114,
+        160,
+        524,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.011,
+        0.0
+      ],
+      "bodyWidth": 291,
+      "rect": [
+        1280,
+        1280,
+        640,
+        640
+      ],
+      "pixelSha256": "84688f28b98b3c84d1f81aafe3b0a2730b6182d99aa773bf05a5ffc0d8d8ff2c"
+    },
+    {
+      "id": "gaze-3-2",
+      "kind": "gaze",
+      "sheet": "gaze-level",
+      "sheetSha256": "73c92dd1548d731db9779b3af9b99013f1d83469385d92afc1d2ba15649cbc2b",
+      "cell": 3,
+      "isolated": false,
+      "sourceBox": [
+        1908,
+        0,
+        2597,
+        1024
+      ],
+      "sourceBounds": [
+        9,
+        123,
+        632,
+        880
+      ],
+      "sourceAnchor": [
+        334.575,
+        880.0
+      ],
+      "scale": 0.546649,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        142,
+        162,
+        483,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.159,
+        0.0
+      ],
+      "bodyWidth": 232,
+      "rect": [
+        1920,
+        1280,
+        640,
+        640
+      ],
+      "pixelSha256": "f989439f05d02f7abf83efee5507461bb84a13c615351e441868a083478740fc"
+    },
+    {
+      "id": "gaze-4-2",
+      "kind": "gaze",
+      "sheet": "gaze-level",
+      "sheetSha256": "73c92dd1548d731db9779b3af9b99013f1d83469385d92afc1d2ba15649cbc2b",
+      "cell": 4,
+      "isolated": false,
+      "sourceBox": [
+        2597,
+        0,
+        3072,
+        1024
+      ],
+      "sourceBounds": [
+        59,
+        128,
+        414,
+        878
+      ],
+      "sourceAnchor": [
+        249.611,
+        878.0
+      ],
+      "scale": 0.546649,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        215,
+        166,
+        410,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.028,
+        0.0
+      ],
+      "bodyWidth": 140,
+      "rect": [
+        2560,
+        1280,
+        640,
+        640
+      ],
+      "pixelSha256": "eeca3da3f4e480fa2e0af27322106c72fc7bfef9f50fda01b414f8efc804ead2"
+    },
+    {
+      "id": "gaze-0-3",
+      "kind": "gaze",
+      "sheet": "gaze-down1",
+      "sheetSha256": "8239a1f9dc7cf195c44e1e5cef42fe25f5599d8540f427e8b7caaa2721c3180b",
+      "cell": 0,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        0,
+        483,
+        1024
+      ],
+      "sourceBounds": [
+        61,
+        131,
+        436,
+        898
+      ],
+      "sourceAnchor": [
+        226.759,
+        898.0
+      ],
+      "scale": 0.540962,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        230,
+        161,
+        434,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.064,
+        0.0
+      ],
+      "bodyWidth": 143,
+      "rect": [
+        0,
+        1920,
+        640,
+        640
+      ],
+      "pixelSha256": "90d7a42cdf585b9d2bb9acb65637e9beb9aa64b0eab6c2d939bd99166ccd7426"
+    },
+    {
+      "id": "gaze-1-3",
+      "kind": "gaze",
+      "sheet": "gaze-down1",
+      "sheetSha256": "8239a1f9dc7cf195c44e1e5cef42fe25f5599d8540f427e8b7caaa2721c3180b",
+      "cell": 1,
+      "isolated": false,
+      "sourceBox": [
+        483,
+        0,
+        1166,
+        1024
+      ],
+      "sourceBounds": [
+        48,
+        129,
+        676,
+        899
+      ],
+      "sourceAnchor": [
+        342.337,
+        899.0
+      ],
+      "scale": 0.540962,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        160,
+        159,
+        501,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.001,
+        0.0
+      ],
+      "bodyWidth": 240,
+      "rect": [
+        640,
+        1920,
+        640,
+        640
+      ],
+      "pixelSha256": "4269d832f83671b14869267cc26b27aa026500bc5d2f9f8efb1cf44b823b7f02"
+    },
+    {
+      "id": "gaze-2-3",
+      "kind": "gaze",
+      "sheet": "gaze-down1",
+      "sheetSha256": "8239a1f9dc7cf195c44e1e5cef42fe25f5599d8540f427e8b7caaa2721c3180b",
+      "cell": 2,
+      "isolated": false,
+      "sourceBox": [
+        1166,
+        0,
+        1898,
+        1024
+      ],
+      "sourceBounds": [
+        8,
+        127,
+        727,
+        896
+      ],
+      "sourceAnchor": [
+        367.955,
+        896.0
+      ],
+      "scale": 0.540962,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        125,
+        160,
+        514,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.014,
+        0.0
+      ],
+      "bodyWidth": 268,
+      "rect": [
+        1280,
+        1920,
+        640,
+        640
+      ],
+      "pixelSha256": "fef801d79a0dff82885b21986062147def0b987c0dd1c07222e2e49f5d483dbf"
+    },
+    {
+      "id": "gaze-3-3",
+      "kind": "gaze",
+      "sheet": "gaze-down1",
+      "sheetSha256": "8239a1f9dc7cf195c44e1e5cef42fe25f5599d8540f427e8b7caaa2721c3180b",
+      "cell": 3,
+      "isolated": false,
+      "sourceBox": [
+        1898,
+        0,
+        2586,
+        1024
+      ],
+      "sourceBounds": [
+        7,
+        128,
+        640,
+        899
+      ],
+      "sourceAnchor": [
+        336.756,
+        899.0
+      ],
+      "scale": 0.540962,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        141,
+        159,
+        484,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.001,
+        0.0
+      ],
+      "bodyWidth": 238,
+      "rect": [
+        1920,
+        1920,
+        640,
+        640
+      ],
+      "pixelSha256": "a324348c76c4ada9d563069ca445557c4bc7799ead38f934500b482f31c44e6a"
+    },
+    {
+      "id": "gaze-4-3",
+      "kind": "gaze",
+      "sheet": "gaze-down1",
+      "sheetSha256": "8239a1f9dc7cf195c44e1e5cef42fe25f5599d8540f427e8b7caaa2721c3180b",
+      "cell": 4,
+      "isolated": false,
+      "sourceBox": [
+        2586,
+        0,
+        3072,
+        1024
+      ],
+      "sourceBounds": [
+        50,
+        132,
+        425,
+        898
+      ],
+      "sourceAnchor": [
+        259.502,
+        898.0
+      ],
+      "scale": 0.540962,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        207,
+        161,
+        410,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.068,
+        0.0
+      ],
+      "bodyWidth": 142,
+      "rect": [
+        2560,
+        1920,
+        640,
+        640
+      ],
+      "pixelSha256": "f22629859aedca418eb40d1c6f5ea94dccca36c7e1c80e63a8095c256491e05b"
+    },
+    {
+      "id": "gaze-0-4",
+      "kind": "gaze",
+      "sheet": "gaze-down2",
+      "sheetSha256": "dd87a7b323b33b2db7dcde39930b9c29f6f8f7483538bb963d1a3a313ea64ac1",
+      "cell": 0,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        0,
+        514,
+        1024
+      ],
+      "sourceBounds": [
+        74,
+        128,
+        479,
+        914
+      ],
+      "sourceAnchor": [
+        301.253,
+        914.0
+      ],
+      "scale": 0.529262,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        200,
+        160,
+        414,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.009,
+        0.0
+      ],
+      "bodyWidth": 134,
+      "rect": [
+        0,
+        2560,
+        640,
+        640
+      ],
+      "pixelSha256": "f8bfa1a401949a4916fca77a5186a6dbc1caa3e1a105137b13fc5ac96cf6eca3"
+    },
+    {
+      "id": "gaze-1-4",
+      "kind": "gaze",
+      "sheet": "gaze-down2",
+      "sheetSha256": "dd87a7b323b33b2db7dcde39930b9c29f6f8f7483538bb963d1a3a313ea64ac1",
+      "cell": 1,
+      "isolated": false,
+      "sourceBox": [
+        514,
+        0,
+        1167,
+        1024
+      ],
+      "sourceBounds": [
+        36,
+        128,
+        650,
+        914
+      ],
+      "sourceAnchor": [
+        332.252,
+        914.0
+      ],
+      "scale": 0.529262,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        163,
+        160,
+        488,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.143,
+        0.0
+      ],
+      "bodyWidth": 215,
+      "rect": [
+        640,
+        2560,
+        640,
+        640
+      ],
+      "pixelSha256": "468da5a5d2773274777a0ee18bc4103758771e457cd0289b14130e145c32981e"
+    },
+    {
+      "id": "gaze-2-4",
+      "kind": "gaze",
+      "sheet": "gaze-down2",
+      "sheetSha256": "dd87a7b323b33b2db7dcde39930b9c29f6f8f7483538bb963d1a3a313ea64ac1",
+      "cell": 2,
+      "isolated": false,
+      "sourceBox": [
+        1167,
+        0,
+        1879,
+        1024
+      ],
+      "sourceBounds": [
+        5,
+        128,
+        705,
+        914
+      ],
+      "sourceAnchor": [
+        355.325,
+        914.0
+      ],
+      "scale": 0.529262,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        135,
+        160,
+        505,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.003,
+        0.0
+      ],
+      "bodyWidth": 242,
+      "rect": [
+        1280,
+        2560,
+        640,
+        640
+      ],
+      "pixelSha256": "c4da5d8343c84709ab31e9abf90900027c59c8495ee0758c1534e960ad223197"
+    },
+    {
+      "id": "gaze-3-4",
+      "kind": "gaze",
+      "sheet": "gaze-down2",
+      "sheetSha256": "dd87a7b323b33b2db7dcde39930b9c29f6f8f7483538bb963d1a3a313ea64ac1",
+      "cell": 3,
+      "isolated": false,
+      "sourceBox": [
+        1879,
+        0,
+        2545,
+        1024
+      ],
+      "sourceBounds": [
+        8,
+        128,
+        627,
+        915
+      ],
+      "sourceAnchor": [
+        328.455,
+        915.0
+      ],
+      "scale": 0.529262,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        150,
+        159,
+        478,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.067,
+        0.0
+      ],
+      "bodyWidth": 215,
+      "rect": [
+        1920,
+        2560,
+        640,
+        640
+      ],
+      "pixelSha256": "5b86631c90e3180170c8d3a4c34cb9790323b546ab876998f800a5ee12129a0a"
+    },
+    {
+      "id": "gaze-4-4",
+      "kind": "gaze",
+      "sheet": "gaze-down2",
+      "sheetSha256": "dd87a7b323b33b2db7dcde39930b9c29f6f8f7483538bb963d1a3a313ea64ac1",
+      "cell": 4,
+      "isolated": false,
+      "sourceBox": [
+        2545,
+        0,
+        3072,
+        1024
+      ],
+      "sourceBounds": [
+        40,
+        129,
+        442,
+        914
+      ],
+      "sourceAnchor": [
+        215.162,
+        914.0
+      ],
+      "scale": 0.529262,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        227,
+        160,
+        440,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.021,
+        0.0
+      ],
+      "bodyWidth": 132,
+      "rect": [
+        2560,
+        2560,
+        640,
+        640
+      ],
+      "pixelSha256": "efb44fcc436be95e8a8e866d4bf3c9dcd7bf37d817c0f55b8a768ef12a9da49f"
+    },
+    {
+      "id": "laugh",
+      "kind": "reaction",
+      "sheet": "reactions-a",
+      "sheetSha256": "da9f95746ba400a03049b79097ba1bb09c3e14830d9889b21ef4352a8a1206ca",
+      "cell": 0,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        0,
+        767,
+        774
+      ],
+      "sourceBounds": [
+        54,
+        42,
+        743,
+        759
+      ],
+      "sourceAnchor": [
+        401.467,
+        759.0
+      ],
+      "scale": 0.580195,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        118,
+        160,
+        519,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.003,
+        0.0
+      ],
+      "bodyWidth": 228,
+      "rect": [
+        0,
+        3200,
+        640,
+        640
+      ],
+      "pixelSha256": "a6b34027261dc6db096468517ad8c50cf268099f912bac29a3c2a02375d84d6c"
+    },
+    {
+      "id": "surprised",
+      "kind": "reaction",
+      "sheet": "reactions-a",
+      "sheetSha256": "da9f95746ba400a03049b79097ba1bb09c3e14830d9889b21ef4352a8a1206ca",
+      "cell": 1,
+      "isolated": false,
+      "sourceBox": [
+        767,
+        0,
+        1517,
+        774
+      ],
+      "sourceBounds": [
+        26,
+        41,
+        722,
+        759
+      ],
+      "sourceAnchor": [
+        376.406,
+        759.0
+      ],
+      "scale": 0.579387,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        117,
+        160,
+        521,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.008,
+        0.0
+      ],
+      "bodyWidth": 230,
+      "rect": [
+        640,
+        3200,
+        640,
+        640
+      ],
+      "pixelSha256": "ecca680dbce34bdbed82cdd86fbf23dad8a9ad0a631405bc5f80752a10e77ae9"
+    },
+    {
+      "id": "wink",
+      "kind": "reaction",
+      "sheet": "reactions-a",
+      "sheetSha256": "da9f95746ba400a03049b79097ba1bb09c3e14830d9889b21ef4352a8a1206ca",
+      "cell": 2,
+      "isolated": false,
+      "sourceBox": [
+        1517,
+        0,
+        2304,
+        775
+      ],
+      "sourceBounds": [
+        11,
+        36,
+        738,
+        759
+      ],
+      "sourceAnchor": [
+        350.135,
+        759.0
+      ],
+      "scale": 0.57538,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        125,
+        160,
+        543,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.237,
+        0.0
+      ],
+      "bodyWidth": 279,
+      "rect": [
+        1280,
+        3200,
+        640,
+        640
+      ],
+      "pixelSha256": "c71a1fe798dc6a0fbb6f4f0f1c9b9a6c7a95d3a8680a8d78beecc72a2bcfa19f"
+    },
+    {
+      "id": "kiss",
+      "kind": "reaction",
+      "sheet": "reactions-a",
+      "sheetSha256": "da9f95746ba400a03049b79097ba1bb09c3e14830d9889b21ef4352a8a1206ca",
+      "cell": 3,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        774,
+        767,
+        1536
+      ],
+      "sourceBounds": [
+        135,
+        16,
+        661,
+        718
+      ],
+      "sourceAnchor": [
+        400.575,
+        718.0
+      ],
+      "scale": 0.592593,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        162,
+        160,
+        475,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.005,
+        0.0
+      ],
+      "bodyWidth": 233,
+      "rect": [
+        1920,
+        3200,
+        640,
+        640
+      ],
+      "pixelSha256": "7ee9e2a4680978dc40bd27476c9aa6bc0380d76725598cfad3ec6fe1193c1782"
+    },
+    {
+      "id": "blink",
+      "kind": "reaction",
+      "sheet": "reactions-a",
+      "sheetSha256": "da9f95746ba400a03049b79097ba1bb09c3e14830d9889b21ef4352a8a1206ca",
+      "cell": 4,
+      "isolated": false,
+      "sourceBox": [
+        767,
+        774,
+        1517,
+        1536
+      ],
+      "sourceBounds": [
+        25,
+        16,
+        741,
+        718
+      ],
+      "sourceAnchor": [
+        379.997,
+        718.0
+      ],
+      "scale": 0.592593,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        110,
+        160,
+        534,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.02,
+        0.0
+      ],
+      "bodyWidth": 306,
+      "rect": [
+        2560,
+        3200,
+        640,
+        640
+      ],
+      "pixelSha256": "3d86eaed81c7afe1f38ace46bf735089832855101a1b9259082d6861f066c3bf"
+    },
+    {
+      "id": "sleep",
+      "kind": "reaction",
+      "sheet": "reactions-a",
+      "sheetSha256": "da9f95746ba400a03049b79097ba1bb09c3e14830d9889b21ef4352a8a1206ca",
+      "cell": 5,
+      "isolated": false,
+      "sourceBox": [
+        1517,
+        775,
+        2304,
+        1536
+      ],
+      "sourceBounds": [
+        52,
+        18,
+        698,
+        716
+      ],
+      "sourceAnchor": [
+        380.296,
+        716.0
+      ],
+      "scale": 0.595989,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        124,
+        160,
+        509,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.003,
+        0.0
+      ],
+      "bodyWidth": 297,
+      "rect": [
+        0,
+        3840,
+        640,
+        640
+      ],
+      "pixelSha256": "59c29445d059ea350a0f1c903cc6e24bc4d7198f347477fe06f17f33b5b555c8"
+    },
+    {
+      "id": "worried",
+      "kind": "reaction",
+      "sheet": "reactions-b",
+      "sheetSha256": "7b9cc4b419bc3494e5b0b9f069d7dc39dafc4ba886b30e8303a84c3fcc7a0a15",
+      "cell": 0,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        0,
+        774,
+        789
+      ],
+      "sourceBounds": [
+        97,
+        111,
+        714,
+        764
+      ],
+      "sourceAnchor": [
+        404.632,
+        764.0
+      ],
+      "scale": 0.63706,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        124,
+        160,
+        517,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.003,
+        0.0
+      ],
+      "bodyWidth": 306,
+      "rect": [
+        640,
+        3840,
+        640,
+        640
+      ],
+      "pixelSha256": "3c35cf86a88ed42dea1c5743dba931ef03c72fbdf1cf6b5fc5fc9b17a7109d31"
+    },
+    {
+      "id": "annoyed",
+      "kind": "reaction",
+      "sheet": "reactions-b",
+      "sheetSha256": "7b9cc4b419bc3494e5b0b9f069d7dc39dafc4ba886b30e8303a84c3fcc7a0a15",
+      "cell": 1,
+      "isolated": false,
+      "sourceBox": [
+        774,
+        0,
+        1559,
+        767
+      ],
+      "sourceBounds": [
+        75,
+        92,
+        712,
+        764
+      ],
+      "sourceAnchor": [
+        394.626,
+        764.0
+      ],
+      "scale": 0.619048,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        122,
+        160,
+        517,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.002,
+        0.0
+      ],
+      "bodyWidth": 302,
+      "rect": [
+        1280,
+        3840,
+        640,
+        640
+      ],
+      "pixelSha256": "ecb70e7000959dd23b39a8cd63eca115be528a992ab899c1f4b4b6c6257e59de"
+    },
+    {
+      "id": "proud",
+      "kind": "reaction",
+      "sheet": "reactions-b",
+      "sheetSha256": "7b9cc4b419bc3494e5b0b9f069d7dc39dafc4ba886b30e8303a84c3fcc7a0a15",
+      "cell": 2,
+      "isolated": false,
+      "sourceBox": [
+        1559,
+        0,
+        2304,
+        790
+      ],
+      "sourceBounds": [
+        20,
+        78,
+        685,
+        765
+      ],
+      "sourceAnchor": [
+        353.192,
+        765.0
+      ],
+      "scale": 0.605531,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        118,
+        159,
+        521,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.001,
+        0.0
+      ],
+      "bodyWidth": 222,
+      "rect": [
+        1920,
+        3840,
+        640,
+        640
+      ],
+      "pixelSha256": "916222b11c966ca7ee877bc8ff44f256644093d583c1f2bdbf221706234955c0"
+    },
+    {
+      "id": "confused",
+      "kind": "reaction",
+      "sheet": "reactions-b",
+      "sheetSha256": "7b9cc4b419bc3494e5b0b9f069d7dc39dafc4ba886b30e8303a84c3fcc7a0a15",
+      "cell": 3,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        789,
+        774,
+        1536
+      ],
+      "sourceBounds": [
+        88,
+        26,
+        750,
+        692
+      ],
+      "sourceAnchor": [
+        456.56,
+        692.0
+      ],
+      "scale": 0.624625,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        90,
+        160,
+        504,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.068,
+        0.0
+      ],
+      "bodyWidth": 274,
+      "rect": [
+        2560,
+        3840,
+        640,
+        640
+      ],
+      "pixelSha256": "5f32a20d096b71eeddccb9dcd4f7710efbff041514ad07683fc0c00bfbf57ebc"
+    },
+    {
+      "id": "excited",
+      "kind": "reaction",
+      "sheet": "reactions-b",
+      "sheetSha256": "7b9cc4b419bc3494e5b0b9f069d7dc39dafc4ba886b30e8303a84c3fcc7a0a15",
+      "cell": 4,
+      "isolated": false,
+      "sourceBox": [
+        774,
+        767,
+        1559,
+        1536
+      ],
+      "sourceBounds": [
+        26,
+        5,
+        766,
+        714
+      ],
+      "sourceAnchor": [
+        396.779,
+        714.0
+      ],
+      "scale": 0.586742,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        102,
+        160,
+        537,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.001,
+        0.0
+      ],
+      "bodyWidth": 218,
+      "rect": [
+        0,
+        4480,
+        640,
+        640
+      ],
+      "pixelSha256": "d518fcde719e69730e2a60101de5ca3d9cedfe114be501c6abf68ce65d548b4d"
+    },
+    {
+      "id": "calm",
+      "kind": "reaction",
+      "sheet": "reactions-b",
+      "sheetSha256": "7b9cc4b419bc3494e5b0b9f069d7dc39dafc4ba886b30e8303a84c3fcc7a0a15",
+      "cell": 5,
+      "isolated": false,
+      "sourceBox": [
+        1559,
+        790,
+        2304,
+        1536
+      ],
+      "sourceBounds": [
+        21,
+        27,
+        686,
+        691
+      ],
+      "sourceAnchor": [
+        354.082,
+        691.0
+      ],
+      "scale": 0.626506,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        111,
+        160,
+        528,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.006,
+        0.0
+      ],
+      "bodyWidth": 309,
+      "rect": [
+        640,
+        4480,
+        640,
+        640
+      ],
+      "pixelSha256": "ec0d61ab4f8d54b391592c9fe2dee2c50a4d92e8d802cf3a7235298c32cc297d"
+    },
+    {
+      "id": "talk-a",
+      "kind": "reaction",
+      "sheet": "extras",
+      "sheetSha256": "780cda1c3feb74bdd31c9c37f99813d639711171dd3c5f772dcfaf042c2eb6ef",
+      "cell": 0,
+      "isolated": false,
+      "sourceBox": [
+        0,
+        0,
+        775,
+        1024
+      ],
+      "sourceBounds": [
+        21,
+        106,
+        769,
+        908
+      ],
+      "sourceAnchor": [
+        389.6,
+        908.0
+      ],
+      "scale": 0.518703,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        128,
+        160,
+        517,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        0.005,
+        0.0
+      ],
+      "bodyWidth": 261,
+      "rect": [
+        1280,
+        4480,
+        640,
+        640
+      ],
+      "pixelSha256": "e10bee8c563ced9dda453aecba663749847ea5d6c6d708e3b7c00799f9442c0c"
+    },
+    {
+      "id": "talk-b",
+      "kind": "reaction",
+      "sheet": "extras",
+      "sheetSha256": "780cda1c3feb74bdd31c9c37f99813d639711171dd3c5f772dcfaf042c2eb6ef",
+      "cell": 1,
+      "isolated": false,
+      "sourceBox": [
+        775,
+        0,
+        1518,
+        1024
+      ],
+      "sourceBounds": [
+        7,
+        106,
+        741,
+        907
+      ],
+      "sourceAnchor": [
+        370.685,
+        907.0
+      ],
+      "scale": 0.519351,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        131,
+        160,
+        512,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.001,
+        0.0
+      ],
+      "bodyWidth": 258,
+      "rect": [
+        1920,
+        4480,
+        640,
+        640
+      ],
+      "pixelSha256": "79d7ccd21f70f9095380a47cc14bd050011c27c0739406b3c41756d55f624d0b"
+    },
+    {
+      "id": "wave",
+      "kind": "reaction",
+      "sheet": "extras",
+      "sheetSha256": "780cda1c3feb74bdd31c9c37f99813d639711171dd3c5f772dcfaf042c2eb6ef",
+      "cell": 2,
+      "isolated": false,
+      "sourceBox": [
+        1518,
+        0,
+        2304,
+        1024
+      ],
+      "sourceBounds": [
+        3,
+        104,
+        759,
+        909
+      ],
+      "sourceAnchor": [
+        333.374,
+        909.0
+      ],
+      "scale": 0.51677,
+      "minimumMargin": 64.0,
+      "outputBounds": [
+        149,
+        160,
+        540,
+        576
+      ],
+      "targetAnchor": [
+        320.0,
+        576.0
+      ],
+      "anchorDrift": [
+        -0.112,
+        0.0
+      ],
+      "bodyWidth": 226,
+      "rect": [
+        2560,
+        4480,
+        640,
+        640
+      ],
+      "pixelSha256": "47ecf8d739d62c749004ee61fecbe78c76e6fe5050dcf8c77f7862eab2a7fe43"
+    }
+  ]
+}

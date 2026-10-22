@@ -28,6 +28,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'app-quit',
   'apply-native-preview-host-commands',
   'authorize-smoke-resource',
+  'import-takeover-image',
   'backend-debug-rpc',
   'blank-main-window',
   'capture-page',
@@ -51,7 +52,9 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-seed-viewers',
   'comments-window-set-bounds',
   'comments-window-set-command-fixture',
+  'comments-window-set-theme',
   'comments-window-set-highlight-anchor',
+  'comments-window-set-auto-show-activity',
   'comments-window-set-view-mode',
   'comments-window-state',
   'comments-window-submit-message',
@@ -145,7 +148,15 @@ export const SMOKE_BACKEND_RPC_METHOD_NAMES = new Set([
   'audio.test.inject-pcm',
   'captions.test.inject-audio',
   'captions.test.snapshot',
+  // Plan 168 S-C5: `smoke:buddy-pet` registers its synthetic pack the way
+  // main does after copying a folder (admin only in the backend).
+  'cohost.pet.import',
   'compositor.scene.update',
+  // Read-only. The preview lifecycle and window probes check which transport
+  // and backing the backend reports (Windows D3D11/fallback, Linux proof
+  // surface); without it `probe:preview-lifecycle:linux` failed every run
+  // (Linux plan 0020).
+  'diagnostics.stats',
   'encoder_bridge.synthetic_record',
   'recording.start_test'
 ])

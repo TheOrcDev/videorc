@@ -5,6 +5,7 @@ import {
   applyBundledBackgroundAssets,
   applySlot,
   backgroundAssetDisplayUrl,
+  backgroundImportTarget,
   canApplySlot,
   checkableBackgroundAssetPath,
   clearActiveSlot,
@@ -17,11 +18,13 @@ import {
   markSlotMissingIfAssetMatches,
   reconcileRegistry,
   removeSlotAsset,
+  removeSlotNeedsConfirm,
   restoreSlotDefault,
   renameAsset,
   setAssetStyle,
   slotDisplayStatus,
   slotName,
+  unattendedImportSlot,
   type BackgroundAsset,
   type BackgroundAssetRegistry,
   type BackgroundAssetSlot
@@ -272,6 +275,27 @@ describe('background asset model', () => {
   })
 })
 
+describe('removeSlotNeedsConfirm (plan 174 S0.3, C-12)', () => {
+  it('asks for the active slot, the scene background, and any imported file', () => {
+    const base = createDefaultRegistry()
+    const imported = withReadySlot(base, 'bg-02', readyAsset('asset-2', 'Mine'))
+    // The active slot leaves the scene.
+    expect(removeSlotNeedsConfirm({ ...imported, activeSlotId: 'bg-02' }, 'bg-02', null)).toBe(true)
+    // The scene's background, even when the slot is not marked active.
+    expect(removeSlotNeedsConfirm(imported, 'bg-02', 'asset-2')).toBe(true)
+    // An imported file that is applied nowhere is still gone for good.
+    expect(removeSlotNeedsConfirm(imported, 'bg-02', null)).toBe(true)
+  })
+
+  it('lets a built-in slot empty without a question, and ignores unknown slots', () => {
+    const base = createDefaultRegistry()
+    const builtInSlot = base.slots.find((slot) => slot.assetId !== null)
+    expect(builtInSlot).toBeTruthy()
+    expect(removeSlotNeedsConfirm(base, builtInSlot!.id, null)).toBe(false)
+    expect(removeSlotNeedsConfirm(base, 'no-such-slot', null)).toBe(false)
+  })
+})
+
 describe('background asset import and editing', () => {
   it('creates an imported asset that is ready with default style', () => {
     const asset = importedAsset('a1', 'Sunset')
@@ -397,6 +421,69 @@ describe('reconcileRegistry with imported assets', () => {
     })
     expect(restored.assets.a1?.styleDefaults.blurPx).toBe(9)
     expect(restored.assets.a1?.styleDefaults.scale).toBe(100)
+  })
+
+  it("keeps a built-in's rename and style edits, with this build's URLs (plan 174, C-3)", () => {
+    let registry = renameAsset(createDefaultRegistry(), 'builtin-bg-03', 'My tutorial')
+    registry = setAssetStyle(registry, 'builtin-bg-03', { blurPx: 12, fit: 'fit' })
+    const stored = JSON.parse(JSON.stringify(registry))
+    // An older build's bundle URL (and a native path from main) never survives.
+    stored.assets['builtin-bg-03'].assetPath = '/assets/tutorial-OLDHASH.webp'
+    stored.assets['builtin-bg-03'].thumbnailPath = '/assets/tutorial-OLDHASH.webp'
+
+    const restored = reconcileRegistry(stored)
+    const fresh = createDefaultRegistry().assets['builtin-bg-03']!
+    expect(restored.assets['builtin-bg-03']).toEqual({
+      ...fresh,
+      name: 'My tutorial',
+      styleDefaults: { ...defaultBackgroundStyle(), blurPx: 12, fit: 'fit' }
+    })
+    expect(slotName(slotById(restored, 'bg-03'), restored)).toBe('My tutorial')
+    // Untouched built-ins and malformed records keep this build's record.
+    expect(restored.assets['builtin-bg-04']).toEqual(
+      createDefaultRegistry().assets['builtin-bg-04']
+    )
+    const malformed = reconcileRegistry({
+      ...stored,
+      assets: { 'builtin-bg-03': { name: '  ', styleDefaults: 'loud' } }
+    })
+    expect(malformed.assets['builtin-bg-03']).toEqual(fresh)
+  })
+})
+
+describe('where an imported background goes (plan 174, C-2 and C-7)', () => {
+  it('fills an empty slot without asking', () => {
+    const registry = removeSlotAsset(createDefaultRegistry(), 'bg-04')
+    expect(backgroundImportTarget(registry)).toEqual({ kind: 'slot', slotId: 'bg-04' })
+    expect(unattendedImportSlot(registry)).toEqual({ slotId: 'bg-04', replaces: null })
+  })
+
+  it('asks which background to replace on a fresh profile, starting from the last slot', () => {
+    const registry = createDefaultRegistry()
+    expect(registry.slots.every((slot) => slot.status === 'ready')).toBe(true)
+    expect(backgroundImportTarget(registry)).toEqual({
+      kind: 'replace',
+      preselectedSlotId: 'bg-10'
+    })
+  })
+
+  it('starts from the active background when there is one', () => {
+    const registry = applySlot(createDefaultRegistry(), 'bg-06')
+    expect(backgroundImportTarget(registry)).toEqual({
+      kind: 'replace',
+      preselectedSlotId: 'bg-06'
+    })
+  })
+
+  it('replaces the last built-in preset unasked, never an imported background first', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-10', importedAsset('mine', 'Mine'))
+    registry = applySlot(registry, 'bg-10')
+    expect(unattendedImportSlot(registry)).toEqual({ slotId: 'bg-09', replaces: 'Light Mode' })
+
+    for (const slot of registry.slots) {
+      registry = importIntoSlot(registry, slot.id, importedAsset(`own-${slot.id}`, slot.id))
+    }
+    expect(unattendedImportSlot(registry)).toEqual({ slotId: 'bg-10', replaces: 'bg-10' })
   })
 })
 

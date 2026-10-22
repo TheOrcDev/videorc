@@ -243,15 +243,23 @@ pub(crate) fn recommend(rungs: &[PerformanceCheckRung]) -> Option<(VideoSettings
 }
 
 /// Remaining rungs after a pass are omitted. Fast-skip and the total wall
-/// budget may drop mid-ladder rungs, but never the floor: the check must
-/// measure 720p before it is allowed to say the machine cannot hold it.
+/// budget may drop mid-ladder rungs, but never a protected one: the check
+/// must measure 720p before it is allowed to say the machine cannot hold it.
 pub(crate) fn should_skip_rung(
     already_passed: bool,
     skip_next: bool,
     over_budget: bool,
-    is_floor: bool,
+    is_protected: bool,
 ) -> bool {
-    already_passed || ((skip_next || over_budget) && !is_floor)
+    already_passed || ((skip_next || over_budget) && !is_protected)
+}
+
+/// The floor, and 720p. Since the 540p rung (plan 090) 720p is no longer the
+/// floor, and slow failing 1440p/1080p rungs on a software encoder spent the
+/// whole budget, so the check said "Use 540p" about a 720p it never measured
+/// (Linux plan 0013).
+pub(crate) fn is_protected_rung(video: &VideoSettings, is_floor: bool) -> bool {
+    is_floor || (video.width == 1280 && video.height == 720)
 }
 
 const RESULT_SETTING_KEY: &str = "performance_check_result";
@@ -499,7 +507,7 @@ async fn run_ladder(
             passed,
             skip_next,
             started.elapsed() > TOTAL_BUDGET,
-            is_floor,
+            is_protected_rung(&video, is_floor),
         ) {
             if !passed {
                 rungs.push(PerformanceCheckRung {
@@ -634,6 +642,7 @@ fn benchmark_session_params(video: &VideoSettings, directory: &Path) -> StartSes
             output_directory: Some(directory.display().to_string()),
             ffmpeg_path: None,
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video: video.clone(),
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,
@@ -1225,5 +1234,31 @@ mod tests {
         assert!(should_skip_rung(false, false, true, false));
         assert!(should_skip_rung(true, false, false, true));
         assert!(!should_skip_rung(false, false, false, true));
+    }
+
+    #[test]
+    fn budget_and_fast_skip_never_drop_720p() {
+        // Plan 0013: [1440, 1080, 720, 540] with slow failing top rungs ran
+        // out of budget and skipped 720p, then recommended 540p.
+        let ladder = ladder_under_ceiling(2560, 1440, 30);
+        let floor = ladder.len() - 1;
+        let p720 = ladder
+            .iter()
+            .position(|video| video.width == 1280 && video.height == 720)
+            .expect("the ladder measures 720p");
+        assert_ne!(p720, floor, "720p is not the floor since the 540p rung");
+        assert!(is_protected_rung(&ladder[p720], false));
+        assert!(is_protected_rung(&ladder[floor], true));
+        assert!(!is_protected_rung(&ladder[0], false));
+        for (index, video) in ladder.iter().enumerate() {
+            let protected = is_protected_rung(video, index == floor);
+            assert_eq!(
+                should_skip_rung(false, true, true, protected),
+                !protected,
+                "{}x{}",
+                video.width,
+                video.height
+            );
+        }
     }
 }

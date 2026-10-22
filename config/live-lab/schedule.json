@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "graceMinutes": 15,
+  "slots": [
+    { "id": "update-check", "at": "04:00", "action": "update-check" },
+    { "id": "churn", "at": "04:30", "action": "run", "scenario": "churn" },
+    {
+      "id": "marathon",
+      "at": "06:00",
+      "action": "run",
+      "scenario": "marathon",
+      "params": { "marathonHours": 4 }
+    },
+    { "id": "idle", "at": "11:00", "action": "run", "scenario": "idle" },
+    { "id": "report", "at": "13:30", "action": "report", "graceMinutes": 360 }
+  ],
+  "weeklyReboot": {
+    "day": "Sun",
+    "at": "03:30",
+    "note": "Documentation only. The admin account sets it once with: sudo pmset repeat restart U 03:30:00. The agent's RunAtLoad tick runs the doctor after each boot."
+  }
+}

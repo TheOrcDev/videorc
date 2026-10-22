@@ -10,7 +10,7 @@ import type {
   CleanCutTranscriptSegment,
   CleanCutTranscriptWord
 } from './clean-cut-view'
-import { momentKind, momentLabel } from './orcle-report-view'
+import { momentKind, momentLabel } from './buddy-report-view'
 import { keptDurationMs, type SkipRange } from './skip-ranges'
 
 // Clean cut review (plan 119 S14, S19): what the player skips, what the
@@ -93,6 +93,22 @@ export function removalKindName(kind: CleanCutRemovalKind): string {
   return KIND_NAMES[kind] ?? 'Cut'
 }
 
+/**
+ * What a screen reader hears when a cut is selected or flipped (plan 174
+ * E-15): "Um 0.4 s, cut. 2 of 14. Enter keeps it."
+ */
+export function removalAnnouncement(
+  removal: Pick<CleanCutRemoval, 'kind' | 'startMs' | 'endMs' | 'enabled'>,
+  position: number,
+  total: number
+): string {
+  const what = `${removalKindName(removal.kind)} ${formatCutLength(removal.endMs - removal.startMs)}`
+  const where = position > 0 && total > 0 ? ` ${position} of ${total}.` : ''
+  return removal.enabled
+    ? `${what}, cut.${where} Enter keeps it.`
+    : `${what}, kept.${where} Enter cuts it.`
+}
+
 /** "1.8 s", "12 s": a short length for inline markers. */
 export function formatCutLength(ms: number): string {
   const seconds = Math.max(0, ms) / 1000
@@ -152,19 +168,94 @@ export function effectiveRemovals(
       wanted === undefined || wanted === removal.enabled ? removal : { ...removal, enabled: wanted }
     )
   }
-  for (const manual of draft.addManual) {
-    out.push({
-      id: manual.key,
-      startMs: manual.startMs,
-      endMs: manual.endMs,
-      startFrame: 0,
-      endFrame: 0,
-      kind: 'manual',
-      reason: 'Removed by you',
-      enabled: true
-    })
-  }
+  out.push(...draftManualRemovals(draft))
   return out.sort(byTime)
+}
+
+/** The draft's own new cuts as removals, so the transcript strikes them too. */
+export function draftManualRemovals(draft: CleanCutDraft): CleanCutRemoval[] {
+  return draft.addManual.map((manual) => ({
+    id: manual.key,
+    startMs: manual.startMs,
+    endMs: manual.endMs,
+    startFrame: 0,
+    endFrame: 0,
+    kind: 'manual',
+    reason: 'Removed by you',
+    enabled: true
+  }))
+}
+
+// --- Editing (plan 174 E-14) --------------------------------------------------------
+
+/** Undo and redo over drafts: the drafts before and after the one shown. */
+export interface CleanCutHistory {
+  past: readonly CleanCutDraft[]
+  future: readonly CleanCutDraft[]
+}
+
+export const EMPTY_CLEAN_CUT_HISTORY: CleanCutHistory = { past: [], future: [] }
+export const CLEAN_CUT_HISTORY_MAX = 100
+
+/** An edit replaced `previous`: it can be undone, and nothing is left to redo. */
+export function recordCleanCutEdit(
+  history: CleanCutHistory,
+  previous: CleanCutDraft,
+  max: number = CLEAN_CUT_HISTORY_MAX
+): CleanCutHistory {
+  return { past: [...history.past, previous].slice(-max), future: [] }
+}
+
+/** ⌘Z: the draft before `current`, or null when there is none. */
+export function undoCleanCutEdit(
+  history: CleanCutHistory,
+  current: CleanCutDraft
+): { history: CleanCutHistory; draft: CleanCutDraft } | null {
+  const draft = history.past.at(-1)
+  if (!draft) return null
+  return {
+    draft,
+    history: { past: history.past.slice(0, -1), future: [current, ...history.future] }
+  }
+}
+
+/** ⇧⌘Z: the draft an undo left, or null when there is none. */
+export function redoCleanCutEdit(
+  history: CleanCutHistory,
+  current: CleanCutDraft
+): { history: CleanCutHistory; draft: CleanCutDraft } | null {
+  const [draft, ...future] = history.future
+  if (!draft) return null
+  return { draft, history: { past: [...history.past, current], future } }
+}
+
+/**
+ * What "Cut selection" cuts: from the first selected word's start to the
+ * last one's end. Null without a word.
+ */
+export function selectionCutRange(
+  words: readonly CleanCutTranscriptWord[],
+  wordIndexes: readonly number[]
+): { startMs: number; endMs: number } | null {
+  const known = wordIndexes.filter((index) => words[index] !== undefined)
+  if (known.length === 0) return null
+  const first = words[Math.min(...known)]
+  const last = words[Math.max(...known)]
+  if (!first || !last || !(last.endMs > first.startMs)) return null
+  return { startMs: first.startMs, endMs: last.endMs }
+}
+
+/**
+ * Word index → the transcript row that shows it, built once per layout so
+ * following the playhead costs a lookup. A word in a part left out has none.
+ */
+export function wordRows(items: readonly CleanCutTranscriptItem[]): Map<number, number> {
+  const rows = new Map<number, number>()
+  items.forEach((item, row) => {
+    if (item.type !== 'paragraph') return
+    for (const token of item.tokens) if (token.type === 'word') rows.set(token.index, row)
+  })
+  return rows
 }
 
 /** Set removals on or off. Back at its saved state, a removal leaves the draft. */

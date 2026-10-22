@@ -44,12 +44,15 @@ let container: HTMLDivElement
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // The Mac look: the window bootstrap writes the platform before first paint.
+  document.documentElement.dataset.platform = 'darwin'
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
 })
 
 afterEach(async () => {
+  delete document.documentElement.dataset.platform
   await act(async () => root.unmount())
   container.remove()
   document.body.innerHTML = ''
@@ -72,7 +75,7 @@ async function render(
 }
 
 const cards = (): HTMLElement[] => [
-  ...container.querySelectorAll<HTMLElement>('[data-slot="removal-card"]')
+  ...container.querySelectorAll<HTMLElement>('[data-testid="removal-card"]')
 ]
 
 function buttons(card: HTMLElement): HTMLButtonElement[] {
@@ -103,24 +106,27 @@ describe('RemovalCards (plan 140, S6)', () => {
     expect(text).toContain('toxic')
     expect(text).toContain('“this stream is trash”')
     expect(card.querySelector('[aria-label="Twitch"]')).toBeTruthy()
-    expect(buttons(card).map((button) => button.dataset.slot)).toEqual([
+    expect(buttons(card).map((button) => button.dataset.testid)).toEqual([
       'removal-confirm',
       'removal-cancel'
     ])
     expect(buttons(card)[0].dataset.variant).toBe('destructive')
     expect(buttons(card)[0].textContent).toBe('Remove↵')
-    expect(buttons(card)[1].textContent).toBe('Cancelesc')
+    expect(buttons(card)[1].textContent).toBe('CancelEsc')
     // Cancel is its own button, never inside another one.
     for (const button of buttons(card)) expect(button.querySelector('button')).toBeNull()
   })
 
-  it('countdown: Removing in Ns, Cancel first, then Remove now', async () => {
+  it('countdown: Removing in Ns, the same button order, Cancel emphasised', async () => {
     await render([countdown()])
     const [card] = cards()
     expect(card.dataset.mode).toBe('countdown')
     expect(card.textContent).toContain('Removing in 4s')
-    expect(buttons(card).map((button) => button.textContent)).toEqual(['Cancelesc', 'Remove now↵'])
-    expect(buttons(card)[0].dataset.variant).toBe('secondary')
+    // Plan 174 H-23: one fixed order on every Buddy card; the mode only
+    // decides which button is emphasised.
+    expect(buttons(card).map((button) => button.textContent)).toEqual(['Remove now↵', 'CancelEsc'])
+    expect(buttons(card)[0].dataset.variant).toBe('ghost')
+    expect(buttons(card)[1].dataset.variant).toBe('secondary')
   })
 
   it('YouTube: confirm first, and the line that says why', async () => {

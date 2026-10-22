@@ -27,8 +27,8 @@ use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::live_chat::{
-    LiveChatAuthorAffiliation, LiveChatEventDetails, LiveChatEventType, LiveChatMessage,
-    LiveChatProviderConnectionState, live_chat_message_id, set_provider_and_emit,
+    LiveChatAuthorAffiliation, LiveChatAuthorVerified, LiveChatEventDetails, LiveChatEventType,
+    LiveChatMessage, LiveChatProviderConnectionState, live_chat_message_id, set_provider_and_emit,
     try_deliver_message,
 };
 use crate::live_chat_persistence::LiveChatPersistenceFailure;
@@ -159,6 +159,10 @@ struct RelayAuthor {
     /// badge drops only the badge, never the whole relay page.
     #[serde(default)]
     affiliation: Option<Value>,
+    /// X's `verified_type` (plan 167): `blue`, `business`, `government` or
+    /// `none`. Raw JSON for the same reason as `affiliation`.
+    #[serde(default)]
+    verified_type: Option<Value>,
 }
 
 /// Retrying cannot fix this; the user has to act (sign in, re-authorize X).
@@ -754,6 +758,13 @@ fn relay_affiliation(value: Option<&Value>) -> Option<LiveChatAuthorAffiliation>
     })
 }
 
+/// X's verified check; anything but a known `verified_type` shows none.
+fn relay_verified(value: Option<&Value>) -> Option<LiveChatAuthorVerified> {
+    value
+        .and_then(Value::as_str)
+        .and_then(LiveChatAuthorVerified::from_x_verified_type)
+}
+
 /// `host_user_id` is the connected account's X id (the OAuth 1.0a one that
 /// creates the broadcast). XAA has no host flag, so the streamer's own
 /// messages are recognised by author id and marked `owner` (plan 095, S1),
@@ -817,6 +828,7 @@ fn relay_event_to_message(
             .map(sharpen_x_avatar_url),
         author_badges: Vec::new(),
         author_affiliation: relay_affiliation(event.author.affiliation.as_ref()),
+        author_verified: relay_verified(event.author.verified_type.as_ref()),
         author_roles,
         published_at,
         received_at: now,
@@ -877,6 +889,7 @@ fn follow_event_to_message(
         reply: None,
         first_message: false,
         author_affiliation: None,
+        author_verified: None,
     })
 }
 
@@ -1416,6 +1429,67 @@ mod tests {
         }))
         .unwrap();
         assert!(event.url.is_none());
+    }
+
+    /// Plan 167: X's verified check, only for a `verified_type` X sent, and
+    /// an odd value drops only the check, never the comment.
+    #[test]
+    fn relay_verified_type_maps_to_a_check_and_never_drops_the_comment() {
+        let with_verified = |verified: Value| {
+            let event: RelayEvent = serde_json::from_value(json!({
+                "messageId": "m1",
+                "text": "hi",
+                "author": { "name": "Dom", "verifiedType": verified }
+            }))
+            .unwrap();
+            relay_event_to_message(event, "session-1", None, X_USER_ID)
+                .expect("the comment survives")
+                .author_verified
+        };
+
+        assert_eq!(
+            with_verified(json!("blue")),
+            Some(LiveChatAuthorVerified::Blue)
+        );
+        assert_eq!(
+            with_verified(json!(" Business ")),
+            Some(LiveChatAuthorVerified::Business)
+        );
+        assert_eq!(
+            with_verified(json!("government")),
+            Some(LiveChatAuthorVerified::Government)
+        );
+        for unknown in [
+            json!("none"),
+            json!(""),
+            json!("weird"),
+            json!(true),
+            json!({ "type": "blue" }),
+            Value::Null,
+        ] {
+            assert_eq!(with_verified(unknown), None);
+        }
+        let missing: RelayEvent =
+            serde_json::from_value(json!({ "messageId": "m2", "text": "hi" })).unwrap();
+        let message = relay_event_to_message(missing, "session-1", None, X_USER_ID).unwrap();
+        assert_eq!(message.author_verified, None);
+        let wire = serde_json::to_value(&message).unwrap();
+        assert!(
+            wire.get("authorVerified").is_none(),
+            "an unverified author sends no key, never null"
+        );
+
+        let verified: RelayEvent = serde_json::from_value(json!({
+            "messageId": "m3",
+            "text": "hi",
+            "author": { "name": "Dom", "verifiedType": "business" }
+        }))
+        .unwrap();
+        let message = relay_event_to_message(verified, "session-1", None, X_USER_ID).unwrap();
+        assert_eq!(
+            serde_json::to_value(&message).unwrap()["authorVerified"],
+            json!("business")
+        );
     }
 
     #[test]

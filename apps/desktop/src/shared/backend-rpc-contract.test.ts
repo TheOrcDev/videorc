@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import type {
+  Banner,
   CompositorStatus,
   DiagnosticStats,
   SceneEditorDraftAck,
@@ -309,6 +310,42 @@ describe('backend RPC contract', () => {
     ]) {
       expect(() => validateBackendRpcResult('stream.output.topology.probe', malformed)).toThrow()
     }
+
+    // Plan 0015: Linux OpenH264 / VAAPI raw path. The encoder note is
+    // informational in every state; a fallbackReason on a healthy topology is
+    // still a contract violation.
+    const linux: StreamOutputTopologyProbeResult = {
+      capabilityKey: `stream-output-topology-v1:${'b'.repeat(64)}`,
+      streamProfile: params.streamProfile,
+      outputRoles: ['shared'],
+      requestedBridgeOutput: 'raw-yuv420p',
+      effectiveBridgeOutput: 'raw-yuv420p',
+      effectiveEncodeBackend: 'software-open-h264',
+      probeState: 'not-required',
+      encoderSelectionReason: 'OpenH264 software encoding was selected explicitly for this session.'
+    }
+    expect(validateBackendRpcResult('stream.output.topology.probe', linux)).toEqual(linux)
+    const vaapi = { ...linux, effectiveEncodeBackend: 'hardware-vaapi' as const }
+    delete (vaapi as Partial<StreamOutputTopologyProbeResult>).encoderSelectionReason
+    expect(validateBackendRpcResult('stream.output.topology.probe', vaapi)).toEqual(vaapi)
+    expect(
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...result,
+        encoderSelectionReason: 'Intel Quick Sync was selected but its check failed.'
+      })
+    ).toMatchObject({ probeState: 'rejected' })
+    expect(() =>
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...linux,
+        fallbackReason: linux.encoderSelectionReason
+      })
+    ).toThrow('fallbackReason')
+    expect(() =>
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...linux,
+        encoderSelectionReason: ''
+      })
+    ).toThrow('encoderSelectionReason')
   })
 
   it('types and exactly validates authoritative secret-free stream-target snapshots', () => {
@@ -1774,7 +1811,7 @@ describe('backend RPC contract', () => {
     ).toThrow('clip.marks.list')
   })
 
-  it('validates the Orcle report RPCs and the saved event (plan 119 S1)', () => {
+  it('validates the Buddy report RPCs and the saved event (plan 119 S1)', () => {
     const report = {
       version: 1,
       sessionId: 'session-1',
@@ -2087,7 +2124,7 @@ describe('backend RPC contract', () => {
     // and closed: a bad code/status shape fails the event like any other.
     const detail = {
       code: 'ai-gateway-error',
-      message: 'The Orcle tick failed on every configured model.',
+      message: 'The Buddy tick failed on every configured model.',
       status: 502
     }
     const errored = { ...state, status: 'error', reason: 'gateway-error', detail }
@@ -2144,7 +2181,24 @@ describe('backend RPC contract', () => {
       rules: ['No spoilers'],
       listen: false,
       wakeWordRequired: false,
-      removeConfirm: 'confirm'
+      removeConfirm: 'confirm',
+      persona: {
+        id: 'default',
+        name: 'Buddy',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default',
+        avatar: { kind: 'still' },
+        motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+        reactions: {}
+      },
+      autoChat: {
+        mode: 'off',
+        greetings: { enabled: false, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     expect(validateBackendRpcParams('cohost.settings.set', { listen: true })).toEqual({
@@ -2172,6 +2226,26 @@ describe('backend RPC contract', () => {
     expectTypeOf<BackendRpcParams<'cohost.start'>['sessionId']>().toEqualTypeOf<string>()
   })
 
+  it('validates the anonymous usage stats switch', () => {
+    const on = { enabled: true, envDisabled: false }
+    expect(validateBackendRpcResult('usageStats.get', on)).toEqual(on)
+    const forcedOff = { enabled: false, envDisabled: true }
+    expect(validateBackendRpcResult('usageStats.set', forcedOff)).toEqual(forcedOff)
+    expect(validateBackendRpcParams('usageStats.set', { enabled: false })).toEqual({
+      enabled: false
+    })
+    expect(() => validateBackendRpcParams('usageStats.set', {})).toThrow('usageStats.set')
+    expect(() => validateBackendRpcParams('usageStats.set', { enabled: 'no' })).toThrow(
+      'usageStats.set'
+    )
+    expect(() =>
+      validateBackendRpcParams('usageStats.set', { enabled: true, installId: 'x' })
+    ).toThrow('usageStats.set')
+    expect(() => validateBackendRpcResult('usageStats.get', { enabled: true })).toThrow(
+      'usageStats.get'
+    )
+  })
+
   it('validates the 7TV emote switch, its status and its event (plan 089)', () => {
     const linked = {
       sevenTv: true,
@@ -2181,15 +2255,29 @@ describe('backend RPC contract', () => {
         emoteCount: 986,
         globalCount: 45,
         platforms: ['twitch', 'kick', 'youtube']
-      }
+      },
+      twitchGifs: 'animated'
     }
     expect(validateBackendRpcResult('liveChat.emotes.get', linked)).toEqual(linked)
     expect(validateBackendEventPayload('liveChat.emotes', linked)).toEqual(linked)
-    const off = { sevenTv: false, sevenTvStatus: { state: 'off' } }
+    const off = { sevenTv: false, sevenTvStatus: { state: 'off' }, twitchGifs: 'still' }
     expect(validateBackendRpcResult('liveChat.emotes.set', off)).toEqual(off)
     expect(validateBackendRpcParams('liveChat.emotes.set', { sevenTv: false })).toEqual({
       sevenTv: false
     })
+    // Plan 155: the GIF mode is one of three words, and always present.
+    expect(validateBackendRpcParams('liveChat.emotes.set', { twitchGifs: 'off' })).toEqual({
+      twitchGifs: 'off'
+    })
+    expect(() => validateBackendRpcParams('liveChat.emotes.set', { twitchGifs: 'paused' })).toThrow(
+      'liveChat.emotes.set'
+    )
+    expect(() =>
+      validateBackendRpcResult('liveChat.emotes.get', {
+        sevenTv: false,
+        sevenTvStatus: { state: 'off' }
+      })
+    ).toThrow('liveChat.emotes.get')
     // The backend never sends null or unknown keys; refuse them loudly.
     expect(() =>
       validateBackendRpcResult('liveChat.emotes.get', {
@@ -2312,7 +2400,7 @@ describe('backend RPC contract', () => {
     ).toThrow('liveChat.moderation.request')
   })
 
-  it('types and exactly validates Orcle voice commands, their answers and the kill switches (plan 140 S3)', () => {
+  it('types and exactly validates Buddy voice commands, their answers and the kill switches (plan 140 S3)', () => {
     const base = {
       sessionId: 'session-1',
       status: 'listening',
@@ -2353,7 +2441,7 @@ describe('backend RPC contract', () => {
       ...base,
       command: {
         id: 'cmd-2',
-        heard: 'orcle highlight the comment from coders',
+        heard: 'buddy highlight the comment from coders',
         kind: 'highlight',
         status: 'ambiguous',
         message: "Which comment? Say 'the first one' or press 1 or 2.",
@@ -2378,7 +2466,7 @@ describe('backend RPC contract', () => {
       heard: 'what is the weather',
       kind: 'unknown',
       status: 'not-found',
-      message: "Orcle didn't catch that: 'what is the weather'.",
+      message: "Buddy didn't catch that: 'what is the weather'.",
       at: '2026-10-04T12:00:00Z'
     }
     for (const status of [
@@ -2394,7 +2482,18 @@ describe('backend RPC contract', () => {
       const state = { ...base, command: { ...minimal, status } }
       expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     }
-    for (const kind of ['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']) {
+    for (const kind of [
+      'highlight',
+      'clear',
+      'remove',
+      'confirm',
+      'cancel',
+      'unknown',
+      // Plan 186 S11: banner commands finish at once, without a target.
+      'show-banner',
+      'hide-banner',
+      'hide-banners'
+    ]) {
       const state = { ...base, command: { ...minimal, kind } }
       expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     }
@@ -2488,7 +2587,24 @@ describe('backend RPC contract', () => {
       rules: [],
       listen: true,
       wakeWordRequired: true,
-      removeConfirm: 'countdown'
+      removeConfirm: 'countdown',
+      persona: {
+        id: 'default',
+        name: 'Buddy',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default',
+        avatar: { kind: 'still' },
+        motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+        reactions: {}
+      },
+      autoChat: {
+        mode: 'off',
+        greetings: { enabled: false, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     const withoutWakeWord: Record<string, unknown> = { ...settings }
@@ -2594,5 +2710,145 @@ describe('session source backend wire results', () => {
     expect(() =>
       validateBackendRpcParams('session.start', { sources: { cameraId: null } })
     ).toThrow(/cameraId/)
+  })
+})
+
+describe('banner backend wire contract (plan 186)', () => {
+  const banner = {
+    id: '5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b',
+    name: 'Sponsor',
+    imageFile: '5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.png',
+    thumbnailFile: '5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.thumb.png',
+    width: 2400,
+    height: 400,
+    hasAlpha: true,
+    sortOrder: 0,
+    shown: false,
+    horizontal: { x: 0.2, y: 0.782222, w: 0.6, h: 0.177778 },
+    vertical: { x: 0.071111, y: 0.699583, w: 0.857778, h: 0.080417 },
+    showOnStream: true,
+    showInRecording: true,
+    opacity: 1,
+    createdAt: '2026-10-20T18:00:00Z',
+    updatedAt: '2026-10-20T18:00:00Z'
+  }
+
+  it('registers every banner method and the changed event with a strict schema', () => {
+    expect(runtimeValidatedBackendRpcMethods).toEqual(
+      expect.arrayContaining([
+        'banners.list',
+        'banners.importImage',
+        'banners.update',
+        'banners.reorder',
+        'banners.delete',
+        'banners.show',
+        'banners.hide'
+      ])
+    )
+    expectTypeOf<BackendRpcResult<'banners.list'>>().toEqualTypeOf<Banner[]>()
+    expectTypeOf<BackendRpcResult<'banners.show'>>().toEqualTypeOf<Banner>()
+    expectTypeOf<BackendRpcParams<'banners.hide'>>().toEqualTypeOf<{ id?: string }>()
+    expectTypeOf<BackendEventMap['banners.changed']>().toEqualTypeOf<Banner[]>()
+
+    expect(validateBackendRpcParams('banners.list', undefined)).toBeUndefined()
+    expect(validateBackendRpcResult('banners.list', [banner])).toStrictEqual([banner])
+    expect(validateBackendRpcResult('banners.show', banner)).toStrictEqual(banner)
+    expect(validateBackendRpcResult('banners.importImage', banner)).toStrictEqual(banner)
+    expect(validateBackendRpcResult('banners.update', banner)).toStrictEqual(banner)
+    for (const method of ['banners.reorder', 'banners.delete', 'banners.hide'] as const) {
+      expect(validateBackendRpcResult(method, [])).toStrictEqual([])
+      expect(validateBackendRpcResult(method, [banner])).toStrictEqual([banner])
+    }
+    expect(validateBackendEventPayload('banners.changed', [banner])).toStrictEqual([banner])
+    expect(() => validateBackendEventPayload('banners.changed', banner)).toThrow('banners.changed')
+  })
+
+  it('refuses unknown fields, paths for files, nulls and out-of-range values', () => {
+    expect(() => validateBackendRpcResult('banners.show', { ...banner, extra: 1 })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('banners.show', { ...banner, imageFile: '/tmp/x.png' })
+    ).toThrow('banner file basename')
+    expect(() =>
+      validateBackendRpcResult('banners.show', { ...banner, thumbnailFile: '../x.png' })
+    ).toThrow('banner file basename')
+    expect(() => validateBackendRpcResult('banners.show', { ...banner, id: 'a/b' })).toThrow(
+      'banner id'
+    )
+    expect(() =>
+      validateBackendRpcResult('banners.show', { ...banner, hideAfterSec: null })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('banners.show', { ...banner, repeatEveryMin: null })
+    ).toThrow()
+    expect(() => validateBackendRpcResult('banners.show', { ...banner, opacity: 1.5 })).toThrow()
+    expect(() => validateBackendRpcResult('banners.show', { ...banner, width: 0 })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('banners.show', {
+        ...banner,
+        horizontal: { x: 0, y: 0, w: 1.2, h: 1 }
+      })
+    ).toThrow()
+    const { createdAt: _createdAt, ...withoutCreatedAt } = banner
+    expect(() => validateBackendRpcResult('banners.show', withoutCreatedAt)).toThrow()
+    expect(() =>
+      validateBackendRpcResult(
+        'banners.list',
+        Array.from({ length: 25 }, (_, index) => ({ ...banner, sortOrder: index }))
+      )
+    ).toThrow('at most 24')
+  })
+
+  it('validates params exactly, with 0 turning a timer off', () => {
+    expect(
+      validateBackendRpcParams('banners.importImage', { sourceCapability: 'cap-1' })
+    ).toStrictEqual({ sourceCapability: 'cap-1' })
+    expect(() => validateBackendRpcParams('banners.importImage', { path: '/tmp/x.png' })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('banners.importImage', { sourceCapability: '' })
+    ).toThrow()
+
+    const update = {
+      id: banner.id,
+      name: 'Follow me',
+      horizontal: { x: 0.1, y: 0.1, w: 0.3, h: 0.05 },
+      vertical: { x: 0.1, y: 0.1, w: 0.8, h: 0.05 },
+      showOnStream: true,
+      showInRecording: false,
+      opacity: 0.2,
+      hideAfterSec: 0,
+      repeatEveryMin: 0
+    }
+    expect(validateBackendRpcParams('banners.update', update)).toStrictEqual(update)
+    expect(validateBackendRpcParams('banners.update', { id: banner.id, opacity: 1 })).toStrictEqual(
+      {
+        id: banner.id,
+        opacity: 1
+      }
+    )
+    expect(() => validateBackendRpcParams('banners.update', { ...update, opacity: 0.1 })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('banners.update', { ...update, hideAfterSec: null })
+    ).toThrow()
+    expect(() => validateBackendRpcParams('banners.update', { ...update, shown: true })).toThrow()
+    expect(() => validateBackendRpcParams('banners.update', { name: 'No id' })).toThrow()
+
+    expect(validateBackendRpcParams('banners.reorder', { ids: [banner.id] })).toStrictEqual({
+      ids: [banner.id]
+    })
+    expect(() =>
+      validateBackendRpcParams('banners.reorder', {
+        ids: Array.from({ length: 25 }, (_, index) => `banner-${index}`)
+      })
+    ).toThrow('at most 24')
+    for (const method of ['banners.delete', 'banners.show'] as const) {
+      expect(validateBackendRpcParams(method, { id: banner.id })).toStrictEqual({ id: banner.id })
+      expect(() => validateBackendRpcParams(method, {})).toThrow()
+      expect(() => validateBackendRpcParams(method, { id: banner.id, all: true })).toThrow()
+    }
+    expect(validateBackendRpcParams('banners.hide', {})).toStrictEqual({})
+    expect(validateBackendRpcParams('banners.hide', { id: banner.id })).toStrictEqual({
+      id: banner.id
+    })
+    expect(() => validateBackendRpcParams('banners.hide', { id: null })).toThrow()
   })
 })

@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client'
 import { CaptionsReader } from '@/components/captions-reader'
 import { AppErrorBoundary } from '@/components/error-boundary'
 import { WindowFrame } from '@/components/window-frame'
+import { WindowProviders } from '@/components/window-providers'
 import type { CaptionWindowSnapshot } from '@/lib/backend'
 import '@/styles.css'
 
@@ -74,7 +75,9 @@ function CaptionsWindowApp(): ReactElement {
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <CaptionsWindowApp />
+      <WindowProviders window="captions">
+        <CaptionsWindowApp />
+      </WindowProviders>
     </AppErrorBoundary>
   </React.StrictMode>
 )

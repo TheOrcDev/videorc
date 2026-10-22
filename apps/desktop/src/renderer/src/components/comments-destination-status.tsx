@@ -8,30 +8,8 @@ import type {
   StreamPlatform
 } from '@/lib/backend'
 import type { ChatSendFailure } from '@/lib/chat-send'
-import type { CohostState } from '@/lib/backend'
-import { cohostChipView } from '@/lib/cohost-view'
+import { chatStateLabel } from '@/lib/state-labels'
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
-
-function providerStateLabel(state: LiveChatProviderConnectionState): string {
-  switch (state) {
-    case 'disabled':
-      return 'Idle'
-    case 'connecting':
-      return 'Connecting'
-    case 'connected':
-      return 'Connected'
-    case 'reconnecting':
-      return 'Reconnecting'
-    case 'waiting':
-      return 'Waiting'
-    case 'failed':
-      return 'Failed'
-    case 'unsupported':
-      return 'Unavailable'
-    case 'ended':
-      return 'Ended'
-  }
-}
 
 function providerBadgeVariant(
   state: LiveChatProviderConnectionState
@@ -50,16 +28,6 @@ function providerBadgeVariant(
   }
 }
 
-function providerStatusLabel(provider: LiveChatProviderState): string {
-  if (provider.write === 'read-only') {
-    return 'Receive-only'
-  }
-  if (provider.write === 'missing-scope') return 'Reconnect to send'
-  if (provider.write === 'failed') return 'Send failed'
-  if (provider.write === 'unavailable' && provider.state === 'connected') return 'Receive-only'
-  return providerStateLabel(provider.state)
-}
-
 // Chat binds to the linked account's channel, not to wherever the stream key
 // points. On a manual-RTMP stream of a different channel that reads the wrong
 // chat with a green "Connected" badge — name the bound account so the
@@ -72,12 +40,6 @@ export function providerBadgeTitle(provider: LiveChatProviderState): string {
     return `${message} · ${identity}`
   }
   return message || identity
-}
-
-/** The badge word for a parked connector: "Paused" when it resumes on its own. */
-function providerBadgeLabel(provider: LiveChatProviderState): string {
-  if (provider.state === 'waiting' && provider.retryAt) return 'Paused'
-  return providerStatusLabel(provider)
 }
 
 /**
@@ -109,64 +71,46 @@ export function commentsDestinationNotes({
     } else if (provider.write === 'read-only' || provider.state === 'connected') {
       // X sends now (closed-beta chat API, 2026-08-19) — read-only here only
       // means THIS stream lacks send context (e.g. a manual-RTMP X target).
-      parts.push(`${label} receive-only`)
+      parts.push(`${label} read-only`)
     } else if (provider.state === 'failed') {
       parts.push(`${label} failed`)
     } else if (provider.state === 'connecting' || provider.state === 'reconnecting') {
-      parts.push(`${label} ${providerStateLabel(provider.state).toLowerCase()}`)
+      parts.push(`${label} ${chatStateLabel(provider).toLowerCase()}`)
     }
   }
 
   return parts.join(' · ')
 }
 
-/** Co-host status, in the destination strip's own vocabulary. Monochrome by
- * rule — only `listening` earns the live accent, exactly like a connected
- * destination. */
-export function CohostStatusChip({ state }: { state: CohostState | null }): ReactElement | null {
-  const chip = cohostChipView(state)
-  if (!chip) return null
-  return (
-    <Badge data-slot="cohost-status-chip" variant={chip.tone === 'live' ? 'success' : 'neutral'}>
-      {chip.label}
-    </Badge>
-  )
-}
-
+// Buddy's own status lives in the Buddy pane's header (plan 174 S3.14a): the
+// strip names chat destinations only.
 export function CommentsDestinationStatus({
   providers,
   mode = 'providers',
   sendTargets = [],
-  failures = [],
-  cohostState = null
+  failures = []
 }: {
   providers: LiveChatProviderState[]
   mode?: 'providers' | 'composer'
   sendTargets?: StreamPlatform[]
   failures?: ChatSendFailure[]
-  /** Latest `cohost.state`; null hides the chip entirely. */
-  cohostState?: CohostState | null
 }): ReactElement | null {
-  if (providers.length === 0 && mode === 'providers' && !cohostState) {
+  if (providers.length === 0 && mode === 'providers') {
     return null
   }
 
   if (mode === 'composer') {
     const notes = commentsDestinationNotes({ providers, sendTargets })
-    const chip = cohostChipView(cohostState)
-    if (!notes && !chip && failures.length === 0) return null
+    if (!notes && failures.length === 0) return null
     return (
       <div className="flex min-w-0 flex-col gap-1.5" data-slot="comments-destination-status">
-        {notes || chip ? (
-          <div className="flex min-w-0 items-center gap-1.5">
-            <p
-              className="min-w-0 flex-1 truncate text-[11px] leading-tight text-muted-foreground"
-              title={notes}
-            >
-              {notes}
-            </p>
-            <CohostStatusChip state={cohostState} />
-          </div>
+        {notes ? (
+          <p
+            className="min-w-0 truncate text-[11px] leading-tight text-muted-foreground"
+            title={notes}
+          >
+            {notes}
+          </p>
         ) : null}
         {failures.length > 0 ? (
           <div className="flex flex-wrap gap-1">
@@ -174,10 +118,13 @@ export function CommentsDestinationStatus({
               <Badge
                 key={`${failure.destinationId}:${failure.reason}`}
                 className="h-auto max-w-full justify-start whitespace-normal text-left"
-                title={failure.reason}
                 variant="destructive"
               >
-                <ChatPlatformIcon decorative platform={failure.platform} />
+                {/* A Badge forces its icons to 12 px: YouTube's mark may not
+                    shrink (plan 165), so its chip names it in words only. */}
+                {failure.platform === 'youtube' ? null : (
+                  <ChatPlatformIcon decorative platform={failure.platform} />
+                )}
                 {CHAT_PLATFORM_LABELS[failure.platform]}: {failure.reason}
               </Badge>
             ))}
@@ -187,25 +134,39 @@ export function CommentsDestinationStatus({
     )
   }
 
+  // What each badge cannot say (a paused chat's resume time, the account
+  // chat reads as) is visible text under the badges, never hover text (plan
+  // 174 S1.10, H-16).
+  const details = providers
+    .map((provider) => ({ provider, detail: providerBadgeTitle(provider) }))
+    .filter((entry) => entry.detail)
   return (
     <div
       aria-label="Chat destination status"
-      className="flex flex-wrap items-center gap-1"
+      className="flex flex-col items-center gap-1.5"
       data-slot="comments-destination-status"
     >
-      {providers.map((provider) => (
-        <Badge
+      <div className="flex flex-wrap items-center justify-center gap-1">
+        {providers.map((provider) => (
+          <Badge key={provider.id} variant={providerBadgeVariant(provider.state)}>
+            {provider.platform === 'youtube' ? null : (
+              <ChatPlatformIcon decorative platform={provider.platform} />
+            )}
+            {CHAT_PLATFORM_LABELS[provider.platform]}
+            <span aria-hidden>·</span>
+            {chatStateLabel(provider)}
+          </Badge>
+        ))}
+      </div>
+      {details.map(({ provider, detail }) => (
+        <p
           key={provider.id}
-          title={providerBadgeTitle(provider)}
-          variant={providerBadgeVariant(provider.state)}
+          className="max-w-full text-center text-xs text-muted-foreground"
+          data-slot="comments-destination-detail"
         >
-          <ChatPlatformIcon decorative platform={provider.platform} />
-          {CHAT_PLATFORM_LABELS[provider.platform]}
-          <span aria-hidden>·</span>
-          {providerBadgeLabel(provider)}
-        </Badge>
+          {CHAT_PLATFORM_LABELS[provider.platform]}: {detail}
+        </p>
       ))}
-      <CohostStatusChip state={cohostState} />
     </div>
   )
 }

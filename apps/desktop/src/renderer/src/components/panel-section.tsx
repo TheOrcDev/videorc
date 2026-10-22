@@ -7,6 +7,8 @@ import { cn } from '@/lib/utils'
  * The flush section (plan 050, D4): the single section treatment for every
  * pane. No border box, background, radius, or shadow; a 13 px / 600 header,
  * a 12 px description, 16 px padding, and a hairline to the next section.
+ * The header is an h2 under the toolbar's h1 (plan 174 S1.6a, A-24); a
+ * section nested under another section's heading passes `headingLevel={3}`.
  */
 export function PanelSection({
   title,
@@ -15,7 +17,8 @@ export function PanelSection({
   action,
   children,
   className,
-  contentClassName
+  contentClassName,
+  headingLevel = 2
 }: {
   // Optional: a titleless section is just padded content (no header row), for
   // when the surrounding layout already names it.
@@ -23,10 +26,14 @@ export function PanelSection({
   description?: ReactNode
   icon?: AppIcon
   action?: ReactNode
-  children: ReactNode
+  /** Optional: a section that is only its header (a title and what it says) has no content box. */
+  children?: ReactNode
   className?: string
   contentClassName?: string
+  /** The outline level of the title: 2 (the default) under the page, 3 when nested. */
+  headingLevel?: 2 | 3
 }): ReactElement {
+  const Heading = headingLevel === 3 ? 'h3' : 'h2'
   const hasHeader = Boolean(title || description || action)
   return (
     <section
@@ -40,22 +47,24 @@ export function PanelSection({
         <header className="flex min-h-6 items-start justify-between gap-3">
           <div className="flex min-w-0 flex-col gap-0.5">
             {title ? (
-              <h3 className="flex items-center gap-2 text-[13px] leading-5 font-semibold text-foreground">
+              <Heading className="flex items-center gap-2 text-section font-semibold text-foreground">
                 {LeadingIcon ? (
                   <LeadingIcon className="size-4 text-muted-foreground" weight="duotone" />
                 ) : null}
                 {title}
-              </h3>
+              </Heading>
             ) : null}
             {description ? (
-              <div className="text-xs text-muted-foreground">{description}</div>
+              <div className="text-meta text-muted-foreground">{description}</div>
             ) : null}
           </div>
           {/* As tall as the title line, so a 28 px button or a switch centres on it. */}
           {action ? <div className="flex h-5 shrink-0 items-center gap-2">{action}</div> : null}
         </header>
       ) : null}
-      <div className={cn('flex flex-col gap-3', contentClassName)}>{children}</div>
+      {children !== null && children !== undefined && children !== false ? (
+        <div className={cn('flex flex-col gap-3', contentClassName)}>{children}</div>
+      ) : null}
     </section>
   )
 }

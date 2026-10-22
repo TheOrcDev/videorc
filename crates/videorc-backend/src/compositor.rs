@@ -13,18 +13,27 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use uuid::Uuid;
 
+use crate::banner_prepare::{
+    BannerBitmap, BannerBitmapKey, BannerPrepareRequest, BannerPrepareService,
+};
+use crate::banners::{
+    BannerLeg, BannerSet, banner_draw_rect, banner_leg_carries, banner_rect_for, banners_with_files,
+};
 use crate::capture_health::{
     CaptureHealthCameraEpoch, CaptureHealthCameraProducerSample, CaptureHealthMonitor,
     CaptureHealthSample, CaptureHealthScreenEpoch, CaptureHealthScreenProducerSample,
     CaptureHealthTransition,
 };
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
+use crate::overlay_layout::{OverlayOrientation, OverlayRect, OverlaySessionShape};
 
 #[path = "compositor_preview_frame_lease.rs"]
 mod preview_frame_lease;
 #[cfg(test)]
 #[path = "compositor_scene_switch_tests.rs"]
 mod scene_switch_tests;
+#[path = "compositor_source_iso_batch.rs"]
+pub(crate) mod source_iso_batch;
 use crate::diagnostics::{
     CompositorCpuFrameCounts, CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
     CompositorSourceImportStats, apply_active_scene_revision, apply_capture_health,
@@ -416,6 +425,8 @@ pub struct CompositorRuntime {
     image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
+    /// Plan 157: Screen/Camera ISO stores while a separate-source capture runs.
+    source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     preview_frame_lease_capacity: Arc<tokio::sync::Semaphore>,
     /// Recent frame evidence, oldest first (instant-record P3). The startup
     /// barrier seeds itself from this ring so a compositor that has been
@@ -442,6 +453,19 @@ pub struct CompositorRuntime {
     /// session's output canvas and the preview reconciler must neither
     /// resize nor retire it.
     capture_lease: Option<CompositorCaptureLease>,
+    /// The banners the picture carries (plan 186 S3), at snapshot level
+    /// beside the takeover and never inside `Scene`: the primary leg, the
+    /// auxiliary leg and the idle preview read one set. Swapped whole by
+    /// `install_banner_set`; no scene commit and no capture change is
+    /// involved, and the next tick sees it.
+    banners: Arc<BannerSet>,
+    /// The session shape banner leg plans are computed against, from session
+    /// start to its end; `None` on the idle preview, where every shown banner
+    /// with a switch on draws. A set swap mid-session re-plans in place.
+    banner_session_shape: Option<OverlaySessionShape>,
+    /// The auxiliary output of the current run, so a banner set change can
+    /// kick prepares for its canvas too.
+    stream_output: Option<CompositorAuxiliaryOutput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -480,11 +504,15 @@ impl CompositorFrameConsumer {
         !matches!(self, Self::NativePreview)
     }
 
-    /// Native preview is Metal-only on macOS. Off macOS — and whenever no GPU
-    /// compositor exists — it is the Electron proof surface, so the CPU path
-    /// must sample live BGRA (Linux portal PipeWire frames included).
-    const fn composes_cpu_pixels(self, gpu_available: bool) -> bool {
-        self.requires_cpu_fallback() || (!gpu_available && matches!(self, Self::NativePreview))
+    /// Native preview never CPU-composes. On macOS it is Metal; off macOS (and
+    /// with no GPU compositor) it is the Electron proof surface, which draws
+    /// the per-source `/preview/{camera,screen}/latest.bmp` layers and never
+    /// reads composed frames. Composing them anyway cost ~7 of 12 logical CPUs
+    /// on an idle Linux Studio with a screen source (Linux plan 0014). The
+    /// tick still publishes a metadata frame and its evidence, so scene/layout
+    /// proofs and the capture-health heartbeat keep advancing.
+    const fn composes_cpu_pixels(self) -> bool {
+        self.requires_cpu_fallback()
     }
 
     const fn label(self) -> &'static str {
@@ -505,6 +533,8 @@ pub struct CompositorStartParams {
     pub height: u32,
     pub frame_consumer: CompositorFrameConsumer,
     pub stream_output: Option<CompositorAuxiliaryOutput>,
+    /// Plan 157: Screen/Camera ISO legs; `None` on every ordinary run.
+    pub source_iso_output: Option<CompositorSourceIsoOutput>,
     /// Per-leg caption overlay plan (R1): `primary` is the recording (or the
     /// stream when stream-only); `aux` is the split stream leg.
     pub caption_overlay_on_primary: bool,
@@ -513,6 +543,27 @@ pub struct CompositorStartParams {
     /// aux when a split stream leg exists, else primary when it carries the stream.
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
+    pub buddy_overlay_on_primary: bool,
+    pub buddy_overlay_on_aux: bool,
+}
+
+/// Plan 157: the separate-source (ISO) legs. Both legs render at ONE raster
+/// (the recording profile canvas, fit/contain) and publish into their own
+/// frame stores, which the Screen/Camera encoder bridges read. Neither leg
+/// carries captions, highlight cards, backgrounds or scene geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositorSourceIsoOutput {
+    pub width: u32,
+    pub height: u32,
+    pub frame_consumer: CompositorFrameConsumer,
+}
+
+/// The per-role ISO frame stores of a live run.
+#[derive(Debug, Clone)]
+pub struct CompositorSourceIsoFrameStores {
+    pub screen: CompositorFrameStore,
+    pub camera: CompositorFrameStore,
+    pub(crate) batches: Arc<source_iso_batch::SourceIsoBatchStore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -534,6 +585,7 @@ struct CompositorRenderLoopParams {
     /// Hot-swappable loop configuration; see [`CompositorLoopConfig`].
     config: watch::Receiver<CompositorLoopConfig>,
     stream_output: Option<CompositorAuxiliaryOutput>,
+    source_iso_output: Option<CompositorSourceIsoOutput>,
 }
 
 /// Render-loop settings a live run can change without a restart
@@ -547,6 +599,8 @@ pub struct CompositorLoopConfig {
     pub caption_overlay_on_aux: bool,
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
+    pub buddy_overlay_on_primary: bool,
+    pub buddy_overlay_on_aux: bool,
 }
 
 /// Capture ownership of the preview compositor run.
@@ -572,6 +626,165 @@ pub struct CompositorArmParams {
     pub caption_overlay_on_aux: bool,
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
+    pub buddy_overlay_on_primary: bool,
+    pub buddy_overlay_on_aux: bool,
+}
+
+/// The per-leg flags of the two layout-driven overlays (plan 164): the
+/// comment-highlight card and the Buddy. Captions keep their start-time plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayLegFlags {
+    pub highlight_on_primary: bool,
+    pub highlight_on_aux: bool,
+    pub buddy_on_primary: bool,
+    pub buddy_on_aux: bool,
+}
+
+/// Plan 164 (S-B3.4, S-C1): swap the highlight and Buddy flags of the live
+/// run in place when `overlays.layout.set` lands mid-session. Returns false
+/// when no run is live; the next session reads the stored layout at start.
+pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
+    let compositor = state.compositor.lock().await;
+    let Some(config_tx) = compositor.loop_config_tx.as_ref() else {
+        return false;
+    };
+    let current = *config_tx.borrow();
+    let next = CompositorLoopConfig {
+        highlight_overlay_on_primary: flags.highlight_on_primary,
+        highlight_overlay_on_aux: flags.highlight_on_aux,
+        buddy_overlay_on_primary: flags.buddy_on_primary,
+        buddy_overlay_on_aux: flags.buddy_on_aux,
+        ..current
+    };
+    if next == current {
+        return true;
+    }
+    config_tx.send(next).is_ok()
+}
+
+// --- Banners (plan 186 S3) ---------------------------------------------------
+
+impl CompositorRuntime {
+    /// The canvases banners are prepared for: the run's primary canvas and
+    /// its auxiliary output's, when a run is live.
+    fn banner_canvases(&self) -> Vec<(u32, u32)> {
+        let mut canvases = Vec::new();
+        if self.run_id.is_some() {
+            canvases.push((self.status.width.max(1), self.status.height.max(1)));
+            if let Some(output) = self.stream_output {
+                canvases.push((output.width.max(1), output.height.max(1)));
+            }
+        }
+        canvases
+    }
+
+    /// The prepares the current set wants on the current canvases, so the
+    /// bitmaps are (usually) ready before the first tick that draws them.
+    fn banner_prepare_requests(&self) -> Vec<BannerPrepareRequest> {
+        let canvases = self.banner_canvases();
+        let mut requests = Vec::new();
+        for layer in &self.banners.layers {
+            if layer.fade.hides() {
+                continue;
+            }
+            let Some(file_revision) = layer.file_revision else {
+                continue;
+            };
+            for canvas in &canvases {
+                let orientation = OverlayOrientation::for_canvas(canvas.0, canvas.1);
+                let rect = banner_rect_for(&layer.banner, orientation, None);
+                requests.push(BannerPrepareRequest {
+                    key: BannerBitmapKey::new(
+                        &layer.banner.id,
+                        file_revision,
+                        *canvas,
+                        rect,
+                        layer.banner.opacity,
+                    ),
+                    path: Arc::clone(&layer.image_path),
+                    rect,
+                    opacity: layer.banner.opacity,
+                });
+            }
+        }
+        requests
+    }
+
+    /// Drop the layers whose fade-out ended (D10). Runs every render tick
+    /// that gets the lock; swaps the `Arc` only when something leaves.
+    fn reap_faded_banners(&mut self, now: Instant) -> bool {
+        match self.banners.without_faded_out(now) {
+            Some(next) => {
+                self.banners = Arc::new(next);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Plan 186 S3: install the shown banners (`banners::shown_banners_for_compositor`)
+/// as the compositor's set. Called after every banner mutation (before
+/// `banners.changed` goes out) and once at backend start, because shown
+/// survives a relaunch (D3). Touches neither capture, the scene graph nor a
+/// session: the set is one `Arc` the next tick clones. Prepares for the
+/// current canvases are queued off this task.
+pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
+    let shown = crate::banners::shown_banners_for_compositor(&state.database)?;
+    // Stat the files before taking the lock.
+    let shown = banners_with_files(shown, &state.database.banner_assets_dir());
+    for (banner, path, revision) in &shown {
+        if revision.is_none() {
+            // Said, not hidden: the banner stays in the set but draws nothing.
+            tracing::warn!(
+                banner = %banner.id,
+                path = %path.display(),
+                "A showing banner's image file is missing; it will not be drawn"
+            );
+        }
+    }
+    let now = Instant::now();
+    let requests = {
+        let mut compositor = state.compositor.lock().await;
+        let next = compositor.banners.next_with_files(shown, now);
+        compositor.banners = Arc::new(next);
+        compositor.banner_prepare_requests()
+    };
+    for request in requests {
+        state.banner_prepare.request(request);
+    }
+    Ok(())
+}
+
+/// The session shape banner leg plans follow from now on (`Some` from a
+/// session's compositor start, `None` back on the idle preview). The stop
+/// and lease-release paths clear it themselves; this is for the session
+/// start, after the run is armed or started.
+pub async fn set_banner_session_shape(state: &AppState, shape: Option<OverlaySessionShape>) {
+    let requests = {
+        let mut compositor = state.compositor.lock().await;
+        compositor.banner_session_shape = shape;
+        compositor.banner_prepare_requests()
+    };
+    for request in requests {
+        state.banner_prepare.request(request);
+    }
+}
+
+/// The canvases a Show is budgeted against (`banners.show`): the live run's
+/// primary and auxiliary canvases, none without a run.
+pub async fn banner_prepare_canvases(state: &AppState) -> Vec<(u32, u32)> {
+    state.compositor.lock().await.banner_canvases()
+}
+
+#[cfg(test)]
+pub(crate) async fn banner_set_for_test(state: &AppState) -> Arc<BannerSet> {
+    Arc::clone(&state.compositor.lock().await.banners)
+}
+
+#[cfg(test)]
+pub(crate) async fn banner_session_shape_for_test(state: &AppState) -> Option<OverlaySessionShape> {
+    state.compositor.lock().await.banner_session_shape
 }
 
 /// Why a capture could not arm the preview compositor in place. Callers fall
@@ -784,6 +997,7 @@ impl LiveSourceFetchState {
 struct CompositorRenderCache {
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
+    source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
     transition: Option<SceneTransition>,
@@ -792,9 +1006,34 @@ struct CompositorRenderCache {
     editor_draft: Option<EditorDraft>,
     active_image_source: Option<CompositorImageSource>,
     background_image_source: Option<CompositorImageSource>,
+    /// The banner set and the session shape it is planned against (plan 186
+    /// S3): one `Arc` clone per tick, read by both legs.
+    banners: Arc<BannerSet>,
+    banner_session_shape: Option<OverlaySessionShape>,
 }
 
 impl CompositorRenderCache {
+    fn capture_source_needs(&self) -> crate::live_layout::SceneSourceNeeds {
+        let iso = active_source_iso_capture_needs(
+            self.snapshot.as_ref(),
+            self.source_iso_frame_stores.as_ref(),
+        );
+        crate::live_layout::SceneSourceNeeds {
+            camera: iso.camera
+                || scene_needs_live_camera_frame(
+                    self.snapshot.as_ref(),
+                    self.active_image_source.as_ref(),
+                )
+                || scene_needs_live_camera_frame(self.simulcast_snapshot.as_ref(), None),
+            screen: iso.screen
+                || scene_needs_live_screen_frame(
+                    self.snapshot.as_ref(),
+                    self.active_image_source.as_ref(),
+                )
+                || scene_needs_live_screen_frame(self.simulcast_snapshot.as_ref(), None),
+        }
+    }
+
     async fn refresh_initial(state: &AppState) -> Self {
         let compositor = state.compositor.lock().await;
         Self::from_runtime(&compositor)
@@ -802,7 +1041,9 @@ impl CompositorRenderCache {
 
     fn refresh_nonblocking(&mut self, state: &AppState) {
         if let Ok(mut compositor) = state.compositor.try_lock() {
-            compositor.reap_editor_draft(Instant::now());
+            let now = Instant::now();
+            compositor.reap_editor_draft(now);
+            compositor.reap_faded_banners(now);
             *self = Self::from_runtime(&compositor);
         }
     }
@@ -828,6 +1069,7 @@ impl CompositorRenderCache {
         Self {
             frame_store: compositor.frame_store.clone(),
             stream_frame_store: compositor.stream_frame_store.clone(),
+            source_iso_frame_stores: compositor.source_iso_frame_stores.clone(),
             snapshot: compositor.scene.clone(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
             transition: compositor.scene_transition.clone(),
@@ -837,6 +1079,8 @@ impl CompositorRenderCache {
                 .filter(|_| compositor.capture_lease.is_none()),
             active_image_source,
             background_image_source,
+            banners: Arc::clone(&compositor.banners),
+            banner_session_shape: compositor.banner_session_shape,
         }
     }
 }
@@ -1422,6 +1666,9 @@ fn snapshot_with_transition(
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompositorSceneSnapshot {
+    // Confirmed selection survives presets that omit a selected source.
+    // None means this generic scene has no capture-selection authority yet.
+    selected_sources: Option<crate::protocol::SourceSelection>,
     revision: u64,
     scene: Option<Scene>,
     layout: LayoutSettings,
@@ -1704,6 +1951,7 @@ mod editor_draft_tests {
 
     fn snapshot(revision: u64) -> CompositorSceneSnapshot {
         CompositorSceneSnapshot {
+            selected_sources: None,
             revision,
             scene: Some(Scene {
                 id: "scene".to_string(),
@@ -2116,6 +2364,8 @@ mod editor_draft_tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         });
         assert_eq!(
@@ -2198,6 +2448,9 @@ mod editor_draft_tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -2563,6 +2816,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         ),
         frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         stream_frame_store: None,
+        source_iso_frame_stores: None,
         preview_frame_lease_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
         frame_evidence: VecDeque::new(),
         run_id: None,
@@ -2573,6 +2827,9 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         preview_resize_revision: None,
         loop_config_tx: None,
         capture_lease: None,
+        banners: Arc::new(BannerSet::default()),
+        banner_session_shape: None,
+        stream_output: None,
     }
 }
 
@@ -2662,10 +2919,20 @@ async fn start_synthetic_compositor_with_lifecycle(
         caption_overlay_on_aux: params.caption_overlay_on_aux,
         highlight_overlay_on_primary: params.highlight_overlay_on_primary,
         highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+        buddy_overlay_on_primary: params.buddy_overlay_on_primary,
+        buddy_overlay_on_aux: params.buddy_overlay_on_aux,
     });
     let stream_frame_store = params
         .stream_output
         .map(|_| Arc::new(StdMutex::new(FrameStore::new(2))));
+    let source_iso_frame_stores =
+        params
+            .source_iso_output
+            .map(|_| CompositorSourceIsoFrameStores {
+                batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
+                screen: Arc::new(StdMutex::new(FrameStore::new(2))),
+                camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+            });
     let render_dimensions = Arc::new(AtomicU64::new(pack_render_dimensions(
         status.width,
         status.height,
@@ -2679,6 +2946,7 @@ async fn start_synthetic_compositor_with_lifecycle(
         let mut compositor = state.compositor.lock().await;
         compositor.frame_store = Arc::new(StdMutex::new(FrameStore::new(2)));
         compositor.stream_frame_store = stream_frame_store;
+        compositor.source_iso_frame_stores = source_iso_frame_stores;
         compositor.frame_evidence.clear();
         compositor.status = status.clone();
         compositor.run_id = Some(run_id.clone());
@@ -2689,6 +2957,10 @@ async fn start_synthetic_compositor_with_lifecycle(
         compositor.capture_lease = None;
         // A new run is a new world: a drag from the previous run re-drafts.
         compositor.editor_draft = None;
+        // Banners stay (they are not run state); the session that owns this
+        // run sets its shape after the start, so it begins as the idle plan.
+        compositor.banner_session_shape = None;
+        compositor.stream_output = params.stream_output;
         // Spawn and publish the worker handle while holding the ownership lock. A concurrent
         // replacement can therefore never observe a live run id without the handle it must
         // await, avoiding the ineffective `abort` race of `spawn_blocking` workers.
@@ -2701,6 +2973,7 @@ async fn start_synthetic_compositor_with_lifecycle(
                 render_dimensions,
                 config: loop_config_rx.clone(),
                 stream_output: params.stream_output,
+                source_iso_output: params.source_iso_output,
             },
             stop_rx.clone(),
             previous_scene_status.6,
@@ -2831,6 +3104,7 @@ pub async fn stop_compositor(state: &AppState) -> CompositorStatus {
         compositor.status = status.clone();
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
+        compositor.source_iso_frame_stores = None;
         status
     };
     state.emit_event("compositor.status", status.clone());
@@ -2951,6 +3225,9 @@ async fn stop_compositor_if_run_id_with_lifecycle(
         }
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
+        compositor.source_iso_frame_stores = None;
+        compositor.stream_output = None;
+        compositor.banner_session_shape = None;
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
         compositor.status = status.clone();
@@ -3000,6 +3277,7 @@ pub async fn arm_compositor_for_capture(
         };
         if preview_config.frame_consumer != CompositorFrameConsumer::NativePreview
             || compositor.stream_frame_store.is_some()
+            || compositor.source_iso_frame_stores.is_some()
             || compositor.preview_render_dimensions.is_none()
         {
             return Err(CompositorArmRefusal::NotPreviewOwned);
@@ -3011,6 +3289,8 @@ pub async fn arm_compositor_for_capture(
             caption_overlay_on_aux: params.caption_overlay_on_aux,
             highlight_overlay_on_primary: params.highlight_overlay_on_primary,
             highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+            buddy_overlay_on_primary: params.buddy_overlay_on_primary,
+            buddy_overlay_on_aux: params.buddy_overlay_on_aux,
         };
         let config_sent = compositor
             .loop_config_tx
@@ -3089,6 +3369,8 @@ pub async fn release_compositor_capture_lease(
             return None;
         }
         let lease = compositor.capture_lease.take()?;
+        // Back to the idle plan: every shown banner with a switch on draws.
+        compositor.banner_session_shape = None;
         let surface_live = surface.state == PreviewSurfaceState::Live
             && compositor.render_task.is_some()
             && compositor.stop_tx.is_some();
@@ -3508,6 +3790,31 @@ pub async fn compositor_stream_frame_store(state: &AppState) -> Option<Composito
     state.compositor.lock().await.stream_frame_store.clone()
 }
 
+/// Plan 157: the live run's Screen/Camera ISO frame stores, if armed.
+pub async fn compositor_source_iso_frame_stores(
+    state: &AppState,
+) -> Option<CompositorSourceIsoFrameStores> {
+    state
+        .compositor
+        .lock()
+        .await
+        .source_iso_frame_stores
+        .clone()
+}
+
+#[cfg(test)]
+pub(crate) async fn test_install_source_iso_frame_stores(
+    state: &AppState,
+) -> CompositorSourceIsoFrameStores {
+    let stores = CompositorSourceIsoFrameStores {
+        screen: Arc::new(StdMutex::new(FrameStore::new(2))),
+        camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+        batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
+    };
+    state.compositor.lock().await.source_iso_frame_stores = Some(stores.clone());
+    stores
+}
+
 /// How many recent frame-evidence samples the compositor keeps for the
 /// startup barrier to seed from.
 pub const COMPOSITOR_FRAME_EVIDENCE_HISTORY_LEN: usize = 8;
@@ -3902,9 +4209,38 @@ pub async fn update_compositor_scene(
     update_compositor_scene_with_prepare_hook(state, params, || {}).await
 }
 
+pub(crate) async fn update_compositor_scene_with_selected_sources(
+    state: &AppState,
+    params: CompositorSceneUpdateParams,
+    selected_sources: &crate::protocol::SourceSelection,
+) -> CompositorStatus {
+    update_compositor_scene_with_selection_and_prepare_hook(
+        state,
+        params,
+        Some(selected_sources.clone()),
+        || {},
+    )
+    .await
+}
+
 async fn update_compositor_scene_with_prepare_hook(
     state: &AppState,
     params: CompositorSceneUpdateParams,
+    before_blocking_image_prepare: impl FnOnce(),
+) -> CompositorStatus {
+    update_compositor_scene_with_selection_and_prepare_hook(
+        state,
+        params,
+        None,
+        before_blocking_image_prepare,
+    )
+    .await
+}
+
+async fn update_compositor_scene_with_selection_and_prepare_hook(
+    state: &AppState,
+    params: CompositorSceneUpdateParams,
+    selected_sources: Option<crate::protocol::SourceSelection>,
     before_blocking_image_prepare: impl FnOnce(),
 ) -> CompositorStatus {
     let CompositorSceneUpdateParams {
@@ -3919,7 +4255,8 @@ async fn update_compositor_scene_with_prepare_hook(
             .database
             .revalidate_stream_screen_for_compositor(screen)
     });
-    let snapshot = CompositorSceneSnapshot {
+    let mut snapshot = CompositorSceneSnapshot {
+        selected_sources,
         revision,
         scene,
         layout,
@@ -3968,6 +4305,15 @@ async fn update_compositor_scene_with_prepare_hook(
         {
             compositor.pending_scene_request = None;
             return compositor.status.clone();
+        }
+
+        // Generic composition edits preserve current capture authority. Resolve
+        // it at commit time, after any unlocked image preparation.
+        if snapshot.selected_sources.is_none() {
+            snapshot.selected_sources = compositor
+                .scene
+                .as_ref()
+                .and_then(|current| current.selected_sources.clone());
         }
 
         // Scene motion: capture the OUTGOING scene's effective transforms so
@@ -4039,8 +4385,10 @@ impl CompositorSourceEdit {
         primary: Scene,
         auxiliary: Option<Scene>,
         layout: LayoutSettings,
+        selected_sources: crate::protocol::SourceSelection,
     ) -> Self {
         let snapshot = |scene| CompositorSceneSnapshot {
+            selected_sources: Some(selected_sources.clone()),
             revision: 1,
             scene: Some(scene),
             layout: layout.clone(),
@@ -4083,6 +4431,7 @@ impl CompositorSourceEdit {
         target_sources: &crate::protocol::SourceSelection,
     ) {
         for snapshot in std::iter::once(&mut self.primary).chain(self.auxiliary.iter_mut()) {
+            snapshot.selected_sources = Some(target_sources.clone());
             if let Some(scene) = snapshot.scene.as_mut() {
                 if kind == crate::live_source_switch::SourceKind::Camera
                     && snapshot.layout.arrangement_mode
@@ -4317,6 +4666,13 @@ impl CompositorRuntime {
             .is_some_and(|scene| scene.active_screen.is_some())
     }
 
+    /// The banner set the Windows D3D11 media session draws (plan 186 S4),
+    /// read with the committed snapshot each tick like the takeover.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_banner_set(&self) -> Arc<BannerSet> {
+        Arc::clone(&self.banners)
+    }
+
     #[cfg(target_os = "windows")]
     pub(crate) fn windows_scene_images(
         &self,
@@ -4355,6 +4711,12 @@ impl CompositorRuntime {
             primary,
             auxiliary: self.simulcast_scene.clone(),
         })
+    }
+
+    /// Only live ISO members own capture demand. A hidden selected source is
+    /// still needed; explicit Off or terminal role retirement releases it.
+    pub(crate) fn source_iso_capture_needs(&self) -> crate::live_layout::SceneSourceNeeds {
+        active_source_iso_capture_needs(self.scene.as_ref(), self.source_iso_frame_stores.as_ref())
     }
     pub(crate) fn source_edit_is_current(&self, original: &CompositorSourceEdit) -> bool {
         self.scene.as_ref() == Some(&original.primary) && self.simulcast_scene == original.auxiliary
@@ -4510,6 +4872,10 @@ pub async fn update_compositor_simulcast_scene(
         return;
     }
     let snapshot = CompositorSceneSnapshot {
+        selected_sources: compositor
+            .scene
+            .as_ref()
+            .and_then(|primary| primary.selected_sources.clone()),
         revision,
         scene,
         layout,
@@ -4826,6 +5192,7 @@ async fn stop_current_compositor(state: &AppState) -> bool {
         compositor.capture_lease = None;
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
+        compositor.source_iso_frame_stores = None;
     }
     crate::capture_recovery::note_compositor_lifecycle_changed(state, None).await;
     true
@@ -4925,6 +5292,7 @@ async fn run_synthetic_compositor_loop(
         render_dimensions,
         config: mut config_rx,
         stream_output,
+        source_iso_output,
     } = params;
     // Loop configuration is hot-swappable (instant-record P4): a capture arms
     // the preview run in place, so fps, consumer and overlay flags are plain
@@ -4936,6 +5304,8 @@ async fn run_synthetic_compositor_loop(
         mut caption_overlay_on_aux,
         mut highlight_overlay_on_primary,
         mut highlight_overlay_on_aux,
+        mut buddy_overlay_on_primary,
+        mut buddy_overlay_on_aux,
     } = *config_rx.borrow_and_update();
     let mut pending_loop_config: Option<CompositorLoopConfig> = None;
     let mut loop_config_closed = false;
@@ -4954,6 +5324,10 @@ async fn run_synthetic_compositor_loop(
         matches!(frame_consumer, CompositorFrameConsumer::NativePreview) && stream_output.is_none();
     let mut gpu_compositor = new_gpu_compositor(smooth_preview_scaling);
     let mut stream_gpu_compositor = stream_output.and_then(|_| new_gpu_compositor(false));
+    // Plan 157: one GPU compositor per ISO leg; nearest sampling like the
+    // recording leg so a 1:1 screen stays pixel-exact.
+    let mut iso_screen_gpu_compositor = source_iso_output.and_then(|_| new_gpu_compositor(false));
+    let mut iso_camera_gpu_compositor = source_iso_output.and_then(|_| new_gpu_compositor(false));
     // Rate-collapse watchdog for the always-on pipeline: the 2026-08-27
     // incident (33 idle minutes of silent decay to ~6 fresh fps) is exactly
     // the state every liveness-only watchdog ignores.
@@ -4988,6 +5362,7 @@ async fn run_synthetic_compositor_loop(
     let mut next_live_source_refresh_at = Instant::now() + COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL;
 
     let mut frames_rendered = 0_u64;
+    let mut latest_published_sequence = 0_u64;
     let mut frames_in_window = 0_u64;
     let mut repeated_frames = 0_u64;
     let mut dropped_frames = 0_u64;
@@ -5048,6 +5423,8 @@ async fn run_synthetic_compositor_loop(
             caption_overlay_on_aux = next.caption_overlay_on_aux;
             highlight_overlay_on_primary = next.highlight_overlay_on_primary;
             highlight_overlay_on_aux = next.highlight_overlay_on_aux;
+            buddy_overlay_on_primary = next.buddy_overlay_on_primary;
+            buddy_overlay_on_aux = next.buddy_overlay_on_aux;
             tracing::info!(
                 "compositor {run_id} loop config swapped in place: {} fps, consumer {}",
                 target_fps,
@@ -5136,7 +5513,6 @@ async fn run_synthetic_compositor_loop(
 
                 let render_started_at = Instant::now();
                 frames_rendered = frames_rendered.saturating_add(1);
-                frames_in_window = frames_in_window.saturating_add(1);
                 // Preview bounds can change without restarting the compositor
                 // (including portrait <-> landscape). Re-read every tick so
                 // the next published frame and Metal target adopt the new
@@ -5156,10 +5532,15 @@ async fn run_synthetic_compositor_loop(
                         frame_consumer,
                         stream_output,
                         stream_gpu_compositor.as_mut(),
+                        source_iso_output,
+                        iso_screen_gpu_compositor.as_mut(),
+                        iso_camera_gpu_compositor.as_mut(),
                         caption_overlay_on_primary,
                         caption_overlay_on_aux,
                         highlight_overlay_on_primary,
                         highlight_overlay_on_aux,
+                        buddy_overlay_on_primary,
+                        buddy_overlay_on_aux,
                     )
                         .await;
                 // Adoption at the publish boundary uses the same recovery/
@@ -5201,11 +5582,22 @@ async fn run_synthetic_compositor_loop(
                     delivery_stats.screen_fresh_serves,
                 );
                 let fallback_frame_age_ms = published.fallback_frame_age_ms;
-                cpu_frame_counts.record(published.compositor_backend);
-                if is_repeated_compositor_frame(previous_fingerprint, published.fingerprint) {
+                if published.primary_published {
+                    latest_published_sequence = frames_rendered;
+                    frames_in_window = frames_in_window.saturating_add(1);
+                }
+                if published.primary_published {
+                    cpu_frame_counts.record(published.compositor_backend);
+                }
+                let fingerprint = if published.primary_published {
+                    published.fingerprint
+                } else {
+                    previous_fingerprint.unwrap_or(published.fingerprint)
+                };
+                if !published.primary_published || is_repeated_compositor_frame(previous_fingerprint, fingerprint) {
                     repeated_frames = repeated_frames.saturating_add(1);
                 }
-                previous_fingerprint = Some(published.fingerprint);
+                previous_fingerprint = Some(fingerprint);
                 frame_times_ms.push(render_started_at.elapsed().as_secs_f64() * 1000.0);
                 source_fetch_times_ms.push(published.timings.source_fetch_ms);
                 scene_snapshot_times_ms.push(published.timings.scene_snapshot_ms);
@@ -5235,7 +5627,10 @@ async fn run_synthetic_compositor_loop(
                 frame_store_publish_times_ms.push(published.timings.frame_store_publish_ms);
 
                 let surface_progress_started_at = Instant::now();
-                let surface_status = match try_update_preview_surface_frames(&state, frames_rendered) {
+                let surface_sequence = if published.primary_published { frames_rendered } else {
+                    latest_surface_status.as_ref().map_or(0, |status| status.frames_rendered)
+                };
+                let surface_status = match try_update_preview_surface_frames(&state, surface_sequence) {
                     Ok(Some(status)) => {
                         preview_surface_active = status.transport.is_surface();
                         latest_surface_status = Some(status.clone());
@@ -5255,7 +5650,7 @@ async fn run_synthetic_compositor_loop(
                 preview_surface_progress_times_ms
                     .push(surface_progress_started_at.elapsed().as_secs_f64() * 1000.0);
 
-                if preview_surface_active
+                if published.primary_published && preview_surface_active
                     && should_emit_preview_surface_compositor_progress(latest_surface_status.as_ref())
                 {
                     let status_progress_started_at = Instant::now();
@@ -5296,10 +5691,8 @@ async fn run_synthetic_compositor_loop(
                         }
                         let sampled_camera_mutation_epoch = observed_camera_mutation_epoch;
                         let fetch = live_sources.fetch_stats();
-                        let camera_is_consumed = scene_needs_live_camera_frame(
-                            render_cache.snapshot.as_ref(),
-                            render_cache.active_image_source.as_ref(),
-                        );
+                        let capture_needs = render_cache.capture_source_needs();
+                        let camera_is_consumed = capture_needs.camera;
                         let camera_target_fps = live_sources
                             .camera
                             .as_ref()
@@ -5372,10 +5765,7 @@ async fn run_synthetic_compositor_loop(
                             producer.capture_callbacks = stall.capture_callbacks;
                             producer.frame_store_publications = stall.frame_store_publications;
                         }
-                        let screen_is_consumed = scene_needs_live_screen_frame(
-                            render_cache.snapshot.as_ref(),
-                            render_cache.active_image_source.as_ref(),
-                        );
+                        let screen_is_consumed = capture_needs.screen;
                         let (screen_target_fps, mut screen_producer) = if screen_is_consumed {
                             match preview_screen_restart_snapshot(&state).await {
                                 Some(snapshot) => {
@@ -5557,16 +5947,17 @@ async fn run_synthetic_compositor_loop(
                         latest_source_statuses = sources;
                     }
                     let sources = latest_source_statuses.clone();
-                    let frame_age_ms = compositor_frame_age_ms(
-                        &sources,
-                        fallback_frame_age_ms,
-                    );
+                    let frame_age_ms = if published.primary_published {
+                        compositor_frame_age_ms(&sources, fallback_frame_age_ms)
+                    } else {
+                        fallback_frame_age_ms
+                    };
                     let status = match try_update_compositor_status(
                         &state,
                         &run_id,
                         CompositorMetrics {
                             render_fps: measured_fps,
-                            frames_rendered,
+                            frames_rendered: latest_published_sequence,
                             repeated_frames,
                             dropped_frames,
                             frame_age_ms,
@@ -5731,6 +6122,7 @@ impl SourceFrameFingerprint {
 /// The result of compositing and publishing one frame: how stale the frame was, plus
 /// the fingerprint of the real source frames that fed it.
 struct CompositorPublishResult {
+    primary_published: bool,
     fallback_frame_age_ms: u64,
     fingerprint: SourceFrameFingerprint,
     compositor_backend: CompositorBackend,
@@ -5884,6 +6276,10 @@ struct PreparedGpuSource<'a> {
     /// Camera chroma key; forces `blend` semantics via the shader's computed
     /// alpha, so keyed camera quads set both.
     chroma_key: Option<crate::metal_compositor::GpuChromaKey>,
+    /// A turned quad (the Buddy sprite, plan 168 S-B2); see `GpuSource`.
+    corners: Option<[[f32; 2]; 4]>,
+    sampler: crate::metal_compositor::GpuSourceSampler,
+    opacity: f32,
 }
 
 #[cfg(target_os = "macos")]
@@ -5930,6 +6326,9 @@ impl<'a> PreparedGpuSource<'a> {
             mask: scene_mask_into_metal(self.mask),
             blend: self.blend,
             chroma_key: self.chroma_key,
+            corners: self.corners,
+            sampler: self.sampler,
+            opacity: self.opacity,
         }
     }
 }
@@ -6024,19 +6423,41 @@ fn push_caption_overlay_gpu_source<'a>(
     content_namespace: u64,
     safe_inset: usize,
 ) {
+    let layout = crate::overlay_layout::overlay_blit_layout(
+        overlay.width as usize,
+        overlay.height as usize,
+        canvas_width.max(1) as usize,
+        canvas_height.max(1) as usize,
+        overlay.blit_rect(canvas_width, canvas_height),
+        safe_inset,
+    );
+    push_overlay_gpu_source_at(
+        prepared_sources,
+        overlay,
+        layout,
+        canvas_width,
+        canvas_height,
+        content_namespace,
+    );
+}
+
+/// [`push_caption_overlay_gpu_source`] at a layout already decided (the
+/// Buddy's bubble above the pet's head, plan 168 D16).
+#[cfg(target_os = "macos")]
+fn push_overlay_gpu_source_at<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    overlay: &'a crate::captions::CaptionOverlay,
+    layout: (usize, usize, usize, usize),
+    canvas_width: u32,
+    canvas_height: u32,
+    content_namespace: u64,
+) {
     let overlay_width = overlay.width as usize;
     let overlay_height = overlay.height as usize;
     if overlay.rgba.len() < overlay_width * overlay_height * 4 {
         return;
     }
-    let (source_left, dest_left, dest_top, draw_width) = caption_overlay_layout_with_inset(
-        overlay_width,
-        overlay_height,
-        canvas_width.max(1) as usize,
-        canvas_height.max(1) as usize,
-        overlay.placement,
-        safe_inset,
-    );
+    let (source_left, dest_left, dest_top, draw_width) = layout;
     let draw_height = overlay_height.min(canvas_height.max(1) as usize);
     // Channel conversion happens once when the overlay revision is installed. Crop only
     // when the canvas is narrower than the overlay; the common path borrows immutable BGRA.
@@ -6090,7 +6511,298 @@ fn push_caption_overlay_gpu_source<'a>(
         // its alpha-0 pixels overwrite the frame as an opaque black box.
         blend: true,
         chroma_key: None,
+        corners: None,
+        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+        opacity: 1.0,
     });
+}
+
+// The pet atlas's key-addressed Metal slot (D8) must be the namespace the
+// sprite is keyed with.
+#[cfg(target_os = "macos")]
+const _: () = assert!(
+    crate::metal_compositor::KEYED_TEXTURE_NAMESPACES[0]
+        == crate::buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE
+);
+
+// The banners' key-addressed slots (plan 186 S3) must be the namespace they
+// are keyed with, and hold the four that may show at once.
+#[cfg(target_os = "macos")]
+const _: () = assert!(
+    crate::metal_compositor::KEYED_TEXTURE_NAMESPACES[1]
+        == crate::banner_prepare::BANNER_METAL_NAMESPACE
+        && crate::metal_compositor::BANNER_KEYED_TEXTURE_SLOTS == crate::banners::BANNER_MAX_SHOWN
+);
+
+/// Banners on the Metal path (plan 186 S3): one blended quad per banner from
+/// a key-addressed texture in namespace 9 (slot = the banner, content = the
+/// prepared revision), so a bitmap uploads once per prepare and never per
+/// frame. The quad is the contained rect; a bitmap still being re-prepared is
+/// the banner's last one, which the linear sampler scales into the rect.
+/// Opacity is baked into the bitmap; the fade rides the per-layer opacity.
+/// Drawn after the scene and the takeover, before captions (D5).
+#[cfg(target_os = "macos")]
+fn push_banner_gpu_sources<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    inputs: &CompositorRenderInputs<'a>,
+) {
+    let canvas_width = f64::from(inputs.width.max(1));
+    let canvas_height = f64::from(inputs.height.max(1));
+    for draw in inputs.banners {
+        let bitmap = &*draw.bitmap;
+        let (bitmap_width, bitmap_height) = (bitmap.width as usize, bitmap.height as usize);
+        if bitmap_width == 0
+            || bitmap_height == 0
+            || bitmap.bgra.len() < bitmap_width * bitmap_height * 4
+        {
+            continue;
+        }
+        let (x, y, width, height) = draw.draw_rect(inputs.width, inputs.height);
+        if width == 0 || height == 0 {
+            continue;
+        }
+        prepared_sources.push(PreparedGpuSource {
+            pixels: PreparedGpuSourcePixels::Borrowed(&bitmap.bgra),
+            kind: crate::metal_compositor::GpuSourceKind::Image,
+            content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                namespace: crate::banner_prepare::BANNER_METAL_NAMESPACE,
+                revision: bitmap.revision,
+                variant: draw.slot,
+            }),
+            iosurface: None,
+            pixel_buffer: None,
+            width: bitmap_width,
+            height: bitmap_height,
+            dest: [
+                (x as f64 / canvas_width) as f32,
+                (y as f64 / canvas_height) as f32,
+                (width as f64 / canvas_width) as f32,
+                (height as f64 / canvas_height) as f32,
+            ],
+            crop: [0.0; 4],
+            mirror: false,
+            mask: SceneMask::None,
+            // Straight alpha over the picture: a PNG's soft edges and holes
+            // show what is beneath.
+            blend: true,
+            chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Linear,
+            opacity: draw.opacity,
+        });
+    }
+}
+
+/// The Buddy on the Metal path (plan 168 S-B2): the pet as one turned,
+/// linearly sampled quad from its atlas (namespace 7, a key-addressed slot
+/// that never re-uploads when another layer appears), then the bubble
+/// (namespace 8) above its head. Captions draw before, the card after (D9).
+#[cfg(target_os = "macos")]
+fn push_buddy_gpu_sources<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    inputs: &CompositorRenderInputs<'a>,
+) {
+    if let Some(sprite) = inputs.buddy_leg.and_then(|leg| leg.sprite.as_ref()) {
+        push_buddy_sprite_gpu_source(prepared_sources, sprite, inputs.width, inputs.height);
+    }
+    if let Some(overlay) = inputs.buddy_overlay {
+        let layout = buddy_bubble_layout(overlay, inputs.buddy_leg, inputs.width, inputs.height);
+        push_overlay_gpu_source_at(
+            prepared_sources,
+            overlay,
+            layout,
+            inputs.width,
+            inputs.height,
+            crate::buddy_sprite::BUDDY_BUBBLE_METAL_NAMESPACE,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn push_buddy_sprite_gpu_source<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    sprite: &'a crate::buddy_sprite::BuddySpriteLayer,
+    canvas_width: u32,
+    canvas_height: u32,
+) {
+    let atlas = &*sprite.atlas;
+    let draw = &sprite.draw;
+    let [cell_x, cell_y, cell_w, cell_h] = draw.cell;
+    if !draw.is_drawable()
+        || cell_x + cell_w > atlas.width
+        || cell_y + cell_h > atlas.height
+        || atlas.bgra.len() < atlas.width as usize * atlas.height as usize * 4
+    {
+        return;
+    }
+    let (width, height) = (canvas_width.max(1) as f32, canvas_height.max(1) as f32);
+    let corners = draw.corners().map(|[x, y]| [x / width, y / height]);
+    let min_x = corners
+        .iter()
+        .map(|corner| corner[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|corner| corner[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners
+        .iter()
+        .map(|corner| corner[1])
+        .fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|corner| corner[1])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let (atlas_width, atlas_height) = (atlas.width as f32, atlas.height as f32);
+    prepared_sources.push(PreparedGpuSource {
+        pixels: PreparedGpuSourcePixels::Borrowed(&atlas.bgra),
+        kind: crate::metal_compositor::GpuSourceKind::Image,
+        content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+            namespace: crate::buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE,
+            revision: atlas.revision,
+            variant: 0,
+        }),
+        iosurface: None,
+        pixel_buffer: None,
+        width: atlas.width as usize,
+        height: atlas.height as usize,
+        // The bounding box; the quad itself is `corners`.
+        dest: [min_x, min_y, max_x - min_x, max_y - min_y],
+        crop: [
+            cell_x as f32 / atlas_width,
+            cell_y as f32 / atlas_height,
+            (atlas.width - cell_x - cell_w) as f32 / atlas_width,
+            (atlas.height - cell_y - cell_h) as f32 / atlas_height,
+        ],
+        mirror: false,
+        mask: SceneMask::None,
+        // Straight alpha over the frame; the gutters and alpha bleed keep
+        // the linear filter's edge clean.
+        blend: true,
+        chroma_key: None,
+        corners: Some(corners),
+        sampler: crate::metal_compositor::GpuSourceSampler::Linear,
+        opacity: draw.opacity,
+    });
+}
+
+#[derive(Debug)]
+enum GpuComposeFailure {
+    #[cfg(target_os = "macos")]
+    TargetRingBusy,
+    Unavailable(String),
+}
+
+#[cfg(test)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SourceIsoCompositionTiming {
+    role: usize,
+    sequence: u64,
+    began_ms: f64,
+    completed_ms: f64,
+    outcome: &'static str,
+    target_refs: u64,
+    source_texture_ms: Option<f64>,
+    command_wait_ms: Option<f64>,
+}
+
+#[cfg(test)]
+static SOURCE_ISO_COMPOSITION_TRACE: std::sync::Mutex<Vec<SourceIsoCompositionTiming>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_trace_source_iso_composition(
+    role: usize,
+    sequence: u64,
+    began: Instant,
+    result: &Result<GpuCompositorFrame, GpuComposeFailure>,
+) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_DIR").is_some()) {
+        return;
+    }
+    let completed = Instant::now();
+    let outcome = match result {
+        Ok(_) => "native",
+        #[cfg(target_os = "macos")]
+        Err(GpuComposeFailure::TargetRingBusy) => "ring-busy",
+        Err(_) => "gpu-error",
+    };
+    #[cfg(target_os = "macos")]
+    let target_refs = crate::metal_compositor::metal_retention_snapshot()
+        .encoder_in_flight_target_refs_live_count;
+    #[cfg(not(target_os = "macos"))]
+    let target_refs = 0;
+    let mut trace = SOURCE_ISO_COMPOSITION_TRACE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if trace.len() < 4096 {
+        trace.push(SourceIsoCompositionTiming {
+            role,
+            sequence,
+            began_ms: crate::encoder_bridge::test_source_iso_trace_ms(began),
+            completed_ms: crate::encoder_bridge::test_source_iso_trace_ms(completed),
+            outcome,
+            target_refs,
+            source_texture_ms: result
+                .as_ref()
+                .ok()
+                .map(|frame| frame.timings.source_texture_ms),
+            command_wait_ms: result
+                .as_ref()
+                .ok()
+                .map(|frame| frame.timings.command_wait_ms),
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_take_source_iso_composition_trace() -> Vec<SourceIsoCompositionTiming> {
+    std::mem::take(
+        &mut *SOURCE_ISO_COMPOSITION_TRACE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    )
+}
+
+impl From<&str> for GpuComposeFailure {
+    fn from(reason: &str) -> Self {
+        Self::Unavailable(reason.to_owned())
+    }
+}
+
+impl From<String> for GpuComposeFailure {
+    fn from(reason: String) -> Self {
+        Self::Unavailable(reason)
+    }
+}
+
+impl std::fmt::Display for GpuComposeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::TargetRingBusy => {
+                formatter.write_str("Metal target ring busy; retaining previous native frame")
+            }
+            Self::Unavailable(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+impl GpuComposeFailure {
+    fn retains_native_frame(&self, consumer: CompositorFrameConsumer) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            matches!(self, Self::TargetRingBusy)
+                && matches!(consumer, CompositorFrameConsumer::VideoToolboxEncoder)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = consumer;
+            false
+        }
+    }
 }
 
 /// Compose the scene on the GPU for the cases the GPU path reproduces exactly:
@@ -6103,12 +6815,12 @@ fn try_gpu_compose(
     gpu: Option<&mut GpuCompositor>,
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
-) -> Result<GpuCompositorFrame, String> {
+) -> Result<GpuCompositorFrame, GpuComposeFailure> {
     try_gpu_compose_with_chrome(gpu, inputs, publish_yuv_frame, &[])
 }
 
 /// Editor chrome content namespace (images use 1, captions 2, highlight 3,
-/// capture storage 4 and 5). One key per tone: the three 2x2 bitmaps never
+/// capture storage 4 and 5, the Buddy's pet 7 and bubble 8). One key per tone: the three 2x2 bitmaps never
 /// change, so a slot that keeps its tone never re-uploads.
 #[cfg(target_os = "macos")]
 const EDITOR_CHROME_CONTENT_NAMESPACE: u64 = 6;
@@ -6183,6 +6895,9 @@ fn push_editor_chrome_gpu_sources<'a>(
             // picture through, not stamp opaque boxes.
             blend: true,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         });
     }
 }
@@ -6195,7 +6910,7 @@ fn try_gpu_compose_with_chrome(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
     editor_chrome: &[ChromeQuad],
-) -> Result<GpuCompositorFrame, String> {
+) -> Result<GpuCompositorFrame, GpuComposeFailure> {
     let gpu = gpu.ok_or_else(|| {
         if metal_compositor_enabled() {
             "Metal compositor unavailable"
@@ -6205,6 +6920,7 @@ fn try_gpu_compose_with_chrome(
     })?;
     let prepare_started_at = Instant::now();
     let empty_snapshot = CompositorSceneSnapshot {
+        selected_sources: None,
         revision: 0,
         scene: None,
         layout: crate::protocol::default_layout_settings(),
@@ -6259,6 +6975,9 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                    opacity: 1.0,
                 });
                 true
             } else {
@@ -6319,7 +7038,11 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         });
+        push_banner_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
                 inputs.caption_overlay,
@@ -6336,6 +7059,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
+        push_buddy_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
                 &mut prepared_sources,
@@ -6394,7 +7118,11 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         });
+        push_banner_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
                 inputs.caption_overlay,
@@ -6411,6 +7139,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
+        push_buddy_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
                 &mut prepared_sources,
@@ -6502,6 +7231,9 @@ fn try_gpu_compose_with_chrome(
                         chroma_key: camera_chroma_key(layout)
                             .as_ref()
                             .and_then(scene_chroma_key_into_metal),
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
                     });
                 } else {
                     let placeholder = missing_source_black_bgra();
@@ -6530,6 +7262,9 @@ fn try_gpu_compose_with_chrome(
                         mask: camera_mask(layout),
                         blend: false,
                         chroma_key: None,
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
                     });
                 }
             }
@@ -6584,6 +7319,9 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
                     });
                 } else {
                     let placeholder = missing_source_black_bgra();
@@ -6612,6 +7350,9 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
                     });
                 }
             }
@@ -6643,6 +7384,9 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                    opacity: 1.0,
                 });
             }
         }
@@ -6650,6 +7394,7 @@ fn try_gpu_compose_with_chrome(
     // Startup and all-hidden scenes still need a fresh black target. Metal's
     // render pass clears it even with no sources; rejecting the empty list
     // incorrectly degraded those frames to CPU and left native preview stale.
+    push_banner_gpu_sources(&mut prepared_sources, inputs);
     if let Some(overlay) = inputs.caption_overlay {
         let safe_inset = caption_overlay_safe_inset(
             inputs.caption_overlay,
@@ -6666,6 +7411,7 @@ fn try_gpu_compose_with_chrome(
             safe_inset,
         );
     }
+    push_buddy_gpu_sources(&mut prepared_sources, inputs);
     if let Some(overlay) = inputs.highlight_overlay {
         push_caption_overlay_gpu_source(
             &mut prepared_sources,
@@ -6694,7 +7440,13 @@ fn try_gpu_compose_with_chrome(
         &sources,
         publish_yuv_frame,
     )
-    .ok_or("Metal compositor failed to render scene")?;
+    .ok_or_else(|| {
+        if gpu.target_ring_busy() {
+            GpuComposeFailure::TargetRingBusy
+        } else {
+            GpuComposeFailure::from("Metal compositor failed to render scene")
+        }
+    })?;
     Ok(gpu_compositor_frame(gpu, output, prepare_ms))
 }
 
@@ -7275,8 +8027,8 @@ fn try_gpu_compose(
     _gpu: Option<&mut GpuCompositor>,
     _inputs: &CompositorRenderInputs<'_>,
     _publish_yuv_frame: bool,
-) -> Result<GpuCompositorFrame, String> {
-    Err("Metal compositor unavailable on this OS".to_string())
+) -> Result<GpuCompositorFrame, GpuComposeFailure> {
+    Err("Metal compositor unavailable on this OS".into())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -7285,7 +8037,7 @@ fn try_gpu_compose_with_chrome(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
     _editor_chrome: &[ChromeQuad],
-) -> Result<GpuCompositorFrame, String> {
+) -> Result<GpuCompositorFrame, GpuComposeFailure> {
     try_gpu_compose(gpu, inputs, publish_yuv_frame)
 }
 
@@ -7317,10 +8069,15 @@ async fn publish_compositor_frame(
     frame_consumer: CompositorFrameConsumer,
     stream_output: Option<CompositorAuxiliaryOutput>,
     stream_gpu: Option<&mut GpuCompositor>,
+    source_iso_output: Option<CompositorSourceIsoOutput>,
+    iso_screen_gpu: Option<&mut GpuCompositor>,
+    iso_camera_gpu: Option<&mut GpuCompositor>,
     caption_overlay_on_primary: bool,
     caption_overlay_on_aux: bool,
     highlight_overlay_on_primary: bool,
     highlight_overlay_on_aux: bool,
+    buddy_overlay_on_primary: bool,
+    buddy_overlay_on_aux: bool,
 ) -> CompositorPublishResult {
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
@@ -7354,10 +8111,21 @@ async fn publish_compositor_frame(
         .and_then(|_| render_cache.simulcast_snapshot.clone());
     let active_image_source = render_cache.active_image_source.clone();
     let background_image_source = render_cache.background_image_source.clone();
+    // Plan 157: the ISO legs render ONE source each, full-frame, derived from
+    // the same transitioned snapshot the primary uses this tick.
+    let source_iso_frame_stores =
+        source_iso_output.and_then(|_| render_cache.source_iso_frame_stores.clone());
+    let iso_screen_snapshot = source_iso_frame_stores
+        .as_ref()
+        .and_then(|_| source_iso_snapshot(snapshot.as_ref(), SourceIsoRole::Screen));
+    let iso_camera_snapshot = source_iso_frame_stores
+        .as_ref()
+        .and_then(|_| source_iso_snapshot(snapshot.as_ref(), SourceIsoRole::Camera));
     let scene_snapshot_ms = scene_snapshot_started_at.elapsed().as_secs_f64() * 1000.0;
     let (camera_frame, camera_frame_fetch_ms) =
         if scene_needs_live_camera_frame(snapshot.as_ref(), active_image_source.as_ref())
             || scene_needs_live_camera_frame(simulcast_snapshot.as_ref(), None)
+            || scene_needs_live_camera_frame(iso_camera_snapshot.as_ref(), None)
         {
             let camera_fetch_started_at = Instant::now();
             (
@@ -7373,6 +8141,7 @@ async fn publish_compositor_frame(
     let (screen_frame, screen_frame_fetch_ms) =
         if scene_needs_live_screen_frame(snapshot.as_ref(), active_image_source.as_ref())
             || scene_needs_live_screen_frame(simulcast_snapshot.as_ref(), None)
+            || scene_needs_live_screen_frame(iso_screen_snapshot.as_ref(), None)
         {
             let screen_fetch_started_at = Instant::now();
             (
@@ -7438,12 +8207,50 @@ async fn publish_compositor_frame(
     // auxiliary bars without scaling one leg's pixels onto the other.
     let caption_overlays = crate::captions::current_caption_overlays(&state.caption_overlay);
     let highlight_overlay = crate::captions::current_caption_overlay(&state.highlight_overlay);
+    let buddy_overlays = crate::captions::current_caption_overlays(&state.buddy_overlay);
     // The vertical leg needs its own portrait-sized card; the horizontal
     // raster is up to 60% of a landscape width and would crop.
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
+    // Plan 168 S-B1: the pet on each leg that carries the Buddy, drawn from
+    // the sprite slot once per composed frame at `published_at` (both legs
+    // share the clock; the atlas is built off this thread).
+    let buddy_now = if buddy_overlay_on_primary || buddy_overlay_on_aux {
+        state.buddy_sprite.clock_seconds(published_at)
+    } else {
+        0.0
+    };
+    let primary_buddy = buddy_overlay_on_primary.then(|| {
+        buddy_leg_frame(
+            state,
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (width, height),
+            buddy_now,
+            caption_overlay_for_output(
+                &caption_overlays,
+                crate::captions::CaptionOverlayTarget::Primary,
+                caption_overlay_on_primary,
+            ),
+            highlight_overlay
+                .as_ref()
+                .filter(|_| highlight_overlay_on_primary),
+        )
+    });
+    // Plan 186 S3: the banners each leg carries, fades at `published_at`
+    // (both legs share the clock). A `banner:<id>` draft moves its picture on
+    // the idle preview only (`editor_draft` is already gated to that run).
+    let primary_banners = banner_draws_for_leg(
+        &render_cache.banners,
+        render_cache.banner_session_shape,
+        BannerLeg::Primary,
+        (width, height),
+        published_at,
+        banner_draft_of(editor_draft),
+        &state.banner_prepare,
+    );
     let mut bytes;
+    let mut retain_previous_native_frame = false;
     {
         let inputs = CompositorRenderInputs {
             sequence,
@@ -7464,14 +8271,26 @@ async fn publish_compositor_frame(
             } else {
                 None
             },
+            buddy_overlay: caption_overlay_for_output(
+                &buddy_overlays,
+                crate::captions::CaptionOverlayTarget::Primary,
+                buddy_overlay_on_primary,
+            ),
+            buddy_leg: primary_buddy.as_ref(),
+            banners: &primary_banners,
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
-        match try_gpu_compose_with_chrome(
+        #[cfg(test)]
+        let compose_began = Instant::now();
+        let composed = try_gpu_compose_with_chrome(
             gpu.as_deref_mut(),
             &inputs,
             frame_consumer.publishes_cpu_yuv(),
             &editor_chrome,
-        ) {
+        );
+        #[cfg(test)]
+        test_trace_source_iso_composition(0, sequence, compose_began, &composed);
+        match composed {
             Ok(frame) => {
                 bytes = frame.yuv;
                 pixel_format = frame.pixel_format;
@@ -7484,6 +8303,7 @@ async fn publish_compositor_frame(
                 compositor_backend = CompositorBackend::Metal;
             }
             Err(reason) => {
+                retain_previous_native_frame = reason.retains_native_frame(frame_consumer);
                 let gpu_available = gpu.is_some();
                 let failed_gpu_timings = take_failed_gpu_timings(gpu);
                 timings.merge_gpu(failed_gpu_timings);
@@ -7499,11 +8319,11 @@ async fn publish_compositor_frame(
                     compositor_fallback_reason = None;
                     let _ = reason;
                 } else if cfg!(target_os = "macos") {
-                    compositor_fallback_reason = Some(reason);
+                    compositor_fallback_reason = Some(reason.to_string());
                 } else {
                     let _ = reason;
                 }
-                if frame_consumer.composes_cpu_pixels(gpu_available) {
+                if !retain_previous_native_frame && frame_consumer.composes_cpu_pixels() {
                     bytes = {
                         let mut store = frame_store
                             .lock()
@@ -7520,16 +8340,27 @@ async fn publish_compositor_frame(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let publish_started_at = Instant::now();
-        metal_target_handoff = export_handle.metal_target_handoff();
-        store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            pixel_format,
-            export_handle.with_presentation_time(published_at),
-            captured_at,
-            bytes,
-        );
+        metal_target_handoff = if retain_previous_native_frame {
+            store
+                .latest()
+                .and_then(|frame| frame.metadata.metal_target_handoff())
+        } else {
+            export_handle.metal_target_handoff()
+        };
+        if retain_previous_native_frame && metal_target_handoff.is_some() {
+            compositor_backend = CompositorBackend::Metal;
+        }
+        if !retain_previous_native_frame {
+            store.publish_with_metadata(
+                sequence,
+                width,
+                height,
+                pixel_format,
+                export_handle.with_presentation_time(published_at),
+                captured_at,
+                bytes,
+            );
+        }
         timings.frame_store_publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
     }
     let primary_published = frame_store
@@ -7553,6 +8384,38 @@ async fn publish_compositor_frame(
         } else {
             snapshot.as_ref()
         };
+        let aux_highlight_overlay = if !highlight_overlay_on_aux {
+            None
+        } else if stream_output.composes_simulcast_scene {
+            simulcast_highlight_overlay.as_ref()
+        } else {
+            highlight_overlay.as_ref()
+        };
+        let aux_buddy = buddy_overlay_on_aux.then(|| {
+            buddy_leg_frame(
+                state,
+                crate::buddy_sprite::BuddySpriteLeg::Auxiliary,
+                (stream_output.width.max(1), stream_output.height.max(1)),
+                buddy_now,
+                caption_overlay_for_output(
+                    &caption_overlays,
+                    crate::captions::CaptionOverlayTarget::Auxiliary,
+                    caption_overlay_on_aux,
+                ),
+                aux_highlight_overlay,
+            )
+        });
+        // The auxiliary leg picks each banner's rect by its own canvas (the
+        // vertical rect on the simulcast leg); drafts never reach it.
+        let aux_banners = banner_draws_for_leg(
+            &render_cache.banners,
+            render_cache.banner_session_shape,
+            BannerLeg::Auxiliary,
+            (stream_output.width.max(1), stream_output.height.max(1)),
+            published_at,
+            None,
+            &state.banner_prepare,
+        );
         let inputs = CompositorRenderInputs {
             sequence,
             width: stream_output.width.max(1),
@@ -7575,13 +8438,17 @@ async fn publish_compositor_frame(
                 crate::captions::CaptionOverlayTarget::Auxiliary,
                 caption_overlay_on_aux,
             ),
-            highlight_overlay: if !highlight_overlay_on_aux {
-                None
-            } else if stream_output.composes_simulcast_scene {
-                simulcast_highlight_overlay.as_ref()
-            } else {
-                highlight_overlay.as_ref()
-            },
+            highlight_overlay: aux_highlight_overlay,
+            // The bubble is rasterized per target like the caption bar (plan
+            // 164 S-C2), so the auxiliary leg always has its own raster; the
+            // pet has its own atlas per leg (plan 168 D5).
+            buddy_overlay: caption_overlay_for_output(
+                &buddy_overlays,
+                crate::captions::CaptionOverlayTarget::Auxiliary,
+                buddy_overlay_on_aux,
+            ),
+            buddy_leg: aux_buddy.as_ref(),
+            banners: &aux_banners,
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -7592,6 +8459,8 @@ async fn publish_compositor_frame(
             inputs,
             stream_gpu,
             stream_output.frame_consumer,
+            #[cfg(test)]
+            3,
         ) {
             timings.merge_gpu(aux_timings);
         }
@@ -7607,6 +8476,117 @@ async fn publish_compositor_frame(
             });
         auxiliary_proof = Some((aux_snapshot, published));
     }
+    if let (Some(iso_output), Some(iso_stores)) = (source_iso_output, source_iso_frame_stores) {
+        let batch_store = iso_stores.batches.clone();
+        let membership = batch_store.membership();
+        let batch_frames = [
+            frame_store.clone(),
+            iso_stores.screen.clone(),
+            iso_stores.camera.clone(),
+        ];
+        // Screen leg: the Screen/Window source alone (image stand-ins apply,
+        // they are screen-like). Camera leg: the camera alone. A committed
+        // source removal is handled by the role supervisor; never publish
+        // black filler as if its selected source were still present.
+        let legs: [SourceIsoLeg<'_>; 2] = [
+            SourceIsoLeg {
+                snapshot: iso_screen_snapshot.as_ref(),
+                store: iso_stores.screen,
+                gpu: iso_screen_gpu,
+                image_source: active_image_source.as_ref(),
+            },
+            SourceIsoLeg {
+                snapshot: iso_camera_snapshot.as_ref(),
+                store: iso_stores.camera,
+                gpu: iso_camera_gpu,
+                image_source: None,
+            },
+        ];
+        for (
+            leg_index,
+            SourceIsoLeg {
+                snapshot: leg_snapshot,
+                store,
+                gpu,
+                image_source,
+            },
+        ) in legs.into_iter().enumerate()
+        {
+            #[cfg(not(test))]
+            let _ = leg_index;
+            if leg_snapshot.is_none() {
+                continue;
+            }
+            let leg_camera_frame = camera_frame
+                .as_ref()
+                .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
+                .map(|(frame, _)| frame);
+            let leg_screen_frame = screen_frame
+                .as_ref()
+                .filter(|_| scene_accepts_source(leg_snapshot, screen_key));
+            // A contended capture authority cannot prove current source pixels.
+            // Keep the last published ISO frame instead of encoding a black
+            // frame; the supervisor owns committed removal/terminal failure.
+            if (scene_needs_live_camera_frame(leg_snapshot, image_source)
+                && leg_camera_frame.is_none())
+                || (scene_needs_live_screen_frame(leg_snapshot, image_source)
+                    && leg_screen_frame.is_none())
+            {
+                continue;
+            }
+            // Each ISO frame is stamped with ITS source's capture time (the
+            // bridge seeds the shared recording epoch from it); a leg with no
+            // live frame this tick is a continuity frame dated at publish.
+            let leg_captured_at = compositor_frame_content_captured_at(
+                leg_camera_frame,
+                leg_screen_frame,
+                published_at,
+            );
+            let inputs = CompositorRenderInputs {
+                sequence,
+                width: iso_output.width.max(1),
+                height: iso_output.height.max(1),
+                snapshot: leg_snapshot,
+                active_image_source: image_source,
+                background_image_source: None,
+                camera_frame: leg_camera_frame,
+                screen_frame: leg_screen_frame,
+                caption_overlay: None,
+                highlight_overlay: None,
+                // A source take is the source alone: no Buddy and no banners
+                // either (plan 157), whatever the Combined legs carry.
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
+            };
+            #[cfg(test)]
+            let trace_role = leg_index + 1;
+            if let Some(iso_timings) = publish_auxiliary_compositor_frame(
+                sequence,
+                leg_captured_at,
+                published_at,
+                store,
+                inputs,
+                gpu,
+                iso_output.frame_consumer,
+                #[cfg(test)]
+                trace_role,
+            ) {
+                timings.merge_gpu(iso_timings);
+            }
+        }
+        let frames = std::array::from_fn(|role| {
+            membership.active[role]
+                .then(|| {
+                    batch_frames[role]
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .latest()
+                })
+                .flatten()
+        });
+        batch_store.publish(membership, sequence, frames);
+    }
     let evidence = CompositorFrameEvidence {
         sequence,
         scene_revision: snapshot.as_ref().map(|snapshot| snapshot.revision),
@@ -7618,7 +8598,8 @@ async fn publish_compositor_frame(
         has_image_source,
         published_at,
     };
-    if let Ok(mut compositor) = state.compositor.try_lock()
+    if primary_published
+        && let Ok(mut compositor) = state.compositor.try_lock()
         && set_latest_frame_evidence_if_current_run(&mut compositor, run_id, evidence)
         && let Some(receipt) = compositor.source_edit_receipt.as_ref()
         && compositor
@@ -7679,8 +8660,32 @@ async fn publish_compositor_frame(
             }
         }
     }
+    let (fallback_frame_age_ms, fingerprint) = if retain_previous_native_frame {
+        let age = frame_store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .latest()
+            .map_or(0, |frame| frame.captured_at.elapsed().as_millis() as u64);
+        let previous = state
+            .compositor
+            .try_lock()
+            .ok()
+            .and_then(|runtime| runtime.frame_evidence.back().copied());
+        (
+            age,
+            previous.map_or_else(SourceFrameFingerprint::default, |evidence| {
+                SourceFrameFingerprint {
+                    camera: evidence.camera_sequence,
+                    screen: evidence.screen_sequence,
+                }
+            }),
+        )
+    } else {
+        (captured_at.elapsed().as_millis() as u64, fingerprint)
+    };
     CompositorPublishResult {
-        fallback_frame_age_ms: captured_at.elapsed().as_millis() as u64,
+        primary_published,
+        fallback_frame_age_ms,
         fingerprint,
         compositor_backend,
         compositor_fallback_reason,
@@ -7720,20 +8725,30 @@ fn publish_auxiliary_compositor_frame(
     inputs: CompositorRenderInputs<'_>,
     mut gpu: Option<&mut GpuCompositor>,
     frame_consumer: CompositorFrameConsumer,
+    #[cfg(test)] trace_role: usize,
 ) -> Option<GpuCompositorTimings> {
     let width = inputs.width;
     let height = inputs.height;
     let mut pixel_format = CompositorPixelFormat::yuv420p_cpu_buffer();
     let mut export_handle = CompositorFrameExportHandle::default();
-    let (bytes, gpu_timings) = match try_gpu_compose(
+    #[cfg(test)]
+    let compose_began = Instant::now();
+    let composed = try_gpu_compose(
         gpu.as_deref_mut(),
         &inputs,
         frame_consumer.publishes_cpu_yuv(),
-    ) {
+    );
+    #[cfg(test)]
+    test_trace_source_iso_composition(trace_role, sequence, compose_began, &composed);
+    let (bytes, gpu_timings) = match composed {
         Ok(frame) => {
             pixel_format = frame.pixel_format;
             export_handle = frame.export_handle;
             (frame.yuv, Some(frame.timings))
+        }
+        Err(reason) if reason.retains_native_frame(frame_consumer) => {
+            tracing::debug!(%reason, sequence, "Auxiliary compositor retained its previous native frame");
+            return Some(take_failed_gpu_timings(gpu));
         }
         Err(_) if frame_consumer.requires_cpu_fallback() => {
             let mut bytes = {
@@ -7778,13 +8793,132 @@ struct CompositorRenderInputs<'a> {
     /// Comment-highlight card (Comments upgrade S2) — its own slot, composited
     /// after the caption bar; top vs bottom keeps them from overlapping.
     highlight_overlay: Option<&'a crate::captions::CaptionOverlay>,
+    /// The Buddy's bubble raster (plan 168 D16; plan 164 Phase C's avatar
+    /// raster before): composited after the pet and BEFORE the highlight
+    /// card, so the card wins an overlap (owner answer 7: the most urgent
+    /// thing on screen stays on top).
+    buddy_overlay: Option<&'a crate::captions::CaptionOverlay>,
+    /// The Buddy's pet on this leg and where its bubble anchors (plan 168
+    /// S-B1): the pet draws after the caption bar, then the bubble (D9).
+    /// `None` blits a bubble inside its own rect (tests, no pet frame).
+    buddy_leg: Option<&'a crate::buddy_sprite::BuddyLegFrame>,
+    /// The banners this leg carries this tick (plan 186 S3), bottom to top:
+    /// drawn after the scene and the takeover, before captions (D5).
+    banners: &'a [BannerDraw],
 }
 
-/// Full frame render: the scene, then the caption overlay topmost — applied
-/// here (not in the scene renderer) so every scene early-return path still
-/// gets captions.
+/// One banner as a leg draws it this tick (plan 186 S3): the prepared bitmap
+/// (exact, or the banner's last one while a prepare is in flight), its Metal
+/// slot, the stored image size the contained rect is computed from, the rect
+/// (committed, or the live draft's on the idle preview) and the fade factor.
+/// Opacity is baked into the bitmap; `opacity` here is the fade alone.
+#[derive(Clone)]
+pub(crate) struct BannerDraw {
+    pub bitmap: Arc<BannerBitmap>,
+    pub slot: u64,
+    pub image: (u32, u32),
+    pub rect: OverlayRect,
+    pub opacity: f32,
+}
+
+impl BannerDraw {
+    /// Where the image lands on the canvas: `(x, y, w, h)` in canvas pixels.
+    pub(crate) fn draw_rect(
+        &self,
+        canvas_width: u32,
+        canvas_height: u32,
+    ) -> (usize, usize, usize, usize) {
+        banner_draw_rect(
+            self.image.0,
+            self.image.1,
+            canvas_width.max(1) as usize,
+            canvas_height.max(1) as usize,
+            self.rect,
+        )
+    }
+
+    /// The bitmap is the exact prepared size for this rect; otherwise it is
+    /// the last prepared one (a re-prepare in flight): Metal scales it into
+    /// the rect, the CPU draws it at its old size at the new position.
+    #[cfg(test)]
+    fn is_exact_on(&self, canvas_width: u32, canvas_height: u32) -> bool {
+        let (_, _, width, height) = self.draw_rect(canvas_width, canvas_height);
+        (self.bitmap.width as usize, self.bitmap.height as usize) == (width, height)
+    }
+}
+
+/// The banners `leg` draws on `canvas` this tick, bottom to top: the set's
+/// layers that the leg plan carries (`banners::banner_leg_carries`), each
+/// with its fade at `now` and its bitmap from the prepare service (which
+/// queues a prepare when the exact one is missing and never blocks). `draft`
+/// is the live Scene editor draft `(stage id, rect)` on the idle preview;
+/// a `banner:<id>` draft moves that banner's picture for the tick while the
+/// prepared bitmap stays keyed by the committed rect.
+pub(crate) fn banner_draws_for_leg(
+    set: &BannerSet,
+    shape: Option<OverlaySessionShape>,
+    leg: BannerLeg,
+    canvas: (u32, u32),
+    now: Instant,
+    draft: Option<(&str, OverlayRect)>,
+    prepare: &BannerPrepareService,
+) -> Vec<BannerDraw> {
+    let orientation = OverlayOrientation::for_canvas(canvas.0, canvas.1);
+    let mut draws = Vec::new();
+    for layer in &set.layers {
+        let fade = layer.fade.value_at(now);
+        if fade <= 0.0 || !banner_leg_carries(shape, leg, &layer.banner) {
+            continue;
+        }
+        let Some(file_revision) = layer.file_revision else {
+            continue;
+        };
+        let committed = banner_rect_for(&layer.banner, orientation, None);
+        let rect = banner_rect_for(&layer.banner, orientation, draft);
+        let request = BannerPrepareRequest {
+            key: BannerBitmapKey::new(
+                &layer.banner.id,
+                file_revision,
+                canvas,
+                committed,
+                layer.banner.opacity,
+            ),
+            path: Arc::clone(&layer.image_path),
+            rect: committed,
+            opacity: layer.banner.opacity,
+        };
+        let Some(bitmap) = prepare.lookup(&request, now).bitmap().cloned() else {
+            continue;
+        };
+        draws.push(BannerDraw {
+            bitmap,
+            slot: layer.metal_slot(),
+            image: (layer.banner.width, layer.banner.height),
+            rect,
+            opacity: fade,
+        });
+    }
+    draws
+}
+
+/// The `(stage id, rect)` of a live draft with a transform, for
+/// `banner_draws_for_leg`. The renderer's banner drafts carry the exact image
+/// rect on the primary canvas, so the contained draw lands on it.
+fn banner_draft_of(draft: Option<&EditorDraft>) -> Option<(&str, OverlayRect)> {
+    let draft = draft?;
+    let transform = draft.transform.as_ref()?;
+    Some((
+        draft.source_id.as_str(),
+        OverlayRect::new(transform.x, transform.y, transform.width, transform.height),
+    ))
+}
+
+/// Full frame render: the scene, then the banners, then the caption overlay
+/// and the rest — applied here (not in the scene renderer) so every scene
+/// early-return path still gets them.
 fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &mut [u8]) {
     render_compositor_yuv420p_scene(inputs, bytes);
+    composite_banners(&inputs, bytes);
     if let Some(overlay) = inputs.caption_overlay {
         composite_caption_overlay(
             overlay,
@@ -7799,9 +8933,129 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
             ),
         );
     }
+    if let Some(sprite) = inputs.buddy_leg.and_then(|leg| leg.sprite.as_ref()) {
+        crate::buddy_sprite::blit_sprite_affine_to_yuv420p(
+            bytes,
+            inputs.width,
+            inputs.height,
+            &sprite.atlas,
+            &sprite.draw,
+        );
+    }
+    if let Some(overlay) = inputs.buddy_overlay {
+        let layout = buddy_bubble_layout(overlay, inputs.buddy_leg, inputs.width, inputs.height);
+        composite_overlay_at(overlay, inputs.width, inputs.height, bytes, layout, 1.0);
+    }
     if let Some(overlay) = inputs.highlight_overlay {
         composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
     }
+}
+
+/// Banners on the CPU path (plan 186 S3): a 1:1 straight-alpha blit of each
+/// prepared bitmap at its contained rect, the fade as the opacity. A bitmap
+/// still being re-prepared (the banner's last one) draws at its old size at
+/// the new position, clipped to the canvas.
+fn composite_banners(inputs: &CompositorRenderInputs<'_>, dest: &mut [u8]) {
+    let canvas_width = inputs.width.max(1) as usize;
+    for draw in inputs.banners {
+        let bitmap = &*draw.bitmap;
+        let (x, y, _, _) = draw.draw_rect(inputs.width, inputs.height);
+        let draw_width = (bitmap.width as usize).min(canvas_width.saturating_sub(x));
+        if draw_width == 0 {
+            continue;
+        }
+        composite_straight_alpha_at(
+            StraightAlphaBitmap {
+                bytes: &bitmap.bgra,
+                order: OverlayPixelOrder::Bgra,
+                width: bitmap.width as usize,
+                height: bitmap.height as usize,
+            },
+            inputs.width,
+            inputs.height,
+            dest,
+            (0, x, y, draw_width),
+            draw.opacity,
+        );
+    }
+}
+
+/// Where the Buddy's bubble lands: above the pet's head on a leg that has a
+/// pet frame (plan 168 D16), else inside its own rect like any overlay. The
+/// tuple of `overlay_layout::overlay_blit_layout`; shared by CPU and Metal.
+fn buddy_bubble_layout(
+    overlay: &crate::captions::CaptionOverlay,
+    buddy_leg: Option<&crate::buddy_sprite::BuddyLegFrame>,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (usize, usize, usize, usize) {
+    match buddy_leg {
+        Some(leg) => crate::buddy_sprite::buddy_bubble_blit_layout(
+            overlay.width as usize,
+            overlay.height as usize,
+            canvas_width.max(1) as usize,
+            canvas_height.max(1) as usize,
+            leg.bubble_anchor,
+        ),
+        None => crate::overlay_layout::overlay_blit_layout(
+            overlay.width as usize,
+            overlay.height as usize,
+            canvas_width.max(1) as usize,
+            canvas_height.max(1) as usize,
+            overlay.blit_rect(canvas_width, canvas_height),
+            0,
+        ),
+    }
+}
+
+/// An overlay's blit on a canvas in canvas pixels `[x, y, w, h]`: the gaze
+/// targets plan 168 Phase C reads per leg.
+fn overlay_canvas_rect(
+    overlay: &crate::captions::CaptionOverlay,
+    canvas_width: u32,
+    canvas_height: u32,
+    safe_inset: usize,
+) -> [f32; 4] {
+    let (_, left, top, width) = crate::overlay_layout::overlay_blit_layout(
+        overlay.width as usize,
+        overlay.height as usize,
+        canvas_width.max(1) as usize,
+        canvas_height.max(1) as usize,
+        overlay.blit_rect(canvas_width, canvas_height),
+        safe_inset,
+    );
+    let height = (overlay.height as usize).min(canvas_height.max(1) as usize);
+    [left as f32, top as f32, width as f32, height as f32]
+}
+
+/// The Buddy on one leg for this frame (plan 168 S-B1): the pet's draw from
+/// the sprite slot plus the gaze targets Phase C reads, the highlight card's
+/// and the caption bar's blits on this canvas.
+fn buddy_leg_frame(
+    state: &AppState,
+    leg: crate::buddy_sprite::BuddySpriteLeg,
+    canvas: (u32, u32),
+    now_seconds: f64,
+    caption: Option<&crate::captions::CaptionOverlay>,
+    highlight: Option<&crate::captions::CaptionOverlay>,
+) -> crate::buddy_sprite::BuddyLegFrame {
+    let (width, height) = canvas;
+    state
+        .buddy_sprite
+        .leg_frame(crate::buddy_sprite::BuddyLegRequest {
+            leg,
+            canvas,
+            now_seconds,
+            highlight_rect: highlight.map(|overlay| overlay_canvas_rect(overlay, width, height, 0)),
+            caption_rect: caption.map(|overlay| {
+                overlay_canvas_rect(
+                    overlay,
+                    width,
+                    height,
+                    caption_overlay_safe_inset(Some(overlay), highlight, width, height),
+                )
+            }),
+        })
 }
 
 /// `render_compositor_yuv420p_frame` plus the editor chrome quads blended
@@ -7888,6 +9142,9 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         screen_frame,
         caption_overlay: _,
         highlight_overlay: _,
+        buddy_overlay: _,
+        buddy_leg: _,
+        banners: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -8511,38 +9768,12 @@ fn render_synthetic_source_rect(
     );
 }
 
-/// Vertical safe margin for the caption bar, as a fraction of canvas height.
-const CAPTION_OVERLAY_MARGIN: f64 = 0.04;
-/// Portrait canvases (the vertical simulcast leg, vertical scenes) are watched
-/// in TikTok, Shorts and Reels, which draw their own caption, username, music
-/// line and buttons across the bottom fifth and a header across the top.
-/// Overlays keep out of those bands; the side margin is unchanged (plan 077).
-/// Mirrored by the renderer's `captionBarFramePosition`.
-const PORTRAIT_OVERLAY_TOP_MARGIN: f64 = 0.08;
-const PORTRAIT_OVERLAY_BOTTOM_MARGIN: f64 = 0.22;
-
-/// The distance an overlay keeps from the top or bottom edge it is anchored to.
-fn overlay_edge_margin(
-    canvas_width: usize,
-    canvas_height: usize,
-    vertical: crate::captions::CaptionOverlayPosition,
-) -> usize {
-    let fraction = if canvas_height > canvas_width {
-        match vertical {
-            crate::captions::CaptionOverlayPosition::Top => PORTRAIT_OVERLAY_TOP_MARGIN,
-            crate::captions::CaptionOverlayPosition::Bottom => PORTRAIT_OVERLAY_BOTTOM_MARGIN,
-        }
-    } else {
-        CAPTION_OVERLAY_MARGIN
-    };
-    ((canvas_height as f64) * fraction).round() as usize
-}
 const OVERLAY_COLLISION_GAP: f64 = 0.02;
 
-/// The comment-highlight card owns its anchor corner and never yields. A
-/// caption sharing that vertical edge is pushed inward by the complete
-/// highlight bitmap plus a small title-safe gap, but only when the two draw
-/// rects would actually overlap horizontally on THIS canvas: a narrow centred
+/// The comment-highlight card owns its rect and never yields. A caption
+/// hugging the same vertical edge is pushed inward by the complete highlight
+/// bitmap plus a small title-safe gap, but only when the two draw rects
+/// would actually overlap horizontally on THIS canvas: a narrow centred
 /// caption next to a corner card keeps its normal position. CPU, Metal and
 /// D3D11 all consume this value, so the live stream cannot diverge from
 /// preview/recording output.
@@ -8557,42 +9788,43 @@ pub(crate) fn caption_overlay_safe_inset(
     };
     overlay_collision_inset(
         (caption.width as usize, caption.height as usize),
-        caption.placement,
+        caption.blit_rect(canvas_width, canvas_height),
         (highlight.width as usize, highlight.height as usize),
-        highlight.placement,
+        highlight.blit_rect(canvas_width, canvas_height),
         canvas_width.max(1) as usize,
         canvas_height.max(1) as usize,
     )
 }
 
 /// Pure collision rule behind `caption_overlay_safe_inset`: sizes are
-/// `(width, height)` in overlay pixels. Returns the extra vertical inset the
-/// YIELDING overlay needs; 0 when the two cannot touch.
+/// `(width, height)` in overlay pixels, rects the overlays' blit rects.
+/// Returns the extra vertical inset the YIELDING overlay needs; 0 when the
+/// two hug different edges or cannot touch horizontally.
 pub(crate) fn overlay_collision_inset(
     yielding_size: (usize, usize),
-    yielding_placement: crate::captions::OverlayPlacement,
+    yielding_rect: crate::overlay_layout::OverlayRect,
     fixed_size: (usize, usize),
-    fixed_placement: crate::captions::OverlayPlacement,
+    fixed_rect: crate::overlay_layout::OverlayRect,
     canvas_width: usize,
     canvas_height: usize,
 ) -> usize {
-    if yielding_placement.vertical != fixed_placement.vertical {
+    if yielding_rect.bottom_gravity() != fixed_rect.bottom_gravity() {
         return 0;
     }
-    let (_, yielding_left, _, yielding_width) = caption_overlay_layout_with_inset(
+    let (_, yielding_left, _, yielding_width) = crate::overlay_layout::overlay_blit_layout(
         yielding_size.0,
         yielding_size.1,
         canvas_width,
         canvas_height,
-        yielding_placement,
+        yielding_rect,
         0,
     );
-    let (_, fixed_left, _, fixed_width) = caption_overlay_layout_with_inset(
+    let (_, fixed_left, _, fixed_width) = crate::overlay_layout::overlay_blit_layout(
         fixed_size.0,
         fixed_size.1,
         canvas_width,
         canvas_height,
-        fixed_placement,
+        fixed_rect,
         0,
     );
     let x_ranges_overlap = yielding_left < fixed_left.saturating_add(fixed_width)
@@ -8604,70 +9836,6 @@ pub(crate) fn overlay_collision_inset(
         .round()
         .max(1.0) as usize;
     fixed_size.1.saturating_add(gap)
-}
-
-/// Alpha-composite the caption bar over a YUV420p frame — the one true
-/// alpha-blending blit (scene blits are binary: alpha<16 skip, else write).
-/// The bar is pre-rendered at the leg's output width; wider bars are
-/// center-cropped (bar edges are padding), never scaled.
-/// Where an overlay (caption bar or highlight card) lands on a canvas — the
-/// single layout oracle shared by the CPU blit, the Metal source placement and
-/// the Windows D3D11 layer transform. Returns
-/// `(source_left, dest_left, dest_top, draw_width)`.
-///
-/// Vertical: 4% of canvas height as the safe margin (plus `safe_inset`); on a
-/// portrait canvas the platform safe area instead (8% top, 22% bottom).
-/// Horizontal: `Center` is centred (captions); `Left`/`Right` sit the SAME
-/// pixel margin from the side edge, so a corner card is visually square in
-/// landscape and vertical. Wider-than-canvas overlays are center-cropped.
-#[cfg(test)]
-pub(crate) fn caption_overlay_layout(
-    overlay_width: usize,
-    overlay_height: usize,
-    canvas_width: usize,
-    canvas_height: usize,
-    placement: impl Into<crate::captions::OverlayPlacement>,
-) -> (usize, usize, usize, usize) {
-    caption_overlay_layout_with_inset(
-        overlay_width,
-        overlay_height,
-        canvas_width,
-        canvas_height,
-        placement,
-        0,
-    )
-}
-
-pub(crate) fn caption_overlay_layout_with_inset(
-    overlay_width: usize,
-    overlay_height: usize,
-    canvas_width: usize,
-    canvas_height: usize,
-    placement: impl Into<crate::captions::OverlayPlacement>,
-    safe_inset: usize,
-) -> (usize, usize, usize, usize) {
-    let placement = placement.into();
-    let draw_width = overlay_width.min(canvas_width);
-    let draw_height = overlay_height.min(canvas_height);
-    let source_left = (overlay_width - draw_width) / 2;
-    let margin = ((canvas_height as f64) * CAPTION_OVERLAY_MARGIN).round() as usize;
-    let edge_margin = overlay_edge_margin(canvas_width, canvas_height, placement.vertical);
-    let max_dest_left = canvas_width - draw_width;
-    let dest_left = match placement.horizontal {
-        crate::captions::OverlayHorizontal::Left => margin.min(max_dest_left),
-        crate::captions::OverlayHorizontal::Center => max_dest_left / 2,
-        crate::captions::OverlayHorizontal::Right => max_dest_left.saturating_sub(margin),
-    };
-    let inset_margin = edge_margin.saturating_add(safe_inset);
-    let dest_top = match placement.vertical {
-        crate::captions::CaptionOverlayPosition::Top => {
-            inset_margin.min(canvas_height.saturating_sub(draw_height))
-        }
-        crate::captions::CaptionOverlayPosition::Bottom => {
-            canvas_height.saturating_sub(draw_height.saturating_add(inset_margin))
-        }
-    };
-    (source_left, dest_left, dest_top, draw_width.max(1))
 }
 
 /// Straight-alpha source-over for one plane sample, shared by the caption
@@ -8683,26 +9851,108 @@ fn composite_caption_overlay(
     dest: &mut [u8],
     safe_inset: usize,
 ) {
+    let layout = crate::overlay_layout::overlay_blit_layout(
+        overlay.width as usize,
+        overlay.height as usize,
+        canvas_width.max(1) as usize,
+        canvas_height.max(1) as usize,
+        overlay.blit_rect(canvas_width.max(1), canvas_height.max(1)),
+        safe_inset,
+    );
+    composite_overlay_at(overlay, canvas_width, canvas_height, dest, layout, 1.0);
+}
+
+/// Straight-alpha blit of an overlay bitmap at a layout from
+/// `overlay_blit_layout` (or `buddy_bubble_blit_layout`): `(source_left,
+/// dest_left, dest_top, draw_width)`, rows cut at the canvas height.
+/// `opacity` multiplies every alpha; `1.0` is exactly the plain blit.
+fn composite_overlay_at(
+    overlay: &crate::captions::CaptionOverlay,
+    canvas_width: u32,
+    canvas_height: u32,
+    dest: &mut [u8],
+    layout: (usize, usize, usize, usize),
+    opacity: f32,
+) {
+    composite_straight_alpha_at(
+        StraightAlphaBitmap {
+            bytes: &overlay.rgba,
+            order: OverlayPixelOrder::Rgba,
+            width: overlay.width as usize,
+            height: overlay.height as usize,
+        },
+        canvas_width,
+        canvas_height,
+        dest,
+        layout,
+        opacity,
+    );
+}
+
+/// Channel order of a straight-alpha overlay bitmap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayPixelOrder {
+    Rgba,
+    /// Prepared banner bitmaps, read as-is (no second copy; plan 186 S3).
+    Bgra,
+}
+
+/// A straight-alpha bitmap for `composite_straight_alpha_at`.
+#[derive(Clone, Copy)]
+struct StraightAlphaBitmap<'a> {
+    bytes: &'a [u8],
+    order: OverlayPixelOrder,
+    width: usize,
+    height: usize,
+}
+
+/// `opacity` as a fixed-point alpha multiplier, 256 = exactly 1.
+fn opacity_scale(opacity: f32) -> u32 {
+    (opacity.clamp(0.0, 1.0) * 256.0).round() as u32
+}
+
+/// `alpha × scale / 256`, rounded; the identity at scale 256.
+fn scaled_alpha(alpha: u8, scale: u32) -> u8 {
+    ((u32::from(alpha) * scale + 128) >> 8).min(255) as u8
+}
+
+/// The shared straight-alpha source-over blit behind `composite_overlay_at`
+/// and the banners (plan 186 S3): luma per pixel, chroma per 2x2 block from
+/// its top-left sample, rows and columns cut at the canvas.
+fn composite_straight_alpha_at(
+    bitmap: StraightAlphaBitmap<'_>,
+    canvas_width: u32,
+    canvas_height: u32,
+    dest: &mut [u8],
+    layout: (usize, usize, usize, usize),
+    opacity: f32,
+) {
     let canvas_width = canvas_width.max(1) as usize;
     let canvas_height = canvas_height.max(1) as usize;
     if dest.len() < raw_yuv420p_len(canvas_width as u32, canvas_height as u32) {
         return;
     }
-    let overlay_width = overlay.width as usize;
-    let overlay_height = overlay.height as usize;
-    if overlay.rgba.len() < overlay_width * overlay_height * 4 {
+    let overlay_width = bitmap.width;
+    let overlay_height = bitmap.height;
+    if bitmap.bytes.len() < overlay_width * overlay_height * 4 {
         return;
     }
 
-    let draw_height = overlay_height.min(canvas_height);
-    let (source_left, dest_left, dest_top, draw_width) = caption_overlay_layout_with_inset(
-        overlay_width,
-        overlay_height,
-        canvas_width,
-        canvas_height,
-        overlay.placement,
-        safe_inset,
-    );
+    let (source_left, dest_left, dest_top, draw_width) = layout;
+    if dest_left >= canvas_width || dest_top >= canvas_height || source_left >= overlay_width {
+        return;
+    }
+    let draw_width = draw_width
+        .min(canvas_width - dest_left)
+        .min(overlay_width - source_left);
+    let draw_height = overlay_height.min(canvas_height - dest_top);
+    if draw_width == 0 || draw_height == 0 {
+        return;
+    }
+    let scale = opacity_scale(opacity);
+    if scale == 0 {
+        return;
+    }
 
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
@@ -8712,12 +9962,21 @@ fn composite_caption_overlay(
 
     let overlay_pixel = |x: usize, y: usize| -> (u8, u8, u8, u8) {
         let index = (y * overlay_width + x) * 4;
-        (
-            overlay.rgba[index],
-            overlay.rgba[index + 1],
-            overlay.rgba[index + 2],
-            overlay.rgba[index + 3],
-        )
+        let alpha = scaled_alpha(bitmap.bytes[index + 3], scale);
+        match bitmap.order {
+            OverlayPixelOrder::Rgba => (
+                bitmap.bytes[index],
+                bitmap.bytes[index + 1],
+                bitmap.bytes[index + 2],
+                alpha,
+            ),
+            OverlayPixelOrder::Bgra => (
+                bitmap.bytes[index + 2],
+                bitmap.bytes[index + 1],
+                bitmap.bytes[index],
+                alpha,
+            ),
+        }
     };
     let blend = alpha_blend_channel;
 
@@ -8830,6 +10089,17 @@ fn blit_rgba_to_yuv420p(
     let uv_top = draw_top / 2;
     let uv_right = draw_right.div_ceil(2).min(uv_width);
     let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
+    let masked = options.mask != SceneMask::None;
+    // Per-column source x, once per blit (identical to map_source_pixel).
+    let luma_columns = (draw_left..draw_right.max(draw_left))
+        .map(|dest_x| map_source_column(dest_x as u32, source, &fit, options.mirror_x))
+        .collect::<Vec<_>>();
+    let chroma_columns = (uv_left..uv_right.max(uv_left))
+        .map(|uv_x| {
+            let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
+            map_source_column(dest_x as u32, source, &fit, options.mirror_x)
+        })
+        .collect::<Vec<_>>();
     let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
     let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
     rayon::join(
@@ -8839,19 +10109,20 @@ fn blit_rgba_to_yuv420p(
                 .enumerate()
                 .for_each(|(relative_y, row)| {
                     let dest_y = draw_top + relative_y;
-                    for (dest_x, output) in
-                        row.iter_mut().enumerate().take(draw_right).skip(draw_left)
+                    let Some(source_y) = map_source_row(dest_y as u32, source, &fit) else {
+                        return;
+                    };
+                    for (column, (dest_x, output)) in row
+                        .iter_mut()
+                        .enumerate()
+                        .take(draw_right)
+                        .skip(draw_left)
+                        .enumerate()
                     {
-                        if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                        if masked && !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
                             continue;
                         }
-                        let Some((source_x, source_y)) = map_source_pixel(
-                            dest_x as u32,
-                            dest_y as u32,
-                            source,
-                            &fit,
-                            options.mirror_x,
-                        ) else {
+                        let Some(source_x) = luma_columns[column] else {
                             continue;
                         };
                         let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
@@ -8877,19 +10148,16 @@ fn blit_rgba_to_yuv420p(
                 .enumerate()
                 .for_each(|(relative_y, (u_row, v_row))| {
                     let uv_y = uv_top + relative_y;
-                    for uv_x in uv_left..uv_right {
+                    let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
+                    let Some(source_y) = map_source_row(dest_y as u32, source, &fit) else {
+                        return;
+                    };
+                    for (column, uv_x) in (uv_left..uv_right).enumerate() {
                         let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
-                        let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
-                        if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                        if masked && !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
                             continue;
                         }
-                        let Some((source_x, source_y)) = map_source_pixel(
-                            dest_x as u32,
-                            dest_y as u32,
-                            source,
-                            &fit,
-                            options.mirror_x,
-                        ) else {
+                        let Some(source_x) = chroma_columns[column] else {
                             continue;
                         };
                         let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
@@ -9080,6 +10348,7 @@ fn source_fit(
     }
 }
 
+#[cfg(target_os = "windows")]
 fn map_source_pixel(
     dest_x: u32,
     dest_y: u32,
@@ -9087,28 +10356,74 @@ fn map_source_pixel(
     fit: &SourceFit,
     mirror_x: bool,
 ) -> Option<(u32, u32)> {
-    if dest_x < fit.x || dest_y < fit.y || fit.width == 0 || fit.height == 0 {
+    let source_x = map_source_column(dest_x, source, fit, mirror_x)?;
+    let source_y = map_source_row(dest_y, source, fit)?;
+    Some((source_x, source_y))
+}
+
+/// One axis of source-pixel mapping: the two axes are independent, so a blit
+/// computes each column once per frame and each row once per row instead of
+/// two divides, a floor and a clamp for every output pixel (Linux plan 0014:
+/// the 1080p CPU compositor rendered 8 fps at ~470 % on ogre).
+fn map_source_axis(
+    dest: u32,
+    fit_origin: u32,
+    fit_extent: u32,
+    source_origin: f64,
+    source_extent: f64,
+    source_len: u32,
+) -> Option<u32> {
+    if dest < fit_origin || fit_extent == 0 {
         return None;
     }
-    let local_x = f64::from(dest_x - fit.x) / f64::from(fit.width);
-    let local_y = f64::from(dest_y - fit.y) / f64::from(fit.height);
-    if !(0.0..=1.0).contains(&local_x) || !(0.0..=1.0).contains(&local_y) {
+    let local = f64::from(dest - fit_origin) / f64::from(fit_extent);
+    if !(0.0..=1.0).contains(&local) {
         return None;
     }
-    let source_x = fit.source_x + local_x * fit.source_width;
-    let source_y = fit.source_y + local_y * fit.source_height;
-    let source_x = source_x
-        .floor()
-        .clamp(0.0, f64::from(source.width.saturating_sub(1))) as u32;
-    let source_y = source_y
-        .floor()
-        .clamp(0.0, f64::from(source.height.saturating_sub(1))) as u32;
-    let source_x = if mirror_x {
+    let mapped = source_origin + local * source_extent;
+    Some(
+        mapped
+            .floor()
+            .clamp(0.0, f64::from(source_len.saturating_sub(1))) as u32,
+    )
+}
+
+fn map_source_column(
+    dest_x: u32,
+    source: &RgbaSource<'_>,
+    fit: &SourceFit,
+    mirror_x: bool,
+) -> Option<u32> {
+    if fit.height == 0 {
+        return None;
+    }
+    let source_x = map_source_axis(
+        dest_x,
+        fit.x,
+        fit.width,
+        fit.source_x,
+        fit.source_width,
+        source.width,
+    )?;
+    Some(if mirror_x {
         source.width.saturating_sub(1).saturating_sub(source_x)
     } else {
         source_x
-    };
-    Some((source_x, source_y))
+    })
+}
+
+fn map_source_row(dest_y: u32, source: &RgbaSource<'_>, fit: &SourceFit) -> Option<u32> {
+    if fit.width == 0 {
+        return None;
+    }
+    map_source_axis(
+        dest_y,
+        fit.y,
+        fit.height,
+        fit.source_y,
+        fit.source_height,
+        source.height,
+    )
 }
 
 fn source_mask_allows(mask: SceneMask, dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {
@@ -9364,6 +10679,133 @@ fn camera_circle_mask_applies(layout: &LayoutSettings) -> bool {
     matches!(camera_mask(layout), SceneMask::Circle)
 }
 
+/// One ISO leg's inputs for a single publish tick.
+struct SourceIsoLeg<'a> {
+    snapshot: Option<&'a CompositorSceneSnapshot>,
+    store: CompositorFrameStore,
+    gpu: Option<&'a mut GpuCompositor>,
+    image_source: Option<&'a CompositorImageSource>,
+}
+
+/// Plan 157: which single source an ISO leg isolates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceIsoRole {
+    Screen,
+    Camera,
+}
+
+fn active_source_iso_capture_needs(
+    snapshot: Option<&CompositorSceneSnapshot>,
+    stores: Option<&CompositorSourceIsoFrameStores>,
+) -> crate::live_layout::SceneSourceNeeds {
+    let Some(selected) = snapshot.and_then(|snapshot| snapshot.selected_sources.as_ref()) else {
+        return Default::default();
+    };
+    let Some(stores) = stores else {
+        return Default::default();
+    };
+    let membership = stores.batches.membership();
+    crate::live_layout::SceneSourceNeeds {
+        camera: membership.active[source_iso_batch::CAMERA] && selected.camera_id.is_some(),
+        screen: membership.active[source_iso_batch::SCREEN]
+            && (selected.window_id.is_some() || selected.screen_id.is_some()),
+    }
+}
+
+/// Derives the ISO leg from confirmed capture selection, including sources
+/// omitted by the primary preset. It is visible and full-frame, under a layout
+/// that contains (never crops), draws no bubble mask, no chroma key and no
+/// background. Mirror is preserved (it is the camera's own orientation).
+/// `None` when the role is unselected. Generic scenes without selection
+/// authority retain their device-bound source behavior.
+fn source_iso_snapshot(
+    snapshot: Option<&CompositorSceneSnapshot>,
+    role: SourceIsoRole,
+) -> Option<CompositorSceneSnapshot> {
+    let snapshot = snapshot?;
+    let scene = snapshot.scene.as_ref()?;
+    let mut iso_source = if let Some(selected) = snapshot.selected_sources.as_ref() {
+        let (id, name, kind, device_id) = match role {
+            SourceIsoRole::Screen => {
+                if let Some(window_id) = selected.window_id.as_ref() {
+                    (
+                        "source:base",
+                        "Window capture",
+                        SceneSourceKind::Window,
+                        window_id,
+                    )
+                } else {
+                    (
+                        "source:base",
+                        "Screen capture",
+                        SceneSourceKind::Screen,
+                        selected.screen_id.as_ref()?,
+                    )
+                }
+            }
+            SourceIsoRole::Camera => (
+                "source:camera",
+                "Camera",
+                SceneSourceKind::Camera,
+                selected.camera_id.as_ref()?,
+            ),
+        };
+        SceneSource {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            device_id: Some(device_id.clone()),
+            transform: full_frame_transform(),
+            default_transform: full_frame_transform(),
+            visible: true,
+            locked: false,
+        }
+    } else {
+        scene
+            .sources
+            .iter()
+            .find(|source| {
+                source.device_id.is_some()
+                    && match role {
+                        SourceIsoRole::Screen => matches!(
+                            source.kind,
+                            SceneSourceKind::Screen | SceneSourceKind::Window
+                        ),
+                        SourceIsoRole::Camera => matches!(source.kind, SceneSourceKind::Camera),
+                    }
+            })?
+            .clone()
+    };
+    iso_source.visible = true;
+    iso_source.transform = full_frame_transform();
+    iso_source.default_transform = full_frame_transform();
+    let mut layout = snapshot.layout.clone();
+    layout.layout_preset = match role {
+        SourceIsoRole::Screen => crate::protocol::LayoutPreset::ScreenOnly,
+        SourceIsoRole::Camera => crate::protocol::LayoutPreset::CameraOnly,
+    };
+    layout.arrangement_mode = crate::protocol::ArrangementMode::Preset;
+    layout.source_transform_overrides.clear();
+    layout.camera_fit = crate::protocol::CameraFit::Fit;
+    layout.camera_zoom = 100;
+    layout.camera_offset_x = 0;
+    layout.camera_offset_y = 0;
+    layout.camera_shape = crate::protocol::CameraShape::Rectangle;
+    layout.camera_chroma_key_enabled = false;
+    layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::default();
+    Some(CompositorSceneSnapshot {
+        selected_sources: snapshot.selected_sources.clone(),
+        revision: snapshot.revision,
+        scene: Some(Scene {
+            sources: vec![iso_source],
+            background: None,
+            ..scene.clone()
+        }),
+        layout,
+        active_screen: snapshot.active_screen.clone(),
+    })
+}
+
 fn full_frame_transform() -> SceneTransform {
     SceneTransform {
         x: 0.0,
@@ -9440,6 +10882,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::captions::OverlayPlacement;
     use crate::protocol::{
         SceneConfigParams, SourceSelection, StreamScreenStatus, VideoPreset, VideoSettings,
     };
@@ -9592,17 +11035,27 @@ mod tests {
         screen_id: Option<&str>,
         camera_id: Option<&str>,
     ) -> CompositorSceneSnapshot {
-        let mut layout = crate::protocol::default_layout_settings();
-        layout.layout_preset = layout_preset;
-        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
-            transition_ms: None,
-            sources: SourceSelection {
+        test_scene_snapshot_with_selection(
+            layout_preset,
+            SourceSelection {
                 screen_id: screen_id.map(ToString::to_string),
                 window_id: None,
                 camera_id: camera_id.map(ToString::to_string),
                 microphone_id: None,
                 test_pattern: false,
             },
+        )
+    }
+
+    fn test_scene_snapshot_with_selection(
+        layout_preset: LayoutPreset,
+        sources: SourceSelection,
+    ) -> CompositorSceneSnapshot {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = layout_preset;
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: sources.clone(),
             layout: layout.clone(),
             video: Some(VideoSettings {
                 preset: VideoPreset::Custom,
@@ -9615,10 +11068,291 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         CompositorSceneSnapshot {
+            selected_sources: Some(sources),
             revision: 1,
             scene: Some(scene),
             layout,
             active_screen: None,
+        }
+    }
+
+    #[test]
+    fn source_iso_capture_health_demand_tracks_selection_and_live_membership() {
+        for preset in [LayoutPreset::CameraOnly, LayoutPreset::ScreenOnly] {
+            let snapshot = test_scene_snapshot(preset.clone(), Some("screen-1"), Some("camera-1"));
+            let stores = CompositorSourceIsoFrameStores {
+                screen: Arc::new(StdMutex::new(FrameStore::new(2))),
+                camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+                batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
+            };
+            let mut cache = CompositorRenderCache {
+                frame_store: stores.screen.clone(),
+                stream_frame_store: None,
+                source_iso_frame_stores: Some(stores.clone()),
+                snapshot: Some(snapshot),
+                simulcast_snapshot: None,
+                transition: None,
+                editor_draft: None,
+                active_image_source: None,
+                background_image_source: None,
+                banners: Arc::new(BannerSet::default()),
+                banner_session_shape: None,
+            };
+            assert_eq!(
+                cache.capture_source_needs(),
+                crate::live_layout::SceneSourceNeeds {
+                    camera: true,
+                    screen: true,
+                }
+            );
+            let hidden = if preset == LayoutPreset::CameraOnly {
+                source_iso_batch::SCREEN
+            } else {
+                source_iso_batch::CAMERA
+            };
+            let visible = crate::live_layout::SceneSourceNeeds {
+                camera: preset == LayoutPreset::CameraOnly,
+                screen: preset == LayoutPreset::ScreenOnly,
+            };
+            let selected = cache
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .selected_sources
+                .as_mut()
+                .unwrap();
+            let saved = selected.clone();
+            selected.camera_id = None;
+            selected.screen_id = None;
+            assert_eq!(
+                cache.capture_source_needs(),
+                visible,
+                "explicit Off releases ISO demand"
+            );
+            cache.snapshot.as_mut().unwrap().selected_sources = Some(saved);
+            stores.batches.retire(hidden, None);
+            assert_eq!(
+                cache.capture_source_needs(),
+                visible,
+                "retired ISO does not keep capture alive"
+            );
+            cache.source_iso_frame_stores = None;
+            assert_eq!(
+                cache.capture_source_needs(),
+                visible,
+                "ISO-off keeps ordinary scene demand"
+            );
+            cache.simulcast_snapshot = Some(test_scene_snapshot(
+                if preset == LayoutPreset::CameraOnly {
+                    LayoutPreset::ScreenOnly
+                } else {
+                    LayoutPreset::CameraOnly
+                },
+                Some("screen-1"),
+                Some("camera-1"),
+            ));
+            assert_eq!(
+                cache.capture_source_needs(),
+                crate::live_layout::SceneSourceNeeds {
+                    camera: true,
+                    screen: true,
+                },
+                "auxiliary source remains a health consumer"
+            );
+        }
+    }
+
+    #[test]
+    fn source_iso_snapshot_isolates_one_full_frame_source_per_role() {
+        let mut snapshot = test_scene_snapshot(
+            LayoutPreset::ScreenCamera,
+            Some("screen-1"),
+            Some("camera-1"),
+        );
+        snapshot.layout.camera_shape = crate::protocol::CameraShape::Circle;
+        snapshot.layout.camera_fit = crate::protocol::CameraFit::Fill;
+        snapshot.layout.camera_zoom = 140;
+        snapshot.layout.camera_offset_x = 12;
+        snapshot.layout.camera_chroma_key_enabled = true;
+        snapshot.layout.camera_mirror = true;
+        if let Some(scene) = snapshot.scene.as_mut() {
+            for source in scene.sources.iter_mut() {
+                if matches!(source.kind, SceneSourceKind::Camera) {
+                    source.visible = false;
+                }
+            }
+        }
+
+        let screen = source_iso_snapshot(Some(&snapshot), SourceIsoRole::Screen)
+            .expect("screen ISO snapshot");
+        let screen_scene = screen.scene.as_ref().expect("screen scene");
+        assert_eq!(screen_scene.sources.len(), 1);
+        assert!(matches!(
+            screen_scene.sources[0].kind,
+            SceneSourceKind::Screen
+        ));
+        assert!(screen_scene.sources[0].visible);
+        assert_eq!(screen_scene.sources[0].transform, full_frame_transform());
+        assert_eq!(screen.layout.layout_preset, LayoutPreset::ScreenOnly);
+        assert!(screen_scene.background.is_none());
+
+        let camera = source_iso_snapshot(Some(&snapshot), SourceIsoRole::Camera)
+            .expect("camera ISO snapshot");
+        let camera_scene = camera.scene.as_ref().expect("camera scene");
+        assert_eq!(camera_scene.sources.len(), 1);
+        assert!(matches!(
+            camera_scene.sources[0].kind,
+            SceneSourceKind::Camera
+        ));
+        assert!(
+            camera_scene.sources[0].visible,
+            "a camera hidden in the composed scene is still recorded on its own leg"
+        );
+        assert_eq!(camera.layout.layout_preset, LayoutPreset::CameraOnly);
+        assert_eq!(camera.layout.camera_fit, crate::protocol::CameraFit::Fit);
+        assert_eq!(camera.layout.camera_zoom, 100);
+        assert_eq!(camera.layout.camera_offset_x, 0);
+        assert_eq!(
+            camera.layout.camera_shape,
+            crate::protocol::CameraShape::Rectangle
+        );
+        assert!(!camera.layout.camera_chroma_key_enabled);
+        assert!(
+            camera.layout.camera_mirror,
+            "mirror is the camera's own orientation"
+        );
+        assert_eq!(camera.revision, snapshot.revision);
+    }
+
+    #[test]
+    fn source_iso_snapshot_is_none_without_the_role_source() {
+        let screen_only = test_scene_snapshot(LayoutPreset::ScreenOnly, Some("screen-1"), None);
+        assert!(source_iso_snapshot(Some(&screen_only), SourceIsoRole::Screen).is_some());
+        assert!(source_iso_snapshot(Some(&screen_only), SourceIsoRole::Camera).is_none());
+        assert!(source_iso_snapshot(None, SourceIsoRole::Screen).is_none());
+    }
+
+    #[test]
+    fn source_iso_snapshot_keeps_selected_sources_omitted_by_presets() {
+        for (preset, role, kind, device_id) in [
+            (
+                LayoutPreset::CameraOnly,
+                SourceIsoRole::Screen,
+                SceneSourceKind::Screen,
+                "screen-1",
+            ),
+            (
+                LayoutPreset::VerticalCameraOnly,
+                SourceIsoRole::Screen,
+                SceneSourceKind::Screen,
+                "screen-1",
+            ),
+            (
+                LayoutPreset::ScreenOnly,
+                SourceIsoRole::Camera,
+                SceneSourceKind::Camera,
+                "camera-1",
+            ),
+            (
+                LayoutPreset::VerticalScreenOnly,
+                SourceIsoRole::Camera,
+                SceneSourceKind::Camera,
+                "camera-1",
+            ),
+        ] {
+            let mut snapshot =
+                test_scene_snapshot(preset.clone(), Some("screen-1"), Some("camera-1"));
+            snapshot.layout.camera_mirror = true;
+            assert!(
+                snapshot
+                    .scene
+                    .as_ref()
+                    .unwrap()
+                    .sources
+                    .iter()
+                    .all(|source| source.kind != kind)
+            );
+            let iso = source_iso_snapshot(Some(&snapshot), role).expect("selected hidden source");
+            let scene = iso.scene.as_ref().unwrap();
+            assert_eq!(scene.sources.len(), 1);
+            assert_eq!(scene.sources[0].kind, kind);
+            assert_eq!(scene.sources[0].device_id.as_deref(), Some(device_id));
+            assert!(scene.sources[0].visible);
+            assert_eq!(scene.sources[0].transform, full_frame_transform());
+            assert!(iso.layout.camera_mirror);
+        }
+    }
+
+    #[test]
+    fn source_iso_snapshot_keeps_hidden_window_identity_over_saved_screen() {
+        let snapshot = test_scene_snapshot_with_selection(
+            LayoutPreset::CameraOnly,
+            SourceSelection {
+                screen_id: Some("screen-saved".to_string()),
+                window_id: Some("window:42".to_string()),
+                camera_id: Some("camera-1".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+        );
+        assert!(
+            snapshot
+                .scene
+                .as_ref()
+                .unwrap()
+                .sources
+                .iter()
+                .all(|source| source.kind == SceneSourceKind::Camera)
+        );
+        let iso = source_iso_snapshot(Some(&snapshot), SourceIsoRole::Screen).unwrap();
+        let source = &iso.scene.as_ref().unwrap().sources[0];
+        assert_eq!(source.kind, SceneSourceKind::Window);
+        assert_eq!(source.device_id.as_deref(), Some("window:42"));
+    }
+
+    #[test]
+    fn source_iso_snapshot_actual_off_overrides_retained_scene_identity() {
+        let mut snapshot = test_scene_snapshot(
+            LayoutPreset::ScreenCamera,
+            Some("screen-1"),
+            Some("camera-1"),
+        );
+        let selected = snapshot.selected_sources.as_mut().unwrap();
+        selected.screen_id = None;
+        selected.camera_id = None;
+        assert_eq!(snapshot.scene.as_ref().unwrap().sources.len(), 2);
+        assert!(source_iso_snapshot(Some(&snapshot), SourceIsoRole::Screen).is_none());
+        assert!(source_iso_snapshot(Some(&snapshot), SourceIsoRole::Camera).is_none());
+    }
+
+    #[test]
+    fn source_iso_snapshot_source_edit_turns_off_layout_omitted_role() {
+        for (preset, role, kind) in [
+            (
+                LayoutPreset::CameraOnly,
+                SourceIsoRole::Screen,
+                crate::live_source_switch::SourceKind::Capture,
+            ),
+            (
+                LayoutPreset::ScreenOnly,
+                SourceIsoRole::Camera,
+                crate::live_source_switch::SourceKind::Camera,
+            ),
+        ] {
+            let primary = test_scene_snapshot(preset.clone(), Some("screen-1"), Some("camera-1"));
+            let mut selected = primary.selected_sources.clone().unwrap();
+            assert!(source_iso_snapshot(Some(&primary), role).is_some());
+            match role {
+                SourceIsoRole::Screen => selected.screen_id = None,
+                SourceIsoRole::Camera => selected.camera_id = None,
+            }
+            let mut edit = CompositorSourceEdit {
+                auxiliary: Some(primary.clone()),
+                primary,
+            };
+            edit.patch(kind, None, &selected);
+            assert!(source_iso_snapshot(Some(&edit.primary), role).is_none());
+            assert!(source_iso_snapshot(edit.auxiliary.as_ref(), role).is_none());
         }
     }
 
@@ -9876,6 +11610,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
 
         gpu.force_next_pixel_buffer_import_failure();
@@ -10185,6 +11922,9 @@ mod tests {
                     mask: SourceMask::None,
                     blend: true,
                     chroma_key: scene_chroma_key_into_metal(&spec),
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                    opacity: 1.0,
                 }],
             )
             .expect("metal compose");
@@ -10421,6 +12161,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -10440,6 +12181,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             true,
         )
@@ -10457,6 +12201,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             true,
         )
@@ -10526,6 +12273,7 @@ mod tests {
         overlay.default_transform = overlay.transform.clone();
         scene.sources.push(overlay);
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -10545,6 +12293,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             true,
         )
@@ -10624,6 +12375,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -10673,6 +12425,9 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             true,
         )
@@ -10726,6 +12481,7 @@ mod tests {
             visibility_percent: 20.0,
         });
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -10771,6 +12527,9 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             false,
         )
@@ -10778,6 +12537,201 @@ mod tests {
 
         assert!(frame.pixel_format.has_metal_iosurface_target());
         assert!(frame.export_handle.has_metal_iosurface_target());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn source_iso_busy_target_ring_preserves_native_frame_and_resumes() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            return;
+        };
+        let state = test_state();
+        state.compositor.lock().await.run_id = Some("ring-busy-test".into());
+        let mut live_sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        let store = compositor_frame_store(&state).await;
+        let mut held = Vec::new();
+        for sequence in 1..=6 {
+            let result = publish_compositor_frame(
+                &state,
+                "ring-busy-test",
+                sequence,
+                8,
+                4,
+                &mut live_sources,
+                &mut cache,
+                Some(&mut gpu),
+                CompositorFrameConsumer::VideoToolboxEncoder,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+            .await;
+            let frame = store.lock().unwrap().latest().expect("native frame");
+            assert!(frame.metadata.has_metal_iosurface_target());
+            assert_eq!(
+                compositor_latest_frame_evidence(&state)
+                    .await
+                    .unwrap()
+                    .sequence,
+                sequence.min(5)
+            );
+            assert_eq!(result.primary_published, sequence <= 5);
+            assert_eq!(
+                result
+                    .metal_target_handoff
+                    .as_ref()
+                    .map(|handoff| handoff.iosurface_id),
+                frame.metadata.metal_target_iosurface_id()
+            );
+            if sequence <= 5 {
+                assert_eq!(frame.sequence, sequence);
+                held.push(
+                    frame
+                        .metadata
+                        .metal_target_pixel_buffer()
+                        .unwrap()
+                        .begin_in_flight(),
+                );
+            } else {
+                assert_eq!(
+                    frame.sequence, 5,
+                    "busy must not republish old content as fresh"
+                );
+                assert!(
+                    result
+                        .compositor_fallback_reason
+                        .as_deref()
+                        .unwrap()
+                        .contains("target ring busy")
+                );
+            }
+        }
+        held.pop();
+        let resumed = publish_compositor_frame(
+            &state,
+            "ring-busy-test",
+            7,
+            8,
+            4,
+            &mut live_sources,
+            &mut cache,
+            Some(&mut gpu),
+            CompositorFrameConsumer::VideoToolboxEncoder,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(resumed.compositor_backend, CompositorBackend::Metal);
+        assert_eq!(store.lock().unwrap().latest().unwrap().sequence, 7);
+        assert_eq!(
+            compositor_latest_frame_evidence(&state)
+                .await
+                .unwrap()
+                .sequence,
+            7
+        );
+        assert!(
+            !GpuComposeFailure::from("device unavailable")
+                .retains_native_frame(CompositorFrameConsumer::VideoToolboxEncoder)
+        );
+        assert!(
+            !GpuComposeFailure::TargetRingBusy
+                .retains_native_frame(CompositorFrameConsumer::RawYuvEncoder)
+        );
+
+        // The ISO auxiliary publisher follows the same hold/resume contract.
+        let auxiliary = Arc::new(std::sync::Mutex::new(FrameStore::new(2)));
+        let inputs = |sequence| CompositorRenderInputs {
+            sequence,
+            width: 8,
+            height: 4,
+            snapshot: None,
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: None,
+            caption_overlay: None,
+            highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+        };
+        drop(held);
+        publish_auxiliary_compositor_frame(
+            8,
+            Instant::now(),
+            Instant::now(),
+            auxiliary.clone(),
+            inputs(8),
+            Some(&mut gpu),
+            CompositorFrameConsumer::VideoToolboxEncoder,
+            1,
+        );
+        let mut held = Vec::new();
+        for sequence in 9..=13 {
+            publish_auxiliary_compositor_frame(
+                sequence,
+                Instant::now(),
+                Instant::now(),
+                auxiliary.clone(),
+                inputs(sequence),
+                Some(&mut gpu),
+                CompositorFrameConsumer::VideoToolboxEncoder,
+                1,
+            );
+            held.push(
+                auxiliary
+                    .lock()
+                    .unwrap()
+                    .latest()
+                    .unwrap()
+                    .metadata
+                    .metal_target_pixel_buffer()
+                    .unwrap()
+                    .begin_in_flight(),
+            );
+        }
+        publish_auxiliary_compositor_frame(
+            14,
+            Instant::now(),
+            Instant::now(),
+            auxiliary.clone(),
+            inputs(14),
+            Some(&mut gpu),
+            CompositorFrameConsumer::VideoToolboxEncoder,
+            1,
+        );
+        assert_eq!(auxiliary.lock().unwrap().latest().unwrap().sequence, 13);
+        held.pop();
+        publish_auxiliary_compositor_frame(
+            15,
+            Instant::now(),
+            Instant::now(),
+            auxiliary.clone(),
+            inputs(15),
+            Some(&mut gpu),
+            CompositorFrameConsumer::VideoToolboxEncoder,
+            1,
+        );
+        assert_eq!(auxiliary.lock().unwrap().latest().unwrap().sequence, 15);
     }
 
     #[cfg(target_os = "macos")]
@@ -10812,6 +12766,7 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.scene = Some(CompositorSceneSnapshot {
+                selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
                 layout,
@@ -10833,6 +12788,11 @@ mod tests {
             CompositorFrameConsumer::RawYuvEncoder,
             None,
             None,
+            None,
+            None,
+            None,
+            false,
+            false,
             false,
             false,
             false,
@@ -10901,6 +12861,7 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.scene = Some(CompositorSceneSnapshot {
+                selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
                 layout,
@@ -10922,6 +12883,11 @@ mod tests {
             CompositorFrameConsumer::VideoToolboxEncoder,
             None,
             None,
+            None,
+            None,
+            None,
+            false,
+            false,
             false,
             false,
             false,
@@ -10950,7 +12916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_preview_cpu_composes_when_gpu_is_absent_and_jpeg_consumer_still_gets_yuv() {
+    async fn native_preview_publishes_without_cpu_pixels_and_jpeg_consumer_still_gets_yuv() {
         let state = test_state();
         let mut live_sources = CompositorLiveSources::default();
         let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
@@ -10967,6 +12933,11 @@ mod tests {
             CompositorFrameConsumer::NativePreview,
             None,
             None,
+            None,
+            None,
+            None,
+            false,
+            false,
             false,
             false,
             false,
@@ -10978,8 +12949,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .latest()
-            .expect("native preview CPU frame");
-        assert_eq!(native.bytes.len(), raw_yuv420p_len(16, 8));
+            .expect("native preview metadata frame");
+        // Linux plan 0014: nothing reads composed native-preview pixels.
+        assert_eq!(native.sequence, 1);
+        assert!(native.bytes.is_empty());
 
         publish_compositor_frame(
             &state,
@@ -10993,6 +12966,11 @@ mod tests {
             CompositorFrameConsumer::JpegFallback,
             None,
             None,
+            None,
+            None,
+            None,
+            false,
+            false,
             false,
             false,
             false,
@@ -11010,7 +12988,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_preview_cpu_composes_portal_screen_bgra_when_gpu_is_absent() {
+    async fn native_preview_attaches_portal_screen_without_composing_pixels() {
         let state = test_state();
         let video = VideoSettings {
             preset: VideoPreset::Custom,
@@ -11053,6 +13031,7 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.scene = Some(CompositorSceneSnapshot {
+                selected_sources: None,
                 revision: 7,
                 scene: Some(scene),
                 layout: LayoutSettings {
@@ -11077,6 +13056,11 @@ mod tests {
             CompositorFrameConsumer::NativePreview,
             None,
             None,
+            None,
+            None,
+            None,
+            false,
+            false,
             false,
             false,
             false,
@@ -11095,12 +13079,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .latest()
-            .expect("CPU-composed portal preview frame");
-        assert_eq!(latest.bytes.len(), raw_yuv420p_len(16, 8));
-        assert!(
-            latest.bytes.iter().any(|byte| *byte != 0),
-            "portal pixels must survive CPU composition; empty/black means the proof surface stays synthetic"
-        );
+            .expect("portal preview metadata frame");
+        // The proof surface draws the screen's own BMP layer; the compositor
+        // only proves the source is attached (plan 0014).
+        assert_eq!(latest.sequence, 4);
+        assert!(latest.bytes.is_empty());
         assert!(crate::linux_portal_capture::parse_portal_source_id(portal_id).is_some());
         assert!(crate::screen_capture::parse_screencapturekit_display_id(portal_id).is_none());
     }
@@ -11146,6 +13129,7 @@ mod tests {
         camera.transform = full_frame_transform();
         camera.default_transform = full_frame_transform();
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -11165,6 +13149,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             true,
         ) {
@@ -11185,6 +13172,7 @@ mod tests {
             return;
         };
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: None,
             layout: crate::protocol::default_layout_settings(),
@@ -11215,6 +13203,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             true,
         ) {
@@ -11310,6 +13301,64 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn overlay_flags_swap_in_place_for_the_highlight_and_the_buddy() {
+        let state = test_state();
+        let flags = OverlayLegFlags {
+            highlight_on_primary: true,
+            highlight_on_aux: false,
+            buddy_on_primary: false,
+            buddy_on_aux: true,
+        };
+        // No live run: nothing to swap; the next session reads the layout.
+        assert!(!update_overlay_flags(&state, flags).await);
+        let (loop_config_tx, mut loop_config_rx) = watch::channel(CompositorLoopConfig {
+            target_fps: 30,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            caption_overlay_on_primary: true,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
+        });
+        state.compositor.lock().await.loop_config_tx = Some(loop_config_tx);
+        assert!(update_overlay_flags(&state, flags).await);
+        assert!(loop_config_rx.has_changed().unwrap());
+        let next = *loop_config_rx.borrow_and_update();
+        assert_eq!(
+            (
+                next.highlight_overlay_on_primary,
+                next.highlight_overlay_on_aux,
+                next.buddy_overlay_on_primary,
+                next.buddy_overlay_on_aux
+            ),
+            (true, false, false, true)
+        );
+        // Captions, fps and the consumer ride along untouched.
+        assert!(next.caption_overlay_on_primary);
+        assert_eq!(next.target_fps, 30);
+        assert_eq!(
+            next.frame_consumer,
+            CompositorFrameConsumer::VideoToolboxEncoder
+        );
+        // The same flags again: true, and nothing is sent.
+        assert!(update_overlay_flags(&state, flags).await);
+        assert!(!loop_config_rx.has_changed().unwrap());
+        // Only the Buddy changes: still a swap.
+        assert!(
+            update_overlay_flags(
+                &state,
+                OverlayLegFlags {
+                    buddy_on_aux: false,
+                    ..flags
+                }
+            )
+            .await
+        );
+        assert!(!loop_config_rx.borrow_and_update().buddy_overlay_on_aux);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn independent_heartbeat_declares_blocked_render_before_loop_release() {
         let state = test_state();
@@ -11331,6 +13380,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         });
         let supervisor_state = state.clone();
         let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
@@ -12159,10 +14210,13 @@ mod tests {
                 height: 360,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -12214,10 +14268,13 @@ mod tests {
                     frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                     composes_simulcast_scene: false,
                 }),
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -12305,10 +14362,13 @@ mod tests {
                     frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                     composes_simulcast_scene: true,
                 }),
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -12494,6 +14554,7 @@ mod tests {
             let mut compositor = state.compositor.lock().await;
             compositor.stream_frame_store = Some(stream_store.clone());
             compositor.scene = Some(CompositorSceneSnapshot {
+                selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
                 layout,
@@ -12521,6 +14582,11 @@ mod tests {
                 composes_simulcast_scene: false,
             }),
             Some(&mut stream_gpu),
+            None,
+            None,
+            None,
+            false,
+            false,
             false,
             false,
             false,
@@ -13324,10 +15390,13 @@ mod tests {
                 height: 1080,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -13346,10 +15415,13 @@ mod tests {
             height: 36,
             frame_consumer: CompositorFrameConsumer::NativePreview,
             stream_output: None,
+            source_iso_output: None,
             caption_overlay_on_primary: false,
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         };
 
         let first = start_synthetic_compositor(state.clone(), params(64)).await;
@@ -13373,10 +15445,13 @@ mod tests {
             height,
             frame_consumer: CompositorFrameConsumer::NativePreview,
             stream_output: None,
+            source_iso_output: None,
             caption_overlay_on_primary: false,
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         }
     }
 
@@ -13390,6 +15465,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         }
     }
 
@@ -13518,6 +15595,7 @@ mod tests {
                     frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                     composes_simulcast_scene: false,
                 }),
+                source_iso_output: None,
                 ..preview_params(64, 36)
             },
         )
@@ -13559,10 +15637,13 @@ mod tests {
                 height: 36,
                 frame_consumer: CompositorFrameConsumer::NativePreview,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -13591,10 +15672,13 @@ mod tests {
             height: 36,
             frame_consumer: CompositorFrameConsumer::NativePreview,
             stream_output: None,
+            source_iso_output: None,
             caption_overlay_on_primary: false,
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         };
         let (left, right) = tokio::join!(
             start_synthetic_compositor(state.clone(), params(64)),
@@ -13623,10 +15707,13 @@ mod tests {
                 height: 395,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -13657,10 +15744,13 @@ mod tests {
                 height: 1080,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -14126,6 +16216,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -14160,6 +16251,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -14238,6 +16332,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: caption,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -14331,6 +16428,9 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14339,6 +16439,9 @@ mod tests {
             CompositorRenderInputs {
                 caption_overlay: Some(&caption),
                 highlight_overlay: Some(&highlight),
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
                 ..base_inputs
             },
             &mut with_both,
@@ -14372,12 +16475,12 @@ mod tests {
         canvas_height: usize,
         safe_inset: usize,
     ) -> (usize, usize, usize, usize) {
-        let (_, left, top, draw_width) = caption_overlay_layout_with_inset(
+        let (_, left, top, draw_width) = crate::overlay_layout::overlay_blit_layout(
             overlay.width as usize,
             overlay.height as usize,
             canvas_width,
             canvas_height,
-            overlay.placement,
+            overlay.blit_rect(canvas_width as u32, canvas_height as u32),
             safe_inset,
         );
         let draw_height = (overlay.height as usize).min(canvas_height);
@@ -14393,7 +16496,14 @@ mod tests {
                 .round()
                 .max(1.0) as usize;
             for anchor in ALL_HIGHLIGHT_ANCHORS {
-                let highlight_edge = OverlayPlacement::from(anchor).vertical;
+                let highlight_edge = if OverlayPlacement::from(anchor)
+                    .rect_for_canvas(canvas_width as u32, canvas_height as u32)
+                    .bottom_gravity()
+                {
+                    CaptionOverlayPosition::Bottom
+                } else {
+                    CaptionOverlayPosition::Top
+                };
                 for position in [CaptionOverlayPosition::Top, CaptionOverlayPosition::Bottom] {
                     // Wide caption: its centred x-range reaches under either
                     // corner card. Narrow caption: clears both corners.
@@ -14458,6 +16568,44 @@ mod tests {
         );
     }
 
+    /// The legacy oracle for a push without a rect: `(source_left, left, top, width)`.
+    fn legacy_layout(
+        overlay_width: usize,
+        overlay_height: usize,
+        canvas_width: usize,
+        canvas_height: usize,
+        placement: impl Into<OverlayPlacement>,
+    ) -> (usize, usize, usize, usize) {
+        legacy_layout_with_inset(
+            overlay_width,
+            overlay_height,
+            canvas_width,
+            canvas_height,
+            placement,
+            0,
+        )
+    }
+
+    fn legacy_layout_with_inset(
+        overlay_width: usize,
+        overlay_height: usize,
+        canvas_width: usize,
+        canvas_height: usize,
+        placement: impl Into<OverlayPlacement>,
+        safe_inset: usize,
+    ) -> (usize, usize, usize, usize) {
+        crate::overlay_layout::overlay_blit_layout(
+            overlay_width,
+            overlay_height,
+            canvas_width,
+            canvas_height,
+            placement
+                .into()
+                .rect_for_canvas(canvas_width as u32, canvas_height as u32),
+            safe_inset,
+        )
+    }
+
     #[test]
     fn overlay_layout_portrait_keeps_out_of_the_platform_ui_bands() {
         use crate::captions::CaptionOverlayPosition;
@@ -14465,7 +16613,7 @@ mod tests {
         // A 1080x1920 vertical leg: a centred caption bar sits 8% below the
         // top or 22% above the bottom, clear of TikTok/Shorts/Reels chrome.
         let (bar_width, bar_height) = (820_usize, 160_usize);
-        let (_, left, top, width) = caption_overlay_layout(
+        let (_, left, top, width) = legacy_layout(
             bar_width,
             bar_height,
             1080,
@@ -14473,7 +16621,7 @@ mod tests {
             CaptionOverlayPosition::Top,
         );
         assert_eq!((left, top, width), ((1080 - 820) / 2, 154, 820));
-        let (_, _, top, _) = caption_overlay_layout(
+        let (_, _, top, _) = legacy_layout(
             bar_width,
             bar_height,
             1080,
@@ -14482,7 +16630,7 @@ mod tests {
         );
         assert_eq!(top, 1920 - 422 - 160);
         // The yielding inset still stacks on top of the safe area.
-        let (_, _, top, _) = caption_overlay_layout_with_inset(
+        let (_, _, top, _) = legacy_layout_with_inset(
             bar_width,
             bar_height,
             1080,
@@ -14492,8 +16640,7 @@ mod tests {
         );
         assert_eq!(top, 1920 - 422 - 100 - 160);
         // Square and landscape canvases keep the 4% rule.
-        let (_, _, top, _) =
-            caption_overlay_layout(100, 10, 1000, 1000, CaptionOverlayPosition::Bottom);
+        let (_, _, top, _) = legacy_layout(100, 10, 1000, 1000, CaptionOverlayPosition::Bottom);
         assert_eq!(top, 1000 - 40 - 10);
     }
 
@@ -14503,15 +16650,10 @@ mod tests {
 
         let (card_width, card_height) = (400_usize, 200_usize);
         for (canvas_width, canvas_height) in [(1920_usize, 1080_usize), (1080, 1920)] {
-            let margin = ((canvas_height as f64) * CAPTION_OVERLAY_MARGIN).round() as usize;
+            let margin = ((canvas_height as f64) * 0.04).round() as usize;
             for anchor in ALL_HIGHLIGHT_ANCHORS {
-                let (source_left, left, top, draw_width) = caption_overlay_layout(
-                    card_width,
-                    card_height,
-                    canvas_width,
-                    canvas_height,
-                    anchor,
-                );
+                let (source_left, left, top, draw_width) =
+                    legacy_layout(card_width, card_height, canvas_width, canvas_height, anchor);
                 assert_eq!((source_left, draw_width), (0, card_width));
                 let (right, bottom) = (left + card_width, top + card_height);
                 let x_margin = match anchor {
@@ -14539,12 +16681,11 @@ mod tests {
                 let expected_y_margin = if canvas_height > canvas_width {
                     match anchor {
                         CommentHighlightAnchor::TopLeft | CommentHighlightAnchor::TopRight => {
-                            ((canvas_height as f64) * PORTRAIT_OVERLAY_TOP_MARGIN).round() as usize
+                            ((canvas_height as f64) * 0.08).round() as usize
                         }
                         CommentHighlightAnchor::BottomLeft
                         | CommentHighlightAnchor::BottomRight => {
-                            ((canvas_height as f64) * PORTRAIT_OVERLAY_BOTTOM_MARGIN).round()
-                                as usize
+                            ((canvas_height as f64) * 0.22).round() as usize
                         }
                     }
                 } else {
@@ -14560,70 +16701,218 @@ mod tests {
     }
 
     #[test]
-    fn overlay_layout_center_placement_matches_the_legacy_caption_formula() {
-        use crate::captions::CaptionOverlayPosition;
+    fn overlay_layout_over_wide_or_tight_overlays_stay_inside_their_rect() {
+        for anchor in ALL_HIGHLIGHT_ANCHORS {
+            let rect = OverlayPlacement::from(anchor).rect_for_canvas(1920, 1080);
+            let (rect_left, _, rect_right, _) = rect.pixels(1920, 1080);
+            // Wider than the rect: centre-cropped to the rect, never scaled.
+            let (source_left, left, _, draw_width) = legacy_layout(2400, 100, 1920, 1080, anchor);
+            assert_eq!(draw_width, rect_right - rect_left, "{anchor:?}");
+            assert_eq!(source_left, (2400 - draw_width) / 2, "{anchor:?}");
+            assert_eq!(left, rect_left, "{anchor:?}");
+            // Fits the canvas but not the rect: the same crop.
+            let (source_left, left, _, draw_width) = legacy_layout(1900, 100, 1920, 1080, anchor);
+            assert_eq!(draw_width, rect_right - rect_left, "{anchor:?}");
+            assert_eq!(source_left, (1900 - draw_width) / 2, "{anchor:?}");
+            assert!(left + draw_width <= 1920, "{anchor:?}");
+        }
+        // A rect wider than the canvas clamps to it.
+        let full = crate::overlay_layout::OverlayRect::new(0.0, 0.0, 1.0, 1.0);
+        let (source_left, left, _, draw_width) =
+            crate::overlay_layout::overlay_blit_layout(2400, 100, 1920, 1080, full, 0);
+        assert_eq!((source_left, left, draw_width), (240, 0, 1920));
+    }
 
-        // Portrait canvases use the platform safe area instead (asserted in
-        // `overlay_layout_portrait_keeps_out_of_the_platform_ui_bands`).
-        for (canvas_width, canvas_height) in [(1920_usize, 1080_usize), (32, 16), (16, 8), (1, 1)] {
-            for (overlay_width, overlay_height) in [
-                (960_usize, 120_usize),
-                (1921, 300),
-                (4096, 2048),
-                (7, 3),
-                (1, 1),
-            ] {
-                for safe_inset in [0_usize, 1, 222, 5000] {
-                    for position in [CaptionOverlayPosition::Top, CaptionOverlayPosition::Bottom] {
-                        // The pre-anchor formula, verbatim.
-                        let draw_width = overlay_width.min(canvas_width);
-                        let draw_height = overlay_height.min(canvas_height);
-                        let source_left = (overlay_width - draw_width) / 2;
-                        let dest_left = (canvas_width - draw_width) / 2;
-                        let margin =
-                            ((canvas_height as f64) * CAPTION_OVERLAY_MARGIN).round() as usize;
-                        let inset_margin = margin.saturating_add(safe_inset);
-                        let dest_top = match position {
-                            CaptionOverlayPosition::Top => {
-                                inset_margin.min(canvas_height.saturating_sub(draw_height))
-                            }
-                            CaptionOverlayPosition::Bottom => canvas_height
-                                .saturating_sub(draw_height.saturating_add(inset_margin)),
-                        };
-                        assert_eq!(
-                            caption_overlay_layout_with_inset(
-                                overlay_width,
-                                overlay_height,
-                                canvas_width,
-                                canvas_height,
-                                position,
-                                safe_inset,
-                            ),
-                            (source_left, dest_left, dest_top, draw_width.max(1))
+    /// Parity fixture (plan 164 S-B3.5, extended by S-C3): a synthetic
+    /// 1280x720 test-pattern scene with a 200x100 red highlight at rect
+    /// (0.1, 0.2, 0.25, 0.2) and a 200x100 green Buddy at rect
+    /// (0.15, 0.25, 0.25, 0.2), overlapping the card's bottom-right, renders
+    /// through CPU and Metal; the two agree on every pixel of the two rects
+    /// and their 2 px border (within ±2 per channel against each path's own
+    /// clean render), and the card wins the overlap on both paths (owner
+    /// answer 7: the Buddy blits under the highlight).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_blit_the_same_overlay_rect() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let (canvas_w, canvas_h) = (1280_u32, 720_u32);
+        let layout = crate::protocol::default_layout_settings();
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: true,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: canvas_w,
+                height: canvas_h,
+                fps: 30,
+                bitrate_kbps: 6000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        };
+        let highlight = test_caption_overlay(
+            200,
+            100,
+            [255, 0, 0, 255],
+            OverlayPlacement::new(
+                Some(crate::overlay_layout::OverlayRect::new(0.1, 0.2, 0.25, 0.2)),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
+        );
+        let buddy = test_caption_overlay(
+            200,
+            100,
+            [0, 255, 0, 255],
+            crate::buddy_overlay::buddy_overlay_placement(Some(
+                crate::overlay_layout::OverlayRect::new(0.15, 0.25, 0.25, 0.2),
+            )),
+        );
+        let card = overlay_draw_rect(&highlight, 1280, 720, 0);
+        let avatar = overlay_draw_rect(&buddy, 1280, 720, 0);
+        assert_eq!(card, (128, 144, 328, 244));
+        assert_eq!(avatar, (192, 180, 392, 280));
+        fn inputs<'a>(
+            snapshot: &'a CompositorSceneSnapshot,
+            highlight: Option<&'a crate::captions::CaptionOverlay>,
+            buddy: Option<&'a crate::captions::CaptionOverlay>,
+            sequence: u64,
+        ) -> CompositorRenderInputs<'a> {
+            CompositorRenderInputs {
+                sequence,
+                width: 1280,
+                height: 720,
+                snapshot: Some(snapshot),
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: None,
+                highlight_overlay: highlight,
+                buddy_overlay: buddy,
+                buddy_leg: None,
+                banners: &[],
+            }
+        }
+        let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(inputs(&snapshot, None, None, 1), &mut cpu_clean);
+        let mut cpu = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(
+            inputs(&snapshot, Some(&highlight), Some(&buddy), 1),
+            &mut cpu,
+        );
+        // The same sequence for every render: the test pattern animates by
+        // sequence, and the border check compares each path with itself.
+        let metal_clean = try_gpu_compose(Some(&mut gpu), &inputs(&snapshot, None, None, 1), true)
+            .expect("clean scene renders on Metal")
+            .yuv;
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(&snapshot, Some(&highlight), Some(&buddy), 1),
+            true,
+        )
+        .expect("overlay scene renders on Metal")
+        .yuv;
+        assert_eq!(metal.len(), cpu.len());
+
+        let (red_y, red_u, red_v) = rgb_to_yuv(255, 0, 0);
+        let (green_y, green_u, green_v) = rgb_to_yuv(0, 255, 0);
+        let width = canvas_w as usize;
+        let height = canvas_h as usize;
+        let (uv_width, uv_height) = (width.div_ceil(2), height.div_ceil(2));
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 2;
+        let inside = |rect: (usize, usize, usize, usize), x: usize, y: usize| {
+            (rect.0..rect.2).contains(&x) && (rect.1..rect.3).contains(&y)
+        };
+        let (left, top) = (card.0.min(avatar.0), card.1.min(avatar.1));
+        let (right, bottom) = (card.2.max(avatar.2), card.3.max(avatar.3));
+        for y in top - 2..bottom + 2 {
+            for x in left - 2..right + 2 {
+                let index = y * width + x;
+                // The card is on top of the Buddy where they overlap.
+                let expected = if inside(card, x, y) {
+                    Some(red_y)
+                } else if inside(avatar, x, y) {
+                    Some(green_y)
+                } else {
+                    None
+                };
+                match expected {
+                    Some(luma) => {
+                        assert!(
+                            close(cpu[index], luma),
+                            "cpu luma at {x},{y}: {}",
+                            cpu[index]
+                        );
+                        assert!(
+                            close(metal[index], luma),
+                            "metal luma at {x},{y}: {}",
+                            metal[index]
+                        );
+                    }
+                    None => {
+                        assert!(
+                            close(cpu[index], cpu_clean[index]),
+                            "cpu border luma changed at {x},{y}"
+                        );
+                        assert!(
+                            close(metal[index], metal_clean[index]),
+                            "metal border luma changed at {x},{y}"
                         );
                     }
                 }
             }
         }
-    }
-
-    #[test]
-    fn overlay_layout_over_wide_or_tight_overlays_stay_on_canvas_for_every_anchor() {
-        for anchor in ALL_HIGHLIGHT_ANCHORS {
-            // Wider than the canvas: centre-cropped exactly like captions.
-            let (source_left, left, _, draw_width) =
-                caption_overlay_layout(2400, 100, 1920, 1080, anchor);
-            assert_eq!(
-                (source_left, left, draw_width),
-                (240, 0, 1920),
-                "{anchor:?}"
-            );
-            // Fits, but with less slack than the margin: clamped on-canvas.
-            let (source_left, left, _, draw_width) =
-                caption_overlay_layout(1900, 100, 1920, 1080, anchor);
-            assert_eq!(source_left, 0);
-            assert!(left + draw_width <= 1920, "{anchor:?}");
-        }
+        // Chroma, sampled strictly inside each overlay's exclusive area (half
+        // resolution): the card's left part, the Buddy's part below the card.
+        let chroma = |rect: (usize, usize, usize, usize), u: u8, v: u8, name: &str| {
+            for uv_y in (rect.1 + 2) / 2..(rect.3 - 2) / 2 {
+                for uv_x in (rect.0 + 2) / 2..(rect.2 - 2) / 2 {
+                    let uv_index = uv_y * uv_width + uv_x;
+                    for (plane, expected, start) in [("u", u, u_start), ("v", v, v_start)] {
+                        assert!(
+                            close(cpu[start + uv_index], expected),
+                            "cpu {name} {plane} at {uv_x},{uv_y}"
+                        );
+                        assert!(
+                            close(metal[start + uv_index], expected),
+                            "metal {name} {plane} at {uv_x},{uv_y}"
+                        );
+                    }
+                }
+            }
+        };
+        chroma((card.0, card.1, avatar.0, card.3), red_u, red_v, "card");
+        chroma(
+            (avatar.0, card.3, avatar.2, avatar.3),
+            green_u,
+            green_v,
+            "buddy",
+        );
+        // The overlap itself is the card's red on both paths.
+        chroma(
+            (avatar.0, avatar.1, card.2, card.3),
+            red_u,
+            red_v,
+            "overlap",
+        );
     }
 
     #[test]
@@ -14642,6 +16931,9 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14667,6 +16959,9 @@ mod tests {
             render_compositor_yuv420p_frame(
                 CompositorRenderInputs {
                     highlight_overlay: Some(&highlight),
+                    buddy_overlay: None,
+                    buddy_leg: None,
+                    banners: &[],
                     ..base_inputs
                 },
                 &mut frame,
@@ -14771,6 +17066,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -14789,6 +17087,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut scene_only,
         );
@@ -14823,13 +17124,20 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
         let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
-        // margin = 1 → rows 1..5 across the full width.
-        assert_eq!(bytes[2 * canvas_w as usize], white_y);
-        assert_eq!(bytes[2 * canvas_w as usize + 31], white_y);
+        // margin = 1 → rows 1..5 across the bar's rect: the legacy centred bar
+        // spans 4%..96% of the width (columns 1..31), and a bitmap wider than
+        // that is centre-cropped to it (plan 164: the rect bounds the width).
+        assert_eq!(bytes[2 * canvas_w as usize + 1], white_y);
+        assert_eq!(bytes[2 * canvas_w as usize + 30], white_y);
+        assert_ne!(bytes[2 * canvas_w as usize], white_y);
+        assert_ne!(bytes[2 * canvas_w as usize + 31], white_y);
         // Row 0 (above the margin) untouched by the bar.
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_scene(
@@ -14844,6 +17152,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut baseline,
         );
@@ -14888,6 +17199,7 @@ mod tests {
             visibility_percent: 20.0,
         });
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -14933,6 +17245,9 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -14977,6 +17292,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -15027,6 +17343,9 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -15099,6 +17418,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -15133,6 +17453,9 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -15350,6 +17673,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -15384,6 +17708,9 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
             },
             &mut bytes,
         );
@@ -15538,6 +17865,7 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.scene = Some(CompositorSceneSnapshot {
+                selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
                 layout: layout.clone(),
@@ -15582,6 +17910,11 @@ mod tests {
             CompositorFrameConsumer::RawYuvEncoder,
             None,
             None,
+            None,
+            None,
+            None,
+            false,
+            false,
             false,
             false,
             false,
@@ -15632,6 +17965,7 @@ mod tests {
             let mut compositor = state.compositor.lock().await;
             compositor.run_id = Some("camera-publication-run".into());
             compositor.scene = Some(CompositorSceneSnapshot {
+                selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
                 layout: layout.clone(),
@@ -15687,6 +18021,11 @@ mod tests {
             CompositorFrameConsumer::RawYuvEncoder,
             None,
             None,
+            None,
+            None,
+            None,
+            false,
+            false,
             false,
             false,
             false,
@@ -16009,6 +18348,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         state.compositor.lock().await.scene = Some(CompositorSceneSnapshot {
+            selected_sources: None,
             revision: 1,
             scene: Some(scene),
             layout,
@@ -16041,6 +18381,11 @@ mod tests {
                     CompositorFrameConsumer::RawYuvEncoder,
                     None,
                     None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    false,
                     false,
                     false,
                     false,
@@ -16216,5 +18561,1446 @@ mod tests {
             created_at: "2026-06-04T00:00:00Z".to_string(),
             updated_at: "2026-06-04T00:00:00Z".to_string(),
         }
+    }
+}
+
+/// Plan 168 Phase B: the Buddy's pet through the CPU and Metal paths.
+#[cfg(test)]
+mod buddy_sprite_tests {
+    use super::*;
+    use crate::buddy_sprite::{
+        BUDDY_SPRITE_DEFAULT_PIVOT, BuddyBubbleAnchor, BuddyLegFrame, BuddySpriteDraw,
+        BuddySpriteLayer,
+    };
+
+    const WIDTH: u32 = 1280;
+    const HEIGHT: u32 = 720;
+
+    fn solid_overlay(
+        width: u32,
+        height: u32,
+        rgba_pixel: [u8; 4],
+        placement: impl Into<crate::captions::OverlayPlacement>,
+        revision: u64,
+    ) -> crate::captions::CaptionOverlay {
+        let rgba = std::iter::repeat_n(rgba_pixel, (width * height) as usize)
+            .flatten()
+            .collect::<Vec<_>>();
+        crate::captions::CaptionOverlay {
+            bgra: Arc::new(rgba_to_bgra_bytes(&rgba)),
+            rgba: Arc::new(rgba),
+            width,
+            height,
+            placement: placement.into(),
+            revision,
+        }
+    }
+
+    fn inputs<'a>(
+        sequence: u64,
+        caption: Option<&'a crate::captions::CaptionOverlay>,
+        highlight: Option<&'a crate::captions::CaptionOverlay>,
+        bubble: Option<&'a crate::captions::CaptionOverlay>,
+        buddy_leg: Option<&'a BuddyLegFrame>,
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence,
+            width: WIDTH,
+            height: HEIGHT,
+            snapshot: None,
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: None,
+            caption_overlay: caption,
+            highlight_overlay: highlight,
+            buddy_overlay: bubble,
+            buddy_leg,
+            banners: &[],
+        }
+    }
+
+    fn cpu_frame(inputs: CompositorRenderInputs<'_>) -> Vec<u8> {
+        let mut bytes = vec![0; raw_yuv420p_len(inputs.width, inputs.height)];
+        render_compositor_yuv420p_frame(inputs, &mut bytes);
+        bytes
+    }
+
+    /// The S-B5 draw: cell 4 of the 3 x 2 fixture (neighbours on three
+    /// sides), 150 px on canvas from 120 px cells, turned 30 degrees and
+    /// scaled 1.1 x 0.9 about page-pet's pivot, nudged by (12, -7).
+    fn parity_leg() -> BuddyLegFrame {
+        let atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
+        let buddy_box = [565.0, 285.0, 150.0, 150.0];
+        let (sin, cos) = 30.0_f32.to_radians().sin_cos();
+        let draw = BuddySpriteDraw {
+            affine: [cos * 1.1, sin * 1.1, -sin * 0.9, cos * 0.9],
+            translate: [12.0, -7.0],
+            ..BuddySpriteDraw::at_rest(
+                atlas.cell("cell-4").unwrap().rect,
+                buddy_box,
+                BUDDY_SPRITE_DEFAULT_PIVOT,
+            )
+        };
+        BuddyLegFrame {
+            buddy_box,
+            sprite: Some(BuddySpriteLayer { atlas, draw }),
+            bubble_anchor: crate::buddy_sprite::buddy_bubble_anchor(buddy_box, 0.25),
+        }
+    }
+
+    /// Distance from a canvas point to the quad's outline, and whether the
+    /// point is inside.
+    fn edge_distance(corners: [[f32; 2]; 4], point: [f32; 2]) -> (f32, bool) {
+        // Outline order: top-left, top-right, bottom-right, bottom-left.
+        let outline = [corners[0], corners[1], corners[3], corners[2]];
+        let mut distance = f32::INFINITY;
+        let mut sign = None;
+        let mut inside = true;
+        for index in 0..4 {
+            let [ax, ay] = outline[index];
+            let [bx, by] = outline[(index + 1) % 4];
+            let (ex, ey) = (bx - ax, by - ay);
+            let (px, py) = (point[0] - ax, point[1] - ay);
+            let t = ((px * ex + py * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+            let (dx, dy) = (px - t * ex, py - t * ey);
+            distance = distance.min((dx * dx + dy * dy).sqrt());
+            let cross = ex * py - ey * px;
+            let side = cross >= 0.0;
+            if *sign.get_or_insert(side) != side {
+                inside = false;
+            }
+        }
+        (distance, inside)
+    }
+
+    /// Plan 168 S-B5: the CPU and Metal paths draw the same sprite. A
+    /// synthetic 3 x 2 atlas of flat colours with a 1 px alpha ramp edge,
+    /// turned 30 degrees and scaled 1.1 x 0.9 on a 1280 x 720 canvas: the
+    /// two readbacks agree within 3 per channel inside the quad and 8 on its
+    /// edge ring, and the inside is the cell's colour on both.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_draw_the_same_sprite() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let leg = parity_leg();
+        let draw = leg.sprite.as_ref().unwrap().draw;
+        let cpu = cpu_frame(inputs(1, None, None, None, Some(&leg)));
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(1, None, None, None, Some(&leg)),
+            true,
+        )
+        .expect("the sprite renders on Metal")
+        .yuv;
+        assert_eq!(metal.len(), cpu.len());
+        let corners = draw.corners();
+        let (width, height) = (WIDTH as usize, HEIGHT as usize);
+        let (uv_width, uv_height) = (width / 2, height / 2);
+        let close = |a: u8, b: u8, tolerance: i16| (i16::from(a) - i16::from(b)).abs() <= tolerance;
+        const EDGE_RING_PX: f32 = 2.0;
+        let (cell_y, cell_u, cell_v) = rgb_to_yuv(200, 60, 220);
+        let min_x = corners.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min) as usize - 4;
+        let max_x = corners.iter().map(|c| c[0]).fold(0.0, f32::max) as usize + 4;
+        let min_y = corners.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min) as usize - 4;
+        let max_y = corners.iter().map(|c| c[1]).fold(0.0, f32::max) as usize + 4;
+        let (mut inside_pixels, mut ring_pixels) = (0, 0);
+        let (mut worst_inside, mut worst_ring) = (0_i16, 0_i16);
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let index = y * width + x;
+                let (distance, inside) = edge_distance(corners, [x as f32 + 0.5, y as f32 + 0.5]);
+                let difference = (i16::from(cpu[index]) - i16::from(metal[index])).abs();
+                let tolerance = if distance <= EDGE_RING_PX {
+                    ring_pixels += 1;
+                    worst_ring = worst_ring.max(difference);
+                    8
+                } else {
+                    if inside {
+                        inside_pixels += 1;
+                    }
+                    worst_inside = worst_inside.max(difference);
+                    3
+                };
+                assert!(
+                    close(cpu[index], metal[index], tolerance),
+                    "luma at {x},{y} (edge distance {distance:.2}, inside {inside}): cpu {} metal {}",
+                    cpu[index],
+                    metal[index]
+                );
+                if inside && distance > 3.0 {
+                    assert!(close(cpu[index], cell_y, 3), "cpu luma at {x},{y}");
+                }
+            }
+        }
+        assert!(inside_pixels > 10_000 && ring_pixels > 500);
+        eprintln!(
+            "sprite parity: worst luma difference {worst_inside} inside, {worst_ring} on the edge ring"
+        );
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        for uv_y in min_y / 2..max_y / 2 {
+            for uv_x in min_x / 2..max_x / 2 {
+                let (distance, inside) =
+                    edge_distance(corners, [uv_x as f32 * 2.0 + 1.0, uv_y as f32 * 2.0 + 1.0]);
+                // The block's four pixels lie within 0.71 px of its centre.
+                let tolerance = if distance <= EDGE_RING_PX + 0.71 {
+                    8
+                } else {
+                    3
+                };
+                let uv_index = uv_y * uv_width + uv_x;
+                for (plane, start, expected) in [("u", u_start, cell_u), ("v", v_start, cell_v)] {
+                    let (a, b) = (cpu[start + uv_index], metal[start + uv_index]);
+                    assert!(
+                        close(a, b, tolerance),
+                        "{plane} at {uv_x},{uv_y} (edge distance {distance:.2}): cpu {a} metal {b}"
+                    );
+                    if inside && distance > 3.0 {
+                        assert!(close(a, expected, 3), "cpu {plane} at {uv_x},{uv_y}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Plan 168 S-B2 / D8: the atlas lives in a key-addressed Metal slot, so
+    /// a caption appearing and disappearing under it (shifting its layer
+    /// index) never uploads it again: once across 100 frames.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_uploads_the_buddy_atlas_once_while_a_caption_comes_and_goes() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let leg = parity_leg();
+        let caption = solid_overlay(
+            400,
+            60,
+            [255, 255, 255, 255],
+            crate::captions::CaptionOverlayPosition::Bottom,
+            1,
+        );
+        let mut caption_frames = 0;
+        for frame in 0..100_u64 {
+            let caption = (frame / 10 % 2 == 0).then_some(&caption);
+            caption_frames += usize::from(caption.is_some());
+            try_gpu_compose(
+                Some(&mut gpu),
+                &inputs(frame, caption, None, None, Some(&leg)),
+                frame == 99,
+            )
+            .expect("metal frame");
+        }
+        assert_eq!(caption_frames, 50);
+        assert_eq!(gpu.keyed_texture_uploads(), 1, "the atlas uploaded once");
+        // A new atlas revision uploads once more, into the same slot.
+        let mut next = parity_leg();
+        let atlas = next.sprite.as_mut().unwrap();
+        atlas.atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
+        try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(100, None, None, None, Some(&next)),
+            false,
+        )
+        .expect("metal frame");
+        try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(101, None, None, None, Some(&next)),
+            false,
+        )
+        .expect("metal frame");
+        assert_eq!(gpu.keyed_texture_uploads(), 2);
+    }
+
+    /// D9 on both paths: the pet over the caption bar, its bubble over the
+    /// pet, the highlight card over everything.
+    #[test]
+    fn the_pet_sits_under_its_bubble_and_the_card() {
+        let atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(100));
+        let buddy_box = [600.0, 300.0, 100.0, 100.0];
+        let leg = BuddyLegFrame {
+            buddy_box,
+            sprite: Some(BuddySpriteLayer {
+                draw: BuddySpriteDraw::at_rest(
+                    atlas.cell("cell-1").unwrap().rect,
+                    buddy_box,
+                    BUDDY_SPRITE_DEFAULT_PIVOT,
+                ),
+                atlas,
+            }),
+            // Head top at 20 %: the bubble's bottom rows overlap the pet.
+            bubble_anchor: BuddyBubbleAnchor { x: 650.0, y: 320.0 },
+        };
+        let bubble = solid_overlay(
+            60,
+            40,
+            [250, 250, 251, 255],
+            crate::buddy_overlay::buddy_overlay_placement(None),
+            1,
+        );
+        // The card covers the pet's bottom-right corner.
+        let card = solid_overlay(
+            100,
+            40,
+            [255, 0, 0, 255],
+            crate::captions::OverlayPlacement::new(
+                Some(crate::overlay_layout::OverlayRect::new(
+                    680.0 / 1280.0,
+                    380.0 / 720.0,
+                    100.0 / 1280.0,
+                    40.0 / 720.0,
+                )),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
+            1,
+        );
+        let check = |frame: &[u8], path: &str| {
+            let luma = |x: usize, y: usize| frame[y * WIDTH as usize + x];
+            let (pet_y, _, _) = rgb_to_yuv(40, 200, 60);
+            let (bubble_y, _, _) = rgb_to_yuv(250, 250, 251);
+            let (card_y, _, _) = rgb_to_yuv(255, 0, 0);
+            let near = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 3;
+            assert!(near(luma(620, 350), pet_y), "{path}: the pet");
+            assert!(
+                near(luma(650, 310), bubble_y),
+                "{path}: the bubble over the pet"
+            );
+            assert!(
+                near(luma(650, 290), bubble_y),
+                "{path}: the bubble above the head"
+            );
+            assert!(
+                near(luma(690, 390), card_y),
+                "{path}: the card over the pet"
+            );
+        };
+        let frame_inputs = || inputs(1, None, Some(&card), Some(&bubble), Some(&leg));
+        // The bubble's raster bottom-centre sits on the anchor.
+        assert_eq!(
+            buddy_bubble_layout(&bubble, Some(&leg), WIDTH, HEIGHT),
+            (0, 620, 280, 60)
+        );
+        check(&cpu_frame(frame_inputs()), "cpu");
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut gpu) = new_gpu_compositor(false) {
+                let metal = try_gpu_compose(Some(&mut gpu), &frame_inputs(), true)
+                    .expect("metal frame")
+                    .yuv;
+                check(&metal, "metal");
+            }
+        }
+    }
+
+    #[test]
+    fn both_legs_of_a_frame_draw_the_buddy_at_one_clock() {
+        // Plan 168 S-C4: `publish_compositor_frame` reads the slot clock once
+        // per frame at `published_at` and hands it to both legs. At one clock
+        // the animator steps once: a leg asked again draws what it drew, and
+        // only the next frame moves on.
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let primary = (WIDTH, HEIGHT);
+        let auxiliary = (HEIGHT, WIDTH);
+        for (leg, canvas) in [
+            (crate::buddy_sprite::BuddySpriteLeg::Primary, primary),
+            (crate::buddy_sprite::BuddySpriteLeg::Auxiliary, auxiliary),
+        ] {
+            state.buddy_sprite.install_atlas_for_test(
+                leg,
+                canvas,
+                crate::buddy_animator::tests::alive(),
+            );
+        }
+        let published_at = Instant::now();
+        let draw = |leg, canvas, now| {
+            buddy_leg_frame(&state, leg, canvas, now, None, None)
+                .sprite
+                .expect("the pet draws")
+                .draw
+        };
+        state
+            .buddy_sprite
+            .notify(crate::buddy_animator::BuddyAnimatorEvent::React {
+                reaction: "surprised".to_string(),
+            });
+        let mut previous = None;
+        for frame in 0..20_u32 {
+            let at = published_at + Duration::from_millis(u64::from(frame) * 33);
+            let now = state.buddy_sprite.clock_seconds(at);
+            assert_eq!(
+                now.to_bits(),
+                state.buddy_sprite.clock_seconds(at).to_bits()
+            );
+            let first = (
+                draw(crate::buddy_sprite::BuddySpriteLeg::Primary, primary, now),
+                draw(
+                    crate::buddy_sprite::BuddySpriteLeg::Auxiliary,
+                    auxiliary,
+                    now,
+                ),
+            );
+            let again = (
+                draw(crate::buddy_sprite::BuddySpriteLeg::Primary, primary, now),
+                draw(
+                    crate::buddy_sprite::BuddySpriteLeg::Auxiliary,
+                    auxiliary,
+                    now,
+                ),
+            );
+            assert_eq!(first, again, "frame {frame}");
+            // Both legs turn the same body: one motion state, each at its size.
+            assert_eq!(first.0.affine, first.1.affine, "frame {frame}");
+            if (1..10).contains(&frame) {
+                assert_ne!(
+                    Some(first),
+                    previous,
+                    "frame {frame} moves with the reaction"
+                );
+            }
+            previous = Some(first);
+        }
+    }
+
+    /// The pet's per-frame draw comes from the slot for the leg's canvas: no
+    /// pet before its atlas exists (the bubble still has its anchor), then
+    /// the state's cell at rest in the box.
+    #[test]
+    fn a_leg_frame_draws_the_installed_atlas_in_the_buddy_box() {
+        let layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        let slot = crate::buddy_sprite::BuddySpriteSlot::new(
+            &crate::cohost::CohostPersona::default(),
+            layout,
+            None,
+        );
+        let atlas = slot.install_atlas_for_test(
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (WIDTH, HEIGHT),
+            crate::buddy_sprite::tests::parity_atlas(64),
+        );
+        let frame = slot.leg_frame(crate::buddy_sprite::BuddyLegRequest {
+            leg: crate::buddy_sprite::BuddySpriteLeg::Primary,
+            canvas: (WIDTH, HEIGHT),
+            now_seconds: 2.0,
+            highlight_rect: None,
+            caption_rect: None,
+        });
+        let sprite = frame.sprite.expect("the installed atlas draws");
+        assert_eq!(sprite.atlas.revision, atlas.revision);
+        assert_eq!(sprite.draw.cell, atlas.neutral().unwrap().rect);
+        assert_eq!(
+            frame.buddy_box,
+            crate::buddy_sprite::buddy_box(layout.horizontal, WIDTH, HEIGHT)
+        );
+        assert_eq!(
+            slot.resident_atlas(crate::buddy_sprite::BuddySpriteLeg::Primary)
+                .map(|resident| resident.revision),
+            Some(atlas.revision)
+        );
+        // The CPU path draws the neutral cell's colour in the box.
+        let leg = BuddyLegFrame {
+            sprite: Some(sprite),
+            ..frame
+        };
+        let cpu = cpu_frame(inputs(1, None, None, None, Some(&leg)));
+        let [x, y, w, h] = leg.buddy_box;
+        let centre = (y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize;
+        assert_eq!(cpu[centre], rgb_to_yuv(230, 40, 40).0);
+    }
+}
+
+/// Plan 186 S3: banners through the CPU and Metal paths.
+#[cfg(test)]
+mod banner_tests {
+    use super::*;
+    use crate::banner_prepare::{BannerFileRevision, prepare_banner_bitmap};
+    use crate::banners::{BannerFade, BannerLayer};
+    use crate::protocol::{Banner, StreamScreen, StreamScreenStatus};
+
+    const WIDTH: u32 = 1280;
+    const HEIGHT: u32 = 720;
+
+    fn banner_row(id: &str, width: u32, height: u32) -> Banner {
+        Banner {
+            id: id.to_string(),
+            name: id.to_string(),
+            image_file: format!("{id}.png"),
+            thumbnail_file: format!("{id}.thumb.png"),
+            width,
+            height,
+            has_alpha: true,
+            sort_order: 0,
+            shown: true,
+            horizontal: OverlayRect::new(0.1, 0.2, 400.0 / 1280.0, 200.0 / 720.0),
+            vertical: OverlayRect::new(0.1, 0.1, 0.8, 0.2),
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// A `width` x `height` image of `rgb`, opaque inside, alpha 128 on a
+    /// 2 px border (the half-alpha edge), as the import would store it.
+    fn edged_image(width: u32, height: u32, rgb: [u8; 3]) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let edge = x < 2 || y < 2 || x + 2 >= width || y + 2 >= height;
+            image::Rgba([rgb[0], rgb[1], rgb[2], if edge { 128 } else { 255 }])
+        })
+    }
+
+    fn draw(
+        bitmap: Arc<BannerBitmap>,
+        banner: &Banner,
+        rect: OverlayRect,
+        fade: f32,
+    ) -> BannerDraw {
+        BannerDraw {
+            bitmap,
+            slot: crate::banners::banner_metal_slot(&banner.id),
+            image: (banner.width, banner.height),
+            rect,
+            opacity: fade,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn inputs<'a>(
+        sequence: u64,
+        width: u32,
+        height: u32,
+        snapshot: Option<&'a CompositorSceneSnapshot>,
+        active_image_source: Option<&'a CompositorImageSource>,
+        caption: Option<&'a crate::captions::CaptionOverlay>,
+        highlight: Option<&'a crate::captions::CaptionOverlay>,
+        banners: &'a [BannerDraw],
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence,
+            width,
+            height,
+            snapshot,
+            active_image_source,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: None,
+            caption_overlay: caption,
+            highlight_overlay: highlight,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners,
+        }
+    }
+
+    fn cpu_frame(inputs: CompositorRenderInputs<'_>) -> Vec<u8> {
+        let mut bytes = vec![0; raw_yuv420p_len(inputs.width, inputs.height)];
+        render_compositor_yuv420p_frame(inputs, &mut bytes);
+        bytes
+    }
+
+    fn solid_overlay(
+        width: u32,
+        height: u32,
+        rgba_pixel: [u8; 4],
+        rect: OverlayRect,
+    ) -> crate::captions::CaptionOverlay {
+        let rgba = std::iter::repeat_n(rgba_pixel, (width * height) as usize)
+            .flatten()
+            .collect::<Vec<_>>();
+        crate::captions::CaptionOverlay {
+            bgra: Arc::new(rgba_to_bgra_bytes(&rgba)),
+            rgba: Arc::new(rgba),
+            width,
+            height,
+            placement: crate::captions::OverlayPlacement::new(
+                Some(rect),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
+            revision: 1,
+        }
+    }
+
+    fn file_revision() -> BannerFileRevision {
+        BannerFileRevision {
+            size: 1,
+            modified_nanos: 1,
+        }
+    }
+
+    fn layer(banner: Banner, now: Instant) -> BannerLayer {
+        BannerLayer {
+            image_path: Arc::from(Path::new("/nonexistent").join(&banner.image_file)),
+            banner,
+            file_revision: Some(file_revision()),
+            fade: BannerFade {
+                from: 1.0,
+                to: 1.0,
+                started_at: now,
+            },
+        }
+    }
+
+    /// Seed the service with the exact bitmap for `banner` on `canvas`.
+    fn seed(
+        service: &BannerPrepareService,
+        banner: &Banner,
+        canvas: (u32, u32),
+        rgb: [u8; 3],
+    ) -> Arc<BannerBitmap> {
+        let orientation = OverlayOrientation::for_canvas(canvas.0, canvas.1);
+        let rect = banner_rect_for(banner, orientation, None);
+        let (_, _, width, height) = banner_draw_rect(
+            banner.width,
+            banner.height,
+            canvas.0 as usize,
+            canvas.1 as usize,
+            rect,
+        );
+        let image = edged_image(banner.width, banner.height, rgb);
+        service.insert_for_test(
+            BannerBitmapKey::new(&banner.id, file_revision(), canvas, rect, banner.opacity),
+            prepare_banner_bitmap(&image, width as u32, height as u32, banner.opacity),
+        )
+    }
+
+    fn close(a: u8, b: u8, tolerance: i16) -> bool {
+        (i16::from(a) - i16::from(b)).abs() <= tolerance
+    }
+
+    /// Parity fixture: a 400x200 banner at (128, 144) on a black 1280x720
+    /// canvas, half-alpha 2 px edges, opacity 0.5 baked, under a 200x100 red
+    /// highlight card at (384, 216) that covers its right part. CPU and Metal
+    /// agree within 2 per channel inside (8 on the soft edge ring), both
+    /// match the analytic blend inside, and the card wins the overlap on
+    /// both (owner answer 7).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_draw_the_same_banner() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let mut banner = banner_row("parity", 400, 200);
+        banner.opacity = 0.5;
+        let rgb = [0, 160, 255];
+        let bitmap = Arc::new(prepare_banner_bitmap(
+            &edged_image(400, 200, rgb),
+            400,
+            200,
+            banner.opacity,
+        ));
+        let draws = [draw(Arc::clone(&bitmap), &banner, banner.horizontal, 1.0)];
+        assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (128, 144, 400, 200));
+        assert!(draws[0].is_exact_on(WIDTH, HEIGHT));
+        let card = solid_overlay(
+            200,
+            100,
+            [255, 0, 0, 255],
+            OverlayRect::new(0.3, 0.3, 0.25, 0.2),
+        );
+        let card_rect = (384_usize, 216_usize, 584_usize, 316_usize);
+        let cpu_clean = cpu_frame(inputs(1, WIDTH, HEIGHT, None, None, None, None, &[]));
+        let cpu = cpu_frame(inputs(
+            1,
+            WIDTH,
+            HEIGHT,
+            None,
+            None,
+            None,
+            Some(&card),
+            &draws,
+        ));
+        let metal_clean = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(1, WIDTH, HEIGHT, None, None, None, None, &[]),
+            true,
+        )
+        .expect("clean frame on Metal")
+        .yuv;
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(1, WIDTH, HEIGHT, None, None, None, Some(&card), &draws),
+            true,
+        )
+        .expect("banner frame on Metal")
+        .yuv;
+        assert_eq!(metal.len(), cpu.len());
+
+        // Inside: the banner's colour at alpha 128/255 (opacity 0.5 baked)
+        // over TV black, in RGB: (0, 80, 128).
+        let (inside_y, inside_u, inside_v) = rgb_to_yuv(0, 80, 128);
+        let (red_y, red_u, red_v) = rgb_to_yuv(255, 0, 0);
+        let (width, height) = (WIDTH as usize, HEIGHT as usize);
+        let banner_rect = (128_usize, 144_usize, 528_usize, 344_usize);
+        let inside = |rect: (usize, usize, usize, usize), x: usize, y: usize| {
+            (rect.0..rect.2).contains(&x) && (rect.1..rect.3).contains(&y)
+        };
+        let on_edge = |x: usize, y: usize| {
+            x < banner_rect.0 + 2
+                || y < banner_rect.1 + 2
+                || x + 2 >= banner_rect.2
+                || y + 2 >= banner_rect.3
+        };
+        let mut worst = 0_i16;
+        for y in banner_rect.1 - 2..banner_rect.3 + 2 {
+            for x in banner_rect.0 - 2..banner_rect.2 + 2 {
+                let index = y * width + x;
+                let difference = (i16::from(cpu[index]) - i16::from(metal[index])).abs();
+                if inside(card_rect, x, y) {
+                    assert!(close(cpu[index], red_y, 2), "cpu card luma at {x},{y}");
+                    assert!(close(metal[index], red_y, 2), "metal card luma at {x},{y}");
+                } else if inside(banner_rect, x, y) {
+                    let tolerance = if on_edge(x, y) { 8 } else { 2 };
+                    worst = worst.max(difference);
+                    assert!(
+                        close(cpu[index], metal[index], tolerance),
+                        "luma at {x},{y}: cpu {} metal {}",
+                        cpu[index],
+                        metal[index]
+                    );
+                    if !on_edge(x, y) {
+                        assert!(
+                            close(cpu[index], inside_y, 3),
+                            "cpu luma at {x},{y}: {}",
+                            cpu[index]
+                        );
+                        // The half-alpha edge is visibly lighter than the inside
+                        // on both paths (blended, not thresholded).
+                    }
+                } else {
+                    assert!(
+                        close(cpu[index], cpu_clean[index], 2),
+                        "cpu border at {x},{y}"
+                    );
+                    assert!(
+                        close(metal[index], metal_clean[index], 2),
+                        "metal border at {x},{y}"
+                    );
+                }
+            }
+        }
+        eprintln!("banner parity: worst luma difference {worst}");
+        // The soft edge: alpha 64/255 over black is darker than the inside
+        // and lighter than black on both paths.
+        let (black_y, _, _) = rgb_to_yuv(0, 0, 0);
+        for (x, y) in [(128_usize, 200_usize), (300, 144), (300, 343), (527, 200)] {
+            for (frame, path) in [(&cpu, "cpu"), (&metal, "metal")] {
+                let luma = frame[y * width + x];
+                assert!(
+                    luma > black_y + 8 && luma < inside_y - 8,
+                    "{path} edge at {x},{y}: {luma}"
+                );
+            }
+        }
+        // Chroma, strictly inside the banner's exclusive area and the card.
+        let (uv_width, uv_height) = (width.div_ceil(2), height.div_ceil(2));
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        let chroma = |rect: (usize, usize, usize, usize), u: u8, v: u8, name: &str| {
+            for uv_y in (rect.1 + 4) / 2..(rect.3 - 4) / 2 {
+                for uv_x in (rect.0 + 4) / 2..(rect.2 - 4) / 2 {
+                    let uv_index = uv_y * uv_width + uv_x;
+                    for (plane, expected, start) in [("u", u, u_start), ("v", v, v_start)] {
+                        assert!(
+                            close(cpu[start + uv_index], expected, 3),
+                            "cpu {name} {plane} at {uv_x},{uv_y}: {}",
+                            cpu[start + uv_index]
+                        );
+                        assert!(
+                            close(metal[start + uv_index], expected, 3),
+                            "metal {name} {plane} at {uv_x},{uv_y}: {}",
+                            metal[start + uv_index]
+                        );
+                    }
+                }
+            }
+        };
+        chroma(
+            (banner_rect.0, banner_rect.1, card_rect.0, banner_rect.3),
+            inside_u,
+            inside_v,
+            "banner",
+        );
+        chroma(card_rect, red_u, red_v, "card");
+    }
+
+    /// D5 z order: scene -> takeover -> banners -> captions -> card, on the
+    /// CPU path and (when a GPU is here) on Metal's takeover branch.
+    #[test]
+    fn banners_draw_above_the_takeover_and_below_captions_and_the_card() {
+        let layout = crate::protocol::default_layout_settings();
+        let scene = crate::scene::scene_from_capture_config(crate::protocol::SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: true,
+            },
+            layout: layout.clone(),
+            video: None,
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let snapshot = CompositorSceneSnapshot {
+            selected_sources: None,
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: Some(StreamScreen {
+                id: "takeover".to_string(),
+                name: "Takeover".to_string(),
+                image_path: "/tmp/takeover.png".to_string(),
+                thumbnail_path: None,
+                sort_order: 1,
+                status: StreamScreenStatus::Ready,
+                created_at: String::new(),
+                updated_at: String::new(),
+            }),
+        };
+        // A 16x9 white takeover (contained, so the aspect fills the canvas).
+        let takeover = CompositorImageSource {
+            image_path: "takeover.png".to_string(),
+            file_revision: None,
+            width: Some(16),
+            height: Some(9),
+            rgba: Some(Arc::new([255, 255, 255, 255].repeat(16 * 9))),
+            bgra: Some(Arc::new([255, 255, 255, 255].repeat(16 * 9))),
+            content_revision: 1,
+            state: "live".to_string(),
+            message: None,
+        };
+        let banner = banner_row("over-takeover", 400, 200);
+        let bitmap = Arc::new(prepare_banner_bitmap(
+            &image::RgbaImage::from_pixel(400, 200, image::Rgba([0, 0, 255, 255])),
+            400,
+            200,
+            1.0,
+        ));
+        let draws = [draw(bitmap, &banner, banner.horizontal, 1.0)];
+        // A caption bar across the banner's bottom-left rows (clear of the
+        // card's columns, so the collision rule leaves it in place) and the
+        // card over the banner's right part.
+        let caption = solid_overlay(
+            256,
+            20,
+            [0, 255, 0, 255],
+            OverlayRect::new(0.1, 324.0 / 720.0, 256.0 / 1280.0, 20.0 / 720.0),
+        );
+        let card = solid_overlay(
+            200,
+            100,
+            [255, 0, 0, 255],
+            OverlayRect::new(0.3, 0.3, 0.25, 0.2),
+        );
+        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        let (green_y, _, _) = rgb_to_yuv(0, 255, 0);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        let check = |frame: &[u8], path: &str| {
+            let luma = |x: usize, y: usize| frame[y * WIDTH as usize + x];
+            assert!(close(luma(10, 10), white_y, 2), "{path}: the takeover");
+            assert!(
+                close(luma(200, 200), blue_y, 2),
+                "{path}: the banner over the takeover"
+            );
+            assert!(
+                close(luma(200, 334), green_y, 2),
+                "{path}: the caption over the banner"
+            );
+            assert!(
+                close(luma(450, 250), red_y, 2),
+                "{path}: the card over the banner"
+            );
+        };
+        let frame_inputs = || {
+            inputs(
+                1,
+                WIDTH,
+                HEIGHT,
+                Some(&snapshot),
+                Some(&takeover),
+                Some(&caption),
+                Some(&card),
+                &draws,
+            )
+        };
+        check(&cpu_frame(frame_inputs()), "cpu");
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut gpu) = new_gpu_compositor(false) {
+                let metal = try_gpu_compose(Some(&mut gpu), &frame_inputs(), true)
+                    .expect("metal frame")
+                    .yuv;
+                check(&metal, "metal");
+            }
+        }
+    }
+
+    /// Each leg picks the rect for its own canvas: the vertical simulcast leg
+    /// draws the vertical rect, keyed to its own prepared bitmap.
+    #[test]
+    fn the_vertical_leg_draws_the_vertical_rect() {
+        let now = Instant::now();
+        let service = BannerPrepareService::with_decoder(
+            Arc::new(|_: &Path| Err("no decode in this test".to_string())),
+            crate::banner_prepare::BANNER_BITMAP_BUDGET_BYTES,
+        );
+        let banner = banner_row("legs", 2400, 400);
+        let primary_canvas = (WIDTH, HEIGHT);
+        let vertical_canvas = (HEIGHT, WIDTH);
+        let horizontal_bitmap = seed(&service, &banner, primary_canvas, [1, 2, 3]);
+        let vertical_bitmap = seed(&service, &banner, vertical_canvas, [1, 2, 3]);
+        assert_ne!(
+            (horizontal_bitmap.width, horizontal_bitmap.height),
+            (vertical_bitmap.width, vertical_bitmap.height)
+        );
+        let set = BannerSet {
+            layers: vec![layer(banner.clone(), now)],
+        };
+        let shape = Some(OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: true,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::VerticalSimulcast,
+        });
+        let primary = banner_draws_for_leg(
+            &set,
+            shape,
+            BannerLeg::Primary,
+            primary_canvas,
+            now,
+            None,
+            &service,
+        );
+        let aux = banner_draws_for_leg(
+            &set,
+            shape,
+            BannerLeg::Auxiliary,
+            vertical_canvas,
+            now,
+            None,
+            &service,
+        );
+        assert_eq!(primary.len(), 1);
+        assert_eq!(aux.len(), 1);
+        assert_eq!(primary[0].rect, banner.horizontal);
+        assert_eq!(aux[0].rect, banner.vertical);
+        assert!(Arc::ptr_eq(&primary[0].bitmap, &horizontal_bitmap));
+        assert!(Arc::ptr_eq(&aux[0].bitmap, &vertical_bitmap));
+        assert!(primary[0].is_exact_on(WIDTH, HEIGHT));
+        assert!(aux[0].is_exact_on(HEIGHT, WIDTH));
+        // The contained rect lands inside the portrait canvas.
+        let (x, y, w, h) = aux[0].draw_rect(HEIGHT, WIDTH);
+        assert!(x + w <= HEIGHT as usize && y + h <= WIDTH as usize);
+        // Nothing was queued: both lookups were exact.
+        assert_eq!(service.prepares_completed(), 0);
+        // A stream-only banner stays off the recording's primary leg when a
+        // split stream leg carries it.
+        let mut stream_only = banner_row("stream-only", 2400, 400);
+        stream_only.show_in_recording = false;
+        seed(&service, &stream_only, primary_canvas, [1, 2, 3]);
+        let set = BannerSet {
+            layers: vec![layer(stream_only, now)],
+        };
+        let split = Some(OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: true,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
+        });
+        assert!(
+            banner_draws_for_leg(
+                &set,
+                split,
+                BannerLeg::Primary,
+                primary_canvas,
+                now,
+                None,
+                &service
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            banner_draws_for_leg(
+                &set,
+                split,
+                BannerLeg::Auxiliary,
+                primary_canvas,
+                now,
+                None,
+                &service
+            )
+            .len(),
+            1
+        );
+    }
+
+    /// Until a re-prepare lands, the last prepared bitmap draws: at the new
+    /// rect on Metal (the quad scales it), at its old size at the new
+    /// position on the CPU, and the exact key is queued once.
+    #[test]
+    fn a_stale_bitmap_draws_at_the_new_place_while_the_prepare_is_queued() {
+        let now = Instant::now();
+        let service = BannerPrepareService::with_decoder(
+            Arc::new(|_: &Path| {
+                std::thread::sleep(Duration::from_secs(30));
+                Err("never".to_string())
+            }),
+            crate::banner_prepare::BANNER_BITMAP_BUDGET_BYTES,
+        );
+        let mut banner = banner_row("moving", 400, 200);
+        let old = seed(&service, &banner, (WIDTH, HEIGHT), [0, 0, 255]);
+        // The rect grows: the exact bitmap would be 800x400.
+        banner.horizontal = OverlayRect::new(0.05, 0.1, 800.0 / 1280.0, 400.0 / 720.0);
+        let set = BannerSet {
+            layers: vec![layer(banner.clone(), now)],
+        };
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            None,
+            &service,
+        );
+        assert_eq!(draws.len(), 1);
+        assert!(
+            Arc::ptr_eq(&draws[0].bitmap, &old),
+            "the last bitmap stands in"
+        );
+        assert!(!draws[0].is_exact_on(WIDTH, HEIGHT));
+        assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (64, 72, 800, 400));
+        // CPU: the old 400x200 pixels at (64, 72), nothing beyond them (the
+        // fixture's outer 2 px are half-alpha, so sample inside them).
+        let frame = cpu_frame(inputs(1, WIDTH, HEIGHT, None, None, None, None, &draws));
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        let (black_y, _, _) = rgb_to_yuv(0, 0, 0);
+        let luma = |x: usize, y: usize| frame[y * WIDTH as usize + x];
+        assert!(close(luma(64 + 10, 72 + 10), blue_y, 2));
+        assert!(close(luma(64 + 397, 72 + 197), blue_y, 2));
+        assert!(close(luma(64 + 400, 72 + 10), black_y, 2));
+        assert!(close(luma(64 + 10, 72 + 200), black_y, 2));
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut gpu) = new_gpu_compositor(false) {
+                let metal = try_gpu_compose(
+                    Some(&mut gpu),
+                    &inputs(1, WIDTH, HEIGHT, None, None, None, None, &draws),
+                    true,
+                )
+                .expect("metal frame")
+                .yuv;
+                let luma = |x: usize, y: usize| metal[y * WIDTH as usize + x];
+                // Metal scales the old bitmap into the whole new rect.
+                assert!(close(luma(64 + 10, 72 + 10), blue_y, 2));
+                assert!(close(luma(64 + 790, 72 + 390), blue_y, 2));
+                assert!(close(luma(64 + 810, 72 + 10), black_y, 2));
+            }
+        }
+    }
+
+    /// Steady state uploads nothing: the banner's texture uploads once and
+    /// stays through 120 ticks while a caption comes and goes under it; a new
+    /// prepared revision uploads once more into the same slot.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_uploads_a_banner_once_across_120_ticks() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let banner = banner_row("steady", 400, 200);
+        let image = edged_image(400, 200, [0, 160, 255]);
+        let bitmap = Arc::new(prepare_banner_bitmap(&image, 400, 200, 1.0));
+        let caption = solid_overlay(
+            400,
+            20,
+            [0, 255, 0, 255],
+            OverlayRect::new(0.1, 0.8, 400.0 / 1280.0, 20.0 / 720.0),
+        );
+        let fade_at = |frame: u64| (frame as f32 / 120.0).clamp(0.0, 1.0);
+        for frame in 0..120_u64 {
+            // The fade changes the layer opacity, never the texture.
+            let draws = [draw(
+                Arc::clone(&bitmap),
+                &banner,
+                banner.horizontal,
+                fade_at(frame),
+            )];
+            let caption = (frame / 10 % 2 == 0).then_some(&caption);
+            try_gpu_compose(
+                Some(&mut gpu),
+                &inputs(frame, WIDTH, HEIGHT, None, None, caption, None, &draws),
+                frame == 119,
+            )
+            .expect("metal frame");
+            if frame == 0 {
+                assert_eq!(gpu.keyed_texture_uploads(), 1, "uploaded on the first tick");
+            }
+        }
+        assert_eq!(gpu.keyed_texture_uploads(), 1, "no upload across 120 ticks");
+        // A re-prepare (new revision, same slot) uploads once more.
+        let next = Arc::new(prepare_banner_bitmap(&image, 400, 200, 0.5));
+        for frame in 120..124_u64 {
+            let draws = [draw(Arc::clone(&next), &banner, banner.horizontal, 1.0)];
+            try_gpu_compose(
+                Some(&mut gpu),
+                &inputs(frame, WIDTH, HEIGHT, None, None, None, None, &draws),
+                false,
+            )
+            .expect("metal frame");
+        }
+        assert_eq!(gpu.keyed_texture_uploads(), 2);
+        assert_eq!(
+            gpu.keyed_slot_count(crate::banner_prepare::BANNER_METAL_NAMESPACE),
+            1
+        );
+    }
+
+    /// Namespace 9 holds four slots (the four banners that may show); a
+    /// fifth slot id evicts the least recently drawn one. The Buddy's
+    /// namespace 7 keeps its single slot.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_keeps_four_banner_slots_and_evicts_the_least_recently_drawn() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let namespace = crate::banner_prepare::BANNER_METAL_NAMESPACE;
+        let banners = (0..5)
+            .map(|index| {
+                let mut banner = banner_row(&format!("slot-{index}"), 64, 32);
+                banner.horizontal = OverlayRect::new(0.05 * index as f64, 0.1, 0.2, 0.2);
+                let bitmap = Arc::new(prepare_banner_bitmap(
+                    &image::RgbaImage::from_pixel(64, 32, image::Rgba([10, 20, 30, 255])),
+                    64,
+                    32,
+                    1.0,
+                ));
+                (banner, bitmap)
+            })
+            .collect::<Vec<_>>();
+        let draws_of = |indices: &[usize]| {
+            indices
+                .iter()
+                .map(|index| {
+                    let (banner, bitmap) = &banners[*index];
+                    draw(Arc::clone(bitmap), banner, banner.horizontal, 1.0)
+                })
+                .collect::<Vec<_>>()
+        };
+        let compose = |gpu: &mut GpuCompositor, frame: u64, draws: &[BannerDraw]| {
+            try_gpu_compose(
+                Some(gpu),
+                &inputs(frame, WIDTH, HEIGHT, None, None, None, None, draws),
+                false,
+            )
+            .expect("metal frame");
+        };
+        compose(&mut gpu, 1, &draws_of(&[0, 1, 2, 3]));
+        compose(&mut gpu, 2, &draws_of(&[0, 1, 2, 3]));
+        assert_eq!(gpu.keyed_texture_uploads(), 4);
+        assert_eq!(gpu.keyed_slot_count(namespace), 4);
+        // A fifth banner takes the least recently drawn slot (banner 0 was
+        // drawn first on the last frame).
+        compose(&mut gpu, 3, &draws_of(&[4]));
+        assert_eq!(gpu.keyed_texture_uploads(), 5);
+        assert_eq!(gpu.keyed_slot_count(namespace), 4);
+        // Banner 4 is resident now; banner 0 must come back (evicting 1).
+        compose(&mut gpu, 4, &draws_of(&[4]));
+        assert_eq!(gpu.keyed_texture_uploads(), 5);
+        compose(&mut gpu, 5, &draws_of(&[0]));
+        assert_eq!(gpu.keyed_texture_uploads(), 6);
+        compose(&mut gpu, 6, &draws_of(&[2, 3, 4, 0]));
+        assert_eq!(gpu.keyed_texture_uploads(), 6, "the four residents stay");
+        assert_eq!(gpu.keyed_slot_count(namespace), 4);
+    }
+
+    /// A `banner:<id>` draft with a transform moves that banner's picture on
+    /// the idle preview for the tick; the bitmap stays keyed by the committed
+    /// rect, so no prepare is queued for a drag sample. A chrome-only draft
+    /// and other stage ids change nothing.
+    #[test]
+    fn a_banner_draft_moves_the_picture_without_a_prepare() {
+        let now = Instant::now();
+        let service = BannerPrepareService::with_decoder(
+            Arc::new(|_: &Path| Err("no decode in this test".to_string())),
+            crate::banner_prepare::BANNER_BITMAP_BUDGET_BYTES,
+        );
+        let banner = banner_row("dragged", 400, 200);
+        let bitmap = seed(&service, &banner, (WIDTH, HEIGHT), [0, 0, 255]);
+        let set = BannerSet {
+            layers: vec![layer(banner.clone(), now)],
+        };
+        let dragged = OverlayRect::new(0.5, 0.5, 400.0 / 1280.0, 200.0 / 720.0);
+        let chrome = EditorChrome {
+            selected: CameraTransform {
+                x: 0.5,
+                y: 0.5,
+                width: dragged.w,
+                height: dragged.h,
+            },
+            handles: true,
+            active_handle: None,
+            guides: Vec::new(),
+            scale: 1.0,
+            slot_css_width: None,
+        };
+        let mut draft = EditorDraft {
+            source_id: "banner:dragged".to_string(),
+            transform: Some(CameraTransform {
+                x: dragged.x,
+                y: dragged.y,
+                width: dragged.w,
+                height: dragged.h,
+            }),
+            chrome: chrome.clone(),
+            refreshed_at: now,
+            release_at_revision: None,
+            generation: 1,
+        };
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            banner_draft_of(Some(&draft)),
+            &service,
+        );
+        assert_eq!(draws.len(), 1);
+        assert_eq!(draws[0].rect, dragged);
+        assert!(
+            Arc::ptr_eq(&draws[0].bitmap, &bitmap),
+            "the committed bitmap, moved"
+        );
+        assert!(draws[0].is_exact_on(WIDTH, HEIGHT), "a move keeps the size");
+        assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (640, 360, 400, 200));
+        assert_eq!(service.cache_len(), 1, "no prepare for a drag sample");
+        // A resize draws the committed bitmap scaled into the drafted rect.
+        draft.transform = Some(CameraTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0 / 1280.0,
+            height: 400.0 / 720.0,
+        });
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            banner_draft_of(Some(&draft)),
+            &service,
+        );
+        assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (0, 0, 800, 400));
+        assert!(!draws[0].is_exact_on(WIDTH, HEIGHT));
+        // Chrome-only hold: the committed rect.
+        draft.transform = None;
+        assert!(banner_draft_of(Some(&draft)).is_none());
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            banner_draft_of(Some(&draft)),
+            &service,
+        );
+        assert_eq!(draws[0].rect, banner.horizontal);
+        // A source drag leaves banners alone.
+        draft.source_id = "camera-1".to_string();
+        draft.transform = Some(CameraTransform {
+            x: 0.5,
+            y: 0.5,
+            width: 0.2,
+            height: 0.2,
+        });
+        let draws = banner_draws_for_leg(
+            &set,
+            None,
+            BannerLeg::Primary,
+            (WIDTH, HEIGHT),
+            now,
+            banner_draft_of(Some(&draft)),
+            &service,
+        );
+        assert_eq!(draws[0].rect, banner.horizontal);
+        // Faded out: nothing draws, even with a draft.
+        let gone = BannerSet {
+            layers: vec![BannerLayer {
+                fade: BannerFade {
+                    from: 0.0,
+                    to: 0.0,
+                    started_at: now,
+                },
+                ..layer(banner, now)
+            }],
+        };
+        assert!(
+            banner_draws_for_leg(
+                &gone,
+                None,
+                BannerLeg::Primary,
+                (WIDTH, HEIGHT),
+                now,
+                None,
+                &service
+            )
+            .is_empty()
+        );
+    }
+
+    /// `install_banner_set` swaps one `Arc` on the runtime and nothing else:
+    /// no scene, no run, no capture is touched; a hidden banner fades out and
+    /// is reaped once gone; the session shape set by a session is cleared
+    /// when its run stops.
+    #[tokio::test]
+    async fn install_banner_set_swaps_the_set_and_touches_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("videorc-banner-install-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
+        );
+        let png = dir.join("sponsor.png");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 40, 40, 255]))
+            .save(&png)
+            .unwrap();
+        let banner = crate::banners::import_banner(&state.database, &png).unwrap();
+        install_banner_set(&state).await.unwrap();
+        assert!(
+            banner_set_for_test(&state).await.layers.is_empty(),
+            "hidden: not in the set"
+        );
+        state.database.show_banner(&banner.id, 4).unwrap();
+        let before = Instant::now();
+        install_banner_set(&state).await.unwrap();
+        let set = banner_set_for_test(&state).await;
+        assert_eq!(set.layers.len(), 1);
+        let layer = &set.layers[0];
+        assert_eq!(layer.banner.id, banner.id);
+        assert!(layer.file_revision.is_some(), "the stored file was found");
+        assert!(layer.fade.started_at >= before && !layer.fade.hides());
+        assert!(layer.image_path.ends_with(&banner.image_file));
+        {
+            let compositor = state.compositor.lock().await;
+            assert!(compositor.scene.is_none(), "no scene commit");
+            assert!(compositor.run_id.is_none(), "no run started");
+            assert!(compositor.capture_lease.is_none());
+            assert!(compositor.banner_session_shape.is_none());
+        }
+        // A second install with no change keeps the fade (the Arc may swap,
+        // the layer does not restart).
+        install_banner_set(&state).await.unwrap();
+        assert_eq!(banner_set_for_test(&state).await.layers[0].fade, layer.fade);
+        // Hide: the banner stays, fading out; the tick reaps it once settled.
+        state.database.hide_banner(&banner.id).unwrap();
+        install_banner_set(&state).await.unwrap();
+        let hiding = banner_set_for_test(&state).await;
+        assert_eq!(hiding.layers.len(), 1);
+        assert!(hiding.layers[0].fade.hides());
+        {
+            let mut compositor = state.compositor.lock().await;
+            assert!(!compositor.reap_faded_banners(Instant::now()));
+            assert!(compositor.reap_faded_banners(Instant::now() + crate::banners::BANNER_FADE));
+            assert!(compositor.banners.layers.is_empty());
+        }
+        // The session shape: set by a session, cleared with its run.
+        let shape = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: false,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+        };
+        set_banner_session_shape(&state, Some(shape)).await;
+        assert_eq!(banner_session_shape_for_test(&state).await, Some(shape));
+        set_banner_session_shape(&state, None).await;
+        assert_eq!(banner_session_shape_for_test(&state).await, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `composite_overlay_at` at opacity 1.0 is the plain blit, byte for
+    /// byte; a lower opacity blends less; 0 draws nothing.
+    #[test]
+    fn overlay_opacity_one_is_the_identity_blit() {
+        let overlay = solid_overlay(
+            8,
+            4,
+            [255, 255, 255, 200],
+            OverlayRect::new(0.25, 0.25, 0.5, 0.5),
+        );
+        let (canvas_w, canvas_h) = (32_u32, 16_u32);
+        let layout = (0_usize, 8_usize, 4_usize, 8_usize);
+        let mut plain = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_straight_alpha_at(
+            StraightAlphaBitmap {
+                bytes: &overlay.rgba,
+                order: OverlayPixelOrder::Rgba,
+                width: 8,
+                height: 4,
+            },
+            canvas_w,
+            canvas_h,
+            &mut plain,
+            layout,
+            1.0,
+        );
+        let mut full = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_overlay_at(&overlay, canvas_w, canvas_h, &mut full, layout, 1.0);
+        assert_eq!(plain, full);
+        assert_eq!(scaled_alpha(200, opacity_scale(1.0)), 200);
+        assert_eq!(scaled_alpha(255, opacity_scale(1.0)), 255);
+        assert_eq!(scaled_alpha(200, opacity_scale(0.5)), 100);
+        // The BGRA order reads the same pixels swapped.
+        let mut bgra = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_straight_alpha_at(
+            StraightAlphaBitmap {
+                bytes: &overlay.bgra,
+                order: OverlayPixelOrder::Bgra,
+                width: 8,
+                height: 4,
+            },
+            canvas_w,
+            canvas_h,
+            &mut bgra,
+            layout,
+            1.0,
+        );
+        assert_eq!(bgra, full);
+        let index = 4 * canvas_w as usize + 8;
+        let mut half = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_overlay_at(&overlay, canvas_w, canvas_h, &mut half, layout, 0.5);
+        assert!(half[index] > 0 && half[index] < full[index]);
+        let mut none = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_overlay_at(&overlay, canvas_w, canvas_h, &mut none, layout, 0.0);
+        assert!(none.iter().all(|byte| *byte == 0));
+        // A layout past the canvas edge is clipped, never a panic.
+        let mut clipped = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        composite_overlay_at(
+            &overlay,
+            canvas_w,
+            canvas_h,
+            &mut clipped,
+            (0, 28, 14, 8),
+            1.0,
+        );
+        assert!(clipped[14 * canvas_w as usize + 28] > 0);
+        assert!(clipped[15 * canvas_w as usize + 31] > 0);
     }
 }

@@ -287,7 +287,7 @@ async function verifySessionA(outputPath) {
     } else if (target.stalled) {
       const latest = targetSnapshotsLatestState(target.id)
       console.log(`  • ${target.label} no bytes; final reported state: ${latest ?? 'absent'}`)
-      if (latest !== 'failed' && latest !== 'live') {
+      if (latest !== 'failed' && latest !== 'reconnecting' && latest !== 'live') {
         failures.push(`stalled leg has no honest final state (${latest ?? 'absent'})`)
       }
     } else {

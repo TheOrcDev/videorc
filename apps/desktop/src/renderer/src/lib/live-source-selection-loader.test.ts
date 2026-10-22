@@ -112,7 +112,7 @@ describe('lazy live source controller admission', () => {
     controller.setSession('new', 'recording')
     await controller.refresh()
     expect(callbacks.changed).toHaveBeenLastCalledWith(
-      expect.objectContaining({ checking: true, error: expect.stringContaining('Retry') })
+      expect.objectContaining({ checking: true, error: expect.stringContaining('Check again') })
     )
     await expect(controller.select('microphone', null, Promise.resolve([]))).rejects.toThrow(
       'loading'

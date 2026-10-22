@@ -6,9 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GroupedList, ListRow } from './list-row'
 import { ConfigGrid, PageHeader } from './page'
-import { Pane, PaneBody, Toolbar } from './pane'
+import { PANE_OWNS_SCROLL, Pane, PaneBody, PaneStrip, Toolbar, WINDOW_TITLE_CLASS } from './pane'
 import { PanelSection } from './panel-section'
-import { StatusBar, StatusBarHint } from './status-bar'
+import { STATUS_BAR_ACTION_CLASS, StatusBar, StatusBarHint } from './status-bar'
+import { StatusBarAction } from './status-bar-action'
 
 // Plan 050, D4: panes, toolbars, flush sections, grouped lists, status bar.
 
@@ -59,6 +60,37 @@ describe('Toolbar', () => {
     expect(owned).not.toContain('overflow-y-auto')
     expect(owned).toContain('flex-col')
   })
+
+  it('stops scrolling for a page whose root owns its scroll, with no list of pages (A-14)', () => {
+    // Plan 174 S1.6b: the page says so on its root; the shell keeps no ids.
+    expect(PANE_OWNS_SCROLL).toEqual({ 'data-pane-scroll': 'own' })
+    const markup = renderToStaticMarkup(createElement(PaneBody, null, 'x'))
+    for (const rule of ['flex', 'flex-col', 'overflow-y-hidden']) {
+      expect(markup).toContain(`has-[&gt;[data-pane-scroll=own]]:${rule}`)
+    }
+  })
+
+  it('titles the toolbar with the one window title recipe: 14 px / 600', () => {
+    expect(WINDOW_TITLE_CLASS).toContain('text-sm font-semibold text-foreground')
+    const markup = renderToStaticMarkup(createElement(Toolbar, { title: 'Studio' }))
+    // Focusable by script only (plan 174 S3.21, A-18): the shell moves the
+    // focus here after keyboard navigation.
+    expect(markup).toContain(
+      `<h1 class="${WINDOW_TITLE_CLASS} outline-none" tabindex="-1">Studio</h1>`
+    )
+  })
+})
+
+describe('PaneStrip', () => {
+  it('pins a strip under the toolbar: a hairline below, the gutter at the sides', () => {
+    const markup = renderToStaticMarkup(
+      createElement(PaneStrip, { className: 'flex gap-2', children: 'filters' })
+    )
+    expect(markup).toContain('data-slot="pane-strip"')
+    for (const token of ['shrink-0', 'border-b', 'border-border', 'px-gutter', 'py-2', 'gap-2']) {
+      expect(markup).toContain(token)
+    }
+  })
 })
 
 describe('flush sections', () => {
@@ -75,8 +107,11 @@ describe('flush sections', () => {
     }
     expect(markup).toContain('border-b')
     expect(markup).toContain('p-gutter')
-    expect(markup).toContain('text-[13px] leading-5 font-semibold')
-    expect(markup).toContain('text-xs text-muted-foreground')
+    // The type tokens (plan 174 S1.6a): 13 / 600 header, 12 px description,
+    // and the header is an h2 under the toolbar's h1 (A-24).
+    expect(markup).toContain('text-section font-semibold')
+    expect(markup).toContain('text-meta text-muted-foreground')
+    expect(markup).toMatch(/<h2[^>]*>Recording<\/h2>/)
   })
 
   it('splits the two ConfigGrid columns with a hairline', () => {
@@ -133,7 +168,12 @@ describe('StatusBar', () => {
         createElement(
           StatusBar,
           { leading: createElement('span', null, 'Connected') },
-          createElement(StatusBarHint, { keys: '⌘K', label: 'Search', onClick })
+          createElement(StatusBarHint, {
+            accelerator: 'CmdOrCtrl+K',
+            platform: 'darwin',
+            label: 'Search',
+            onClick
+          })
         )
       )
     )
@@ -144,5 +184,63 @@ describe('StatusBar', () => {
     expect(hint?.textContent).toBe('⌘KSearch')
     act(() => hint?.click())
     expect(onClick).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('StatusBarAction', () => {
+  it('names an icon-only action for assistive tech and on hover (H-PAT)', () => {
+    const onClick = vi.fn()
+    act(() =>
+      root.render(
+        createElement(StatusBarAction, {
+          icon: createElement('svg', { 'aria-hidden': true }),
+          label: 'Open Preview',
+          onClick
+        })
+      )
+    )
+    const action = container.querySelector<HTMLButtonElement>('[data-slot=status-bar-action]')
+    expect(action?.getAttribute('aria-label')).toBe('Open Preview')
+    // Named on hover by a tooltip, never a native title (plan 174 S1.10).
+    expect(action?.hasAttribute('title')).toBe(false)
+    expect(action?.getAttribute('data-state')).toBe('closed')
+    expect(action?.getAttribute('type')).toBe('button')
+    expect(action?.className).toContain(STATUS_BAR_ACTION_CLASS)
+    act(() => action?.click())
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a word when it has one, keeps the full name, and marks a toggle that is on', () => {
+    const markup = renderToStaticMarkup(
+      createElement(StatusBarAction, {
+        label: 'Clear view',
+        text: 'Clear',
+        hint: 'Clear view (keeps Library history)',
+        pressed: true
+      })
+    )
+    expect(markup).toContain('aria-label="Clear view"')
+    expect(markup).toContain('aria-pressed="true"')
+    // The hint is the tooltip and the description, never a title (S1.10).
+    expect(markup).toContain('aria-description="Clear view (keeps Library history)"')
+    expect(markup).not.toContain('title=')
+    expect(markup).toContain('>Clear</button>')
+  })
+
+  it('shares one look with the shortcut hints', () => {
+    for (const token of ['h-5', 'text-[11px]', 'text-subtle', 'hover:bg-accent']) {
+      expect(STATUS_BAR_ACTION_CLASS).toContain(token)
+    }
+    act(() =>
+      root.render(
+        createElement(StatusBarHint, {
+          accelerator: 'CmdOrCtrl+K',
+          label: 'Search',
+          onClick: () => {}
+        })
+      )
+    )
+    const hint = container.querySelector('[data-slot=status-bar-hint]')
+    expect(hint?.className).toBe(STATUS_BAR_ACTION_CLASS)
   })
 })

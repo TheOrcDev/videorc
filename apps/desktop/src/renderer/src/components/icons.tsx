@@ -19,7 +19,18 @@ import type { ComponentType, SVGProps } from 'react'
 
 import type * as PhosphorIcons from '@phosphor-icons/react'
 
-import orcleEmblemUrl from '../assets/orcle/orcle-emblem-64.webp'
+// A file, never a data URI (plan 174 S4.1): under Vite's 4 KB inline limit
+// this 2.6 KB picture became 2.7 KB of base64 in the eager bundle. Every
+// importer must use the same query, or the bundle carries both copies.
+import buddyEmblemUrl from '../assets/buddy/buddy-emblem-64.webp?no-inline'
+import {
+  YOUTUBE_ARTBOARD,
+  YOUTUBE_ICON_URL,
+  YOUTUBE_MARK,
+  YOUTUBE_MARK_ASPECT,
+  YOUTUBE_MARK_MIN_PX
+} from '../lib/youtube-mark'
+import { X_MARK_PATH } from '../lib/x-mark'
 
 /**
  * The props every registry icon accepts.
@@ -56,7 +67,7 @@ type _RegistryIconProps = _AssertIconProps<
     | 'ArrowUp'
     | 'ArrowsClockwise'
     | 'ArrowsDownUp'
-    | 'Brain'
+    | 'BookmarkSimple'
     | 'Broadcast'
     | 'Bug'
     | 'CaretDown'
@@ -88,10 +99,10 @@ type _RegistryIconProps = _AssertIconProps<
     | 'Info'
     | 'InstagramLogo'
     | 'Layout'
-    | 'Lightning'
     | 'LinkSimple'
     | 'LockKey'
     | 'MagnifyingGlass'
+    | 'MagnifyingGlassPlus'
     | 'Microphone'
     | 'MinusCircle'
     | 'Monitor'
@@ -105,7 +116,6 @@ type _RegistryIconProps = _AssertIconProps<
     | 'PushPin'
     | 'Record'
     | 'Scissors'
-    | 'ShieldCheck'
     | 'SignIn'
     | 'SignOut'
     | 'SlidersHorizontal'
@@ -130,16 +140,14 @@ type _RegistryIconProps = _AssertIconProps<
     | 'Wrench'
     | 'X'
     | 'XCircle'
-    | 'XLogo'
-    | 'YoutubeLogo'
   >
 >
 
 /**
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
- * from the pre-audit set (see the audit table in the Nucleo plan). The Orcle
- * tab's slot is `OrcleIcon`, the Orcle eye emblem, below.
+ * from the pre-audit set (see the audit table in the Nucleo plan). The Buddy
+ * tab's slot is `BuddyIcon`, the Buddy emblem, below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -168,7 +176,6 @@ export {
   CircleNotch as SpinnerIcon,
   Heartbeat as HeartbeatIcon,
   Gauge as GaugeIcon,
-  ShieldCheck as VerifiedIcon,
   MinusCircle as DisabledIcon
 } from '@phosphor-icons/react'
 /**
@@ -181,6 +188,9 @@ export {
   X as CloseIcon,
   DotsThree as MoreIcon,
   MagnifyingGlass as SearchIcon,
+  // Opens a small picture larger to look at it (the Buddy's bubble sample
+  // and its preview); never a zoom level control.
+  MagnifyingGlassPlus as ZoomInIcon,
   SlidersHorizontal as AdjustIcon,
   Layout as LayoutIcon
 } from '@phosphor-icons/react'
@@ -219,7 +229,10 @@ export {
   FileVideo as VideoFileIcon,
   FilmSlate as ClapperboardIcon,
   FrameCorners as FrameIcon,
-  Crosshair as CrosshairIcon
+  Crosshair as CrosshairIcon,
+  // A marker: a point on a recording's timeline its owner wants to find
+  // again (CONTEXT.md). Never scissors, which mean a cut (plan 174 S3.12).
+  BookmarkSimple as MarkerIcon
 } from '@phosphor-icons/react'
 /**
  * Files, assets and editing.
@@ -248,13 +261,12 @@ export {
   LinkSimple as LinkIcon
 } from '@phosphor-icons/react'
 /**
- * AI, tooling and appearance. Orcle (code name `cohost`) has its own mark,
- * the real eye emblem: `OrcleIcon` below at icon size, `OrcleEmblem` larger.
+ * AI, tooling and appearance. Buddy (code name `cohost`) has its own mark,
+ * the real Buddy artwork: `BuddyIcon` below at icon size, `BuddyEmblem` larger.
  */
 export {
-  Brain as BrainIcon,
   Sparkle as SparkleIcon,
-  Lightning as FastIcon,
+  // Scissors means cutting only: Clean cut and clips (plan 174 S3.12, J1-22).
   Scissors as ClipIcon,
   Wrench as RepairIcon,
   Bug as BugIcon,
@@ -273,11 +285,70 @@ export {
  */
 export {
   TwitchLogo as TwitchIcon,
-  XLogo as XPlatformIcon,
-  YoutubeLogo as YoutubeIcon,
   TiktokLogo as TiktokIcon,
   InstagramLogo as InstagramIcon
 } from '@phosphor-icons/react'
+
+export { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX }
+
+/**
+ * YouTube's mark (plan 165): the official full-colour icon from YouTube's
+ * brand site, unmodified (`assets/brand/youtube/`), never a redrawn glyph.
+ *
+ * Like `BuddyIcon` it is an `<svg>` around an `<image>`, so `currentColor`,
+ * tint classes and hover recolours cannot reach the artwork: the red and the
+ * white triangle are YouTube's. Its height is the `size` prop, clamped to at
+ * least YOUTUBE_MARK_MIN_PX, and its width follows the mark's aspect. The
+ * size is set inline, so a caller's `size-3.5` class cannot shrink it; a
+ * surface that has no room for 20px shows the word "YouTube" instead.
+ * `weight` is accepted and ignored.
+ */
+export const YoutubeIcon: AppIcon = ({ size, weight: _weight, children, style, ...props }) => {
+  const requested = typeof size === 'number' ? size : Number.parseFloat(size ?? '')
+  const height = Math.max(YOUTUBE_MARK_MIN_PX, Number.isFinite(requested) ? requested : 0)
+  const width = Math.round(height * YOUTUBE_MARK_ASPECT * 100) / 100
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      // The viewBox crops to the mark, so the svg box IS the visible icon.
+      viewBox={`${YOUTUBE_MARK.x} ${YOUTUBE_MARK.y} ${YOUTUBE_MARK.width} ${YOUTUBE_MARK.height}`}
+      width={width}
+      height={height}
+      data-slot="platform-mark"
+      data-platform="youtube"
+      {...props}
+      style={{ ...style, width, height, flexShrink: 0 }}
+    >
+      {children}
+      <image
+        href={YOUTUBE_ICON_URL}
+        width={YOUTUBE_ARTBOARD.width}
+        height={YOUTUBE_ARTBOARD.height}
+      />
+    </svg>
+  )
+}
+/**
+ * X's mark (plan 167): the path from X's partner icon kit
+ * (`assets/brand/x/`), never a redrawn glyph. X's rule is one solid colour,
+ * black on light surfaces and white on dark, so it is pure black or pure
+ * white by theme, never the `foreground` token or a caller's tint (the fill
+ * classes win over an inherited `text-*`). `weight` is accepted and ignored.
+ */
+export const XPlatformIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    width={size ?? '1em'}
+    height={size ?? '1em'}
+    data-slot="platform-mark"
+    data-platform="x"
+    {...props}
+  >
+    {children}
+    <path className="fill-black dark:fill-white" d={X_MARK_PATH} />
+  </svg>
+)
 /**
  * Kick's mark (plan 063). Phosphor has no Kick logo, so this is a hand-drawn,
  * simplified version: the stepped "K" knocked out of a rounded square, drawn
@@ -302,9 +373,9 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
 )
 
 /**
- * Orcle's mark (plan 149): the real Orcle eye emblem, the full-colour artwork
- * in `assets/brand/orcle/`, at icon size. The owner's call: Orcle appears as
- * its actual image everywhere, the sidebar, the Stream Manager, the Studio
+ * Buddy's mark (plans 149 and 164): the owner's stone golem, the full-colour
+ * artwork in `assets/brand/buddy/`, at icon size. The owner's call: it appears
+ * as its actual image everywhere, the sidebar, the Stream Manager, the Studio
  * session row, popovers and menus, never as a redrawn glyph.
  *
  * It stays an `<svg>` so every slot that sizes and lays out icons through
@@ -316,16 +387,16 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
  * It is the one full-colour icon in the registry. `weight` is accepted and
  * ignored, and `currentColor` never tints it: the red iris is the brand.
  */
-export const OrcleIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
+export const BuddyIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 256 256"
     width={size ?? '1em'}
     height={size ?? '1em'}
-    data-slot="orcle-icon"
+    data-slot="buddy-icon"
     {...props}
   >
     {children}
-    <image href={orcleEmblemUrl} width="256" height="256" preserveAspectRatio="xMidYMid meet" />
+    <image href={buddyEmblemUrl} width="256" height="256" preserveAspectRatio="xMidYMid meet" />
   </svg>
 )

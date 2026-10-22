@@ -15,6 +15,7 @@ import {
   isMissingUpdateFeedError,
   shouldAutoDownload,
   shouldBackgroundRecheck,
+  updateReadyNotification,
   updateStatusFromEvent
 } from './updater-status'
 import {
@@ -45,6 +46,9 @@ type CaptureInstallBlockedGetter = () => boolean
 
 let currentStatus: UpdateStatus = { phase: 'idle' }
 let getMainWindow: MainWindowGetter = () => null
+// Whether a recording or a livestream is running (or unconfirmed): the same
+// guard that blocks install also keeps the OS banner off a capture.
+let captureActive: CaptureInstallBlockedGetter = () => false
 let listenersAttached = false
 let updaterConfigurationBlocked = false
 let feedRoute: UpdateFeedRoute = 'primary'
@@ -271,13 +275,10 @@ function attachUpdaterListeners(): void {
     safeConsole.log(`[auto-update] ${info.version} downloaded; ready to install.`)
     // Non-blocking heads-up for the background flow (the user may not be in
     // Settings). Accurate for the manual flow too — they can restart now or it
-    // applies on the next quit.
-    if (Notification.isSupported()) {
-      new Notification({
-        title: `Videorc ${info.version} is ready`,
-        body: 'Restart Videorc to finish updating, or it will apply the next time you quit.',
-        silent: true
-      }).show()
+    // applies on the next quit. Never during a capture (plan 174 I-20).
+    const notice = updateReadyNotification(info.version, captureActive())
+    if (notice && Notification.isSupported()) {
+      new Notification({ ...notice, silent: true }).show()
     }
   })
   autoUpdater.on('error', (error) => {
@@ -389,6 +390,7 @@ export function registerUpdaterIpc(
   ) => ReturnType<AcquireBackendInterruption>
 ): void {
   getMainWindow = mainWindowGetter
+  captureActive = captureInstallBlocked
   if (!updaterConfigurationBlocked) {
     attachUpdaterListeners()
   }

@@ -136,7 +136,7 @@ describe('shouldRunPerformanceCheck', () => {
       })
     ).toMatchObject({
       checkLabel: 'Check this computer',
-      text: 'This computer has not been measured yet.'
+      text: "This computer hasn't been measured yet."
     })
     const trustedV2 = { ...poison, capabilityKey: 'performance-check-v2:abc' }
     expect(isUntrustedPerformanceCheckResult(trustedV2)).toBe(false)
@@ -145,10 +145,11 @@ describe('shouldRunPerformanceCheck', () => {
 })
 
 describe('outputLabel', () => {
-  it('names outputs the way the picker does', () => {
-    expect(outputLabel(videoPresets['record-4k30'])).toBe('4K 30')
-    expect(outputLabel(videoPresets['tutorial-720p30'])).toBe('720p 30')
-    expect(outputLabel(videoPresets['vertical-1080x1920'])).toBe('1080p 30')
+  it('names outputs in the one video spelling (plan 174 S1.4)', () => {
+    expect(outputLabel(videoPresets['record-4k30'])).toBe('4K · 30 fps')
+    expect(outputLabel(videoPresets['tutorial-720p30'])).toBe('720p · 30 fps')
+    // A portrait canvas keeps both sides (plan 174 S1.4).
+    expect(outputLabel(videoPresets['vertical-1080x1920'])).toBe('1080 × 1920 · 30 fps')
   })
 })
 
@@ -167,7 +168,7 @@ describe('performanceCheckLine', () => {
         rungCount: 3,
         video: videoPresets['tutorial-1440p30']
       })
-    ).toMatchObject({ busy: true, text: 'Checking what this computer can record… 1440p 30' })
+    ).toMatchObject({ busy: true, text: 'Checking what this computer can record… 1440p · 30 fps' })
     expect(line({ running: false, stale: false }, 'tutorial-1080p30')).toMatchObject({
       checkLabel: 'Check this computer'
     })
@@ -177,10 +178,10 @@ describe('performanceCheckLine', () => {
     expect(line({ running: false, stale: false, result: weak }, 'tutorial-1440p30')).toEqual({
       tone: 'warning',
       busy: false,
-      text: '1440p 30 is too heavy for this computer. Recordings will stutter. 720p 30 held steady.',
+      text: '1440p · 30 fps is too heavy for this computer. Recordings will stutter. 720p · 30 fps held steady.',
       checkLabel: 'Check again',
       applyPreset: 'tutorial-720p30',
-      applyLabel: 'Use 720p 30'
+      applyLabel: 'Use 720p · 30 fps'
     })
   })
 
@@ -188,7 +189,7 @@ describe('performanceCheckLine', () => {
     const verified = line({ running: false, stale: false, result: strong }, 'tutorial-1440p30')
     expect(verified).toMatchObject({
       tone: 'muted',
-      text: '1440p 30 is verified for this computer.'
+      text: '1440p · 30 fps is verified for this computer.'
     })
     expect(verified?.applyPreset).toBeUndefined()
   })
@@ -198,7 +199,7 @@ describe('performanceCheckLine', () => {
       line({ running: false, stale: false, result: strong }, 'stream-safe-1080p60')
     ).toMatchObject({
       tone: 'muted',
-      text: '1080p 60 has not been measured. 4K 30 held steady.',
+      text: "1080p · 60 fps hasn't been measured. 4K · 30 fps held steady.",
       applyPreset: 'record-4k30'
     })
     const nothing = result([['tutorial-720p30', 'failed']], 'tutorial-720p30', true)
@@ -207,7 +208,7 @@ describe('performanceCheckLine', () => {
     ).toMatchObject({
       tone: 'warning',
       checkLabel: 'Check again',
-      text: 'Nothing held steady on this computer, not even 720p 30. Close other apps and check again.'
+      text: 'Nothing held steady on this computer, not even 720p · 30 fps. Close other apps and check again.'
     })
   })
 })
@@ -215,8 +216,10 @@ describe('performanceCheckLine', () => {
 describe('performanceCheckTooHeavyToast', () => {
   it('warns once when a chosen output is heavier than what held', () => {
     expect(performanceCheckTooHeavyToast(videoPresets['record-4k30'], weak)).toEqual({
-      title: '4K 30 is too heavy for this computer',
-      description: 'Recordings will stutter. 720p 30 held steady. Switch in Recording → Output.'
+      title: '4K · 30 fps is too heavy for this computer',
+      description: 'Recordings will stutter. 720p · 30 fps held steady.',
+      actionLabel: 'Use 720p · 30 fps',
+      preset: 'tutorial-720p30'
     })
   })
 
@@ -375,7 +378,7 @@ describe('540p30 floor (plan 090 D1)', () => {
       fps: 30,
       bitrateKbps: 2500
     })
-    expect(outputLabel(videoPresets['tutorial-540p30'])).toBe('540p 30')
+    expect(outputLabel(videoPresets['tutorial-540p30'])).toBe('540p · 30 fps')
   })
 
   it('moves an untouched install to it and verifies it', () => {

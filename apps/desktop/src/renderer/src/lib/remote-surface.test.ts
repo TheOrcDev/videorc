@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   executeRemoteIntent,
+  remoteLayoutLabels,
   RemoteSurfacePublisher,
   type RemoteIntentContext,
   type RemoteSurfaceValues
@@ -17,8 +18,10 @@ function remoteIntentContext(overrides: Partial<RemoteIntentContext> = {}) {
       }
     },
     sessionActive: false,
-    streamEnabled: true,
-    startSession: vi.fn(async () => true),
+    recordBlockedReason: null,
+    liveStreamBlockedReason: null,
+    startRecording: vi.fn(async () => true),
+    startLivestream: vi.fn(async () => false),
     stopSession: vi.fn(async () => true),
     setMicrophoneMuted: vi.fn(async () => true),
     systemAudio: ['available', false],
@@ -32,6 +35,7 @@ function remoteIntentContext(overrides: Partial<RemoteIntentContext> = {}) {
     showCommentHighlight: vi.fn(async () => ({ ok: true })),
     clearCommentHighlight: vi.fn(async () => ({ ok: true })),
     markClip: vi.fn(async () => ({ ok: true })),
+    banners: [],
     ...overrides
   }
   return { context, requests }
@@ -71,7 +75,7 @@ describe('executeRemoteIntent', () => {
         ['systemAudioOn', 'systemAudioOff', 'systemAudioToggle'].map((kind) => ({
           intentId: `sa-${kind}`,
           ok: false,
-          message: 'System audio is not available.'
+          message: "System audio isn't available."
         }))
       )
     }
@@ -84,7 +88,7 @@ describe('executeRemoteIntent', () => {
     expect(idle.requests).toEqual([
       {
         method: 'remote.intent.ack',
-        params: { intentId: 'clip-idle', ok: false, message: 'No active session.' }
+        params: { intentId: 'clip-idle', ok: false, message: "You're not recording or live." }
       }
     ])
 
@@ -121,10 +125,66 @@ describe('executeRemoteIntent', () => {
 
     await executeRemoteIntent({ intentId: 'intent-1', intent: { kind: 'recordStart' } }, context)
 
-    expect(context.startSession).toHaveBeenCalledOnce()
+    expect(context.startRecording).toHaveBeenCalledOnce()
+    expect(context.startLivestream).not.toHaveBeenCalled()
     expect(requests).toEqual([
       { method: 'remote.intent.ack', params: { intentId: 'intent-1', ok: true } }
     ])
+  })
+
+  // Plan 174 S3.1 (B-3): recordStart records and streamStart goes live,
+  // whatever mode the Studio saved last. The start itself refuses (so the
+  // Studio shows why); its reason rides on the failed ack for the deck key.
+  it('calls the explicit intents and relays why a start is blocked', async () => {
+    const live = remoteIntentContext()
+    await executeRemoteIntent(
+      { intentId: 'go-live', intent: { kind: 'streamStart' } },
+      live.context
+    )
+    expect(live.context.startLivestream).toHaveBeenCalledOnce()
+    expect(live.context.startRecording).not.toHaveBeenCalled()
+    // Opening the Go Live dialog is not a started stream.
+    expect(live.requests.at(-1)).toEqual({
+      method: 'remote.intent.ack',
+      params: {
+        intentId: 'go-live',
+        ok: false,
+        message: "The livestream didn't start. Finish going live on your computer."
+      }
+    })
+
+    const blocked = remoteIntentContext({
+      recordBlockedReason: 'Pick a screen or a camera first.',
+      liveStreamBlockedReason: 'Set up a destination to go live.',
+      startRecording: vi.fn(async () => false),
+      startLivestream: vi.fn(async () => false)
+    })
+    for (const kind of ['recordStart', 'recordToggle', 'streamStart']) {
+      await executeRemoteIntent({ intentId: `blocked-${kind}`, intent: { kind } }, blocked.context)
+    }
+    // One door: the Studio's own starts refuse, and show why there too.
+    expect(blocked.context.startRecording).toHaveBeenCalledTimes(2)
+    expect(blocked.context.startLivestream).toHaveBeenCalledOnce()
+    expect(blocked.requests.map(({ params }) => params)).toEqual([
+      { intentId: 'blocked-recordStart', ok: false, message: 'Pick a screen or a camera first.' },
+      { intentId: 'blocked-recordToggle', ok: false, message: 'Pick a screen or a camera first.' },
+      { intentId: 'blocked-streamStart', ok: false, message: 'Set up a destination to go live.' }
+    ])
+
+    // While a session runs the blocked reasons are moot: recordToggle stops it.
+    const active = remoteIntentContext({
+      sessionActive: true,
+      recordBlockedReason: 'A capture session is already active.'
+    })
+    await executeRemoteIntent(
+      { intentId: 'toggle-stop', intent: { kind: 'recordToggle' } },
+      active.context
+    )
+    expect(active.context.stopSession).toHaveBeenCalledOnce()
+    expect(active.requests.at(-1)).toEqual({
+      method: 'remote.intent.ack',
+      params: { intentId: 'toggle-stop', ok: true }
+    })
   })
 
   it('rejects invalid scene presets without applying them', async () => {
@@ -138,7 +198,7 @@ describe('executeRemoteIntent', () => {
     expect(context.applyLayoutPreset).not.toHaveBeenCalled()
     expect(requests.at(-1)).toEqual({
       method: 'remote.intent.ack',
-      params: { intentId: 'intent-2', ok: false, message: 'Unknown layout preset "unknown".' }
+      params: { intentId: 'intent-2', ok: false, message: "That scene isn't available anymore." }
     })
   })
 
@@ -183,14 +243,14 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-scene-failed',
         ok: false,
-        message: 'The layout change was not committed.'
+        message: "Couldn't switch the scene."
       }
     })
   })
 
   it('rejects a start that returns without an authoritative session commit', async () => {
     const { context, requests } = remoteIntentContext({
-      startSession: vi.fn(async () => false)
+      startRecording: vi.fn(async () => false)
     })
 
     await executeRemoteIntent(
@@ -203,7 +263,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-start-not-committed',
         ok: false,
-        message: 'The capture session did not start. Check Studio for details.'
+        message: "Recording didn't start. Check Studio on your computer."
       }
     })
   })
@@ -224,7 +284,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-stop-not-committed',
         ok: false,
-        message: 'The active session did not stop. Check Studio for details.'
+        message: "Couldn't stop. Check Studio on your computer."
       }
     })
   })
@@ -244,7 +304,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-takeover-failed',
         ok: false,
-        message: 'The takeover was not activated.'
+        message: "Couldn't show the takeover."
       }
     })
   })
@@ -264,7 +324,7 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-takeover-clear-failed',
         ok: false,
-        message: 'The takeover was not cleared.'
+        message: "Couldn't hide the takeover."
       }
     })
   })
@@ -308,14 +368,15 @@ describe('executeRemoteIntent', () => {
       params: {
         intentId: 'intent-mic-rejected',
         ok: false,
-        message: 'The microphone change was not applied.'
+        message: "Couldn't change the microphone."
       }
     })
   })
 
   it('forwards microphone toggles and action failures', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { context, requests } = remoteIntentContext({
-      startSession: vi.fn(async () => {
+      startRecording: vi.fn(async () => {
         throw new Error('start rejected')
       })
     })
@@ -326,8 +387,15 @@ describe('executeRemoteIntent', () => {
     expect(context.setMicrophoneMuted).toHaveBeenCalledWith('toggle')
     expect(requests.at(-1)).toEqual({
       method: 'remote.intent.ack',
-      params: { intentId: 'intent-4', ok: false, message: 'start rejected' }
+      // The raw error goes to the console; the phone reads plain words.
+      params: {
+        intentId: 'intent-4',
+        ok: false,
+        message: 'Something went wrong. Check Studio on your computer.'
+      }
     })
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
   })
 
   it('shows a comment by id and relays the refusal reason verbatim', async () => {
@@ -365,7 +433,7 @@ describe('executeRemoteIntent', () => {
       },
       {
         method: 'remote.intent.ack',
-        params: { intentId: 'intent-h3', ok: false, message: 'commentHighlight needs a messageId.' }
+        params: { intentId: 'intent-h3', ok: false, message: 'Choose a message to put on stream.' }
       }
     ])
   })
@@ -404,7 +472,8 @@ describe('RemoteSurfacePublisher', () => {
     ['screen-camera'],
     [],
     systemAudioStatus,
-    systemAudioShown
+    systemAudioShown,
+    []
   ]
 
   it('projects system audio as two booleans, masked while the device cannot run', async () => {
@@ -445,6 +514,214 @@ describe('RemoteSurfacePublisher', () => {
       // The phone learns an on/off and an available flag: never the status
       // string, the device id or its name.
       expect(JSON.stringify(published)).not.toMatch(/permission-required|system-audio:/)
+      publisher.detach()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('remoteLayoutLabels (plan 174 I-14)', () => {
+  it('names each preset as the desktop does, never a title-cased id', () => {
+    expect(remoteLayoutLabels(['screen-camera', 'side-by-side'])).toEqual({
+      'screen-camera': 'Screen + camera',
+      'side-by-side': 'Side by side'
+    })
+    // The phone lists both orientations together, so the vertical twins say so.
+    expect(
+      remoteLayoutLabels(['screen-camera', 'vertical-screen-camera', 'vertical-split'])
+    ).toEqual({
+      'screen-camera': 'Screen + camera',
+      'vertical-screen-camera': 'Vertical screen + camera',
+      'vertical-split': 'Split'
+    })
+  })
+
+  it('rides along in describe and carries only fixed preset names', async () => {
+    vi.useFakeTimers()
+    try {
+      const published: unknown[] = []
+      const publisher = new RemoteSurfacePublisher()
+      publisher.attach({
+        request: async (_method, params) => {
+          published.push(params)
+          return undefined as never
+        }
+      })
+      publisher.markConnected()
+      publisher.syncValues([
+        'idle',
+        false,
+        true,
+        false,
+        false,
+        'screen-camera',
+        null,
+        false,
+        false,
+        false,
+        ['screen-camera', 'camera-only'],
+        [{ id: 'brb', name: 'Be right back' }],
+        undefined,
+        false,
+        []
+      ])
+      await vi.runAllTimersAsync()
+      const [{ describe: described }] = published as Array<{
+        describe: { layoutLabels: Record<string, string> }
+      }>
+      expect(described.layoutLabels).toEqual({
+        'screen-camera': 'Screen + camera',
+        'camera-only': 'Camera only'
+      })
+      publisher.detach()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('banner intents (plan 186 S7)', () => {
+  const banners = [
+    { id: 'sponsor', name: 'Sponsor', shown: true },
+    { id: 'follow', name: 'Follow me', shown: false }
+  ]
+  const acks = (requests: Array<{ method: string; params: unknown }>) =>
+    requests.filter(({ method }) => method === 'remote.intent.ack').map(({ params }) => params)
+  const calls = (requests: Array<{ method: string; params: unknown }>) =>
+    requests
+      .filter(({ method }) => method.startsWith('banners.'))
+      .map(({ method, params }) => [method, params])
+
+  it('shows, hides and toggles by id through the explicit backend calls', async () => {
+    const { context, requests } = remoteIntentContext({ banners })
+    for (const [intentId, intent] of [
+      ['b-1', { kind: 'bannerShow', bannerId: 'follow' }],
+      ['b-2', { kind: 'bannerHide', bannerId: 'sponsor' }],
+      // A toggle picks its verb from the state the remotes are shown.
+      ['b-3', { kind: 'bannerToggle', bannerId: 'sponsor' }],
+      ['b-4', { kind: 'bannerToggle', bannerId: 'follow' }],
+      // Without an id, hide hides them all.
+      ['b-5', { kind: 'bannerHide' }]
+    ] as const) {
+      await executeRemoteIntent({ intentId, intent }, context)
+    }
+    expect(calls(requests)).toEqual([
+      ['banners.show', { id: 'follow' }],
+      ['banners.hide', { id: 'sponsor' }],
+      ['banners.hide', { id: 'sponsor' }],
+      ['banners.show', { id: 'follow' }],
+      ['banners.hide', {}]
+    ])
+    expect(acks(requests)).toEqual(
+      ['b-1', 'b-2', 'b-3', 'b-4', 'b-5'].map((intentId) => ({ intentId, ok: true }))
+    )
+  })
+
+  it('refuses a banner the list no longer has without calling the backend', async () => {
+    const { context, requests } = remoteIntentContext({ banners })
+    for (const [intentId, intent] of [
+      ['gone-1', { kind: 'bannerShow', bannerId: 'deleted' }],
+      ['gone-2', { kind: 'bannerToggle', bannerId: 'deleted' }],
+      ['gone-3', { kind: 'bannerHide', bannerId: 'deleted' }],
+      ['gone-4', { kind: 'bannerShow' }]
+    ] as const) {
+      await executeRemoteIntent({ intentId, intent }, context)
+    }
+    expect(calls(requests)).toEqual([])
+    expect(acks(requests)).toEqual(
+      ['gone-1', 'gone-2', 'gone-3', 'gone-4'].map((intentId) => ({
+        intentId,
+        ok: false,
+        message: "That banner isn't available anymore."
+      }))
+    )
+  })
+
+  it("relays the backend's refusal verbatim and says plainly when anything else fails", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const sent: Array<{ method: string; params: unknown }> = []
+    const failing = (error: Error): RemoteIntentContext['client'] => ({
+      request: async (method, params) => {
+        sent.push({ method, params })
+        if (method.startsWith('banners.')) throw error
+        return undefined as never
+      }
+    })
+    const refused = remoteIntentContext({
+      banners,
+      client: failing(new Error('Four banners are showing. Hide one first.'))
+    })
+    await executeRemoteIntent(
+      { intentId: 'full', intent: { kind: 'bannerShow', bannerId: 'follow' } },
+      refused.context
+    )
+    const broken = remoteIntentContext({ banners, client: failing(new Error('socket closed')) })
+    await executeRemoteIntent(
+      { intentId: 'show-broken', intent: { kind: 'bannerShow', bannerId: 'follow' } },
+      broken.context
+    )
+    await executeRemoteIntent(
+      { intentId: 'hide-broken', intent: { kind: 'bannerToggle', bannerId: 'sponsor' } },
+      broken.context
+    )
+    await executeRemoteIntent(
+      { intentId: 'all-broken', intent: { kind: 'bannerHide' } },
+      broken.context
+    )
+    expect(acks(sent)).toEqual([
+      { intentId: 'full', ok: false, message: 'Four banners are showing. Hide one first.' },
+      { intentId: 'show-broken', ok: false, message: "Couldn't show the banner." },
+      { intentId: 'hide-broken', ok: false, message: "Couldn't hide the banner." },
+      { intentId: 'all-broken', ok: false, message: "Couldn't hide the banners." }
+    ])
+    vi.mocked(console.warn).mockRestore()
+  })
+
+  it('describes banners as id, name and shown only, never a file or a place', async () => {
+    vi.useFakeTimers()
+    try {
+      const published: unknown[] = []
+      const publisher = new RemoteSurfacePublisher()
+      publisher.attach({
+        request: async (_method, params) => {
+          published.push(params)
+          return undefined as never
+        }
+      })
+      publisher.markConnected()
+      // Studio hands over its whole banner list; describe keeps three fields.
+      const full = {
+        id: 'sponsor',
+        name: 'Sponsor',
+        shown: true,
+        imageFile: 'sponsor.png',
+        thumbnailFile: 'sponsor.thumb.png',
+        horizontal: { x: 0, y: 0, w: 1, h: 1 }
+      }
+      publisher.syncValues([
+        'idle',
+        false,
+        true,
+        false,
+        false,
+        'screen-camera',
+        null,
+        false,
+        false,
+        false,
+        ['screen-camera'],
+        [],
+        undefined,
+        false,
+        [full]
+      ])
+      await vi.runAllTimersAsync()
+      const [{ describe: described }] = published as Array<{
+        describe: { banners: unknown }
+      }>
+      expect(described.banners).toEqual([{ id: 'sponsor', name: 'Sponsor', shown: true }])
+      expect(JSON.stringify(published)).not.toMatch(/\.png|horizontal/)
       publisher.detach()
     } finally {
       vi.useRealTimers()

@@ -3,17 +3,16 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { CommentRow, commentMentions } from '@/components/comment-row'
-import type { LiveChatMessage, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
+import type {
+  LiveChatMessage,
+  LiveChatProviderState,
+  StreamPlatform,
+  TwitchGifMode
+} from '@/lib/backend'
+import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { chatDraftMaxChars } from '@/lib/chat-send'
 
-import {
-  chatPaneMessages,
-  followChatOnResize,
-  pickedSendProviders,
-  spotlightScrollAllowed,
-  SPOTLIGHT_SCROLL_QUIET_MS,
-  type ChatPaneFilter
-} from './stream-manager-chat'
+import { chatPaneMessages, pickedSendProviders, type ChatPaneFilter } from './stream-manager-chat'
 
 function message(
   id: string,
@@ -44,12 +43,24 @@ const messages = [
   message('1', 'twitch', 'hello @OrcDev, love the setup'),
   message('2', 'youtube', 'which mic is that?'),
   message('3', 'x', 'first time here'),
-  message('4', 'twitch', 'Cool_User followed', { eventType: 'follow', details: { kind: 'follow' } })
+  message('4', 'twitch', 'Cool_User followed', {
+    eventType: 'follow',
+    details: { kind: 'follow' }
+  }),
+  // Plan 162: Power-ups and redemptions are Activity only, like follows.
+  message('5', 'twitch', 'GVASTE used a Celebration', {
+    eventType: 'power-up',
+    details: { kind: 'power-up', bits: 300, powerUp: 'celebration' }
+  }),
+  message('6', 'twitch', 'Von6 redeemed Hydrate', {
+    eventType: 'redemption',
+    details: { kind: 'redemption', reward: 'custom', channelPoints: 500, title: 'Hydrate' }
+  })
 ]
 const context = { questionMessageIds: new Set(['2']), mentionNames: ['OrcDev'] }
 
 describe('Stream Manager chat pane', () => {
-  it('never lists follows, and filters by platform, question, mention and search', () => {
+  it('never lists follows, Power-ups or redemptions, and filters by platform, question, mention and search', () => {
     const ids = (filter: ChatPaneFilter): string[] =>
       chatPaneMessages(messages, filter, context).map((row) => row.id)
     expect(ids(all)).toEqual(['1', '2', '3'])
@@ -105,16 +116,20 @@ describe('Stream Manager chat pane', () => {
         })
       })
     )
-    expect(markup).toContain('data-slot="comment-first-message"')
+    expect(markup).toContain('data-testid="comment-first-message"')
     expect(markup).toContain('First chat')
     // Plan 057, D3: the arrow says reply; the chip says mention in four
     // characters, with the words on hover.
     expect(markup).toContain('↳ @ph4se_on3: which mic is that?')
     expect(markup).not.toContain('Replying to')
-    expect(markup).toContain('data-slot="comment-mention"')
+    expect(markup).toContain('data-testid="comment-mention"')
     expect(markup).toContain('@you')
-    expect(markup).toContain('title="Mentions you"')
-    expect(markup).toContain('data-slot="comment-role"')
+    // "Mentions you" is the chip's tooltip, never a native title (S1.10).
+    expect(markup).not.toContain('title="Mentions you"')
+    expect(markup).toMatch(
+      /<span(?=[^>]*data-testid="comment-mention")(?=[^>]*data-state="closed")/
+    )
+    expect(markup).toContain('data-testid="comment-role"')
     expect(markup).toContain('VIP')
   })
 
@@ -187,6 +202,73 @@ describe('Stream Manager chat pane', () => {
     expect(markup).not.toContain('>RainTime<')
   })
 
+  it('draws a Twitch GIF as its own fixed-height block with the title until cached (plan 155)', () => {
+    const gif = {
+      type: 'gif',
+      text: '[Y A Y Yes GIF]',
+      imageUrl: 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif'
+    }
+    const render = (density: 'compact' | 'comfortable', mode?: TwitchGifMode): string => {
+      const row = createElement(CommentRow, {
+        density,
+        message: message('11', 'twitch', '[Y A Y Yes GIF]', { fragments: [gif] })
+      })
+      return renderToStaticMarkup(
+        mode ? createElement(ChatGifModeProvider, { mode, children: row }) : row
+      )
+    }
+    const compact = render('compact')
+    // Not an emote: its own block, at the compact height, named by its title.
+    expect(compact).toContain('data-slot="comment-gif"')
+    expect(compact).toContain('data-gif-mode="animated"')
+    expect(compact).toContain('h-16')
+    expect(compact).toContain('data-slot="comment-gif-title"')
+    expect(compact).toContain('>GIF</span>')
+    expect(compact).toContain('Y A Y Yes')
+    expect(compact).not.toContain('[Y A Y Yes GIF]')
+    expect(compact).not.toContain('data-slot="comment-emote"')
+    // The CDN URL never reaches the DOM: the image comes from main's cache.
+    expect(compact).not.toContain('giphy.com')
+    expect(render('comfortable')).toContain('h-24')
+    // Off keeps the title block and never asks main for the image.
+    const off = render('compact', 'off')
+    expect(off).toContain('data-gif-mode="off"')
+    expect(off).toContain('data-slot="comment-gif-title"')
+    expect(render('compact', 'still')).toContain('data-gif-mode="still"')
+  })
+
+  it('keeps the words around a GIF, and a refused GIF as its title text (plan 155)', () => {
+    const markup = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message('12', 'twitch', 'gg [Y A Y Yes GIF] wow', {
+          fragments: [
+            { type: 'text', text: 'gg ' },
+            {
+              type: 'gif',
+              text: '[Y A Y Yes GIF]',
+              imageUrl: 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif'
+            },
+            { type: 'text', text: ' wow' }
+          ]
+        })
+      })
+    )
+    expect(markup).toContain('gg ')
+    expect(markup).toContain(' wow')
+    expect(markup).toContain('data-slot="comment-gif"')
+    // The backend dropped the URL of a GIF off the asset allowlist: the row
+    // shows what was sent, as text, with no block.
+    const refused = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message('13', 'twitch', '[Nope GIF]', {
+          fragments: [{ type: 'gif', text: '[Nope GIF]' }]
+        })
+      })
+    )
+    expect(refused).toContain('[Nope GIF]')
+    expect(refused).not.toContain('data-slot="comment-gif"')
+  })
+
   it('shows the time on every row in History, and on hover while live', () => {
     const row = (timestamps: 'always' | 'hover'): string =>
       renderToStaticMarkup(
@@ -196,80 +278,10 @@ describe('Stream Manager chat pane', () => {
           timestamps
         })
       )
-    expect(row('always')).toContain('<time class="ml-auto shrink-0')
-    expect(row('always')).not.toContain('opacity-0')
-    expect(row('hover')).toContain('opacity-0')
-    expect(row('hover')).toContain('group-hover/comment:opacity-100')
-  })
-})
-
-describe('followChatOnResize (plan 057, P4)', () => {
-  function setup(pinned: boolean) {
-    const content = { id: 'content' } as unknown as Element
-    const viewport = { scrollTop: 100, scrollHeight: 900, firstElementChild: content }
-    const observed: Element[] = []
-    let fire = (): void => undefined
-    let disconnected = false
-    const cleanup = followChatOnResize(
-      viewport,
-      () => pinned,
-      (callback) => {
-        fire = callback
-        return {
-          observe: (target) => observed.push(target),
-          disconnect: () => {
-            disconnected = true
-          }
-        }
-      }
-    )
-    return {
-      viewport,
-      content,
-      observed,
-      fire: () => fire(),
-      cleanup,
-      isDisconnected: () => disconnected
-    }
-  }
-
-  it('keeps a pinned chat on its newest row when the viewport or its rows resize', () => {
-    const chat = setup(true)
-    expect(chat.observed).toEqual([chat.viewport, chat.content])
-    chat.fire()
-    expect(chat.viewport.scrollTop).toBe(900)
-  })
-
-  it('leaves a streamer who scrolled back where they are', () => {
-    const chat = setup(false)
-    chat.fire()
-    expect(chat.viewport.scrollTop).toBe(100)
-    chat.cleanup()
-    expect(chat.isDisconnected()).toBe(true)
-  })
-})
-
-describe('spotlightScrollAllowed', () => {
-  const now = 1_000_000
-  it('always pulls up while the list follows the latest', () => {
-    expect(
-      spotlightScrollAllowed({ pinned: true, lastUserScrollAtMs: now - 100, nowMs: now })
-    ).toBe(true)
-  })
-
-  it('never fights a streamer who scrolled up in the last five seconds', () => {
-    expect(
-      spotlightScrollAllowed({ pinned: false, lastUserScrollAtMs: now - 4_999, nowMs: now })
-    ).toBe(false)
-    expect(
-      spotlightScrollAllowed({
-        pinned: false,
-        lastUserScrollAtMs: now - SPOTLIGHT_SCROLL_QUIET_MS,
-        nowMs: now
-      })
-    ).toBe(true)
-    expect(spotlightScrollAllowed({ pinned: false, lastUserScrollAtMs: null, nowMs: now })).toBe(
-      true
-    )
+    const time = (markup: string): string => markup.match(/<time class="([^"]*)"/)?.[1] ?? ''
+    expect(time(row('always'))).toContain('ml-auto shrink-0')
+    expect(time(row('always'))).not.toContain('opacity-0')
+    expect(time(row('hover'))).toContain('opacity-0')
+    expect(time(row('hover'))).toContain('group-hover/comment:opacity-100')
   })
 })

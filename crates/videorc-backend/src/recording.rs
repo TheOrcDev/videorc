@@ -180,7 +180,7 @@ const TRANSIENT_FIFO_TEST_PAUSE_MS_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_MS";
 /// incidents showed ~50ms FIFO writes only on the record-only path that lacked
 /// this demux thread, while the live auxiliary input keeps its smaller
 /// latency-first queue.
-const ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
+pub(crate) const ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
 const SPLIT_STREAM_INPUT_THREAD_QUEUE_PACKETS: usize = 8;
 /// FFmpeg starts per-input demux threads only after `avformat_find_stream_info`.
 /// Its default multi-megabyte MPEG-TS probe can therefore hold an entire short
@@ -480,6 +480,30 @@ fn ensure_session_start_process_live(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Drains the older source transitions, but never behind a person: a Linux
+/// share dialog has no device deadline, so a start that queued behind it held
+/// the ordered command lane until the dialog closed and then ran admission for
+/// an abandoned Record (plan 0010 addendum 3). Fail fast with the reason.
+async fn wait_for_prior_source_transitions(
+    state: &AppState,
+    transitions: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    tokio::pin!(transitions);
+    loop {
+        if let Some(reason) =
+            crate::preview_screen::session_start_blocked_by_share_dialog(state).await
+        {
+            anyhow::bail!(reason);
+        }
+        tokio::select! {
+            () = &mut transitions => return Ok(()),
+            () = tokio::time::sleep(SESSION_START_SHARE_DIALOG_POLL) => {}
+        }
+    }
+}
+
+const SESSION_START_SHARE_DIALOG_POLL: Duration = Duration::from_millis(250);
+
 async fn admit_session_start(
     state: &AppState,
 ) -> Result<(
@@ -513,7 +537,7 @@ async fn admit_session_start(
     // and therefore drains the exact camera/screen supervisors admitted by
     // those older commands before capture ownership can be published.
     let prior_source_transitions = state.source_transition_fence.observe();
-    prior_source_transitions.wait().await;
+    wait_for_prior_source_transitions(state, prior_source_transitions.wait()).await?;
     ensure_session_start_process_live(state)?;
 
     // Native transition waits deliberately never own the publication/shutdown
@@ -567,6 +591,47 @@ impl Drop for CaptureStartupResources {
     }
 }
 
+/// A failed/cancelled ISO start must release its exact compositor membership
+/// before reconciling any native source it reacquired. Reconciliation waits for
+/// the startup admission fence after this stack has unwound; it never stops a
+/// source required by a newer recording or preview scene.
+struct SourceIsoCaptureStartupGuard {
+    state: Option<AppState>,
+    batches: Option<Arc<crate::compositor::source_iso_batch::SourceIsoBatchStore>>,
+    #[cfg(test)]
+    cleanup_done: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for SourceIsoCaptureStartupGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        if let Some(batches) = self.batches.take() {
+            for role in 0..3 {
+                batches.retire(role, None);
+            }
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // Bounded native start replies can still be Starting. Wait only
+            // transitions already admitted when this owner unwinds; a later
+            // native completion must not strand a newly-live hidden source.
+            let transitions = state.source_transition_fence.observe();
+            #[cfg(test)]
+            let cleanup_done = self.cleanup_done.take();
+            let cleanup_state = state.clone();
+            state.spawn_process_task(async move {
+                transitions.wait().await;
+                crate::live_layout::reconcile_source_iso_capture_demand(&cleanup_state).await;
+                #[cfg(test)]
+                if let Some(done) = cleanup_done {
+                    let _ = done.send(());
+                }
+            });
+        }
+    }
+}
+
 /// Deletes only the empty MKV reserved for this exact session when a
 /// post-spawn start is rejected. The owner runs it only after FFmpeg has been
 /// reaped, so Windows never races an open output handle and nonempty recovery
@@ -587,6 +652,10 @@ impl PostSpawnRejectedStartCleanup {
     }
 
     async fn run(self) {
+        let _ = self
+            .state
+            .database
+            .fail_uncommitted_source_iso_sessions(&self.session_id);
         let Some(output_path) = self.output_path.as_deref() else {
             return;
         };
@@ -1180,7 +1249,15 @@ fn stop_term_grace_decision(
 
 #[derive(Debug)]
 enum FfmpegStderrEvent {
+    /// A line FFmpeg printed at warning level or above, a stats/progress line,
+    /// or an untagged `fprintf` (command replies and prompts). Exactly what the
+    /// pre-161 `-loglevel warning` stream carried, with level tags removed.
     Line(String),
+    /// An informational `av_log` line (`-loglevel level+info`): the startup
+    /// stream dump, fifo recovery progress, the end-of-run summary. Only the
+    /// stream-leg monitor reads these (plan 161); they never reach the stderr
+    /// tail, the fatal classifier or the bounded log ring.
+    Info(String),
     ReadFailed,
     Eof,
 }
@@ -1193,6 +1270,7 @@ fn spawn_ffmpeg_stderr_reader(
     stderr: Option<ChildStderr>,
     mut startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
     progress: FfmpegProgressBeacon,
+    tee: Option<crate::metrics_journal::FfmpegStderrTee>,
 ) -> Option<mpsc::Receiver<FfmpegStderrEvent>> {
     let Some(stderr) = stderr else {
         if let Some(sender) = startup_ready.take() {
@@ -1204,11 +1282,12 @@ fn spawn_ffmpeg_stderr_reader(
         return None;
     };
     let (sender, receiver) = mpsc::channel(256);
-    tokio::spawn(relay_ffmpeg_stderr(
+    tokio::spawn(relay_ffmpeg_stderr_teed(
         BufReader::new(stderr),
         sender,
         startup_ready,
         progress,
+        tee,
     ));
     Some(receiver)
 }
@@ -1238,17 +1317,48 @@ async fn read_bounded_ffmpeg_line<R: AsyncBufRead + Unpin>(
     }
 }
 
+#[cfg(test)]
 async fn relay_ffmpeg_stderr<R>(
+    reader: R,
+    sender: mpsc::Sender<FfmpegStderrEvent>,
+    startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    progress: FfmpegProgressBeacon,
+) where
+    R: AsyncBufRead + Unpin,
+{
+    relay_ffmpeg_stderr_teed(reader, sender, startup_ready, progress, None).await;
+}
+
+/// `tee` (metrics journal on, plan 166 S3) receives every raw line before
+/// any filtering; it never blocks and redacts at write time.
+async fn relay_ffmpeg_stderr_teed<R>(
     mut reader: R,
     sender: mpsc::Sender<FfmpegStderrEvent>,
     mut startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
     progress: FfmpegProgressBeacon,
+    tee: Option<crate::metrics_journal::FfmpegStderrTee>,
 ) where
     R: AsyncBufRead + Unpin,
 {
     loop {
         match read_bounded_ffmpeg_line(&mut reader).await {
-            Ok(Some(line)) => {
+            Ok(Some(raw_line)) => {
+                if let Some(tee) = tee.as_ref() {
+                    tee.offer(&raw_line);
+                }
+                // Plan 161: bridge FFmpeg runs with `-loglevel level+info` so
+                // fifo reconnects are visible. Informational chatter goes to
+                // its own event; every existing reader below sees the same
+                // untagged text the warning-level stream used to carry.
+                let (line, level) = strip_ffmpeg_log_levels(&raw_line);
+                if level.is_some_and(FfmpegLogLevel::is_informational)
+                    && !is_ffmpeg_progress_noise(&line)
+                {
+                    if sender.send(FfmpegStderrEvent::Info(line)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
                 progress
                     .evidence
                     .lock()
@@ -1961,6 +2071,8 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// Plan 157: the Screen/Camera ISO writers of a separate-source take.
+    source_iso: Option<crate::source_iso::SourceIsoRuntime>,
     /// Owns monitor cancellation and task lifetime. It is declared before the
     /// pump so an unexpected `ActiveRecording` drop aborts the monitor before
     /// releasing the generation-scoped media authority.
@@ -2005,6 +2117,16 @@ pub struct ActiveRecording {
     /// Portrait canvas `(width, height)` of the vertical simulcast leg when it
     /// burns the comment card. The renderer rasterizes a second card for it.
     pub comment_highlight_vertical_canvas: Option<(u32, u32)>,
+    /// The session shape the overlay leg plan was built for (plan 164), kept
+    /// so a layout saved mid-session can re-plan the compositor flags. None
+    /// on paths without the compositor bridge (nothing draws overlays there).
+    pub overlay_session_shape: Option<crate::overlay_layout::OverlaySessionShape>,
+    /// Whether a banner shown after the start reaches this session's picture
+    /// (plan 186 S4): the compositor paths read the banner set every tick; the
+    /// legacy FFmpeg graph only through its overlay FIFO, and the direct D3D11
+    /// recording draws nothing over the screen. `banners.show` refuses a new
+    /// banner while this is false.
+    accepts_banners: bool,
     pub _capture_permit: Option<CapturePermit>,
     /// Signals the process monitor at the exact user-stop edge. The monitor
     /// orders this against FFmpeg exit readiness before it touches the shared
@@ -2101,6 +2223,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         screen_overlay: None,
         encoder_bridge: None,
         encoder_bridge_stream: None,
+        source_iso: None,
         #[cfg(target_os = "windows")]
         windows_d3d11_monitor: None,
         #[cfg(target_os = "windows")]
@@ -2120,6 +2243,8 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         performance_check: false,
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
+        overlay_session_shape: None,
+        accepts_banners: true,
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
@@ -2211,11 +2336,41 @@ pub struct ScreenOverlaySession {
     /// frame may outlive the short recording-lock snapshot which described
     /// it, so installation must compare this token before touching pixels.
     generation_token: Arc<()>,
+    /// What the frame is composed from (plan 186 S4): the takeover and the
+    /// banners. Shared with the preparation tickets, which replace one part
+    /// under this lock and compose off every lock.
+    inputs: Arc<StdMutex<LegacyOverlayInputs>>,
     current_frame: Arc<StdMutex<Vec<u8>>>,
+    /// The inputs revision the installed frame was composed from, so a slow
+    /// composition never replaces a newer one that already carried its
+    /// change.
+    installed_revision: StdMutex<u64>,
     stop: Arc<AtomicBool>,
     writer: Option<JoinHandle<()>>,
     #[cfg(test)]
     preparation_blocker: Option<ScreenOverlayPreparationBlocker>,
+}
+
+/// The legacy FFmpeg graph's live layer is one full-canvas RGBA frame at
+/// `SCREEN_OVERLAY_FPS`; it is composed from these (plan 186 S4): the takeover
+/// image scaled to the canvas and the banners prepared for the canvas. Every
+/// replacement bumps `revision`.
+#[derive(Debug, Default)]
+struct LegacyOverlayInputs {
+    takeover: Option<Arc<Vec<u8>>>,
+    banners: Arc<Vec<LegacyBannerLayer>>,
+    revision: u64,
+}
+
+/// One banner on the legacy overlay frame: its bitmap prepared once for the
+/// canvas (straight-alpha BGRA at its contained size, opacity baked;
+/// `banner_prepare::prepare_banner_bitmap`) at its canvas position
+/// (`banners::banner_draw_rect`). Show and Hide are instant here: no fade.
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyBannerLayer {
+    x: usize,
+    y: usize,
+    bitmap: Arc<crate::banner_prepare::BannerBitmap>,
 }
 
 #[derive(Debug, Clone)]
@@ -2224,6 +2379,7 @@ pub(crate) struct ScreenOverlayPreparationTicket {
     generation_token: Arc<()>,
     width: u32,
     height: u32,
+    inputs: Arc<StdMutex<LegacyOverlayInputs>>,
     #[cfg(test)]
     blocker: Option<ScreenOverlayPreparationBlocker>,
 }
@@ -2235,6 +2391,8 @@ pub(crate) struct PreparedScreenOverlayFrame {
     width: u32,
     height: u32,
     frame: Vec<u8>,
+    /// The inputs revision this frame was composed from.
+    revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2287,25 +2445,203 @@ impl ScreenOverlayPreparationBlocker {
 }
 
 impl ScreenOverlayPreparationTicket {
+    /// The frame with `path` as the takeover (none clears it) over the
+    /// banners installed now. Decode, scale and compose run here, off every
+    /// lock; the takeover is replaced under the inputs lock first, so any
+    /// composition that starts later carries it too.
     pub(crate) fn prepare(self, path: Option<String>) -> Result<PreparedScreenOverlayFrame> {
         #[cfg(test)]
         if let Some(blocker) = self.blocker.as_ref() {
             blocker.block();
         }
-        let frame = match path {
-            Some(path) => {
-                screen_overlay_frame_from_path(Path::new(&path), self.width, self.height)?
-            }
-            None => transparent_overlay_frame(self.width, self.height),
+        let takeover = match path {
+            Some(path) => Some(Arc::new(screen_overlay_frame_from_path(
+                Path::new(&path),
+                self.width,
+                self.height,
+            )?)),
+            None => None,
         };
-        Ok(PreparedScreenOverlayFrame {
+        let (takeover, banners, revision) = {
+            let mut inputs = self
+                .inputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inputs.takeover = takeover;
+            inputs.revision += 1;
+            (
+                inputs.takeover.clone(),
+                Arc::clone(&inputs.banners),
+                inputs.revision,
+            )
+        };
+        Ok(self.composed(takeover, &banners, revision))
+    }
+
+    /// The frame with `shown` as the banners (bottom to top; plan 186 S4)
+    /// over the takeover installed now. Each banner is decoded and scaled
+    /// once to its contained size on this canvas, opacity baked, on this
+    /// thread; the writer thread only ever copies the composed frame.
+    pub(crate) fn prepare_banners(
+        self,
+        shown: Vec<crate::banners::BannerWithFile>,
+    ) -> Result<PreparedScreenOverlayFrame> {
+        #[cfg(test)]
+        if let Some(blocker) = self.blocker.as_ref() {
+            blocker.block();
+        }
+        let banners = Arc::new(prepare_legacy_banner_layers(
+            &shown,
+            self.width,
+            self.height,
+        ));
+        let (takeover, banners, revision) = {
+            let mut inputs = self
+                .inputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inputs.banners = banners;
+            inputs.revision += 1;
+            (
+                inputs.takeover.clone(),
+                Arc::clone(&inputs.banners),
+                inputs.revision,
+            )
+        };
+        Ok(self.composed(takeover, &banners, revision))
+    }
+
+    fn composed(
+        self,
+        takeover: Option<Arc<Vec<u8>>>,
+        banners: &[LegacyBannerLayer],
+        revision: u64,
+    ) -> PreparedScreenOverlayFrame {
+        let frame = legacy_overlay_frame(
+            takeover.as_deref().map(Vec::as_slice),
+            banners,
+            self.width,
+            self.height,
+        );
+        PreparedScreenOverlayFrame {
             session_id: self.session_id,
             generation_token: self.generation_token,
             width: self.width,
             height: self.height,
             frame,
-        })
+            revision,
+        }
     }
+}
+
+/// The banners shown at a legacy session's start, prepared for its canvas
+/// (plan 186 S4): decoded, scaled to the contained rect of the canvas's
+/// orientation and opacity-baked, the same recipe as the compositor's
+/// prepare worker. A banner whose file cannot be read is skipped with a
+/// warning; the others still draw.
+fn prepare_legacy_banner_layers(
+    shown: &[crate::banners::BannerWithFile],
+    width: u32,
+    height: u32,
+) -> Vec<LegacyBannerLayer> {
+    let orientation = crate::overlay_layout::OverlayOrientation::for_canvas(width, height);
+    shown
+        .iter()
+        .filter_map(|(banner, path, _)| {
+            let image = match crate::banner_prepare::decode_banner_file(path) {
+                Ok(image) => image,
+                Err(error) => {
+                    tracing::warn!(
+                        banner = %banner.id,
+                        path = %path.display(),
+                        "Could not prepare a banner for the legacy overlay frame: {error}"
+                    );
+                    return None;
+                }
+            };
+            let rect = crate::banners::banner_rect_for(banner, orientation, None);
+            let (x, y, draw_width, draw_height) = crate::banners::banner_draw_rect(
+                image.width(),
+                image.height(),
+                width.max(1) as usize,
+                height.max(1) as usize,
+                rect,
+            );
+            let bitmap = crate::banner_prepare::prepare_banner_bitmap(
+                &image,
+                draw_width as u32,
+                draw_height as u32,
+                banner.opacity,
+            );
+            Some(LegacyBannerLayer {
+                x,
+                y,
+                bitmap: Arc::new(bitmap),
+            })
+        })
+        .collect()
+}
+
+/// The legacy FFmpeg graph's overlay frame (plan 186 S4): full-canvas
+/// straight-alpha RGBA, transparent where nothing is drawn, the takeover
+/// first (when it is a full-canvas frame) and then each banner, bottom to
+/// top, source-over at its canvas position. Pure.
+fn legacy_overlay_frame(
+    takeover: Option<&[u8]>,
+    banners: &[LegacyBannerLayer],
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let canvas_width = width as usize;
+    let canvas_height = height as usize;
+    let mut frame = match takeover {
+        Some(takeover) if takeover.len() == canvas_width * canvas_height * 4 => takeover.to_vec(),
+        _ => transparent_overlay_frame(width, height),
+    };
+    for layer in banners {
+        let bitmap = &*layer.bitmap;
+        let bitmap_width = bitmap.width as usize;
+        let bitmap_height = bitmap.height as usize;
+        if bitmap.bgra.len() < bitmap_width * bitmap_height * 4
+            || layer.x >= canvas_width
+            || layer.y >= canvas_height
+        {
+            continue;
+        }
+        let draw_width = bitmap_width.min(canvas_width - layer.x);
+        let draw_height = bitmap_height.min(canvas_height - layer.y);
+        for row in 0..draw_height {
+            let source_row = &bitmap.bgra[row * bitmap_width * 4..][..draw_width * 4];
+            let dest_start = ((layer.y + row) * canvas_width + layer.x) * 4;
+            let dest_row = &mut frame[dest_start..dest_start + draw_width * 4];
+            for (source, dest) in source_row.chunks_exact(4).zip(dest_row.chunks_exact_mut(4)) {
+                blend_bgra_over_rgba(source, dest);
+            }
+        }
+    }
+    frame
+}
+
+/// Straight-alpha source-over of one BGRA pixel onto one RGBA pixel, both
+/// un-premultiplied: `a = sa + da(1 − sa)`, `c = (sc·sa + dc·da(1 − sa)) / a`.
+fn blend_bgra_over_rgba(source: &[u8], dest: &mut [u8]) {
+    let source_alpha = u32::from(source[3]);
+    if source_alpha == 0 {
+        return;
+    }
+    if source_alpha == 255 {
+        dest.copy_from_slice(&[source[2], source[1], source[0], 255]);
+        return;
+    }
+    let dest_alpha = u32::from(dest[3]);
+    // Alphas in 1/255 units; the result alpha here is in 1/(255·255) units.
+    let out_alpha = source_alpha * 255 + dest_alpha * (255 - source_alpha);
+    for (channel, source_channel) in [source[2], source[1], source[0]].into_iter().enumerate() {
+        let source_weight = u32::from(source_channel) * source_alpha * 255;
+        let dest_weight = u32::from(dest[channel]) * dest_alpha * (255 - source_alpha);
+        dest[channel] = ((source_weight + dest_weight + out_alpha / 2) / out_alpha).min(255) as u8;
+    }
+    dest[3] = ((out_alpha + 127) / 255).min(255) as u8;
 }
 
 impl ScreenOverlaySession {
@@ -2314,13 +2650,23 @@ impl ScreenOverlaySession {
         width: u32,
         height: u32,
         initial_image_path: Option<String>,
+        initial_banners: Vec<LegacyBannerLayer>,
     ) -> Result<Self> {
-        let transparent = transparent_overlay_frame(width, height);
-        let initial = match initial_image_path {
-            Some(path) => screen_overlay_frame_from_path(Path::new(&path), width, height)
-                .unwrap_or_else(|_| transparent.clone()),
-            None => transparent,
-        };
+        let takeover = initial_image_path
+            .and_then(|path| screen_overlay_frame_from_path(Path::new(&path), width, height).ok())
+            .map(Arc::new);
+        let banners = Arc::new(initial_banners);
+        let initial = legacy_overlay_frame(
+            takeover.as_deref().map(Vec::as_slice),
+            &banners,
+            width,
+            height,
+        );
+        let inputs = Arc::new(StdMutex::new(LegacyOverlayInputs {
+            takeover,
+            banners,
+            revision: 0,
+        }));
         let current_frame = Arc::new(StdMutex::new(initial));
         let stop = Arc::new(AtomicBool::new(false));
         let writer_path = fifo_path.clone();
@@ -2335,7 +2681,9 @@ impl ScreenOverlaySession {
             width,
             height,
             generation_token: Arc::new(()),
+            inputs,
             current_frame,
+            installed_revision: StdMutex::new(0),
             stop,
             writer: Some(writer),
             #[cfg(test)]
@@ -2349,11 +2697,16 @@ impl ScreenOverlaySession {
             generation_token: self.generation_token.clone(),
             width: self.width,
             height: self.height,
+            inputs: Arc::clone(&self.inputs),
             #[cfg(test)]
             blocker: self.preparation_blocker.clone(),
         }
     }
 
+    /// `false` when the frame belongs to another overlay generation or
+    /// canvas. `true` when its change is on the picture: installed, or
+    /// already carried by a newer composition (which read the inputs after
+    /// this one replaced its part), which an older frame must not undo.
     fn install_prepared_frame(&self, prepared: PreparedScreenOverlayFrame) -> bool {
         if !Arc::ptr_eq(&self.generation_token, &prepared.generation_token)
             || self.width != prepared.width
@@ -2361,9 +2714,17 @@ impl ScreenOverlaySession {
         {
             return false;
         }
+        let mut installed = self
+            .installed_revision
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if prepared.revision < *installed {
+            return true;
+        }
         if let Ok(mut current) = self.current_frame.lock() {
             *current = prepared.frame;
         }
+        *installed = prepared.revision;
         true
     }
 
@@ -2379,7 +2740,9 @@ impl ScreenOverlaySession {
             width,
             height,
             generation_token: Arc::new(()),
+            inputs: Arc::new(StdMutex::new(LegacyOverlayInputs::default())),
             current_frame: Arc::new(StdMutex::new(transparent_overlay_frame(width, height))),
+            installed_revision: StdMutex::new(0),
             stop: Arc::new(AtomicBool::new(false)),
             writer: None,
             preparation_blocker: Some(blocker),
@@ -2545,6 +2908,78 @@ impl ActiveRecording {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
+}
+
+impl ActiveRecording {
+    /// See the `accepts_banners` field (plan 186 S4).
+    pub(crate) fn accepts_banners(&self) -> bool {
+        self.accepts_banners
+    }
+}
+
+/// Whether a session can take a banner shown after it started (plan 186 S4).
+/// The compositor paths (Metal, CPU, the Windows D3D11 media session) read
+/// the banner set every tick. The legacy FFmpeg graph is static; its only
+/// live layer is the overlay FIFO, created only when the session starts with
+/// a takeover, a stream or a banner. The direct D3D11 recording path draws
+/// nothing over the screen (it is never chosen with a banner showing).
+fn session_accepts_banners(
+    use_encoder_bridge: bool,
+    direct_d3d11_recording: bool,
+    legacy_overlay_fifo: bool,
+) -> bool {
+    if use_encoder_bridge {
+        !direct_d3d11_recording
+    } else {
+        legacy_overlay_fifo
+    }
+}
+
+/// `Some(accepts)` for the active session, `None` when nothing runs
+/// (`banners.show` refuses a new banner on a session that cannot draw it).
+pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
+    let recording = state.recording.lock().await;
+    recording.as_ref().map(ActiveRecording::accepts_banners)
+}
+
+/// Plan 186 S4: recompose the legacy FFmpeg overlay frame when the banner
+/// set changes mid-session (Show, Hide, a rect or opacity change, a reorder).
+/// The compositor paths read the set on their next tick; only the legacy
+/// graph's FIFO holds pixels. Decode and compose run off `state.recording`,
+/// like the takeover's, so Stop never waits on them. A session without the
+/// FIFO is left alone: `banners.show` already refused a new banner there, and
+/// hiding one that never drew changes nothing.
+pub async fn apply_banners_to_legacy_overlay(state: &AppState) -> Result<()> {
+    let preparation = {
+        let recording = state.recording.lock().await;
+        recording
+            .as_ref()
+            .and_then(ActiveRecording::active_screen_overlay_preparation)
+    };
+    let Some(preparation) = preparation else {
+        return Ok(());
+    };
+    let shown = crate::banners::banners_with_files(
+        crate::banners::shown_banners_for_compositor(&state.database)?,
+        &state.database.banner_assets_dir(),
+    );
+    let prepared = tokio::task::spawn_blocking(move || preparation.prepare_banners(shown))
+        .await
+        .context("Legacy banner overlay preparation task stopped")??;
+    let commit = {
+        let recording = state.recording.lock().await;
+        recording
+            .as_ref()
+            .map_or(PreparedScreenOverlayCommit::Retired, |recording| {
+                recording.commit_prepared_active_screen(prepared)
+            })
+    };
+    if commit == PreparedScreenOverlayCommit::Superseded {
+        tracing::debug!(
+            "The legacy overlay session changed while the banners were prepared; the new session composed its own frame."
+        );
+    }
+    Ok(())
 }
 
 /// Returns the current session's authoritative per-destination runtime state.
@@ -2810,19 +3245,81 @@ pub fn default_recordings_dir() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    // macOS keeps captures under ~/Movies; Windows uses ~/Videos (the
-    // platform's Known Folder for the same content).
     #[cfg(target_os = "windows")]
-    let (home_var, media_dir) = ("USERPROFILE", "Videos");
+    let home_var = "USERPROFILE";
     #[cfg(not(target_os = "windows"))]
-    let (home_var, media_dir) = ("HOME", "Movies");
-
-    std::env::var_os(home_var)
+    let home_var = "HOME";
+    let home = std::env::var_os(home_var)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(media_dir)
-        .join("Videorc")
-        .join("Recordings")
+        .unwrap_or_else(|| PathBuf::from("."));
+    platform_recordings_dir(&home)
+}
+
+/// macOS keeps captures under ~/Movies; Windows uses ~/Videos (the
+/// platform's Known Folder for the same content).
+#[cfg(not(target_os = "linux"))]
+fn platform_recordings_dir(home: &Path) -> PathBuf {
+    let media_dir = if cfg!(target_os = "windows") {
+        "Videos"
+    } else {
+        "Movies"
+    };
+    home.join(media_dir).join("Videorc").join("Recordings")
+}
+
+/// Linux: the XDG videos folder, see [`linux_default_recordings_dir`].
+#[cfg(target_os = "linux")]
+fn platform_recordings_dir(home: &Path) -> PathBuf {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
+    let legacy = home.join("Movies").join("Videorc").join("Recordings");
+    let legacy_has_recordings = std::fs::read_dir(&legacy)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    linux_default_recordings_dir(
+        home,
+        std::env::var_os("XDG_VIDEOS_DIR").map(PathBuf::from),
+        user_dirs.as_deref(),
+        legacy_has_recordings,
+    )
+}
+
+/// Linux plan 0019 item 4: recordings go to the XDG videos folder
+/// (`XDG_VIDEOS_DIR`, else `user-dirs.dirs`, else `~/Videos`), not a macOS
+/// `~/Movies` the app had to create. Someone who already recorded into
+/// `~/Movies/Videorc/Recordings` keeps that folder, so a take never lands
+/// somewhere new without being asked.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_default_recordings_dir(
+    home: &Path,
+    env_videos: Option<PathBuf>,
+    user_dirs: Option<&str>,
+    legacy_has_recordings: bool,
+) -> PathBuf {
+    if legacy_has_recordings {
+        return home.join("Movies").join("Videorc").join("Recordings");
+    }
+    let from_user_dirs = || {
+        user_dirs?.lines().find_map(|line| {
+            let value = line.trim().strip_prefix("XDG_VIDEOS_DIR=")?;
+            let value = value.trim().trim_matches('"');
+            let path = match value.strip_prefix("$HOME") {
+                Some(rest) => home.join(rest.trim_start_matches('/')),
+                None => PathBuf::from(value),
+            };
+            Some(path)
+        })
+    };
+    // A videos folder set to home itself means "disabled" in xdg-user-dirs.
+    let videos = env_videos
+        .filter(|dir| dir.is_absolute())
+        .or_else(from_user_dirs)
+        .filter(|dir| dir.is_absolute() && dir.as_path() != home)
+        .unwrap_or_else(|| home.join("Videos"));
+    videos.join("Videorc").join("Recordings")
 }
 
 /// FX8: Library titles read in the user's wall clock. Generic over the zone so
@@ -2953,6 +3450,7 @@ async fn commit_recording_startup_scene_at_time(
     layout: LayoutSettings,
     active_screen: Option<StreamScreen>,
     now_millis: u64,
+    selected_sources: Option<&crate::protocol::SourceSelection>,
 ) -> RecordingStartupSceneLease {
     // Recording startup and live/idle scene transactions share one commit edge.
     // Keep this lease alive until the exact startup revision reaches compositor
@@ -2965,17 +3463,23 @@ async fn commit_recording_startup_scene_at_time(
     }
     let current_revision = state.compositor.lock().await.status.scene_revision;
     let scene_revision = crate::live_layout::next_scene_revision(current_revision, now_millis);
-    update_compositor_scene(
-        state,
-        CompositorSceneUpdateParams {
-            revision: scene_revision,
-            scene: Some(scene.clone()),
-            layout,
-            active_screen,
-            transition_ms: None,
-        },
-    )
-    .await;
+    let compositor_params = CompositorSceneUpdateParams {
+        revision: scene_revision,
+        scene: Some(scene.clone()),
+        layout,
+        active_screen,
+        transition_ms: None,
+    };
+    if let Some(selected_sources) = selected_sources {
+        crate::compositor::update_compositor_scene_with_selected_sources(
+            state,
+            compositor_params,
+            selected_sources,
+        )
+        .await;
+    } else {
+        update_compositor_scene(state, compositor_params).await;
+    }
 
     RecordingStartupSceneLease {
         scene_revision,
@@ -3117,6 +3621,15 @@ async fn start_session_with_timeline(
         .output
         .record_enabled
         .then(|| recording_output_path(&output_dir, &started_at, &session_id));
+    // Plan 157: separate source recordings. Validated above; `Some` means the
+    // session must carry Screen + Camera ISO legs or fail to start.
+    let source_iso_plan = crate::source_iso::armed_plan(&params.output);
+    let mut source_iso_capture_startup = SourceIsoCaptureStartupGuard {
+        state: source_iso_plan.as_ref().map(|_| state.clone()),
+        batches: None,
+        #[cfg(test)]
+        cleanup_done: None,
+    };
     let stream_resolution = if params.output.stream_enabled {
         match params
             .streaming
@@ -3175,6 +3688,29 @@ async fn start_session_with_timeline(
         layout: params.layout.clone(),
         output: params.output.clone(),
     })?;
+    if let (Some(plan), Some(path)) = (source_iso_plan.as_ref(), output_path.as_deref()) {
+        let roles = plan
+            .iso_roles()
+            .map(|role| {
+                (
+                    role.as_str(),
+                    role.title_suffix(),
+                    crate::source_iso::recording_role_mkv_path(path, role)
+                        .display()
+                        .to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (_, _, path) in &roles {
+            anyhow::ensure!(
+                !Path::new(path).exists(),
+                "Separate recording path already exists: {path}"
+            );
+        }
+        state
+            .database
+            .reserve_source_iso_sessions(&session_id, &roles)?;
+    }
     if params.purpose.is_performance_check() {
         // Benchmark rows never reach the Library and must not replace the
         // user's remembered capture; the performance check deletes them.
@@ -3422,6 +3958,10 @@ async fn start_session_with_timeline(
     let has_session_audio = has_native_audio || silent_audio_fifo.is_some();
     let audio_tracks = capture_audio_tracks(&capture);
     let active_screen = state.database.active_stream_screen()?;
+    // Plan 186 S4: the banners showing when the session starts decide whether
+    // the legacy graph gets its overlay FIFO and whether the direct D3D11
+    // recording (which draws nothing over the screen) may be chosen.
+    let shown_banners_at_start = crate::banners::shown_banners_for_compositor(&state.database)?;
     let use_encoder_bridge =
         should_use_compositor_encoder_bridge(&state, &params, active_screen.as_ref()).await?;
     if matches!(capture.video, VideoInput::TestPattern)
@@ -3496,6 +4036,27 @@ async fn start_session_with_timeline(
     } else {
         None
     };
+    // Plan 157: the PCM taps exist before the audio bus so it can be handed
+    // them at attach; their writers wait for the ISO muxers to open.
+    let source_iso_taps = match source_iso_plan.as_ref() {
+        Some(plan) => {
+            if !use_encoder_bridge {
+                bail!(
+                    "{}: Separate source recordings need the compositor encoder bridge; this session's capture path cannot carry them.",
+                    crate::source_iso::HEALTH_UNAVAILABLE
+                );
+            }
+            let taps = crate::source_iso::prepare_source_audio_taps(&session_id, plan)?;
+            if let Some(tap) = taps.microphone.as_ref() {
+                startup_resources.track_fifo(tap.path());
+            }
+            if let Some(tap) = taps.system.as_ref() {
+                startup_resources.track_fifo(tap.path());
+            }
+            Some(Arc::new(taps))
+        }
+        None => None,
+    };
     let requested_encoder_bridge_video_output = if use_encoder_bridge {
         recording_encoder_bridge_video_output(
             params.output.record_enabled,
@@ -3512,6 +4073,12 @@ async fn start_session_with_timeline(
     )
     .await?;
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
+    if source_iso_plan.is_some() {
+        anyhow::ensure!(
+            encoder_bridge_video_output == EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            "Separate source recordings require the timestamped MPEG-TS recording transport"
+        );
+    }
     // Intel iGPU MFTs that reject the requested CBR at probe time are only kept
     // alive if every MF leg encodes at the bitrate the probe validated; encode
     // config must match the probe or the MFT fails mid-session with
@@ -3626,6 +4193,10 @@ async fn start_session_with_timeline(
         None
     };
     let session_caption_plan = caption_leg_plan(&params);
+    // Plan 164: the highlight card and the Buddy follow the streamer's
+    // per-output switches in the backend-owned overlay layout; captions keep
+    // `burnTarget` (derived from the same switches by the renderer).
+    let overlay_layout = crate::overlay_layout::load_overlay_layout(&state.database);
     // A new session must never inherit a composited caption bar. The overlay
     // slot is app-global and the renderer's stop-time clear is best-effort
     // (fire-and-forget, and a closed renderer never sends it) — clearing here
@@ -3637,6 +4208,9 @@ async fn start_session_with_timeline(
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
+    // The Buddy's bubble too (plan 164): the avatar stays (its raster is the
+    // renderer's, re-pushed for this session's canvases), the words do not.
+    let _ = crate::buddy_overlay::clear(&state).await;
     // Burn-in needs the synthetic compositor (encoder-bridge path) and, for a
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
@@ -3786,26 +4360,46 @@ async fn start_session_with_timeline(
                 None
             }
             WindowsD3d11SessionSelection::Candidate(plan) => {
-                let (highlight_on_primary, highlight_on_auxiliary) =
-                    crate::captions::highlight_overlay_leg_plan(
-                        params.output.record_enabled,
-                        params.output.stream_enabled,
-                        // The D3D11 path refuses simulcast sessions above, so
-                        // its auxiliary is always a split stream leg.
-                        if plan.auxiliary.is_some() {
-                            crate::captions::HighlightAuxLeg::Stream
-                        } else {
-                            crate::captions::HighlightAuxLeg::None
-                        },
-                    );
+                let d3d11_overlay_shape = crate::overlay_layout::OverlaySessionShape {
+                    record_enabled: params.output.record_enabled,
+                    stream_enabled: params.output.stream_enabled,
+                    // The D3D11 path refuses simulcast sessions above, so its
+                    // auxiliary is always a split stream leg.
+                    aux_leg: if plan.auxiliary.is_some() {
+                        crate::overlay_layout::OverlayAuxLeg::Stream
+                    } else {
+                        crate::overlay_layout::OverlayAuxLeg::None
+                    },
+                };
+                let d3d11_overlay_plans = crate::overlay_layout::overlay_session_plans(
+                    d3d11_overlay_shape,
+                    &overlay_layout,
+                );
+                let (highlight_on_primary, highlight_on_auxiliary) = (
+                    d3d11_overlay_plans.highlight.primary,
+                    d3d11_overlay_plans.highlight.aux,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
+                    buddy: state.buddy_overlay.clone(),
+                    buddy_sprite: state.buddy_sprite.clone(),
                     caption_on_primary: session_caption_plan.primary,
                     caption_on_auxiliary: session_caption_plan.aux,
                     highlight_on_primary,
                     highlight_on_auxiliary,
+                    buddy_on_primary: d3d11_overlay_plans.buddy.primary,
+                    buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
+                    // Plan 186 S4: banners follow this session's leg plan
+                    // live, from the compositor's banner set.
+                    banner_shape: d3d11_overlay_shape,
+                    banner_prepare: state.banner_prepare.clone(),
                 };
+                state.buddy_sprite.prepare(&buddy_sprite_legs(
+                    d3d11_overlay_plans.buddy,
+                    (plan.primary.width, plan.primary.height),
+                    plan.auxiliary.map(|video| (video.width, video.height)),
+                ));
                 match WindowsD3d11SessionPump::start(
                     &state.windows_d3d11_media,
                     plan.clone(),
@@ -3960,15 +4554,21 @@ async fn start_session_with_timeline(
             .release_native_session_output(&session_id);
     }
 
-    let screen_overlay_fifo =
-        if !use_encoder_bridge && (active_screen.is_some() || params.output.stream_enabled) {
-            let fifo_path = screen_overlay_fifo_path(&session_id);
-            create_screen_overlay_fifo(&fifo_path)?;
-            startup_resources.track_fifo(&fifo_path);
-            Some(fifo_path)
-        } else {
-            None
-        };
+    // The legacy graph's only live layer: the full-canvas RGBA FIFO. It exists
+    // when the session starts with a takeover, a stream, or (plan 186 S4) a
+    // banner; a banner shown later on a session without it is refused.
+    let screen_overlay_fifo = if !use_encoder_bridge
+        && (active_screen.is_some()
+            || params.output.stream_enabled
+            || !shown_banners_at_start.is_empty())
+    {
+        let fifo_path = screen_overlay_fifo_path(&session_id);
+        create_screen_overlay_fifo(&fifo_path)?;
+        startup_resources.track_fifo(&fifo_path);
+        Some(fifo_path)
+    } else {
+        None
+    };
 
     let mut pipeline = RecordingPipeline::new(
         params.output.record_enabled,
@@ -4079,11 +4679,25 @@ async fn start_session_with_timeline(
     } else {
         None
     };
-    let highlight_overlay_plan = crate::captions::highlight_overlay_leg_plan(
-        params.output.record_enabled,
-        params.output.stream_enabled,
-        highlight_aux_leg(encoder_bridge_stream_output.as_ref()),
-    );
+    let overlay_session_shape = crate::overlay_layout::OverlaySessionShape {
+        record_enabled: params.output.record_enabled,
+        stream_enabled: params.output.stream_enabled,
+        aux_leg: highlight_aux_leg(encoder_bridge_stream_output.as_ref()),
+    };
+    let overlay_plans =
+        crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
+    // Plan 168 S-B1: the pet's atlases start building now (off this task),
+    // so the session's first frame already has the Buddy.
+    if use_encoder_bridge {
+        state.buddy_sprite.prepare(&buddy_sprite_legs(
+            overlay_plans.buddy,
+            (params.output.video.width, params.output.video.height),
+            encoder_bridge_stream_output
+                .as_ref()
+                .map(|output| (output.width, output.height)),
+        ));
+    }
+    let highlight_overlay_plan = (overlay_plans.highlight.primary, overlay_plans.highlight.aux);
     let comment_highlight_vertical_canvas = comment_highlight_vertical_canvas(
         encoder_bridge_stream_output.as_ref(),
         highlight_overlay_plan,
@@ -4093,9 +4707,40 @@ async fn start_session_with_timeline(
             session = %session_id,
             primary = highlight_overlay_plan.0,
             aux = highlight_overlay_plan.1,
+            buddy_primary = overlay_plans.buddy.primary,
+            buddy_aux = overlay_plans.buddy.aux,
+            // S-B2.2: any item (not only captions) whose switches disagree
+            // on a shared leg asks for the split; the topology decides.
+            needs_split = crate::overlay_layout::overlay_layout_needs_split(
+                overlay_session_shape,
+                &overlay_layout
+            ),
             vertical_canvas = ?comment_highlight_vertical_canvas,
-            "comment highlight leg plan"
+            "overlay leg plan"
         );
+    }
+    // D13: every switch pair this session cannot honour is said out loud
+    // (the Go Live sheet already showed the same sentence before start).
+    // Plan 186 D6: the shown banners are one more item, `banners`.
+    if use_encoder_bridge {
+        let banner_switches = crate::banners::shown_banner_switches(&state.database)
+            .unwrap_or_else(|error| {
+                tracing::warn!("Could not read the shown banners for the start notices: {error:#}");
+                Vec::new()
+            });
+        for notice in crate::overlay_layout::overlay_start_notices(
+            overlay_session_shape,
+            &overlay_layout,
+            &banner_switches,
+        ) {
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Info,
+                "overlay-start-notice",
+                &notice.notice,
+            );
+        }
     }
     #[cfg(target_os = "windows")]
     let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
@@ -4110,6 +4755,9 @@ async fn start_session_with_timeline(
         && params.output.record_enabled
         && !params.output.stream_enabled
         && params.scene.is_none()
+        // Plan 186 S4: the direct path draws nothing over the screen, so a
+        // banner showing at start keeps the session on the D3D11 compositor.
+        && shown_banners_at_start.is_empty()
         && matches!(
             params.layout.layout_preset,
             LayoutPreset::ScreenOnly | LayoutPreset::ScreenCamera
@@ -4119,6 +4767,8 @@ async fn start_session_with_timeline(
         && !session_caption_plan.aux
         && !highlight_overlay_plan.0
         && !highlight_overlay_plan.1
+        && !overlay_plans.buddy.primary
+        && !overlay_plans.buddy.aux
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
@@ -4193,6 +4843,7 @@ async fn start_session_with_timeline(
     let direct_d3d11_consumer_lease = direct_d3d11_recording_source
         .as_ref()
         .map(crate::preview_screen::PreviewScreenD3D11FrameSource::consumer_lease);
+    let direct_d3d11_recording = direct_d3d11_recording_source.is_some();
     if direct_d3d11_recording_source.is_some() {
         let direct_description = if cfg!(target_os = "windows")
             && matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera)
@@ -4216,12 +4867,12 @@ async fn start_session_with_timeline(
     let mut startup_barrier_result: Option<CompositorStartupBarrierResult> = None;
     let mut recording_startup_scene: Option<RecordingStartupSceneLease> = None;
     let mut compositor_capture_lease: Option<CompositorCaptureLeaseGuard> = None;
-    let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store) =
+    let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store, source_iso_frame_stores) =
         if direct_d3d11_recording_source.is_some() {
             // The direct path owns the retained WGC source and schedules it on
             // the bridge clock. Starting the CPU compositor here would retain
             // the full-frame BGRA -> I420 cost even though its output is unused.
-            (None, None)
+            (None, None, None)
         } else if use_encoder_bridge && !use_windows_d3d11_media {
             let target_fps = recording_compositor_target_fps(&state, &params.output.video)
                 .await
@@ -4251,6 +4902,7 @@ async fn start_session_with_timeline(
             // Record button is never a dead click.
             let armed_in_place = if cfg!(target_os = "macos")
                 && encoder_bridge_stream_output.is_none()
+                && source_iso_plan.is_none()
                 && compositor_frame_consumer == CompositorFrameConsumer::VideoToolboxEncoder
                 && !recording_compositor_arm_disabled()
             {
@@ -4266,6 +4918,8 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
+                        buddy_overlay_on_primary: overlay_plans.buddy.primary,
+                        buddy_overlay_on_aux: overlay_plans.buddy.aux,
                     },
                 )
                 .await
@@ -4318,6 +4972,13 @@ async fn start_session_with_timeline(
                         height: params.output.video.height,
                         frame_consumer: compositor_frame_consumer,
                         stream_output: encoder_bridge_stream_output,
+                        source_iso_output: source_iso_plan.as_ref().map(|_| {
+                            crate::compositor::CompositorSourceIsoOutput {
+                                width: params.output.video.width,
+                                height: params.output.video.height,
+                                frame_consumer: compositor_frame_consumer,
+                            }
+                        }),
                         // Per-leg overlay plan (R1): primary is the clean source
                         // recording (or the stream when stream-only); aux is the
                         // captioned stream leg for combined sessions.
@@ -4325,11 +4986,24 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
+                        buddy_overlay_on_primary: overlay_plans.buddy.primary,
+                        buddy_overlay_on_aux: overlay_plans.buddy.aux,
                     },
                 )
                 .await;
             }
+            if source_iso_plan.is_some() {
+                source_iso_capture_startup.batches =
+                    crate::compositor::compositor_source_iso_frame_stores(&state)
+                        .await
+                        .map(|stores| stores.batches);
+                prepare_source_iso_selected_capture(&state, &params, &ffmpeg_path).await?;
+            }
             timeline.mark(RecordingStartPhase::CompositorArm);
+            // Plan 186 S3: banners follow the session's leg plan from its
+            // first frame; the stop and lease-release paths return the
+            // compositor to the idle plan.
+            crate::compositor::set_banner_session_shape(&state, Some(overlay_session_shape)).await;
             let scene = params.scene.clone().unwrap_or_else(|| {
                 scene_from_capture_config(SceneConfigParams {
                     transition_ms: None,
@@ -4341,11 +5015,15 @@ async fn start_session_with_timeline(
                 })
             });
             let startup_source_requirements = recording_startup_source_requirements(&scene);
+            let capture_requirements = source_iso_startup_capture_requirements(
+                startup_source_requirements,
+                source_iso_plan.as_ref().map(|_| &params.sources),
+            );
             if let Err(error) = await_recording_camera_cadence_ready(
                 &state,
                 &session_id,
                 params.output.video.fps,
-                startup_source_requirements,
+                capture_requirements,
                 Some(crate::protocol::PreviewCameraStartParams {
                     sources: params.sources.clone(),
                     layout: params.layout.clone(),
@@ -4379,6 +5057,7 @@ async fn start_session_with_timeline(
                 params.layout.clone(),
                 active_screen.clone(),
                 u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+                Some(&params.sources),
             )
             .await;
             // Dual-orientation: seed the vertical leg's scene from the simulcast
@@ -4491,15 +5170,24 @@ async fn start_session_with_timeline(
             } else {
                 None
             };
-            (recording_store, stream_store)
+            let iso_stores = if source_iso_plan.is_some() {
+                Some(
+                    crate::compositor::compositor_source_iso_frame_stores(&state)
+                        .await
+                        .context("Separate source recording frame stores were not prepared")?,
+                )
+            } else {
+                None
+            };
+            (recording_store, stream_store, iso_stores)
         } else {
             // A live Windows D3D11 pump owns capture, composition, preview
             // surfaces, and both NV12 outputs. Starting the synthetic CPU
             // compositor here would duplicate capture/GPU work even though
             // the bridge writer consumes only D3D11 tickets.
-            (None, None)
+            (None, None, None)
         };
-    let args = if use_encoder_bridge {
+    let mut args = if use_encoder_bridge {
         let fifo_path = encoder_bridge_fifo
             .as_deref()
             .context("Encoder bridge FIFO path was not prepared")?;
@@ -4547,6 +5235,17 @@ async fn start_session_with_timeline(
             &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
         )?
     };
+    if source_iso_plan.is_some() {
+        crate::source_iso::stamp_combined_audio_metadata(&mut args);
+        crate::source_iso::bound_combined_iso_pcm_packets(&mut args);
+        if let Some(output) = output_path.as_deref() {
+            crate::source_iso::configure_iso_local_muxer(
+                &mut args,
+                output,
+                params.output.video.fps,
+            )?;
+        }
+    }
     let ffmpeg_live_audio_filter_count = ffmpeg_live_microphone_filter_count(&args);
     #[cfg(debug_assertions)]
     let source_switch_output_audio_timing = inspect_source_switch_output_audio_timing(
@@ -4687,7 +5386,7 @@ async fn start_session_with_timeline(
     // Rust therefore drops the process guard first on cancellation at either
     // await between construction and publication, synchronously signalling
     // FFmpeg before this active value joins its native-audio FIFO writer.
-    let pending_active: ActiveRecording;
+    let mut pending_active: ActiveRecording;
     // Plan 069: on a system-audio platform every bus runs at the system-audio
     // playout delay with the decision 8 offset split, matching the FFmpeg
     // track shift in `ffmpeg_session_params`; elsewhere the defaults.
@@ -4717,6 +5416,9 @@ async fn start_session_with_timeline(
                 )
             })
         });
+    if let (Some(audio), Some(taps)) = (attached_native_audio.as_ref(), source_iso_taps.as_ref()) {
+        audio.set_source_taps(taps.clone());
+    }
     // The System audio switch (plan 069 S4). It opens nothing here: an On
     // setting is requested only after the session is published, so capture
     // never delays Record (decision 12).
@@ -4750,6 +5452,7 @@ async fn start_session_with_timeline(
         stderr,
         Some(ffmpeg_output_startup_sender),
         ffmpeg_progress.clone(),
+        crate::metrics_journal::ffmpeg_stderr_tee(&session_id),
     );
     // Legacy capture also writes preview JPEGs to stdout. Drain before waiting
     // for media progress so that a full preview pipe cannot block that proof.
@@ -4789,13 +5492,17 @@ async fn start_session_with_timeline(
             // process creates a fresh monitor/accumulator, while the explicit generation
             // remains testable so future in-place restarts cannot inherit counters.
             let process_generation = 0_u64;
+            let mut stream_legs = StreamLegMonitor::new(stream_url_positions);
+            let mut ffmpeg_repeats = FfmpegRepeatThrottle::default();
+            let mut reconnecting_since = std::collections::HashMap::new();
             let mut stream_health_accumulator =
                 StreamHealthAccumulator::new(&log_session_id, process_generation);
             let mut pending_stream_health = ParsedStreamHealthDelta::default();
             let mut last_stream_health_published_at = Instant::now();
             let stderr_reached_eof = loop {
-                let line = match stderr_events.recv().await {
-                    Some(FfmpegStderrEvent::Line(line)) => line,
+                let (line, informational) = match stderr_events.recv().await {
+                    Some(FfmpegStderrEvent::Line(line)) => (line, false),
+                    Some(FfmpegStderrEvent::Info(line)) => (line, true),
                     Some(FfmpegStderrEvent::Eof) | None => break true,
                     Some(FfmpegStderrEvent::ReadFailed) => {
                         let _ = emit_session_log(
@@ -4811,6 +5518,27 @@ async fn start_session_with_timeline(
                 };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Plan 161: per-leg reconnects and deaths, attributed exactly.
+                if let Some(update) = stream_legs.observe(trimmed) {
+                    publish_stream_leg_update(
+                        &log_state,
+                        &log_session_id,
+                        &stream_targets_snapshot,
+                        &mut reconnecting_since,
+                        update,
+                    )
+                    .await;
+                }
+                if informational {
+                    // The startup dump quotes every output URL (the stream
+                    // key); keep only a URL-free trace.
+                    tracing::debug!(
+                        "{}",
+                        sanitized_ffmpeg_diagnostic_line(trimmed, FFMPEG_STDERR_TAIL_LINE_CHARS)
+                    );
                     continue;
                 }
 
@@ -4879,7 +5607,12 @@ async fn start_session_with_timeline(
                 // Progress/stat spam must not reach the bounded log ring —
                 // it evicted every useful entry within ~60s during the
                 // 2026-07-08 X incident. Stats still feed stream health.
-                if is_ffmpeg_progress_noise(trimmed) {
+                // Plan 161: a leg retrying every two seconds repeats the
+                // same tcp/rtmp/fifo error lines; the first is news, the
+                // same line again within a minute is not.
+                let repeat_admitted = is_ffmpeg_progress_noise(trimmed)
+                    || ffmpeg_repeats.admit(trimmed, Instant::now());
+                if is_ffmpeg_progress_noise(trimmed) || !repeat_admitted {
                     tracing::debug!("{trimmed}");
                 } else {
                     log_state.emit_log("warn", trimmed);
@@ -4905,34 +5638,14 @@ async fn start_session_with_timeline(
                 {
                     last_stream_health_published_at = Instant::now();
                 }
-                if looks_like_ffmpeg_health_event(trimmed) {
+                if repeat_admitted && looks_like_ffmpeg_health_event(trimmed) {
                     publish_ffmpeg_health_event_if_active(&log_state, &log_session_id, trimmed)
                         .await;
                 }
                 // A `tee` slave dropping mid-session (onfail=ignore keeps the rest
                 // running) — attribute it to the specific target and re-emit the
                 // per-target snapshot so the UI can flag exactly which platform fell.
-                // Per-target fifo-muxer legs (plan 023): attribute by URL.
-                if let Some(failure) = parse_fifo_output_failure(trimmed)
-                    && let Some(position) = stream_url_positions
-                        .iter()
-                        .find(|(url, _)| *url == failure.url)
-                        .map(|(_, position)| *position)
-                {
-                    let reason = if failure.reason.is_empty() {
-                        "Stream connection failed".to_string()
-                    } else {
-                        failure.reason.clone()
-                    };
-                    publish_stream_target_failure_if_active(
-                        &log_state,
-                        &log_session_id,
-                        &stream_targets_snapshot,
-                        position,
-                        reason,
-                    )
-                    .await;
-                }
+                // Per-target fifo-muxer legs (plan 023) are `stream_legs` above.
                 if let Some(failure) = parse_tee_slave_failure(trimmed)
                     && let Some(Some(position)) = slave_positions.get(failure.slave_index).copied()
                 {
@@ -4993,6 +5706,94 @@ async fn start_session_with_timeline(
     let windows_d3d11_auxiliary_input = windows_d3d11_media
         .as_ref()
         .and_then(WindowsD3d11SessionPump::auxiliary_encoder_source);
+    let source_iso_track_shift_ms = session_audio_sync(
+        &params.audio,
+        crate::system_audio_session::system_audio_capable(),
+    )
+    .map_or(params.audio.microphone_sync_offset_ms, |split| {
+        split.track_shift_ms
+    });
+    let source_iso_start_barrier = source_iso_plan.as_ref().map(|_| {
+        crate::encoder_bridge::RecordingStartBarrier::new(
+            3 + usize::from(encoder_bridge_stream_profile.is_some()),
+            encoder_bridge_frame_store.clone(),
+            params.output.video.fps,
+            source_iso_track_shift_ms,
+            source_iso_frame_stores.clone(),
+        )
+    });
+    // Construct ISO writers under cancellation ownership before Combined
+    // joins their shared startup barrier. Any known armed-role startup failure
+    // rejects the entire take before ownership transfers to ActiveRecording.
+    let mut source_iso_runtime = match (source_iso_plan.clone(), source_iso_taps.clone()) {
+        (Some(plan), Some(taps)) => {
+            let iso_start: Result<crate::source_iso::SourceIsoStartGuard> = (|| {
+                let frame_stores = source_iso_frame_stores.clone().with_context(|| {
+                    format!(
+                        "{}: Separate source recordings need the compositor encoder bridge; this session's capture path cannot carry them.",
+                        crate::source_iso::HEALTH_UNAVAILABLE
+                    )
+                })?;
+                let combined_mkv_path = output_path
+                    .as_deref()
+                    .context("Separate source recordings need a local recording path")?;
+                crate::source_iso::start_source_iso_writers(
+                    crate::source_iso::SourceIsoStartParams {
+                        state: &state,
+                        session_id: &session_id,
+                        plan,
+                        combined_mkv_path,
+                        ffmpeg_path: &ffmpeg_path,
+                        video: &params.output.video,
+                        video_output: encoder_bridge_video_output,
+                        frame_stores,
+                        video_epoch: video_epoch.clone(),
+                        bitrate_kbps: encoder_bridge_recording_bitrate_kbps,
+                        keep_original_media: params.output.keep_original_mkv,
+                        start_barrier: source_iso_start_barrier.clone(),
+                        track_shift_ms: source_iso_track_shift_ms,
+                    },
+                    taps,
+                )
+            })();
+            match iso_start {
+                Ok(runtime) => {
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Info,
+                        crate::source_iso::HEALTH_STARTED,
+                        "Separate source recordings armed: Screen and Camera files record beside the Combined recording.",
+                    );
+                    // Cleanup-owned until `pending_active` takes it: the
+                    // startup-failure and overlay-failure returns below, and
+                    // cancellation of this future, abort the writers from Drop.
+                    Some(runtime)
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    uncommitted_capture_process
+                        .set_failure(PublishedSessionStartFailureOrigin::EncoderBridge, &message);
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Error,
+                        crate::source_iso::HEALTH_UNAVAILABLE,
+                        &message,
+                    );
+                    uncommitted_capture_process
+                        .terminate_and_reap_before_fifo_writer_join()
+                        .await;
+                    return Err(error);
+                }
+            }
+        }
+        _ => None,
+    };
+    #[cfg(test)]
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.test_pause("writers", pid).await;
+    }
     let (mut encoder_bridge, mut encoder_bridge_stream) = if use_encoder_bridge {
         let bridge_fifo_path = match encoder_bridge_fifo
             .clone()
@@ -5047,6 +5848,7 @@ async fn start_session_with_timeline(
             params.output.stream_enabled && encoder_bridge_stream_profile.is_none(),
             recording_diagnostics_context,
             video_epoch.clone(),
+            source_iso_start_barrier.clone(),
         ) {
             Ok(bridge) => Some(bridge),
             Err(error) => {
@@ -5111,6 +5913,7 @@ async fn start_session_with_timeline(
                         true,
                         stream_diagnostics_context,
                         video_epoch.clone(),
+                        source_iso_start_barrier.clone(),
                     )?)
                 }
                 _ => None,
@@ -5126,6 +5929,7 @@ async fn start_session_with_timeline(
             } else {
                 recording_bridge.wait_until_ready().await?;
             }
+            if let Some(iso) = source_iso_runtime.as_mut() { iso.wait_until_ready().await?; }
             Ok(())
         }
         .await;
@@ -5258,12 +6062,35 @@ async fn start_session_with_timeline(
             pump.monitor(),
         )
     });
+    // Plan 186 S4: the banners showing at start, prepared for the output
+    // canvas off this task (decode and Lanczos scale, tens of milliseconds
+    // at 4K). A preparation failure costs the banners, never the session.
+    let legacy_banner_layers = if screen_overlay_fifo.is_some()
+        && !shown_banners_at_start.is_empty()
+    {
+        let shown = crate::banners::banners_with_files(
+            shown_banners_at_start.clone(),
+            &state.database.banner_assets_dir(),
+        );
+        let (width, height) = (params.output.video.width, params.output.video.height);
+        tokio::task::spawn_blocking(move || prepare_legacy_banner_layers(&shown, width, height))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "Legacy banner preparation task stopped; the session starts without banners: {error}"
+                );
+                Vec::new()
+            })
+    } else {
+        Vec::new()
+    };
     let screen_overlay = match screen_overlay_fifo {
         Some(screen_overlay_fifo) => match ScreenOverlaySession::start(
             screen_overlay_fifo,
             params.output.video.width,
             params.output.video.height,
             active_screen.clone().map(|screen| screen.image_path),
+            legacy_banner_layers,
         ) {
             Ok(screen_overlay) => Some(screen_overlay),
             Err(error) => {
@@ -5290,6 +6117,26 @@ async fn start_session_with_timeline(
         },
         None => None,
     };
+    // Plan 186 S4: whether a banner shown from now on reaches this picture.
+    let accepts_banners = session_accepts_banners(
+        use_encoder_bridge,
+        direct_d3d11_recording,
+        screen_overlay.is_some(),
+    );
+    if !accepts_banners {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Info,
+            "recording-banners-fixed-at-start",
+            if direct_d3d11_recording {
+                "Direct D3D11 screen recording draws no banner overlay; a banner shown now is refused until the session ends."
+            } else {
+                "This FFmpeg session has no overlay layer (no takeover, stream or banner at start); a banner shown now is refused until the session ends."
+            },
+            None,
+        );
+    }
     pending_active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -5321,6 +6168,7 @@ async fn start_session_with_timeline(
         screen_overlay,
         encoder_bridge,
         encoder_bridge_stream,
+        source_iso: None,
         #[cfg(target_os = "windows")]
         windows_d3d11_monitor,
         #[cfg(target_os = "windows")]
@@ -5340,6 +6188,8 @@ async fn start_session_with_timeline(
             highlight_overlay_plan,
         ),
         comment_highlight_vertical_canvas,
+        overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
+        accepts_banners,
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
@@ -5371,11 +6221,19 @@ async fn start_session_with_timeline(
     let running_status =
         pending_active.status(running_state, Some(format!("Running {mode} session.")));
 
+    #[cfg(test)]
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.test_pause("precommit", pid).await;
+    }
+
     // Acquire the final owner slot while the uncommitted child guard is still
     // armed. From `commit` through monitor spawn there are no await points, so
     // cancellation can leave neither an orphan FFmpeg child nor an active
     // recording without its reaper.
     let mut recording = state.recording.lock().await;
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.validate_health()?;
+    }
     let mut confirmed_sources = params.sources.clone();
     let live_microphone_id = match capture.microphone.as_ref() {
         Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
@@ -5443,6 +6301,18 @@ async fn start_session_with_timeline(
         {
             sources.microphone_unavailable("Live microphone replacement is not available on Linux yet. This session keeps its initial microphone input.");
         }
+        // Linux plan 0024: no Linux adapter swaps a screen or camera mid-
+        // session yet; say so instead of the internal adapter text.
+        if cfg!(target_os = "linux") {
+            sources.kind_unavailable(
+                crate::live_source_switch::SourceKind::Capture,
+                "Changing the screen during a session isn't available on Linux yet. Stop, change it, then start again.",
+            );
+            sources.kind_unavailable(
+                crate::live_source_switch::SourceKind::Camera,
+                "Changing the camera during a session isn't available on Linux yet. Stop, change it, then start again.",
+            );
+        }
         sources
             .snapshot(&session_id)
             .expect("new session source snapshot")
@@ -5459,8 +6329,12 @@ async fn start_session_with_timeline(
     }
     let (child, session_start_admission, ffmpeg_stderr_monitor) =
         uncommitted_capture_process.commit();
+    pending_active.source_iso =
+        source_iso_runtime.map(crate::source_iso::SourceIsoStartGuard::commit);
     let watchdog_pid = pending_active.pid;
     *recording = Some(pending_active);
+    source_iso_capture_startup.state = None;
+    source_iso_capture_startup.batches = None;
     session_start_admission.commit();
     // A delayed idle capture-config reload that was queued before session start
     // may resume only after `recording` is authoritative; the idle-only commit
@@ -5563,7 +6437,7 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
-        // Orcle's listen intent (plan 068): wanted before this capture, it
+        // Buddy's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
         let listen_state = state.clone();
         tokio::spawn(async move {
@@ -5825,6 +6699,9 @@ impl Drop for SessionStartRowGuard {
             None,
             None,
         );
+        let _ = self
+            .database
+            .fail_uncommitted_source_iso_sessions(&self.session_id);
         let _ = self.database.add_session_log(
             &self.session_id,
             HealthLevel::Error,
@@ -5953,6 +6830,13 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         return Ok(idle_status());
     };
 
+    let iso_stop_at = active
+        .source_iso
+        .as_ref()
+        .map(|iso| iso.request_stop_at(Instant::now()));
+    if let (Some(boundary), Some(audio)) = (iso_stop_at, active.native_audio.as_ref()) {
+        audio.request_stop_at(boundary);
+    }
     let pid = active.pid;
     let output_path = active.output_path.clone();
     let session_id = active.session_id.clone();
@@ -6008,6 +6892,8 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     if let Some(native_audio) = active.native_audio.as_ref() {
         if active.native_audio_silent_drain {
             native_audio_silent_drain_started = native_audio.request_silent_drain();
+        } else if let Some(boundary) = iso_stop_at {
+            native_audio.request_stop_at(boundary);
         } else {
             native_audio.request_stop();
         }
@@ -6086,7 +6972,11 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         if let Some(encoder_bridge_stream) = &active.encoder_bridge_stream {
             encoder_bridge_stream.stop();
         }
-        encoder_bridge.stop();
+        if let Some(boundary) = iso_stop_at {
+            encoder_bridge.stop_at(boundary);
+        } else {
+            encoder_bridge.stop();
+        }
     } else if let Some(stdin) = active.stdin.take() {
         legacy_ffmpeg_stdin = Some(stdin);
     } else if ffmpeg_live_audio_stop_session.is_none() {
@@ -6341,6 +7231,15 @@ where
     base_finalization.status = "completed".to_string();
     base_finalization.mp4_path = Some(preferred_output.display().to_string());
     let output_ownership = capture_session_file_bound_identity(&input)?;
+    if let Some(expected) = state
+        .database
+        .source_iso_recovery_ownership(&params.session_id)?
+    {
+        anyhow::ensure!(
+            expected.is_some() && output_ownership == expected,
+            "ISO capture ownership could not be verified; refusing to adopt its current path"
+        );
+    }
     let mut recovery_path = None;
     let published = export_recording_to_mp4_with_exporter(
         &state,
@@ -6766,6 +7665,7 @@ pub async fn create_preview_snapshot(
             output_directory: None,
             ffmpeg_path: Some(ffmpeg_path.clone()),
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video: default_video_settings(),
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,
@@ -7055,7 +7955,7 @@ fn begin_recording_encoder_bridge_teardown(
     begin_encoder_bridge_shutdown(take_all_encoder_bridge_sessions(recording, stream), grace)
 }
 
-async fn finish_recording_encoder_bridge_teardown(
+pub(crate) async fn finish_recording_encoder_bridge_teardown(
     state: &AppState,
     batch: Option<EncoderBridgeShutdownBatch>,
     origin: &'static str,
@@ -7358,6 +8258,7 @@ fn live_preview_session_params(
             output_directory: None,
             ffmpeg_path: Some(ffmpeg_path),
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video,
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,
@@ -7902,11 +8803,13 @@ async fn stop_fallback(
     };
     sleep(base_delay).await;
 
-    // A live RTMP leg keeps its own longer, fixed grace. A record-only FFmpeg
-    // that is still advancing its output clock is draining admitted frames
-    // (below-realtime software encode), not hung: TERM here truncates the
-    // file and used to surface as a fake encoder failure.
-    if !streaming && let Some(progress) = progress.as_ref() {
+    // An FFmpeg that is still advancing its output clock is draining admitted
+    // frames (below-realtime software encode), not hung: TERM here truncates
+    // the file and used to surface as a fake encoder failure. That holds with
+    // a live RTMP leg too (Linux plan 0017: ogre's sink kept receiving 25 fps
+    // through the whole 8 s grace before the TERM). A dead ingest stops the
+    // clock, so it still escalates at the next poll.
+    if let Some(progress) = progress.as_ref() {
         let mut waited = base_delay;
         let mut drain_logged = false;
         loop {
@@ -8064,8 +8967,8 @@ async fn wait_for_process_exit(pid: u32, wait: Duration) -> bool {
 /// the session's intended fps and whether an audio source was selected.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PostRecordingGate {
-    intended_fps: Option<f64>,
-    expect_audio: bool,
+    pub(crate) intended_fps: Option<f64>,
+    pub(crate) expect_audio: bool,
 }
 
 struct SessionMonitorContext {
@@ -8519,7 +9422,7 @@ fn persist_terminal_session_or_recovery(
     persist_finalization_or_recovery(state, &finalization, &mut None)
 }
 
-fn persist_finalization_or_recovery(
+pub(crate) fn persist_finalization_or_recovery(
     state: &AppState,
     finalization: &SessionFinalization,
     recovery_path: &mut Option<PathBuf>,
@@ -8793,6 +9696,7 @@ async fn monitor_session(
                 keep_original_media: active.keep_original_media,
                 performance_check: active.performance_check,
                 native_audio_stats,
+                records_file: active.output_path.is_some(),
             }
         });
     let retired_active = monitored_recording
@@ -8828,6 +9732,9 @@ async fn monitor_session(
     let mut encoder_bridge_lifecycle = EncoderBridgeLifecycleSnapshot::default();
     let mut encoder_bridge_teardown_duration_ms = 0_u64;
     let mut encoder_bridge_detached_writers = 0_usize;
+    // Plan 157: per-role outcomes of the ISO writers, committed as Library
+    // rows below whatever the Combined leg's verdict is (the files are real).
+    let mut source_iso_finished: Option<Vec<crate::source_iso::FinishedSourceIsoRole>> = None;
 
     #[cfg(target_os = "windows")]
     if let Some(mut active) = retired_active {
@@ -8891,6 +9798,9 @@ async fn monitor_session(
         if let Some(pump) = active.windows_d3d11_media.as_ref() {
             let _ = pump.destroy_preview();
         }
+        if let Some(source_iso) = active.source_iso.take() {
+            source_iso_finished = Some(source_iso.finish(&state).await);
+        }
         teardown_current_windows_d3d11_presenter(&state, "windows-d3d11-recording-process-exited")
             .await;
         // The pump must release the D3D generation before the suspended CPU
@@ -8920,6 +9830,7 @@ async fn monitor_session(
             ENCODER_BRIDGE_TEARDOWN_GRACE,
         );
         let compositor_capture_lease = active.compositor_capture_lease.take();
+        let source_iso = active.source_iso.take();
         drop(active);
         let teardown_report = finish_recording_encoder_bridge_teardown(
             &state,
@@ -8927,6 +9838,9 @@ async fn monitor_session(
             "recording-process-exit",
         )
         .await;
+        if let Some(source_iso) = source_iso {
+            source_iso_finished = Some(source_iso.finish(&state).await);
+        }
         // The bridge writer no longer reads the frame store: hand the armed
         // preview compositor back (or stop it when no surface is live).
         if let Some(lease) = compositor_capture_lease {
@@ -9159,6 +10073,21 @@ async fn monitor_session(
     // terminal status is published.
     let mut pending_finalization_job: Option<PendingRecordingFinalizationJob> = None;
     let performance_check_session = monitored_recording.performance_check;
+    // Plan 157: ISO rows + their finalization jobs are registered BEFORE the
+    // terminal status so the quit/updater gates never see an idle gap.
+    if let Some(finished) = source_iso_finished.take()
+        && !performance_check_session
+    {
+        crate::source_iso::commit_finished_source_iso_roles(
+            &state,
+            &session_id,
+            finished,
+            &monitored_recording.ffmpeg_path,
+            &ended_at,
+            duration_ms,
+            monitored_recording.keep_original_media,
+        );
+    }
     let terminal_status = match status {
         Ok(exit_status)
             if should_finalize_recording_session(
@@ -9574,6 +10503,7 @@ async fn monitor_session(
                 monitored_recording.stop_escalated,
                 recording_bridge_terminal_failure.as_deref(),
                 &exit_status.to_string(),
+                monitored_recording.records_file,
             );
             monitored_recording
                 .pipeline
@@ -10041,6 +10971,34 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
         let output_ownership = capture_session_file_bound_identity(&input_mkv)
             .ok()
             .flatten();
+        let iso_ownership = state.database.source_iso_recovery_ownership(&session_id);
+        if let Ok(Some(expected)) = &iso_ownership {
+            let matches = expected
+                .as_ref()
+                .zip(output_ownership.as_ref())
+                .is_some_and(|(expected, actual)| expected == actual);
+            if !matches {
+                let _ = state.database.set_session_finalization_state(&session_id, FINALIZATION_STATE_FAILED,
+                    Some("Interrupted separate recording ownership could not be verified; the current file was not adopted."));
+                continue;
+            }
+        } else if iso_ownership.is_err() {
+            continue;
+        }
+        let iso_gate = if matches!(iso_ownership, Ok(Some(_))) {
+            let Ok((intended_fps, expect_audio)) = state
+                .database
+                .source_iso_recording_expectations(&session_id)
+            else {
+                continue;
+            };
+            Some(PostRecordingGate {
+                intended_fps,
+                expect_audio,
+            })
+        } else {
+            None
+        };
         state.emit_log(
             "info",
             format!("Resuming the interrupted MP4 export for session {session_id}."),
@@ -10061,7 +11019,7 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
                     final_diagnostics,
                     finalized_caption_artifact: None,
                     captioned_copy_requested: false,
-                    post_recording_gate: None,
+                    post_recording_gate: iso_gate,
                     pipeline_reported_freezes: false,
                 },
                 control,
@@ -11190,6 +12148,8 @@ struct MonitoredRecording {
     keep_original_media: bool,
     performance_check: bool,
     native_audio_stats: Option<NativeAudioStats>,
+    /// False for a stream-only session: there is no file to keep.
+    records_file: bool,
 }
 
 fn should_finalize_recording_session(
@@ -11230,13 +12190,20 @@ fn classify_failed_ffmpeg_exit(
     stop_escalated: bool,
     recording_bridge_terminal_failure: Option<&str>,
     exit_status: &str,
+    records_file: bool,
 ) -> (RecordingPipelineStage, &'static str, String) {
     if stop_intent_preceded_exit && stop_escalated {
+        // A stream-only session has no file to keep (Linux plan 0017).
+        let outcome = if records_file {
+            "The file was kept as recovery media and may be cut short."
+        } else {
+            "The stream server may not have seen a clean end of the stream."
+        };
         return (
             RecordingPipelineStage::Muxer,
             "recording-stop-forced",
             format!(
-                "FFmpeg did not finish after Stop, so Videorc forced it to stop. The file was kept as recovery media and may be cut short. (FFmpeg exit: {exit_status})"
+                "FFmpeg did not finish after Stop, so Videorc forced it to stop. {outcome} (FFmpeg exit: {exit_status})"
             ),
         );
     }
@@ -11313,6 +12280,21 @@ struct PreparedNativeAudioSource {
 }
 
 async fn resolve_capture_inputs(ffmpeg_path: &str, params: &StartSessionParams) -> CaptureInputs {
+    #[cfg(test)]
+    if matches!(
+        params
+            .sources
+            .screen_id
+            .as_deref()
+            .or(params.sources.window_id.as_deref()),
+        Some("screen:screencapturekit:4294967294" | "window:screencapturekit:4294967293")
+    ) {
+        return CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: resolve_microphone_input(params.sources.microphone_id.as_deref()),
+        };
+    }
     let microphone = resolve_microphone_input(params.sources.microphone_id.as_deref());
 
     // Camera-only makes the camera the primary input. No screen is enumerated or
@@ -12738,6 +13720,7 @@ pub fn stream_output_topology_probe_log_line(
                 result
                     .fallback_reason
                     .as_deref()
+                    .or(result.encoder_selection_reason.as_deref())
                     .map(|reason| format!(" reason={reason}"))
                     .unwrap_or_default(),
             )
@@ -13680,6 +14663,105 @@ async fn emit_preflight_failure_report(
     );
 }
 
+fn source_iso_startup_capture_requirements(
+    mut visible: CompositorStartupSourceRequirements,
+    selected: Option<&crate::protocol::SourceSelection>,
+) -> CompositorStartupSourceRequirements {
+    if let Some(selected) = selected {
+        visible.require_camera_source |= selected.camera_id.is_some();
+        visible.require_screen_source |=
+            selected.screen_id.is_some() || selected.window_id.is_some();
+        visible.require_real_source |=
+            visible.require_camera_source || visible.require_screen_source;
+    }
+    visible
+}
+
+/// ISO eligibility is independent of the current layout. Idle layout retirement
+/// may already have released an omitted source, so cross native admission for
+/// both selected roles. Healthy generations are reused by the existing owners;
+/// first-frame/cadence and completed-batch barriers still prove readiness.
+async fn prepare_source_iso_selected_capture(
+    state: &AppState,
+    params: &StartSessionParams,
+    ffmpeg_path: &str,
+) -> Result<()> {
+    let (camera, screen) = tokio::join!(
+        async {
+            let status = crate::preview_camera::preview_camera_status(state).await;
+            let current = crate::preview_camera::preview_camera_frame_source(state).await;
+            if status.state == crate::protocol::PreviewCameraState::Live
+                && current
+                    .as_ref()
+                    .and_then(|source| source.source_key())
+                    .is_some_and(|key| params.sources.camera_id.as_ref() == Some(&key.id))
+            {
+                status
+            } else {
+                crate::preview_camera::start_preview_camera(
+                    state.clone(),
+                    crate::protocol::PreviewCameraStartParams {
+                        sources: params.sources.clone(),
+                        layout: params.layout.clone(),
+                        video: params.output.video.clone(),
+                        ffmpeg_path: Some(ffmpeg_path.to_owned()),
+                    },
+                )
+                .await
+            }
+        },
+        async {
+            let status = crate::preview_screen::preview_screen_status(state).await;
+            let current = crate::preview_screen::preview_screen_frame_source(state).await;
+            let selected = params
+                .sources
+                .window_id
+                .as_ref()
+                .or(params.sources.screen_id.as_ref());
+            if status.state == crate::protocol::PreviewScreenState::Live
+                && current
+                    .as_ref()
+                    .and_then(|source| source.source_key())
+                    .is_some_and(|key| selected == Some(&key.id))
+            {
+                status
+            } else {
+                crate::preview_screen::start_preview_screen(
+                    state.clone(),
+                    crate::protocol::PreviewScreenStartParams {
+                        sources: params.sources.clone(),
+                        video: params.output.video.clone(),
+                        protected_overlay_window_ids:
+                            crate::preview_screen::source_iso_protected_overlay_window_ids(state)
+                                .await,
+                        ffmpeg_path: Some(ffmpeg_path.to_owned()),
+                    },
+                )
+                .await
+            }
+        }
+    );
+    anyhow::ensure!(
+        matches!(camera.state, crate::protocol::PreviewCameraState::Live),
+        "Selected Camera could not be prepared for separate recording ({:?}): {}",
+        camera.state,
+        camera
+            .message
+            .as_deref()
+            .unwrap_or("capture did not become live")
+    );
+    anyhow::ensure!(
+        matches!(screen.state, crate::protocol::PreviewScreenState::Live),
+        "Selected Screen/Window could not be prepared for separate recording ({:?}): {}",
+        screen.state,
+        screen
+            .message
+            .as_deref()
+            .unwrap_or("capture did not become live")
+    );
+    Ok(())
+}
+
 fn recording_startup_source_requirements(scene: &Scene) -> CompositorStartupSourceRequirements {
     let mut require_camera_source = false;
     let mut require_screen_source = false;
@@ -14032,13 +15114,7 @@ async fn should_use_compositor_encoder_bridge(
         missing.push("camera");
     }
     let detail = if screen_preview_is_failed(&screen_status) {
-        format!(
-            " Screen preview reported: {}.",
-            screen_status
-                .message
-                .as_deref()
-                .unwrap_or("failed without a message")
-        )
+        screen_preview_failure_detail(screen_status.message.as_deref())
     } else {
         String::new()
     };
@@ -14058,6 +15134,16 @@ async fn should_use_compositor_encoder_bridge(
 /// dangling row as a usable screen let sessions start with nothing to composite.
 fn stream_screen_image_usable(active_screen: Option<&crate::protocol::StreamScreen>) -> bool {
     active_screen.is_some_and(|screen| std::path::Path::new(&screen.image_path).is_file())
+}
+
+/// " Screen preview reported: …." once, whatever the message ends with (ogre:
+/// "…while starting screen capture.. Re-select the source").
+fn screen_preview_failure_detail(message: Option<&str>) -> String {
+    let message = message
+        .map(|message| message.trim().trim_end_matches('.'))
+        .filter(|message| !message.is_empty())
+        .unwrap_or("failed without a message");
+    format!(" Screen preview reported: {message}.")
 }
 
 fn screen_preview_is_failed(status: &crate::protocol::PreviewScreenStatus) -> bool {
@@ -15196,11 +16282,38 @@ pub async fn probe_stream_output_topology(
         effective_bridge_output: stream_output_bridge(decision.effective),
         effective_encode_backend: decision.effective_encode_backend,
         probe_state: decision.probe_state,
-        fallback_reason: combined_output_fallback_reason(
+        fallback_reason: topology_result_fallback_reason(
+            decision.probe_state,
+            decision.requested != decision.effective,
             decision.fallback_reason,
-            decision.encoder_selection_fallback_reason,
+            decision.encoder_selection_fallback_reason.clone(),
         ),
+        encoder_selection_reason: decision
+            .encoder_selection_fallback_reason
+            .as_deref()
+            .map(bounded_stream_output_topology_fallback_reason),
     })
+}
+
+/// The wire `fallbackReason` is a topology verdict (plan 0015): a passed or
+/// not-required probe on its requested bridge carries none, even when the raw
+/// path's encoder was itself a fallback (Linux OpenH264, VAAPI rejected).
+/// That encoder note travels as `encoderSelectionReason` instead; the shared
+/// contract rejects a `fallbackReason` on a healthy topology.
+fn topology_result_fallback_reason(
+    probe_state: StreamOutputTopologyProbeState,
+    bridge_changed: bool,
+    bridge: Option<String>,
+    encoder_selection: Option<String>,
+) -> Option<String> {
+    let fallback_verdict = matches!(
+        probe_state,
+        StreamOutputTopologyProbeState::Rejected | StreamOutputTopologyProbeState::Unsupported
+    );
+    if !fallback_verdict && !bridge_changed {
+        return None;
+    }
+    combined_output_fallback_reason(bridge, encoder_selection)
 }
 
 /// Why the session is not on its requested path. When the bridge was rejected
@@ -17407,12 +18520,16 @@ fn bridge_compositor_split_output_ffmpeg_args(
     Ok(args)
 }
 
-fn bridge_ffmpeg_base_args() -> Vec<String> {
+pub(crate) fn bridge_ffmpeg_base_args() -> Vec<String> {
     vec![
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
-        "warning".to_string(),
+        // `level+info` (plan 161): fifo legs log their reconnects ("Recovery
+        // failed", "Recovery successful") and the startup dump maps output
+        // indexes to destinations, all at INFO. Every line carries its level,
+        // and `relay_ffmpeg_stderr` keeps INFO out of the warning-level paths.
+        BRIDGE_FFMPEG_LOGLEVEL.to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
         FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
@@ -17500,9 +18617,18 @@ fn append_bridge_recording_input_args(
             // its output muxer; the 2026-08-29 failure delivered 61 valid access
             // units and still left a zero-byte MKV. Record-only therefore uses
             // the proven 4 KiB split-FIFO bound, while shared streaming preserves
-            // its established 64 KiB posture. Do not add `-fflags nobuffer`: on
+            // its established 64 KiB posture when ISO is off. An ISO-on shared
+            // graph must open promptly too: waiting for 64 KiB of easy content
+            // stalls the common audio bus and both sibling muxers for seconds.
+            // Do not add `-fflags nobuffer`: on
             // a non-seekable FIFO it discards the first keyframe during probing.
-            let probe_bytes = if params.output.stream_enabled {
+            let probe_bytes = if params.output.stream_enabled
+                && !params
+                    .output
+                    .separate_source_recordings
+                    .as_ref()
+                    .is_some_and(|iso| iso.enabled)
+            {
                 SHARED_STREAM_ENCODED_MPEGTS_INPUT_PROBE_BYTES
             } else {
                 MINIMAL_ENCODED_MPEGTS_INPUT_PROBE_BYTES
@@ -17542,7 +18668,7 @@ fn append_bridge_recording_input_args(
     }
 }
 
-fn append_bridge_encoded_video_input_args(
+pub(crate) fn append_bridge_encoded_video_input_args(
     args: &mut Vec<String>,
     next_input_index: &mut usize,
     fifo_path: &Path,
@@ -17631,6 +18757,16 @@ fn append_bridge_copy_flv_output(
     // carry mpegts inputs to flv slaves — it forwards the mpegts codec tag
     // [27], which the FLV muxer rejects; standalone outputs negotiate tags
     // correctly — plan 023 L1).
+    //
+    // Reconnect after ANY error, on a keyframe (plan 161). An ingest that
+    // closes the connection mid-stream surfaces as AVERROR_EOF, which the fifo
+    // refuses to retry by default (`is_recoverable` in libavformat/fifo.c): the
+    // leg then closed for good while FFmpeg finished that one output quietly
+    // and the session stayed "On air" (YouTube, 2026-10-07). Retries are
+    // unlimited (FFmpeg's `max_recovery_attempts` default of 0) and every
+    // failed attempt logs `[fifo @ …] Error opening <url>`, which attributes
+    // the leg; `restart_with_keyframe` (honoured only with
+    // `drop_pkts_on_overflow`) resumes on a clean picture.
     args.extend([
         "-f".to_string(),
         "fifo".to_string(),
@@ -17641,6 +18777,10 @@ fn append_bridge_copy_flv_output(
         "-drop_pkts_on_overflow".to_string(),
         "1".to_string(),
         "-attempt_recovery".to_string(),
+        "1".to_string(),
+        "-recover_any_error".to_string(),
+        "1".to_string(),
+        "-restart_with_keyframe".to_string(),
         "1".to_string(),
         "-recovery_wait_time".to_string(),
         "2".to_string(),
@@ -18552,6 +19692,8 @@ fn source_switch_output_options_are_known(options: &[String]) -> bool {
             "-queue_size",
             "-drop_pkts_on_overflow",
             "-attempt_recovery",
+            "-recover_any_error",
+            "-restart_with_keyframe",
             "-recovery_wait_time",
             "-flvflags",
             "-colorspace",
@@ -18586,6 +19728,9 @@ fn unique_arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 #[cfg(debug_assertions)]
 fn source_switch_filter_shift_ms(filter: &str) -> Option<i32> {
+    let filter = filter
+        .strip_suffix(",asetnsamples=n=480:p=0")
+        .unwrap_or(filter);
     let prefix = filter.strip_suffix("aresample=async=1:first_pts=0,apad")?;
     if prefix.is_empty() {
         return Some(0);
@@ -19893,6 +21038,7 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     validate_simulcast_targets(params)?;
     validate_caption_output_policy(params)?;
     validate_video_profile_policy(params)?;
+    crate::source_iso::validate_separate_source_recordings(params)?;
 
     Ok(())
 }
@@ -20200,6 +21346,76 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
     )
 }
 
+/// Plan 164 (S-B3.4): a layout saved mid-session re-plans the highlight and
+/// Buddy legs for the running session and swaps the compositor flags in
+/// place. Captions keep their start-time plan (their burn target is a session
+/// parameter, pre-armed with its leg); the Windows D3D11 pump keeps its
+/// start-time overlay input, which is said in the log rather than hidden.
+pub async fn apply_overlay_layout_to_active_session(
+    state: &AppState,
+    layout: &crate::overlay_layout::OverlayLayout,
+) {
+    let (session_id, plans, d3d11) = {
+        let mut recording = state.recording.lock().await;
+        let Some(active) = recording.as_mut() else {
+            return;
+        };
+        let Some(shape) = active.overlay_session_shape else {
+            return;
+        };
+        let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
+        active.comment_highlight_available = plans.highlight.burns_anywhere();
+        #[cfg(target_os = "windows")]
+        let d3d11 = active.windows_d3d11_media.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let d3d11 = false;
+        (active.session_id.clone(), plans, d3d11)
+    };
+    let swapped = crate::compositor::update_overlay_flags(
+        state,
+        crate::compositor::OverlayLegFlags {
+            highlight_on_primary: plans.highlight.primary,
+            highlight_on_aux: plans.highlight.aux,
+            buddy_on_primary: plans.buddy.primary,
+            buddy_on_aux: plans.buddy.aux,
+        },
+    )
+    .await;
+    // Plan 168 S-B1, mid-session: the pet's atlases for a leg it just joined
+    // start building now, as they do at session start. The first frames
+    // after the swap draw it as soon as the atlas exists (`leg_frame` asks
+    // too, so this only shortens the wait).
+    let buddy_canvases = if swapped && (plans.buddy.primary || plans.buddy.aux) {
+        let canvases = crate::compositor::banner_prepare_canvases(state).await;
+        match canvases.first() {
+            Some(primary) => {
+                let legs = buddy_sprite_legs(plans.buddy, *primary, canvases.get(1).copied());
+                state.buddy_sprite.prepare(&legs);
+                legs.len()
+            }
+            None => 0,
+        }
+    } else {
+        0
+    };
+    tracing::info!(
+        session = %session_id,
+        highlight_primary = plans.highlight.primary,
+        highlight_aux = plans.highlight.aux,
+        buddy_primary = plans.buddy.primary,
+        buddy_aux = plans.buddy.aux,
+        buddy_legs_prepared = buddy_canvases,
+        swapped,
+        "overlay layout changed mid-session"
+    );
+    if d3d11 {
+        state.emit_log(
+            "warn",
+            "Overlay layout changed mid-session; the Windows D3D11 media path applies output switches at the next session start.",
+        );
+    }
+}
+
 /// A session can put a comment card on stream only when the compositor bridge
 /// renders it AND the leg plan burns it on at least one leg. Deriving this
 /// from the same plan the compositor receives keeps "On stream" honest: the
@@ -20208,15 +21424,34 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
     use_encoder_bridge && (leg_plan.0 || leg_plan.1)
 }
 
+/// The legs (and their canvases) the Buddy's pet draws on in a session
+/// (plan 168 S-B1), for `BuddySpriteSlot::prepare`.
+fn buddy_sprite_legs(
+    plan: crate::overlay_layout::OverlayLegPlan,
+    primary: (u32, u32),
+    auxiliary: Option<(u32, u32)>,
+) -> Vec<(crate::buddy_sprite::BuddySpriteLeg, (u32, u32))> {
+    let mut legs = Vec::with_capacity(2);
+    if plan.primary {
+        legs.push((crate::buddy_sprite::BuddySpriteLeg::Primary, primary));
+    }
+    if plan.aux
+        && let Some(auxiliary) = auxiliary
+    {
+        legs.push((crate::buddy_sprite::BuddySpriteLeg::Auxiliary, auxiliary));
+    }
+    legs
+}
+
 fn highlight_aux_leg(
     stream_output: Option<&CompositorAuxiliaryOutput>,
-) -> crate::captions::HighlightAuxLeg {
+) -> crate::overlay_layout::OverlayAuxLeg {
     match stream_output {
-        None => crate::captions::HighlightAuxLeg::None,
+        None => crate::overlay_layout::OverlayAuxLeg::None,
         Some(output) if output.composes_simulcast_scene => {
-            crate::captions::HighlightAuxLeg::VerticalSimulcast
+            crate::overlay_layout::OverlayAuxLeg::VerticalSimulcast
         }
-        Some(_) => crate::captions::HighlightAuxLeg::Stream,
+        Some(_) => crate::overlay_layout::OverlayAuxLeg::Stream,
     }
 }
 
@@ -20269,6 +21504,14 @@ fn recording_compositor_stream_output_with_plan(
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
             | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
+        // The raw path has no auxiliary encoder. Dropping the vertical leg
+        // silently sent the landscape program to every vertical destination
+        // (Linux, ogre 2026-10-12: a 720x1280 destination received 1280x720).
+        if params.simulcast.is_some() && params.output.stream_enabled {
+            bail!(
+                "This computer can't encode a separate vertical stream yet, so vertical destinations would receive the landscape video. Turn off the vertical destinations to go live."
+            );
+        }
         return Ok(None);
     }
     // Dual-orientation simulcast claims the auxiliary output: the vertical
@@ -20618,10 +21861,35 @@ fn resolve_provider_stream_output_plan_with_separate_roles(
             }
         })
         .collect::<Vec<_>>();
+    let destinations_shared = strictest_shared_stream_profile(&shared_candidates)?;
     if params.output.record_enabled {
         shared_candidates.push(provider_safe_shared_profile(&params.output.video));
     }
     let shared = strictest_shared_stream_profile(&shared_candidates)?;
+    // One encode serves both: a recording below the destinations' profile
+    // would silently send the livestream at the recording's quality (Linux
+    // raw path, plan 0016: a 1080p stream arrived at 640x360). Refuse instead;
+    // the renderer re-plans the recording to follow the stream. Simulcast is
+    // left as it was: its horizontal leg is the session's primary encode. A
+    // recording that differs from the shared encode is already refused by
+    // the profile policy ("share one encoder"); this is the case it misses.
+    if params.simulcast.is_none()
+        && params.output.record_enabled
+        && same_video_profile(&params.output.video, &shared)
+        && !same_video_profile(&shared, &destinations_shared)
+    {
+        bail!(
+            "This computer runs one encode for the recording and the livestream, so recording at {}x{}@{}fps, {} kbps would send the livestream at that quality too. Record at the stream's {}x{}@{}fps, {} kbps or turn recording off.",
+            params.output.video.width,
+            params.output.video.height,
+            params.output.video.fps,
+            params.output.video.bitrate_kbps,
+            destinations_shared.width,
+            destinations_shared.height,
+            destinations_shared.fps,
+            destinations_shared.bitrate_kbps
+        );
+    }
     for target in &mut targets {
         target.video = shared.clone();
     }
@@ -20904,7 +22172,7 @@ fn encoder_bridge_output_profile(video: &VideoSettings) -> EncoderBridgeOutputPr
     }
 }
 
-fn encoder_bridge_diagnostics_context(
+pub(crate) fn encoder_bridge_diagnostics_context(
     role: EncoderBridgeOutputRole,
     recording_output: Option<&VideoSettings>,
     stream_output: Option<&VideoSettings>,
@@ -21254,7 +22522,7 @@ fn redact_stream_url(url: &str) -> String {
 /// Windows file APIs use the `\\?\` namespace for long-path safety, but FFmpeg's
 /// tee muxer treats that prefix as an invalid slave filename. Keep verbatim paths
 /// internally and remove the namespace only at the subprocess boundary.
-fn ffmpeg_file_path(path: &Path) -> String {
+pub(crate) fn ffmpeg_file_path(path: &Path) -> String {
     let path = path.display().to_string();
     #[cfg(target_os = "windows")]
     {
@@ -21584,7 +22852,321 @@ async fn publish_stream_target_failure_if_active(
             "stream-target-failed",
             &format!("Streaming to {label} stopped: {reason}"),
         );
+        note_buddy_destination_failed(state);
         state.emit_event("stream.targets", snapshot);
+    }
+}
+
+/// Moves one destination to `next` (plan 161). Returns its label, the state it
+/// left and the replacement snapshot only when the STATE changed. A new reason
+/// for the same state is stored silently: a leg retrying every two seconds
+/// must not flood the renderer or the health log. Skipped destinations never
+/// change.
+fn transition_stream_target(
+    shared: &SharedStreamTargetsSnapshot,
+    position: usize,
+    next: StreamTargetState,
+    message: Option<String>,
+) -> Option<(String, StreamTargetState, StreamTargetsSnapshot)> {
+    let mut snapshot = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = snapshot.targets.get_mut(position)?;
+    if entry.state == StreamTargetState::NotConfigured {
+        return None;
+    }
+    if entry.state == next {
+        entry.message = message;
+        return None;
+    }
+    let previous = entry.state;
+    entry.state = next;
+    entry.message = message;
+    let label = entry.label.clone();
+    Some((label, previous, snapshot.clone()))
+}
+
+/// How long the stderr consumer waits for the recording slot before it gives
+/// up on one broadcast. The stop path holds that slot while it joins this
+/// consumer with a bounded abort, so the wait must stay short and bounded.
+const STREAM_TARGET_PUBLISH_ATTEMPTS: u32 = 10;
+const STREAM_TARGET_PUBLISH_RETRY: Duration = Duration::from_millis(50);
+
+/// Runs `publish` while this exact session owns the recording slot. A retired
+/// consumer can never publish into a replacement session. Unlike a single
+/// `try_lock`, a briefly busy slot does not lose a reconnect notice.
+async fn with_active_session<F>(state: &AppState, session_id: &str, publish: F)
+where
+    F: FnOnce(),
+{
+    for attempt in 0..STREAM_TARGET_PUBLISH_ATTEMPTS {
+        if let Ok(recording) = state.recording.try_lock() {
+            if recording
+                .as_ref()
+                .is_some_and(|active| active.session_id == session_id)
+            {
+                publish();
+            }
+            return;
+        }
+        if attempt + 1 < STREAM_TARGET_PUBLISH_ATTEMPTS {
+            sleep(STREAM_TARGET_PUBLISH_RETRY).await;
+        }
+    }
+}
+
+/// Health event and snapshot broadcast for one FFmpeg-reported leg change
+/// (plan 161). `reconnecting_since` remembers when each leg went down so the
+/// resume notice can say for how long.
+async fn publish_stream_leg_update(
+    state: &AppState,
+    session_id: &str,
+    targets: &SharedStreamTargetsSnapshot,
+    reconnecting_since: &mut std::collections::HashMap<usize, Instant>,
+    update: StreamLegUpdate,
+) {
+    // A failed destination is terminal: a dead tee slave, a finished output,
+    // or a broadcast the platform ended. FFmpeg reconnecting the socket
+    // underneath cannot bring the broadcast back, so it never revives one.
+    if let StreamLegUpdate::Reconnecting { position, .. } | StreamLegUpdate::Resumed { position } =
+        &update
+        && stream_targets_snapshot_value(targets)
+            .targets
+            .get(*position)
+            .is_some_and(|target| target.state == StreamTargetState::Failed)
+    {
+        return;
+    }
+    match update {
+        StreamLegUpdate::Reconnecting { position, reason } => {
+            let transition = transition_stream_target(
+                targets,
+                position,
+                StreamTargetState::Reconnecting,
+                Some(format!("Reconnecting: {reason}")),
+            );
+            let Some((label, _, snapshot)) = transition else {
+                return;
+            };
+            reconnecting_since
+                .entry(position)
+                .or_insert_with(Instant::now);
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    STREAM_TARGET_RECONNECTING_CODE,
+                    &format!(
+                        "Streaming to {label} is reconnecting: {reason}. Until it is back, viewers there see nothing; the other destinations keep streaming."
+                    ),
+                );
+                state.emit_event("stream.targets", snapshot);
+            })
+            .await;
+        }
+        StreamLegUpdate::Resumed { position } => {
+            let down_for = reconnecting_since
+                .remove(&position)
+                .map(|since| since.elapsed());
+            let transition =
+                transition_stream_target(targets, position, StreamTargetState::Live, None);
+            let Some((label, _, snapshot)) = transition else {
+                return;
+            };
+            let message = match down_for {
+                Some(down_for) => format!(
+                    "Streaming to {label} resumed after {} of reconnecting.",
+                    format_stream_leg_outage(down_for)
+                ),
+                None => format!("Streaming to {label} resumed."),
+            };
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Info,
+                    STREAM_TARGET_RESUMED_CODE,
+                    &message,
+                );
+                state.emit_event("stream.targets", snapshot);
+            })
+            .await;
+        }
+        StreamLegUpdate::Failed { position, reason } => {
+            reconnecting_since.remove(&position);
+            publish_stream_target_failure_if_active(state, session_id, targets, position, reason)
+                .await;
+        }
+        StreamLegUpdate::UnattributedReconnecting { reason } => {
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    STREAM_TARGET_RECONNECTING_CODE,
+                    &format!(
+                        "A live destination is reconnecting: {reason}. The other destinations keep streaming."
+                    ),
+                );
+            })
+            .await;
+        }
+        StreamLegUpdate::UnattributedResumed => {
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Info,
+                    STREAM_TARGET_RECONNECTED_CODE,
+                    "A live destination dropped its connection and reconnected by itself. Viewers there saw a short interruption.",
+                );
+            })
+            .await;
+        }
+    }
+}
+
+/// What a platform's own API says about the stream it should be receiving
+/// (plan 161, S4; `platform_stream_watch`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlatformStreamObservation {
+    Receiving,
+    /// The platform says it is not receiving the stream, in its own words.
+    NotReceiving {
+        detail: String,
+    },
+    /// The platform ended the broadcast; reconnecting cannot bring it back.
+    Ended {
+        detail: String,
+    },
+}
+
+/// The destination state a platform observation leads to, if any. FFmpeg's
+/// view wins while it is reconnecting a leg: the platform can only demote a
+/// destination FFmpeg believes is live, and it only clears the warning it
+/// raised itself (nothing else sets `Warning` on a live destination).
+fn platform_observation_transition(
+    current: StreamTargetState,
+    observation: &PlatformStreamObservation,
+) -> Option<(StreamTargetState, Option<String>)> {
+    match (observation, current) {
+        (PlatformStreamObservation::Receiving, StreamTargetState::Warning) => {
+            Some((StreamTargetState::Live, None))
+        }
+        (PlatformStreamObservation::NotReceiving { detail }, StreamTargetState::Live) => Some((
+            StreamTargetState::Warning,
+            Some(format!("Not receiving: {detail}")),
+        )),
+        (
+            PlatformStreamObservation::Ended { detail },
+            StreamTargetState::Live
+            | StreamTargetState::Warning
+            | StreamTargetState::Reconnecting
+            | StreamTargetState::Connecting,
+        ) => Some((StreamTargetState::Failed, Some(detail.clone()))),
+        _ => None,
+    }
+}
+
+/// Applies a platform observation to this session's destinations on that
+/// platform. `target_id` narrows it when the poller knows its destination;
+/// when it matches nothing, every destination on the platform is meant.
+pub(crate) async fn observe_platform_stream(
+    state: &AppState,
+    session_id: &str,
+    platform: crate::streaming::StreamPlatform,
+    target_id: Option<&str>,
+    observation: PlatformStreamObservation,
+) {
+    let recording = state.recording.lock().await;
+    let Some(active) = recording
+        .as_ref()
+        .filter(|active| active.session_id == session_id)
+    else {
+        return;
+    };
+    let shared = &active.stream_targets_snapshot;
+    let candidates: Vec<(usize, StreamTargetState)> = {
+        let snapshot = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let on_platform = || {
+            snapshot
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| target.platform == platform)
+        };
+        let exact: Vec<_> = on_platform()
+            .filter(|(_, target)| target_id.is_some_and(|id| target.target_id == id))
+            .map(|(position, target)| (position, target.state))
+            .collect();
+        if exact.is_empty() {
+            on_platform()
+                .map(|(position, target)| (position, target.state))
+                .collect()
+        } else {
+            exact
+        }
+    };
+    for (position, current) in candidates {
+        let Some((next, message)) = platform_observation_transition(current, &observation) else {
+            continue;
+        };
+        let Some((label, _, snapshot)) = transition_stream_target(shared, position, next, message)
+        else {
+            continue;
+        };
+        let (level, code, text) = match &observation {
+            PlatformStreamObservation::Receiving => (
+                HealthLevel::Info,
+                STREAM_TARGET_RESUMED_CODE,
+                format!("{label} is receiving the stream again."),
+            ),
+            PlatformStreamObservation::NotReceiving { detail } => (
+                HealthLevel::Warn,
+                STREAM_TARGET_NOT_RECEIVING_CODE,
+                format!(
+                    "{label} isn't receiving the stream ({detail}), although Videorc is still sending it. Viewers there may see nothing."
+                ),
+            ),
+            PlatformStreamObservation::Ended { detail } => (
+                HealthLevel::Warn,
+                "stream-target-failed",
+                format!("Streaming to {label} stopped: {detail}."),
+            ),
+        };
+        let _ = emit_health_event(state, Some(session_id), level, code, &text);
+        if next == StreamTargetState::Failed {
+            note_buddy_destination_failed(state);
+        }
+        state.emit_event("stream.targets", snapshot);
+    }
+}
+
+/// Plan 168 D14: a destination failed; the Buddy reacts only when the persona
+/// chose a reaction for it (owner default: none).
+fn note_buddy_destination_failed(state: &AppState) {
+    state
+        .buddy_sprite
+        .notify(crate::buddy_animator::BuddyAnimatorEvent::Trigger {
+            trigger: crate::buddy_pet::BuddyTrigger::DestinationFailed,
+            reaction: None,
+        });
+}
+
+pub(crate) const STREAM_TARGET_NOT_RECEIVING_CODE: &str = "stream-target-not-receiving";
+pub(crate) const STREAM_TARGET_RECONNECTING_CODE: &str = "stream-target-reconnecting";
+pub(crate) const STREAM_TARGET_RESUMED_CODE: &str = "stream-target-resumed";
+pub(crate) const STREAM_TARGET_RECONNECTED_CODE: &str = "stream-target-reconnected";
+
+fn format_stream_leg_outage(duration: Duration) -> String {
+    let seconds = duration.as_secs().max(1);
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min {} s", seconds / 60, seconds % 60)
     }
 }
 
@@ -21761,28 +23343,248 @@ fn parse_tee_slave_failure(line: &str) -> Option<TeeSlaveFailure> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FifoOutputFailure {
+    /// The fifo muxer's log context (`fifo @ 0x…`). It is stable for the
+    /// leg's whole life, so it attributes the later recovery lines, which
+    /// never name the URL (plan 161).
+    context: String,
     url: String,
     reason: String,
+}
+
+/// Splits a `[fifo @ 0x…] message` line into the fifo's log context and its
+/// message. The fifo line can follow a `\r`-terminated stats segment, so it is
+/// found anywhere in the line.
+fn fifo_log_message(line: &str) -> Option<(&str, &str)> {
+    let start = line.find("[fifo @ ")?;
+    let rest = &line[start + 1..];
+    let close = rest.find("] ")?;
+    Some((&rest[..close], rest[close + 2..].trim_end()))
 }
 
 /// Parses an FFmpeg `fifo` muxer failure line, e.g.
 /// `[fifo @ 0x..] Error opening rtmp://host/app/key: Connection refused`.
 /// Stream targets ride per-target fifo-muxer outputs (plan 023 L1), so a
-/// failing leg is attributed by URL instead of a tee slave index.
+/// failing leg is attributed by URL instead of a tee slave index. With
+/// recovery on, the fifo prints this line on EVERY failed reconnect attempt.
 fn parse_fifo_output_failure(line: &str) -> Option<FifoOutputFailure> {
-    let tag = line.find("[fifo @")?;
-    let rest = &line[tag..];
-    let marker = "Error opening ";
-    let start = rest.find(marker)? + marker.len();
-    let (url, reason) = rest[start..].rsplit_once(": ")?;
+    let (context, message) = fifo_log_message(line)?;
+    let rest = message.strip_prefix("Error opening ")?;
+    let (url, reason) = rest.rsplit_once(": ")?;
     let url = url.trim();
     if url.is_empty() {
         return None;
     }
     Some(FifoOutputFailure {
+        context: context.to_string(),
         url: url.to_string(),
         reason: reason.trim().trim_end_matches('.').to_string(),
     })
+}
+
+/// Parses FFmpeg's startup dump header for one output,
+/// `Output #1, fifo, to 'rtmp://host/app/key':`, into the output index and
+/// its URL. Printed at INFO, so it arrives as an `Info` stderr event.
+fn parse_ffmpeg_output_header(line: &str) -> Option<(usize, &str)> {
+    let rest = line.trim().strip_prefix("Output #")?;
+    let (index, rest) = rest.split_once(", ")?;
+    let index = index.parse::<usize>().ok()?;
+    let start = rest.find(" to '")? + " to '".len();
+    let url = rest[start..].strip_suffix("':")?;
+    (!url.is_empty()).then_some((index, url))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputMuxFailure {
+    output_index: usize,
+    reason: String,
+}
+
+/// Parses FFmpeg's per-output mux failure, which names the output by index
+/// and never by URL:
+/// `[aost#1:1/aac @ 0x…] Error submitting a packet to the muxer: End of file`
+/// (the 2026-10-07 YouTube leg) or `[out#1/fifo @ 0x…] Error muxing a packet`.
+/// FFmpeg finishes only that output, so the process, the other legs and the
+/// progress clock carry on: nothing else ever reports it (plan 161).
+fn parse_ffmpeg_output_mux_failure(line: &str) -> Option<OutputMuxFailure> {
+    const SUBMIT: &str = "Error submitting a packet to the muxer";
+    const MUXING: &str = "Error muxing a packet";
+    let (message_start, reason) = if let Some(start) = line.find(SUBMIT) {
+        let reason = line[start + SUBMIT.len()..]
+            .trim_start_matches(':')
+            .trim()
+            .trim_end_matches('.')
+            .to_string();
+        (start, reason)
+    } else {
+        (line.find(MUXING)?, String::new())
+    };
+    let prefix = line[..message_start].trim_end();
+    let context_start = prefix.rfind('[')?;
+    let context = prefix[context_start + 1..].strip_suffix(']')?;
+    let context = context.split(" @ ").next()?;
+    let digits = if let Some(rest) = context.strip_prefix("out#") {
+        rest.split('/').next()?
+    } else {
+        let (_, rest) = context.split_once("ost#")?;
+        rest.split(':').next()?
+    };
+    Some(OutputMuxFailure {
+        output_index: digits.parse().ok()?,
+        reason,
+    })
+}
+
+/// What happened to one stream leg, from FFmpeg's own words (plan 161).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamLegUpdate {
+    /// The leg's connection is down and the fifo is retrying it.
+    Reconnecting { position: usize, reason: String },
+    /// The fifo reconnected the leg.
+    Resumed { position: usize },
+    /// The leg will not come back by itself.
+    Failed { position: usize, reason: String },
+    /// A fifo we cannot attribute is retrying (it reconnected before it ever
+    /// printed its URL). Reported once per leg until it recovers.
+    UnattributedReconnecting { reason: String },
+    /// A fifo we cannot attribute dropped and reconnected immediately.
+    UnattributedResumed,
+}
+
+/// One session's stream legs as FFmpeg reports them. Pure: stripped stderr
+/// lines in, per-destination updates out (plan 161).
+///
+/// Attribution is exact, never guessed: a fifo prints its URL only on
+/// `Error opening <url>`, which teaches the monitor that fifo's context; its
+/// later `Recovery failed` / `Recovery successful` lines carry the context
+/// alone. The startup dump (`Output #N, fifo, to '<url>'`) maps FFmpeg's
+/// output index for the per-output mux failure.
+#[derive(Debug, Default)]
+struct StreamLegMonitor {
+    url_positions: Vec<(String, usize)>,
+    fifo_contexts: std::collections::HashMap<String, usize>,
+    output_positions: std::collections::HashMap<usize, usize>,
+    unattributed_reconnecting: std::collections::HashSet<String>,
+}
+
+impl StreamLegMonitor {
+    fn new(url_positions: Vec<(String, usize)>) -> Self {
+        Self {
+            url_positions,
+            ..Self::default()
+        }
+    }
+
+    fn position_for_url(&self, url: &str) -> Option<usize> {
+        self.url_positions
+            .iter()
+            .find(|(candidate, _)| candidate == url)
+            .map(|(_, position)| *position)
+    }
+
+    fn observe(&mut self, line: &str) -> Option<StreamLegUpdate> {
+        if let Some((output_index, url)) = parse_ffmpeg_output_header(line) {
+            if let Some(position) = self.position_for_url(url) {
+                self.output_positions.insert(output_index, position);
+            }
+            return None;
+        }
+        if let Some(failure) = parse_fifo_output_failure(line) {
+            let position = self.position_for_url(&failure.url)?;
+            self.fifo_contexts.insert(failure.context, position);
+            return Some(StreamLegUpdate::Reconnecting {
+                position,
+                reason: stream_leg_reason(failure.reason),
+            });
+        }
+        if let Some((context, message)) = fifo_log_message(line) {
+            let position = self.fifo_contexts.get(context).copied();
+            if let Some(reason) = message.strip_prefix("Recovery failed:") {
+                let reason = stream_leg_reason(reason.trim().trim_end_matches('.').to_string());
+                return match position {
+                    Some(position) => Some(StreamLegUpdate::Reconnecting { position, reason }),
+                    None => self
+                        .unattributed_reconnecting
+                        .insert(context.to_string())
+                        .then_some(StreamLegUpdate::UnattributedReconnecting { reason }),
+                };
+            }
+            if message == "Recovery successful" {
+                return Some(match position {
+                    Some(position) => StreamLegUpdate::Resumed { position },
+                    None => {
+                        self.unattributed_reconnecting.remove(context);
+                        StreamLegUpdate::UnattributedResumed
+                    }
+                });
+            }
+            if message.starts_with("Maximal number of") {
+                return Some(StreamLegUpdate::Failed {
+                    position: position?,
+                    reason: "Videorc stopped reconnecting".to_string(),
+                });
+            }
+            return None;
+        }
+        let failure = parse_ffmpeg_output_mux_failure(line)?;
+        let position = *self.output_positions.get(&failure.output_index)?;
+        Some(StreamLegUpdate::Failed {
+            position,
+            reason: if failure.reason.is_empty() {
+                "The connection closed".to_string()
+            } else {
+                format!("The connection closed ({})", failure.reason)
+            },
+        })
+    }
+}
+
+/// Keeps a line FFmpeg repeats in a loop out of the log ring and the persisted
+/// health log (plan 161). A fifo leg retrying every two seconds prints the
+/// same tcp, rtmp and fifo errors each time; the first is news, the same line
+/// within [`FFMPEG_REPEAT_WINDOW`] is not. Log-context pointers are ignored so
+/// a fresh `[rtmp @ 0x…]` per attempt still counts as the same line.
+#[derive(Debug, Default)]
+struct FfmpegRepeatThrottle {
+    last_admitted: std::collections::HashMap<String, Instant>,
+}
+
+const FFMPEG_REPEAT_WINDOW: Duration = Duration::from_secs(60);
+const FFMPEG_REPEAT_KEYS: usize = 512;
+
+impl FfmpegRepeatThrottle {
+    fn admit(&mut self, line: &str, now: Instant) -> bool {
+        let key = ffmpeg_repeat_key(line);
+        if let Some(at) = self.last_admitted.get(&key)
+            && now.saturating_duration_since(*at) < FFMPEG_REPEAT_WINDOW
+        {
+            return false;
+        }
+        if self.last_admitted.len() >= FFMPEG_REPEAT_KEYS {
+            self.last_admitted.clear();
+        }
+        self.last_admitted.insert(key, now);
+        true
+    }
+}
+
+/// The line with every `0x…` pointer reduced to `0x`.
+fn ffmpeg_repeat_key(line: &str) -> String {
+    let mut key = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("0x") {
+        key.push_str(&rest[..start + 2]);
+        rest = rest[start + 2..].trim_start_matches(|c: char| c.is_ascii_hexdigit());
+    }
+    key.push_str(rest);
+    key
+}
+
+fn stream_leg_reason(reason: String) -> String {
+    if reason.is_empty() {
+        "Stream connection failed".to_string()
+    } else {
+        reason
+    }
 }
 
 fn output_mode(record_enabled: bool, stream_enabled: bool) -> &'static str {
@@ -22120,6 +23922,90 @@ fn emit_session_log(
     Ok(())
 }
 
+/// The bridge FFmpeg's log level: every `av_log` line tagged with its level.
+const BRIDGE_FFMPEG_LOGLEVEL: &str = "level+info";
+
+/// An `av_log` level as printed by `-loglevel level+…` (`get_level_str` in
+/// libavutil/log.c), least to most severe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FfmpegLogLevel {
+    Trace,
+    Debug,
+    Verbose,
+    Info,
+    Warning,
+    Error,
+    Fatal,
+    Panic,
+}
+
+impl FfmpegLogLevel {
+    fn from_tag(tag: &str) -> Option<Self> {
+        Some(match tag {
+            "trace" => Self::Trace,
+            "debug" => Self::Debug,
+            "verbose" => Self::Verbose,
+            "info" => Self::Info,
+            "warning" => Self::Warning,
+            "error" => Self::Error,
+            "fatal" => Self::Fatal,
+            "panic" => Self::Panic,
+            _ => return None,
+        })
+    }
+
+    fn is_informational(self) -> bool {
+        self <= Self::Info
+    }
+}
+
+/// Removes `-loglevel level+…` tags from one stderr line and returns the most
+/// severe level it carried (`None` for an untagged line: `-progress` output,
+/// command replies and prompts are plain `fprintf`/avio writes).
+///
+/// FFmpeg prints the tag AFTER the context prefixes
+/// (`[fifo @ 0x1] [info] Recovery successful`, `[info] frame= …`), and the
+/// stats line ends in `\r`, so one `\n` line can hold several tagged
+/// segments (`[info] frame= …\r[flv @ 0x2] [warning] Failed to update …`).
+/// Each `\r` segment is stripped on its own and the separators are kept.
+fn strip_ffmpeg_log_levels(line: &str) -> (String, Option<FfmpegLogLevel>) {
+    if !line.contains("] ") {
+        return (line.to_string(), None);
+    }
+    let mut level: Option<FfmpegLogLevel> = None;
+    let stripped = line
+        .split('\r')
+        .map(|segment| {
+            let mut cursor = 0;
+            // At most a parent context, a context and the level tag.
+            for _ in 0..3 {
+                let rest = &segment[cursor..];
+                if !rest.starts_with('[') {
+                    break;
+                }
+                let Some(close) = rest.find("] ") else {
+                    break;
+                };
+                let inner = &rest[1..close];
+                if let Some(tagged) = FfmpegLogLevel::from_tag(inner) {
+                    level = Some(level.map_or(tagged, |current| current.max(tagged)));
+                    let mut owned = String::with_capacity(segment.len());
+                    owned.push_str(&segment[..cursor]);
+                    owned.push_str(&rest[close + 2..]);
+                    return owned;
+                }
+                if !inner.contains(" @ ") {
+                    break;
+                }
+                cursor += close + 2;
+            }
+            segment.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\r");
+    (stripped, level)
+}
+
 /// FFmpeg `-progress`/stats output: either the combined `frame= ... speed=`
 /// status line or a single `key=value` counter. These arrive multiple times
 /// per second and must stay out of the bounded log ring buffer.
@@ -22156,6 +24042,10 @@ fn looks_like_ffmpeg_health_event(line: &str) -> bool {
         || normalized.contains("permission")
         || normalized.contains("failed")
         || normalized.contains("connection")
+        // Plan 161: the only words FFmpeg says when one output dies.
+        || normalized.contains("end of file")
+        || normalized.contains("error submitting")
+        || normalized.contains("error muxing")
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -23108,6 +24998,7 @@ mod tests {
             width: 2,
             height: 2,
             frame: vec![7; 16],
+            revision: 1,
         };
         let mut replacement = test_active_recording_stub("reused-session-id");
         replacement.screen_overlay = Some(ScreenOverlaySession::test_stub(2, 2, blocker));
@@ -23126,6 +25017,210 @@ mod tests {
                 .all(|byte| *byte == 0),
             "a prepared frame must not enter a successor overlay generation"
         );
+    }
+
+    fn legacy_banner(
+        x: usize,
+        y: usize,
+        width: u32,
+        height: u32,
+        bgra: &[u8],
+    ) -> LegacyBannerLayer {
+        assert_eq!(bgra.len(), (width * height * 4) as usize);
+        LegacyBannerLayer {
+            x,
+            y,
+            bitmap: Arc::new(crate::banner_prepare::BannerBitmap {
+                width,
+                height,
+                bgra: Arc::new(bgra.to_vec()),
+                revision: 1,
+            }),
+        }
+    }
+
+    fn rgba_at(frame: &[u8], width: u32, x: usize, y: usize) -> [u8; 4] {
+        let start = (y * width as usize + x) * 4;
+        frame[start..start + 4].try_into().unwrap()
+    }
+
+    /// Plan 186 S4: the legacy overlay frame is the takeover first, then the
+    /// banners source-over at their rects; transparent where nothing draws.
+    #[test]
+    fn legacy_overlay_frame_composes_the_takeover_then_the_banners() {
+        const WIDTH: u32 = 4;
+        const HEIGHT: u32 = 4;
+        let blue = [0_u8, 0, 255, 255];
+        let takeover = blue.repeat((WIDTH * HEIGHT) as usize);
+        // A 2x1 banner at (1, 2): an opaque red pixel and a half-alpha green
+        // one (BGRA, opacity already baked by the prepare).
+        let banner = legacy_banner(1, 2, 2, 1, &[0, 0, 255, 255, 0, 255, 0, 128]);
+
+        let frame = legacy_overlay_frame(
+            Some(&takeover[..]),
+            std::slice::from_ref(&banner),
+            WIDTH,
+            HEIGHT,
+        );
+        assert_eq!(frame.len(), (WIDTH * HEIGHT * 4) as usize);
+        assert_eq!(
+            rgba_at(&frame, WIDTH, 1, 2),
+            [255, 0, 0, 255],
+            "red over blue"
+        );
+        assert_eq!(
+            rgba_at(&frame, WIDTH, 2, 2),
+            [0, 128, 127, 255],
+            "half green over opaque blue"
+        );
+        for (x, y) in [(0, 0), (3, 3), (0, 2), (3, 2), (1, 1), (1, 3)] {
+            assert_eq!(
+                rgba_at(&frame, WIDTH, x, y),
+                blue,
+                "({x}, {y}) is the takeover"
+            );
+        }
+
+        // No takeover: transparent except the banner's own pixels, straight alpha kept.
+        let frame = legacy_overlay_frame(None, std::slice::from_ref(&banner), WIDTH, HEIGHT);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 2, 2), [0, 255, 0, 128]);
+        assert_eq!(rgba_at(&frame, WIDTH, 0, 0), [0, 0, 0, 0]);
+
+        // Banners stack bottom to top: a later opaque banner wins its pixel,
+        // and a banner hanging off the canvas is cut, never wrapped.
+        let top = legacy_banner(2, 2, 3, 3, &[255, 255, 255, 255].repeat(9));
+        let frame = legacy_overlay_frame(Some(&takeover[..]), &[banner, top], WIDTH, HEIGHT);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 2, 2), [255, 255, 255, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 3, 3), [255, 255, 255, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 0, 3), blue);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 3), blue);
+
+        // A takeover of the wrong size is not a frame: transparent instead.
+        let frame = legacy_overlay_frame(Some(&takeover[..8]), &[], WIDTH, HEIGHT);
+        assert!(frame.iter().all(|byte| *byte == 0));
+    }
+
+    /// Plan 186 S4: a legacy session recomposes its FIFO frame whenever the
+    /// takeover or the banner set changes, each prepared off the recording
+    /// lock; the takeover stays under the banners and an older composition
+    /// never undoes a newer one.
+    #[test]
+    fn legacy_overlay_session_recomposes_when_the_takeover_or_the_banners_change() {
+        let dir = std::env::temp_dir().join(format!("videorc-legacy-banners-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let banner_path = dir.join("banner.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(&banner_path)
+            .unwrap();
+        let takeover_path = dir.join("takeover.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]))
+            .save(&takeover_path)
+            .unwrap();
+        let banner = crate::protocol::Banner {
+            id: "b1".to_string(),
+            name: "b1".to_string(),
+            image_file: "banner.png".to_string(),
+            thumbnail_file: "banner.thumb.png".to_string(),
+            width: 2,
+            height: 2,
+            has_alpha: false,
+            sort_order: 0,
+            shown: true,
+            // Half the canvas, bottom right: a 2x2 image contained at (2, 2).
+            horizontal: crate::overlay_layout::OverlayRect::new(0.5, 0.5, 0.5, 0.5),
+            vertical: crate::overlay_layout::OverlayRect::new(0.5, 0.5, 0.5, 0.5),
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let shown = || {
+            vec![(
+                banner.clone(),
+                Arc::<Path>::from(banner_path.as_path()),
+                crate::banner_prepare::banner_file_revision(&banner_path),
+            )]
+        };
+        let blocker = ScreenOverlayPreparationBlocker::new();
+        blocker.release();
+        let mut active = test_active_recording_stub("legacy-banners");
+        active.screen_overlay = Some(ScreenOverlaySession::test_stub(4, 4, blocker));
+        let frame =
+            |active: &ActiveRecording| active.screen_overlay.as_ref().unwrap().test_current_frame();
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+
+        // Show: the banner lands at its contained rect over nothing.
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket.prepare_banners(shown()).unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        let shown_frame = frame(&active);
+        assert_eq!(rgba_at(&shown_frame, 4, 2, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&shown_frame, 4, 3, 3), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&shown_frame, 4, 0, 0), [0, 0, 0, 0]);
+        assert_eq!(rgba_at(&shown_frame, 4, 1, 2), [0, 0, 0, 0]);
+
+        // A takeover activated later goes under the banner.
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket
+            .prepare(Some(takeover_path.display().to_string()))
+            .unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        let both = frame(&active);
+        assert_eq!(rgba_at(&both, 4, 0, 0), [0, 0, 255, 255]);
+        assert_eq!(rgba_at(&both, 4, 2, 2), [255, 0, 0, 255]);
+
+        // Two prepares in flight: the one that read the inputs last carries
+        // both changes; the older one, committed after it, changes nothing.
+        let hide_ticket = active.active_screen_overlay_preparation().unwrap();
+        let clear_ticket = active.active_screen_overlay_preparation().unwrap();
+        let hidden = hide_ticket.prepare_banners(Vec::new()).unwrap();
+        let cleared = clear_ticket.prepare(None).unwrap();
+        assert!(cleared.revision > hidden.revision);
+        assert_eq!(
+            active.commit_prepared_active_screen(cleared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+        assert_eq!(
+            active.commit_prepared_active_screen(hidden),
+            PreparedScreenOverlayCommit::Applied,
+            "its change is on the picture already"
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+
+        // A banner whose file is gone is skipped; the frame still composes.
+        std::fs::remove_file(&banner_path).unwrap();
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket.prepare_banners(shown()).unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Plan 186 S4: which sessions take a banner shown after their start.
+    #[test]
+    fn session_accepts_banners_follows_the_render_path() {
+        // The compositor bridge (Metal, CPU, the Windows D3D11 media session).
+        assert!(session_accepts_banners(true, false, false));
+        // The direct D3D11 recording draws nothing over the screen.
+        assert!(!session_accepts_banners(true, true, false));
+        // The legacy FFmpeg graph: only with its overlay FIFO.
+        assert!(session_accepts_banners(false, false, true));
+        assert!(!session_accepts_banners(false, false, false));
     }
 
     #[derive(Debug)]
@@ -24372,6 +26467,7 @@ mod tests {
             effective_encode_backend: EncodeBackend::HardwareQsv,
             probe_state: StreamOutputTopologyProbeState::Rejected,
             fallback_reason: Some("stage=process-output HRESULT=0x8000FFFF".to_string()),
+            encoder_selection_reason: None,
         };
         let line = stream_output_topology_probe_log_line(
             std::time::Duration::from_millis(18_250),
@@ -24428,6 +26524,64 @@ mod tests {
             Some(encoder)
         );
         assert_eq!(combined_output_fallback_reason(None, None), None);
+    }
+
+    #[test]
+    fn a_healthy_topology_never_carries_the_encoder_note_as_its_fallback_reason() {
+        // Plan 0015: Linux OpenH264 is not-required on the raw path it asked
+        // for; its "selected explicitly" note made the renderer reject the
+        // whole check and block Go Live.
+        let encoder = "OpenH264 software encoding was selected explicitly for this session.";
+        for state in [
+            StreamOutputTopologyProbeState::NotRequired,
+            StreamOutputTopologyProbeState::Passed,
+        ] {
+            assert_eq!(
+                topology_result_fallback_reason(state, false, None, Some(encoder.to_string())),
+                None
+            );
+        }
+        assert_eq!(
+            topology_result_fallback_reason(
+                StreamOutputTopologyProbeState::NotRequired,
+                true,
+                Some("bridge changed".to_string()),
+                None
+            )
+            .as_deref(),
+            Some("bridge changed")
+        );
+        let rejected = topology_result_fallback_reason(
+            StreamOutputTopologyProbeState::Rejected,
+            true,
+            Some("Media Foundation rejected".to_string()),
+            Some(encoder.to_string()),
+        )
+        .unwrap();
+        assert!(rejected.starts_with("OpenH264 software"), "{rejected}");
+
+        let video = qsv_test_video();
+        let result = StreamOutputTopologyProbeResult {
+            capability_key: "stream-output-topology-v1:test".to_string(),
+            stream_profile: video.clone(),
+            recording_profile: None,
+            output_roles: vec![StreamOutputTopologyRole::Shared],
+            requested_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_encode_backend: EncodeBackend::SoftwareOpenH264,
+            probe_state: StreamOutputTopologyProbeState::NotRequired,
+            fallback_reason: None,
+            encoder_selection_reason: Some(encoder.to_string()),
+        };
+        let wire = serde_json::to_value(&result).unwrap();
+        assert!(wire.get("fallbackReason").is_none(), "{wire}");
+        assert_eq!(wire["encoderSelectionReason"], encoder);
+        let line =
+            stream_output_topology_probe_log_line(std::time::Duration::from_millis(0), Ok(&result));
+        assert!(
+            line.contains("probe=not-required reason=OpenH264"),
+            "{line}"
+        );
     }
 
     #[test]
@@ -25590,6 +27744,7 @@ mod tests {
             layout.clone(),
             None,
             1_000,
+            None,
         )
         .await;
         assert_eq!(startup.scene_revision, 1_000);
@@ -25703,6 +27858,7 @@ mod tests {
             scene: None,
             output: OutputSettings {
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 record_enabled,
                 stream_enabled,
                 output_directory: None,
@@ -25736,6 +27892,670 @@ mod tests {
             },
             "t0".to_string(),
         )
+    }
+
+    struct SourceIsoFixtureTick {
+        sequence: u64,
+        audio_start_sample: u64,
+        video_sequence: u64,
+        video_captured_at: Instant,
+    }
+
+    impl SourceIsoFixtureTick {
+        fn at(origin: Instant, sample_end: Instant, video_latency: Duration) -> Self {
+            let elapsed = sample_end.duration_since(origin);
+            let sequence = (elapsed.as_millis() / 10) as u64;
+            assert!(sequence > 0);
+            assert_eq!(elapsed, Duration::from_millis(sequence * 10));
+            let video_captured_at = sample_end - video_latency;
+            Self {
+                sequence,
+                audio_start_sample: (sequence - 1) * 480,
+                video_sequence: (video_captured_at
+                    .saturating_duration_since(origin)
+                    .as_millis()
+                    / 10) as u64,
+                video_captured_at,
+            }
+        }
+    }
+
+    #[test]
+    fn source_iso_fixture_clock_keeps_scheduled_sample_end_through_delayed_delivery() {
+        let origin = Instant::now();
+        for sequence in [1, 50, 80, 190, 370] {
+            let scheduled = origin + Duration::from_millis(sequence * 10);
+            // Delivery may bunch after a delayed callback; it cannot relabel
+            // already-captured samples or the source content with a new time.
+            for delivery_lag_ms in [0, 2, 47] {
+                let delivered = scheduled + Duration::from_millis(delivery_lag_ms);
+                let tick = SourceIsoFixtureTick::at(origin, scheduled, Duration::from_millis(72));
+                assert_eq!(tick.sequence, sequence);
+                assert_eq!(tick.audio_start_sample + 480, sequence * 480);
+                assert_eq!(
+                    tick.video_captured_at + Duration::from_millis(72),
+                    scheduled
+                );
+                assert_eq!(tick.video_sequence, (sequence * 10).saturating_sub(72) / 10);
+                assert!(delivered >= scheduled);
+            }
+        }
+    }
+
+    /// Real session coordinator, compositor, native encoders, muxers and Stop.
+    /// Only device producers are replaced by controlled frame stores.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "maintained runtime smoke; produces real encoded artifacts"]
+    async fn source_iso_runtime_artifacts() {
+        let directory = std::path::PathBuf::from(
+            std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_DIR").expect("runtime evidence directory"),
+        );
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_RECOVER").is_some() {
+            let reconciled = state.database.reconcile_orphaned_sessions().unwrap();
+            assert_eq!(
+                reconciled, 3,
+                "every durable member recovered after process interruption"
+            );
+            assert_eq!(state.database.reconcile_orphaned_sessions().unwrap(), 0);
+            let rows = state.database.list_session_items_page(None, 20).unwrap();
+            assert_eq!(rows.items.len(), 3);
+            for row in &rows.items {
+                if row.recording_role.as_deref() != Some("combined") {
+                    assert_eq!(
+                        row.finalization_state,
+                        Some(crate::protocol::RecordingFinalizationState::Failed)
+                    );
+                    let path = state
+                        .database
+                        .session_recording_path(&row.id)
+                        .unwrap()
+                        .unwrap();
+                    state
+                        .database
+                        .verify_source_iso_capture_ownership(&row.id, Path::new(&path))
+                        .unwrap();
+                    remux_session(
+                        state.clone(),
+                        RemuxSessionParams {
+                            session_id: row.id.clone(),
+                            ffmpeg_path: Some("ffmpeg".into()),
+                        },
+                    )
+                    .await
+                    .expect("owned interrupted role media remains recoverable");
+                }
+            }
+            std::fs::write(directory.join("recovery.json"), serde_json::to_vec_pretty(&serde_json::json!({"reconciled": reconciled, "secondReconcile": 0, "roles": rows.items})).unwrap()).unwrap();
+            return;
+        }
+        let stream_port = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_STREAM_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok());
+        let mut params = if stream_port.is_some() {
+            simulcast_split_params(true).0
+        } else {
+            base_params(true, false)
+        };
+        let shared_stream = test_force_shared_encoder_output_from_env();
+        if shared_stream {
+            assert!(stream_port.is_some());
+            params.streaming.as_mut().unwrap().targets.truncate(1);
+            params.simulcast = None;
+        }
+        if let Some(port) = stream_port {
+            for (index, target) in params
+                .streaming
+                .as_mut()
+                .unwrap()
+                .targets
+                .iter_mut()
+                .enumerate()
+            {
+                target.server_url = format!("rtmp://127.0.0.1:{}/live", port + index as u16);
+                target.stream_key = format!("iso-{index}");
+                target.platform = crate::streaming::StreamPlatform::Custom;
+            }
+        }
+
+        let screen_fixture_id = if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_WINDOW").is_some() {
+            "window:screencapturekit:4294967293"
+        } else {
+            "screen:screencapturekit:4294967294"
+        };
+        if screen_fixture_id.starts_with("window:") {
+            params.sources.screen_id = None;
+            params.sources.window_id = Some(screen_fixture_id.into());
+        } else {
+            params.sources.screen_id = Some(screen_fixture_id.into());
+            params.sources.window_id = None;
+        }
+        params.sources.camera_id = Some("camera:iso-runtime".into());
+        params.sources.microphone_id = Some("microphone:coreaudio:42".into());
+        let cancellation = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_CANCEL").ok();
+        let startup_failure =
+            std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_START_FAILURE").is_some();
+        let audio_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_AUDIO").unwrap_or_default();
+        if cancellation.is_some() || startup_failure || audio_case == "no-microphone" {
+            params.sources.microphone_id = None;
+        }
+        params.audio.microphone_muted = audio_case == "muted";
+        if audio_case == "gains" {
+            params.audio.microphone_gain_db = -6.0;
+            params.audio.system_audio_gain_db = 3.0;
+        }
+        let system_enabled = audio_case != "system-off";
+        let (microphone, microphone_tx, microphone_stats) =
+            crate::audio::test_controlled_native_audio_source();
+        state.warm_microphone.install(
+            42,
+            crate::session_audio::InitialAudioSource::warm(microphone),
+        );
+        params.output.ffmpeg_path =
+            Some(std::env::var("VIDEORC_SMOKE_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into()));
+        params.output.output_directory = Some(directory.display().to_string());
+        params.output.keep_original_mkv = true;
+        params.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            });
+        params.output.video.width = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_WIDTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1920);
+        params.output.video.height = params.output.video.width * 9 / 16;
+        params.output.video.fps = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        if params.output.video.fps == 60
+            && let Some(streaming) = params.streaming.as_mut()
+        {
+            streaming.default_output_preset = VideoPreset::StreamSafe1080p60;
+            for target in &mut streaming.targets {
+                if target.output_orientation
+                    != Some(crate::streaming::StreamOutputOrientation::Vertical)
+                {
+                    target.output_preset = Some(VideoPreset::StreamSafe1080p60);
+                }
+            }
+        }
+        params.audio.microphone_sync_offset_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_OFFSET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if shared_stream {
+            let plan = resolve_provider_stream_output_plan(&params).unwrap();
+            assert!(
+                !plan.separate_encoded_output_role,
+                "forced shared topology must be exercised"
+            );
+            assert!(
+                recording_compositor_stream_output_with_plan(
+                    &params,
+                    EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                    Some(&plan)
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        let idle_hidden_role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_START_HIDDEN").ok();
+        if let Some(role) = idle_hidden_role.as_deref() {
+            params.layout.layout_preset = if role == "camera" {
+                LayoutPreset::ScreenOnly
+            } else {
+                LayoutPreset::CameraOnly
+            };
+        }
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:iso-runtime",
+            &params.layout,
+            &params.output.video,
+        )
+        .await;
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            screen_fixture_id,
+            1,
+            1,
+            &params.output.video,
+        )
+        .await;
+        if let Some(role) = idle_hidden_role.as_deref() {
+            if role == "camera" {
+                crate::preview_camera::stop_preview_camera(&state).await;
+                assert!(
+                    crate::preview_camera::preview_camera_frame_source(&state)
+                        .await
+                        .is_none()
+                );
+            } else {
+                crate::preview_screen::stop_preview_screen(&state).await;
+                assert!(
+                    crate::preview_screen::preview_screen_frame_source(&state)
+                        .await
+                        .is_none()
+                );
+            }
+        }
+        let (system_tx, system_rx) = std::sync::mpsc::sync_channel(512);
+        let system_stats = Arc::new(crate::audio::AudioCaptureStats::default());
+        let producer_system_stats = system_stats.clone();
+        let system_sender = Arc::new(std::sync::Mutex::new(system_tx));
+        let producer_system_sender = system_sender.clone();
+        let capture_latency_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_CAPTURE_LATENCY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let producer_state = state.clone();
+        let (producer_stop, mut producer_stopping) = tokio::sync::oneshot::channel();
+        let stereo_right_gain = if audio_case == "stereo" { 0.5_f32 } else { 1.0 };
+        let live_controls = audio_case == "live-controls";
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ProducerTiming {
+            sequence: u64,
+            video_sequence: u64,
+            captured_ms: f64,
+            delivered_ms: f64,
+            video_captured_ms: f64,
+            camera_published_ms: f64,
+            screen_published_ms: f64,
+            camera_publish_stage_us: [u64; 4],
+            screen_publish_stage_us: [u64; 4],
+        }
+        crate::encoder_bridge::test_source_iso_trace_ms(Instant::now());
+        let producer = tokio::spawn(async move {
+            let mut timing_trace = Vec::with_capacity(512);
+            let source_origin = Instant::now();
+            let mut tick = tokio::time::interval_at(
+                tokio::time::Instant::from_std(source_origin + Duration::from_millis(10)),
+                Duration::from_millis(10),
+            );
+            loop {
+                // AudioFrame.captured_at is the last sample's clock boundary,
+                // not when an asynchronously scheduled callback delivered it.
+                let captured_at = tokio::select! {
+                    _ = &mut producer_stopping => break,
+                    at = tick.tick() => at.into_std(),
+                };
+                let delivered_at = Instant::now();
+                let source_tick = SourceIsoFixtureTick::at(
+                    source_origin,
+                    captured_at,
+                    Duration::from_millis(capture_latency_ms),
+                );
+                let sequence = source_tick.sequence;
+                let pulse_at = |sequence: u64| {
+                    if matches!(sequence % 290, 0..=49 | 80..=119 | 190..=209 | 250..=289) {
+                        255
+                    } else {
+                        100
+                    }
+                };
+                let pulse = if live_controls {
+                    255
+                } else {
+                    pulse_at(sequence - 1)
+                };
+                let samples = (0..480)
+                    .flat_map(|index| {
+                        let time = (source_tick.audio_start_sample + index) as f64 / 48_000.0;
+                        let value = if pulse == 255 {
+                            (time * 997.0 * std::f64::consts::TAU).sin() as f32 * 0.25
+                        } else {
+                            0.0
+                        };
+                        [value, value * stereo_right_gain]
+                    })
+                    .collect();
+                let system_samples = (0..480)
+                    .flat_map(|index| {
+                        let time = (source_tick.audio_start_sample + index) as f64 / 48_000.0;
+                        let value = if pulse == 255 {
+                            (time * 317.0 * std::f64::consts::TAU).sin() as f32 * 0.2
+                        } else {
+                            0.0
+                        };
+                        [value, value * stereo_right_gain]
+                    })
+                    .collect();
+                if producer_system_sender
+                    .lock()
+                    .unwrap()
+                    .try_send(crate::audio::AudioFrame {
+                        timestamp_micros: (sequence - 1) * 10_000,
+                        captured_at,
+                        sample_rate: 48_000,
+                        channels: 2,
+                        samples: system_samples,
+                    })
+                    .is_ok()
+                {
+                    producer_system_stats.record_captured_frames(480);
+                }
+                let frame = crate::audio::AudioFrame {
+                    timestamp_micros: (sequence - 1) * 10_000,
+                    captured_at,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    samples,
+                };
+                if microphone_tx.try_send(frame).is_ok() {
+                    microphone_stats.record_captured_frames(480);
+                }
+
+                let video_sequence = source_tick.video_sequence;
+                let video_pulse = pulse_at(video_sequence);
+                let video_captured_at = source_tick.video_captured_at;
+                let camera_publish_stage_us = crate::preview_camera::test_publish_camera_pixels(
+                    &producer_state,
+                    sequence,
+                    [(video_sequence % 32 * 6) as u8, 0, video_pulse, 255],
+                    video_captured_at,
+                )
+                .await;
+                let camera_published_at = Instant::now();
+                let screen_publish_stage_us = crate::preview_screen::test_publish_screen_pixels(
+                    &producer_state,
+                    sequence,
+                    [(video_sequence % 32 * 6) as u8, video_pulse, 0, 255],
+                    video_captured_at,
+                )
+                .await;
+                if timing_trace.len() < 4096 {
+                    timing_trace.push(ProducerTiming {
+                        sequence,
+                        video_sequence,
+                        camera_publish_stage_us,
+                        screen_publish_stage_us,
+                        captured_ms: crate::encoder_bridge::test_source_iso_trace_ms(captured_at),
+                        delivered_ms: crate::encoder_bridge::test_source_iso_trace_ms(delivered_at),
+                        video_captured_ms: crate::encoder_bridge::test_source_iso_trace_ms(
+                            video_captured_at,
+                        ),
+                        camera_published_ms: crate::encoder_bridge::test_source_iso_trace_ms(
+                            camera_published_at,
+                        ),
+                        screen_published_ms: crate::encoder_bridge::test_source_iso_trace_ms(
+                            Instant::now(),
+                        ),
+                    });
+                }
+            }
+            timing_trace
+        });
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(async {
+        if let Some(point) = if startup_failure { Some("precommit-failure") } else { cancellation.as_deref() } {
+            let receipt = crate::source_iso::test_pause_next_source_iso_start(point);
+            let start_state = state.clone();
+            let start_params = params.clone();
+            let start = tokio::spawn(async move { start_session(start_state, start_params).await });
+            let receipt = tokio::time::timeout(Duration::from_secs(15), receipt).await;
+            if startup_failure {
+                let failed = tokio::time::timeout(Duration::from_secs(8), start).await.unwrap().unwrap();
+                assert!(failed.is_err(), "known ISO failure must reject whole startup");
+            } else {
+                start.abort();
+                let _ = start.await;
+            }
+            let receipt = receipt.expect("production startup reaches cancellation boundary").unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(8), receipt.reaped).await.unwrap().unwrap(), "ISO children reaped");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if receipt.pids.iter().all(|pid| unsafe { libc::kill(*pid as i32, 0) } != 0) { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("all owned Combined and ISO muxers reaped");
+            assert!(receipt.fifos.iter().all(|path| !path.exists()), "every ISO FIFO retired");
+            let page = state.database.list_session_items_page(None, 20).unwrap();
+            assert_eq!(page.items.len(), 3);
+            for item in page.items.iter().filter(|item| item.recording_role.as_deref() != Some("combined")) {
+                assert_eq!(item.finalization_state, Some(crate::protocol::RecordingFinalizationState::Failed));
+            }
+            std::fs::write(directory.join("cancellation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                "point": point, "ownedPids": receipt.pids, "fifos": receipt.fifos, "reaped": true
+            })).unwrap()).unwrap();
+            // The same capture producers must admit a subsequent real Start.
+        }
+        state.live_source_switch.lock().unwrap().observe_devices(&[
+            crate::protocol::Device { id: "camera:iso-runtime".into(), name: "Controlled camera".into(), kind: crate::protocol::DeviceKind::Camera, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+            crate::protocol::Device { id: screen_fixture_id.into(), name: "Controlled capture".into(), kind: if screen_fixture_id.starts_with("window:") { crate::protocol::DeviceKind::Window } else { crate::protocol::DeviceKind::Screen }, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+        ]);
+        let start_click = Instant::now();
+        let start = start_session(state.clone(), params.clone()).await;
+        let start_ms = start_click.elapsed().as_secs_f64() * 1000.0;
+        if let Err(error) = &start { panic!("production ISO startup: {error:#}"); }
+        let status = start.unwrap();
+        let session_id = status.session_id.as_deref().unwrap();
+        eprintln!("ISO_RUNTIME_STAGE started pid={} session={session_id}", std::process::id());
+        let system = state.recording.lock().await.as_ref().unwrap().native_audio.as_ref().unwrap().system_audio();
+        system.set_echo_guard(false);
+        if system_enabled {
+        let system_stats = system_stats.clone();
+        let source = system.prepare(move || Ok(crate::session_audio::ProducerSource::system(
+            "system:iso-runtime".into(), "Controlled system audio".into(), system_rx,
+            system_stats, Arc::new(std::sync::Mutex::new(None)), Box::new(()),
+        )), Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap();
+        system.attach(source).await.expect("real system audio slot accepts controlled capture");
+        }
+
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_CRASH").is_some() {
+            let recording = state.recording.lock().await;
+            let active = recording.as_ref().unwrap();
+            let mut pids = vec![active.pid];
+            pids.extend_from_slice(active.source_iso.as_ref().unwrap().test_owned_pids());
+            let paths: Vec<String> = [session_id.to_owned(), format!("{session_id}-screen"), format!("{session_id}-camera")]
+                .iter().map(|id| state.database.session_recording_path(id).unwrap().unwrap()).collect();
+            // This receipt establishes owned process identity only. The parent
+            // waits for decoded live clusters before deliberately interrupting.
+            println!("ISO_CRASH_READY {}", serde_json::json!({"sessionId": session_id, "pids": pids, "paths": paths}));
+            use std::io::Write;
+            std::io::stdout().flush().unwrap();
+            drop(recording);
+            std::future::pending::<()>().await;
+        }
+        let mut control_intervals = Vec::new();
+        if live_controls {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            system.detach().await.expect("live system Off acknowledged");
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: -6.0, microphone_muted: false,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+            let off_at = active_capture_elapsed_seconds(&state).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            control_intervals.push(serde_json::json!({"start": off_at + 0.2, "duration": 0.4, "microphone": 0.25 * 10_f64.powf(-6.0 / 20.0), "system": 0.0}));
+            let (sender, receiver) = std::sync::mpsc::sync_channel(512);
+            *system_sender.lock().unwrap() = sender;
+            let source = system.prepare(move || Ok(crate::session_audio::ProducerSource::system(
+                "system:iso-runtime-readded".into(), "Controlled system audio".into(), receiver,
+                system_stats, Arc::new(std::sync::Mutex::new(None)), Box::new(()),
+            )), Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap();
+            system.attach(source).await.expect("live system On acknowledged");
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: true,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+            let mute_at = active_capture_elapsed_seconds(&state).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            control_intervals.push(serde_json::json!({"start": mute_at + 0.2, "duration": 0.4, "microphone": 0.0, "system": 0.2 * 10_f64.powf(f64::from(params.audio.system_audio_gain_db) / 20.0)}));
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: false,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+        }
+        let failure_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FAILURE").ok();
+        if failure_case.as_deref() == Some("capture-recovery") {
+            state.capture_recovery.lock().await.test_camera_recovery_failed("camera:iso-runtime", false);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(state.database.session_finalization_snapshot(&format!("{session_id}-camera")).unwrap().status, "running", "retryable capture failure must not end ISO");
+            state.capture_recovery.lock().await.test_camera_recovery_failed("camera:iso-runtime", true);
+        }
+        let remove_role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_REMOVE").ok();
+        let hidden_role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_HIDE").ok();
+        let hidden = hidden_role.is_some();
+        if remove_role.as_deref() == Some("screen") || hidden {
+            let mut layout = params.layout.clone();
+            layout.layout_preset = if hidden_role.as_deref() == Some("camera") {
+                crate::protocol::LayoutPreset::ScreenOnly
+            } else { crate::protocol::LayoutPreset::CameraOnly };
+            let applied = crate::live_layout::apply_layout_live(&state, crate::protocol::SceneLayoutApplyParams {
+                intent_id: None, simulcast_leg: false,
+                config: crate::protocol::SceneConfigParams { sources: params.sources.clone(), layout,
+                    video: Some(params.output.video.clone()), background: None,
+                    protected_overlay_window_ids: vec![], transition_ms: Some(100),
+                },
+            }).await.expect("real layout hides selected screen");
+            assert!(applied.applied);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if hidden {
+            let role = if hidden_role.as_deref() == Some("camera") { "camera" } else { "screen" };
+            assert_eq!(state.database.session_finalization_snapshot(&format!("{session_id}-{role}")).unwrap().status, "running", "hidden selected source keeps its ISO");
+        }
+        if let Some(role) = remove_role.as_deref() {
+            eprintln!("ISO_RUNTIME_STAGE source-off-begin role={role}");
+            let sources = crate::live_source_switch::get(&state, session_id).await.unwrap();
+            crate::live_source_switch::switch(&state, crate::live_source_switch::SourceSwitchParams {
+                session_id: session_id.into(), request_id: format!("runtime-{role}-off"),
+                expected_source_revision: sources.source_revision,
+                kind: if role == "camera" { crate::live_source_switch::SourceKind::Camera } else { crate::live_source_switch::SourceKind::Capture }, device_id: None,
+                protected_overlay_window_ids: vec![],
+            }).await.expect("authoritative source Off commits");
+            eprintln!("ISO_RUNTIME_STAGE source-off-committed role={role}");
+            if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_READD").is_some() {
+                if role == "camera" {
+                    crate::preview_camera::test_install_live_camera_for_layout(&state, "camera:iso-runtime", &params.layout, &params.output.video).await;
+                } else {
+                    crate::preview_screen::test_install_live_screen_generation(&state, screen_fixture_id, 2, 1, &params.output.video).await;
+                }
+                let sources = crate::live_source_switch::get(&state, session_id).await.unwrap();
+                crate::live_source_switch::switch(&state, crate::live_source_switch::SourceSwitchParams {
+                    session_id: session_id.into(), request_id: format!("runtime-{role}-readd"), expected_source_revision: sources.source_revision,
+                    kind: if role == "camera" { crate::live_source_switch::SourceKind::Camera } else { crate::live_source_switch::SourceKind::Capture },
+                    device_id: Some(if role == "camera" { "camera:iso-runtime" } else { screen_fixture_id }.into()), protected_overlay_window_ids: vec![],
+                }).await.expect("source re-add commits without restarting ended ISO");
+            }
+        }
+        let runtime_duration_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_DURATION_MS")
+            .ok().map(|value| value.parse::<u64>().expect("integer runtime duration")).unwrap_or(4000);
+        assert!((3000..=10000).contains(&runtime_duration_ms), "runtime duration outside 3-10s");
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_STOP_AFTER_REMOVE").is_none() {
+            tokio::time::sleep(Duration::from_millis(runtime_duration_ms - 2000)).await;
+        }
+        let mut terminal_events = state.events.subscribe();
+        let stop_boundary_seconds = active_capture_elapsed_seconds(&state).await.unwrap();
+        let stop_click = Instant::now();
+        eprintln!("ISO_RUNTIME_STAGE stop-begin");
+        let stop = stop_recording(state.clone()).await;
+        stop.expect("real Stop");
+        eprintln!("ISO_RUNTIME_STAGE stop-returned");
+        let terminal = wait_for_final_recording_status(&mut terminal_events, session_id)
+            .await.expect("Stop publishes its terminal authority after ISO teardown");
+        assert!(matches!(terminal.state, RecordingState::Idle), "{terminal:?}");
+        eprintln!("ISO_RUNTIME_STAGE terminal-idle");
+        if let Some(role) = hidden_role.as_deref().or(idle_hidden_role.as_deref()) {
+            if role == "camera" {
+                assert!(crate::preview_camera::preview_camera_frame_source(&state).await.is_none(), "Stop retires hidden Camera after its ISO ends");
+            } else {
+                assert!(crate::preview_screen::preview_screen_frame_source(&state).await.is_none(), "Stop retires hidden Screen after its ISO ends");
+            }
+        }
+        let idle_at = Instant::now();
+        let stop_ms = stop_click.elapsed().as_secs_f64() * 1000.0;
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let page = state.database.list_session_items_page(None, 20).unwrap();
+                let take = page
+                    .items
+                    .iter()
+                    .filter(|item| item.take_id.as_deref() == Some(session_id))
+                    .collect::<Vec<_>>();
+                if take.len() == 3
+                    && take.iter().all(|item| {
+                        item.finalization_state == Some(if failure_case.is_some() && item.recording_role.as_deref() == Some("camera") {
+                            crate::protocol::RecordingFinalizationState::Failed
+                        } else { crate::protocol::RecordingFinalizationState::Finalized })
+                    })
+                {
+                    break;
+                }
+                if take.iter().any(|item| {
+                    !(failure_case.is_some() && item.recording_role.as_deref() == Some("camera")) && item.finalization_state
+                        == Some(crate::protocol::RecordingFinalizationState::Failed)
+                }) {
+                    panic!("runtime take failed: {take:?}");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("all three exports finish");
+        let camera_final = state.database.session_finalization_snapshot(&format!("{session_id}-camera")).unwrap();
+        let camera_diagnostics: serde_json::Value = serde_json::from_str(&camera_final.diagnostics_json).unwrap();
+        if failure_case.as_deref() == Some("bridge") {
+            assert_eq!(camera_diagnostics["sourceIsoMuxerExitCode"], 0, "a failed encoder with clean muxer EOF stays failed");
+        }
+        let intervals = if let Some(role) = remove_role.as_deref() {
+            let row = state.database.session_finalization_snapshot(&format!("{session_id}-{role}")).unwrap();
+            let diagnostics: serde_json::Value = serde_json::from_str(&row.diagnostics_json).unwrap();
+            assert_eq!(diagnostics["sourceIsoOutcome"], "source-removed");
+            serde_json::json!({role: {"outcome": "source-removed", "startSeconds": 0,
+                "endSeconds": diagnostics["sourceIsoEndOffsetMs"].as_f64().unwrap() / 1000.0}})
+        } else { serde_json::json!({}) };
+        std::fs::write(directory.join("runtime-take.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "combinedPath": status.output_path, "sessionId": session_id,
+            "video": params.output.video, "layout": params.layout, "audio": params.audio, "offsetMs": params.audio.microphone_sync_offset_ms,
+            "intervals": intervals, "failureCase": failure_case, "systemAudio": system_enabled,
+            "microphoneSelected": params.sources.microphone_id.is_some(), "audioCase": audio_case, "stereoRightGain": stereo_right_gain, "controlIntervals": control_intervals,
+            "latency": {"cold": cancellation.is_none(), "clickToRecordingMs": start_ms,
+                "stopClickToIdleMs": stop_ms, "idleToFinalizedMs": idle_at.elapsed().as_secs_f64() * 1000.0,
+                "surface": "backend-session-coordinator"},
+
+            "orchestration": "start_session/stop_recording", "deviceAdapters": "controlled-frame-stores",
+            "stopBoundarySeconds": stop_boundary_seconds,
+            "runtimeDurationMs": runtime_duration_ms,
+            "sharedStream": shared_stream,
+        })).unwrap()).unwrap();
+        }).catch_unwind().await;
+        let _ = producer_stop.send(());
+        let producer_result = producer.await;
+        shutdown_capture_processes(state.clone()).await;
+        assert!(
+            crate::compositor::shutdown_compositor(&state).await,
+            "runtime compositor retires"
+        );
+        std::fs::write(
+            directory.join("compositor-timing.json"),
+            serde_json::to_vec_pretty(&crate::compositor::test_take_source_iso_composition_trace())
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("iso-teardown-timing.json"),
+            serde_json::to_vec_pretty(&crate::source_iso::test_take_source_iso_teardown_trace())
+                .unwrap(),
+        )
+        .unwrap();
+        let producer_timing = producer_result.expect("controlled producers retired");
+        std::fs::write(
+            directory.join("producer-timing.json"),
+            serde_json::to_vec_pretty(&producer_timing).unwrap(),
+        )
+        .unwrap();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     fn test_state() -> AppState {
@@ -26418,6 +29238,7 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            source_iso: None,
             #[cfg(target_os = "windows")]
             windows_d3d11_monitor: None,
             #[cfg(target_os = "windows")]
@@ -26434,6 +29255,8 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            overlay_session_shape: None,
+            accepts_banners: true,
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
@@ -27482,6 +30305,49 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_encode_never_sends_the_stream_at_a_smaller_recordings_quality() {
+        // Plan 0016: Linux's raw path has no separate stream role. Recording
+        // 640x360 with a 1080p destination used to collapse the stream to the
+        // recording's profile and stream it silently at 640x360.
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::Tutorial720p30);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6000;
+        params.streaming = Some(streaming);
+
+        let refused = resolve_provider_stream_output_plan_with_separate_roles(&params, false)
+            .expect_err("a smaller recording must not cap the livestream");
+        assert!(
+            refused
+                .to_string()
+                .contains("send the livestream at that quality"),
+            "{refused}"
+        );
+
+        // A lower recording bitrate at the same size is the same downgrade.
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            bitrate_kbps: 4000,
+            ..video_preset_defaults(VideoPreset::StreamSafe1080p30)
+        };
+        assert!(resolve_provider_stream_output_plan_with_separate_roles(&params, false).is_err());
+
+        // The recording following the stream (the renderer's re-plan) shares.
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        let plan = resolve_provider_stream_output_plan_with_separate_roles(&params, false).unwrap();
+        assert_eq!(
+            plan.stream_video,
+            video_preset_defaults(VideoPreset::StreamSafe1080p30)
+        );
+        assert!(!plan.separate_encoded_output_role);
+    }
+
+    #[test]
     fn mixed_providers_keep_youtube_rate_only_with_proven_separate_role() {
         let mut params = base_params(true, true);
         params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
@@ -28053,6 +30919,446 @@ mod tests {
 
         assert!(parse_fifo_output_failure("[flv @ 0x1] Error opening rtmp://x: nope").is_none());
         assert!(parse_fifo_output_failure("[fifo @ 0x1] something else").is_none());
+    }
+
+    // Plan 161: lines captured from the bundled FFmpeg 8.1.1 publishing to a
+    // local RTMP listener that was killed mid-stream and then restarted.
+    const YOUTUBE_URL: &str = "rtmp://a.rtmp.youtube.com/live2/abcd-efgh";
+    const TWITCH_URL: &str = "rtmp://live.twitch.tv/app/live_123";
+
+    fn two_leg_monitor() -> StreamLegMonitor {
+        StreamLegMonitor::new(vec![
+            (YOUTUBE_URL.to_string(), 0),
+            (TWITCH_URL.to_string(), 1),
+        ])
+    }
+
+    #[test]
+    fn ffmpeg_level_tags_are_stripped_after_the_context() {
+        assert_eq!(
+            strip_ffmpeg_log_levels(
+                "[fifo @ 0xac4c1c500] [info] Recovery failed: Connection refused"
+            ),
+            (
+                "[fifo @ 0xac4c1c500] Recovery failed: Connection refused".to_string(),
+                Some(FfmpegLogLevel::Info)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels(
+                "[aost#1:1/aac @ 0x703488900] [error] Error submitting a packet to the muxer: End of file"
+            ),
+            (
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+                    .to_string(),
+                Some(FfmpegLogLevel::Error)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels("[a @ 0x1] [b @ 0x2] [warning] nested"),
+            (
+                "[a @ 0x1] [b @ 0x2] nested".to_string(),
+                Some(FfmpegLogLevel::Warning)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels("[info] Press [q] to stop, [?] for help"),
+            (
+                "Press [q] to stop, [?] for help".to_string(),
+                Some(FfmpegLogLevel::Info)
+            )
+        );
+    }
+
+    #[test]
+    fn untagged_ffmpeg_lines_pass_through_unchanged() {
+        for line in [
+            "out_time_us=1500000",
+            "progress=continue",
+            "Command reply for stream 0: ret:0 res:",
+            "Enter command: <target>|all <time>|-1 <command>[ <argument>]",
+            "[fifo @ 0x7ef042a80] Error opening rtmp://127.0.0.1:11937/live/x: Connection refused",
+            "[tee @ 0x10] Slave muxer #2 failed: Connection refused, continuing with 2/3 slaves.",
+        ] {
+            assert_eq!(strip_ffmpeg_log_levels(line), (line.to_string(), None));
+        }
+    }
+
+    #[test]
+    fn a_stats_line_keeps_its_carriage_returns_and_most_severe_level() {
+        let (line, level) = strip_ffmpeg_log_levels(
+            "[info] frame=  360 fps=30 q=2.0 size=N/A time=00:00:12.00 bitrate=N/A speed=1.01x    \rframe=361",
+        );
+        assert_eq!(
+            line,
+            "frame=  360 fps=30 q=2.0 size=N/A time=00:00:12.00 bitrate=N/A speed=1.01x    \rframe=361"
+        );
+        assert_eq!(level, Some(FfmpegLogLevel::Info));
+        assert!(
+            is_ffmpeg_progress_noise(&line),
+            "stats stay progress noise after the tag is gone"
+        );
+        let stats = parse_ffmpeg_stream_health(&line).expect("stats still parse");
+        assert_eq!(stats.fps, Some(30.0));
+        assert_eq!(stats.speed, Some(1.01));
+
+        let (line, level) = strip_ffmpeg_log_levels(
+            "[info] frame=  1 fps=30 speed=1x    \r[flv @ 0xac4c1f200] [warning] Failed to update header with correct duration.",
+        );
+        assert_eq!(
+            line,
+            "frame=  1 fps=30 speed=1x    \r[flv @ 0xac4c1f200] Failed to update header with correct duration."
+        );
+        assert_eq!(level, Some(FfmpegLogLevel::Warning));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stderr_relay_routes_info_away_from_warning_readers() {
+        let (event_sender, mut events) = mpsc::channel(256);
+        let input = format!(
+            "[info] Output #1, fifo, to '{YOUTUBE_URL}':\n\
+             [fifo @ 0x1] [error] Error opening {YOUTUBE_URL}: Connection refused\n\
+             [fifo @ 0x1] [info] Recovery failed: Connection refused\n\
+             [info] frame=  1 fps=30 speed=1x    \rframe=2\n\
+             Command reply for stream 0: ret:0 res:\n"
+        );
+        let progress = FfmpegProgressBeacon::default();
+        relay_ffmpeg_stderr(
+            BufReader::new(input.as_bytes()),
+            event_sender,
+            None,
+            progress.clone(),
+        )
+        .await;
+
+        let mut received = Vec::new();
+        while let Some(event) = events.recv().await {
+            received.push(match event {
+                FfmpegStderrEvent::Line(line) => format!("line:{line}"),
+                FfmpegStderrEvent::Info(line) => format!("info:{line}"),
+                FfmpegStderrEvent::Eof => "eof".to_string(),
+                FfmpegStderrEvent::ReadFailed => "read-failed".to_string(),
+            });
+        }
+        assert_eq!(
+            received,
+            vec![
+                format!("info:Output #1, fifo, to '{YOUTUBE_URL}':"),
+                format!("line:[fifo @ 0x1] Error opening {YOUTUBE_URL}: Connection refused"),
+                "info:[fifo @ 0x1] Recovery failed: Connection refused".to_string(),
+                "line:frame=  1 fps=30 speed=1x    \rframe=2".to_string(),
+                "line:Command reply for stream 0: ret:0 res:".to_string(),
+                "eof".to_string(),
+            ]
+        );
+        let evidence = progress
+            .evidence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tail = evidence.tail.summary().unwrap_or_default();
+        assert!(
+            !tail.contains("Output #1") && !tail.contains("Recovery failed"),
+            "INFO lines must never reach the persisted stderr tail: {tail}"
+        );
+    }
+
+    #[test]
+    fn bridge_ffmpeg_tags_every_log_line_with_its_level() {
+        let args = bridge_ffmpeg_base_args();
+        assert_eq!(arg_value(&args, "-loglevel"), Some("level+info"));
+    }
+
+    #[test]
+    fn output_headers_map_ffmpeg_output_indexes_to_urls() {
+        assert_eq!(
+            parse_ffmpeg_output_header(&format!("Output #1, fifo, to '{YOUTUBE_URL}':")),
+            Some((1, YOUTUBE_URL))
+        );
+        assert_eq!(
+            parse_ffmpeg_output_header("Output #0, matroska, to '/tmp/session.mkv':"),
+            Some((0, "/tmp/session.mkv"))
+        );
+        assert!(parse_ffmpeg_output_header("Input #0, lavfi, from 'testsrc':").is_none());
+        assert!(parse_ffmpeg_output_header("  Stream #0:0 -> #1:0 (copy)").is_none());
+    }
+
+    #[test]
+    fn output_mux_failures_name_the_output_index() {
+        // The 2026-10-07 incident line (output #1 was YouTube).
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure(
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+            ),
+            Some(OutputMuxFailure {
+                output_index: 1,
+                reason: "End of file".to_string()
+            })
+        );
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure(
+                "[vost#3:0/copy @ 0x1] Error submitting a packet to the muxer: Broken pipe"
+            ),
+            Some(OutputMuxFailure {
+                output_index: 3,
+                reason: "Broken pipe".to_string()
+            })
+        );
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure("[out#2/fifo @ 0x1] Error muxing a packet"),
+            Some(OutputMuxFailure {
+                output_index: 2,
+                reason: String::new()
+            })
+        );
+        assert!(parse_ffmpeg_output_mux_failure("[flv @ 0x1] Failed to update header").is_none());
+        assert!(parse_ffmpeg_output_mux_failure("Error muxing a packet").is_none());
+    }
+
+    #[test]
+    fn a_dropped_leg_reconnects_and_resumes_on_its_own_target() {
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe(&format!("Output #1, fifo, to '{YOUTUBE_URL}':")),
+            None
+        );
+        for noise in [
+            "[flv @ 0xac4c1f200] Failed to update header with correct duration.",
+            "[tcp @ 0xac4c446e0] Connection to tcp://a.rtmp.youtube.com:1935?tcp_nodelay=0 failed: Connection refused",
+            "[rtmp @ 0xac4c20700] Cannot open connection tcp://a.rtmp.youtube.com:1935?tcp_nodelay=0",
+        ] {
+            assert_eq!(monitor.observe(noise), None, "{noise}");
+        }
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0xac4c1c500] Error opening {YOUTUBE_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xac4c1c500] Recovery failed: Connection refused"),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        // The success line can trail a `\r` stats segment.
+        assert_eq!(
+            monitor
+                .observe("frame=  1 fps=30 speed=1x    \r[fifo @ 0xac4c1c500] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 0 })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xac4c1c500] Maximal number of 3 recovery attempts reached."),
+            Some(StreamLegUpdate::Failed {
+                position: 0,
+                reason: "Videorc stopped reconnecting".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_fifo_is_reported_without_guessing_a_destination() {
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            Some(StreamLegUpdate::UnattributedReconnecting {
+                reason: "Broken pipe".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            None,
+            "one notice per outage"
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery successful"),
+            Some(StreamLegUpdate::UnattributedResumed)
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            Some(StreamLegUpdate::UnattributedReconnecting {
+                reason: "Broken pipe".to_string()
+            }),
+            "a later outage is a new notice"
+        );
+        // An immediate reconnect (the ingest dropped, the first retry worked).
+        assert_eq!(
+            monitor.observe("[fifo @ 0xddd] Recovery successful"),
+            Some(StreamLegUpdate::UnattributedResumed)
+        );
+        assert_eq!(
+            monitor.observe(
+                "[fifo @ 0xeee] Error opening rtmp://elsewhere/app/key: Connection refused"
+            ),
+            None,
+            "a URL that is not a destination of this session"
+        );
+    }
+
+    #[test]
+    fn a_mux_failure_fails_only_the_mapped_destination() {
+        let mut monitor = two_leg_monitor();
+        monitor.observe("Output #0, matroska, to '/tmp/session.mkv':");
+        monitor.observe(&format!("Output #1, fifo, to '{YOUTUBE_URL}':"));
+        monitor.observe(&format!("Output #2, fifo, to '{TWITCH_URL}':"));
+        assert_eq!(
+            monitor.observe(
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+            ),
+            Some(StreamLegUpdate::Failed {
+                position: 0,
+                reason: "The connection closed (End of file)".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[out#2/fifo @ 0x1] Error muxing a packet"),
+            Some(StreamLegUpdate::Failed {
+                position: 1,
+                reason: "The connection closed".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe(
+                "[aost#0:1/aac @ 0x1] Error submitting a packet to the muxer: End of file"
+            ),
+            None,
+            "output #0 is the local recording, not a destination"
+        );
+    }
+
+    #[test]
+    fn a_platform_only_demotes_a_live_leg_and_clears_its_own_warning() {
+        let not_receiving = PlatformStreamObservation::NotReceiving {
+            detail: "YouTube reports no data".to_string(),
+        };
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Live, &not_receiving),
+            Some((
+                StreamTargetState::Warning,
+                Some("Not receiving: YouTube reports no data".to_string())
+            ))
+        );
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Reconnecting, &not_receiving),
+            None,
+            "FFmpeg already says this leg is down"
+        );
+        assert_eq!(
+            platform_observation_transition(
+                StreamTargetState::Warning,
+                &PlatformStreamObservation::Receiving
+            ),
+            Some((StreamTargetState::Live, None))
+        );
+        assert_eq!(
+            platform_observation_transition(
+                StreamTargetState::Reconnecting,
+                &PlatformStreamObservation::Receiving
+            ),
+            None,
+            "only FFmpeg's own recovery clears a reconnect"
+        );
+        let ended = PlatformStreamObservation::Ended {
+            detail: "YouTube ended this broadcast".to_string(),
+        };
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Reconnecting, &ended),
+            Some((
+                StreamTargetState::Failed,
+                Some("YouTube ended this broadcast".to_string())
+            ))
+        );
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::NotConfigured, &ended),
+            None
+        );
+    }
+
+    #[test]
+    fn a_retry_loop_is_news_once_a_minute() {
+        let mut throttle = FfmpegRepeatThrottle::default();
+        let start = Instant::now();
+        let first =
+            "[rtmp @ 0xac4c20700] Cannot open connection tcp://127.0.0.1:19361?tcp_nodelay=0";
+        let again =
+            "[rtmp @ 0xac4c20980] Cannot open connection tcp://127.0.0.1:19361?tcp_nodelay=0";
+        assert!(throttle.admit(first, start));
+        assert!(
+            !throttle.admit(again, start + Duration::from_secs(2)),
+            "a fresh context pointer is the same line"
+        );
+        assert!(throttle.admit(
+            "[fifo @ 0x1] Error opening rtmp://127.0.0.1:19361/live/k: Connection refused",
+            start + Duration::from_secs(2)
+        ));
+        assert!(throttle.admit(again, start + FFMPEG_REPEAT_WINDOW));
+        assert_eq!(
+            ffmpeg_repeat_key("[tcp @ 0xac4c446e0] x 0x12 y"),
+            "[tcp @ 0x] x 0x y"
+        );
+    }
+
+    #[test]
+    fn stream_target_transitions_broadcast_state_changes_only() {
+        let shared = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: "s".to_string(),
+            targets: vec![
+                StreamTargetRuntime {
+                    target_id: "youtube".to_string(),
+                    platform: StreamPlatform::Youtube,
+                    label: "YouTube".to_string(),
+                    state: StreamTargetState::Live,
+                    message: None,
+                    redacted_url: None,
+                },
+                StreamTargetRuntime {
+                    target_id: "kick".to_string(),
+                    platform: StreamPlatform::Kick,
+                    label: "Kick".to_string(),
+                    state: StreamTargetState::NotConfigured,
+                    message: Some("No key".to_string()),
+                    redacted_url: None,
+                },
+            ],
+        }));
+        let (label, previous, snapshot) = transition_stream_target(
+            &shared,
+            0,
+            StreamTargetState::Reconnecting,
+            Some("Reconnecting: Connection refused".to_string()),
+        )
+        .expect("live to reconnecting is a change");
+        assert_eq!(label, "YouTube");
+        assert_eq!(previous, StreamTargetState::Live);
+        assert_eq!(snapshot.targets[0].state, StreamTargetState::Reconnecting);
+        assert!(
+            transition_stream_target(
+                &shared,
+                0,
+                StreamTargetState::Reconnecting,
+                Some("Reconnecting: Broken pipe".to_string()),
+            )
+            .is_none(),
+            "a retry with a new reason is not a broadcast"
+        );
+        assert_eq!(
+            stream_targets_snapshot_value(&shared).targets[0]
+                .message
+                .as_deref(),
+            Some("Reconnecting: Broken pipe"),
+            "but the authoritative snapshot keeps the latest reason"
+        );
+        assert!(
+            transition_stream_target(&shared, 1, StreamTargetState::Live, None).is_none(),
+            "a skipped destination never goes live"
+        );
+        let (_, previous, snapshot) =
+            transition_stream_target(&shared, 0, StreamTargetState::Live, None).unwrap();
+        assert_eq!(previous, StreamTargetState::Reconnecting);
+        assert_eq!(snapshot.targets[0].message, None);
     }
 
     #[test]
@@ -29731,6 +33037,13 @@ mod tests {
                 "single RTMP target must be fifo-muxer wrapped: {args:?}"
             );
             assert_eq!(arg_value(&args, "-fifo_format"), Some("flv"));
+            // Plan 161: an ingest that closes the connection (EOF) reconnects
+            // on a keyframe instead of closing the leg for good.
+            assert_eq!(arg_value(&args, "-attempt_recovery"), Some("1"));
+            assert_eq!(arg_value(&args, "-recover_any_error"), Some("1"));
+            assert_eq!(arg_value(&args, "-restart_with_keyframe"), Some("1"));
+            assert_eq!(arg_value(&args, "-drop_pkts_on_overflow"), Some("1"));
+            assert_eq!(arg_value(&args, "-max_recovery_attempts"), None);
             assert_eq!(
                 input_arg_value(&args, &fifo_path.display().to_string(), "-f"),
                 Some("mpegts")
@@ -29978,6 +33291,80 @@ mod tests {
             assert_eq!(
                 input_arg_value(&args, &fifo_path.display().to_string(), "-pix_fmt"),
                 Some("yuv420p")
+            );
+        }
+    }
+
+    #[test]
+    fn source_iso_nominal_rate_changes_only_the_local_copy_output_in_every_graph() {
+        let (mut params, _) = simulcast_split_params(true);
+        params.output.video.fps = 60;
+        let streaming = params.streaming.as_mut().unwrap();
+        streaming.targets[0].output_preset = Some(VideoPreset::StreamSafe1080p60);
+        let targets = stream_targets_from_streaming(streaming).unwrap();
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let output = Path::new("/tmp/nominal-rate.mkv");
+        let fifo = Path::new("/tmp/nominal-rate.ts");
+        let video = EncoderBridgeVideoOutput::VideoToolboxH264MpegTs;
+        let split = recording_compositor_stream_output(&params, video)
+            .unwrap()
+            .unwrap();
+        let graphs = [
+            bridge_compositor_ffmpeg_args(&capture, &params, Some(output), &[], fifo, video)
+                .unwrap(),
+            bridge_compositor_ffmpeg_args(&capture, &params, Some(output), &targets, fifo, video)
+                .unwrap(),
+            bridge_compositor_split_output_ffmpeg_args(
+                &capture,
+                &params,
+                Some(output),
+                &targets,
+                fifo,
+                Path::new("/tmp/nominal-stream.ts"),
+                video,
+                split,
+            )
+            .unwrap(),
+        ];
+        for original in graphs {
+            assert!(
+                !original.iter().any(|arg| arg == "-r:v"),
+                "ISO-off graph remains unchanged"
+            );
+            assert!(
+                !original.iter().any(|arg| arg == "tee"),
+                "native copy outputs have separate destination scopes"
+            );
+            let output_index = original
+                .iter()
+                .position(|arg| arg == &ffmpeg_file_path(output))
+                .unwrap();
+            let mut declared = original.clone();
+            crate::source_iso::configure_iso_local_muxer(&mut declared, output, 60).unwrap();
+            assert_eq!(
+                &declared[..output_index],
+                &original[..output_index],
+                "inputs, maps and codecs unchanged"
+            );
+            assert_eq!(
+                &declared[output_index..output_index + 6],
+                &[
+                    "-r:v",
+                    "60",
+                    "-flush_packets",
+                    "1",
+                    "-cluster_time_limit",
+                    "500"
+                ]
+            );
+            assert_eq!(
+                &declared[output_index + 6..],
+                &original[output_index..],
+                "all later stream outputs unchanged"
             );
         }
     }
@@ -30886,6 +34273,7 @@ mod tests {
                     layout: crate::protocol::default_layout_settings(),
                     output: OutputSettings {
                         keep_original_mkv: false,
+                        separate_source_recordings: None,
                         record_enabled: true,
                         stream_enabled: false,
                         output_directory: None,
@@ -31053,6 +34441,179 @@ mod tests {
         assert!(camera_cadence_mismatch_warning(None, 30).is_none());
         assert!(camera_cadence_mismatch_warning(Some(0.0), 30).is_none());
         assert!(camera_cadence_mismatch_warning(Some(f64::NAN), 30).is_none());
+    }
+
+    #[tokio::test]
+    async fn source_iso_failed_start_cleanup_waits_only_admitted_native_transitions() {
+        for replacement_take in [false, true] {
+            let state = test_state();
+            let native_start = state.source_transition_fence.begin();
+            let stores = crate::compositor::test_install_source_iso_frame_stores(&state).await;
+            let (cleanup_done, cleanup_complete) = tokio::sync::oneshot::channel();
+            let guard = SourceIsoCaptureStartupGuard {
+                state: Some(state.clone()),
+                batches: Some(stores.batches.clone()),
+                cleanup_done: Some(cleanup_done),
+            };
+            drop(guard);
+            assert!(
+                stores
+                    .batches
+                    .membership()
+                    .active
+                    .iter()
+                    .all(|active| !active)
+            );
+            // A later source transition cannot extend the captured cleanup wait.
+            let newer_transition = state.source_transition_fence.begin();
+            let mut params = base_params(true, false);
+            params.output.video.width = 64;
+            params.output.video.height = 36;
+            params.sources.camera_id = Some("camera:iso-runtime".into());
+            params.sources.screen_id = Some("screen:screencapturekit:4294967294".into());
+            params.layout.layout_preset = LayoutPreset::ScreenOnly;
+            let scene = scene_from_capture_config(SceneConfigParams {
+                sources: params.sources.clone(),
+                layout: params.layout.clone(),
+                video: Some(params.output.video.clone()),
+                background: None,
+                protected_overlay_window_ids: vec![],
+                transition_ms: None,
+            });
+            crate::compositor::update_compositor_scene_with_selected_sources(
+                &state,
+                CompositorSceneUpdateParams {
+                    revision: 1,
+                    scene: Some(scene),
+                    layout: params.layout.clone(),
+                    active_screen: None,
+                    transition_ms: None,
+                },
+                &params.sources,
+            )
+            .await;
+            let newer_stores = if replacement_take {
+                Some(crate::compositor::test_install_source_iso_frame_stores(&state).await)
+            } else {
+                None
+            };
+            // Late publication from the already-admitted start must be seen by
+            // rollback. The cleanup task cannot run past its fence before this.
+            crate::preview_camera::test_install_live_camera_for_layout(
+                &state,
+                "camera:iso-runtime",
+                &params.layout,
+                &params.output.video,
+            )
+            .await;
+            let camera = crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .unwrap();
+            drop(native_start);
+            let cleaned = tokio::time::timeout(Duration::from_secs(2), cleanup_complete).await;
+            drop(newer_transition);
+            cleaned
+                .expect("cleanup waits only the captured native transition")
+                .expect("cleanup completed");
+            if replacement_take {
+                assert_eq!(
+                    crate::preview_camera::preview_camera_frame_source(&state)
+                        .await
+                        .unwrap()
+                        .generation(),
+                    camera.generation(),
+                    "new take owns the live source"
+                );
+            } else {
+                assert!(
+                    crate::preview_camera::preview_camera_frame_source(&state)
+                        .await
+                        .is_none(),
+                    "late hidden native completion is retired"
+                );
+            }
+            if let Some(stores) = newer_stores {
+                for role in 0..3 {
+                    stores.batches.retire(role, None);
+                }
+            }
+            crate::preview_camera::stop_preview_camera(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn source_iso_startup_reacquires_idle_hidden_source_and_reuses_visible_generation() {
+        for hidden_camera in [false, true] {
+            let state = test_state();
+            let mut params = base_params(true, false);
+            params.output.video.width = 64;
+            params.output.video.height = 36;
+            params.sources.camera_id = Some("camera:iso-runtime".into());
+            params.sources.screen_id = Some("screen:screencapturekit:4294967294".into());
+            params.layout.layout_preset = if hidden_camera {
+                LayoutPreset::ScreenOnly
+            } else {
+                LayoutPreset::CameraOnly
+            };
+            crate::preview_camera::test_install_live_camera_for_layout(
+                &state,
+                "camera:iso-runtime",
+                &params.layout,
+                &params.output.video,
+            )
+            .await;
+            crate::preview_screen::test_install_live_screen_generation(
+                &state,
+                params.sources.screen_id.as_deref().unwrap(),
+                1,
+                1,
+                &params.output.video,
+            )
+            .await;
+            let camera_generation = crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .unwrap()
+                .generation();
+            let screen_generation = crate::preview_screen::preview_screen_frame_source(&state)
+                .await
+                .unwrap()
+                .generation();
+            if hidden_camera {
+                crate::preview_camera::stop_preview_camera(&state).await;
+            } else {
+                crate::preview_screen::stop_preview_screen(&state).await;
+            }
+            let prepared = prepare_source_iso_selected_capture(&state, &params, "ffmpeg").await;
+            let camera = crate::preview_camera::preview_camera_frame_source(&state).await;
+            let screen = crate::preview_screen::preview_screen_frame_source(&state).await;
+            crate::preview_camera::stop_preview_camera(&state).await;
+            crate::preview_screen::stop_preview_screen(&state).await;
+            prepared.unwrap();
+            let camera = camera.expect("selected Camera reacquired");
+            let screen = screen.expect("selected Screen reacquired");
+            assert_eq!(camera.generation() == camera_generation, !hidden_camera);
+            assert_eq!(screen.generation() == screen_generation, hidden_camera);
+            let scene = scene_from_capture_config(SceneConfigParams {
+                sources: params.sources.clone(),
+                layout: params.layout.clone(),
+                video: Some(params.output.video.clone()),
+                background: None,
+                protected_overlay_window_ids: vec![],
+                transition_ms: None,
+            });
+            let visible = recording_startup_source_requirements(&scene);
+            assert_eq!(
+                source_iso_startup_capture_requirements(visible, None),
+                visible,
+                "ISO-off retains visible source requirements"
+            );
+            let iso = source_iso_startup_capture_requirements(visible, Some(&params.sources));
+            assert!(iso.require_camera_source && iso.require_screen_source);
+            assert_ne!(
+                visible, iso,
+                "omitted source readiness belongs to ISO barrier, not Combined scene proof"
+            );
+        }
     }
 
     #[test]
@@ -32719,6 +36280,7 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            source_iso: None,
             #[cfg(target_os = "windows")]
             windows_d3d11_monitor: None,
             #[cfg(target_os = "windows")]
@@ -32738,6 +36300,8 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            overlay_session_shape: None,
+            accepts_banners: true,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,
@@ -32868,14 +36432,80 @@ mod tests {
     #[test]
     fn default_recordings_dir_uses_videorc_media_folder() {
         let path = default_recordings_dir();
-        let media_component = if cfg!(target_os = "windows") {
-            "Videos"
-        } else {
-            "Movies"
-        };
-
-        assert!(path.iter().any(|c| c == media_component));
+        if cfg!(target_os = "windows") {
+            assert!(path.iter().any(|c| c == "Videos"));
+        } else if cfg!(target_os = "macos") {
+            assert!(path.iter().any(|c| c == "Movies"));
+        }
         assert!(path.ends_with(PathBuf::from("Videorc").join("Recordings")));
+    }
+
+    #[test]
+    fn screen_preview_failure_detail_ends_with_one_full_stop() {
+        assert_eq!(
+            screen_preview_failure_detail(Some(
+                "Timed out after 59s while starting screen capture."
+            )),
+            " Screen preview reported: Timed out after 59s while starting screen capture."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(Some("Portal closed")),
+            " Screen preview reported: Portal closed."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(Some(" . ")),
+            " Screen preview reported: failed without a message."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(None),
+            " Screen preview reported: failed without a message."
+        );
+    }
+
+    // POSIX paths only: on Windows "/home/streamer" is not absolute and joins
+    // with `\`, so the XDG rules cannot be expressed there (they never run
+    // there either).
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_recordings_go_to_the_xdg_videos_folder_unless_movies_already_has_takes() {
+        let home = Path::new("/home/streamer");
+        let recordings = |dir: &str| PathBuf::from(dir).join("Videorc").join("Recordings");
+        // Nothing configured: ~/Videos, never a macOS ~/Movies.
+        assert_eq!(
+            linux_default_recordings_dir(home, None, None, false),
+            recordings("/home/streamer/Videos")
+        );
+        // user-dirs.dirs, with $HOME and a localized name.
+        let user_dirs = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_VIDEOS_DIR=\"$HOME/Vidéos\"\n";
+        assert_eq!(
+            linux_default_recordings_dir(home, None, Some(user_dirs), false),
+            recordings("/home/streamer/Vidéos")
+        );
+        // The environment wins over the file.
+        assert_eq!(
+            linux_default_recordings_dir(
+                home,
+                Some(PathBuf::from("/data/clips")),
+                Some(user_dirs),
+                false
+            ),
+            recordings("/data/clips")
+        );
+        // A videos folder set to home (disabled) or relative falls back.
+        assert_eq!(
+            linux_default_recordings_dir(
+                home,
+                Some(PathBuf::from("clips")),
+                Some("XDG_VIDEOS_DIR=\"$HOME/\""),
+                false
+            ),
+            recordings("/home/streamer/Videos")
+        );
+        // Earlier takes in ~/Movies/Videorc/Recordings keep that folder.
+        assert_eq!(
+            linux_default_recordings_dir(home, None, Some(user_dirs), true),
+            recordings("/home/streamer/Movies")
+        );
     }
 
     // Regression (2026-07-06): a Settings value of "~/Movies/…" was used as a
@@ -35399,6 +39029,39 @@ mod tests {
     }
 
     #[test]
+    fn the_raw_path_refuses_a_vertical_leg_it_cannot_encode() {
+        use crate::streaming::StreamOutputOrientation as Orientation;
+        let mut params = base_params(false, true);
+        params.streaming = Some(streaming_with_orientations(&[
+            Orientation::Horizontal,
+            Orientation::Vertical,
+        ]));
+        params.simulcast = Some(simulcast_leg());
+        let error = recording_compositor_stream_output_with_plan(
+            &params,
+            EncoderBridgeVideoOutput::RawYuv420p,
+            None,
+        )
+        .expect_err("a raw bridge cannot produce the vertical leg");
+        assert!(
+            error.to_string().contains("vertical destinations"),
+            "{error}"
+        );
+
+        // Without a vertical leg the raw path still has nothing to add.
+        params.simulcast = None;
+        assert_eq!(
+            recording_compositor_stream_output_with_plan(
+                &params,
+                EncoderBridgeVideoOutput::RawYuv420p,
+                None,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn vertical_targets_require_the_simulcast_leg_and_vice_versa() {
         use crate::streaming::StreamOutputOrientation as Orientation;
         // Vertical destination without a simulcast leg: refuse with the arm copy.
@@ -35504,6 +39167,36 @@ mod tests {
         params.simulcast = Some(simulcast_leg());
         let targets = stream_targets_from_streaming(&streaming).unwrap();
         (params, targets)
+    }
+
+    #[test]
+    fn source_iso_shared_input_uses_bounded_probe_without_changing_iso_off_streams() {
+        for (streaming, iso, expected) in [
+            (false, false, "4096"),
+            (true, false, "65536"),
+            (true, true, "4096"),
+        ] {
+            let mut params = base_params(true, streaming);
+            params.output.separate_source_recordings =
+                Some(crate::protocol::SeparateSourceRecordingsSettings {
+                    enabled: iso,
+                    keep_combined: true,
+                });
+            let mut args = Vec::new();
+            append_bridge_recording_input_args(
+                &mut args,
+                &CaptureInputs {
+                    video: VideoInput::TestPattern,
+                    camera_index: None,
+                    microphone: None,
+                },
+                &params,
+                Path::new("/tmp/owned-test-video"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            );
+            let index = args.iter().position(|arg| arg == "-probesize").unwrap();
+            assert_eq!(args[index + 1], expected);
+        }
     }
 
     #[test]
@@ -38264,6 +41957,22 @@ mod low_end_windows_recording_tests {
     }
 
     #[test]
+    fn a_forced_stream_only_stop_never_mentions_a_file() {
+        // Linux plan 0017: a stream-only session has no recovery media.
+        let (stage, code, message) =
+            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)", false);
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-stop-forced");
+        assert!(!message.contains("file"), "{message}");
+        assert!(!message.contains("recovery"), "{message}");
+        assert!(message.contains("forced it to stop"), "{message}");
+        assert!(
+            message.contains("(FFmpeg exit: signal: 9 (SIGKILL))"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn forced_stop_is_never_reported_as_an_encoder_failure() {
         let (stage, code, message) = classify_failed_ffmpeg_exit(
             true,
@@ -38272,6 +41981,7 @@ mod low_end_windows_recording_tests {
                 "recording raw-video encoder output stopped: The pipe is being closed. (os error 232)",
             ),
             "exit code: 1",
+            true,
         );
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
@@ -38305,7 +42015,8 @@ mod low_end_windows_recording_tests {
 
     #[test]
     fn forced_stop_without_bridge_error_preserves_windows_exit() {
-        let (stage, code, message) = classify_failed_ffmpeg_exit(true, true, None, "exit code: 1");
+        let (stage, code, message) =
+            classify_failed_ffmpeg_exit(true, true, None, "exit code: 1", true);
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
         assert_forced_stop_message_reports_only_confirmed_outcome(&message, "exit code: 1");
@@ -38318,6 +42029,7 @@ mod low_end_windows_recording_tests {
             true,
             Some("Broken pipe (os error 32)"),
             "signal: 9 (SIGKILL)",
+            true,
         );
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
@@ -38329,7 +42041,7 @@ mod low_end_windows_recording_tests {
     #[test]
     fn forced_stop_without_bridge_error_preserves_sigkill_exit() {
         let (stage, code, message) =
-            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)");
+            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)", true);
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
         assert_forced_stop_message_reports_only_confirmed_outcome(&message, "signal: 9 (SIGKILL)");
@@ -38339,20 +42051,21 @@ mod low_end_windows_recording_tests {
     fn unsolicited_failures_keep_their_original_owner() {
         // Bridge died on its own: no stop intent, no escalation.
         let (stage, code, message) =
-            classify_failed_ffmpeg_exit(false, false, Some("FIFO timed out"), "exit code: 1");
+            classify_failed_ffmpeg_exit(false, false, Some("FIFO timed out"), "exit code: 1", true);
         assert_eq!(stage, RecordingPipelineStage::VideoEncoder);
         assert_eq!(code, "encoder-bridge-failed");
         assert!(message.contains("FIFO timed out"));
         // Bridge failed first and the user then pressed Stop, but FFmpeg left
         // by itself: still the bridge's failure, not a forced stop.
         let (_, code, _) =
-            classify_failed_ffmpeg_exit(true, false, Some("FIFO timed out"), "exit code: 1");
+            classify_failed_ffmpeg_exit(true, false, Some("FIFO timed out"), "exit code: 1", true);
         assert_eq!(code, "encoder-bridge-failed");
         // An escalation without a user stop cannot happen through the ladder;
         // never let the flag alone relabel a crash.
-        let (_, code, _) = classify_failed_ffmpeg_exit(false, true, None, "exit code: 1");
+        let (_, code, _) = classify_failed_ffmpeg_exit(false, true, None, "exit code: 1", true);
         assert_eq!(code, "ffmpeg-exit");
-        let (stage, code, _) = classify_failed_ffmpeg_exit(false, false, None, "exit code: 1");
+        let (stage, code, _) =
+            classify_failed_ffmpeg_exit(false, false, None, "exit code: 1", true);
         assert_eq!(
             (stage, code),
             (RecordingPipelineStage::Muxer, "ffmpeg-exit")
@@ -38376,8 +42089,11 @@ mod low_end_windows_recording_tests {
             "progress cannot hold the ladder open forever"
         );
         // TERM + KILL must still land inside the stop RPC's finalize window so
-        // the first Stop click reaches a terminal status.
+        // the first Stop click reaches a terminal status, with or without a
+        // live RTMP leg (plan 0017: streams drain too).
         assert!(STOP_TERM_DRAIN_MAX + STOP_KILL_DELAY < STOP_FINALIZE_TIMEOUT);
+        assert!(STOP_TERM_DRAIN_MAX + STOP_KILL_DELAY_STREAMING < STOP_FINALIZE_TIMEOUT);
+        assert!(STOP_TERM_DELAY_STREAMING < STOP_TERM_DRAIN_MAX);
     }
 
     #[test]

@@ -186,6 +186,21 @@ describe('stats bar items (plan 057)', () => {
     })
   })
 
+  it('shows no chat pace while no platform reads chat, with the reason (plan 174 H-10)', () => {
+    const offline = { ...provider('twitch'), state: 'reconnecting' as const }
+    const items = statItems({
+      dashboard: live(),
+      viewerSample: null,
+      messages: [],
+      providers: [offline],
+      nowMs: T0 + 5_000
+    })
+    const chat = find(items, 'chat')
+    expect(chat).toMatchObject({ value: '–', tone: 'subtle', description: "Chat isn't connected" })
+    expect(chat?.unit).toBeUndefined()
+    expect(chat?.value).not.toBe('0')
+  })
+
   it('reports viewers with the peak on hover, greyed once stale', () => {
     let dashboard = reduceDashboardViewers(live(), sample(30, 900), at(30))
     dashboard = reduceDashboardViewers(dashboard, sample(60, 1234), at(60))
@@ -240,7 +255,7 @@ describe('stats bar items (plan 057)', () => {
     expect(viewers?.value).toBe('12')
     expect(viewers?.details).toEqual([
       { label: 'Twitch', value: '12', platform: 'twitch' },
-      { label: 'Kick', value: 'waiting', platform: 'kick' },
+      { label: 'Kick', value: 'Waiting', platform: 'kick' },
       { label: 'Peak', value: '12' }
     ])
   })
@@ -557,8 +572,10 @@ describe('stats bar items (plan 057)', () => {
         providers: [provider('twitch')],
         nowMs: T0
       })
-      expect(find(items, 'supporters')).toMatchObject({ value: '–' })
-      expect(find(items, 'tips')).toMatchObject({ value: '–' })
+      // Unmeasured subs and tips are not in the bar at all (plan 174 V-8):
+      // never a run of placeholders, and never a retained row's count.
+      expect(find(items, 'supporters')).toBeUndefined()
+      expect(find(items, 'tips')).toBeUndefined()
       expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '–' })
     }
   })

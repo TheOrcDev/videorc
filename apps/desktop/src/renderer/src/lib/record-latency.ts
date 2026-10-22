@@ -6,6 +6,8 @@
 // transition closes the sample. `starting` / `stopping` fill the intermediate
 // fields when they arrive first.
 
+import { NO_VALUE } from './format'
+
 export type RecordLatencyKind = 'start' | 'stop'
 export type RecordLatencyOrigin = 'click' | 'session-call'
 
@@ -168,15 +170,15 @@ export function slowestTimelinePhase(
 }
 
 export function formatLatencyMs(value: number | undefined | null): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value)} ms` : '--'
+  return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value)} ms` : NO_VALUE
 }
 
 export function formatTimelineSummary(
   snapshot: RecordLatencyTimelineSnapshot | undefined | null
 ): string {
-  if (!snapshot) return '--'
+  if (!snapshot) return NO_VALUE
   const cold = snapshot.cold === true ? ' · cold' : snapshot.cold === false ? ' · warm' : ''
   const origin =
-    snapshot.clickToOriginMs !== undefined ? ` · ${snapshot.clickToOriginMs} ms click→backend` : ''
+    snapshot.clickToOriginMs !== undefined ? ` · ${snapshot.clickToOriginMs} ms click→engine` : ''
   return `${formatLatencyMs(snapshot.totalMs)} · ${snapshot.outcome}${cold}${origin}`
 }

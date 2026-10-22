@@ -1,6 +1,22 @@
-import { Fragment, type CSSProperties, type ReactElement, type ReactNode, type Ref } from 'react'
+import {
+  Fragment,
+  useEffect,
+  useId,
+  useRef,
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode,
+  type Ref
+} from 'react'
 
-import { commentCanHighlight } from '@/lib/live-chat-view'
+import { gifTitle } from '../../../shared/chat-gif'
+
+import {
+  CHAT_PLATFORM_LABELS,
+  commentCanHighlight,
+  commentRowTint,
+  type CommentRowTint
+} from '@/lib/live-chat-view'
 export { commentCanHighlight } from '@/lib/live-chat-view'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -8,11 +24,10 @@ import {
   CopyIcon,
   DeleteIcon,
   ExternalLinkIcon,
+  LivestreamIcon,
   MicrophoneIcon,
-  PreviewIcon,
   SendIcon,
-  SparkleIcon,
-  SpinnerIcon
+  SparkleIcon
 } from '@/components/icons'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -25,21 +40,27 @@ import {
   ContextMenuLabel,
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
+import { Spinner } from '@/components/ui/spinner'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type {
   CohostFlag,
   CommentHighlightState,
   LiveChatAuthorAffiliation,
+  LiveChatAuthorVerified,
   LiveChatMessage,
   LiveChatMessageFragment
 } from '@/lib/backend'
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
+import { clickSelectsText } from '@/lib/chat-list-keys'
 import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
+import { isGifFragment, splitGifFragments, useChatGifMode } from '@/lib/chat-gifs'
 import { copyChatLink, copyChatText, openChatLink } from '@/lib/chat-link-actions'
 import { chatLinksIn, splitLinks, type ChatLinkPiece } from '@/lib/chat-links'
 import { noticeViewerWords } from '@/lib/chat-notice'
 import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
+import { X_VERIFIED_LABEL, X_VERIFIED_URL } from '@/lib/x-mark'
 
 export type CommentHighlightPhase = 'idle' | 'applying' | 'live' | 'failed'
 export type CommentTimestamps = 'always' | 'hover'
@@ -91,7 +112,80 @@ export function formatCommentTime(iso: string): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-/** The on-stream badge, shared by chat and Activity rows (plan 095, S2). */
+/**
+ * A chip's explanation, on hover (plan 174 S1.10): never a native `title`.
+ * The chip stays plain text inside its row; the words it stands for are the
+ * tooltip.
+ */
+function ChipHint({ hint, children }: { hint: string; children: ReactElement }): ReactElement {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{hint}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/**
+ * Why a highlight did not land, in words (plan 174 S1.10, H-16): a failed
+ * show's reason, or the failed action on a message already on stream. It is
+ * the row's visible secondary line while the badge says Failed, never hover
+ * text. Null when nothing failed or no reason came back.
+ */
+export function highlightProblem(status: CommentHighlightPresentation): string | null {
+  if (status.phase === 'failed') return status.reason?.trim() || null
+  if (status.phase === 'live') return status.commandError?.trim() || null
+  return null
+}
+
+/**
+ * What a removal did when it did not simply remove (plan 174 S1.10, H-16):
+ * hidden only in Videorc, not removed, or unconfirmed, as the row's visible
+ * secondary line. A plain removal says "Removed" and keeps its outcome on
+ * the chip's hover.
+ */
+export function removalOutcomeLine(status: RemovalStatusView | null | undefined): string | null {
+  if (!status || status.kind === 'removing' || status.kind === 'removed') return null
+  return status.detail?.trim() || null
+}
+
+/** A row's outcome lines under its text: a failed highlight, then a removal. */
+function RowOutcomes({
+  highlight,
+  removal
+}: {
+  highlight: CommentHighlightPresentation
+  removal?: RemovalStatusView | null
+}): ReactElement | null {
+  const problem = highlightProblem(highlight)
+  const removed = removalOutcomeLine(removal)
+  if (!problem && !removed) return null
+  return (
+    <>
+      {problem ? (
+        <span
+          className="text-left text-xs text-muted-foreground"
+          data-slot="highlight-problem"
+          data-testid="highlight-failed-reason"
+        >
+          {problem}
+        </span>
+      ) : null}
+      {removed ? (
+        <span
+          className="text-left text-xs text-muted-foreground"
+          data-slot="removal-outcome"
+          data-testid="removal-outcome"
+        >
+          {removed}
+        </span>
+      ) : null}
+    </>
+  )
+}
+
+/** The on-stream badge, shared by chat and Activity rows (plan 095, S2). The
+ * reason for a failure is the row's own line (`highlightProblem`). */
 export function HighlightStatus({
   status
 }: {
@@ -99,21 +193,17 @@ export function HighlightStatus({
 }): ReactElement | null {
   switch (status.phase) {
     case 'applying':
-      return <Badge variant="secondary">Applying…</Badge>
+      return <Badge>Applying…</Badge>
     case 'live':
       return (
         <span className="flex items-center gap-1">
           <Badge variant="success">On stream</Badge>
-          {status.commandError ? (
-            <Badge title={status.commandError} variant="destructive">
-              Action failed
-            </Badge>
-          ) : null}
+          {status.commandError ? <Badge variant="destructive">Action failed</Badge> : null}
         </span>
       )
     case 'failed':
       return (
-        <Badge title={status.reason} variant="destructive">
+        <Badge data-testid="highlight-failed" variant="destructive">
           Failed
         </Badge>
       )
@@ -124,9 +214,10 @@ export function HighlightStatus({
 
 /**
  * A removal's state on its row (plan 140, S6): "Removing…" while it runs,
- * then "Removed" or "Hidden in Videorc" (whose tooltip says viewers may still
- * see it, and why), or a quiet "Not removed" / "Unconfirmed" with the
- * outcome on hover. Outside the struck-through text, so it stays readable.
+ * then "Removed" or "Hidden in Videorc", or a quiet "Not removed" /
+ * "Unconfirmed". Anything but a plain removal says what happened on the row's
+ * own line (`removalOutcomeLine`); "Removed" keeps its outcome on hover.
+ * Outside the struck-through text, so it stays readable.
  */
 export function RemovalStatus({
   status
@@ -136,32 +227,31 @@ export function RemovalStatus({
   if (!status) return null
   if (status.kind === 'removing') {
     return (
-      <Badge data-removal={status.kind} data-slot="removal-status" variant="secondary">
-        <SpinnerIcon
-          aria-hidden
-          className="motion-safe:animate-spin"
-          data-icon="inline-start"
-          weight="bold"
-        />
+      <Badge data-removal={status.kind} data-testid="removal-status">
+        <Spinner aria-hidden data-icon="inline-start" weight="bold" />
         {status.label}
       </Badge>
     )
   }
-  return (
+  const chip = (
     <Badge
       className="shrink-0"
       data-removal={status.kind}
-      data-slot="removal-status"
-      title={status.detail ?? undefined}
+      data-testid="removal-status"
       variant="outline"
     >
       {status.label}
     </Badge>
   )
+  return status.kind === 'removed' && status.detail ? (
+    <ChipHint hint={status.detail}>{chip}</ChipHint>
+  ) : (
+    chip
+  )
 }
 
 /**
- * What Orcle says about this comment. A flag names its kind (plus who it is
+ * What Buddy says about this comment. A flag names its kind (plus who it is
  * aimed at, or the chat rule it broke) and, at most, LABELS a suggested
  * action: the flag itself never moderates; only the streamer's "Remove from
  * chat" does. "Suggested" marks a comment worth showing; it sits inside the
@@ -181,40 +271,39 @@ function CohostMarks({
     const action = cohostFlagActionLabel(flag)
     return (
       <span className="flex min-w-0 items-center gap-1" data-slot="cohost-comment-flag">
-        <Badge
-          className={cn('max-w-40', flag.severity !== 'high' && 'text-subtle')}
-          title={cohostFlagDetail(flag)}
-          variant={flag.severity === 'high' ? 'destructive' : 'outline'}
-        >
-          <span className="truncate">{cohostFlagChipLabel(flag)}</span>
-        </Badge>
-        {action ? <span className="shrink-0 text-[10px] text-subtle">{action}</span> : null}
+        <ChipHint hint={cohostFlagDetail(flag)}>
+          <Badge
+            className="max-w-40"
+            variant={flag.severity === 'high' ? 'destructive' : 'outline'}
+          >
+            <span className="truncate">{cohostFlagChipLabel(flag)}</span>
+          </Badge>
+        </ChipHint>
+        {action ? (
+          <span className="shrink-0 text-[11px] text-muted-foreground">{action}</span>
+        ) : null}
       </span>
     )
   }
   if (spotlight) {
     // Pull-up (plan 060): private to the streamer, never on stream by itself.
     return (
-      <Badge
-        data-slot="cohost-comment-spotlight"
-        title="Orcle heard you talking about this message"
-        variant="outline"
-      >
-        <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
-        Talking about this
-      </Badge>
+      <ChipHint hint="Buddy heard you talking about this message">
+        <Badge data-testid="cohost-comment-spotlight" variant="outline">
+          <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
+          Talking about this
+        </Badge>
+      </ChipHint>
     )
   }
   if (!suggested) return null
   return (
-    <Badge
-      data-slot="cohost-comment-suggested"
-      title="Orcle suggests showing this message on the stream"
-      variant="outline"
-    >
-      <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
-      Suggested
-    </Badge>
+    <ChipHint hint="Buddy suggests showing this message on the stream">
+      <Badge data-testid="cohost-comment-suggested" variant="outline">
+        <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
+        Suggested
+      </Badge>
+    </ChipHint>
   )
 }
 
@@ -225,6 +314,17 @@ const ROLE_LABELS: Record<string, string> = {
   member: 'Member'
 }
 
+/**
+ * Row backgrounds (plan 154, D2, D3): one tint per row, never two. A paid
+ * row is a fill and a hairline ring; a member's row is one notch quieter,
+ * a fill alone, so a member's Super Chat still reads louder.
+ */
+const ROW_TINT_CLASS: Record<Exclude<CommentRowTint, null>, string> = {
+  paid: 'bg-warning/10 ring-1 ring-warning/30',
+  spotlight: 'bg-accent',
+  member: 'bg-member/8'
+}
+
 /** Role tags (owner, moderator, VIP, member) as glass tag chips (plan 055, D3). */
 function RoleTags({ roles }: { roles: readonly string[] }): ReactElement | null {
   const labels = [...new Set(roles.map((role) => ROLE_LABELS[role]).filter(Boolean))]
@@ -232,7 +332,7 @@ function RoleTags({ roles }: { roles: readonly string[] }): ReactElement | null 
   return (
     <>
       {labels.map((label) => (
-        <Badge key={label} className="shrink-0" data-slot="comment-role" variant="outline">
+        <Badge key={label} className="shrink-0" data-testid="comment-role" variant="outline">
           {label}
         </Badge>
       ))}
@@ -253,14 +353,36 @@ function AffiliationBadge({
   if (!localUrl) return null
   const label = affiliation.description ?? 'Affiliated organization'
   return (
-    <img
-      alt={label}
-      className="size-4 shrink-0 rounded-[4px] object-cover"
-      data-slot="comment-affiliation"
-      draggable={false}
-      src={localUrl}
-      title={label}
-    />
+    <ChipHint hint={label}>
+      <img
+        alt={label}
+        className="size-4 shrink-0 rounded-chip object-cover"
+        data-slot="comment-affiliation"
+        draggable={false}
+        src={localUrl}
+      />
+    </ChipHint>
+  )
+}
+
+/**
+ * The author's verified check (plan 167): X's own Premium, Verified
+ * Organization or government check, as X's file, never tinted. It sits right
+ * after the name, before the organization logo, in X's order.
+ */
+function VerifiedCheck({ verified }: { verified: LiveChatAuthorVerified }): ReactElement {
+  const label = X_VERIFIED_LABEL[verified]
+  return (
+    <ChipHint hint={label}>
+      <img
+        alt={label}
+        className="size-4 shrink-0"
+        data-slot="comment-verified"
+        data-verified={verified}
+        draggable={false}
+        src={X_VERIFIED_URL[verified]}
+      />
+    </ChipHint>
   )
 }
 
@@ -298,22 +420,132 @@ function Emote({
   )
 }
 
+/**
+ * A Twitch GIF Keyboard GIF (plan 155, D5): its own block under the text,
+ * at a fixed height so the virtualized list never re-measures when the image
+ * lands. Until main's cache resolves it (and whenever it refuses it) the
+ * block shows the GIF's title with a "GIF" tag; the row never changes
+ * height. Still draws the first frame only; Off never asks for the image.
+ */
+function ChatGif({
+  fragment,
+  density
+}: {
+  fragment: LiveChatMessageFragment
+  density: 'compact' | 'comfortable'
+}): ReactElement {
+  const mode = useChatGifMode()
+  const title = gifTitle(fragment.text)
+  const localUrl = useCachedAvatar(mode === 'off' ? null : fragment.imageUrl, 'gif')
+  const height = density === 'comfortable' ? 'h-24' : 'h-16'
+  const image =
+    localUrl && mode === 'animated' ? (
+      <img
+        alt={title}
+        className="h-full w-auto max-w-full rounded-chip object-contain"
+        data-slot="comment-gif-image"
+        draggable={false}
+        src={localUrl}
+      />
+    ) : localUrl && mode === 'still' ? (
+      <StillFrame alt={title} src={localUrl} />
+    ) : null
+  return (
+    <span
+      className={cn('mt-1 flex items-center gap-1.5 text-left', height)}
+      data-gif-mode={mode}
+      data-slot="comment-gif"
+      title={title}
+    >
+      {image ?? (
+        <span
+          className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+          data-slot="comment-gif-title"
+        >
+          <Badge className="shrink-0" variant="outline">
+            GIF
+          </Badge>
+          <span className="truncate">{title}</span>
+        </span>
+      )}
+    </span>
+  )
+}
+
+/** One frame of an animated image: drawn to a canvas as soon as it loads,
+ * so the file's later frames never play (Still, or reduced motion). */
+function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    let cancelled = false
+    const image = new Image()
+    image.decoding = 'async'
+    image.onload = () => {
+      if (cancelled) return
+      canvas.width = image.naturalWidth
+      canvas.height = image.naturalHeight
+      canvas.getContext('2d')?.drawImage(image, 0, 0)
+    }
+    image.src = src
+    return () => {
+      cancelled = true
+      image.onload = null
+    }
+  }, [src])
+  return (
+    <canvas
+      aria-label={alt}
+      className="h-full w-auto max-w-full rounded-chip object-contain"
+      data-slot="comment-gif-still"
+      ref={canvasRef}
+      role="img"
+    />
+  )
+}
+
 /** Text with emotes inline when the platform sent them (Twitch, Kick) or
  * the backend matched them (7TV), zero-width 7TV emotes stacked on the emote
- * before them. Without an emote it is `text` as is. */
+ * before them. A Twitch GIF (plan 155) is its own block after the text it
+ * came with. Without an emote or GIF it is `text` as is. */
 function FragmentText({
   text,
   fragments,
-  links
+  links,
+  density = 'compact'
 }: {
   text: string
   fragments: readonly LiveChatMessageFragment[]
   /** Viewer-written text: its links get Open link and Copy link. */
   links: boolean
+  density?: 'compact' | 'comfortable'
 }): ReactNode {
   if (!fragments.some((fragment) => fragment.imageUrl)) {
     return links ? <LinkedText text={text} /> : text
   }
+  if (fragments.some(isGifFragment)) {
+    return splitGifFragments(fragments).map((part, index) =>
+      part.kind === 'gif' ? (
+        <ChatGif density={density} fragment={part.fragment} key={index} />
+      ) : (
+        <Fragment key={index}>
+          <EmoteText fragments={part.fragments} links={links} />
+        </Fragment>
+      )
+    )
+  }
+  return <EmoteText fragments={fragments} links={links} />
+}
+
+/** A run of text and emotes, zero-width 7TV emotes stacked. */
+function EmoteText({
+  fragments,
+  links
+}: {
+  fragments: readonly LiveChatMessageFragment[]
+  links: boolean
+}): ReactNode {
   return groupEmoteOverlays(fragments).map((piece, index) => {
     if (piece.kind === 'text') {
       return <span key={index}>{links ? <LinkedText text={piece.text} /> : piece.text}</span>
@@ -355,7 +587,7 @@ function ChatLink({ link }: { link: ChatLinkPiece }): ReactElement {
           {link.text}
         </span>
       </ContextMenuTrigger>
-      <ContextMenuContent className="w-56" data-slot="comment-link-menu">
+      <ContextMenuContent className="w-56" data-testid="comment-link-menu">
         <ContextMenuLabel className="truncate font-normal text-subtle">
           {link.host}
         </ContextMenuLabel>
@@ -402,14 +634,17 @@ export function commentLinkText(message: LiveChatMessage): string | undefined {
  * Twitch's sentence, then the viewer's own words below it (plan 151, D3). */
 function MessageBody({
   message,
-  noticeWords
+  noticeWords,
+  density
 }: {
   message: LiveChatMessage
   noticeWords: string | undefined
+  density: 'compact' | 'comfortable'
 }): ReactNode {
   if (!noticeWords) {
     return (
       <FragmentText
+        density={density}
         fragments={message.fragments}
         links={viewerWrote(message)}
         text={message.messageText}
@@ -446,16 +681,19 @@ function EventStatus({ message }: { message: LiveChatMessage }): ReactElement | 
     return <Badge variant="warning">{message.amountText}</Badge>
   }
   if (message.eventType === 'membership') {
-    return <Badge variant="secondary">Member</Badge>
+    return <Badge>Member</Badge>
   }
   if (message.eventType === 'moderation') {
-    return <Badge variant="secondary">Moderation</Badge>
+    return <Badge>Moderation</Badge>
   }
   if (message.eventType === 'system') {
-    return <Badge variant="secondary">System</Badge>
+    return <Badge>System</Badge>
   }
   return null
 }
+
+/** The parts a highlightable row's button is named by: who, where, what. */
+type CommentNameIds = { author: string; platform: string; text: string }
 
 function CommentContent({
   message,
@@ -466,7 +704,8 @@ function CommentContent({
   suggested,
   spotlight,
   mentioned,
-  timestamps
+  timestamps,
+  nameIds
 }: {
   message: LiveChatMessage
   density: 'compact' | 'comfortable'
@@ -477,6 +716,7 @@ function CommentContent({
   spotlight: boolean
   mentioned: boolean
   timestamps: CommentTimestamps
+  nameIds?: CommentNameIds
 }): ReactElement {
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
@@ -484,37 +724,39 @@ function CommentContent({
 
   return (
     <>
-      <Avatar aria-hidden className="mt-0.5" size="sm">
+      {/* Sized with the 20 px platform marks (plan 165): 32 px in the compact
+          rail, 40 px (both lines) in the Stream Manager. */}
+      <Avatar aria-hidden className="mt-0.5" size={density === 'comfortable' ? 'lg' : 'default'}>
         {avatarUrl ? <AvatarImage alt="" src={avatarUrl} /> : null}
         <AvatarFallback>{monogramInitials(message.authorName)}</AvatarFallback>
       </Avatar>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-center gap-1.5">
-          <ChatPlatformIcon decorative platform={message.platform} />
           {/* text-left: a highlightable row is a Button, whose centred text
               would otherwise float the name mid-row, away from the avatar. */}
-          <span className="min-w-0 truncate text-left font-medium text-foreground">
+          <span
+            className="min-w-0 truncate text-left font-medium text-foreground"
+            id={nameIds?.author}
+          >
             {message.authorName}
           </span>
+          {message.authorVerified ? <VerifiedCheck verified={message.authorVerified} /> : null}
           {message.authorAffiliation ? (
             <AffiliationBadge affiliation={message.authorAffiliation} />
           ) : null}
           <RoleTags roles={message.authorRoles} />
           {message.firstMessage ? (
-            <Badge className="shrink-0" data-slot="comment-first-message" variant="outline">
+            <Badge className="shrink-0" data-testid="comment-first-message" variant="outline">
               <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
               First chat
             </Badge>
           ) : null}
           {mentioned ? (
-            <Badge
-              className="shrink-0"
-              data-slot="comment-mention"
-              title="Mentions you"
-              variant="secondary"
-            >
-              @you
-            </Badge>
+            <ChipHint hint="Mentions you">
+              <Badge className="shrink-0" data-testid="comment-mention">
+                @you
+              </Badge>
+            </ChipHint>
           ) : null}
           <span className="flex-1" />
           <EventStatus message={message} />
@@ -526,7 +768,7 @@ function CommentContent({
             // a clock on every row is noise mid-stream (plan 057, D3).
             <time
               className={cn(
-                'ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground',
+                'ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground',
                 timestamps === 'hover' &&
                   'opacity-0 group-focus-within/comment:opacity-100 group-hover/comment:opacity-100'
               )}
@@ -534,6 +776,17 @@ function CommentContent({
             >
               {time}
             </time>
+          ) : null}
+          {/* The platform mark closes the row on the far right (owner call,
+              plan 165): 20 px, YouTube's official icon, clear of the name. */}
+          <ChatPlatformIcon className="ml-1 mr-0" decorative platform={message.platform} />
+          {nameIds ? (
+            // The mark's words, for the row button's name only ("Ada on
+            // YouTube: Ship it!"): a hidden node still counts when
+            // aria-labelledby points at it.
+            <span hidden id={nameIds.platform}>
+              {`on ${CHAT_PLATFORM_LABELS[message.platform]}:`}
+            </span>
           ) : null}
         </span>
         {message.reply ? (
@@ -553,12 +806,34 @@ function CommentContent({
             message.eventType === 'moderation' && 'italic text-muted-foreground',
             message.isDeleted && 'text-muted-foreground line-through'
           )}
+          id={nameIds?.text}
         >
-          <MessageBody message={message} noticeWords={noticeWords} />
+          <MessageBody density={density} message={message} noticeWords={noticeWords} />
         </span>
+        <RowOutcomes highlight={highlight} removal={removal} />
       </span>
     </>
   )
+}
+
+/**
+ * What a highlightable row's button does, then any outcome its own lines
+ * show (plan 174 S1.10): the visible lines sit inside the button, whose name
+ * is only who said what, so a screen reader hears them here.
+ */
+export function commentRowDescription(
+  highlight: CommentHighlightPresentation,
+  removal: RemovalStatusView | null | undefined,
+  suggested: boolean
+): string {
+  const action =
+    highlight.phase === 'live'
+      ? 'Takes it off the stream'
+      : suggested
+        ? 'Shows it on stream. Buddy suggests it'
+        : 'Shows it on stream'
+  const outcomes = [highlightProblem(highlight), removalOutcomeLine(removal)].filter(Boolean)
+  return outcomes.length > 0 ? `${action}. ${outcomes.join(' ')}` : action
 }
 
 /** The most links one row's ⋯ menu offers (plan 151, D12). */
@@ -595,8 +870,9 @@ function commentLinkMenuItems(message: LiveChatMessage): KebabMenuItem[] {
  * chat" (destructive: it sorts last, below a separator, in the destructive
  * tone). The stream toggle says "Take off
  * stream", never "Remove": only the irreversible item may say remove.
- * Empty without Reply or Remove from chat: a row outside a live session has
- * no menu.
+ * Copy and the links stay in History too (plan 174 S3.16a, H-30); a row the
+ * account cannot remove on its platform keeps the item, disabled with the
+ * fix (H-11).
  */
 export function commentRowMenu({
   message,
@@ -604,7 +880,8 @@ export function commentRowMenu({
   highlightPhase,
   onHighlight,
   onReply,
-  onRemoveFromChat
+  onRemoveFromChat,
+  removeFromChatReason = null
 }: {
   message: LiveChatMessage
   highlightable: boolean
@@ -612,15 +889,16 @@ export function commentRowMenu({
   onHighlight?: (message: LiveChatMessage) => void
   onReply?: (message: LiveChatMessage) => void
   onRemoveFromChat?: (message: LiveChatMessage) => void
+  /** Why the row cannot be removed right now: the item is offered disabled. */
+  removeFromChatReason?: string | null
 }): KebabMenuItem[] {
-  if (!onReply && !onRemoveFromChat) return []
   return [
     ...(highlightable
       ? [
           {
             id: 'show',
             label: highlightPhase === 'live' ? 'Take off stream' : 'Show on stream',
-            icon: PreviewIcon,
+            icon: LivestreamIcon,
             onSelect: () => onHighlight?.(message)
           }
         ]
@@ -635,14 +913,16 @@ export function commentRowMenu({
       icon: CopyIcon,
       onSelect: () => void copyChatText(`${message.authorName}: ${message.messageText}`)
     },
-    ...(onRemoveFromChat
+    ...(onRemoveFromChat || removeFromChatReason
       ? [
           {
             id: 'remove-from-chat',
             label: REMOVE_FROM_CHAT_LABEL,
             icon: DeleteIcon,
             destructive: true,
-            onSelect: () => onRemoveFromChat(message)
+            disabled: !onRemoveFromChat,
+            disabledReason: removeFromChatReason,
+            onSelect: () => onRemoveFromChat?.(message)
           }
         ]
       : [])
@@ -662,6 +942,8 @@ export function CommentRow({
   onHighlight,
   onReply,
   onRemoveFromChat,
+  removeFromChatReason = null,
+  tabIndex = 0,
   ref,
   style,
   index
@@ -687,6 +969,12 @@ export function CommentRow({
   /** ⋯ Remove from chat (plan 140, S6). Pass it only for a row that can be
    * removed now (`removeFromChatAvailable`); the backend re-checks. */
   onRemoveFromChat?: (message: LiveChatMessage) => void
+  /** Why Remove from chat is off for this row (plan 174 H-11): the item
+   * stays, disabled, with the fix on hover. */
+  removeFromChatReason?: string | null
+  /** The list's roving focus (plan 174 S3.16a, H-7): 0 on the active row,
+   * -1 on every other. The row's ⋯ follows it. */
+  tabIndex?: number
   /** Virtualized lists measure and place the row (plan 055, S10). */
   ref?: Ref<HTMLLIElement>
   style?: CSSProperties
@@ -697,6 +985,16 @@ export function CommentRow({
   // never once the comment is already on (or on its way to) the stream.
   const suggested = cohostSuggested && highlightable && highlight.phase === 'idle'
   const mentioned = commentMentions(message, mentionNames)
+  const tint = commentRowTint(message, {
+    spotlight: cohostSpotlight,
+    onStream: highlight.phase === 'live'
+  })
+  const rowId = useId()
+  const nameIds: CommentNameIds = {
+    author: `${rowId}-author`,
+    platform: `${rowId}-platform`,
+    text: `${rowId}-text`
+  }
   const content = (
     <CommentContent
       density={density}
@@ -704,6 +1002,7 @@ export function CommentRow({
       highlight={highlight}
       mentioned={mentioned}
       message={message}
+      nameIds={highlightable ? nameIds : undefined}
       removal={removal}
       spotlight={cohostSpotlight && !cohostFlag}
       suggested={suggested}
@@ -716,40 +1015,54 @@ export function CommentRow({
     highlightPhase: highlight.phase,
     onHighlight,
     onReply,
-    onRemoveFromChat
+    onRemoveFromChat,
+    removeFromChatReason
   })
 
   return (
     <li
       ref={ref}
-      className={cn('group/comment', menu.length > 0 && 'flex items-start gap-0.5')}
+      className={cn(
+        'group/comment group/kebab-host flex items-start gap-0.5',
+        !highlightable && 'rounded-row outline-none focus-visible:ring-2 focus-visible:ring-ring/50'
+      )}
       data-highlight-phase={highlight.phase}
       data-index={index}
+      data-member={tint === 'member' || undefined}
       data-mention={mentioned || undefined}
       data-message-id={message.id}
+      data-row-tint={tint ?? undefined}
       data-spotlight={cohostSpotlight || undefined}
       style={style}
+      // A row with no button of its own still takes the list's focus, so the
+      // arrows pass through it and C copies it.
+      tabIndex={highlightable ? undefined : tabIndex}
     >
       {highlightable ? (
+        // One button, and a click on it shows the message on stream or takes
+        // it off (owner call, plan 174 D10). Its name is what the row says,
+        // so a screen reader reads the chat (S0.5, H-2): author, platform,
+        // message. aria-pressed says on stream; the action is the description.
         <Button
-          aria-label={
-            highlight.phase === 'live'
-              ? `Take ${message.authorName}'s message off the stream`
-              : suggested
-                ? `Show ${message.authorName}'s message on the stream (Orcle suggestion)`
-                : `Show ${message.authorName}'s message on the stream`
-          }
+          aria-description={commentRowDescription(highlight, removal, suggested)}
+          aria-labelledby={`${nameIds.author} ${nameIds.platform} ${nameIds.text}`}
           aria-pressed={highlight.phase === 'live'}
           disabled={highlight.phase === 'applying'}
           className={cn(
             'h-auto w-full min-w-0 flex-1 items-start justify-start gap-2 whitespace-normal px-2 py-1.5',
-            cohostSpotlight && highlight.phase !== 'live' && 'bg-accent',
-            message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
+            tint && ROW_TINT_CLASS[tint]
           )}
-          title={highlight.phase === 'live' ? 'Take off stream' : 'Show this message on the stream'}
+          tabIndex={tabIndex}
           type="button"
           variant={highlight.phase === 'live' ? 'secondary' : 'ghost'}
-          onClick={() => onHighlight?.(message)}
+          onClick={(event) => {
+            // Only a mouse drag that ends with words selected in this row is
+            // not a click (owner call, D10): copying text never shows it on
+            // stream. A keyboard click (detail 0) never carries a drag.
+            if (event.detail > 0 && clickSelectsText(window.getSelection(), event.currentTarget))
+              return
+            onHighlight?.(message)
+          }}
         >
           {content}
         </Button>
@@ -757,20 +1070,19 @@ export function CommentRow({
         <div
           className={cn(
             'flex min-w-0 flex-1 items-start gap-2 rounded-row px-2 py-1.5',
-            cohostSpotlight && 'bg-accent',
-            message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
+            tint && ROW_TINT_CLASS[tint]
           )}
         >
           {content}
         </div>
       )}
-      {menu.length > 0 ? (
-        <KebabMenu
-          className="mt-1 shrink-0 opacity-0 group-hover/comment:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
-          items={menu}
-          label={`Actions for ${message.authorName}'s message`}
-        />
-      ) : null}
+      <KebabMenu
+        className="mt-1 shrink-0"
+        items={menu}
+        label={`Actions for ${message.authorName}'s message`}
+        reveal="hover"
+        tabIndex={tabIndex}
+      />
     </li>
   )
 }

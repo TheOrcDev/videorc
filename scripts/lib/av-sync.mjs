@@ -317,7 +317,12 @@ export async function measureAvSync(filePath, options = {}) {
  */
 export function flashClickFixtureArgs(
   outputPath,
-  { seconds = 5, audioDelayMs = 0, fps = 30 } = {}
+  {
+    seconds = 5,
+    audioDelayMs = 0,
+    fps = 30,
+    videoCodecArgs = ['-c:v', 'libx264', '-preset', 'ultrafast']
+  } = {}
 ) {
   const audioFilter = audioDelayMs > 0 ? `,adelay=${audioDelayMs}|${audioDelayMs}` : ''
   return [
@@ -340,10 +345,7 @@ export function flashClickFixtureArgs(
     `aresample=48000${audioFilter}`,
     '-fps_mode',
     'cfr',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
+    ...videoCodecArgs,
     '-pix_fmt',
     'yuv420p',
     '-c:a',

@@ -42,6 +42,13 @@ export const PREVIEW_TIMELINE_LIMITS = Object.freeze({
   oracleWindows: 256
 })
 
+/**
+ * The Preview window's title (shared/window-names.ts, plan 174 S2.3a), then
+ * the title builds before it used, so an A/B against an older base still
+ * finds its window. Always scoped to the owned PID.
+ */
+export const PREVIEW_WINDOW_TITLES = Object.freeze(['Preview', 'Videorc Preview'])
+
 /** Only the already-authenticated Electron PID establishes owned window roles. */
 export function previewCgWindowEvidence(sample, expectedWindowPid) {
   const windows = Array.isArray(sample?.windows) ? sample.windows : []
@@ -60,7 +67,7 @@ export function previewCgWindowEvidence(sample, expectedWindowPid) {
             : 'other-or-unknown',
         role: !owned
           ? 'unknown'
-          : window.name === 'Videorc Preview'
+          : PREVIEW_WINDOW_TITLES.includes(window.name)
             ? 'preview'
             : window.name === 'Videorc'
               ? 'main'
@@ -937,7 +944,8 @@ function findInProcessPreviewWindows(windows, expectedWindowPid) {
     return (
       window.alpha > 0 &&
       (expectedPid === null || window.pid === expectedPid) &&
-      name.includes('videorc preview') &&
+      (PREVIEW_WINDOW_TITLES.some((title) => name === title.toLowerCase()) ||
+        name.includes('videorc preview')) &&
       (owner.includes('electron') || owner.includes('videorc'))
     )
   })

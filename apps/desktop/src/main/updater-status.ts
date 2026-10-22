@@ -100,3 +100,20 @@ export function shouldBackgroundRecheck(status: UpdateStatus): boolean {
       return status.reason === 'windows-feed-unpublished'
   }
 }
+
+/**
+ * The OS notice that a downloaded update is ready (plan 174 I-20): never while
+ * Videorc records or is on air, where a system banner can land on the
+ * captured screen. The sidebar chip and Settings → About still say it, and
+ * the update installs the next time Videorc quits either way.
+ */
+export function updateReadyNotification(
+  version: string,
+  captureActive: boolean
+): { title: string; body: string } | null {
+  if (captureActive) return null
+  return {
+    title: `Videorc ${version} is ready`,
+    body: 'Restart Videorc to finish updating, or it installs the next time you quit.'
+  }
+}

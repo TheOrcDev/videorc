@@ -1,3 +1,4 @@
+import { Window } from 'happy-dom'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -7,8 +8,11 @@ import {
   RemovalStatus,
   commentCanHighlight,
   commentHighlightPresentationForMessage,
+  commentRowDescription,
   commentRowMenu,
   formatCommentTime,
+  highlightProblem,
+  removalOutcomeLine,
   type CommentHighlightPresentation
 } from '@/components/comment-row'
 import type { LiveChatMessage } from '@/lib/backend'
@@ -121,18 +125,55 @@ describe('CommentRow', () => {
     expect(markup).toContain('Ada Lovelace')
     expect(markup).toContain('Ship it!')
     expect(markup).toContain('aria-pressed="false"')
-    expect(markup).toContain('Show Ada Lovelace&#x27;s message on the stream')
+    expect(markup).toContain('aria-description="Shows it on stream"')
+  })
+
+  it('names the row by what it says, the action in its description (plan 174 S0.5, H-2)', async () => {
+    // The row stays one button whose click shows the message on stream (owner
+    // call, D10), but a screen reader now reads the chat, not "Show Ada's
+    // message on the stream".
+    const dom = new Window()
+    try {
+      const rows = [
+        [renderRow({ phase: 'idle' }), 'false', 'Shows it on stream'],
+        [renderRow({ phase: 'live' }), 'true', 'Takes it off the stream'],
+        [
+          renderToStaticMarkup(
+            createElement(CommentRow, {
+              cohostSuggested: true,
+              message: message(),
+              onHighlight: () => undefined
+            })
+          ),
+          'false',
+          'Shows it on stream. Buddy suggests it'
+        ]
+      ] as const
+      for (const [markup, pressed, description] of rows) {
+        dom.document.body.innerHTML = markup
+        const button = dom.document.querySelector('button')!
+        const name = (button.getAttribute('aria-labelledby') ?? '')
+          .split(' ')
+          .map((id) => dom.document.getElementById(id)?.textContent ?? '')
+          .join(' ')
+        expect(name).toBe('Ada Lovelace on YouTube: Ship it!')
+        expect(button.hasAttribute('aria-label')).toBe(false)
+        expect(button.getAttribute('aria-pressed')).toBe(pressed)
+        expect(button.getAttribute('aria-description')).toBe(description)
+      }
+    } finally {
+      await dom.happyDOM.close()
+    }
   })
 
   it('keeps the username beside the avatar instead of centring it over the message', () => {
     // A highlightable row is a Button (centred text). Without an explicit
     // left alignment the flex-1 name floats to the middle of the row.
     const markup = renderRow({ phase: 'idle' })
-    const nameSpan = /<span class="([^"]*)">Ada Lovelace<\/span>/.exec(markup)
+    const nameSpan = /<span class="([^"]*)"[^>]*>Ada Lovelace<\/span>/.exec(markup)
 
     expect(nameSpan?.[1]).toContain('text-left')
-    // The name also appears earlier in the button's aria-label, so order the
-    // rendered name span itself: avatar, then name, then message.
+    // Order the rendered name span itself: avatar, then name, then message.
     const nameAt = nameSpan?.index ?? -1
     expect(markup.indexOf('data-slot="avatar"')).toBeLessThan(nameAt)
     expect(nameAt).toBeLessThan(markup.indexOf('Ship it!'))
@@ -175,12 +216,12 @@ describe('CommentRow: Talking about this', () => {
         onHighlight: () => undefined
       })
     )
-    expect(markup).toContain('data-slot="cohost-comment-spotlight"')
+    expect(markup).toContain('data-testid="cohost-comment-spotlight"')
     expect(markup).toContain('Talking about this')
     expect(markup).toContain('data-spotlight="true"')
     expect(markup).toContain('bg-accent')
-    // One Orcle mark at a time: the pull-up wins over the suggestion.
-    expect(markup).not.toContain('data-slot="cohost-comment-suggested"')
+    // One Buddy mark at a time: the pull-up wins over the suggestion.
+    expect(markup).not.toContain('data-testid="cohost-comment-suggested"')
   })
 
   it('never pulls up a flagged comment, and stays quiet without a spotlight', () => {
@@ -205,6 +246,74 @@ describe('CommentRow: Talking about this', () => {
     )
     expect(quiet).not.toContain('Talking about this')
     expect(quiet).not.toContain('data-spotlight')
+  })
+})
+
+describe('CommentRow: member tint (plan 154)', () => {
+  const member = (overrides: Partial<LiveChatMessage> = {}): LiveChatMessage =>
+    message({ authorRoles: ['member'], ...overrides })
+
+  it("tints a member's row under both shells and keeps the Member chip", () => {
+    for (const onHighlight of [() => undefined, undefined]) {
+      const markup = renderToStaticMarkup(
+        createElement(CommentRow, { message: member(), onHighlight })
+      )
+      expect(markup).toContain('bg-member/8')
+      expect(markup).toContain('data-member="true"')
+      expect(markup).toContain('data-row-tint="member"')
+      expect(markup).toContain('data-testid="comment-role"')
+      expect(markup).toContain('>Member<')
+      expect(markup).not.toContain('bg-accent')
+      expect(markup).not.toContain('bg-warning/10')
+    }
+  })
+
+  it('lets a paid message and the pull-up win over the member tint', () => {
+    const paid = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: member({ eventType: 'paid', amountText: '$5' }),
+        onHighlight: () => undefined
+      })
+    )
+    expect(paid).toContain('bg-warning/10 ring-1 ring-warning/30')
+    expect(paid).toContain('data-row-tint="paid"')
+    expect(paid).not.toContain('bg-member/8')
+    expect(paid).toContain('>Member<')
+
+    const spotlight = renderToStaticMarkup(
+      createElement(CommentRow, {
+        cohostSpotlight: true,
+        message: member(),
+        onHighlight: () => undefined
+      })
+    )
+    expect(spotlight).toContain('bg-accent')
+    expect(spotlight).toContain('data-row-tint="spotlight"')
+    expect(spotlight).not.toContain('bg-member/8')
+  })
+
+  it('paints no tint on stream, on a removed message, or without the role', () => {
+    const onStream = renderToStaticMarkup(
+      createElement(CommentRow, {
+        cohostSpotlight: true,
+        highlight: { phase: 'live' },
+        message: member(),
+        onHighlight: () => undefined
+      })
+    )
+    expect(onStream).not.toContain('bg-member/8')
+    expect(onStream).not.toContain('bg-accent')
+    expect(onStream).not.toContain('data-row-tint')
+
+    const removed = renderToStaticMarkup(
+      createElement(CommentRow, { message: member({ isDeleted: true }) })
+    )
+    expect(removed).not.toContain('bg-member/8')
+    expect(removed).not.toContain('data-member')
+
+    const viewer = renderToStaticMarkup(createElement(CommentRow, { message: message() }))
+    expect(viewer).not.toContain('data-member')
+    expect(viewer).not.toContain('data-row-tint')
   })
 })
 
@@ -267,14 +376,21 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
     }
   })
 
-  it('has no menu at all outside a live session', () => {
+  it('keeps Copy and the links outside a live session (plan 174 S3.16a, H-30)', () => {
     expect(
       commentRowMenu({
         message: message(),
-        highlightable: true,
+        highlightable: false,
         highlightPhase: 'idle'
-      })
-    ).toEqual([])
+      }).map((item) => item.id)
+    ).toEqual(['copy'])
+    expect(
+      commentRowMenu({
+        message: message({ messageText: 'see https://videorc.com/docs' }),
+        highlightable: false,
+        highlightPhase: 'idle'
+      }).map((item) => item.id)
+    ).toEqual(['open-link-0', 'copy-link-0', 'copy'])
     // Remove from chat alone still opens the menu, without Reply.
     expect(
       commentRowMenu({
@@ -313,15 +429,17 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
         })
       })
     )
-    const chip = /<span[^>]*data-slot="removal-status"[^>]*>([^<]*)<\/span>/.exec(markup)
+    const chip = /<span[^>]*data-testid="removal-status"[^>]*>([^<]*)<\/span>/.exec(markup)
     expect(chip?.[0]).toContain('data-removal="hidden"')
-    expect(chip?.[0]).toContain(
-      'title="Hidden in Videorc. Viewers on YouTube still see it. YouTube quota is paused."'
+    // The outcome is the row's own line, never hover text (plan 174 S1.10).
+    expect(chip?.[0]).not.toContain('title=')
+    expect(markup).toContain(
+      'data-testid="removal-outcome">Hidden in Videorc. Viewers on YouTube still see it. YouTube quota is paused.<'
     )
     expect(chip?.[1]).toBe('Hidden in Videorc')
     // The body keeps its muted line-through; the chip is not inside it.
     expect(markup).toContain('line-through')
-    expect(markup.indexOf('data-slot="removal-status"')).toBeLessThan(
+    expect(markup.indexOf('data-testid="removal-status"')).toBeLessThan(
       markup.indexOf('line-through')
     )
   })
@@ -331,7 +449,8 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
       createElement(RemovalStatus, { status: removalStatusView(message(), undefined, true) })
     )
     expect(removing).toContain('Removing…')
-    expect(removing).toContain('motion-safe:animate-spin')
+    expect(removing).toContain('data-slot="spinner"')
+    expect(removing).toContain('animate-spin')
     expect(renderToStaticMarkup(createElement(RemovalStatus, { status: null }))).toBe('')
   })
 })
@@ -383,5 +502,67 @@ describe("CommentRow: a Twitch notice's own words (plan 151, D3)", () => {
 
   it('goes on stream as an activity event', () => {
     expect(commentCanHighlight(streak)).toBe(true)
+  })
+})
+
+// Plan 174 S1.10 (H-16): outcomes are the row's own lines, never hover text.
+describe('CommentRow outcome lines', () => {
+  it('says why a highlight failed, or why its action failed on stream', () => {
+    expect(highlightProblem({ phase: 'idle' })).toBeNull()
+    expect(highlightProblem({ phase: 'applying' })).toBeNull()
+    expect(highlightProblem({ phase: 'failed', reason: ' The stream is not live. ' })).toBe(
+      'The stream is not live.'
+    )
+    expect(highlightProblem({ phase: 'failed' })).toBeNull()
+    expect(highlightProblem({ phase: 'live', commandError: 'The card did not update.' })).toBe(
+      'The card did not update.'
+    )
+    expect(highlightProblem({ phase: 'live' })).toBeNull()
+  })
+
+  it('says what a removal did unless it simply removed', () => {
+    const view = (kind: 'removing' | 'removed' | 'hidden' | 'failed' | 'unknown') => ({
+      kind,
+      label: kind,
+      detail: 'What happened.'
+    })
+    expect(removalOutcomeLine(null)).toBeNull()
+    expect(removalOutcomeLine(view('removing'))).toBeNull()
+    expect(removalOutcomeLine(view('removed'))).toBeNull()
+    for (const kind of ['hidden', 'failed', 'unknown'] as const) {
+      expect(removalOutcomeLine(view(kind))).toBe('What happened.')
+    }
+    expect(removalOutcomeLine({ kind: 'failed', label: 'Not removed', detail: null })).toBeNull()
+  })
+
+  it("adds the row's outcome lines to the button's description", () => {
+    expect(commentRowDescription({ phase: 'idle' }, null, false)).toBe('Shows it on stream')
+    expect(commentRowDescription({ phase: 'idle' }, null, true)).toBe(
+      'Shows it on stream. Buddy suggests it'
+    )
+    expect(
+      commentRowDescription({ phase: 'failed', reason: 'The stream is not live.' }, null, false)
+    ).toBe('Shows it on stream. The stream is not live.')
+    expect(
+      commentRowDescription(
+        { phase: 'live', commandError: 'The card did not update.' },
+        { kind: 'hidden', label: 'Hidden in Videorc', detail: 'Viewers may still see it.' },
+        false
+      )
+    ).toBe('Takes it off the stream. The card did not update. Viewers may still see it.')
+  })
+
+  it('shows a failed highlight reason under the text, with no title on the badge', () => {
+    const markup = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message(),
+        highlight: { phase: 'failed', reason: 'The stream is not live.' },
+        onHighlight: () => undefined
+      })
+    )
+    expect(markup).toMatch(/data-testid="highlight-failed"[^>]*>Failed</)
+    expect(markup).toContain('data-testid="highlight-failed-reason">The stream is not live.<')
+    expect(markup).not.toMatch(/<button[^>]*title=/)
+    expect(markup).toContain('aria-description="Shows it on stream. The stream is not live."')
   })
 })

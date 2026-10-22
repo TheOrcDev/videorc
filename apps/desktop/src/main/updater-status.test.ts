@@ -6,6 +6,7 @@ import {
   isMissingUpdateFeedError,
   shouldAutoDownload,
   shouldBackgroundRecheck,
+  updateReadyNotification,
   updateStatusFromEvent
 } from './updater-status'
 
@@ -95,5 +96,18 @@ describe('updater status mapping', () => {
     expect(shouldAutoDownload({ phase: 'not-available', currentVersion: '1.0.0' })).toBe(false)
     expect(shouldAutoDownload({ phase: 'idle' })).toBe(false)
     expect(shouldAutoDownload({ phase: 'downloaded', version: '1.2.3' })).toBe(false)
+  })
+})
+
+describe('updateReadyNotification (plan 174 I-20)', () => {
+  it('says the update is ready and that quitting installs it', () => {
+    expect(updateReadyNotification('0.9.141', false)).toEqual({
+      title: 'Videorc 0.9.141 is ready',
+      body: 'Restart Videorc to finish updating, or it installs the next time you quit.'
+    })
+  })
+
+  it('never shows an OS banner while a recording or a livestream runs', () => {
+    expect(updateReadyNotification('0.9.141', true)).toBeNull()
   })
 })

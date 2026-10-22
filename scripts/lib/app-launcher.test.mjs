@@ -49,6 +49,7 @@ const SMOKE_ENV_KEYS = [
   'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR',
   'VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED',
   'VIDEORC_DISABLE_BACKEND_REAP',
+  'VIDEORC_USAGE_STATS',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
   'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN'
@@ -322,6 +323,7 @@ test('smokeAppEnv enables ledger reaping by default for isolated smoke launches'
     const env = smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: stateDir })
 
     assert.equal(env.VIDEORC_DISABLE_BACKEND_REAP, '0')
+    assert.equal(env.VIDEORC_USAGE_STATS, '0')
     assert.equal(env.VIDEORC_SMOKE_PRINT_BACKEND_READY, '1')
     assert.equal(env.VIDEORC_APP_DATA_DIR, resolve(stateDir, 'app-data'))
     assert.equal(env.VIDEORC_USER_DATA_DIR, resolve(stateDir, 'user-data'))

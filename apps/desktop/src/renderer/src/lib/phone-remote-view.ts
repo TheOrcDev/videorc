@@ -1,10 +1,15 @@
 import { encode } from 'uqr'
 
 import type { RemoteLanDevice, RemoteLanStatus } from '@/lib/backend'
+import { plural } from '@/lib/format'
 
-/** Phone remote is off by default; an empty card body reads as a render bug. */
+/**
+ * Phone remote is off by default; an empty card body reads as a render bug.
+ * The line says what turning it on does, never "Off" beside the switch
+ * (plan 174 V-6).
+ */
 export const PHONE_REMOTE_OFF_HINT =
-  'Off. Turn on to watch comments and run your stream from a phone on the same Wi-Fi.'
+  'Turning this on also turns on Remote control, and pairs phones with a code you scan.'
 
 /** Nothing connected this long after a code is shown ⇒ explain why not. */
 export const PAIRING_TROUBLE_HINT_AFTER_MS = 30_000
@@ -74,7 +79,36 @@ export function phoneRemoteSummary(status: RemoteLanStatus): {
     tone: 'ok',
     text:
       connected > 0
-        ? `${connected} phone${connected === 1 ? '' : 's'} connected · ${where}`
+        ? `${plural(connected, 'phone')} connected · ${where}`
         : `Listening on ${where} · same Wi-Fi only`
   }
+}
+
+/** The backend keeps at most this many characters of a phone's name
+ * (`MAX_DEVICE_NAME_CHARS` in remote_lan.rs). */
+export const PHONE_NAME_MAX_CHARS = 40
+
+/** The name Rename… saves, or null when there is nothing to save (empty or
+ * unchanged), so Save stays disabled (plan 174 I-28). */
+export function renamedPhoneName(current: string, typed: string): string | null {
+  const next = typed.trim().slice(0, PHONE_NAME_MAX_CHARS)
+  return next === '' || next === current ? null : next
+}
+
+/**
+ * Each paired phone's name as the list shows it. Phones pair as
+ * "iPhone · Safari", so repeats are numbered in list order ("iPhone · Safari
+ * 2") until the streamer renames them (plan 174 I-28).
+ */
+export function phoneDisplayNames(
+  devices: readonly Pick<RemoteLanDevice, 'id' | 'name'>[]
+): Map<string, string> {
+  const seen = new Map<string, number>()
+  const names = new Map<string, string>()
+  for (const device of devices) {
+    const index = (seen.get(device.name) ?? 0) + 1
+    seen.set(device.name, index)
+    names.set(device.id, index > 1 ? `${device.name} ${index}` : device.name)
+  }
+  return names
 }

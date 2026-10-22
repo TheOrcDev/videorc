@@ -12,12 +12,15 @@ let container: HTMLDivElement
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // The Mac look: the window bootstrap writes the platform before first paint.
+  document.documentElement.dataset.platform = 'darwin'
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
 })
 
 afterEach(async () => {
+  delete document.documentElement.dataset.platform
   await act(async () => root.unmount())
   container.remove()
   vi.unstubAllGlobals()
@@ -83,7 +86,10 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     const remove = action('Remove from chat')
     expect(remove).toBeTruthy()
     expect(remove!.dataset.variant).toBe('destructive')
-    expect(remove!.title).toBe('Remove from chat (⇧⌫)')
+    // The key is the chip and the tooltip's, never a native title (plan 174 S1.10).
+    expect(remove!.hasAttribute('title')).toBe(false)
+    expect(remove!.parentElement?.getAttribute('data-state')).toBe('closed')
+    expect(remove!.querySelector('kbd')?.textContent).toBe('⇧⌫')
     expect(action('Dismiss')?.dataset.variant).toBe('ghost')
     await act(async () => remove!.click())
     expect(onRemoveFlagged).toHaveBeenCalledWith(flag)
@@ -115,12 +121,12 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     expect(onDismissFlag).not.toHaveBeenCalled()
   })
 
-  it('says Orcle acts only when asked', async () => {
+  it('says Buddy posts only in the modes you turn on', async () => {
     await renderPane()
     const hint = container.querySelector<HTMLElement>('[data-slot="cohost-acts-on-ask"]')
-    expect(hint?.textContent).toBe('Orcle never acts on its own.')
-    expect(hint?.title).toBe(
-      'Orcle never acts on its own. It removes a comment only when you tell it to.'
-    )
+    expect(hint?.textContent).toBe('Posts only in the modes you turn on.')
+    // The whole sentence is the line's tooltip (plan 174 S1.10).
+    expect(hint?.hasAttribute('title')).toBe(false)
+    expect(hint?.getAttribute('data-state')).toBe('closed')
   })
 })

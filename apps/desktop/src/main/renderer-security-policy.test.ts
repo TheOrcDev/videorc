@@ -342,6 +342,25 @@ describe('renderer security policy', () => {
     expect(roleCanInvokeChannel('comments', 'oauth:open-url')).toBe(false)
   })
 
+  it('lets only main and the Stream Manager cache a Twitch GIF (plan 155)', () => {
+    expect(roleCanInvokeChannel('main', 'chat-gifs:cache')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'chat-gifs:cache')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'chat-gifs:cache')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'chat-gifs:cache')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('cacheChatGif')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('cacheChatGif')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('cacheChatGif')
+    // The display mode relay: only the main renderer (the backend socket's
+    // owner) pushes; the Stream Manager seeds and follows.
+    expect(roleCanInvokeChannel('main', 'chat-gifs:push-mode')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'chat-gifs:push-mode')).toBe(false)
+    expect(roleCanInvokeChannel('comments', 'chat-gifs:get-mode')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'chat-gifs:get-mode')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('getChatGifMode')
+    expect(AUXILIARY_API_KEYS.comments).toContain('onChatGifMode')
+    expect(AUXILIARY_API_KEYS.comments).not.toContain('pushChatGifMode')
+  })
+
   it('lets only main and the Comments window read cached image bytes (plan 095)', () => {
     // The highlight card decodes avatars and emotes from bytes; the cache
     // directory stays main-owned and only its managed file names resolve.
@@ -371,6 +390,14 @@ describe('renderer security policy', () => {
     expect(roleCanInvokeChannel('notes', 'comments-window:set-highlight-anchor')).toBe(false)
     expect(roleCanInvokeChannel('captions', 'comments-window:set-highlight-anchor')).toBe(false)
     expect(AUXILIARY_API_KEYS.comments).toContain('setCommentsWindowHighlightAnchor')
+  })
+
+  it('lets only main and the Chat window flip Activity auto-show (plan 156)', () => {
+    expect(roleCanInvokeChannel('main', 'comments-window:set-auto-show-activity')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:set-auto-show-activity')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:set-auto-show-activity')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:set-auto-show-activity')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('setCommentsWindowAutoShowActivity')
   })
 
   it('lets only the Chat window start a scope reconnect, checked by sender (plan 140)', () => {
@@ -406,7 +433,7 @@ describe('renderer security policy', () => {
     expect(result.slice(0, 400)).toContain('event.sender.id !== mainWindow.webContents.id')
   })
 
-  it('lets only the Chat window answer Orcle, checked by sender (plan 140, S6 part B)', () => {
+  it('lets only the Chat window answer Buddy, checked by sender (plan 140, S6 part B)', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:cohost-command')).toBe(true)
     expect(roleCanInvokeChannel('notes', 'comments-window:cohost-command')).toBe(false)
     expect(roleCanInvokeChannel('captions', 'comments-window:cohost-command')).toBe(false)
@@ -526,7 +553,11 @@ describe('renderer security policy', () => {
   it('routes denied X documentation popups through the validated external opener', () => {
     // Plan 080 S5 moved the destination card (and its X block) out of the tab.
     const destinationCard = source('../renderer/src/components/streaming/destination-card.tsx')
-    expect(destinationCard).toContain('openExternalUrl(xNativeCapability.docsUrl)')
-    expect(destinationCard).toContain('openExternalUrl(xNativeCapability.apiOverviewUrl)')
+    // Plan 174 S3.5a: every external link on the card is one ExternalLinkButton,
+    // which opens through the validated opener; none is a raw target=_blank link.
+    expect(destinationCard).toContain('<ExternalLinkButton url={xNativeCapability.docsUrl}>')
+    expect(destinationCard).toContain('<ExternalLinkButton url={xNativeCapability.apiOverviewUrl}>')
+    expect(destinationCard).toContain('onClick={() => openExternalUrl(url)}')
+    expect(destinationCard).not.toContain('target="_blank"')
   })
 })

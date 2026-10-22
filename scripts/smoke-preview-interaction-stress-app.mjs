@@ -361,7 +361,10 @@ async function issueLayoutIntentBurst(smoke, sequence) {
       while (Date.now() < deadline) {
         const button = Array.from(document.querySelectorAll('[data-videorc-layout-preset]'))
           .find((candidate) => candidate.getAttribute('data-videorc-layout-preset') === preset);
-        if (button?.getAttribute('aria-pressed') === 'true') {
+        if (
+          button?.getAttribute('aria-checked') === 'true' ||
+          button?.getAttribute('aria-pressed') === 'true'
+        ) {
           observe(preset, 'committed', button);
           return { preset, pressed: true, disabled: Boolean(button.disabled), label: button.textContent?.trim() ?? '', timeline };
         }
@@ -1184,7 +1187,8 @@ while true {
       previewWindow = content.windows.first { window in
         let title = window.title ?? ""
         let owner = window.owningApplication?.applicationName ?? ""
-        return title == "Videorc Preview" &&
+        // shared/window-names.ts (plan 174 S2.3a); the old title keeps A/B runs on older builds working.
+        return (title == "Preview" || title == "Videorc Preview") &&
           window.owningApplication?.processID == ${expectedPid} &&
           (owner.localizedCaseInsensitiveContains("Electron") ||
             owner.localizedCaseInsensitiveContains("Videorc"))

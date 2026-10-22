@@ -17,8 +17,8 @@ const toggleVariants = cva(
       size: {
         default:
           'h-control min-w-7 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2',
-        sm: 'h-7 min-w-7 px-2.5 has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5',
-        lg: 'h-8 min-w-8 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2'
+        // The one compact size (plan 174 S4.1): 24 px, where the skill allows it.
+        xs: 'h-6 min-w-6 px-1.5 text-xs'
       }
     },
     defaultVariants: {

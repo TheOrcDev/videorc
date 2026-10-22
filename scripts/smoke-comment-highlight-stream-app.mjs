@@ -98,6 +98,24 @@ const modernScenarios = [
     allowHighlightUnavailable: false
   }
 ]
+// Linux's raw bridge runs one encode for the recording and the stream, and a
+// caption burned into the stream only needs a clean recording beside it,
+// which one encode cannot give (plan 0016; the renderer refuses that session
+// the same way). The split scenario needs a separate stream encoder.
+const unsupportedScenarios =
+  process.platform === 'linux'
+    ? new Map([
+        ['split-record-stream', 'Linux has no separate stream encoder (plan 0016)'],
+        [
+          'dual-orientation-record-stream',
+          'Linux has no separate vertical encoder; the backend refuses the vertical leg'
+        ]
+      ])
+    : new Map()
+for (const [label, reason] of unsupportedScenarios) {
+  console.log(`[${label}] SKIP: ${reason}`)
+}
+
 const legacyScenario = {
   label: 'legacy-stream-only-60fps',
   anchor: 'bottom-left',
@@ -112,13 +130,14 @@ mkdirSync(outputDirectory, { recursive: true })
 
 await runScenarioGroup({
   label: 'modern',
-  scenarios: modernScenarios,
+  scenarios: modernScenarios.filter((scenario) => !unsupportedScenarios.has(scenario.label)),
   indexOffset: 0
 })
 await runScenarioGroup({
   label: 'legacy',
   scenarios: [legacyScenario],
-  indexOffset: modernScenarios.length
+  indexOffset: modernScenarios.filter((scenario) => !unsupportedScenarios.has(scenario.label))
+    .length
 })
 
 console.log(

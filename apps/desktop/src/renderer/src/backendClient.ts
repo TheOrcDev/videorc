@@ -68,13 +68,26 @@ export class BackendAbortError extends Error {
   ) {
     super(
       outcomeUnknown
-        ? `Backend request "${method}" was cancelled after it was sent; its outcome is unknown.`
-        : `Backend request "${method}" was cancelled.`
+        ? `The "${method}" request was canceled after it was sent; its outcome is unknown.`
+        : `The "${method}" request was canceled.`
     )
   }
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+
+// Plan 174 S2.5: what this client rejects with is plain copy, because some
+// callers still show `error.message` inline (userErrorMessage maps the toasts,
+// and `lib/backend-transport.ts` classifies the first three as transient).
+/** `request()` while the WebSocket isn't open. */
+export const ENGINE_NOT_CONNECTED = "Videorc's engine isn't connected."
+/** In-flight requests when the WebSocket closes. */
+export const ENGINE_CONNECTION_CLOSED = "Videorc's engine connection closed."
+/** `ws.onerror` during `connect()`. */
+export const ENGINE_UNREACHABLE = "Couldn't connect to Videorc's engine."
+/** The client was closed for good: Videorc's engine is down for this window. */
+const ENGINE_SHUT_DOWN = "Videorc's engine is shut down."
+const ENGINE_CHECKS_UNAVAILABLE = "Videorc couldn't load its engine checks."
 
 // Warm layout mutations intentionally give the backend's ordered command lane,
 // source transition, and first-fresh-frame proof their own bounded windows.
@@ -124,6 +137,8 @@ const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   // Backend file mutations have a 30s outcome-unknown boundary. Leave 15s
   // for queue admission, response delivery, and authoritative error parsing.
   'screens.importImage': 45_000,
+  // Plan 186: the same AssetImport lane as a takeover image.
+  'banners.importImage': 45_000,
   'sessions.delete': 45_000,
   'stream.output.topology.probe': 120_000,
   'session.start': 120_000,
@@ -159,7 +174,7 @@ export class BackendClient {
 
   connect(): Promise<void> {
     if (this.closed) {
-      return Promise.reject(new Error('Backend client is closed.'))
+      return Promise.reject(new Error(ENGINE_SHUT_DOWN))
     }
     if (this.connectPromise) {
       return this.connectPromise
@@ -195,7 +210,7 @@ export class BackendClient {
       if (!this.isConnectAttemptCurrent(generation)) {
         throw this.inactiveConnectError()
       }
-      throw new Error('Backend protocol validator could not load.')
+      throw new Error(ENGINE_CHECKS_UNAVAILABLE)
     }
     if (!this.isConnectAttemptCurrent(generation)) {
       throw this.inactiveConnectError()
@@ -221,7 +236,7 @@ export class BackendClient {
         resolve()
       }
       ws.onerror = () => {
-        const error = new Error('Could not connect to the Rust backend.')
+        const error = new Error(ENGINE_UNREACHABLE)
         if (!opened && this.isSocketCurrent(ws, generation)) {
           this.ws = null
           this.connectionGeneration += 1
@@ -237,8 +252,8 @@ export class BackendClient {
         }
       }
       ws.onclose = () => {
-        this.rejectPendingForSocket(ws, new Error('Backend connection closed.'))
-        reject(new Error('Backend connection closed.'))
+        this.rejectPendingForSocket(ws, new Error(ENGINE_CONNECTION_CLOSED))
+        reject(new Error(ENGINE_CONNECTION_CLOSED))
         const wasCurrent = this.ws === ws
         if (wasCurrent) {
           this.ws = null
@@ -264,14 +279,14 @@ export class BackendClient {
     this.connectionGeneration += 1
     const connectAttempt = this.connectAttempt
     this.connectAttempt = null
-    connectAttempt?.reject(new Error('Backend client is closed.'))
+    connectAttempt?.reject(new Error(ENGINE_SHUT_DOWN))
 
     const ws = this.ws
     this.ws = null
     if (!ws) {
       return
     }
-    this.rejectPendingForSocket(ws, new Error('Backend connection closed.'))
+    this.rejectPendingForSocket(ws, new Error(ENGINE_CONNECTION_CLOSED))
     ws.close()
     this.emit('connection.closed', null)
   }
@@ -283,14 +298,14 @@ export class BackendClient {
   ): Promise<TPayload> {
     const ws = this.ws
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error('Backend WebSocket is not connected.'))
+      return Promise.reject(new Error(ENGINE_NOT_CONNECTED))
     }
     if (options.signal?.aborted) {
       return Promise.reject(abortError(method))
     }
 
     if (!backendContractRuntime) {
-      return Promise.reject(new Error('Backend protocol validator is not ready.'))
+      return Promise.reject(new Error("Videorc's engine checks aren't ready yet."))
     }
     try {
       backendContractRuntime.validateBackendRpcParams(method, params)
@@ -310,7 +325,7 @@ export class BackendClient {
           id,
           pending?.sent
             ? requestOutcomeUnknownError(method, `timed out after ${timeoutMs}ms after it was sent`)
-            : new Error(`Backend request "${method}" timed out before it was sent.`)
+            : new Error(`The "${method}" request timed out before it was sent.`)
         )
       }, timeoutMs)
       const cleanup = (): void => {
@@ -371,7 +386,7 @@ export class BackendClient {
   private handleMessage(raw: string, socket: WebSocket): void {
     const contract = backendContractRuntime
     if (!contract) {
-      this.emit('error', { message: 'Backend protocol validator could not load.' })
+      this.emit('error', { message: ENGINE_CHECKS_UNAVAILABLE })
       return
     }
 
@@ -379,7 +394,7 @@ export class BackendClient {
     try {
       parsed = contract.parseBackendWireMessage(raw)
     } catch {
-      this.emit('error', { message: 'Backend sent an invalid websocket message.' })
+      this.emit('error', { message: "Videorc's engine sent an unreadable message." })
       return
     }
 
@@ -401,7 +416,7 @@ export class BackendClient {
         pending.reject(
           new BackendRequestError(
             parsed.error?.code ?? 'backend-request-failed',
-            parsed.error?.message ?? 'Backend request failed.'
+            parsed.error?.message ?? "Videorc's engine couldn't do that."
           )
         )
       }
@@ -411,7 +426,9 @@ export class BackendClient {
     try {
       this.emit(parsed.event, contract.validateBackendEventPayload(parsed.event, parsed.payload))
     } catch {
-      this.emit('error', { message: `Backend event "${parsed.event}" failed validation.` })
+      this.emit('error', {
+        message: `Videorc's engine sent an unreadable "${parsed.event}" event.`
+      })
     }
   }
 
@@ -473,8 +490,8 @@ export class BackendClient {
 
   private inactiveConnectError(): Error {
     return this.closed
-      ? new Error('Backend client is closed.')
-      : new Error('Backend connection attempt was superseded.')
+      ? new Error(ENGINE_SHUT_DOWN)
+      : new Error('A newer engine connection replaced this one.')
   }
 
   private emit(event: string, payload: unknown): void {
@@ -501,12 +518,12 @@ function abortError(method: string, outcomeUnknown = false): BackendAbortError {
 
 function sendError(method: string, reason: unknown): Error {
   const detail = reason instanceof Error ? reason.message : String(reason)
-  return new Error(`Could not send backend request "${method}": ${detail}`)
+  return new Error(`Couldn't send the "${method}" request: ${detail}`)
 }
 
 function requestOutcomeUnknownError(method: string, detail: string): BackendRequestError {
   return new BackendRequestError(
     'request-outcome-unknown',
-    `Backend request "${method}" ${detail}; its outcome is unknown.`
+    `The "${method}" request ${detail}; its outcome is unknown.`
   )
 }

@@ -2,7 +2,11 @@ import { nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { describe, expect, it, vi } from 'vitest'
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn(), warning: vi.fn() } }))
 import { toast } from 'sonner'
-import { executeGlobalShortcut, GlobalShortcutsRegistrar } from './global-shortcuts'
+import {
+  executeGlobalShortcut,
+  globalShortcutLabel,
+  GlobalShortcutsRegistrar
+} from './global-shortcuts'
 import { withGlobalShortcut } from '../../../shared/global-shortcut-bindings'
 import {
   GLOBAL_SHORTCUT_ACTIONS,
@@ -15,8 +19,8 @@ describe('global layout shortcuts', () => {
   it('dispatches every layout action exactly once without microphone fallback', () => {
     const context = {
       sessionActive: false,
-      streamEnabled: false,
-      startSession: vi.fn(),
+      startRecording: vi.fn(async () => true),
+      startLivestream: vi.fn(async () => false),
       stopSession: vi.fn(),
       toggleMicrophoneMute: vi.fn(),
       markClip: vi.fn(),
@@ -32,6 +36,40 @@ describe('global layout shortcuts', () => {
     executeGlobalShortcut('invalid' as GlobalShortcutAction, context)
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
     expect(context.switchLayout).toHaveBeenCalledTimes(12)
+    expect(context.startRecording).not.toHaveBeenCalled()
+    expect(context.startLivestream).not.toHaveBeenCalled()
+  })
+
+  // Plan 174 S3.1 (B-3, A-3): the record key records and the Go Live key goes
+  // live, whatever mode was saved last; while a session runs both stop it.
+  // The hotkey never refuses on its own: a Go Live with no destination is the
+  // provider's refusal ("Set up a destination to go live"), not the key's.
+  it('starts the explicit intents idle and stops the session while active', () => {
+    const idle = {
+      sessionActive: false,
+      startRecording: vi.fn(async () => true),
+      startLivestream: vi.fn(async () => false),
+      stopSession: vi.fn(async () => true),
+      toggleMicrophoneMute: vi.fn()
+    }
+    executeGlobalShortcut('record-toggle', idle)
+    expect(idle.startRecording).toHaveBeenCalledOnce()
+    expect(idle.startLivestream).not.toHaveBeenCalled()
+    executeGlobalShortcut('stream-toggle', idle)
+    expect(idle.startLivestream).toHaveBeenCalledOnce()
+    expect(idle.startRecording).toHaveBeenCalledOnce()
+    expect(idle.stopSession).not.toHaveBeenCalled()
+    expect(toast.warning).not.toHaveBeenCalledWith(
+      'Set up a destination to go live',
+      expect.anything()
+    )
+
+    const active = { ...idle, sessionActive: true, stopSession: vi.fn(async () => true) }
+    executeGlobalShortcut('record-toggle', active)
+    executeGlobalShortcut('stream-toggle', active)
+    expect(active.stopSession).toHaveBeenCalledTimes(2)
+    expect(active.startRecording).toHaveBeenCalledOnce()
+    expect(active.startLivestream).toHaveBeenCalledOnce()
   })
   it('keeps stable IDs, unassigned defaults and validates unknown actions', () => {
     expect(globalShortcutEntries({})).toHaveLength(17)
@@ -58,8 +96,8 @@ describe('global layout shortcuts', () => {
 describe('system audio shortcut', () => {
   const base = () => ({
     sessionActive: false,
-    streamEnabled: false,
-    startSession: vi.fn(),
+    startRecording: vi.fn(),
+    startLivestream: vi.fn(),
     stopSession: vi.fn(),
     toggleMicrophoneMute: vi.fn(),
     setSystemAudioEnabled: vi.fn()
@@ -74,7 +112,8 @@ describe('system audio shortcut', () => {
     expect(on.setSystemAudioEnabled).toHaveBeenCalledExactlyOnceWith(false)
     expect(off.toggleMicrophoneMute).not.toHaveBeenCalled()
     expect(on.toggleMicrophoneMute).not.toHaveBeenCalled()
-    expect(off.startSession).not.toHaveBeenCalled()
+    expect(off.startRecording).not.toHaveBeenCalled()
+    expect(off.startLivestream).not.toHaveBeenCalled()
   })
 
   it('is a no-op that says why when the device cannot run', () => {
@@ -96,7 +135,7 @@ describe('system audio shortcut', () => {
       id: 'global-shortcut-system-audio'
     })
     expect(vi.mocked(toast.warning).mock.calls[1][0]).toBe(
-      'System audio is not available on this computer'
+      "System audio isn't available on this computer"
     )
   })
 })
@@ -132,6 +171,19 @@ describe('withGlobalShortcut', () => {
   })
 })
 
+describe('globalShortcutLabel (plan 174 A-22)', () => {
+  it('names what a shortcut does, never its id', () => {
+    expect(globalShortcutLabel('stream-toggle')).toBe('Go Live / end livestream')
+    expect(globalShortcutLabel('layout-next')).toBe('Next scene')
+    expect(globalShortcutLabel('layout:camera-only')).not.toContain('camera-only')
+    // Out of its list, a vertical layout says so (plan 174 S2.3a).
+    expect(globalShortcutLabel('layout:vertical-screen-camera')).toBe('Vertical screen + camera')
+    expect(globalShortcutLabel('record-toggle')).toBe('Record / stop recording')
+    expect(globalShortcutLabel('mic-toggle')).toBe('Mute / unmute microphone')
+    expect(globalShortcutLabel('unknown-action')).toBe('unknown-action')
+  })
+})
+
 describe('GlobalShortcutsRegistrar conflicts', () => {
   it('names the Shortcuts tab and offers a button that opens it (plan 064)', async () => {
     const target = new EventTarget()
@@ -147,9 +199,9 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
       await vi.waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1))
 
       const [title, options] = vi.mocked(toast.error).mock.calls[0] ?? []
-      expect(title).toBe('Some global shortcuts could not be registered')
+      expect(title).toBe("A global shortcut didn't register")
       expect(options?.description).toBe(
-        'record-toggle: invalid, duplicate or already used by another app. Pick different bindings in Settings → Shortcuts.'
+        'Record / stop recording: another app uses it, or the keys are taken twice. Choose different keys in Settings → Shortcuts.'
       )
       const action = options?.action as { label: string; onClick: () => void }
       expect(action.label).toBe('Open Shortcuts')

@@ -1,4 +1,4 @@
-import { isMacPlatform } from '@/lib/platform'
+import { currentPlatform, isMacPlatform } from '@/lib/platform'
 
 /**
  * The sidebar's shortcut layer: key chips stay hidden until the user reaches
@@ -17,7 +17,9 @@ import { isMacPlatform } from '@/lib/platform'
 export type ModifierKey = 'Meta' | 'Control'
 
 export function commandModifierKey(platform: string | undefined): ModifierKey {
-  return isMacPlatform(platform) ? 'Meta' : 'Control'
+  // The same platform the chips print with (ShortcutKeys), so the key the
+  // layer watches and the key its chips advertise never disagree.
+  return isMacPlatform(currentPlatform(platform)) ? 'Meta' : 'Control'
 }
 
 /**

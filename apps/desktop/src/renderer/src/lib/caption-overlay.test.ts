@@ -15,6 +15,19 @@ import {
 const measure: TextMeasurer = (text, fontPx) => text.length * fontPx * 0.55
 
 describe('captionBarMetrics', () => {
+  it('wraps to the placed rect width instead of the style fraction (plan 164)', () => {
+    const fraction = captionBarMetrics(1920, 'm', 'glass', 1080)
+    const placed = captionBarMetrics(1920, 'm', 'glass', 1080, 960)
+    expect(placed.fontPx).toBe(fraction.fontPx)
+    expect(placed.maxTextWidthPx).toBe(960 - placed.paddingXPx * 2)
+    // A rect wider than the canvas clamps to the canvas; a bogus width is ignored.
+    expect(captionBarMetrics(1920, 'm', 'glass', 1080, 4000).maxTextWidthPx).toBe(
+      1920 - placed.paddingXPx * 2
+    )
+    expect(captionBarMetrics(1920, 'm', 'glass', 1080, 0)).toEqual(fraction)
+    expect(captionBarMetrics(1920, 'm', 'glass', 1080, Number.NaN)).toEqual(fraction)
+  })
+
   it('scales the font with output width and the size knob, with a floor', () => {
     const m1080 = captionBarMetrics(1920, 'm')
     expect(m1080.fontPx).toBe(48)

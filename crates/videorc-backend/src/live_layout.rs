@@ -2044,24 +2044,37 @@ async fn retire_unused_sources_after_commit(
     needs: SceneSourceNeeds,
 ) {
     let mut needs = needs;
-    if let Some(edit) = state.compositor.lock().await.source_edit_snapshot() {
-        let current = source_edit_needs(&edit);
-        needs.camera |= current.camera;
-        needs.screen |= current.screen;
+    {
+        let compositor = state.compositor.lock().await;
+        let iso = compositor.source_iso_capture_needs();
+        needs.camera |= iso.camera;
+        needs.screen |= iso.screen;
+        if let Some(edit) = compositor.source_edit_snapshot() {
+            let current = source_edit_needs(&edit);
+            needs.camera |= current.camera;
+            needs.screen |= current.screen;
+        }
     }
     if !needs.screen {
+        // Startup owns this admission fence until ISO consumers are installed.
+        // Never hold a compositor guard while admitting a preview stop: source
+        // publication takes preview-runtime locks before the compositor lock.
+        let admission = state.session_start_source_transition_fence.lock().await;
         let transition = acquire_preview_screen_transition(state).await;
         let stop = {
             let intents = state.layout_intents.lock().await;
+            let iso = state.compositor.lock().await.source_iso_capture_needs();
             if intents.latest_intent_id == intent_id
                 && state.latest_layout_intent_id() == intent_id
                 && !intents.latest_needs_screen
+                && !iso.screen
             {
                 Some(begin_preview_screen_stop_with_transition(state, transition).await)
             } else {
                 None
             }
         };
+        drop(admission);
         if let Some(stop) = stop {
             let _ = finish_preview_screen_stop(stop).await;
         }
@@ -2073,21 +2086,101 @@ async fn retire_unused_sources_after_commit(
     let grace_state = state.clone();
     state.spawn_process_task(async move {
         sleep(UNUSED_CAMERA_STOP_GRACE).await;
-        let stop = {
-            let intents = grace_state.layout_intents.lock().await;
-            if intents.latest_intent_id == intent_id
-                && grace_state.latest_layout_intent_id() == intent_id
-                && !intents.latest_needs_camera
-            {
-                Some(begin_preview_camera_stop(&grace_state).await)
-            } else {
-                None
-            }
-        };
-        if let Some(stop) = stop {
-            let _ = finish_preview_camera_stop(stop).await;
-        }
+        retire_unused_camera_after_grace(&grace_state, intent_id).await;
     });
+}
+
+async fn retire_unused_camera_after_grace(state: &AppState, intent_id: u64) {
+    let admission = state.session_start_source_transition_fence.lock().await;
+    let stop = {
+        let intents = state.layout_intents.lock().await;
+        let iso = state.compositor.lock().await.source_iso_capture_needs();
+        // Recheck after the grace and startup waits. Selection and membership
+        // may have changed since the layout scheduled this cleanup.
+        if intents.latest_intent_id == intent_id
+            && state.latest_layout_intent_id() == intent_id
+            && !intents.latest_needs_camera
+            && !iso.camera
+        {
+            Some(begin_preview_camera_stop(state).await)
+        } else {
+            None
+        }
+    };
+    drop(admission);
+    if let Some(stop) = stop {
+        let _ = finish_preview_camera_stop(stop).await;
+    }
+}
+
+/// Terminal ISO cleanup has no live layout-intent token: Stop invalidates it.
+/// Reconcile against current consumers instead, fenced against a new capture
+/// and scene commit. Callers retiring startup resources must schedule this
+/// after releasing startup admission, never await it while owning that fence.
+pub(crate) async fn reconcile_source_iso_capture_demand(state: &AppState) {
+    let admission = state.session_start_source_transition_fence.lock().await;
+    let screen_transition = acquire_preview_screen_transition(state).await;
+    let intents = state.layout_intents.lock().await;
+    let commit = state.scene_commit.lock().await;
+    let fallback_needs = {
+        let scene = state.scene.lock().await;
+        required_scene_sources(&scene)
+    };
+    let (needs, camera_identity, screen_identity) = {
+        // Same preview -> compositor order as source publication. Never carry
+        // these guards into the generation-CAS stop helpers below.
+        let camera = state.preview_camera.lock().await;
+        let screen = state.preview_screen.lock().await;
+        let compositor = state.compositor.lock().await;
+        let mut needs = compositor
+            .source_edit_snapshot()
+            .as_ref()
+            .map_or(fallback_needs, source_edit_needs);
+        let iso = compositor.source_iso_capture_needs();
+        needs.camera |= iso.camera;
+        needs.screen |= iso.screen;
+        if intents.latest_intent_id == state.latest_layout_intent_id() {
+            // A warm visible layout owns its producer before scene commit.
+            // Invalidated pre-Stop intent fields have no such authority.
+            needs.camera |= intents.latest_needs_camera;
+            needs.screen |= intents.latest_needs_screen;
+        }
+        // A pending native start owns its admission. Failed/stalled active
+        // generations still need teardown when their last consumer leaves.
+        let camera_identity = (camera.status.state != PreviewCameraState::Starting)
+            .then(|| crate::preview_camera::source_identity_locked(&camera))
+            .flatten();
+        let screen_identity = (screen.status.state != PreviewScreenState::Starting)
+            .then(|| crate::preview_screen::source_identity_locked(&screen))
+            .flatten();
+        (needs, camera_identity, screen_identity)
+    };
+    let camera_stop = if !needs.camera
+        && let Some(identity) = camera_identity
+    {
+        crate::preview_camera::stop_abandoned_camera_generation(state, &identity).await
+    } else {
+        None
+    };
+    let screen_stop = if !needs.screen
+        && let Some(identity) = screen_identity
+    {
+        crate::preview_screen::stop_abandoned_screen_generation(state, &identity).await
+    } else {
+        None
+    };
+    drop(commit);
+    drop(intents);
+    drop(admission);
+    // Supervisors now own physical teardown and startup observes their source
+    // transition tickets. Keep the screen transition through its completion.
+    if let Some(stop) = screen_stop {
+        let _ = finish_preview_screen_stop(stop).await;
+    }
+    drop(screen_transition);
+    if let Some(stop) = camera_stop {
+        let _ = finish_preview_camera_stop(stop).await;
+    }
 }
 
 fn missing_readiness_messages(
@@ -2346,17 +2439,23 @@ async fn commit_scene_with_layout_at_time_with_policy(
     // concurrent-commit regression. Production has no artificial yield.
     #[cfg(test)]
     tokio::task::yield_now().await;
-    let compositor_status = update_compositor_scene(
-        state,
-        CompositorSceneUpdateParams {
-            revision,
-            scene: Some(scene.clone()),
-            layout,
-            active_screen,
-            transition_ms,
-        },
-    )
-    .await;
+    let compositor_params = CompositorSceneUpdateParams {
+        revision,
+        scene: Some(scene.clone()),
+        layout,
+        active_screen,
+        transition_ms,
+    };
+    let compositor_status = if let Some(selected_sources) = selected_sources {
+        crate::compositor::update_compositor_scene_with_selected_sources(
+            state,
+            compositor_params,
+            selected_sources,
+        )
+        .await
+    } else {
+        update_compositor_scene(state, compositor_params).await
+    };
     // Install selected visual intent inside the same scene commit fence, and
     // only when the latest primary config supplied it. Generic scene edits
     // must not infer source selection from their visible composition.
@@ -2677,6 +2776,342 @@ mod tests {
             .unwrap();
         assert_eq!(after.confirmed, committed.confirmed);
         assert_eq!(after.source_revision, committed.source_revision);
+    }
+
+    #[tokio::test]
+    async fn source_iso_layout_retirement_preserves_hidden_capture_until_role_retirement() {
+        for preset in [LayoutPreset::CameraOnly, LayoutPreset::ScreenOnly] {
+            let state = test_state();
+            *state.recording.lock().await =
+                Some(crate::recording::test_active_recording_stub("iso"));
+            let mut params = config(preset.clone(), true, true);
+            let video = params.video.as_mut().unwrap();
+            video.width = 64;
+            video.height = 36;
+            crate::preview_camera::test_install_live_camera_for_layout(
+                &state,
+                params.sources.camera_id.as_deref().unwrap(),
+                &params.layout,
+                video,
+            )
+            .await;
+            crate::preview_screen::test_install_live_screen_generation(
+                &state,
+                params.sources.screen_id.as_deref().unwrap(),
+                1,
+                1,
+                video,
+            )
+            .await;
+            state
+                .live_source_switch
+                .lock()
+                .unwrap()
+                .start("iso".into(), params.sources.clone());
+            let stores = crate::compositor::test_install_source_iso_frame_stores(&state).await;
+            let camera_before = crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .unwrap();
+            let screen_before = crate::preview_screen::preview_screen_frame_source(&state)
+                .await
+                .unwrap();
+            let applied = apply_layout_live(
+                &state,
+                SceneLayoutApplyParams {
+                    intent_id: Some(1),
+                    simulcast_leg: false,
+                    config: params,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(applied.applied);
+            // Exercise an already queued camera retirement after its grace too.
+            retire_unused_camera_after_grace(&state, 1).await;
+            crate::preview_camera::test_publish_camera_pixels(
+                &state,
+                77,
+                [1, 2, 3, 255],
+                std::time::Instant::now(),
+            )
+            .await;
+            crate::preview_screen::test_publish_screen_pixels(
+                &state,
+                88,
+                [3, 2, 1, 255],
+                std::time::Instant::now(),
+            )
+            .await;
+            let camera = crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .unwrap();
+            let screen = crate::preview_screen::preview_screen_frame_source(&state)
+                .await
+                .unwrap();
+            assert_eq!(camera.generation(), camera_before.generation());
+            assert_eq!(screen.generation(), screen_before.generation());
+            assert_eq!(camera.latest_frame_blocking().unwrap().0.sequence, 77);
+            assert_eq!(screen.latest_frame_blocking().unwrap().sequence, 88);
+
+            let needs = required_scene_sources(&applied.scene);
+            if preset == LayoutPreset::CameraOnly {
+                stores
+                    .batches
+                    .retire(crate::compositor::source_iso_batch::SCREEN, None);
+                retire_unused_sources_after_commit(&state, 1, needs).await;
+                assert!(
+                    crate::preview_screen::preview_screen_frame_source(&state)
+                        .await
+                        .is_none()
+                );
+            } else {
+                stores
+                    .batches
+                    .retire(crate::compositor::source_iso_batch::CAMERA, None);
+                retire_unused_camera_after_grace(&state, 1).await;
+                assert!(
+                    crate::preview_camera::preview_camera_frame_source(&state)
+                        .await
+                        .is_none()
+                );
+            }
+            crate::preview_camera::stop_preview_camera(&state).await;
+            crate::preview_screen::stop_preview_screen(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn source_iso_retirement_rechecks_demand_after_startup_admission_wait() {
+        for preset in [LayoutPreset::CameraOnly, LayoutPreset::ScreenOnly] {
+            let state = test_state();
+            let mut params = config(preset.clone(), true, true);
+            params.video.as_mut().unwrap().width = 64;
+            params.video.as_mut().unwrap().height = 36;
+            let video = params.video.as_ref().unwrap();
+            crate::preview_camera::test_install_live_camera_for_layout(
+                &state,
+                params.sources.camera_id.as_deref().unwrap(),
+                &params.layout,
+                video,
+            )
+            .await;
+            crate::preview_screen::test_install_live_screen_generation(
+                &state,
+                params.sources.screen_id.as_deref().unwrap(),
+                1,
+                1,
+                video,
+            )
+            .await;
+            let scene = scene_from_capture_config(params.clone());
+            let needs = required_scene_sources(&scene);
+            let intent = begin_layout_intent(&state, Some(1), needs).await.unwrap();
+            crate::compositor::update_compositor_scene_with_selected_sources(
+                &state,
+                CompositorSceneUpdateParams {
+                    revision: 1,
+                    scene: Some(scene),
+                    layout: params.layout,
+                    active_screen: None,
+                    transition_ms: None,
+                },
+                &params.sources,
+            )
+            .await;
+            let startup = state.session_start_source_transition_fence.lock().await;
+            let retirement = async {
+                if preset == LayoutPreset::CameraOnly {
+                    retire_unused_sources_after_commit(&state, intent, needs).await;
+                } else {
+                    retire_unused_camera_after_grace(&state, intent).await;
+                }
+            };
+            tokio::pin!(retirement);
+            assert!(
+                futures_util::poll!(retirement.as_mut()).is_pending(),
+                "retirement waits for startup admission"
+            );
+            let stores = crate::compositor::test_install_source_iso_frame_stores(&state).await;
+            drop(startup);
+            tokio::time::timeout(Duration::from_secs(1), retirement)
+                .await
+                .unwrap();
+            assert!(
+                crate::preview_camera::preview_camera_frame_source(&state)
+                    .await
+                    .is_some()
+            );
+            assert!(
+                crate::preview_screen::preview_screen_frame_source(&state)
+                    .await
+                    .is_some()
+            );
+            stores
+                .batches
+                .retire(crate::compositor::source_iso_batch::CAMERA, None);
+            stores
+                .batches
+                .retire(crate::compositor::source_iso_batch::SCREEN, None);
+            crate::preview_camera::stop_preview_camera(&state).await;
+            crate::preview_screen::stop_preview_screen(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn source_iso_terminal_reconciliation_releases_only_retired_hidden_roles() {
+        for preset in [LayoutPreset::CameraOnly, LayoutPreset::ScreenOnly] {
+            let (state, stores) = iso_reconciliation_fixture(preset.clone()).await;
+            reconcile_source_iso_capture_demand(&state).await;
+            assert_capture_roles(&state, true, true).await;
+            stores
+                .batches
+                .retire(crate::compositor::source_iso_batch::SCREEN, None);
+            stores
+                .batches
+                .retire(crate::compositor::source_iso_batch::CAMERA, None);
+            // The real Stop invalidates the old intent without rewriting its
+            // stored needs. Terminal cleanup must still release hidden capture.
+            state.invalidate_layout_source_work();
+            reconcile_source_iso_capture_demand(&state).await;
+            assert_capture_roles(
+                &state,
+                preset == LayoutPreset::CameraOnly,
+                preset == LayoutPreset::ScreenOnly,
+            )
+            .await;
+            crate::preview_camera::stop_preview_camera(&state).await;
+            crate::preview_screen::stop_preview_screen(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn source_iso_terminal_reconciliation_preserves_pending_auxiliary_and_stream_consumers() {
+        let (state, stores) = iso_reconciliation_fixture(LayoutPreset::CameraOnly).await;
+        stores
+            .batches
+            .retire(crate::compositor::source_iso_batch::SCREEN, None);
+        let needs = SceneSourceNeeds {
+            camera: true,
+            screen: true,
+        };
+        begin_layout_intent(&state, Some(2), needs).await.unwrap();
+        reconcile_source_iso_capture_demand(&state).await;
+        assert_capture_roles(&state, true, true).await;
+        state.invalidate_layout_source_work();
+        let auxiliary = config(LayoutPreset::VerticalScreenOnly, false, true);
+        crate::compositor::update_compositor_simulcast_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 2,
+                scene: Some(scene_from_capture_config(auxiliary.clone())),
+                layout: auxiliary.layout,
+                active_screen: None,
+                transition_ms: None,
+            },
+        )
+        .await;
+        reconcile_source_iso_capture_demand(&state).await;
+        assert_capture_roles(&state, true, true).await;
+        crate::compositor::clear_compositor_simulcast_scene(&state).await;
+        let key = crate::source_registry::SourceKey::screen("screen:screencapturekit:1");
+        state.source_registry.lock().await.acquire(
+            key.clone(),
+            crate::source_registry::SourceConsumerReason::Streaming,
+        );
+        reconcile_source_iso_capture_demand(&state).await;
+        assert_capture_roles(&state, true, true).await;
+        state.source_registry.lock().await.release(
+            &key,
+            &crate::source_registry::SourceConsumerReason::Streaming,
+        );
+        reconcile_source_iso_capture_demand(&state).await;
+        assert_capture_roles(&state, true, false).await;
+        crate::preview_camera::stop_preview_camera(&state).await;
+    }
+
+    #[tokio::test]
+    async fn source_iso_terminal_reconciliation_rechecks_new_take_after_startup_wait() {
+        let (state, retired) = iso_reconciliation_fixture(LayoutPreset::ScreenOnly).await;
+        retired
+            .batches
+            .retire(crate::compositor::source_iso_batch::CAMERA, None);
+        state.invalidate_layout_source_work();
+        let startup = state.session_start_source_transition_fence.lock().await;
+        let cleanup = reconcile_source_iso_capture_demand(&state);
+        tokio::pin!(cleanup);
+        assert!(futures_util::poll!(cleanup.as_mut()).is_pending());
+        let next_take = crate::compositor::test_install_source_iso_frame_stores(&state).await;
+        drop(startup);
+        tokio::time::timeout(Duration::from_secs(1), cleanup)
+            .await
+            .unwrap();
+        assert_capture_roles(&state, true, true).await;
+        next_take
+            .batches
+            .retire(crate::compositor::source_iso_batch::CAMERA, None);
+        reconcile_source_iso_capture_demand(&state).await;
+        assert_capture_roles(&state, false, true).await;
+        crate::preview_screen::stop_preview_screen(&state).await;
+    }
+
+    async fn iso_reconciliation_fixture(
+        preset: LayoutPreset,
+    ) -> (AppState, crate::compositor::CompositorSourceIsoFrameStores) {
+        let state = test_state();
+        let mut params = config(preset, true, true);
+        params.video.as_mut().unwrap().width = 64;
+        params.video.as_mut().unwrap().height = 36;
+        let video = params.video.as_ref().unwrap();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            params.sources.camera_id.as_deref().unwrap(),
+            &params.layout,
+            video,
+        )
+        .await;
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            params.sources.screen_id.as_deref().unwrap(),
+            1,
+            1,
+            video,
+        )
+        .await;
+        let scene = scene_from_capture_config(params.clone());
+        begin_layout_intent(&state, Some(1), required_scene_sources(&scene))
+            .await
+            .unwrap();
+        crate::compositor::update_compositor_scene_with_selected_sources(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(scene),
+                layout: params.layout,
+                active_screen: None,
+                transition_ms: None,
+            },
+            &params.sources,
+        )
+        .await;
+        let stores = crate::compositor::test_install_source_iso_frame_stores(&state).await;
+        (state, stores)
+    }
+
+    async fn assert_capture_roles(state: &AppState, camera: bool, screen: bool) {
+        assert_eq!(
+            crate::preview_camera::preview_camera_frame_source(state)
+                .await
+                .is_some(),
+            camera,
+            "camera capture ownership"
+        );
+        assert_eq!(
+            crate::preview_screen::preview_screen_frame_source(state)
+                .await
+                .is_some(),
+            screen,
+            "screen capture ownership"
+        );
     }
 
     #[tokio::test]

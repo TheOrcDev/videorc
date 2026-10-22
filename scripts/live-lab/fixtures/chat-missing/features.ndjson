@@ -1,0 +1,2 @@
+{"at":"2026-10-12T06:08:00.000Z","id":"chat-script","kind":"chat-script","sent":14,"deleted":true}
+{"at":"2026-10-12T06:10:00.000Z","id":"chat-arrival","kind":"chat-arrival","sent":14,"arrived":13,"missing":["long"],"maxLatencyMs":4200}

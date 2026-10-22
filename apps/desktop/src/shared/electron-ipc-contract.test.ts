@@ -11,6 +11,8 @@ import {
   normalizeCommentHighlightAnchor
 } from './backend'
 import { CHAT_AVATAR_MAX_BYTES } from './chat-avatar-bytes'
+import { CommentsCommandBroker } from '../main/comments-command-broker'
+import { roleCanInvokeChannel } from './renderer-security-policy'
 import {
   MAX_NOTES_TEXT_LENGTH,
   boundedPassthroughElectronEventChannels,
@@ -34,17 +36,33 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
+    // 127: plan 164 S-A3 adds the Buddy avatar store pair (import, remove).
+    // 128: plan 164 S-C2 adds the Buddy image bytes read for the overlay raster.
+    // 129: plan 168 S-A2 adds buddy-pets:read (pet pack files for the preview).
+    // 130: plan 168 S-A3 adds buddy-pets:import-folder (Import pack…).
+    // 131: plan 168 S-F5 adds buddy-pets:read-creation (the creator's sheets).
+    // 124: plan 155 adds chat-gifs:cache and the GIF mode relay (push, get).
     // 121: plan 152 adds marker request/reply and capture context get/push.
     // 117: plan 151 added chat:open-link.
-    // 116: plan 140 S6 part B added the Orcle command answer pair (part A
+    // 125: plan 156 added the Activity auto-show switch channel (116: plan
+    // 140 S6 part B added the Buddy command answer pair; part A
     // the chat removal relay pair; S5 the Stream
     // Manager's reconnect-scopes channel; plan 119 the in-app player's
     // media:grant-session; plan 095 the highlight card's avatars:read; plan 071
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(121)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(121)
+    // 130: plan 169 D10 retired buddy-assets:import-image (no per-state uploads).
+    // 133: plan 174 S3.14a adds comments-window:open-buddy-tab (the Buddy
+    // pane's behaviour chips open Buddy → Chat in the main window).
+    // 132: plan 174 S3.1 adds app:exit (the renderer's answer to a quit or
+    // close asked while on air).
+    // 131: plan 174 S3.18 adds resource:reveal-support-bundle (Show in Finder).
+    // 134: plan 186 adds banners:pick-image (Assets → Banners → Import image…).
+    // 138: plan 186 S7 adds the Stream Manager's banner list (get, push) and
+    // its show or hide relay pair.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(138)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(138)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -174,6 +192,43 @@ describe('Electron IPC contract', () => {
     expect(() => validateElectronInvokeArgs('chat:open-link', [])).toThrow()
   })
 
+  it('caches only https GIF assets from allowlisted hosts, unmodified (plan 155)', () => {
+    const url = 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif?cid=x'
+    expect(validateElectronInvokeArgs('chat-gifs:cache', [url])).toEqual([url])
+    for (const refused of [
+      'http://media2.giphy.com/media/a/giphy.gif',
+      'https://cdn.7tv.app/emote/x/2x.webp',
+      'https://giphy.com.evil.example/a.gif',
+      'https://user:pass@i.giphy.com/a.gif',
+      `https://i.giphy.com/${'a'.repeat(3000)}`,
+      42
+    ]) {
+      expect(() => validateElectronInvokeArgs('chat-gifs:cache', [refused])).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('chat-gifs:cache', [])).toThrow()
+    // The result is null or a managed cache URL, never a remote one.
+    expect(validateElectronInvokeResult('chat-gifs:cache', null)).toBeNull()
+    const local = `videorc-asset://avatar/${'0'.repeat(32)}.gif`
+    expect(validateElectronInvokeResult('chat-gifs:cache', local)).toBe(local)
+    expect(() => validateElectronInvokeResult('chat-gifs:cache', url)).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('chat-gifs:cache', 'videorc-asset://avatar/../x.gif')
+    ).toThrow()
+  })
+
+  it('relays the GIF display mode as one of three words (plan 155, D6)', () => {
+    for (const mode of ['animated', 'still', 'off']) {
+      expect(validateElectronInvokeArgs('chat-gifs:push-mode', [mode])).toEqual([mode])
+      expect(validateElectronInvokeResult('chat-gifs:get-mode', mode)).toBe(mode)
+      expect(validateElectronEventPayload('chat-gifs:mode', mode)).toBe(mode)
+    }
+    expect(() => validateElectronInvokeArgs('chat-gifs:push-mode', ['paused'])).toThrow()
+    expect(() => validateElectronInvokeArgs('chat-gifs:push-mode', [true])).toThrow()
+    expect(() => validateElectronInvokeResult('chat-gifs:get-mode', null)).toThrow()
+    expect(() => validateElectronEventPayload('chat-gifs:mode', { mode: 'off' })).toThrow()
+    expect(validateElectronInvokeArgs('chat-gifs:get-mode', [])).toEqual([])
+  })
+
   it('exactly validates provider OAuth callback queue results', () => {
     const callback = {
       id: 'A'.repeat(43),
@@ -295,6 +350,20 @@ describe('Electron IPC contract', () => {
     }
   })
 
+  it('accepts only a boolean for the Activity auto-show switch (plan 156)', () => {
+    for (const on of [true, false]) {
+      expect(validateElectronInvokeArgs('comments-window:set-auto-show-activity', [on])).toEqual([
+        on
+      ])
+    }
+    for (const forged of ['yes', 'true', 1, 0, null, {}]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:set-auto-show-activity', [forged])
+      ).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('comments-window:set-auto-show-activity', [])).toThrow()
+  })
+
   it('lets the Stream Manager name a platform to reconnect, never the scopes (plan 140)', () => {
     for (const platform of ['twitch', 'kick']) {
       const command = { requestId: 'reconnect-1', platform }
@@ -402,7 +471,7 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeResult('comments-window:moderation-result-push', true)).toBe(true)
   })
 
-  it('relays one answer to an Orcle command by id, nothing more (plan 140, S6 part B)', () => {
+  it('relays one answer to a Buddy command by id, nothing more (plan 140, S6 part B)', () => {
     const choose = {
       requestId: 'r-1',
       sessionId: 'session-1',
@@ -744,6 +813,13 @@ describe('Electron IPC contract', () => {
       })
     ).toThrow('complete provider OAuth callback URL')
     expect(() => validateElectronEventPayload('shortcut:navigate', 'F12')).toThrow('one of 1, 2, 3')
+    // Plan 174 S3.1 (D2): the exit question and its answer are one of two words.
+    expect(validateElectronEventPayload('app:exit-request', 'quit')).toBe('quit')
+    expect(() => validateElectronEventPayload('app:exit-request', 'restart')).toThrow(
+      'one of quit, close'
+    )
+    expect(validateElectronInvokeArgs('app:exit', ['close'])).toEqual(['close'])
+    expect(() => validateElectronInvokeArgs('app:exit', ['kill'])).toThrow('one of quit, close')
   })
 
   it('bounds every fallback contract and Notes persistence payload', () => {
@@ -966,4 +1042,172 @@ it('preserves and validates queue-loss revisions through delivery IPC mirrors', 
         snapshot: { ...view.snapshot, delivery: { ...view.snapshot.delivery, lossRevision } }
       })
     ).toThrow()
+})
+
+describe('banner image picker IPC (plan 186)', () => {
+  it('takes no arguments and returns null or exactly one input-file capability', () => {
+    expect(isElectronInvokeChannel('banners:pick-image')).toBe(true)
+    expect(electronInvokeApiMethods['banners:pick-image']).toBe('pickBannerImage')
+    expect(boundedPassthroughElectronInvokeChannels).not.toContain('banners:pick-image')
+    expectTypeOf<ElectronInvokeResult<'banners:pick-image'>>().toEqualTypeOf<
+      Awaited<ReturnType<VideorcApi['pickBannerImage']>>
+    >()
+    expect(validateElectronInvokeArgs('banners:pick-image', [])).toEqual([])
+    expect(() => validateElectronInvokeArgs('banners:pick-image', ['/tmp/x.png'])).toThrow()
+
+    const selection = { capabilityId: 'cap-1', kind: 'input-file', displayName: 'sponsor.png' }
+    expect(validateElectronInvokeResult('banners:pick-image', null)).toBeNull()
+    expect(validateElectronInvokeResult('banners:pick-image', selection)).toStrictEqual(selection)
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, kind: 'output-directory' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, path: '/tmp/x.png' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, capabilityId: '' })
+    ).toThrow()
+  })
+})
+
+describe('Stream Manager banner IPC (plan 186 S7)', () => {
+  const sponsor = { id: 'sponsor', name: 'Sponsor', shown: false }
+
+  it('pushes a read-only id, name and shown list from Studio, never an image or a path', () => {
+    expect(validateElectronInvokeArgs('comments-window:banners-push', [[sponsor]])).toEqual([
+      [sponsor]
+    ])
+    expect(validateElectronInvokeArgs('comments-window:banners-push', [null])).toEqual([null])
+    expect(validateElectronInvokeResult('comments-window:banners-get', [sponsor])).toEqual([
+      sponsor
+    ])
+    expect(validateElectronEventPayload('comments-window:banners', [sponsor])).toEqual([sponsor])
+    for (const forged of [
+      [{ ...sponsor, imageFile: 'sponsor.png' }],
+      [{ ...sponsor, path: '/Users/me/Banners/sponsor.png' }],
+      [{ id: 'sponsor', name: 'Sponsor' }],
+      { banners: [sponsor] }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:banners-push', [forged])).toThrow()
+      expect(() => validateElectronEventPayload('comments-window:banners', forged)).toThrow()
+      expect(() => validateElectronInvokeResult('comments-window:banners-get', forged)).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('comments-window:banners-get', [true])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [[{ ...sponsor, id: '../x' }]])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [[{ ...sponsor, name: '' }]])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [
+        Array.from({ length: 25 }, () => sponsor)
+      ])
+    ).toThrow()
+  })
+
+  it('accepts one explicit show, hide or hide-all, and answers done or the sentence why not', () => {
+    for (const command of [
+      { requestId: 'r1', action: 'show', id: 'sponsor' },
+      { requestId: 'r2', action: 'hide', id: 'sponsor' },
+      { requestId: 'r3', action: 'hideAll' }
+    ]) {
+      expect(validateElectronInvokeArgs('comments-window:banner', [command])).toEqual([command])
+    }
+    for (const command of [
+      { requestId: 'r1', action: 'toggle', id: 'sponsor' },
+      { requestId: 'r1', action: 'show' },
+      { requestId: 'r1', action: 'hideAll', id: 'sponsor' },
+      { requestId: '', action: 'hideAll' },
+      { requestId: 'r1', action: 'show', id: 'sponsor', path: '/tmp/a.png' },
+      { requestId: 'r1', action: 'show', id: 'a/b' }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:banner', [command])).toThrow()
+    }
+    const refused = {
+      requestId: 'r1',
+      ok: false,
+      error: 'Four banners are showing. Hide one first.'
+    }
+    for (const resolution of [{ requestId: 'r1', ok: true, value: true }, refused]) {
+      expect(
+        validateElectronInvokeArgs('comments-window:banner-result-push', [resolution])
+      ).toEqual([resolution])
+    }
+    for (const resolution of [
+      { requestId: 'r1', ok: true },
+      { requestId: 'r1', ok: false },
+      { requestId: 'r1', ok: false, error: '' },
+      { requestId: 'r1', ok: true, value: true, error: 'x' }
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:banner-result-push', [resolution])
+      ).toThrow()
+    }
+  })
+
+  it('lets the Stream Manager read and ask, and only Studio push and answer', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:banners-get')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:banner')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:banners-push')).toBe(false)
+    expect(roleCanInvokeChannel('comments', 'comments-window:banner-result-push')).toBe(false)
+    expect(roleCanInvokeChannel('main', 'comments-window:banners-push')).toBe(true)
+    expect(roleCanInvokeChannel('main', 'comments-window:banner-result-push')).toBe(true)
+    for (const role of ['notes', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'comments-window:banner')).toBe(false)
+      expect(roleCanInvokeChannel(role, 'comments-window:banners-get')).toBe(false)
+    }
+  })
+
+  it('relays a show or hide to Studio and its answer back, through every validated hop', async () => {
+    const broker = new CommentsCommandBroker(1_000)
+    const studio: unknown[] = []
+    // Stream Manager → main: the invoke's arguments.
+    const ask = (command: unknown): Promise<unknown> => {
+      const [validated] = validateElectronInvokeArgs('comments-window:banner', [command])
+      // main → Studio: the event the main renderer receives.
+      return broker
+        .request<true>(validated.requestId, () => {
+          studio.push(validateElectronEventPayload('comments-window:banner-request', validated))
+          return true
+        })
+        .then((result) => validateElectronInvokeResult('comments-window:banner', result))
+    }
+    // Studio → main: the answer.
+    const answer = (resolution: unknown): boolean => {
+      const [validated] = validateElectronInvokeArgs('comments-window:banner-result-push', [
+        resolution
+      ])
+      return broker.resolve(validated)
+    }
+
+    const shown = ask({ requestId: 'r-show', action: 'show', id: 'sponsor' })
+    expect(studio).toEqual([{ requestId: 'r-show', action: 'show', id: 'sponsor' }])
+    expect(answer({ requestId: 'r-show', ok: true, value: true })).toBe(true)
+    await expect(shown).resolves.toBe(true)
+
+    const refused = ask({ requestId: 'r-all', action: 'hideAll' })
+    expect(studio.at(-1)).toEqual({ requestId: 'r-all', action: 'hideAll' })
+    expect(
+      answer({ requestId: 'r-all', ok: false, error: 'Four banners are showing. Hide one first.' })
+    ).toBe(true)
+    await expect(refused).rejects.toThrow('Four banners are showing. Hide one first.')
+
+    // Nothing but an explicit action by id crosses, either way.
+    for (const forged of [
+      { requestId: 'r-1', action: 'toggle', id: 'sponsor' },
+      { requestId: 'r-1', action: 'show', id: 'sponsor', imageFile: 'sponsor.png' },
+      { requestId: 'r-1', action: 'show' }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:banner', [forged])).toThrow()
+      expect(() => validateElectronEventPayload('comments-window:banner-request', forged)).toThrow()
+    }
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banner-result-push', [
+        { requestId: 'r-1', ok: true, value: { id: 'sponsor', imageFile: 'sponsor.png' } }
+      ])
+    ).toThrow()
+    expect(() => validateElectronInvokeResult('comments-window:banner', false)).toThrow()
+    expect(broker.pendingCount).toBe(0)
+  })
 })

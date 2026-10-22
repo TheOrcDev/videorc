@@ -1,9 +1,14 @@
-# Videorc recording language
+# Videorc language
+
+The words Videorc uses, in the app and when we talk about it. The recording
+timeline terms come first; the UI glossary after them is the canonical
+vocabulary for copy (plan 174, D3 and D4). How to write with these words is
+in [`docs/ui-copy.md`](docs/ui-copy.md).
+
+## Language
 
 These terms distinguish points on a recording or livestream timeline from
 moments proposed for clipping.
-
-## Language
 
 **Marker**:
 A point on a recording or livestream timeline, with an optional title, that
@@ -17,3 +22,229 @@ _Avoid_: Marker, exported clip
 **Moment**:
 A suggested time range worth reviewing, drawn from clip marks or activity during a stream.
 _Avoid_: Marker, finished clip
+
+## UI glossary
+
+One word per thing on every surface: buttons, toasts, ⌘K, menus, the phone
+remote and the docs. Code names may differ (`session`, `cohost`, `target`);
+copy never shows them. Capitalized terms are names and keep their capitals
+mid-sentence; everything else is sentence case.
+
+### Going live and recording
+
+**Go Live**:
+The action that starts a livestream. The Studio button reads "Go Live…"
+because it opens a dialog; the dialog's title and its primary button read
+"Go live"; ⌘K reads "Go live…".
+_Avoid_: Stream (as a button), Start streaming, Confirm Go Live
+
+**End livestream**:
+Stopping a livestream. The recording of that session stops too, and the
+confirmation says so: "Your recording stops too."
+_Avoid_: Stop all, End stream, Stop streaming
+
+**On air**:
+The state while a livestream runs, and only then.
+_Avoid_: Live (for a recording, a source or any running session), Streaming (as a state)
+
+**Livestream**:
+The page where destinations and stream details are set up. As a noun it is
+lowercase: the broadcast itself. "Stream" is its short form in running text
+("Your stream stopped").
+_Avoid_: broadcast (except a platform's own object, like an X broadcast), live session
+
+**Recording**:
+What Videorc writes to a file, and each item in Library.
+_Avoid_: session (in copy), take, capture
+
+**On stream**:
+Shown in what viewers see: a chat message, a takeover, Buddy. The actions
+are "Show on stream" and "Take off stream".
+_Avoid_: On air (for an item), live (for an item)
+
+**Receiving**:
+A source that is producing frames.
+_Avoid_: Live, Active, On air
+
+**Vertical stream**:
+The 9:16 twin of a livestream that goes out beside the horizontal one.
+_Avoid_: vertical leg, simulcast leg
+
+### Scenes and sources
+
+**Scene**:
+Anything the streamer switches to on stream, built in or saved.
+_Avoid_: layout (for the thing you switch to), preset, view
+
+**Layout**:
+The arrangement inside a scene: where the screen and the camera sit.
+_Avoid_: scene (for the arrangement), composition
+
+**Preset**:
+A quality preset only: resolution, frame rate and bitrate together.
+_Avoid_: preset for a scene or a layout ("Layout preset")
+
+**Source**:
+A capture input: a screen or window, a camera, a microphone, system audio.
+_Avoid_: input, feed
+
+**Takeover**:
+A full-frame image the streamer puts on stream over everything else.
+Assets → Takeovers manages them; Studio's Takeover section puts one on
+stream.
+_Avoid_: screen, takeover screen
+
+**Banner**:
+An image the streamer places anywhere on the picture: a sponsor, their
+socials, a logo, a frame. Assets → Banners imports and manages them; the
+Scene page places them and shows or hides them ("Show", "Hide"). A banner
+stays over a takeover and under captions, Buddy and the highlight card.
+_Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
+name)
+
+**Off**:
+A source or a feature the streamer turned off ("Camera: Off"). When there
+is nothing to pick, say so: "No camera found"; while looking, "Finding
+devices…".
+_Avoid_: None, Disabled (for something turned off)
+
+**Gain**:
+The fader that raises or lowers a source's volume, in dB.
+_Avoid_: Level (for the fader), volume (for a source)
+
+**Level**:
+How loud a source is right now, on its meter.
+_Avoid_: Gain (for the meter), Monitoring
+
+**Microphone**:
+The microphone, spelled out.
+_Avoid_: mic
+
+**Camera**:
+The camera, spelled out.
+_Avoid_: cam, webcam
+
+### Destinations and accounts
+
+**Destination**:
+Where a livestream goes: a YouTube channel, a Twitch account, a Custom RTMP
+server.
+_Avoid_: target, provider, output, platform (for the destination itself)
+
+**Account**:
+The platform sign-in behind a destination. A destination connects with
+"Sign in" or with a "Stream key".
+_Avoid_: OAuth, auth mode, credentials
+
+**Channel**:
+The platform's own channel a destination streams to.
+_Avoid_: target
+
+**Stream key**:
+The secret a platform gives for RTMP.
+_Avoid_: Manual RTMP, RTMP credentials
+
+**X**:
+The platform.
+_Avoid_: X / Twitter, Twitter
+
+**Custom RTMP**:
+A destination that is any RTMP server.
+_Avoid_: Manual RTMP, Custom (alone)
+
+**Stream details**:
+A livestream's title, description, privacy and category.
+_Avoid_: Broadcast info, metadata, Metadata draft
+
+**Read-only**:
+A chat Videorc can read but not post to.
+_Avoid_: receive-only
+
+**Reconnect**:
+What a destination or a chat needs after its connection dropped, and the
+action that fixes it ("Twitch: reconnect to send").
+_Avoid_: re-auth, re-authorize
+
+### Windows and pages
+
+**Stream Manager**:
+The live dashboard window: chat, activity, Buddy and the stats bar.
+_Avoid_: Chat window, Comments window, comments (for chat)
+
+**Chat**:
+The viewers' messages in Stream Manager.
+_Avoid_: comments
+
+**Captions reader**:
+The window that shows live captions as text for the streamer.
+_Avoid_: Captions window, caption viewer
+
+**Preview**, **Notes**:
+The two other windows, by these names.
+_Avoid_: Teleprompter, Preview window (as a title)
+
+**Keep on top**:
+The pin that keeps a window over other apps, the same name in every window.
+_Avoid_: Pin, Always on top, Float
+
+**Health**:
+The page with Videorc's verdicts, warnings and the support bundle.
+_Avoid_: diagnostics, Diagnostics tab
+
+**Support bundle**:
+The redacted file a streamer exports from Health to send to support.
+_Avoid_: diagnostics, logs (as the thing to send)
+
+**Import…**:
+Bringing a local file into Videorc: an image, a recording, an OBS setup.
+_Avoid_: Upload (for a local file), Add file
+
+### Buddy and Premium
+
+**Buddy**:
+Videorc's AI companion on stream, with no article ("Buddy reads chat"), or the name
+the streamer gave it when the character speaks or acts ("Grum: 5 people
+asking…"). "Buddies" for more than one. "Golem" names only the stone golem
+creature, never the feature.
+_Avoid_: the Buddy, co-host, Orcle, pet, sidekick
+
+**Buddy Live**:
+The switch that lets Buddy join a livestream.
+_Avoid_: Joins my streams, chat mode (for the on switch)
+
+**Chat posting**:
+What Buddy may post to your chats as you: Off, Suggest or Auto. It never
+turns Buddy on or off; Buddy Live does.
+_Avoid_: chat mode, auto chat
+
+**Profile**:
+The Buddy page's first tab: Buddy Live and its status, My Buddies, the look,
+the personality and Cloud AI. The page is Buddy; its tabs are Profile, Chat,
+Voice, Reports and Clean cut.
+_Avoid_: the Buddy tab (for the first tab)
+
+**Premium**:
+The paid plan. A locked feature says "{Feature} is part of Videorc Premium."
+with one "View Premium" action.
+_Avoid_: Premium required, Upgrade to unlock, Pro, entitlement
+
+### Taking things away
+
+**Delete**:
+Destroy something the streamer made: a recording, a scene, a marker. A
+recording goes to the Trash (the Recycle Bin on Windows), and the copy names
+the bin.
+_Avoid_: Remove (for a destroy)
+
+**Remove**:
+Take something out of a list or off the stream without destroying it: a
+destination, a source, a chat message, a background.
+_Avoid_: Delete (when nothing is destroyed)
+
+**Discard**:
+Throw away unsaved changes.
+_Avoid_: Revert, Cancel changes
+
+**Clear**:
+Empty a field, a filter or a view.
+_Avoid_: Reset (unless it restores a default), Delete

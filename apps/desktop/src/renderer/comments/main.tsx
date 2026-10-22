@@ -1,15 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
 import { toast } from '@/lib/toast'
+import { toastUserError, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 
+import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
 import { AppErrorBoundary } from '@/components/error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
 import { removeMessagesReconnectStarted } from '@/components/stream-manager/remove-messages-reconnect'
 import { WindowFrame } from '@/components/window-frame'
+import { WindowProviders } from '@/components/window-providers'
 import type {
   CohostActionKind,
+  CohostBuddyActionCommand,
+  CohostAutoChatRelayPatch,
   CohostQuestion,
   CohostState,
+  CohostUtteranceState,
   CohostWindowState,
   CommentHighlightAnchor,
   CommentHighlightState,
@@ -25,13 +31,21 @@ import {
   offCohostWindowState
 } from '@/lib/backend'
 import { applyCohostState } from '@/lib/cohost-state'
+import { ChatGifModeProvider } from '@/lib/chat-gifs'
+import { DEFAULT_TWITCH_GIF_MODE, type TwitchGifMode } from '../../shared/chat-gif'
 import type { CommandAnswer } from '@/components/stream-manager/command-cards'
+
+/** A Buddy action before main's request id (distributive, one per kind). */
+type BuddyActionBody = CohostBuddyActionCommand extends infer Command
+  ? Command extends { requestId: string }
+    ? Omit<Command, 'requestId'>
+    : never
+  : never
 import {
   cohostHighlightMessageId,
   cohostNudgeDismissedFromStorage,
   COHOST_NUDGE_STORAGE_KEY
 } from '@/lib/cohost-view'
-import { Toaster } from '@/components/ui/sonner'
 import {
   createCommentsMarker,
   markerCreateParams,
@@ -49,14 +63,33 @@ import {
   commentsSendTransportFailureCanReplace
 } from '../../shared/comments-send-operation'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
-import { removalOutcomeToast, type RemovalAnswer } from '@/lib/chat-removal-view'
+import {
+  REMOVE_UNDO_MS,
+  removalOutcomeToast,
+  removalUndoToast,
+  type RemovalAnswer
+} from '@/lib/chat-removal-view'
+import { holdUndoableAction, type UndoableAction } from '@/lib/undoable-action'
 import { mergeModerationOperations } from '../../shared/chat-moderation'
 import {
   reconcileBrokerCommentsSnapshot,
   applyCommentsSnapshotDelta
 } from '../../shared/comments-snapshot-delta'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
+import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
 import '@/styles.css'
+
+/** What a failed Buddy action was, for its toast (plan 174 S2.4). */
+function buddyActionContext(command: BuddyActionBody): UserErrorContext {
+  switch (command.kind) {
+    case 'buddy-say':
+      return { action: 'send', object: "Buddy's line" }
+    case 'buddy-show-on-stream':
+      return { action: command.showOnStream ? 'show' : 'hide', object: 'Buddy on stream' }
+    case 'buddy-react':
+      return { action: 'play', object: "Buddy's reaction" }
+  }
+}
 
 // Long-lived second window: drop React's dev perf-track measures, which buffer
 // outside the V8 heap and leak over time (see videorc-react-dev-perf-track-leak).
@@ -97,10 +130,50 @@ function CommentsWindowApp(): ReactElement {
       off?.()
     }
   }, [])
+  // Banners (plan 186 S7): the read-only list Studio pushes through main.
+  // A push that lands before the seed answers wins over the seed.
+  const [banners, setBanners] = useState<BannerSummary[] | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsBanners?.((list) => {
+      pushed = true
+      setBanners(list)
+    })
+    void window.videorc?.getCommentsBanners?.().then((list) => {
+      if (!disposed && !pushed) setBanners(list)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // One show or hide, relayed to Studio. Nothing says so when it works (the
+  // picture and the menu's check are the confirmation); a refusal is a
+  // warning with its own sentence. The banner rules load only then.
+  const runBanner = useCallback(async (action: BannerRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.bannerFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.bannerFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'banner-refusal' }
+      await import('@/lib/banners').then(
+        ({ bannerActionContext, bannerActionError }) =>
+          toastUserError(bannerActionError(error), bannerActionContext(action.action), options),
+        () => toastUserError(error, { action: 'change', object: 'the banner' }, options)
+      )
+      return false
+    }
+  }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
     DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
   )
+  // Auto-show Activity on stream (plan 156): main owns the value; the Studio
+  // renderer runs the engine. This window only renders and flips the switch.
+  const [autoShowActivity, setAutoShowActivity] = useState(false)
   const [highlightState, setHighlightState] = useState<CommentHighlightState>({
     generation: 0,
     phase: 'idle'
@@ -141,6 +214,8 @@ function CommentsWindowApp(): ReactElement {
     setSendFailures(chatSendFailures(operation))
   }, [])
   const [viewerSample, setViewerSample] = useState<ViewerSample | null>(null)
+  // Settings → "GIFs in Twitch chat" (plan 155, D6): relayed through main.
+  const [gifMode, setGifMode] = useState<TwitchGifMode>(DEFAULT_TWITCH_GIF_MODE)
   // The Stream Manager's live data (plan 055, S7): relayed through main.
   const [dashboard, setDashboard] = useState<LiveDashboardState | null>(null)
   // Co-host: the MAIN renderer resolves Premium, consent and the engine state,
@@ -198,6 +273,7 @@ function CommentsWindowApp(): ReactElement {
         if (!state) return
         setAlwaysOnTop(state.alwaysOnTop)
         setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
+        setAutoShowActivity(state.autoShowActivity === true)
       })
       .catch(() => {})
     const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => applyView(next))
@@ -214,6 +290,11 @@ function CommentsWindowApp(): ReactElement {
       .catch(() => {})
     const offViewers = window.videorc?.onViewerSample?.((sample) => setViewerSample(sample))
     void window.videorc
+      ?.getChatGifMode?.()
+      .then((mode) => mode && setGifMode(mode))
+      .catch(() => {})
+    const offGifMode = window.videorc?.onChatGifMode?.((mode) => setGifMode(mode))
+    void window.videorc
       ?.getDashboard?.()
       .then((state) => setDashboard(state ?? null))
       .catch(() => {})
@@ -221,6 +302,7 @@ function CommentsWindowApp(): ReactElement {
     const offState = window.videorc?.onCommentsWindowState?.((state) => {
       setAlwaysOnTop(state.alwaysOnTop)
       setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
+      setAutoShowActivity(state.autoShowActivity === true)
     })
     // Which comment is on stream: seeded + followed via the main-process relay
     // (the main renderer owns the highlight lifecycle).
@@ -241,6 +323,7 @@ function CommentsWindowApp(): ReactElement {
       offSnapshot?.()
       offDelta?.()
       offViewers?.()
+      offGifMode?.()
       offDashboard?.()
       offState?.()
       offHighlight?.()
@@ -279,36 +362,63 @@ function CommentsWindowApp(): ReactElement {
       else next.delete(id)
       return next
     })
-  // "Remove from chat" is the express consent: it runs at once, as manual.
+  // "Remove from chat" is the express consent, and it runs after a short
+  // Undo (plan 174 D20): the row says Removing… at once, and the toast's
+  // own lifecycle runs the removal when it closes, never a clock beside it
+  // (Sonner pauses the toast under the pointer and while the window is
+  // hidden), so Undo is never on screen for a removal that already ran.
+  const pendingRemovals = useRef(new Map<string, UndoableAction>())
   const removeFromChat = (message: LiveChatMessage): void => {
     const sessionId = snapshot.sessionId
     const moderate = window.videorc?.moderateFromCommentsWindow
-    if (!sessionId || !moderate) return
+    if (!sessionId || !moderate || pendingRemovals.current.has(message.id)) return
     flagId(setRemovalRequestIds, message.id, true)
-    void moderate({
-      requestId: crypto.randomUUID(),
-      sessionId,
-      action: 'remove',
-      operationId: crypto.randomUUID(),
-      messageId: message.id
-    })
-      .then((operation) => {
-        noteRemoval(operation)
-        const outcome = removalOutcomeToast(operation, { includeSuccess: false })
-        if (outcome) {
-          ;(outcome.kind === 'error' ? toast.error : toast.warning)(outcome.text, {
-            id: `chat-removal:${operation.operationId}`
-          })
-        }
+    const undoToast = removalUndoToast(message)
+    const action = holdUndoableAction(() => {
+      pendingRemovals.current.delete(message.id)
+      void moderate({
+        requestId: crypto.randomUUID(),
+        sessionId,
+        action: 'remove',
+        operationId: crypto.randomUUID(),
+        messageId: message.id
       })
-      .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not remove the message.', {
-          id: `chat-removal:${message.id}`
+        .then((operation) => {
+          noteRemoval(operation)
+          const outcome = removalOutcomeToast(operation, { includeSuccess: false })
+          if (outcome) {
+            ;(outcome.kind === 'error' ? toast.error : toast.warning)(outcome.text, {
+              id: `chat-removal:${operation.operationId}`
+            })
+          }
         })
-      )
-      .finally(() => flagId(setRemovalRequestIds, message.id, false))
+        .catch((error) =>
+          toastUserError(
+            error,
+            { action: 'remove', object: 'the message' },
+            { id: `chat-removal:${message.id}` }
+          )
+        )
+        .finally(() => flagId(setRemovalRequestIds, message.id, false))
+    })
+    pendingRemovals.current.set(message.id, action)
+    toast.message(undoToast.title, {
+      id: undoToast.id,
+      duration: REMOVE_UNDO_MS,
+      onAutoClose: () => action.flush(),
+      onDismiss: () => action.flush(),
+      action: {
+        label: undoToast.action,
+        onClick: () => {
+          action.undo()
+          pendingRemovals.current.delete(message.id)
+          flagId(setRemovalRequestIds, message.id, false)
+          toast.dismiss(undoToast.id)
+        }
+      }
+    })
   }
-  // An Orcle removal card's Remove or Cancel (Enter or Esc).
+  // A Buddy removal card's Remove or Cancel (Enter or Esc).
   const answerRemoval = (operation: ModerationOperation, answer: RemovalAnswer): void => {
     const sessionId = snapshot.sessionId
     const moderate = window.videorc?.moderateFromCommentsWindow
@@ -322,9 +432,13 @@ function CommentsWindowApp(): ReactElement {
     })
       .then(noteRemoval)
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer the removal.', {
-          id: `chat-removal:${operation.operationId}`
-        })
+        toastUserError(
+          error,
+          answer === 'confirm'
+            ? { action: 'remove', object: 'the message' }
+            : { action: 'keep', object: 'the message' },
+          { id: `chat-removal:${operation.operationId}` }
+        )
       )
       .finally(() => flagId(setRemovalAnsweringIds, operation.operationId, false))
   }
@@ -350,7 +464,7 @@ function CommentsWindowApp(): ReactElement {
         if (highlightIntentRef.current !== intent) return
         setHighlightFailure({
           messageId: message.id,
-          reason: error instanceof Error ? error.message : 'Highlight failed.'
+          reason: userErrorMessage(error, { action: 'show', object: 'the message on stream' }).text
         })
       })
       .finally(() => {
@@ -381,19 +495,52 @@ function CommentsWindowApp(): ReactElement {
           return state
         })
         .catch((error) => {
-          setSendFailures([
-            {
-              destinationId: 'cohost-command',
-              platform: 'custom',
-              reason: error instanceof Error ? error.message : 'Orcle action failed.'
-            }
-          ])
+          // A toast, not a send badge: this was never a chat send (H-4).
+          toastUserError(
+            error,
+            kind === 'approve-utterance'
+              ? { action: 'post', object: "Buddy's message" }
+              : { action: 'update', object: 'Buddy' },
+            { id: 'cohost-action' }
+          )
           return null
         })
         .finally(() => setCohostActionPending(false))
     }
 
-  // Answers to Orcle's voice command cards (plan 140, S6 part B). The reply
+  // The Buddy's own actions (plan 164 S-C4): the Say box and the Show on
+  // stream switch. Not chat commands, so no session is required; the Say box
+  // names the live session when there is one so the line can also be posted
+  // per the chat mode (D7). Studio makes the call and the window state push
+  // follows.
+  const [buddyPending, setBuddyPending] = useState(false)
+  const sendBuddyAction = (command: BuddyActionBody): Promise<void> => {
+    const send = window.videorc?.sendCohostAction
+    if (!send) return Promise.resolve()
+    setBuddyPending(true)
+    return send({ requestId: crypto.randomUUID(), ...command } as CohostBuddyActionCommand)
+      .then(() => undefined)
+      .catch((error) => {
+        toastUserError(error, buddyActionContext(command), { id: 'buddy-action' })
+      })
+      .finally(() => setBuddyPending(false))
+  }
+  const sayBuddy = (text: string, state: CohostUtteranceState): Promise<void> =>
+    sendBuddyAction({
+      kind: 'buddy-say',
+      text,
+      state,
+      ...(live && snapshot.sessionId ? { sessionId: snapshot.sessionId } : {})
+    })
+  const setBuddyShowOnStream = (showOnStream: boolean): void => {
+    void sendBuddyAction({ kind: 'buddy-show-on-stream', showOnStream })
+  }
+  // Plan 168 S-D3: a reaction chip plays on air (Studio calls cohost.pet.react).
+  const reactBuddy = (reaction: string): void => {
+    void sendBuddyAction({ kind: 'buddy-react', reaction })
+  }
+
+  // Answers to Buddy's voice command cards (plan 140, S6 part B). The reply
   // merges like an event: the newer command (by `at`) wins.
   const [commandAnsweringId, setCommandAnsweringId] = useState<string | null>(null)
   const answerCommand = (commandId: string, answer: CommandAnswer): void => {
@@ -406,34 +553,94 @@ function CommentsWindowApp(): ReactElement {
         setCohost((current) => ({ ...current, state: applyCohostState(current.state, state) }))
       )
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer Orcle.', {
-          id: `cohost-command:${commandId}`
-        })
+        toastUserError(
+          error,
+          { action: 'answer', object: 'Buddy' },
+          { id: `cohost-command:${commandId}` }
+        )
       )
       .finally(() => setCommandAnsweringId((current) => (current === commandId ? null : current)))
   }
 
-  // Orcle Live's one switch (plan 119), relayed: on means Orcle reads chat AND
-  // hears you (`listen: true`), off only stops it joining. Every way on (the
-  // status popover, the nudge, the consent CTA and the listening card) sends
-  // the same command; the consent CTA also grants cloud-AI consent in the same
-  // click. The settings are main-renderer owned, and the relay reply carries
-  // the truth back so the switch reflects what happened, not what was clicked.
-  const setOrcleLive = (on: boolean, grantConsent = false): void => {
+  // The Buddy Live switch (plan 174 S3.14a, D7), relayed: `enabled` and
+  // nothing else. It never names listening: the microphone is the listening
+  // card's own choice below. The pane header's switch and the nudge send it.
+  // The settings are main-renderer owned, and the relay reply carries the
+  // truth back so the switch reflects what happened, not what was clicked.
+  const setBuddyLive = (on: boolean): void => {
+    void window.videorc
+      ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled: on })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: on ? 'turn on' : 'turn off', object: 'Buddy Live' },
+          { id: 'cohost-enable' }
+        )
+      )
+  }
+
+  // The one-time listening card's Turn on (plan 068 D3): listening alone,
+  // with its explicit grant, so Studio saves it even though Buddy already
+  // runs. No other on-path ever names the microphone (plan 174 S3.14a).
+  const turnListeningOn = (): void => {
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
-        enabled: on,
-        grantConsent,
-        ...(on ? { listen: true } : {})
+        enabled: true,
+        listen: true,
+        grantListen: true
       })
       .then((state) => state && setCohost(state))
       .catch((error) =>
-        toast.error(
-          error instanceof Error ? error.message : 'Could not change the Orcle setting.',
-          {
-            id: 'cohost-enable'
-          }
+        toastUserError(error, { action: 'turn on', object: 'listening' }, { id: 'cohost-enable' })
+      )
+  }
+
+  // The behaviour chips (plan 174 S3.14a, D7) link to their one home: main
+  // shows the main window and the shell opens Buddy → Chat.
+  const openBuddyChatSettings = (): void => {
+    void window.videorc
+      ?.openBuddyTabFromCommentsWindow?.({ requestId: crypto.randomUUID(), tab: 'chat' })
+      .catch((error) =>
+        toastUserError(error, { action: 'open', object: 'Buddy → Chat' }, { id: 'buddy-open-tab' })
+      )
+  }
+
+  // Cloud-AI consent (plan 174 S0.2): "Turn on cloud AI…" opens the one
+  // consent dialog, and only its Allow grants consent and turns Buddy on.
+  // Listening is never in that click: Studio writes `listen` only when a
+  // command names it, and the listening card asks for it next.
+  const [buddyConsentAsked, setBuddyConsentAsked] = useState(false)
+  const answerBuddyConsent = (accepted: boolean): void => {
+    setBuddyConsentAsked(false)
+    if (!accepted) return
+    void window.videorc
+      ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled: true, grantConsent: true })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toastUserError(error, { action: 'turn on', object: 'Buddy Live' }, { id: 'cohost-enable' })
+      )
+  }
+
+  // Plan 164 S-D6, plan 174 S3.14a (D7): the pane's posting mode governs
+  // only what Buddy posts. It keeps `enabled` exactly as it is and never
+  // names listening, so the save is `{autoChat}` alone: neither Buddy nor its
+  // microphone ever turns on from here. The templates and cooldowns live in
+  // the Buddy tab and ride along untouched (Studio merges the block).
+  const setBuddyAutoChat = (patch: CohostAutoChatRelayPatch): void => {
+    void window.videorc
+      ?.sendCohostEnable?.({
+        requestId: crypto.randomUUID(),
+        enabled: cohost.enabled,
+        autoChat: patch
+      })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: 'change', object: "Buddy's chat mode" },
+          { id: 'cohost-auto-chat' }
         )
       )
   }
@@ -453,7 +660,7 @@ function CommentsWindowApp(): ReactElement {
     : {
         allowed: false,
         featureId: 'live-cohost',
-        reason: cohost.entitlementReason ?? 'Orcle requires Videorc Premium.',
+        reason: cohost.entitlementReason ?? 'Buddy requires Videorc Premium.',
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 
@@ -466,250 +673,278 @@ function CommentsWindowApp(): ReactElement {
     // Real glass: the OS material under the body's window coat, and the
     // frame's content coat on top (plan 050), like every other window.
     <WindowFrame>
-      <StreamManager
-        dashboard={view.mode.kind === 'live' ? dashboard : null}
-        history={view.mode.kind === 'history' ? view.history : undefined}
-        viewerSample={view.mode.kind === 'live' ? viewerSample : null}
-        snapshot={snapshot}
-        viewMode={view.mode}
-        alwaysOnTop={alwaysOnTop}
-        highlightAnchor={highlightAnchor}
-        highlightApplyingId={highlightApplyingId}
-        highlightFailure={highlightFailure}
-        highlightState={highlightState}
-        sendFailures={sendFailures}
-        sendOperation={sendOperation}
-        sendPending={sendPending}
-        cohostActionPending={cohostActionPending}
-        cohostConsented={cohost.consented}
-        cohostEnabled={cohost.enabled}
-        cohostGate={cohostGate}
-        cohostListen={cohost.listen}
-        cohostNudgeDismissedForever={cohostNudgeDismissed}
-        cohostStarting={cohostStarting}
-        cohostState={cohost.state}
-        moderationOperations={moderationOperations}
-        removalAnsweringIds={removalAnsweringIds}
-        removalRequestIds={removalRequestIds}
-        onAnswerRemoval={live ? answerRemoval : undefined}
-        commandAnsweringId={commandAnsweringId}
-        onAnswerCommand={live ? answerCommand : undefined}
-        onRemoveFromChat={live ? removeFromChat : undefined}
-        onCohostAnswered={(question) => void sendCohostAction('answered')(question.id)}
-        onCohostRestoreQuestion={(question) => void sendCohostAction('restore')(question.id)}
-        onCohostPromiseDone={(promise) => void sendCohostAction('promise-done')(promise.id)}
-        onCohostPromiseDismiss={(promise) => void sendCohostAction('promise-dismiss')(promise.id)}
-        onCohostRecapDismiss={() =>
-          void sendCohostAction('recap-dismiss')(snapshot.sessionId ?? '')
-        }
-        onCohostRecapDraft={() => sendCohostAction('recap-draft')(snapshot.sessionId ?? '')}
-        onCohostAuthorGreeted={(entry) => void sendCohostAction('author-greeted')(entry.authorKey)}
-        onCohostEnable={(enabled) => setOrcleLive(enabled)}
-        onCohostEnableConsent={() => setOrcleLive(true, true)}
-        onCohostListenOn={() => setOrcleLive(true)}
-        onCohostNudgeDismiss={() => {
-          setCohostNudgeDismissed(true)
-          localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')
-        }}
-        onCohostDismissFlag={(flag) => void sendCohostAction('dismiss-flag')(flag.messageId)}
-        onCohostDismissQuestion={(question) =>
-          void sendCohostAction('dismiss-question')(question.id)
-        }
-        onCohostShowOnStream={live ? showQuestionOnStream : undefined}
-        onBackToLive={
-          view.mode.kind === 'history'
-            ? () => {
-                void window.videorc?.setCommentsViewMode?.({ kind: 'live' })
-              }
-            : undefined
-        }
-        onClear={
-          view.mode.kind === 'live' && snapshot.sessionId
-            ? () => {
-                setSendFailures([])
-                void window.videorc
-                  ?.clearComments?.({
-                    requestId: crypto.randomUUID(),
-                    sessionId: snapshot.sessionId!
-                  })
-                  .catch((error) =>
-                    setSendFailures([
-                      {
-                        destinationId: 'comments-clear-command',
-                        platform: 'custom',
-                        reason:
-                          error instanceof Error ? error.message : 'Could not clear the chat view.'
-                      }
-                    ])
-                  )
-              }
-            : undefined
-        }
-        onHighlight={live ? requestHighlight : undefined}
-        onMarkClip={
-          live
-            ? () => {
-                void window.videorc
-                  ?.markClipFromCommentsWindow?.({ requestId: crypto.randomUUID() })
-                  .then((event) => {
-                    const copy = clipMarkedToast(event)
-                    ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
-                      id: 'clip-marked',
-                      description: copy.description
+      <ChatGifModeProvider mode={gifMode}>
+        <StreamManager
+          dashboard={view.mode.kind === 'live' ? dashboard : null}
+          history={view.mode.kind === 'history' ? view.history : undefined}
+          viewerSample={view.mode.kind === 'live' ? viewerSample : null}
+          snapshot={snapshot}
+          viewMode={view.mode}
+          alwaysOnTop={alwaysOnTop}
+          highlightAnchor={highlightAnchor}
+          highlightApplyingId={highlightApplyingId}
+          highlightFailure={highlightFailure}
+          highlightState={highlightState}
+          sendFailures={sendFailures}
+          sendOperation={sendOperation}
+          sendPending={sendPending}
+          cohostActionPending={cohostActionPending}
+          cohostConsented={cohost.consented}
+          cohostEnabled={cohost.enabled}
+          cohostGate={cohostGate}
+          cohostListen={cohost.listen}
+          cohostAutoChat={cohost.autoChat}
+          onCohostAutoChatChange={setBuddyAutoChat}
+          onCohostOpenChatSettings={openBuddyChatSettings}
+          onCohostUtteranceApprove={(utterance) =>
+            void sendCohostAction('approve-utterance')(utterance.id)
+          }
+          onCohostUtteranceDismiss={(utterance) =>
+            void sendCohostAction('dismiss-utterance')(utterance.id)
+          }
+          cohostNudgeDismissedForever={cohostNudgeDismissed}
+          cohostStarting={cohostStarting}
+          cohostState={cohost.state}
+          cohostBuddy={cohost.buddy}
+          buddyPending={buddyPending}
+          onBuddySay={sayBuddy}
+          onBuddyShowOnStream={setBuddyShowOnStream}
+          onBuddyReact={reactBuddy}
+          moderationOperations={moderationOperations}
+          removalAnsweringIds={removalAnsweringIds}
+          removalRequestIds={removalRequestIds}
+          onAnswerRemoval={live ? answerRemoval : undefined}
+          commandAnsweringId={commandAnsweringId}
+          onAnswerCommand={live ? answerCommand : undefined}
+          onRemoveFromChat={live ? removeFromChat : undefined}
+          onCohostAnswered={(question) => void sendCohostAction('answered')(question.id)}
+          onCohostRestoreQuestion={(question) => void sendCohostAction('restore')(question.id)}
+          onCohostPromiseDone={(promise) => void sendCohostAction('promise-done')(promise.id)}
+          onCohostPromiseDismiss={(promise) => void sendCohostAction('promise-dismiss')(promise.id)}
+          onCohostRecapDismiss={() =>
+            void sendCohostAction('recap-dismiss')(snapshot.sessionId ?? '')
+          }
+          onCohostRecapDraft={() => sendCohostAction('recap-draft')(snapshot.sessionId ?? '')}
+          onCohostAuthorGreeted={(entry) =>
+            void sendCohostAction('author-greeted')(entry.authorKey)
+          }
+          onCohostEnable={(enabled) => setBuddyLive(enabled)}
+          onCohostEnableConsent={() => setBuddyConsentAsked(true)}
+          onCohostListenOn={turnListeningOn}
+          onCohostNudgeDismiss={() => {
+            setCohostNudgeDismissed(true)
+            localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')
+          }}
+          onCohostDismissFlag={(flag) => void sendCohostAction('dismiss-flag')(flag.messageId)}
+          onCohostDismissQuestion={(question) =>
+            void sendCohostAction('dismiss-question')(question.id)
+          }
+          onCohostShowOnStream={live ? showQuestionOnStream : undefined}
+          onBackToLive={
+            view.mode.kind === 'history'
+              ? () => {
+                  void window.videorc?.setCommentsViewMode?.({ kind: 'live' })
+                }
+              : undefined
+          }
+          onClear={
+            view.mode.kind === 'live' && snapshot.sessionId
+              ? () => {
+                  setSendFailures([])
+                  void window.videorc
+                    ?.clearComments?.({
+                      requestId: crypto.randomUUID(),
+                      sessionId: snapshot.sessionId!
                     })
-                  })
-                  .catch((error) =>
-                    toast.error(
-                      error instanceof Error ? error.message : 'Could not mark the clip.',
-                      {
-                        id: 'clip-marked'
-                      }
+                    .catch((error) =>
+                      // A toast, not a send badge: Clear isn't a send (H-4).
+                      toastUserError(
+                        error,
+                        { action: 'clear', object: 'the chat view' },
+                        { id: 'comments-clear' }
+                      )
                     )
-                  )
-              }
-            : undefined
-        }
-        onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
-        onShowFollowNames={() => {
-          void window.videorc
-            ?.showFollowNamesFromCommentsWindow?.({
-              requestId: crypto.randomUUID(),
-              platform: 'twitch'
-            })
-            .then(() =>
-              toast.success('Allow the follow permission in your browser', {
-                id: 'follow-names',
-                description: 'New Twitch followers show by name once Twitch confirms.'
+                }
+              : undefined
+          }
+          onHighlight={live ? requestHighlight : undefined}
+          onMarkClip={
+            live
+              ? () => {
+                  void window.videorc
+                    ?.markClipFromCommentsWindow?.({ requestId: crypto.randomUUID() })
+                    .then((event) => {
+                      const copy = clipMarkedToast(event)
+                      ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
+                        id: 'clip-marked',
+                        description: copy.description
+                      })
+                    })
+                    .catch((error) =>
+                      toastUserError(
+                        error,
+                        { action: 'mark', object: 'the clip' },
+                        { id: 'clip-marked' }
+                      )
+                    )
+                }
+              : undefined
+          }
+          banners={banners}
+          onBanner={runBanner}
+          onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
+          onShowFollowNames={() => {
+            void window.videorc
+              ?.showFollowNamesFromCommentsWindow?.({
+                requestId: crypto.randomUUID(),
+                platform: 'twitch'
               })
-            )
-            .catch((error) =>
-              toast.error(
-                error instanceof Error ? error.message : 'Could not open the Twitch reconnect.',
-                { id: 'follow-names' }
+              .then(() =>
+                // A step to take, so info (plan 174 S2.4, H-32).
+                toast.info('Approve the Twitch permissions in your browser', {
+                  id: 'follow-names',
+                  description:
+                    'Follower names, Power-ups and channel points show once Twitch confirms.'
+                })
               )
-            )
-        }}
-        onReconnectScopes={(platform) => {
-          const started = removeMessagesReconnectStarted(platform)
-          void window.videorc
-            ?.reconnectScopesFromCommentsWindow?.({ requestId: crypto.randomUUID(), platform })
-            .then(() =>
-              toast.success(started.title, {
-                id: 'reconnect-scopes',
-                description: started.description
-              })
-            )
-            .catch((error) =>
-              toast.error(
-                error instanceof Error ? error.message : 'Could not open the reconnect.',
-                { id: 'reconnect-scopes' }
+              .catch((error) =>
+                toastUserError(
+                  error,
+                  { action: 'open', object: 'the Twitch page' },
+                  { id: 'follow-names' }
+                )
               )
-            )
-        }}
-        markerContext={
-          markerContext
-            ? {
-                ...markerContext,
-                retryAvailable: markerRetryAvailable(markerRetrySessionId, markerContext)
-              }
-            : markerRetrySessionId
-              ? { available: false, retryAvailable: true }
-              : null
-        }
-        onMarker={async (label) => {
-          const api = window.videorc
-          if (!api) throw new Error('Stream Manager is disconnected.')
-          const params = markerCreateParams(markerRetry.current, markerContext, label)
-          markerRetry.current = params
-          setMarkerRetrySessionId(params.sessionId)
-          try {
-            const marker = await createCommentsMarker(api, params)
-            markerRetry.current = null
-            setMarkerRetrySessionId(null)
-            return marker
-          } catch (error) {
-            if (error instanceof MarkerRemovedError) {
+          }}
+          onReconnectScopes={(platform) => {
+            const started = removeMessagesReconnectStarted(platform)
+            void window.videorc
+              ?.reconnectScopesFromCommentsWindow?.({ requestId: crypto.randomUUID(), platform })
+              .then(() =>
+                toast.info(started.title, {
+                  id: 'reconnect-scopes',
+                  description: started.description
+                })
+              )
+              .catch((error) =>
+                toastUserError(
+                  error,
+                  { action: 'open', object: `the ${started.platformName} page` },
+                  { id: 'reconnect-scopes' }
+                )
+              )
+          }}
+          markerContext={
+            markerContext
+              ? {
+                  ...markerContext,
+                  retryAvailable: markerRetryAvailable(markerRetrySessionId, markerContext)
+                }
+              : markerRetrySessionId
+                ? { available: false, retryAvailable: true }
+                : null
+          }
+          onMarker={async (label) => {
+            const api = window.videorc
+            if (!api) throw new Error('Stream Manager is disconnected.')
+            const params = markerCreateParams(markerRetry.current, markerContext, label)
+            markerRetry.current = params
+            setMarkerRetrySessionId(params.sessionId)
+            try {
+              const marker = await createCommentsMarker(api, params)
               markerRetry.current = null
               setMarkerRetrySessionId(null)
+              return marker
+            } catch (error) {
+              if (error instanceof MarkerRemovedError) {
+                markerRetry.current = null
+                setMarkerRetrySessionId(null)
+              }
+              throw error
             }
-            throw error
-          }
-        }}
-        onUndoMarker={async (marker) => {
-          if (!window.videorc) throw new Error('Stream Manager is disconnected.')
-          await window.videorc.markerFromCommentsWindow({
-            requestId: crypto.randomUUID(),
-            action: 'delete',
-            params: { sessionId: marker.sessionId, markerId: marker.id }
-          })
-        }}
-        onSend={(text, options) => {
-          if (!snapshot.sessionId) return
-          const operationId = crypto.randomUUID()
-          sendPendingOperationIdRef.current = operationId
-          setSendPending(true)
-          setSendFailures([])
-          const picked = options?.destinationIds ? new Set(options.destinationIds) : null
-          applySendOperation(
-            pendingCommentsSendOperation({
-              id: operationId,
-              sessionId: snapshot.sessionId,
-              text,
-              providers: picked
-                ? snapshot.providers.filter((provider) => picked.has(provider.id))
-                : snapshot.providers
-            })
-          )
-          void window.videorc
-            ?.sendChatFromCommentsWindow?.({
+          }}
+          onUndoMarker={async (marker) => {
+            if (!window.videorc) throw new Error('Stream Manager is disconnected.')
+            await window.videorc.markerFromCommentsWindow({
               requestId: crypto.randomUUID(),
-              operationId,
-              sessionId: snapshot.sessionId,
-              text,
-              ...(options?.inReplyToQuestionId
-                ? { inReplyToQuestionId: options.inReplyToQuestionId }
-                : {}),
-              ...(options?.destinationIds ? { destinationIds: options.destinationIds } : {})
+              action: 'delete',
+              params: { sessionId: marker.sessionId, markerId: marker.id }
             })
-            .then((operation) => {
-              if (sendPendingOperationIdRef.current !== operationId) return
-              applySendOperation(operation)
-              if (commentsSendOperationTerminal(operation)) {
-                sendPendingOperationIdRef.current = null
-                setSendPending(false)
-              }
-            })
-            .catch((error) => {
-              if (sendPendingOperationIdRef.current !== operationId) return
-              if (!commentsSendTransportFailureCanReplace(sendOperationRef.current, operationId)) {
-                sendPendingOperationIdRef.current = null
-                setSendPending(false)
-                return
-              }
-              sendPendingOperationIdRef.current = null
-              setSendPending(false)
-              applySendOperation(null)
-              setSendFailures([
-                {
-                  destinationId: 'comments-command',
-                  platform: 'custom',
-                  reason: error instanceof Error ? error.message : 'Send failed.'
+          }}
+          onSend={(text, options) => {
+            if (!snapshot.sessionId) return
+            const operationId = crypto.randomUUID()
+            sendPendingOperationIdRef.current = operationId
+            setSendPending(true)
+            setSendFailures([])
+            const picked = options?.destinationIds ? new Set(options.destinationIds) : null
+            applySendOperation(
+              pendingCommentsSendOperation({
+                id: operationId,
+                sessionId: snapshot.sessionId,
+                text,
+                providers: picked
+                  ? snapshot.providers.filter((provider) => picked.has(provider.id))
+                  : snapshot.providers
+              })
+            )
+            void window.videorc
+              ?.sendChatFromCommentsWindow?.({
+                requestId: crypto.randomUUID(),
+                operationId,
+                sessionId: snapshot.sessionId,
+                text,
+                ...(options?.inReplyToQuestionId
+                  ? { inReplyToQuestionId: options.inReplyToQuestionId }
+                  : {}),
+                ...(options?.destinationIds ? { destinationIds: options.destinationIds } : {})
+              })
+              .then((operation) => {
+                if (sendPendingOperationIdRef.current !== operationId) return
+                applySendOperation(operation)
+                if (commentsSendOperationTerminal(operation)) {
+                  sendPendingOperationIdRef.current = null
+                  setSendPending(false)
                 }
-              ])
-            })
-        }}
-        onHighlightAnchorChange={(anchor) => {
-          // Optimistic: main echoes the persisted value back on the state event.
-          setHighlightAnchor(anchor)
-          void window.videorc?.setCommentsWindowHighlightAnchor?.(anchor)
-        }}
-        onToggleAlwaysOnTop={() =>
-          void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)
-        }
-      />
-      {/* sonner needs its own host here because this is a separate React root;
-          with no theme provider it follows prefers-color-scheme, like the page. */}
-      <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" visibleToasts={3} />
+              })
+              .catch((error) => {
+                if (sendPendingOperationIdRef.current !== operationId) return
+                if (
+                  !commentsSendTransportFailureCanReplace(sendOperationRef.current, operationId)
+                ) {
+                  sendPendingOperationIdRef.current = null
+                  setSendPending(false)
+                  return
+                }
+                sendPendingOperationIdRef.current = null
+                setSendPending(false)
+                applySendOperation(null)
+                setSendFailures([
+                  {
+                    destinationId: 'comments-command',
+                    platform: 'custom',
+                    reason: userErrorMessage(error, { action: 'send', object: 'the message' })
+                      .description
+                  }
+                ])
+              })
+          }}
+          onHighlightAnchorChange={(anchor) => {
+            // Optimistic: main echoes the persisted value back on the state event.
+            setHighlightAnchor(anchor)
+            void window.videorc?.setCommentsWindowHighlightAnchor?.(anchor)
+          }}
+          autoShowActivity={autoShowActivity}
+          onAutoShowActivityChange={(on) => {
+            // Optimistic, like the anchor: main's state event is the truth.
+            setAutoShowActivity(on)
+            void window.videorc?.setCommentsWindowAutoShowActivity?.(on)
+          }}
+          onToggleAlwaysOnTop={() =>
+            void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)
+          }
+        />
+      </ChatGifModeProvider>
+      <BuddyConsentDialog open={buddyConsentAsked} onAnswer={answerBuddyConsent} />
     </WindowFrame>
   )
 }
@@ -717,7 +952,12 @@ function CommentsWindowApp(): ReactElement {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <CommentsWindowApp />
+      {/* A separate React root: its own tooltips, and toasts above its 32 px
+          status bar. With no theme provider sonner follows
+          prefers-color-scheme, like the page. */}
+      <WindowProviders window="stream-manager">
+        <CommentsWindowApp />
+      </WindowProviders>
     </AppErrorBoundary>
   </React.StrictMode>
 )

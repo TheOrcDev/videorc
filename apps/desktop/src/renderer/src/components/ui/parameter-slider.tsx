@@ -470,7 +470,7 @@ export const ParameterSliderReset = ({
         'aria-label': 'Reset',
         children: children ?? 'Reset',
         className: cn(
-          'text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring/30 inline-flex h-6 items-center rounded-md px-1.5 text-xs outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-0',
+          'text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring/30 inline-flex h-6 items-center rounded-row px-1.5 text-xs outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-0',
           className
         ),
         disabled: disabled || !modified,

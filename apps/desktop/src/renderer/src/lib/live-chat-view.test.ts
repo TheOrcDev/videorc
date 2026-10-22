@@ -14,6 +14,8 @@ import {
   BoundedLiveChatMessageBatch,
   chatNeedsConnectionAction,
   chatSetupToastWarnings,
+  commentAuthorIsMember,
+  commentRowTint,
   emptyLiveChatSnapshot,
   filterMessagesByPlatform,
   liveChatSendOperationQueryDecision,
@@ -540,4 +542,48 @@ it('reports a suspended overflow when resume flushes its retained tail after sup
   expect(notifications).toEqual(['overflow', 'b,c'])
   batcher.flush()
   expect(notifications).toHaveLength(2)
+})
+
+describe('member row tint (plan 154)', () => {
+  const member = (overrides: Partial<LiveChatMessage> = {}): LiveChatMessage => ({
+    ...message('youtube:m1', 'youtube', '2026-07-10T12:00:00Z'),
+    authorRoles: ['member'],
+    ...overrides
+  })
+  const plain = { spotlight: false, onStream: false }
+
+  it('reads membership from the normalized member role', () => {
+    expect(commentAuthorIsMember({ authorRoles: ['member'] })).toBe(true)
+    expect(commentAuthorIsMember({ authorRoles: ['owner', 'member'] })).toBe(true)
+    expect(commentAuthorIsMember({ authorRoles: ['vip'] })).toBe(false)
+    expect(commentAuthorIsMember({ authorRoles: [] })).toBe(false)
+  })
+
+  it('paints one tint per row: member, then the pull-up, then paid, and none on stream', () => {
+    expect(commentRowTint(member(), plain)).toBe('member')
+    expect(commentRowTint(member(), { spotlight: true, onStream: false })).toBe('spotlight')
+    expect(
+      commentRowTint(member({ eventType: 'paid', amountText: '$5' }), {
+        spotlight: true,
+        onStream: false
+      })
+    ).toBe('paid')
+    expect(
+      commentRowTint(member({ eventType: 'paid', amountText: '$5' }), {
+        spotlight: true,
+        onStream: true
+      })
+    ).toBeNull()
+    expect(commentRowTint(message('m2', 'twitch', '2026-07-10T12:00:00Z'), plain)).toBeNull()
+  })
+
+  it("tints only a member's own rows", () => {
+    expect(commentRowTint(member({ eventType: 'membership' }), plain)).toBe('member')
+    expect(commentRowTint(member({ eventType: 'paid', amountText: undefined }), plain)).toBe(
+      'member'
+    )
+    expect(commentRowTint(member({ eventType: 'system' }), plain)).toBeNull()
+    expect(commentRowTint(member({ eventType: 'moderation' }), plain)).toBeNull()
+    expect(commentRowTint(member({ isDeleted: true }), plain)).toBeNull()
+  })
 })

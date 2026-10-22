@@ -17,6 +17,8 @@ import {
   cleanCutJobEditable,
   cleanCutMinutesLeftLabel,
   cleanCutReadyTitle,
+  cleanCutRecordingFacts,
+  cleanCutRowChip,
   cleanCutSavedLabel,
   cleanCutSavedMs,
   cleanCutStatusView,
@@ -27,6 +29,8 @@ import {
   formatCutClock,
   isCleanCutJobActive,
   latestCleanCutJob,
+  latestCleanCutJobAnyMode,
+  matchCleanCutRecordings,
   recentCleanCutRecordings,
   upsertCleanCutJob,
   type CleanCutCapabilities,
@@ -156,7 +160,7 @@ describe('eligibility (decision 11)', () => {
     }
     expect(reason({ status: 'running' })).toContain('once the recording has finished')
     expect(reason({ finalizationState: 'finalizing' })).toContain('once the recording has finished')
-    expect(reason({ mode: 'imported' })).toBe('Imported videos are not supported yet.')
+    expect(reason({ mode: 'imported' })).toBe("Imported videos aren't supported yet.")
     expect(reason({ derivedFromSessionId: 'rec-0' })).toContain("can't be cut again")
     expect(reason({ cleanCutOfSessionId: 'rec-0' })).toContain("can't be cut again")
     expect(reason({ processingKind: 'noise-cleanup' })).toContain("can't be cut again")
@@ -189,11 +193,64 @@ describe('eligibility (decision 11)', () => {
     expect(recentCleanCutRecordings(rows, 1).map((row) => row.id)).toEqual(['new'])
   })
 
+  it('searches the list by title or by when it ran, case-insensitive', () => {
+    const rows = [
+      session({ id: 'rust', title: 'Building a Rust CLI' }),
+      session({ id: 'auto', title: 'Session 2026-10-08 19:42', startedAt: '2026-10-08T17:42:00Z' })
+    ]
+    expect(matchCleanCutRecordings(rows, '  ').map((row) => row.id)).toEqual(['rust', 'auto'])
+    expect(matchCleanCutRecordings(rows, 'rust').map((row) => row.id)).toEqual(['rust'])
+    expect(matchCleanCutRecordings(rows, '10-08').map((row) => row.id)).toEqual(['auto'])
+    expect(matchCleanCutRecordings(rows, 'nope')).toEqual([])
+  })
+
+  it("says a row's length and when it ran, without a second clock beside an automatic title", () => {
+    expect(cleanCutRecordingFacts(session())).toMatch(/^42:10 · /)
+    expect(cleanCutRecordingFacts(session({ title: 'Session 2026-10-03 16:02' }))).toBe('42:10')
+    expect(
+      cleanCutRecordingFacts(session({ title: 'Session 2026-10-03 16:02', durationMs: undefined }))
+    ).toBe('')
+  })
+
   it('sends the Condensed target in seconds, inside the contract range', () => {
     expect(CONDENSED_TARGET_MINUTES).toEqual([10, 15, 20, 30])
     expect(condensedTargetSeconds(15)).toBe(900)
     expect(condensedTargetSeconds(1)).toBe(120)
     expect(condensedTargetSeconds(90)).toBe(3_600)
+  })
+})
+
+describe('row chips', () => {
+  const idle = { captureActive: false, streaming: false }
+
+  it("chips a recording's newest cut in either mode, and stays quiet without one", () => {
+    const jobs = [
+      job({ id: 'clean', mode: 'clean', createdAt: '2026-10-03T15:00:00Z' }),
+      job({ id: 'condensed', mode: 'condensed', createdAt: '2026-10-03T16:00:00Z' })
+    ]
+    expect(latestCleanCutJobAnyMode(jobs, 'rec-1')?.id).toBe('condensed')
+    expect(latestCleanCutJobAnyMode(jobs, 'rec-2')).toBeNull()
+    expect(cleanCutRowChip(null, idle)).toBeNull()
+    expect(cleanCutRowChip(job({ state: 'cancelled' }), idle)).toBeNull()
+    expect(cleanCutRowChip(job({ state: 'completed' }), idle)).toEqual({
+      label: 'Cut ready',
+      tone: 'ready'
+    })
+    expect(cleanCutRowChip(job({ state: 'completed', mode: 'condensed' }), idle)).toEqual({
+      label: 'Condensed ready',
+      tone: 'ready'
+    })
+    expect(cleanCutRowChip(job({ state: 'failed' }), idle)).toEqual({
+      label: 'Cut failed',
+      tone: 'failed'
+    })
+    expect(cleanCutRowChip(job({ state: 'rendering', progress: 0.4 }), idle)).toEqual({
+      label: 'Cutting 40%',
+      tone: 'working'
+    })
+    expect(
+      cleanCutRowChip(job({ state: 'queued' }), { captureActive: true, streaming: false })
+    ).toEqual({ label: 'Waiting until you stop recording', tone: 'working' })
   })
 })
 
@@ -375,7 +432,7 @@ describe('failure copy', () => {
       "Videorc couldn't be reached. Retry when you're online."
     )
     expect(cleanCutFailureCopy('insufficient-space', undefined)).toBe(
-      'There is not enough free disk space for the cut copy.'
+      "There isn't enough free disk space for the cut copy."
     )
     expect(cleanCutFailureCopy('some-new-code', 'The server said why.')).toBe(
       'The server said why.'
@@ -444,7 +501,14 @@ describe('cleanCutAutoStatus', () => {
     ).toBe('On, cuts this recording when you stop')
     expect(
       cleanCutAutoStatus({ on: true, unlock: null, consented: false, captureActive: false })
-    ).toEqual({ kind: 'attention', label: 'Needs attention', reason: CLEAN_CUT_CONSENT_OFF_REASON })
+    ).toEqual({
+      kind: 'attention',
+      label: 'Needs attention',
+      reason: CLEAN_CUT_CONSENT_OFF_REASON,
+      // Plan 174 E-6: the line offers its fix, never a pointer to a retired tab.
+      fix: 'allow-cloud-ai'
+    })
+    expect(CLEAN_CUT_CONSENT_OFF_REASON).toBe("Cloud AI isn't allowed, so Clean cut can't run.")
     expect(
       cleanCutAutoStatus({
         on: true,

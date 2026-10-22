@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "enabled": true,
+  "channelHandle": "@VideorcApp",
+  "visibility": { "default": "unlisted", "allowPublic": false },
+  "titlePrefix": "Automated test",
+  "onDemand": {
+    "maxRunMinutes": 60,
+    "maxRunsPerDay": 8,
+    "allowedBuilds": ["release", "candidate"]
+  },
+  "schedule": { "enabled": true, "timezone": "Europe/Madrid" },
+  "quota": { "labProjectMaxUnitsPerDay": 8000, "bundledClientMaxUnitsPerDay": 0 },
+  "faults": { "network": false, "process": true },
+  "camera": false,
+  "clipPull": false,
+  "triage": false,
+  "killSwitchUrl": "https://raw.githubusercontent.com/TheOrcDev/videorc-live-lab-reports/main/control.json"
+}

@@ -39,17 +39,20 @@ describe('updateChip', () => {
     expect(updateChip({ phase: 'available', version: '1.1.0' }, false)).toEqual({
       label: 'Update available',
       detail: 'Update 1.1.0 available',
-      action: 'settings'
+      action: 'settings',
+      tone: 'neutral'
     })
     expect(updateChip({ phase: 'downloading', percent: 41.6 }, false)).toEqual({
       label: 'Downloading… 42%',
       detail: 'Downloading update… 42%',
-      action: 'settings'
+      action: 'settings',
+      tone: 'neutral'
     })
     expect(updateChip({ phase: 'downloading', percent: 7, version: '1.1.0' }, false)).toEqual({
       label: 'Downloading… 7%',
       detail: 'Downloading update 1.1.0… 7%',
-      action: 'settings'
+      action: 'settings',
+      tone: 'neutral'
     })
   })
 
@@ -62,22 +65,31 @@ describe('updateChip', () => {
       { phase: 'downloaded', version: '10.10.100' }
     ]
     for (const status of statuses) {
-      const chip = updateChip(status, false)
-      expect(chip?.label.length).toBeLessThanOrEqual(18)
-      expect(chip?.label).not.toContain('10.10.100')
+      for (const captureActive of [false, true]) {
+        const chip = updateChip(status, captureActive)
+        expect(chip?.label.length).toBeLessThanOrEqual(18)
+        expect(chip?.label).not.toContain('10.10.100')
+      }
     }
   })
 
+  // Plan 174 A-25: a click that only navigates never wears the green dot, and
+  // while live the chip says the update waits rather than promising a restart.
   it('offers install when downloaded, but never mid-capture', () => {
     expect(updateChip({ phase: 'downloaded', version: '1.1.0' }, false)).toEqual({
       label: 'Restart to update',
       detail: 'Restart to update to 1.1.0',
-      action: 'install'
+      action: 'install',
+      tone: 'good'
     })
     expect(updateChip({ phase: 'downloaded', version: '1.1.0' }, true)).toEqual({
-      label: 'Restart to update',
-      detail: 'Restart to update to 1.1.0',
-      action: 'settings'
+      label: 'Update after stop',
+      detail: 'Restart to update to 1.1.0 once you stop recording or end the livestream.',
+      action: 'settings',
+      tone: 'neutral'
     })
+    expect(updateChip({ phase: 'downloaded', version: '1.1.0' }, true)?.label).not.toMatch(
+      /session/i
+    )
   })
 })

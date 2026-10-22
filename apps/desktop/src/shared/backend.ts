@@ -2,7 +2,16 @@ import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
 import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
+import type { TwitchGifMode } from './chat-gif'
+import type {
+  BuddyAvatar,
+  BuddyMotionSettings,
+  BuddyPetImportResult,
+  BuddyReactionTable
+} from './buddy-pet'
+import type { BuddyLibraryId } from './buddy-library'
 export type { BackgroundImportResult } from './background-import'
+export type { TwitchGifMode } from './chat-gif'
 
 export interface BackendConnection {
   host: string
@@ -527,6 +536,12 @@ export interface SourceSelection {
   cameraOff?: boolean
   microphoneId?: string
   microphoneName?: string
+  /**
+   * The user chose no microphone (plan 0027), the microphone twin of
+   * `cameraOff`: without it None reads as "never chosen" and any scene click or
+   * device refresh turns the first microphone back on. Renderer intent only.
+   */
+  microphoneOff?: boolean
   testPattern?: boolean
 }
 
@@ -952,6 +967,8 @@ export type StreamTargetState =
   | 'connecting'
   | 'live'
   | 'warning'
+  // Plan 161: a live leg lost its connection and is being retried.
+  | 'reconnecting'
   | 'failed'
   | 'stopped'
 
@@ -1551,9 +1568,25 @@ export interface OutputSettings {
   ffmpegPath?: string
   /** Keep the capture MKV (lossless audio) next to the exported MP4. */
   keepOriginalMkv?: boolean
+  /**
+   * Separate source recordings (Plan 157): write clean Screen (+ system audio)
+   * and Camera (+ microphone) takes beside the composed Combined recording.
+   * Absent/`enabled: false` keeps today's single-file recording.
+   */
+  separateSourceRecordings?: SeparateSourceRecordingsSettings
   video: VideoSettings
   rtmp: RtmpSettings
 }
+
+/** Opt-in ISO takes from one Record session. */
+export interface SeparateSourceRecordingsSettings {
+  enabled: boolean
+  /** Keep the composed Combined master too (default true). */
+  keepCombined: boolean
+}
+
+/** Which file of a take a Library row is. Absent = legacy single recording. */
+export type RecordingRole = 'combined' | 'screen' | 'camera'
 
 export interface StartSessionParams {
   sources: SourceSelection
@@ -1731,6 +1764,39 @@ export interface EncoderPreferenceSetParams {
   preference: WindowsH264EncoderPreference
 }
 
+/**
+ * The metrics journal (plan 166 S1): an NDJSON time series under
+ * `<userData>/logs/metrics/` for unattended runs. Off by default.
+ */
+export interface MetricsJournalState {
+  /** The journal is writing right now. */
+  enabled: boolean
+  /** The saved `diagnostics.metricsJournal` setting. */
+  setting: boolean
+  /** `VIDEORC_METRICS_JOURNAL=1` forced it on; the setting is ignored. */
+  envOverride: boolean
+}
+
+export interface MetricsJournalSetParams {
+  enabled: boolean
+}
+
+/**
+ * `usageStats.get` / `.set`: Settings → General → Privacy → "Share anonymous
+ * usage stats" (on by default). One event per recording or livestream start
+ * and stop to videorc.com; no stream keys, titles, chat or content.
+ */
+export interface UsageStatsState {
+  /** Events are being shared right now. */
+  enabled: boolean
+  /** `VIDEORC_USAGE_STATS=0` turned sharing off for this run. */
+  envDisabled: boolean
+}
+
+export interface UsageStatsSetParams {
+  enabled: boolean
+}
+
 /** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
 export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'
 
@@ -1774,7 +1840,13 @@ export interface StreamOutputTopologyProbeResult {
   effectiveBridgeOutput: StreamOutputBridge
   effectiveEncodeBackend: EncodeBackend
   probeState: StreamOutputTopologyProbeState
+  /** Topology fallback only: a rejected/unsupported probe or a changed bridge. */
   fallbackReason?: string
+  /**
+   * Why the raw path uses this encoder (Linux OpenH264, VAAPI rejected, a
+   * failed Quick Sync check). Informational in every probe state (plan 0015).
+   */
+  encoderSelectionReason?: string
 }
 
 export type CompositorBackend = 'metal' | 'd3d11' | 'cpu' | 'cpu-fallback'
@@ -2094,7 +2166,11 @@ export interface CompositorFrameReady {
   updatedAt: string
 }
 
-export type PreviewSurfaceSceneLayerKind = SceneSourceKind | 'screen-image' | 'background'
+export type PreviewSurfaceSceneLayerKind =
+  | SceneSourceKind
+  | 'screen-image'
+  | 'background'
+  | 'banner'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
@@ -2108,6 +2184,8 @@ export interface PreviewSurfaceSceneLayer {
   fit: PreviewSurfaceSceneLayerFit
   mirror: boolean
   shape?: CameraShape
+  /** 0..1; absent is fully opaque. Banners only (plan 186). */
+  opacity?: number
 }
 
 export interface PreviewSurfaceSceneState {
@@ -2119,6 +2197,12 @@ export interface PreviewSurfaceSceneState {
   activeScreenId?: string
   /** Normalized per-side inset derived from background visibilityPercent. */
   backgroundStageMargin?: number
+  /**
+   * The canvas in pixels the `banner` layers were placed against (plan 186).
+   * Banners are snapshot-level, not part of the scene revision, so the scene
+   * fingerprint ignores both this and the banner layers.
+   */
+  bannerCanvas?: { width: number; height: number }
   updatedAt: string
 }
 
@@ -3226,6 +3310,7 @@ export interface ClipMoment {
 
 /** Who placed a clip mark: a spoken "clip that" or the Mark clip control. */
 import type { MarkerContext, MarkerRelayCommand, MarkerRelayResult } from './session-markers'
+import type { BannerRelayCommand, BannerSummary } from './banner-commands'
 export type * from './session-markers'
 
 export type ClipMarkSource = 'voice' | 'manual'
@@ -3268,7 +3353,7 @@ export interface FollowNamesCommand {
 export type ScopeReconnectPlatform = Extract<StreamPlatform, 'twitch' | 'kick'>
 
 /** Stream Manager → main: reconnect Twitch or Kick asking for every optional
- * permission, so Orcle can remove messages (plan 140, S5). Main picks the
+ * permission, so Buddy can remove messages (plan 140, S5). Main picks the
  * scopes; the window only names the platform. */
 export interface ScopeReconnectCommand {
   requestId: string
@@ -3318,6 +3403,35 @@ export interface AiCapabilities {
     modes?: string[]
     workflowKind?: string
   }
+  /** The Buddy routes (plan 164): the tick contract the web speaks and
+   * whether avatar generation is on, with today's remaining count. Older
+   * servers omit the block: Generate stays off. */
+  cohost?: {
+    tick?: number
+    avatar?: {
+      enabled: boolean
+      remainingToday: number
+      dailyLimit: number
+    }
+    /** Pet creation (plan 168 Phase F): Basic is `{ enabled: false, 0, 0 }`;
+     * older servers omit it and the creator stays off. */
+    pet?: {
+      enabled: boolean
+      creationsRemainingThisMonth: number
+      monthlyLimit: number
+    }
+    /** The account Buddy library (plan 170 D9): `enabled` when signed in and
+     * the web's library store is configured (creating still follows
+     * `avatar.enabled`). Older servers omit it: the library is off. */
+    buddyLibrary?: {
+      enabled: boolean
+      count: number
+      limit: number
+      /** Plan 172 D8: alive packs and imports sync (the web's storage is
+       * S3). Older servers omit it: nothing uploads. */
+      alive?: boolean
+    }
+  }
   entitlement: {
     checkedAt: string
     cloudAi: boolean
@@ -3330,7 +3444,7 @@ export interface AiCapabilities {
     /** Clean cut kill switch off and its provider configured; older servers omit it. */
     cleanCutEnabled?: boolean
     cloudAiEnabled: boolean
-    /** The Orcle command parser route is on (plan 140 S8); older servers omit it. */
+    /** The Buddy command parser route is on (plan 140 S8); older servers omit it. */
     cohostCommandEnabled?: boolean
     gatewayConfigured: boolean
     modelTestingEnabled: boolean
@@ -3534,6 +3648,11 @@ export interface SessionListItem {
   /** Live export progress from the backend registry (only while finalizing). */
   finalizationProgressPercent?: number
   finalizationError?: string
+  /** Plan 157: every file of one separate-source take shares the Combined
+   * session's id here; absent on ordinary rows. */
+  takeId?: string
+  /** Which file of the take this row is (plan 157); absent on ordinary rows. */
+  recordingRole?: RecordingRole
 }
 
 /** Progress of a background recording finalization job (`recording.finalization`). */
@@ -3826,6 +3945,7 @@ export interface CommentsSendOperation {
 // event `liveChat.moderationOperation` carries a ModerationOperation on every
 // change. Manual removal is free; `orcle-voice` needs Premium.
 
+// The value stays 'orcle-voice' (plan 170 D22): saved reports and older apps carry it.
 export type ModerationSource = 'manual' | 'orcle-voice'
 export type RemoveConfirmMode = 'confirm' | 'countdown'
 export type ModerationPhase =
@@ -3895,7 +4015,7 @@ export interface ModerationOperationParams {
  * on one message, or an answer to an open removal card. The window never
  * picks the source: Studio sends every `remove` as `manual`, which runs at
  * once (the menu click is the express consent). Voice removals come from the
- * backend's own Orcle engine, never through this relay.
+ * backend's own Buddy engine, never through this relay.
  */
 export type CommentsModerationCommand =
   | {
@@ -3973,9 +4093,14 @@ export interface SetCommentHighlightParams {
   messageId: string
   pngBase64: string
   anchor: CommentHighlightAnchor
+  /** The placed highlight rect for the horizontal canvas (plan 164); omitted
+   *  keeps the `anchor` corner. */
+  rect?: OverlayRect
   /** The same card rasterized for the vertical simulcast leg; sent only when
    *  `comments.highlight.canvases` reports a vertical canvas. */
   verticalPngBase64?: string
+  /** The placed highlight rect for the vertical leg (plan 164). */
+  verticalRect?: OverlayRect
 }
 
 /** `comments.highlight.canvases`: extra canvases the running session burns
@@ -4002,7 +4127,7 @@ export interface CommentsViewSnapshot {
   /**
    * Live mode only (plan 140, S6): the live session's chat removals, every
    * open one then the newest finished ones, at most 100. Studio publishes it;
-   * the Stream Manager renders the row status and Orcle's removal cards.
+   * the Stream Manager renders the row status and Buddy's removal cards.
    */
   moderationOperations?: ModerationOperation[]
   /** History mode only: the finished session's saved stats (plan 055, S9). */
@@ -4123,6 +4248,10 @@ export interface CommentsWindowState {
    * highlight fired with the window closed (shortcut, deck, co-host) still
    * honours the streamer's pick. */
   highlightAnchor: CommentHighlightAnchor
+  /** Auto-show Activity celebrations on stream (plan 156). Owned by main for
+   * the same reason as the anchor: the engine runs in the Studio renderer
+   * and must keep working with the window closed. Default OFF. */
+  autoShowActivity: boolean
   protected: boolean
   captureProtectionMarkerInstalled?: boolean
   enabled: boolean
@@ -4249,6 +4378,9 @@ export type SessionMediaGrantResult =
   | { url: string; expiresAt: number }
   | { error: SessionMediaGrantRefusal }
 
+/** How the app is leaving: the whole app, or only its main window (plan 174 S3.1). */
+export type AppExitKind = 'quit' | 'close'
+
 export interface VideorcApi {
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
@@ -4262,7 +4394,15 @@ export interface VideorcApi {
   getBackendLogs: () => Promise<BackendLogEvent[]>
   getRuntimeInfo: () => Promise<RuntimeInfo>
   retryHardwareAcceleration: () => Promise<RuntimeInfo>
+  /**
+   * The renderer's answer to `onExitRequest` once the livestream ended (plan
+   * 174 S3.1, D2): main lets this one quit or window close through.
+   */
+  exitApp: (kind: AppExitKind) => Promise<void>
   pickScreenImage: () => Promise<ResourceSelection | null>
+  /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
+   * `input-file` capability for `banners.importImage`. */
+  pickBannerImage: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
   checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>
@@ -4271,10 +4411,42 @@ export interface VideorcApi {
   // managed asset (Assets Tab plan, slice A4).
   importBackgroundImage: () => Promise<BackgroundImportResult | null>
   importScheduledThumbnail: () => Promise<ScheduledThumbnail | null>
+  /** "Start over": deletes the persona's managed folder. */
+  removeBuddyPersona: (personaId: string) => Promise<void>
+  /** The bytes of one stored persona image (`<personaId>/<state>.<ext>`) for
+   * the Buddy overlay raster to decode (plan 164 S-C2); null when there is
+   * no such file. The renderer cannot fetch the managed scheme itself. */
+  readBuddyImage: (relativePath: string) => Promise<Uint8Array | null>
+  /** One file of a pet pack (plan 168): `manifest.json`, `buddy.json`, a
+   * sheet, for the living preview (Phase D). `packId` is a uuid or
+   * `bundled:<name>`; null when there is no such file. */
+  readBuddyPetFile: (personaId: string, packId: string, file: string) => Promise<Uint8Array | null>
+  /** Picks a page-pet pack folder, copies its pack files into the persona's
+   * `pets/<uuid>/` and registers it with the backend (plan 168 S-A3); null
+   * when the picker was cancelled. Throws the backend's reason on refusal. */
+  importBuddyPetFolder: (personaId: string) => Promise<BuddyPetImportResult | null>
+  /** One file of a pet creation (plan 168 S-F5): a stored source
+   * (`sources/<sheet>-v<n>.png`) or the build's `pack/mascot.webp` and
+   * `pack/manifest.json`, from `<personaId>/creations/<buildId>/` under the
+   * write root; null when there is no such file. */
+  readBuddyCreationFile: (
+    personaId: string,
+    buildId: string,
+    file: string
+  ) => Promise<Uint8Array | null>
   backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
   cacheChatAvatar: (url: string) => Promise<string | null>
+  /** A Twitch GIF Keyboard asset through main's cache (plan 155): the
+   * managed local URL, or null when the gate, the size cap, the deadline or
+   * the image sniff refused it. */
+  cacheChatGif: (url: string) => Promise<string | null>
+  /** The main renderer relays Settings → "GIFs in Twitch chat" (plan 155);
+   * the Stream Manager window seeds from main's cache and follows pushes. */
+  pushChatGifMode: (mode: TwitchGifMode) => Promise<void>
+  getChatGifMode: () => Promise<TwitchGifMode>
+  onChatGifMode: (callback: (mode: TwitchGifMode) => void) => () => void
   /** The bytes of one cached image (`videorc-asset://avatar/...`) for the
    * highlight card to decode with `createImageBitmap` (plan 095, S3): null
    * when the URL names no managed cache file or it is over the 2 MB cap. */
@@ -4310,15 +4482,30 @@ export interface VideorcApi {
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
   onClipMarkRequest: (callback: (command: ClipMarkCommand) => void) => () => void
   pushClipMarkResult: (resolution: CommentsCommandResolution<ClipMarkedEvent>) => Promise<boolean>
+  /** Banners in the Stream Manager (plan 186 S7): the Studio renderer pushes
+   * the read-only list (`{id, name, shown}`, null until it loads); the window
+   * seeds from main's copy and follows. */
+  getCommentsBanners: () => Promise<BannerSummary[] | null>
+  pushCommentsBanners: (banners: BannerSummary[] | null) => Promise<boolean>
+  onCommentsBanners: (callback: (banners: BannerSummary[] | null) => void) => () => void
+  /** Show or hide from the Stream Manager: relayed to the MAIN renderer, which
+   * owns the backend socket; a refusal comes back as the reply's error. */
+  bannerFromCommentsWindow: (command: BannerRelayCommand) => Promise<boolean>
+  onBannerRequest: (callback: (command: BannerRelayCommand) => void) => () => void
+  pushBannerResult: (resolution: CommentsCommandResolution<boolean>) => Promise<boolean>
   /** Show who followed from the Stream Manager (plan 071, S2): Electron main
    * starts the Twitch reconnect with the follow permission over its admin
    * socket and opens the browser, so the main window's eager bundle carries
    * none of it. Resolves once the browser opened. */
   showFollowNamesFromCommentsWindow: (command: FollowNamesCommand) => Promise<boolean>
-  /** "Reconnect Twitch to let Orcle remove messages" from the Stream Manager
+  /** "Reconnect Twitch to let Buddy remove messages" from the Stream Manager
    * (plan 140, S5): like Show who followed, main starts the reconnect with
    * every optional permission and opens the browser. Resolves once it opened. */
   reconnectScopesFromCommentsWindow: (command: ScopeReconnectCommand) => Promise<boolean>
+  /** The Stream Manager's read-only behaviour chips (plan 174 S3.14a) link to
+   * Buddy → Chat, their one home: main shows the main window and opens the
+   * Buddy page on that tab through `buddy:deep-link`. Resolves once sent. */
+  openBuddyTabFromCommentsWindow: (command: OpenBuddyTabCommand) => Promise<boolean>
   /** Chat removal relay (plan 140, S6): the Stream Manager's "Remove from
    * chat" and its removal-card answers. The MAIN renderer owns the backend
    * socket and makes the `liveChat.moderation.*` call; the reply is the
@@ -4335,8 +4522,8 @@ export interface VideorcApi {
   getCohostWindowState: () => Promise<CohostWindowState>
   onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
   sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
-  /** Answers to Orcle's voice command cards (plan 140, S6 part B), relayed
-   * like the other Orcle actions: the MAIN renderer makes the call. */
+  /** Answers to Buddy's voice command cards (plan 140, S6 part B), relayed
+   * like the other Buddy actions: the MAIN renderer makes the call. */
   sendCohostCommand: (command: CohostCommandRelayCommand) => Promise<CohostState>
   onCohostCommandRequest: (callback: (command: CohostCommandRelayCommand) => void) => () => void
   pushCohostCommandResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
@@ -4398,6 +4585,7 @@ export interface VideorcApi {
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
   setCommentsWindowHighlightAnchor: (anchor: CommentHighlightAnchor) => Promise<CommentsWindowState>
+  setCommentsWindowAutoShowActivity: (on: boolean) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void
   pushCommentsSnapshot: (view: CommentsViewSnapshot) => Promise<void>
   pushCommentsDelta: (delta: CommentsSnapshotDelta) => Promise<void>
@@ -4463,6 +4651,9 @@ export interface VideorcApi {
   revealSelectedResource: (capabilityId: string) => Promise<void>
   revealSession: (sessionId: string) => Promise<void>
   revealBackgroundAsset: (assetId: string) => Promise<void>
+  /** Shows an exported support bundle in Finder or Explorer (plan 174 S3.18).
+   * Main reveals only a bundle file inside the backend's export folder. */
+  revealSupportBundle: (path: string) => Promise<void>
   obsDiscover?: () => Promise<ObsDiscovery>
   obsRead?: (collection: string, profile: string) => Promise<ObsSetup | null>
   obsReadStreamKey?: (profile: string) => Promise<string | null>
@@ -4492,6 +4683,21 @@ export interface VideorcApi {
    * the raw key here ("1".."9" or ",").
    */
   onShortcutNavigate: (callback: (key: string) => void) => () => void
+  /**
+   * Plan 170 D18: a `videorc://buddy` link arrived. Main has focused the
+   * window and synced the library; the shell opens the Buddy tab, and the
+   * creator when `openCreator` (Make it Alive, after the avatar is worn).
+   */
+  onBuddyDeepLink: (
+    callback: (navigation: { openCreator: boolean; tab?: string }) => void
+  ) => () => void
+  /**
+   * Main was asked to quit (⌘Q, the Dock) or to close the main window (⌘W)
+   * while on air (plan 174 S3.1, D2). The shell asks "End livestream and
+   * quit?" with "Keep streaming" focused, ends the livestream on a yes and
+   * answers with `exitApp`; a no leaves everything as it was.
+   */
+  onExitRequest: (callback: (kind: AppExitKind) => void) => () => void
   /** Whether the command modifier is physically down; see main's before-input-event. */
   onShortcutModifier: (callback: (held: boolean) => void) => () => void
   /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */
@@ -4624,6 +4830,29 @@ export type LiveChatEventType =
   | 'deleted'
   | 'moderation'
   | 'follow'
+  /** Activity-only Twitch rows (plan 162): never listed in chat. */
+  | 'power-up'
+  | 'redemption'
+
+/** Event types listed in Activity and never in the chat list: follows, Twitch
+ * Power-ups and channel point redemptions (plan 162). */
+export function isActivityOnlyEvent(eventType: LiveChatEventType): boolean {
+  return eventType === 'follow' || eventType === 'power-up' || eventType === 'redemption'
+}
+
+/** Which Twitch Power-up a viewer paid bits for (plan 162). */
+export type LiveChatPowerUpKind = 'celebration' | 'gigantify-an-emote' | 'message-effect' | 'custom'
+
+/** Which channel point reward a viewer redeemed (plan 162). */
+export type LiveChatRedemptionKind =
+  | 'custom'
+  | 'highlighted-message'
+  | 'sub-only-message'
+  | 'random-emote-unlock'
+  | 'chosen-emote-unlock'
+  | 'modified-emote-unlock'
+  /** An automatic reward Twitch added after this build. */
+  | 'other'
 
 export type LiveChatMembershipKind = 'new' | 'upgrade' | 'milestone' | 'gift' | 'gift-received'
 
@@ -4686,6 +4915,26 @@ export type LiveChatEventDetails =
   /** A Twitch watch streak (plan 151): `streakCount` streams in a row.
    * `channelPointsAwarded` is what the viewer earned; kept, never shown. */
   | { kind: 'watch-streak'; streakCount: number; channelPointsAwarded?: number }
+  /** A Twitch Power-up paid with bits (plan 162); `emoteName` when
+   * gigantified, `title` a Custom Power-up's own name (plan 163). */
+  | {
+      kind: 'power-up'
+      bits: number
+      powerUp: LiveChatPowerUpKind
+      emoteName?: string
+      title?: string
+    }
+  /** A Twitch channel point redemption (plan 162). `title` is a custom
+   * reward's; automatic rewards have none. `pointsName` is the channel's own
+   * name for its points ("Orc Gold", plan 163), absent for Twitch's default. */
+  | {
+      kind: 'redemption'
+      reward: LiveChatRedemptionKind
+      channelPoints: number
+      title?: string
+      emoteName?: string
+      pointsName?: string
+    }
 
 /** The message a chat message replies to, when the platform threads replies. */
 export interface LiveChatReply {
@@ -4743,10 +4992,13 @@ export interface SevenTvStatus {
 export interface ChatEmotesSettings {
   sevenTv: boolean
   sevenTvStatus: SevenTvStatus
+  /** Settings → General → "GIFs in Twitch chat" (plan 155, D6). */
+  twitchGifs: TwitchGifMode
 }
 
 export interface ChatEmotesSettingsPatch {
   sevenTv?: boolean
+  twitchGifs?: TwitchGifMode
 }
 
 /**
@@ -4761,6 +5013,12 @@ export interface LiveChatAuthorAffiliation {
   url?: string
 }
 
+/**
+ * The verified check a platform shows beside an author's name: X's Premium
+ * (blue), Verified Organization (gold) or government (gray) check (plan 167).
+ */
+export type LiveChatAuthorVerified = 'blue' | 'business' | 'government'
+
 /** One normalized, SQLite-persisted chat message. `id` is the app-level dedupe key. */
 export interface LiveChatMessage {
   id: string
@@ -4773,6 +5031,8 @@ export interface LiveChatMessage {
   authorAvatarUrl?: string
   authorBadges: string[]
   authorAffiliation?: LiveChatAuthorAffiliation
+  /** X's verified check beside the name (plan 167); absent when unverified. */
+  authorVerified?: LiveChatAuthorVerified
   authorRoles: string[]
   publishedAt: string
   receivedAt: string
@@ -4885,7 +5145,7 @@ export interface CohostSettings {
   /** Streamer notes the model answers from; at most 4000 characters. */
   notes: string
   /**
-   * Orcle's picks go on stream by themselves: the server's suggested
+   * Buddy's picks go on stream by themselves: the server's suggested
    * comments and high-priority questions, under the engine's cadence rules
    * (default off).
    */
@@ -4898,12 +5158,12 @@ export interface CohostSettings {
   /** Plain-language chat rules the co-host flags against; ≤ 10 × 120 chars. */
   rules: string[]
   /**
-   * Orcle hears the microphone for the whole live stream, as text, even with
+   * Buddy hears the microphone for the whole live stream, as text, even with
    * live captions off (plan 068; default off).
    */
   listen: boolean
   /**
-   * Plan 140: "Commands need 'Orcle' first". On, the structured phrases
+   * Plan 140: "Commands need 'Buddy' first". On, the structured phrases
    * ("remove it from our chat") stop working without the wake word
    * (default off).
    */
@@ -4914,6 +5174,201 @@ export interface CohostSettings {
    * which always waits for a yes.
    */
   removeConfirm: RemoveConfirmMode
+  /** The user's creature (plan 164 S-A2). The backend always sends it. */
+  persona: CohostPersona
+  /** Automatic chat (plan 164 S-A2). Everything off by default. */
+  autoChat: CohostAutoChat
+}
+
+/** The avatar's state images (plan 164 D16). `idle` is required on stream;
+ * the others fall back to it. */
+export type CohostAvatarState = 'idle' | 'talk' | 'laugh' | 'think'
+export const COHOST_AVATAR_STATES: readonly CohostAvatarState[] = ['idle', 'talk', 'laugh', 'think']
+/** How the comic bubble is drawn (plan 164 D17). */
+export type CohostBubbleStyle = 'speech' | 'thought' | 'shout'
+/** Where the persona's images came from; `default` is the bundled pack. */
+export type CohostPersonaSource = 'default' | 'uploaded' | 'generated'
+
+/**
+ * The user's creature (plan 164): name, personality and looks. `images` are
+ * relative paths under the managed buddy-assets root (`<personaId>/<state>.<ext>`),
+ * absent (never null) for a state with no image.
+ */
+export interface CohostPersona {
+  /** Names the asset folder; regenerated by "Start over". `default` on a fresh install. */
+  id: string
+  /** 1 to 24 characters. */
+  name: string
+  /** At most 1200 characters. */
+  personality: string
+  bubbleStyle: CohostBubbleStyle
+  images: Partial<Record<CohostAvatarState, string>>
+  source: CohostPersonaSource
+  /** Still or Alive (plan 168 D2). The backend always sends it. */
+  avatar: BuddyAvatar
+  /** How the Buddy moves on air (plan 168 D10, D13, D15). */
+  motion: BuddyMotionSettings
+  /** Per-trigger reaction overrides (plan 168 D14); `{}` uses D14's defaults. */
+  reactions: BuddyReactionTable
+  /**
+   * The library avatar this Buddy is (plan 170 D12): a user avatar's uuid or
+   * `official:<slug>`. Absent (never null) for a Buddy made only on this
+   * computer (an imported pack, a look kept while signed out) and for the
+   * untouched default; sync never overwrites a Buddy without it unless it is
+   * the untouched default. 1 to 64 characters.
+   */
+  libraryAvatarId?: BuddyLibraryId
+}
+
+/** The chat posting mode (plan 164 D4). */
+export type CohostAutoChatMode = 'off' | 'suggest' | 'auto'
+/** The activity kinds a greeting template answers (plan 164). */
+export type CohostActivityTemplateKind =
+  | 'follow'
+  | 'sub'
+  | 'resub'
+  | 'sub-gift'
+  | 'community-sub-gift'
+  | 'membership'
+  | 'cheer'
+  | 'kicks'
+  | 'super-chat'
+  | 'super-sticker'
+  | 'raid'
+  | 'watch-streak'
+  | 'power-up'
+  | 'redemption'
+export const COHOST_ACTIVITY_TEMPLATE_KINDS: readonly CohostActivityTemplateKind[] = [
+  'follow',
+  'sub',
+  'resub',
+  'sub-gift',
+  'community-sub-gift',
+  'membership',
+  'cheer',
+  'kicks',
+  'super-chat',
+  'super-sticker',
+  'raid',
+  'watch-streak',
+  'power-up',
+  'redemption'
+]
+export type CohostGreetingPlatform = 'twitch' | 'youtube' | 'kick' | 'x'
+/** The avatar state an utterance shows (plan 164 D18); never `idle`. */
+export type CohostUtteranceState = 'talk' | 'laugh' | 'think'
+
+export interface CohostGreetingTemplate {
+  id: string
+  kind: CohostActivityTemplateKind
+  /** Omitted means any platform. */
+  platform?: CohostGreetingPlatform
+  /** 1 to 200 characters, fields in braces (`{name}`). */
+  text: string
+  state: CohostUtteranceState
+  enabled: boolean
+  /** Plan 168 D14: the reaction this greeting plays (a reaction id of the
+   * pack, or `none`); it wins over the trigger's. Absent, never null. */
+  reaction?: string
+}
+
+export interface CohostCooldownBehaviour {
+  enabled: boolean
+  /** 1 to 3600. */
+  cooldownSeconds: number
+}
+
+/** Automatic chat (plan 164 D5): one mode, three behaviours. */
+export interface CohostAutoChat {
+  mode: CohostAutoChatMode
+  greetings: { enabled: boolean; templates: CohostGreetingTemplate[] }
+  /** Default cooldown 20 s. */
+  answers: CohostCooldownBehaviour
+  /** Default cooldown 240 s. */
+  banter: CohostCooldownBehaviour
+}
+
+// --- Buddy look (plan 169 D8, D9) ---
+
+/** `cohost.avatar.create`: a description, an inspiration picture (base64
+ * WebP, JPEG or PNG, at most 3 MB decoded) or both. Accepted at once; the set arrives as
+ * `cohost.avatar.progress` and `cohost.avatar.draft` events. */
+export interface CohostAvatarCreateParams {
+  /** 1 to 600 characters. */
+  description?: string
+  inspirationBase64?: string
+  /** Plan 170 D13: the library avatar's name (1 to 24; the persona's name
+   * when absent), personality (0 to 1200) and "About you" (0 to 4000). */
+  name?: string
+  personality?: string
+  context?: string
+}
+
+/** The states a draft can redo; idle has no Redo (Try again makes a new character). */
+export type CohostAvatarRedoState = Exclude<CohostAvatarState, 'idle'>
+
+/** `cohost.avatar.redo`: one state of the draft, made again from its idle. */
+export interface CohostAvatarRedoParams {
+  requestId: string
+  state: CohostAvatarRedoState
+}
+
+/** `cohost.avatar.keep` and `cohost.avatar.discard`. */
+export interface CohostAvatarRequestIdParams {
+  requestId: string
+}
+
+/** What create and redo answer at once: the id their events carry. */
+export interface CohostAvatarAccepted {
+  requestId: string
+}
+
+/** Why one picture failed: the web's code and the tile's line. */
+export interface CohostAvatarErrorDetail {
+  code: string
+  message: string
+}
+
+export type CohostAvatarPhase = 'working' | 'done' | 'failed'
+
+/** `cohost.avatar.progress`: one state's step. `path` (the draft picture,
+ * relative to the buddy root) on `done`, `error` on `failed`. */
+export interface CohostAvatarProgressEvent {
+  requestId: string
+  state: CohostAvatarState
+  phase: CohostAvatarPhase
+  path?: string
+  error?: CohostAvatarErrorDetail
+}
+
+/** A draft look (`cohost.avatar.draft`): the pictures it holds
+ * (`<personaId>/drafts/<requestId>/<state>.png`) and why any other state is
+ * missing. Idle is always there. */
+export interface CohostAvatarDraft {
+  requestId: string
+  images: Partial<Record<CohostAvatarState, string>>
+  failed: Partial<Record<CohostAvatarState, CohostAvatarErrorDetail>>
+  /** Plan 170 D13: the account library avatar this draft already is (a
+   * uuid; it is saved on both sides as soon as it is made). Absent for a
+   * draft made by the plan 169 route (an older web). */
+  libraryAvatarId?: string
+}
+
+export type CohostAvatarJobKind = 'create' | 'redo'
+
+/** The look job running now (one at a time per process). */
+export interface CohostAvatarRunning {
+  requestId: string
+  kind: CohostAvatarJobKind
+  /** The state a redo remakes. */
+  state?: CohostAvatarState
+}
+
+/** `cohost.avatar.draft.get` and `cohost.avatar.discard`: the active
+ * Buddy's draft (one left on disk is offered again) and the running job. */
+export interface CohostAvatarDraftStatus {
+  draft?: CohostAvatarDraft
+  running?: CohostAvatarRunning
 }
 
 /** `cohost.settings.set`: absent fields are unchanged. */
@@ -4928,9 +5383,299 @@ export interface CohostSettingsPatch {
   listen?: boolean
   wakeWordRequired?: boolean
   removeConfirm?: RemoveConfirmMode
+  /** Replaces the whole persona; the backend validates and trims it. */
+  persona?: CohostPersona
+  /** Replaces the whole block; the backend validates it. */
+  autoChat?: CohostAutoChat
 }
 
-/** Whether Orcle hears the streamer right now (plan 068). */
+// --- Overlay layout (plan 164) ---------------------------------------------
+// Where the highlight card, the caption bar and the Buddy sit on each output
+// orientation and which outputs carry them. Backend-owned (`app_settings`
+// key `overlayLayout`), served by `overlays.layout.get/set`. Placement lives
+// on the Live Scene canvas and nowhere else; the Stream Manager corner menu
+// is a snap that writes the same rect.
+
+/** A normalized rect in canvas units: x/w over the width, y/h over the height. */
+export interface OverlayRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+export interface OverlayItemLayout {
+  horizontal: OverlayRect
+  vertical: OverlayRect
+  showOnStream: boolean
+  showInRecording: boolean
+}
+
+export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy'] as const
+export type OverlayItem = (typeof OVERLAY_ITEMS)[number]
+
+export type OverlayLayout = Record<OverlayItem, OverlayItemLayout>
+
+export type OverlayOrientation = 'horizontal' | 'vertical'
+
+/** Snap presets: the four corners plus the centred bottom bar captions use. */
+export type OverlaySnap =
+  | 'top-left'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-right'
+  | 'bottom-center'
+
+/** Smallest side a placed rect may have (canvas units); mirrors Rust. */
+export const OVERLAY_RECT_MIN_SIZE = 0.02
+
+export interface MigrateHighlightAnchorParams {
+  anchor: CommentHighlightAnchor
+}
+// --- end overlay layout (plan 164) ------------------------------------------
+
+// --- Banners (plan 186) -----------------------------------------------------
+// The streamer's own images placed anywhere on the picture. Backend-owned
+// (SQLite `banners`, images in the managed `Banners` dir beside `Screens`).
+// One set for every scene; `shown` survives a relaunch. Places reuse the
+// overlay model: a normalized `OverlayRect` per orientation and the two
+// "Appears in" switches. Pinned by `protocol-fixtures/high-risk-contracts.json`
+// → `banner`.
+
+/** At most this many banners in Assets (plan 186 D7). */
+export const BANNER_MAX_COUNT = 24
+/** At most this many banners showing at once (plan 186 D7). */
+export const BANNER_MAX_SHOWN = 4
+export const BANNER_OPACITY_MIN = 0.2
+export const BANNER_OPACITY_MAX = 1
+
+export interface Banner {
+  /** Stable UUID, used by remotes, the Stream Deck and `/banner`. */
+  id: string
+  name: string
+  /** Basename in the managed Banners dir, `<id>.png`. Never a path. */
+  imageFile: string
+  /** Basename of the ~480 px thumbnail, `<id>.thumb.png`. */
+  thumbnailFile: string
+  /** Pixel size of the stored image. */
+  width: number
+  height: number
+  hasAlpha: boolean
+  /** Assets order, also the drawing order: later is on top. */
+  sortOrder: number
+  /** Showing now. Persists across a relaunch. */
+  shown: boolean
+  horizontal: OverlayRect
+  vertical: OverlayRect
+  /** "Appears in: Stream". */
+  showOnStream: boolean
+  /** "Appears in: Recording". */
+  showInRecording: boolean
+  /** 0.2 to 1.0. */
+  opacity: number
+  /** Phase 2 timer: omitted when off, never `null`. */
+  hideAfterSec?: number
+  /** Phase 2 timer: omitted when off, never `null`. */
+  repeatEveryMin?: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** `banners.importImage`: a main-issued `input-file` capability. */
+export interface BannerImportImageParams {
+  sourceCapability: string
+}
+
+/** `banners.update`: only the fields to change. A timer of `0` turns it off. */
+export interface BannerUpdateParams {
+  id: string
+  name?: string
+  horizontal?: OverlayRect
+  vertical?: OverlayRect
+  showOnStream?: boolean
+  showInRecording?: boolean
+  opacity?: number
+  hideAfterSec?: number
+  repeatEveryMin?: number
+}
+
+/** `banners.reorder`: every banner id in the new Assets order. */
+export interface BannerReorderParams {
+  ids: string[]
+}
+
+/** `banners.delete` and `banners.show`. */
+export interface BannerIdParams {
+  id: string
+}
+
+/** `banners.hide`: one banner, or every banner when `id` is absent. */
+export interface BannerHideParams {
+  id?: string
+}
+// --- end banners (plan 186) -------------------------------------------------
+
+// --- Buddy overlay (plan 164) ---------------------------------------------
+// The Buddy on stream (Phase C): the backend owns which avatar state shows
+// and the bubble that is up; the renderer rasterizes the avatar per output
+// canvas and pushes the PNG through `buddy.overlay.set`.
+
+/** One output canvas of the session: the recording (or the only stream) and
+ * the split / vertical stream leg. */
+export type OverlayTarget = 'primary' | 'auxiliary'
+
+/** The bubble that is up: its text and when it ends (RFC 3339). */
+export interface BuddyBubble {
+  text: string
+  until: string
+}
+
+/** `cohost.buddy.state` (event) and `cohost.buddy.status` (RPC): which
+ * persona's images to draw, the state to draw and the bubble, or null. */
+export interface BuddyOverlaySnapshot {
+  personaId: string
+  state: CohostAvatarState
+  bubble: BuddyBubble | null
+}
+
+/** `buddy.overlay.set`: the renderer's raster of the bubble for one output
+ * canvas (plan 168 D16: the bubble only, its tail tip on the bitmap's
+ * bottom-centre; the backend draws the pet and anchors the bubble above its
+ * head). `rect` is the Buddy's placed rect for that canvas orientation, the
+ * width the bubble wraps to. Mirrors `captions.overlay.set`. */
+export interface SetBuddyOverlayParams {
+  target: OverlayTarget
+  pngBase64: string
+  rect: OverlayRect
+}
+
+export interface OverlayTargetInfo {
+  active: boolean
+  width: number
+  height: number
+  revision: number
+  styleRevision: number
+}
+
+/** What a per-target overlay slot holds after a set. */
+export interface OverlayTargetsInfo {
+  active: boolean
+  primary: OverlayTargetInfo
+  auxiliary: OverlayTargetInfo
+}
+// --- end Buddy overlay (plan 164) -----------------------------------------
+
+// --- Buddy pets (plan 168, Phase A) ---
+// The persona's pet packs (D1 to D4): page-pet manifest v1 folders under the
+// managed buddy roots. The pack contract and its validators live in
+// `./buddy-pet`; these are the RPC shapes.
+export type {
+  BuddyAvatar,
+  BuddyMotionSettings,
+  BuddyPetImportResult,
+  BuddyPetSource,
+  BuddyPetSummary,
+  BuddyReactionTable,
+  BuddyTrigger
+} from './buddy-pet'
+
+/** `cohost.pet.import` (main only, after it copied the folder): the folder
+ * as `<personaId>/pets/<packId>` under the write root. */
+export interface CohostPetImportParams {
+  folderToken: string
+}
+
+/** `cohost.pet.remove`: one of the persona's own packs (never `bundled:`). */
+export interface CohostPetRemoveParams {
+  packId: string
+}
+
+/** The removed id and the settings after it: the persona is Still again
+ * when the removed pack was the one it wore. */
+export interface CohostPetRemoved {
+  packId: string
+  settings: CohostSettings
+}
+
+/** `cohost.pet.react`: a reaction id of the active pack (the still pack's
+ * are `talk`, `laugh`, `think`). Phase C plays it on air. */
+export interface CohostPetReactParams {
+  reaction: string
+}
+
+export interface CohostPetReactAccepted {
+  reaction: string
+}
+// --- end Buddy pets (plan 168, Phase A) ---
+
+// --- Buddy library (plan 170 D12, D13) ---
+// The account library and the official avatars: the wire lives in `./buddy-library`.
+export type {
+  CohostLibraryAccepted,
+  CohostLibraryDeleteParams,
+  CohostLibrarySyncParams,
+  CohostLibraryUpdateParams,
+  CohostLibraryUseParams,
+  BuddyLibraryBusy,
+  BuddyLibraryBusyKind,
+  BuddyLibraryEntry,
+  BuddyLibraryEntryAlive,
+  BuddyOfficialAlive,
+  BuddyOfficialAliveState,
+  BuddyLibraryError,
+  BuddyLibraryId,
+  BuddyLibraryState,
+  BuddyLibrarySyncReason,
+  BuddyOfficialCatalogEntry,
+  BuddyOfficialEntry,
+  BuddyOfficialId,
+  BuddyOfficialSlug,
+  BuddyPoseState
+} from './buddy-library'
+// --- end Buddy library (plan 170) ---
+
+// --- Buddy pets (plan 168, Phase F) ---
+// The creator (S-F4): the wire lives in `./buddy-pet-creator`.
+export type {
+  CohostPetBuildIdParams,
+  CohostPetIdentityParams,
+  CohostPetSaveParams,
+  CohostPetSheetGenerateParams,
+  BuddyPetBuildFailure,
+  BuddyPetBuildProgressEvent,
+  BuddyPetBuildProgressStep,
+  BuddyPetCreation,
+  BuddyPetCreationAccepted,
+  BuddyPetCreationBuild,
+  BuddyPetCreationSource,
+  BuddyPetCreationStatus,
+  BuddyPetCreationStep,
+  BuddyPetCreatorError,
+  BuddyPetGazeRow,
+  BuddyPetIdentityNotes,
+  BuddyPetIdentityReadEvent,
+  BuddyPetReference,
+  BuddyPetSheetGeneratedEvent,
+  BuddyPetSheetKey,
+  BuddyPetSheetKindName
+} from './buddy-pet-creator'
+
+/** What `cohost.pet.save` hands back: the saved pack and the settings with
+ * the persona now Alive in it. */
+export interface CohostPetSaved {
+  pack: import('./buddy-pet').BuddyPetSummary
+  settings: CohostSettings
+}
+// --- end Buddy pets (plan 168, Phase F) ---
+// --- Buddy pets (plan 168, Phase B) ---
+/** `buddy.overlay.clear`: the bubble ended; drop its raster from one target,
+ * or from both without a target. */
+export interface ClearBuddyOverlayParams {
+  target?: OverlayTarget
+}
+// --- end Buddy pets (plan 168, Phase B) ---
+
+/** Whether Buddy hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'
 
 export interface CohostListening {
@@ -4964,7 +5709,7 @@ export interface CohostQuestion {
 export type CohostPromiseTriggerKind = 'none' | 'viewers' | 'minutes'
 
 /** When a promise reminder fires: at `value` viewers, after `value` minutes,
- * or (`none`) 20 minutes after Orcle first heard it. */
+ * or (`none`) 20 minutes after Buddy first heard it. */
 export interface CohostPromiseTrigger {
   kind: CohostPromiseTriggerKind | (string & Record<never, never>)
   value?: number
@@ -4986,7 +5731,7 @@ export interface CohostPromiseReminder {
 }
 
 /** A recap for viewers who asked what they missed, or one the streamer
- * drafted; never posted by Orcle. Gone after `expiresAt`. */
+ * drafted; never posted by Buddy. Gone after `expiresAt`. */
 export interface CohostRecap {
   text: string
   at: string
@@ -5113,21 +5858,36 @@ export interface CohostErrorDetail {
   status: number | null
 }
 
-// --- Orcle voice commands (plan 140 S3; contract part B) ---
+// --- Buddy voice commands (plan 140 S3; contract part B) ---
 
 /**
  * What a voice command asked for. `confirm` and `cancel` answer the open card,
- * so they update that command instead of standing on their own.
+ * so they update that command instead of standing on their own. The banner
+ * kinds (plan 186 S11: "show the sponsor banner", "hide the banners") finish
+ * at once: `done`, `not-found` or `refused`, with the sentence in `message`.
  */
-export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | 'cancel' | 'unknown'
+export type CohostCommandKind =
+  | 'highlight'
+  | 'clear'
+  | 'remove'
+  | 'confirm'
+  | 'cancel'
+  | 'unknown'
+  | 'show-banner'
+  | 'hide-banner'
+  | 'hide-banners'
+  // "Buddy, show up" / "Buddy, go away": the Buddy itself on or off the
+  // stream (`overlayLayout.buddy.showOnStream`), finished at once.
+  | 'show-buddy'
+  | 'hide-buddy'
 
 /**
  * Where the latest voice command stands:
  * - `done`: highlighted, cleared, removed or hidden;
- * - `not-found`: no comment matched, or (kind `unknown`) Orcle didn't catch it;
+ * - `not-found`: no comment matched, or (kind `unknown`) Buddy didn't catch it;
  * - `ambiguous`: a chooser is open, `candidates` lists the comments;
  * - `confirm`: a card waits for a yes: a voice removal (`operationId`) or a
- *   highlight of a comment Orcle flagged. A removal card without `operationId`
+ *   highlight of a comment Buddy flagged. A removal card without `operationId`
  *   is still opening; one without `expiresAt` was confirmed and is running;
  * - `refused`: chat moderation refused, or the removal failed;
  * - `unavailable`: paused by Videorc, or Premium is required;
@@ -5160,7 +5920,7 @@ export interface CohostCommandTarget {
 export interface CohostCommand {
   /** `cmd-<uuid>`. */
   id: string
-  /** The words that made the command, as Orcle heard them. */
+  /** The words that made the command, as Buddy heard them. */
   heard: string
   kind: CohostCommandKind
   status: CohostCommandStatus
@@ -5234,6 +5994,13 @@ export interface CohostState {
    * at anchor + 20 s, pushed back by a backoff/quota window).
    */
   nextTickAt?: string | null
+  /**
+   * ISO-8601 instant of the next tick attempt after a failed one; present only
+   * while `status` is `error` and the backoff is still climbing (the presence
+   * reads "Retrying"). Omitted at the backoff ceiling, where Buddy reads as
+   * stopped, and on every other status.
+   */
+  retryAt?: string | null
   /** Session total of chat messages the engine noted for ticks. */
   messagesSeen?: number
   /** Distinct question ids surfaced this session — lifetime, not open count. */
@@ -5262,7 +6029,7 @@ export interface CohostState {
    */
   recentlyResolved?: CohostRecentlyResolved[]
   /**
-   * Whether Orcle hears the streamer (plan 068); absent without a session or
+   * Whether Buddy hears the streamer (plan 068); absent without a session or
    * from a backend before the field (never null).
    */
   listening?: CohostListening
@@ -5286,10 +6053,17 @@ export interface CohostState {
   command?: CohostCommand
   /** Plan 140 S3: the voice-command kill switches; absent while both are on. */
   commandAvailability?: CohostCommandAvailability
+  /**
+   * Plan 164 D7: what the Buddy said or proposes this chat session, oldest
+   * first, at most 20; absent while empty (never null).
+   */
+  utterances?: CohostUtterance[]
+  /** Plan 164 D10: automatic sends this chat session; absent while zero. */
+  autoChatSends?: number
 }
 
 /**
- * Plan 119 S1: what became of a question Orcle caught. The latest outcome
+ * Plan 119 S1: what became of a question Buddy caught. The latest outcome
  * wins; a restore puts it back to `open`; `shown` means still open, but its
  * comment was on stream.
  */
@@ -5314,7 +6088,7 @@ export interface CohostReportQuestion {
 }
 
 export interface CohostReportQuestions {
-  /** Distinct question ids Orcle surfaced. */
+  /** Distinct question ids Buddy surfaced. */
   total: number
   markedAnswered: number
   dismissed: number
@@ -5382,7 +6156,7 @@ export interface CohostReportAlert {
   firstSeenAt: string
 }
 
-/** Recaps are never posted by Orcle, so posting leaves no count. */
+/** Recaps are never posted by Buddy, so posting leaves no count. */
 export interface CohostReportRecap {
   offered: number
   drafted: number
@@ -5407,12 +6181,12 @@ export interface CohostReportCommands {
   expired: number
   /** A removal that failed or ended unknown, or a refused request. */
   failed: number
-  /** No comment matched, or Orcle didn't catch what was said. */
+  /** No comment matched, or Buddy didn't catch what was said. */
   notFound: number
 }
 
 /**
- * What Orcle caught in one stream (plan 119 decision 6): counts by outcome,
+ * What Buddy caught in one stream (plan 119 decision 6): counts by outcome,
  * the questions and what became of them, the promises still open. Saved on
  * this computer when the session ends and deleted with the recording.
  * `cohost.report.get` returns it; `cohost.report.saved` announces it. Every
@@ -5423,7 +6197,7 @@ export interface CohostSessionReport {
   sessionId: string
   startedAt: string
   endedAt: string
-  /** Orcle sessions folded into this report: off and on mid-stream adds one. */
+  /** Buddy sessions folded into this report: off and on mid-stream adds one. */
   segments: number
   streamTitle?: string
   messagesSeen: number
@@ -5437,6 +6211,22 @@ export interface CohostSessionReport {
   recap: CohostReportRecap
   /** Plan 140 S3: voice commands; absent when none was counted (and in older reports). */
   commands?: CohostReportCommands
+  /** Plan 164 D10: what the Buddy posted as you, oldest first, at most 200; absent while empty. */
+  posts?: CohostReportPost[]
+}
+
+export type CohostReportPostResult = 'sent' | 'partial' | 'failed'
+
+/** One automatic send in the report (plan 164 D10). */
+export interface CohostReportPost {
+  /** The utterance id. */
+  id: string
+  at: string
+  trigger: CohostUtteranceTriggerKind
+  text: string
+  /** The platforms the send reached, or was meant to. */
+  destinations: StreamPlatform[]
+  result: CohostReportPostResult
 }
 
 export interface CohostReportChatPlatformCount {
@@ -5452,7 +6242,7 @@ export interface CohostReportChat {
 
 /**
  * `cohost.report.get` / `cohost.report.latest`: the saved report (null when
- * Orcle left none), the session's moments (clip marks and chat peaks, computed
+ * Buddy left none), the session's moments (clip marks and chat peaks, computed
  * on read and never stored) and its chat totals.
  */
 export interface CohostReportPayload {
@@ -5537,6 +6327,57 @@ export interface CohostAuthorParams {
   authorKey: string
 }
 
+/** `cohost.utterance.approve` / `cohost.utterance.dismiss` (plan 164 S-D2). */
+export interface CohostUtteranceParams {
+  sessionId: string
+  utteranceId: string
+}
+
+/** `cohost.utterance.say` (plan 164 D7): the streamer's own line, 1 to 200
+ * characters. One utterance that both posts (in Auto, to the named live-chat
+ * session) and bubbles at once (when the Buddy is on some output). Without a
+ * session (recording with no chat, Off, Suggest) it is bubble-only. */
+export interface CohostSayParams {
+  /** The live live-chat session; omitted or empty = no session, bubble-only. */
+  sessionId?: string
+  text: string
+  /** Defaults to `talk`. */
+  state?: CohostUtteranceState
+}
+
+/** What made the Buddy speak (plan 164 D7). */
+export type CohostUtteranceTriggerKind = 'greeting' | 'answer' | 'banter' | 'manual'
+
+export interface CohostUtteranceTrigger {
+  kind: CohostUtteranceTriggerKind
+  /** The Activity row a greeting answers. */
+  eventId?: string
+  /** The chat row an answer replies to. */
+  messageId?: string
+}
+
+/**
+ * Where an utterance stands (plan 164 D7). `proposed` waits for the
+ * streamer (Suggest) or for the send (Auto); `sent` landed on at least one
+ * destination; `failed` reached none; `dismissed` was declined or expired;
+ * `bubble-only` never goes to chat.
+ */
+export type CohostUtteranceStatus = 'proposed' | 'sent' | 'dismissed' | 'bubble-only' | 'failed'
+
+/** One thing the Buddy said or wants to say (plan 164 D7). */
+export interface CohostUtterance {
+  id: string
+  text: string
+  state: CohostUtteranceState
+  trigger: CohostUtteranceTrigger
+  /** Where a send goes; empty means every writable destination. */
+  destinationIds: string[]
+  status: CohostUtteranceStatus
+  at: string
+  /** Present while `proposed` in Suggest mode: the card leaves then. */
+  expiresAt?: string
+}
+
 /**
  * What the detached Comments window needs to render the Co-host segment. The
  * MAIN renderer owns the backend socket, the entitlement snapshot and the
@@ -5559,6 +6400,33 @@ export interface CohostWindowState {
    * without it (smokes); the window then never offers the listening card.
    */
   listen?: boolean
+  /**
+   * Persisted `cohost.settings.autoChat` (plan 164 S-D6): the mode control
+   * and the three behaviour switches render it. Absent from a relay seeded
+   * without it (smokes); the window then shows the controls off.
+   */
+  autoChat?: CohostAutoChat
+  /** The Buddy on stream (plan 164 Phase C): what the pane's header shows
+   * and operates. Absent from a relay seeded without it (older Studio,
+   * smokes); the window then shows no header. */
+  buddy?: CohostWindowBuddy
+}
+
+/** The Buddy as the Stream Manager operates it (plan 164 S-C4). The window
+ * resolves the state image itself (its own file or the bundled pack). */
+export interface CohostWindowBuddy {
+  /** Plan 168 S-D3 adds `avatar` and `motion` for the header's living
+   * preview; optional so a window seeded by an older Studio still renders. */
+  persona: Pick<CohostPersona, 'id' | 'name' | 'images' | 'bubbleStyle' | 'source'> &
+    Partial<Pick<CohostPersona, 'avatar' | 'motion'>>
+  state: CohostAvatarState
+  /** The bubble's text while one is up. */
+  bubble: string | null
+  /** `overlayLayout.buddy.showOnStream`. */
+  showOnStream: boolean
+  /** `overlayLayout.buddy.showInRecording`; optional so a window seeded by
+   * an older Studio still renders (read as off). */
+  showInRecording?: boolean
 }
 
 /**
@@ -5587,6 +6455,9 @@ export type CohostActionKind =
   | 'recap-dismiss'
   | 'recap-draft'
   | 'author-greeted'
+  | 'approve-utterance'
+  | 'dismiss-utterance'
+  | 'say-utterance'
 
 /** Every action kind the relay accepts; main validates against it. */
 export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
@@ -5598,13 +6469,42 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
   'promise-dismiss',
   'recap-dismiss',
   'recap-draft',
-  'author-greeted'
+  'author-greeted',
+  'approve-utterance',
+  'dismiss-utterance',
+  'say-utterance'
 ]
+
+/** The Buddy's own actions from the Stream Manager (plan 164 S-C4): the Say
+ * box (D7) and the Show on stream switch. Not chat commands, so they need no
+ * live session: Studio routes `buddy-say` to `cohost.utterance.say` (one
+ * utterance that posts per the chat mode when a live session is named, and
+ * bubbles) and the switch to the overlay layout. */
+export type CohostBuddyActionCommand =
+  | {
+      requestId: string
+      kind: 'buddy-say'
+      /** 1 to 200 characters. */
+      text: string
+      state: CohostUtteranceState
+      /** The live session the line may be posted to; absent = bubble-only. */
+      sessionId?: string
+    }
+  | { requestId: string; kind: 'buddy-show-on-stream'; showOnStream: boolean }
+  /** Plan 168 S-D3: a reaction chip beside the Say box; Studio routes it to
+   * `cohost.pet.react`. `reaction` is a reaction id (`[a-z0-9-]{1,40}`). */
+  | { requestId: string; kind: 'buddy-react'; reaction: string }
+
+export const COHOST_BUDDY_ACTION_KINDS = [
+  'buddy-say',
+  'buddy-show-on-stream',
+  'buddy-react'
+] as const
 
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */
 /**
- * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Orcle's
+ * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Buddy's
  * open voice command, by its id. `choose` picks from the chooser (0 to 2),
  * `confirm` and `cancel` answer the card. Studio makes the matching
  * `cohost.command.*` call; the reply is the state after the answer.
@@ -5624,15 +6524,23 @@ export type CohostCommandRelayCommand =
       commandId: string
     }
 
-export interface CohostActionCommand {
+export interface CohostSessionActionCommand {
   requestId: string
   sessionId: string
   kind: CohostActionKind
   /** Question id for question actions; the flagged message id for flags; the
    * promise id for promise actions; the session id again for recap actions
-   * (they have no target of their own); the author key for `author-greeted`. */
+   * (they have no target of their own); the author key for `author-greeted`;
+   * the utterance id for `approve-utterance` / `dismiss-utterance`; the
+   * session id again for `say-utterance`. */
   targetId: string
+  /** `say-utterance` (plan 164 D7): the line, 1 to 200 characters. */
+  text?: string
+  /** `say-utterance`: the avatar state; defaults to `talk`. */
+  state?: CohostUtteranceState
 }
+
+export type CohostActionCommand = CohostSessionActionCommand | CohostBuddyActionCommand
 
 /**
  * Correlated "turn the co-host on/off" from the Comments window (presence W2).
@@ -5646,6 +6554,37 @@ export interface CohostEnableCommand {
   grantConsent?: boolean
   /** Also set `cohost.settings.listen` in the same save (plan 068 D3). */
   listen?: boolean
+  /**
+   * The listening card's own Turn on (plan 174 S3.14a): the streamer read the
+   * microphone disclosure and asked for it, so `listen: true` is saved even
+   * while Buddy already runs. Without it the relay writes `listen` only in
+   * the command that turns Buddy on, never on a later one.
+   */
+  grantListen?: boolean
+  /**
+   * Plan 164 S-D6: the Stream Manager's mode control and behaviour switches.
+   * A partial block; the Studio renderer merges it into the stored
+   * `autoChat` (templates and cooldowns stay) in the same save.
+   */
+  autoChat?: CohostAutoChatRelayPatch
+}
+
+/**
+ * "Open Buddy → Chat" from the Stream Manager (plan 174 S3.14a): the tab id
+ * as the Buddy page names it (`lib/buddy-tabs.ts`); the shell drops an id it
+ * does not know and opens the page on its first tab.
+ */
+export interface OpenBuddyTabCommand {
+  requestId: string
+  tab: string
+}
+
+/** The part of `autoChat` the Stream Manager may change (plan 164 S-D6). */
+export interface CohostAutoChatRelayPatch {
+  mode?: CohostAutoChatMode
+  greetings?: boolean
+  answers?: boolean
+  banter?: boolean
 }
 
 // Live captions (captions.* RPCs + events; premium cloud-AI feature).
@@ -5844,6 +6783,9 @@ export interface PlatformAudience {
   subscriberPoints?: number
   /** Twitch only: false when follow alerts and the sub count need a reconnect. */
   audienceScopes?: boolean
+  /** Twitch only: false when Power-ups and channel point redemptions need a
+   * reconnect (plan 162). */
+  bitsPointsScopes?: boolean
   /** Followers gained this stream, one per read that set a new high, oldest first. */
   followerGains?: FollowerGain[]
   /** Since when a follow event subscription names each new follower (plan
