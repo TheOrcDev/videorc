@@ -13,7 +13,7 @@ import {
   type CleanCutCapabilities
 } from '@/lib/clean-cut-view'
 import { DEFAULT_BASIC_ENTITLEMENTS } from '@/lib/entitlements'
-import { CLOUD_AI_USES } from '@/lib/orcle-tab-view'
+import { CLOUD_AI_CLEAN_CUT_USE, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 
 import { CleanCutCard, type CleanCutFocus } from './clean-cut-card'
 
@@ -27,6 +27,11 @@ vi.mock('@/hooks/use-studio', () => ({
 }))
 const signIn = vi.fn()
 vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => ({ signIn }) }))
+// The lock's Sign in (plan 174 S1.5, LockAlert) starts the same sign-in.
+vi.mock('@/lib/videorc-web-links', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/videorc-web-links')>()),
+  beginVideorcSignIn: () => signIn()
+}))
 
 const MIN = 60_000
 const PREMIUM = {
@@ -165,21 +170,36 @@ function button(label: string): HTMLButtonElement {
 }
 
 function statusRow(): HTMLElement {
-  return document.querySelector('[data-slot="clean-cut-status"]') as HTMLElement
+  return document.querySelector('[data-testid="clean-cut-status"]') as HTMLElement
+}
+
+function recordingRows(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('[data-slot="clean-cut-recording-row"]')]
+}
+
+function chosenRow(): HTMLElement | null {
+  return document.querySelector('[data-slot="clean-cut-recording-row"][data-selected]')
+}
+
+function rowButton(title: string): HTMLButtonElement {
+  const row = recordingRows().find((candidate) =>
+    candidate.querySelector('[data-slot="list-row-title"]')?.textContent?.includes(title)
+  )
+  expect(row, title).toBeTruthy()
+  return row!.querySelector('button[data-slot="list-row"]') as HTMLButtonElement
 }
 
 function autoSwitch(): HTMLButtonElement {
   return document.getElementById('clean-cut-auto-switch') as HTMLButtonElement
 }
 
+/** Kind of cut is a segmented control (plan 174 S1.7): a radio per kind. */
 async function chooseTab(label: string): Promise<void> {
-  const tab = [...document.querySelectorAll('[role="tab"]')].find(
+  const option = [...document.querySelectorAll('[role="radio"]')].find(
     (candidate) => candidate.textContent === label
   ) as HTMLElement
-  expect(tab, label).toBeTruthy()
-  await act(async () => {
-    tab.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-  })
+  expect(option, label).toBeTruthy()
+  await act(async () => option.click())
 }
 
 beforeEach(() => {
@@ -208,7 +228,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(text).toContain('Clean cut')
     expect(text).toContain(CLEAN_CUT_DESCRIPTION)
     expect(text).toContain('Make a clean cut of every recording')
-    expect(document.querySelector('[data-slot="clean-cut-minutes"]')?.textContent).toBe(
+    expect(document.querySelector('[data-testid="clean-cut-minutes"]')?.textContent).toBe(
       '1,066 min left this month'
     )
     expect(autoSwitch().getAttribute('data-state')).toBe('unchecked')
@@ -234,9 +254,11 @@ describe('Clean cut card (plan 119 S14)', () => {
     await act(async () => autoSwitch().click())
     const dialog = document.querySelector('[role="dialog"]')
     expect(dialog?.textContent).toContain('Turn on Clean cut?')
-    expect(dialog?.textContent).toContain(
-      "Clean cut uploads your recording's audio, never the video"
+    // Plan 174 E-13: Clean cut's own line leads, then every other use.
+    expect(dialog?.querySelector('[data-slot="dialog-description"]')?.textContent).toBe(
+      CLOUD_AI_CLEAN_CUT_USE
     )
+    expect(dialog?.textContent).toContain('Allowing cloud AI also covers Buddy:')
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     await act(async () => button('Not now').click())
     expect(setAiConsent).not.toHaveBeenCalled()
@@ -248,11 +270,36 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
   })
 
+  it('offers "Allow cloud AI…" when every recording is on but cloud AI was revoked (plan 174 E-6)', async () => {
+    localStorage.setItem(CLEAN_CUT_AUTO_STORAGE_KEY, '1')
+    await render({ consented: false })
+    const status = document.querySelector('[data-slot="clean-cut-auto-status"]')
+    expect(status?.getAttribute('data-status')).toBe('attention')
+    expect(status?.textContent).toContain("Cloud AI isn't allowed, so Clean cut can't run.")
+    expect(status?.textContent).not.toMatch(/Customize/)
+    const allow = document.querySelector(
+      '[data-testid="clean-cut-allow-cloud-ai"]'
+    ) as HTMLButtonElement | null
+    expect(allow?.textContent).toBe('Allow cloud AI…')
+    await act(async () => allow!.click())
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Turn on Clean cut?')
+    await act(async () => button('Allow and turn on').click())
+    expect(setAiConsent).toHaveBeenCalledWith(true)
+    expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
+  })
+
   it('asks a signed-out streamer to sign in and offers nothing to start', async () => {
     await render({ signedIn: false, entitlements: null, cut: client({ capabilities: null }) })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       'Sign in to use Clean cut, part of Videorc Premium.'
     )
+    // The same lock strip Chat and Voice lead with, above both columns (E-31).
+    const strip = document.querySelector('[data-slot="buddy-tab-lock"]')
+    expect(strip?.querySelector('[data-testid="clean-cut-unlock"]')).toBeTruthy()
+    expect(
+      strip!.compareDocumentPosition(document.querySelector('[data-slot="config-grid"]')!) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
     expect(autoSwitch().disabled).toBe(true)
     expect(button('Make a clean cut').disabled).toBe(true)
     await act(async () => button('Sign in').click())
@@ -271,10 +318,10 @@ describe('Clean cut card (plan 119 S14)', () => {
         }
       })
     })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       "This month's Clean cut minutes are used up."
     )
-    expect(document.querySelector('[data-slot="clean-cut-minutes"]')?.textContent).toBe(
+    expect(document.querySelector('[data-testid="clean-cut-minutes"]')?.textContent).toBe(
       'No minutes left this month'
     )
     expect(button('Review').disabled).toBe(false)
@@ -374,9 +421,7 @@ describe('Clean cut card (plan 119 S14)', () => {
 
   it('makes a Condensed cut at the chosen length (S19)', async () => {
     await render({ focus: { sessionId: 'rec-2', nonce: 1 } })
-    expect(document.querySelector('[aria-label="Recording"]')?.textContent).toContain(
-      'Friday stream'
-    )
+    expect(chosenRow()?.textContent).toContain('Friday stream')
     await chooseTab('Condensed')
     const lengths = [...document.querySelectorAll('[data-slot="clean-cut-target"] button')].map(
       (item) => item.textContent
@@ -425,10 +470,109 @@ describe('Clean cut card (plan 119 S14)', () => {
   })
 })
 
+describe('Clean cut recordings list', () => {
+  const many = Array.from({ length: 8 }, (_, index) =>
+    session({
+      id: `rec-${index}`,
+      title: index === 7 ? 'Podcast with Jev' : `Session 2026-10-0${index + 1} 10:00`,
+      startedAt: `2026-10-0${8 - index}T10:00:00Z`,
+      durationMs: (index + 1) * MIN
+    })
+  )
+
+  it('draws every recording as a row with its poster, length and when it ran, newest open', async () => {
+    await render()
+    expect(recordingRows().map((row) => row.dataset.sessionId)).toEqual([
+      'rec-1',
+      'rec-2',
+      'rec-short'
+    ])
+    expect(recordingRows()[0].querySelector('[data-slot="session-poster"]')).toBeTruthy()
+    expect(recordingRows()[0].textContent).toContain('42:10')
+    expect(chosenRow()?.dataset.sessionId).toBe('rec-1')
+    expect(chosenRow()?.querySelector('[aria-current="true"]')).toBeTruthy()
+    // Only the open row carries the cut controls.
+    expect(document.querySelectorAll('[data-slot="clean-cut-recording"]')).toHaveLength(1)
+    expect(chosenRow()?.querySelector('[data-testid="clean-cut-status"]')).toBeTruthy()
+  })
+
+  it('opens the row that is clicked, and cuts that recording', async () => {
+    await render()
+    await act(async () => rowButton('Friday stream').click())
+    expect(chosenRow()?.dataset.sessionId).toBe('rec-2')
+    await act(async () => button('Make a clean cut').click())
+    expect(current.start).toHaveBeenCalledWith({
+      sessionId: 'rec-2',
+      mode: 'clean',
+      consentToUploadAudio: true
+    })
+  })
+
+  it('names an automatic title once, with no second clock beside it', async () => {
+    await render({ sessions: [session({ title: 'Session 2026-10-03 16:02' })] })
+    const context = recordingRows()[0].querySelector('[data-slot="list-row-context"]')
+    expect(context?.textContent).toBe('42:10')
+  })
+
+  it("chips each recording's newest cut in the same words as its status", async () => {
+    await render({
+      cut: client({
+        jobs: [
+          job({ id: 'done', sourceSessionId: 'rec-1' }),
+          job({ id: 'busy', sourceSessionId: 'rec-2', state: 'transcribing', progress: 0.4 }),
+          job({ id: 'bad', sourceSessionId: 'rec-short', state: 'failed', errorCode: 'network' })
+        ]
+      })
+    })
+    const chips = recordingRows().map(
+      (row) => row.querySelector('[data-testid="clean-cut-row-chip"]')?.textContent ?? null
+    )
+    expect(chips).toEqual(['Cut ready', 'Transcribing 40%', 'Cut failed'])
+  })
+
+  it('shows six rows, then all of them, and searches past that', async () => {
+    await render({ sessions: many })
+    expect(recordingRows()).toHaveLength(6)
+    await act(async () => button('Show all (8)').click())
+    expect(recordingRows()).toHaveLength(8)
+    await act(async () => button('Show fewer').click())
+    expect(recordingRows()).toHaveLength(6)
+
+    const search = document.querySelector(
+      'input[aria-label="Search recordings"]'
+    ) as HTMLInputElement
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => {
+      setValue.call(search, 'jev')
+      search.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(recordingRows().map((row) => row.dataset.sessionId)).toEqual(['rec-7'])
+    await act(async () => {
+      setValue.call(search, 'nothing like it')
+      search.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(recordingRows()).toHaveLength(0)
+    expect(document.querySelector('[data-slot="clean-cut-no-match"]')?.textContent).toContain(
+      'nothing like it'
+    )
+  })
+
+  it('keeps a recording the Library asked for in view past the cap', async () => {
+    await render({ sessions: many, focus: { sessionId: 'rec-7', nonce: 1 } })
+    expect(recordingRows()).toHaveLength(7)
+    expect(chosenRow()?.dataset.sessionId).toBe('rec-7')
+  })
+
+  it('offers no search while every recording fits', async () => {
+    await render()
+    expect(document.querySelector('input[aria-label="Search recordings"]')).toBeNull()
+  })
+})
+
 describe('Clean cut tab layout (plan 150 S7)', () => {
   it('sets the settings beside the recordings, in two titled columns', async () => {
     await render()
-    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
     expect(titles).toEqual(['Clean cut', 'Recordings'])
@@ -445,7 +589,7 @@ describe('Clean cut tab layout (plan 150 S7)', () => {
         capabilities: { ...AVAILABLE, available: false, reasonCode: 'provider-unconfigured' }
       })
     })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       "Clean cut isn't set up on Videorc's side yet."
     )
     expect(autoSwitch().disabled).toBe(true)

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
+import {
+  createDefaultRegistry,
+  effectiveSceneBackground,
+  slotName,
+  unattendedImportSlot
+} from '@/lib/background-assets'
 import { defaultCaptureConfig, legacyStreamKeyMigrationCandidates } from '@/lib/capture'
-import { mergeObsImportIntoConfig } from './obs-import-apply'
+import { mergeObsImportIntoConfig, withObsBackground } from './obs-import-apply'
 import type { ObsImportPlanResult } from './obs-import-map'
 
 // O3 (OBS import plan): the merge is atomic and additive — untouched config
@@ -127,5 +133,39 @@ describe('mergeObsImportIntoConfig', () => {
       updatedAt: '2026-07-08T00:00:00.000Z'
     })
     expect(next.streaming.enabledTargetIds).toContain('youtube')
+  })
+})
+
+describe('withObsBackground (plan 174, C-7)', () => {
+  const managed = {
+    id: 'obs-bg',
+    name: 'Stage backdrop',
+    assetPath: 'videorc-asset://background/obs-bg.png',
+    thumbnailPath: 'videorc-asset://background/obs-bg.png',
+    fileName: 'stage-backdrop.png'
+  }
+
+  it('puts the image where the report said and makes it the scene background', () => {
+    const registry = createDefaultRegistry()
+    const target = unattendedImportSlot(registry)!
+    const next = withObsBackground(
+      registry,
+      { backgroundAsset: managed, backgroundSlotId: target.slotId },
+      '2026-10-10T00:00:00Z'
+    )
+    const slot = next.slots.find((entry) => entry.id === target.slotId)!
+    expect(slot.assetId).toBe('obs-bg')
+    expect(slotName(slot, next)).toBe('Stage backdrop')
+    expect(next.activeSlotId).toBe(target.slotId)
+    expect(effectiveSceneBackground(next)?.managedAssetPath).toBe(managed.assetPath)
+  })
+
+  it('changes nothing when the report promised no background', () => {
+    const registry = createDefaultRegistry()
+    expect(withObsBackground(registry, {})).toBe(registry)
+    expect(withObsBackground(registry, { backgroundAsset: managed })).toBe(registry)
+    expect(
+      withObsBackground(registry, { backgroundAsset: managed, backgroundSlotId: 'bg-99' })
+    ).toBe(registry)
   })
 })

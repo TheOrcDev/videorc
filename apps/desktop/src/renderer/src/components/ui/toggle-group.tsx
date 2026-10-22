@@ -3,6 +3,7 @@ import { type VariantProps } from 'class-variance-authority'
 import { ToggleGroup as ToggleGroupPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
+import { useFieldLabelledBy } from '@/components/ui/field-context'
 import { toggleVariants } from '@/components/ui/toggle'
 
 const ToggleGroupContext = React.createContext<
@@ -24,14 +25,17 @@ function ToggleGroup({
   spacing = 2,
   orientation = 'horizontal',
   children,
+  'aria-labelledby': ariaLabelledBy,
   ...props
 }: React.ComponentProps<typeof ToggleGroupPrimitive.Root> &
   VariantProps<typeof toggleVariants> & {
     spacing?: number
     orientation?: 'horizontal' | 'vertical'
   }) {
+  const labelledBy = useFieldLabelledBy(ariaLabelledBy, props['aria-label'])
   return (
     <ToggleGroupPrimitive.Root
+      aria-labelledby={labelledBy}
       data-slot="toggle-group"
       data-variant={variant}
       data-size={size}

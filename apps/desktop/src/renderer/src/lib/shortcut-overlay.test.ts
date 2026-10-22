@@ -12,9 +12,10 @@ describe('commandModifierKey', () => {
     assert.equal(commandModifierKey('darwin'), 'Meta')
     assert.equal(commandModifierKey('win32'), 'Control')
     assert.equal(commandModifierKey('linux'), 'Control')
-    // Before runtimeInfo arrives the platform is unknown. displayKeyGlyph
-    // renders 'Ctrl' in that state, so the watched key must be Control — the
-    // chip and the key it advertises can never disagree.
+    // Before runtimeInfo arrives the chips print for the platform the theme
+    // bootstrap wrote on <html> (here, in node, the user agent's: not a Mac),
+    // and the watched key follows it, so the chip and the key it advertises
+    // can never disagree.
     assert.equal(commandModifierKey(undefined), 'Control')
   })
 })

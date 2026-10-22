@@ -70,6 +70,95 @@ fn native_screen_preview_thread_startup_timeout() -> Duration {
         .saturating_add(Duration::from_secs(5))
 }
 
+/// Starting copy. Linux status never claims a native preview (AGENTS.md):
+/// it is portal capture shown through the proof surface.
+const SCREEN_PREVIEW_STARTING_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Starting screen capture."
+} else {
+    "Starting native screen preview."
+};
+/// Status copy names the transport: Linux is portal capture shown through the
+/// proof surface, never a native preview (AGENTS.md, Linux plan 0010).
+const SCREEN_PREVIEW_IDLE_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture is not running."
+} else {
+    "Native screen preview is not running."
+};
+const SCREEN_PREVIEW_STOPPED_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture stopped."
+} else {
+    "Native screen preview stopped."
+};
+const SCREEN_PREVIEW_REUSED_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture source reused."
+} else {
+    "Native screen preview source reused."
+};
+const SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+} else {
+    "Native screen preview source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+};
+const SCREEN_PREVIEW_STARTUP_TIMEOUT_SUBJECT: &str = if cfg!(target_os = "linux") {
+    "starting screen capture"
+} else {
+    "starting native screen preview"
+};
+/// Linux portal (plan 0010): a share dialog waits on a person, not a device,
+/// so the device startup deadline does not apply to it. Videorc still stops
+/// waiting eventually, so an abandoned dialog cannot hold the source forever.
+const SHARE_DIALOG_WAIT: Duration = Duration::from_secs(10 * 60);
+/// Linux portal: once the share is granted, PipeWire's first frame is quick.
+/// A display that is asleep or off delivers none.
+const PORTAL_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(20);
+const SHARE_DIALOG_PENDING_MESSAGE: &str =
+    "Waiting for you to choose a screen in the share dialog.";
+const SESSION_START_SHARE_DIALOG_MESSAGE: &str = "Videorc is waiting for you to choose a screen in the share dialog. Choose a screen (or close the dialog), then try again.";
+
+/// Where a native screen start is (plan 0010). Only the Linux portal thread
+/// reports the consent phases; every other platform stays in `Starting`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenStartupPhase {
+    Starting,
+    AwaitingConsent,
+    AwaitingFirstFrame,
+}
+
+impl ScreenStartupPhase {
+    fn deadline(self) -> Duration {
+        match self {
+            Self::Starting => native_screen_preview_thread_startup_timeout(),
+            Self::AwaitingConsent => SHARE_DIALOG_WAIT,
+            Self::AwaitingFirstFrame => PORTAL_FIRST_FRAME_TIMEOUT,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Starting => SCREEN_PREVIEW_STARTING_MESSAGE,
+            Self::AwaitingConsent => SHARE_DIALOG_PENDING_MESSAGE,
+            Self::AwaitingFirstFrame => "Screen share granted. Waiting for its first frame.",
+        }
+    }
+
+    fn expired(self, waited: Duration) -> NativeScreenStartup {
+        match self {
+            Self::Starting => NativeScreenStartup::Failed(format!(
+                "Timed out after {:.0}s while {SCREEN_PREVIEW_STARTUP_TIMEOUT_SUBJECT}.",
+                waited.as_secs_f64()
+            )),
+            Self::AwaitingConsent => NativeScreenStartup::PermissionNeeded(format!(
+                "The share dialog stayed open for {} minutes, so Videorc stopped waiting. Choose your screen again to share it.",
+                waited.as_secs() / 60
+            )),
+            Self::AwaitingFirstFrame => NativeScreenStartup::SourceMissing(
+                "The screen share started but no picture is arriving. Is the display asleep or turned off?"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
 fn native_preview_surface_env_enabled() -> bool {
     // v1 default: the native CAMetalLayer surface IS the production preview. The env
     // var remains a developer kill switch only (VIDEORC_NATIVE_PREVIEW_SURFACE=0).
@@ -157,6 +246,13 @@ pub struct PreviewScreenRuntime {
     native_supervisor: Arc<tokio::sync::Mutex<PreviewScreenNativeSupervisor>>,
     active: Option<NativeScreenPreviewThread>,
     poll_task: Option<JoinHandle<()>>,
+    /// The startup phase a Linux portal start reported for one generation
+    /// (plan 0010): a share dialog waiting on a person, then PipeWire's first
+    /// frame. Session start fails fast instead of queueing behind that wait.
+    startup_phase: Option<(u64, ScreenStartupPhase)>,
+    /// Trips the current start's share-dialog wait (plan 0010); taken by the
+    /// next transition ticket.
+    consent_cancel: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -855,7 +951,7 @@ fn log_screen_generation(
 
 pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
     PreviewScreenRuntime {
-        status: idle_status(Some("Native screen preview is not running.".to_string())),
+        status: idle_status(Some(SCREEN_PREVIEW_IDLE_MESSAGE.to_string())),
         protected_overlay_window_ids: Vec::new(),
         surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
@@ -873,6 +969,8 @@ pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
         )),
         active: None,
         poll_task: None,
+        startup_phase: None,
+        consent_cancel: None,
     }
 }
 
@@ -1029,7 +1127,7 @@ async fn start_preview_screen_with_restart_signal(
         include_cursor,
         exclude_current_process_windows,
         updated_at: Utc::now().to_rfc3339(),
-        message: Some("Starting native screen preview.".to_string()),
+        message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
     };
     let start_lease =
         match begin_screen_start(&state, start_key.clone(), starting, layout_intent_id).await {
@@ -1158,6 +1256,11 @@ fn queue_registered_preview_screen(
 fn allocate_screen_transition_ticket(
     slot: &mut PreviewScreenRuntime,
 ) -> PreviewScreenTransitionTicket {
+    // A start waiting on a person would hold this newer transition (FIFO)
+    // until the share dialog closes: end that wait (plan 0010).
+    if let Some(consent_cancel) = slot.consent_cancel.take() {
+        consent_cancel.store(true, Ordering::SeqCst);
+    }
     slot.transition_sequence = slot.transition_sequence.wrapping_add(1).max(1);
     PreviewScreenTransitionTicket {
         sequence: slot.transition_sequence,
@@ -1208,7 +1311,11 @@ async fn await_screen_transition_completion_with_timeout(
 async fn delayed_screen_transition_status(state: &AppState) -> PreviewScreenStatus {
     let status = {
         let mut slot = state.preview_screen.lock().await;
-        if slot.status.state == PreviewScreenState::Starting {
+        // A Linux start waiting on its share dialog keeps saying so (plan 0010).
+        let consent_phase = slot.startup_phase.is_some_and(|(generation, phase)| {
+            generation == slot.start_generation && phase != ScreenStartupPhase::Starting
+        });
+        if slot.status.state == PreviewScreenState::Starting && !consent_phase {
             slot.status.updated_at = Utc::now().to_rfc3339();
             slot.status.message = Some(
                 "Screen transition is still retiring the previous native session; cleanup continues without overlapping capture."
@@ -1281,6 +1388,7 @@ async fn execute_registered_preview_screen(
     ));
     let (stop_tx, stop_rx) = std_mpsc::channel();
     let (startup_tx, startup_rx) = std_mpsc::channel();
+    let consent_cancel = Arc::new(AtomicBool::new(false));
     let thread_shared = Arc::clone(&shared);
     let thread_config = NativeScreenPreviewConfig {
         source_id: source.source_id.clone(),
@@ -1292,6 +1400,7 @@ async fn execute_registered_preview_screen(
         include_cursor,
         exclude_current_process_windows,
         protected_overlay_window_ids: protected_overlay_window_ids.clone(),
+        consent_cancel: Arc::clone(&consent_cancel),
     };
 
     // This is the final cancellation-free admission check before native
@@ -1390,21 +1499,14 @@ async fn execute_registered_preview_screen(
         join_handle: Some(join_handle),
     });
 
-    let startup_timeout = native_screen_preview_thread_startup_timeout();
-    let startup = tokio::task::spawn_blocking(move || {
-        startup_rx
-            .recv_timeout(startup_timeout)
-            .unwrap_or_else(|_| {
-                NativeScreenStartup::Failed(format!(
-                    "Timed out after {:.0}s while starting native screen preview.",
-                    startup_timeout.as_secs_f64()
-                ))
-            })
-    })
-    .await
-    .unwrap_or_else(|error| {
-        NativeScreenStartup::Failed(format!("Screen startup task failed: {error}"))
-    });
+    let startup = await_native_screen_startup(
+        state,
+        &start_lease,
+        startup_rx,
+        &consent_cancel,
+        ScreenStartupPhase::deadline,
+    )
+    .await;
 
     match startup {
         NativeScreenStartup::Live {
@@ -1616,6 +1718,9 @@ async fn execute_registered_preview_screen(
                 screen_start_fallback_status(state, &start_lease, recovery.as_ref()).await
             }
         }
+        NativeScreenStartup::AwaitingConsent | NativeScreenStartup::ConsentGranted => {
+            unreachable!("startup phases are consumed by await_native_screen_startup")
+        }
         NativeScreenStartup::Failed(message) => {
             stop_supervised_screen(supervisor, Some(start_lease.generation), "failed-start").await;
             let status = failed_status(
@@ -1647,6 +1752,99 @@ async fn execute_registered_preview_screen(
             }
         }
     }
+}
+
+/// Waits for the native thread's startup outcome. The Linux portal thread
+/// first reports its consent phases; each phase has its own deadline and copy,
+/// so a share dialog waiting on a person is never a 59 s device timeout, and a
+/// granted share with no picture names the likely cause (plan 0010).
+async fn await_native_screen_startup(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    startup_rx: std_mpsc::Receiver<NativeScreenStartup>,
+    consent_cancel: &Arc<AtomicBool>,
+    deadline: fn(ScreenStartupPhase) -> Duration,
+) -> NativeScreenStartup {
+    let mut startup_rx = startup_rx;
+    let mut phase = ScreenStartupPhase::Starting;
+    let outcome = loop {
+        let wait = deadline(phase);
+        let received = match tokio::task::spawn_blocking(move || {
+            let received = startup_rx.recv_timeout(wait);
+            (startup_rx, received)
+        })
+        .await
+        {
+            Ok((receiver, received)) => {
+                startup_rx = receiver;
+                received
+            }
+            Err(error) => {
+                break NativeScreenStartup::Failed(format!("Screen startup task failed: {error}"));
+            }
+        };
+        phase = match received {
+            Ok(NativeScreenStartup::AwaitingConsent) => ScreenStartupPhase::AwaitingConsent,
+            Ok(NativeScreenStartup::ConsentGranted) => ScreenStartupPhase::AwaitingFirstFrame,
+            Ok(outcome) => break outcome,
+            Err(_) => break phase.expired(wait),
+        };
+        publish_screen_startup_phase(state, lease, phase, consent_cancel).await;
+    };
+    let mut slot = state.preview_screen.lock().await;
+    if slot
+        .startup_phase
+        .is_some_and(|(generation, _)| generation == lease.generation)
+    {
+        slot.startup_phase = None;
+        slot.consent_cancel = None;
+    }
+    outcome
+}
+
+async fn publish_screen_startup_phase(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    phase: ScreenStartupPhase,
+    consent_cancel: &Arc<AtomicBool>,
+) {
+    let status = {
+        let mut slot = state.preview_screen.lock().await;
+        if slot.start_generation != lease.generation || slot.starting.as_ref() != Some(&lease.key) {
+            // Already superseded: a newer transition is queued behind this
+            // start, so stop waiting on the person now.
+            if phase == ScreenStartupPhase::AwaitingConsent {
+                consent_cancel.store(true, Ordering::SeqCst);
+            }
+            return;
+        }
+        slot.startup_phase = Some((lease.generation, phase));
+        slot.consent_cancel =
+            (phase == ScreenStartupPhase::AwaitingConsent).then(|| Arc::clone(consent_cancel));
+        if slot.status.state != PreviewScreenState::Starting {
+            return;
+        }
+        slot.status.message = Some(phase.message().to_string());
+        slot.status.updated_at = Utc::now().to_rfc3339();
+        slot.status.clone()
+    };
+    tracing::info!(
+        generation = lease.generation,
+        phase = ?phase,
+        "screen capture startup phase"
+    );
+    state.emit_event("preview.screen.status", status);
+}
+
+/// Why a session cannot start right now: a Linux share dialog is waiting on a
+/// person. Session start drains every older source transition first, and that
+/// one has no device deadline, so Record would otherwise hold the ordered
+/// command lane until the dialog closes (plan 0010 addendum 3).
+pub(crate) async fn session_start_blocked_by_share_dialog(state: &AppState) -> Option<String> {
+    let slot = state.preview_screen.lock().await;
+    let waiting = slot.starting.is_some()
+        && slot.startup_phase == Some((slot.start_generation, ScreenStartupPhase::AwaitingConsent));
+    waiting.then(|| SESSION_START_SHARE_DIALOG_MESSAGE.to_string())
 }
 
 async fn screen_start_is_current(state: &AppState, lease: &PreviewScreenStartLease) -> bool {
@@ -2688,7 +2886,7 @@ fn queue_public_screen_stop(
         let status = {
             let mut slot = supervisor_state.preview_screen.lock().await;
             if slot.status == admitted_status && slot.starting.is_none() {
-                let status = idle_status(Some("Native screen preview stopped.".to_string()));
+                let status = idle_status(Some(SCREEN_PREVIEW_STOPPED_MESSAGE.to_string()));
                 slot.status = status.clone();
                 status
             } else {
@@ -3024,7 +3222,7 @@ pub(crate) async fn test_install_starting_screen_generation(
         include_cursor: true,
         exclude_current_process_windows: false,
         updated_at: Utc::now().to_rfc3339(),
-        message: Some("Starting native screen preview.".to_string()),
+        message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
     };
     PreviewScreenStartingIdentity {
         source_key,
@@ -3846,10 +4044,9 @@ fn reuse_current_screen_source_locked(
     let mut status = slot.status.clone();
     status.updated_at = Utc::now().to_rfc3339();
     status.message = Some(if ids_changed {
-        "Native screen preview source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
-            .to_string()
+        SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE.to_string()
     } else {
-        "Native screen preview source reused.".to_string()
+        SCREEN_PREVIEW_REUSED_MESSAGE.to_string()
     });
     slot.status = status.clone();
     let (include_cursor, exclude_current_process_windows) = slot
@@ -4285,10 +4482,21 @@ struct NativeScreenPreviewConfig {
     include_cursor: bool,
     exclude_current_process_windows: bool,
     protected_overlay_window_ids: Vec<u32>,
+    /// Set when a newer screen transition is admitted while this start waits
+    /// on its share dialog (plan 0010). Transitions run in FIFO order, so a
+    /// queued stop or source change could otherwise wait for the person.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    consent_cancel: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
 enum NativeScreenStartup {
+    /// Linux portal: the share dialog is about to wait on a person (plan 0010).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    AwaitingConsent,
+    /// Linux portal: the share was granted; PipeWire's first frame is next.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ConsentGranted,
     Live {
         native_width: u32,
         native_height: u32,
@@ -4386,10 +4594,20 @@ mod linux {
             has_restore_token = saved_token.is_some(),
             "portal screen capture: requesting consent"
         );
+        // Without a restore token the portal shows its share dialog, which
+        // waits on a person: report that phase so the waiter neither applies
+        // the device deadline nor lets Record queue behind it (plan 0010).
+        if saved_token.is_none() {
+            let _ = startup_tx.send(NativeScreenStartup::AwaitingConsent);
+        }
+        // The consent wait is cancellable: a stop (source change, shutdown,
+        // an abandoned dialog) closes the portal session instead of waiting
+        // for the person, so the supervisor's join stays bounded.
         let mut outcome = runtime.block_on(start_portal_session(
             source_type,
             saved_token.clone(),
             config.include_cursor,
+            stop_requested(&stop_rx, &config.consent_cancel),
         ));
         // A refused token (revoked elsewhere, another session) shows the
         // picker once instead of failing forever.
@@ -4400,14 +4618,24 @@ mod linux {
             )
         {
             let _ = store.forget(&config.source_id);
+            let _ = startup_tx.send(NativeScreenStartup::AwaitingConsent);
             outcome = runtime.block_on(start_portal_session(
                 source_type,
                 None,
                 config.include_cursor,
+                stop_requested(&stop_rx, &config.consent_cancel),
             ));
         }
         let grant = match outcome {
             PortalStart::Granted(grant) => grant,
+            PortalStart::Abandoned => {
+                tracing::info!("portal screen capture: consent wait stopped by Videorc");
+                let _ = startup_tx.send(NativeScreenStartup::PermissionNeeded(
+                    "Videorc closed the share dialog because the screen source changed. Choose your screen again to share it."
+                        .to_string(),
+                ));
+                return;
+            }
             PortalStart::Denied(state) => {
                 let message = state.message();
                 let _ = startup_tx.send(match state.lifecycle_status() {
@@ -4430,6 +4658,7 @@ mod linux {
             size = ?grant.size,
             "portal screen capture: granted"
         );
+        let _ = startup_tx.send(NativeScreenStartup::ConsentGranted);
 
         let revoked = Arc::clone(&grant.revoked);
         let startup = std::cell::RefCell::new(Some(startup_tx.clone()));
@@ -4487,6 +4716,26 @@ mod linux {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard.last_error = Some(error);
+            }
+        }
+    }
+
+    /// Resolves once the supervisor asks this capture to stop (or drops the
+    /// sender). Polled from the portal runtime, so it can race the consent
+    /// wait without a second thread.
+    pub(super) async fn stop_requested(
+        stop_rx: &std_mpsc::Receiver<()>,
+        consent_cancel: &AtomicBool,
+    ) {
+        loop {
+            if consent_cancel.load(Ordering::SeqCst) {
+                return;
+            }
+            match stop_rx.try_recv() {
+                Ok(()) | Err(std_mpsc::TryRecvError::Disconnected) => return,
+                Err(std_mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
         }
     }
@@ -6438,7 +6687,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Starting native screen preview.".to_string()),
+            message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
         }
     }
 
@@ -8409,6 +8658,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             protected_overlay_window_ids: Vec::new(),
+            consent_cancel: Arc::new(AtomicBool::new(false)),
         };
         let backend = windows_screen_preview_backend(&config).unwrap();
         let (width, height) = windows_screen_preview_output_dimensions(&config);
@@ -8445,6 +8695,7 @@ mod tests {
             include_cursor: false,
             exclude_current_process_windows: false,
             protected_overlay_window_ids: Vec::new(),
+            consent_cancel: Arc::new(AtomicBool::new(false)),
         };
         let backend = windows_screen_preview_backend(&config).unwrap();
         let args = windows_screen_preview_ffmpeg_args(&backend, 1280, 720, 30, false);
@@ -8699,6 +8950,305 @@ mod tests {
         assert!(timeout > Duration::from_secs(5));
     }
 
+    /// Plan 0010: a registered Starting generation for the phased waiter tests.
+    async fn started_screen_lease(state: &AppState) -> PreviewScreenStartLease {
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:portal:monitor");
+        let start_key = PreviewScreenStartKey {
+            source_key: source_key.clone(),
+            ffmpeg_path: "ffmpeg".to_string(),
+            video: video.clone(),
+            target_fps: video.fps,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let mut starting = idle_status(None);
+        starting.state = PreviewScreenState::Starting;
+        starting.source_id = Some(source_key.id.clone());
+        starting.source_kind = Some(PreviewScreenSourceKind::Screen);
+        starting.message = Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string());
+        match begin_screen_start(state, start_key, starting, None).await {
+            PreviewScreenStartRegistration::Started { lease, .. } => lease,
+            other => panic!("expected a started screen generation, got {other:?}"),
+        }
+    }
+
+    fn short_startup_deadlines(phase: ScreenStartupPhase) -> Duration {
+        match phase {
+            ScreenStartupPhase::Starting => Duration::from_millis(400),
+            ScreenStartupPhase::AwaitingConsent => Duration::from_secs(5),
+            ScreenStartupPhase::AwaitingFirstFrame => Duration::from_millis(200),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_share_dialog_outlives_the_device_deadline_and_ends_with_its_real_answer() {
+        // Plan 0010: the picker answered (cancelled) after the device deadline.
+        // The outcome is the portal's own answer, not a startup timeout, and
+        // Record is refused fast while the dialog is open.
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let (tx, rx) = std_mpsc::channel();
+        tx.send(NativeScreenStartup::AwaitingConsent).unwrap();
+        let answer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(900));
+            tx.send(NativeScreenStartup::PermissionNeeded(
+                "Screen sharing was cancelled in the desktop portal dialog.".to_string(),
+            ))
+            .unwrap();
+        });
+        let waiter = {
+            let state = state.clone();
+            let lease = lease.clone();
+            tokio::spawn(async move {
+                await_native_screen_startup(
+                    &state,
+                    &lease,
+                    rx,
+                    &Arc::new(AtomicBool::new(false)),
+                    short_startup_deadlines,
+                )
+                .await
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while session_start_blocked_by_share_dialog(&state)
+            .await
+            .is_none()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the consent phase was never published"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let status = preview_screen_status(&state).await;
+        assert_eq!(status.state, PreviewScreenState::Starting);
+        assert_eq!(
+            status.message.as_deref(),
+            Some(SHARE_DIALOG_PENDING_MESSAGE)
+        );
+
+        let outcome = waiter.await.unwrap();
+        answer.join().unwrap();
+        assert!(
+            matches!(&outcome, NativeScreenStartup::PermissionNeeded(message) if message.contains("cancelled")),
+            "{outcome:?}"
+        );
+        assert_eq!(session_start_blocked_by_share_dialog(&state).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_granted_share_without_a_first_frame_names_the_sleeping_display() {
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let (tx, rx) = std_mpsc::channel();
+        tx.send(NativeScreenStartup::ConsentGranted).unwrap();
+        let outcome = await_native_screen_startup(
+            &state,
+            &lease,
+            rx,
+            &Arc::new(AtomicBool::new(false)),
+            short_startup_deadlines,
+        )
+        .await;
+        drop(tx);
+        assert!(
+            matches!(&outcome, NativeScreenStartup::SourceMissing(message) if message.contains("asleep")),
+            "{outcome:?}"
+        );
+        assert_eq!(session_start_blocked_by_share_dialog(&state).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_device_start_keeps_the_single_startup_deadline() {
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let (tx, rx) = std_mpsc::channel::<NativeScreenStartup>();
+        let outcome = await_native_screen_startup(
+            &state,
+            &lease,
+            rx,
+            &Arc::new(AtomicBool::new(false)),
+            short_startup_deadlines,
+        )
+        .await;
+        drop(tx);
+        let NativeScreenStartup::Failed(message) = outcome else {
+            panic!("expected the startup timeout");
+        };
+        assert!(message.starts_with("Timed out after"), "{message}");
+        assert_eq!(
+            cfg!(target_os = "linux"),
+            !message.contains("native"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn linux_screen_startup_copy_never_claims_a_native_preview() {
+        for phase in [
+            ScreenStartupPhase::Starting,
+            ScreenStartupPhase::AwaitingConsent,
+            ScreenStartupPhase::AwaitingFirstFrame,
+        ] {
+            let expired = match phase.expired(phase.deadline()) {
+                NativeScreenStartup::Failed(message)
+                | NativeScreenStartup::PermissionNeeded(message)
+                | NativeScreenStartup::SourceMissing(message) => message,
+                other => panic!("unexpected {other:?}"),
+            };
+            if cfg!(target_os = "linux") {
+                assert!(!phase.message().contains("native"), "{phase:?}");
+                assert!(!expired.contains("native"), "{expired}");
+            }
+        }
+        if cfg!(target_os = "linux") {
+            for copy in [
+                SCREEN_PREVIEW_IDLE_MESSAGE,
+                SCREEN_PREVIEW_STOPPED_MESSAGE,
+                SCREEN_PREVIEW_REUSED_MESSAGE,
+                SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE,
+            ] {
+                assert!(!copy.contains("ative"), "{copy}");
+            }
+        }
+        assert_eq!(SHARE_DIALOG_WAIT, Duration::from_secs(600));
+        assert!(matches!(
+            ScreenStartupPhase::AwaitingConsent.expired(SHARE_DIALOG_WAIT),
+            NativeScreenStartup::PermissionNeeded(message) if message.contains("10 minutes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn record_fails_fast_while_a_share_dialog_holds_the_source_transition() {
+        // Plan 0010 addendum 3: the screen start that opened the dialog holds
+        // a source-transition guard until the person answers. Session start
+        // must refuse with the reason, not wait (it held the ordered lane).
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let transition = state.source_transition_fence.begin();
+        publish_screen_startup_phase(
+            &state,
+            &lease,
+            ScreenStartupPhase::AwaitingConsent,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        let refused = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::recording::test_admit_session_start_and_release(&state),
+        )
+        .await
+        .expect("session start waited behind the share dialog")
+        .expect_err("session start was admitted while the share dialog was open");
+        assert!(refused.to_string().contains("share dialog"), "{refused}");
+
+        // Once the dialog is answered the phase moves on and the drained
+        // transition admits the start as before.
+        publish_screen_startup_phase(
+            &state,
+            &lease,
+            ScreenStartupPhase::AwaitingFirstFrame,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        drop(transition);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::recording::test_admit_session_start_and_release(&state),
+        )
+        .await
+        .expect("session start never drained the finished transition")
+        .expect("session start refused after the dialog was answered");
+    }
+
+    #[tokio::test]
+    async fn a_newer_screen_transition_ends_a_share_dialog_wait() {
+        // Plan 0010: transitions run FIFO. A stop (scene without the screen,
+        // another source) queued behind a start that waits on its share
+        // dialog would otherwise wait for the person too.
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let consent_cancel = Arc::new(AtomicBool::new(false));
+        publish_screen_startup_phase(
+            &state,
+            &lease,
+            ScreenStartupPhase::AwaitingConsent,
+            &consent_cancel,
+        )
+        .await;
+        assert!(!consent_cancel.load(Ordering::SeqCst));
+        {
+            let mut slot = state.preview_screen.lock().await;
+            let _ticket = allocate_screen_transition_ticket(&mut slot);
+        }
+        assert!(consent_cancel.load(Ordering::SeqCst));
+
+        // A device phase is never cancelled this way: only the person-wait.
+        let first_frame = Arc::new(AtomicBool::new(false));
+        publish_screen_startup_phase(
+            &state,
+            &lease,
+            ScreenStartupPhase::AwaitingFirstFrame,
+            &first_frame,
+        )
+        .await;
+        {
+            let mut slot = state.preview_screen.lock().await;
+            let _ticket = allocate_screen_transition_ticket(&mut slot);
+        }
+        assert!(!first_frame.load(Ordering::SeqCst));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stop_ends_the_portal_consent_wait() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (stop_tx, stop_rx) = std_mpsc::channel();
+        let started = Instant::now();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            stop_tx.send(()).unwrap();
+        });
+        runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                linux::stop_requested(&stop_rx, &AtomicBool::new(false)),
+            )
+            .await
+            .expect("stop never ended the consent wait");
+        });
+        stopper.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // A newer transition's cancel flag ends it too.
+        let (_stop_tx, stop_rx) = std_mpsc::channel::<()>();
+        let cancelled = AtomicBool::new(true);
+        runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                linux::stop_requested(&stop_rx, &cancelled),
+            )
+            .await
+            .expect("the consent cancel flag never ended the consent wait");
+        });
+
+        // A dropped sender (supervisor gone) ends it too.
+        let (stop_tx, stop_rx) = std_mpsc::channel::<()>();
+        drop(stop_tx);
+        runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                linux::stop_requested(&stop_rx, &AtomicBool::new(false)),
+            )
+            .await
+            .expect("a dropped stop sender never ended the consent wait");
+        });
+    }
+
     #[tokio::test]
     async fn duplicate_screen_start_waits_for_in_flight_start() {
         let state = test_state();
@@ -8734,7 +9284,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Starting native screen preview.".to_string()),
+            message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
         };
 
         assert!(matches!(
@@ -8777,7 +9327,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Native screen preview source reused.".to_string()),
+            message: Some(SCREEN_PREVIEW_REUSED_MESSAGE.to_string()),
         };
         set_screen_status(&state, live.clone()).await;
 
@@ -8823,7 +9373,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Starting native screen preview.".to_string()),
+            message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
         };
 
         let lease = match begin_screen_start(&state, start_key, starting, None).await {
@@ -9012,7 +9562,7 @@ mod tests {
         assert_eq!(slot.run_id.as_deref(), Some("run-1"));
         assert_eq!(
             status.message.as_deref(),
-            Some("Native screen preview source reused.")
+            Some(SCREEN_PREVIEW_REUSED_MESSAGE)
         );
     }
 

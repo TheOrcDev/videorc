@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   clampToRange,
   formatValue,
@@ -22,7 +23,7 @@ const STATUS_VARIANT: Record<
   PowerSliderStatusTone,
   NonNullable<ComponentProps<typeof Badge>['variant']>
 > = {
-  default: 'secondary',
+  default: 'default',
   success: 'success',
   warning: 'warning',
   destructive: 'destructive'
@@ -179,17 +180,21 @@ export function PowerSlider({
             </span>
           )}
           {canReset ? (
-            <Button
-              aria-label={`Reset ${label}`}
-              className="size-7 text-muted-foreground"
-              disabled={disabled}
-              size="icon"
-              title="Reset to default"
-              variant="ghost"
-              onClick={reset}
-            >
-              <ResetIcon className="size-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={`Reset ${label}`}
+                  className="text-muted-foreground"
+                  disabled={disabled}
+                  size="icon"
+                  variant="ghost"
+                  onClick={reset}
+                >
+                  <ResetIcon className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Reset to default</TooltipContent>
+            </Tooltip>
           ) : null}
         </div>
       </div>
@@ -212,7 +217,7 @@ export function PowerSlider({
       </span>
 
       {scalePoints ? (
-        <div className="relative h-3.5 text-[10px] text-muted-foreground">
+        <div className="relative h-4 text-[11px] text-muted-foreground">
           {scalePoints.map((point) => (
             <span
               key={point.value}

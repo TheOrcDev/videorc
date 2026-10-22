@@ -1,17 +1,23 @@
-import { PinIcon } from '@/components/icons'
 import { useEffect, useRef, type CSSProperties, type ReactElement } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { useTrafficLightGutter } from '@/components/window-frame'
+import { ErrorIcon } from '@/components/icons'
+import { PinWindowButton } from '@/components/pin-window-button'
+import { StatusDot } from '@/components/status-dot'
+import { WindowHeader } from '@/components/window-frame'
 import type { CaptionStyleId, CaptionsStatus, CaptionsUpdate } from '@/lib/backend'
 import { captionStyleDefinition } from '@/lib/caption-overlay'
+import { captionsReaderNotice } from '@/lib/captions-page-view'
 import { latestFinalCaptionText } from '@/lib/captions-ui'
+import { captionsStatusLabel, captionsStatusTone } from '@/lib/state-labels'
 import { cn } from '@/lib/utils'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 /**
- * Big-text caption display for the detached Captions window: a dark glass
+ * Big-text caption display for the detached Captions reader window: a dark glass
  * reader meant for a second monitor — or to be captured into the scene as a
- * caption bar. Minimal chrome (drag bar + pin); the newest line is emphasized.
+ * caption bar. Minimal chrome (the window header: its name, one status dot and
+ * Keep on top); the newest line is emphasized, and the body says what is
+ * happening while there is nothing to read.
  */
 export function CaptionsReader({
   lines,
@@ -30,7 +36,6 @@ export function CaptionsReader({
   alwaysOnTop?: boolean
   onToggleAlwaysOnTop?: () => void
 }): ReactElement {
-  const trafficLightGutter = useTrafficLightGutter()
   const feedRef = useRef<HTMLDivElement | null>(null)
 
   // Captions always track the latest speech — no unread state, just follow.
@@ -42,48 +47,26 @@ export function CaptionsReader({
   }, [lines])
 
   const recent = lines.slice(-8)
+  // The body follows the state (D-25, J2-18): off, waiting, starting, or a
+  // failure with its reason, which shows even over earlier captions.
+  const notice = captionsReaderNotice(status, recent.length)
   const latestFinal = latestFinalCaptionText(lines)
-  const statusLabel = readerStatusLabel(status)
+  const statusLabel = captionsStatusLabel(status)
   const latestTextClass = textSize === 's' ? 'text-xl' : textSize === 'l' ? 'text-4xl' : 'text-3xl'
   const readerAppearance = captionReaderAppearance(styleId)
 
   return (
     <div className="flex h-screen flex-col text-foreground">
-      {/* The whole drag bar moves the window (hiddenInset titlebar); the
-          controls opt back out of the drag region. The label clears the
-          traffic lights with the shared gutter. */}
-      <header
-        className={cn(
-          'flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border pr-3 [-webkit-app-region:drag]',
-          trafficLightGutter
-        )}
+      {/* The shared window header (plan 174 S1.6b): the title on the traffic
+          lights' line, the state as a status dot, and Keep on top. */}
+      <WindowHeader
+        meta={<StatusDot label={statusLabel} tone={captionsStatusTone(status)} />}
+        title={WINDOW_NAMES.captions}
       >
-        <span className="flex items-center gap-2 text-xs font-medium text-subtle">
-          Live captions
-          <span className="flex items-center gap-1.5 text-muted-foreground">
-            <span
-              aria-hidden
-              className={cn(
-                'size-1.5 rounded-full glass-dot',
-                captionStatusToneClass(status.state)
-              )}
-            />
-            {statusLabel}
-          </span>
-        </span>
         {onToggleAlwaysOnTop ? (
-          <Button
-            aria-label="Keep this window on top"
-            aria-pressed={alwaysOnTop}
-            className={cn('size-7 [-webkit-app-region:no-drag]', alwaysOnTop && 'text-foreground')}
-            size="icon"
-            variant="ghost"
-            onClick={onToggleAlwaysOnTop}
-          >
-            <PinIcon className="size-4" weight={alwaysOnTop ? 'fill' : 'regular'} />
-          </Button>
+          <PinWindowButton pinned={alwaysOnTop} onPinnedChange={() => onToggleAlwaysOnTop()} />
         ) : null}
-      </header>
+      </WindowHeader>
 
       <div
         className={cn(
@@ -92,35 +75,47 @@ export function CaptionsReader({
         )}
         ref={feedRef}
       >
-        {recent.length === 0 ? (
-          <p className="text-lg text-muted-foreground">
-            Waiting for captions. Turn on Live captions, then record or go live. Captions transcribe
-            your microphone during a session.
+        {notice ? (
+          <p
+            className={cn(
+              'flex items-start gap-2 text-lg select-text',
+              notice.failed ? 'text-foreground' : 'text-muted-foreground'
+            )}
+            data-testid="captions-reader-notice"
+            role={notice.failed ? 'alert' : undefined}
+          >
+            {notice.failed ? (
+              <ErrorIcon
+                aria-hidden
+                className="mt-1 size-4 shrink-0 text-destructive"
+                weight="fill"
+              />
+            ) : null}
+            <span>{notice.text}</span>
           </p>
-        ) : (
-          recent.map((line, index) => {
-            const latest = index === recent.length - 1
-            return (
-              <p
-                className={cn(
-                  'leading-snug transition-colors',
-                  latest ? latestTextClass : 'text-xl text-muted-foreground',
-                  latest && 'font-semibold text-foreground',
-                  latest && line.kind === 'partial' && 'text-muted-foreground',
-                  latest && readerAppearance.className
-                )}
-                key={`${line.sessionClientId}-${line.seq}`}
-                style={
-                  latest
-                    ? { ...readerAppearance.style, opacity: line.kind === 'partial' ? 0.72 : 1 }
-                    : undefined
-                }
-              >
-                {line.text}
-              </p>
-            )
-          })
-        )}
+        ) : null}
+        {recent.map((line, index) => {
+          const latest = index === recent.length - 1
+          return (
+            <p
+              className={cn(
+                'leading-snug transition-colors',
+                latest ? latestTextClass : 'text-xl text-muted-foreground',
+                latest && 'font-semibold text-foreground',
+                latest && line.kind === 'partial' && 'text-muted-foreground',
+                latest && readerAppearance.className
+              )}
+              key={`${line.sessionClientId}-${line.seq}`}
+              style={
+                latest
+                  ? { ...readerAppearance.style, opacity: line.kind === 'partial' ? 0.72 : 1 }
+                  : undefined
+              }
+            >
+              {line.text}
+            </p>
+          )
+        })}
       </div>
       <span aria-live="polite" className="sr-only">
         {latestFinal ? `Final caption: ${latestFinal}` : ''}
@@ -159,44 +154,5 @@ export function captionReaderAppearance(styleId: CaptionStyleId): {
           ? `${Math.max(1, definition.strokeWidthFactor * 14)}px ${definition.strokeColor}`
           : undefined
     }
-  }
-}
-
-/** The header dot's glass tone: colour only where the state means something. */
-export function captionStatusToneClass(state: CaptionsStatus['state']): string {
-  switch (state) {
-    case 'listening':
-    case 'live':
-      return 'tone-success'
-    case 'reconnecting':
-    case 'degraded':
-      return 'tone-warning'
-    case 'blocked':
-    case 'error':
-      return 'tone-destructive'
-    default:
-      return 'tone-neutral'
-  }
-}
-
-function readerStatusLabel(status: CaptionsStatus): string {
-  switch (status.state) {
-    case 'listening':
-    case 'live':
-      return 'Listening'
-    case 'starting':
-      return 'Starting'
-    case 'reconnecting':
-      return 'Reconnecting'
-    case 'degraded':
-      return 'Higher delay'
-    case 'blocked':
-      return 'Blocked'
-    case 'error':
-      return 'Error'
-    case 'ready':
-      return 'Ready'
-    default:
-      return 'Idle'
   }
 }

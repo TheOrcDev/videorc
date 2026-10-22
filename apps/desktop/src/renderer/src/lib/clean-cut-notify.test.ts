@@ -120,5 +120,12 @@ describe('readCleanCutOpenRequest', () => {
       mode: undefined,
       review: false
     })
+    // Plan 174 S3.13: the Library's ask says where the review goes back to.
+    expect(
+      readCleanCutOpenRequest({ sessionId: 'rec-1', review: true, origin: 'library' })
+    ).toMatchObject({ review: true, origin: 'library' })
+    expect(readCleanCutOpenRequest({ sessionId: 'rec-1', origin: 'studio' })).not.toHaveProperty(
+      'origin'
+    )
   })
 })

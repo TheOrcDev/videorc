@@ -4,8 +4,15 @@ import type { ClipMoment, CleanCutRemoval, CleanCutRemovalKind } from './backend
 import {
   CLEAN_CUT_KIND_GROUPS,
   EMPTY_CLEAN_CUT_DRAFT,
+  EMPTY_CLEAN_CUT_HISTORY,
   activeWordIndex,
   addDraftManual,
+  recordCleanCutEdit,
+  redoCleanCutEdit,
+  removalAnnouncement,
+  selectionCutRange,
+  undoCleanCutEdit,
+  wordRows,
   buildCleanCutParagraphs,
   cleanCutKindChips,
   cleanCutPins,
@@ -509,5 +516,55 @@ describe('Condensed parts (S19)', () => {
       'p',
       '[Left out]'
     ])
+  })
+})
+
+describe('transcript editing (plan 174 E-14, E-15)', () => {
+  const words: CleanCutTranscriptWord[] = [
+    { text: 'So', startMs: 1_000, endMs: 1_300 },
+    { text: 'um', startMs: 1_400, endMs: 1_700 },
+    { text: 'today.', startMs: 1_800, endMs: 2_200 }
+  ]
+
+  it('undoes and redoes drafts, and a new edit clears what was undone', () => {
+    const first = addDraftManual(EMPTY_CLEAN_CUT_DRAFT, { startMs: 0, endMs: 100 })
+    const second = addDraftManual(first, { startMs: 200, endMs: 300 })
+    let history = recordCleanCutEdit(EMPTY_CLEAN_CUT_HISTORY, EMPTY_CLEAN_CUT_DRAFT)
+    history = recordCleanCutEdit(history, first)
+    const undone = undoCleanCutEdit(history, second)
+    expect(undone?.draft).toBe(first)
+    const redone = redoCleanCutEdit(undone!.history, first)
+    expect(redone?.draft).toBe(second)
+    expect(redoCleanCutEdit(redone!.history, second)).toBeNull()
+    // A new edit after an undo drops the redo.
+    expect(recordCleanCutEdit(undone!.history, first).future).toEqual([])
+    expect(undoCleanCutEdit(EMPTY_CLEAN_CUT_HISTORY, first)).toBeNull()
+    // Bounded.
+    expect(recordCleanCutEdit({ past: [first, first], future: [] }, second, 2).past).toEqual([
+      first,
+      second
+    ])
+  })
+
+  it('cuts a selection from its first word to its last', () => {
+    expect(selectionCutRange(words, [2, 1])).toEqual({ startMs: 1_400, endMs: 2_200 })
+    expect(selectionCutRange(words, [])).toBeNull()
+    expect(selectionCutRange(words, [9])).toBeNull()
+  })
+
+  it('finds the row that shows a word', () => {
+    const paragraphs = buildCleanCutParagraphs({ words, segments: [], removals: [], pins: [] })
+    const rows = wordRows(cleanCutTranscriptItems(paragraphs, null))
+    expect(rows.get(0)).toBe(0)
+    expect(rows.get(2)).toBe(0)
+    expect(rows.get(7)).toBeUndefined()
+  })
+
+  it('reads a cut out with its place and its key', () => {
+    const cut = { kind: 'filler' as const, startMs: 1_400, endMs: 1_800, enabled: true }
+    expect(removalAnnouncement(cut, 2, 5)).toBe('Um 0.4 s, cut. 2 of 5. Enter keeps it.')
+    expect(removalAnnouncement({ ...cut, enabled: false }, 0, 0)).toBe(
+      'Um 0.4 s, kept. Enter cuts it.'
+    )
   })
 })

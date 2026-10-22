@@ -86,7 +86,8 @@ beforeEach(() => {
     'getComputedStyle',
     'localStorage',
     'Event',
-    'MouseEvent'
+    'MouseEvent',
+    'WheelEvent'
   ] as const)
     vi.stubGlobal(
       key,
@@ -127,7 +128,10 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-const renderChat = async (snapshot: LiveChatSnapshot) => {
+const renderChat = async (
+  snapshot: LiveChatSnapshot,
+  extra: Partial<Parameters<typeof ChatPane>[0]> = {}
+) => {
   await act(async () =>
     root.render(
       createElement(ChatPane, {
@@ -137,22 +141,46 @@ const renderChat = async (snapshot: LiveChatSnapshot) => {
         providers: [],
         live: true,
         questionMessageIds: new Set<string>(),
-        mentionNames: []
+        mentionNames: [],
+        ...extra
       })
     )
   )
 }
-const unpin = async () => {
-  const viewport = container.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]')!
+const chatViewport = () =>
+  container.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]')!
+/** The viewport's geometry: 600 px tall, its content `height` tall. */
+const measure = (height = 116000) => {
+  const viewport = chatViewport()
+  const box = { height }
   Object.defineProperties(viewport, {
-    scrollHeight: { value: 116000, configurable: true },
+    scrollHeight: { get: () => box.height, configurable: true },
     clientHeight: { value: 600, configurable: true },
-    scrollTop: { value: 0, writable: true, configurable: true }
+    scrollTop: { value: height - 600, writable: true, configurable: true }
   })
+  return { viewport, box }
+}
+const scrollTo = async (viewport: HTMLElement, top: number) => {
+  viewport.scrollTop = top
   await act(async () =>
     viewport.dispatchEvent(new dom.Event('scroll', { bubbles: true }) as unknown as Event)
   )
 }
+const wheel = async (viewport: HTMLElement, deltaY: number) => {
+  await act(async () =>
+    viewport.dispatchEvent(
+      new dom.WheelEvent('wheel', { deltaY, bubbles: true }) as unknown as Event
+    )
+  )
+}
+/** The streamer scrolls back to the top with the wheel. */
+const unpin = async () => {
+  const { viewport } = measure()
+  await scrollTo(viewport, viewport.scrollTop)
+  await wheel(viewport, -120)
+  await scrollTo(viewport, 0)
+}
+const paused = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-paused"]')
 const newButton = () =>
   [...container.querySelectorAll('button')].find((button) =>
     /\d+ new/.test(button.textContent ?? '')
@@ -160,7 +188,7 @@ const newButton = () =>
 const badge = (label: string) =>
   [...container.querySelectorAll('[data-slot="pane-tabs-narrow"] button')]
     .find((button) => button.textContent?.startsWith(label))
-    ?.querySelector('[data-slot="pane-unseen"]')?.textContent ?? '0'
+    ?.querySelector('[data-testid="pane-unseen"]')?.textContent ?? '0'
 
 for (const [owner, append] of [
   ['provider', applyLiveChatMessage],
@@ -187,18 +215,20 @@ for (const [owner, append] of [
       expect(newButton()?.textContent).toContain('5 new')
       await act(async () => newButton()!.click())
       expect(newButton()).toBeUndefined()
-      expect(virtual.scrollToIndex).toHaveBeenLastCalledWith(1999, { align: 'end' })
+      expect(paused()).toBeNull()
+      expect(chatViewport().scrollTop).toBe(116000)
     })
     it('follows every newest identity at an unchanged row count without resize callbacks', async () => {
       let snapshot = seed(2000)
       await renderChat(snapshot)
-      virtual.scrollToIndex.mockClear()
+      const { viewport, box } = measure()
       for (let index = 2000; index < 2003; index++) {
         snapshot = append(snapshot, message(index))
+        box.height += 58
         await renderChat(snapshot)
+        expect(viewport.scrollTop).toBe(box.height)
       }
-      expect(virtual.scrollToIndex).toHaveBeenCalledTimes(3)
-      expect(virtual.scrollToIndex).toHaveBeenLastCalledWith(1999, { align: 'end' })
+      expect(paused()).toBeNull()
     })
     it.each(['message', 'follow'] as const)(
       'counts fresh %s deliveries on its hidden pane at rollover',
@@ -316,9 +346,9 @@ it('counts a new open question identity when it replaces an equal-count question
     )
   }
   await render('q1')
-  expect(badge('Orcle')).toBe('0')
+  expect(badge('Buddy')).toBe('0')
   await render('q2')
-  expect(badge('Orcle')).toBe('1')
+  expect(badge('Buddy')).toBe('1')
 })
 
 it('keeps duplicate, tombstone, hydration and emote refreshes from manufacturing unread; resets on clear and session change', async () => {
@@ -416,4 +446,100 @@ it('treats history replacement and returning to live as hydration baselines rath
   snapshot = applyLiveChatMessage(snapshot, message(2003))
   await render()
   expect(badge('Chat')).toBe('1')
+})
+
+describe('the chat stays on its newest message (owner, 2026-10-21)', () => {
+  it('puts the list straight back when something other than the streamer moved it up', async () => {
+    let snapshot = seed(2000)
+    await renderChat(snapshot)
+    const { viewport, box } = measure()
+    await scrollTo(viewport, viewport.scrollTop)
+    // A row above re-measured, scroll anchoring, a clamp: no gesture.
+    await scrollTo(viewport, 2000)
+    expect(viewport.scrollTop).toBe(box.height)
+    expect(paused()).toBeNull()
+    snapshot = applyLiveChatMessage(snapshot, message(2000))
+    box.height += 58
+    await renderChat(snapshot)
+    expect(viewport.scrollTop).toBe(box.height)
+    expect(newButton()).toBeUndefined()
+  })
+
+  it('never unpins on a wheel toward the newest message', async () => {
+    const snapshot = seed(2000)
+    await renderChat(snapshot)
+    const { viewport, box } = measure()
+    await scrollTo(viewport, viewport.scrollTop)
+    await wheel(viewport, 120)
+    await scrollTo(viewport, 2000)
+    expect(viewport.scrollTop).toBe(box.height)
+    expect(paused()).toBeNull()
+  })
+
+  it('offers the way back when the streamer scrolls up with nothing new, and follows again at the bottom', async () => {
+    let snapshot = seed(2000)
+    await renderChat(snapshot)
+    await unpin()
+    expect(paused()?.textContent).toBe('Latest')
+    expect(paused()?.getAttribute('aria-label')).toBe(
+      'Chat paused: reading back. Jump to the newest'
+    )
+    snapshot = applyLiveChatMessage(snapshot, message(2000))
+    await renderChat(snapshot)
+    const viewport = chatViewport()
+    // Reading back holds the place: a new message never moves the list.
+    expect(viewport.scrollTop).toBe(0)
+    expect(paused()?.textContent).toBe('1 new')
+    await scrollTo(viewport, 116000 - 600 - 10)
+    expect(paused()).toBeNull()
+    snapshot = applyLiveChatMessage(snapshot, message(2001))
+    await renderChat(snapshot)
+    expect(viewport.scrollTop).toBe(116000)
+    expect(paused()).toBeNull()
+  })
+
+  it('takes the streamer up for a key that walks toward older messages', async () => {
+    const snapshot = seed(2000)
+    await renderChat(snapshot)
+    const { viewport } = measure()
+    await scrollTo(viewport, viewport.scrollTop)
+    await act(async () =>
+      viewport.dispatchEvent(
+        new dom.KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }) as unknown as Event
+      )
+    )
+    await scrollTo(viewport, 2000)
+    expect(viewport.scrollTop).toBe(2000)
+    expect(paused()?.textContent).toBe('Latest')
+  })
+
+  it('marks the message Buddy hears the streamer talk about without moving the list', async () => {
+    let snapshot = seed(2000)
+    await renderChat(snapshot)
+    const { viewport, box } = measure()
+    virtual.scrollToIndex.mockClear()
+    await renderChat(snapshot, { cohostSpotlight: message(1500).id })
+    expect(virtual.scrollToIndex).not.toHaveBeenCalled()
+    expect(paused()).toBeNull()
+    snapshot = applyLiveChatMessage(snapshot, message(2000))
+    box.height += 58
+    await renderChat(snapshot, { cohostSpotlight: message(1500).id })
+    expect(viewport.scrollTop).toBe(box.height)
+    await renderChat(snapshot, { cohostSpotlight: null })
+    expect(virtual.scrollToIndex).not.toHaveBeenCalled()
+    expect(viewport.scrollTop).toBe(box.height)
+  })
+
+  it("stops following for Buddy's jump to a message, with the way back", async () => {
+    const snapshot = seed(2000)
+    await renderChat(snapshot)
+    measure()
+    virtual.scrollToIndex.mockClear()
+    await renderChat(snapshot, { jumpTo: { messageId: message(1500).id, seq: 1 } })
+    expect(virtual.scrollToIndex).toHaveBeenCalledWith(1500, { align: 'center' })
+    expect(paused()?.textContent).toBe('Latest')
+    await act(async () => paused()!.click())
+    expect(paused()).toBeNull()
+    expect(chatViewport().scrollTop).toBe(116000)
+  })
 })

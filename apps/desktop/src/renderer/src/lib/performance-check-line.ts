@@ -49,7 +49,7 @@ export function performanceCheckLine({
     return {
       tone: 'muted',
       busy: false,
-      text: 'This computer has not been measured yet.',
+      text: "This computer hasn't been measured yet.",
       checkLabel: 'Check this computer'
     }
   }
@@ -86,7 +86,7 @@ export function performanceCheckLine({
       return {
         tone: 'muted',
         busy: false,
-        text: `${outputLabel(video)} has not been measured. ${recommended} held steady.`,
+        text: `${outputLabel(video)} hasn't been measured. ${recommended} held steady.`,
         checkLabel: 'Check again',
         ...offer
       }

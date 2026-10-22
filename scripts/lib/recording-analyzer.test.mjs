@@ -45,9 +45,10 @@ import {
   renderMarkdownReport,
   uniqueFrameStats
 } from './recording-analyzer.mjs'
-import { ffmpegAvailable } from './ffmpeg-available.mjs'
+import { ffmpegAvailable, fixtureH264EncoderArgs } from './ffmpeg-available.mjs'
 
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+const videoCodecArgs = fixtureH264EncoderArgs(ffmpegPath)
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 
 // ---------------------------------------------------------------------------
@@ -803,10 +804,7 @@ describe(
         '3',
         '-fps_mode',
         'cfr',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
+        ...videoCodecArgs,
         '-pix_fmt',
         'yuv420p',
         '-c:a',
@@ -828,10 +826,7 @@ describe(
         '[v]',
         '-fps_mode',
         'cfr',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
+        ...videoCodecArgs,
         '-pix_fmt',
         'yuv420p',
         midfreeze
@@ -851,10 +846,7 @@ describe(
         "volume=enable='between(t,1,1.4)':volume=0",
         '-fps_mode',
         'cfr',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
+        ...videoCodecArgs,
         '-pix_fmt',
         'yuv420p',
         '-c:a',
@@ -878,10 +870,7 @@ describe(
         "volume=enable='between(t,1.5,1.53)':volume=0",
         '-fps_mode',
         'cfr',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
+        ...videoCodecArgs,
         '-pix_fmt',
         'yuv420p',
         '-c:a',
@@ -897,10 +886,7 @@ describe(
         '3',
         '-fps_mode',
         'cfr',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
+        ...videoCodecArgs,
         '-pix_fmt',
         'yuv420p',
         screenonly

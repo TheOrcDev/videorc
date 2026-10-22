@@ -31,6 +31,12 @@ const NEXT_LIVE_SESSION_ID = 'comments-window-probe-next-live'
 const LINK_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-link`
 // Plan 154: the member whose row must paint the member tint.
 const MEMBER_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:youtube:probe-member`
+// Plan 177: a long channel point reward, the row that once pushed its ⋯ out.
+const REWARD_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-reward`
+// Plan 177: a tip paints the paid tint in Activity, as it does in chat.
+const TIP_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-tip`
+// Plan 177: one unbroken token, the content that once widened a whole list.
+const LONG_LINK = `https://videorc.com/download?ref=${'orc'.repeat(40)}`
 const HISTORY_SESSION_ID = 'comments-window-probe-history'
 const HISTORY_MODE = {
   kind: 'history',
@@ -191,7 +197,7 @@ async function main() {
   )
 
   // Three providers share one chronological reader; YouTube + Twitch are
-  // writable while X truthfully remains receive-only.
+  // writable while X truthfully remains read-only.
   await smokeCommand('comments-window-push-snapshot', { snapshot: liveSnapshot() })
   const live = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
@@ -203,7 +209,7 @@ async function main() {
       s.text.includes('Twitch Viewer') &&
       s.text.includes('X Viewer') &&
       // Plan 057: the notes name only what a send skips.
-      s.destinationStatus.includes('X receive-only') &&
+      s.destinationStatus.includes('X read-only') &&
       !s.destinationStatus.includes('Sends to'),
     8000
   )
@@ -443,7 +449,7 @@ async function main() {
   assertCorrelatedTrace(delayedSend.last?.command, 'delayed send result', true)
 
   // The composer travels through the same correlated broker. This response is
-  // intentionally partial: YouTube succeeds, Twitch fails, X is receive-only.
+  // intentionally partial: YouTube succeeds, Twitch fails, X is read-only.
   const outboundText = 'Unified hello from Comments'
   await smokeCommand('comments-window-set-command-fixture', {
     kind: 'send',
@@ -459,10 +465,10 @@ async function main() {
       command: await smokeCommand('comments-window-command-trace')
     }),
     (s) =>
-      // Only the exceptions speak: Twitch's reason once, X receive-only in
+      // Only the exceptions speak: Twitch's reason once, X read-only in
       // the notes, and nothing for YouTube, which got the message.
       s.reader.text.includes('Twitch probe destination rejected this message.') &&
-      s.reader.destinationStatus.includes('X receive-only') &&
+      s.reader.destinationStatus.includes('X read-only') &&
       !s.reader.destinationStatus.includes('YouTube') &&
       s.reader.deliveryStatus === '' &&
       s.command.pendingCount === 0 &&
@@ -471,11 +477,11 @@ async function main() {
   )
   assertProbe(
     partialSend.ok,
-    'send: partial result names Twitch failure and X receive-only state',
+    'send: partial result names Twitch failure and X read-only state',
     JSON.stringify(partialSend.last)
   )
   assertCorrelatedTrace(partialSend.last?.command, 'send result', true)
-  await captureState('partial-send-x-receive-only', 'partial send with X receive-only')
+  await captureState('partial-send-x-receive-only', 'partial send with X read-only')
 
   const lateSendRoute = await smokeCommand('comments-window-route-send-result', {
     operation: lateHistorySendOperation()
@@ -718,6 +724,45 @@ async function probeLinksAndStreaks() {
     'member: a member row paints the member tint and a plain row paints none',
     JSON.stringify(tinted.last?.rowTints)
   )
+  // Plan 177: a reward row paints the reward tint, a tip the paid tint, a
+  // streak row none; every Activity row's ⋯ stays whole inside the pane, and
+  // no list's content is wider than its pane (one long token once widened
+  // every row), in both tiers that show Activity beside chat and both themes.
+  for (const theme of ['light', 'dark']) {
+    await smokeCommand('comments-window-set-theme', { theme })
+    for (const width of [1280, 1040]) {
+      await layoutAt(width)
+      const tag = `rows ${theme} ${width}px`
+      const state = await waitFor(
+        () => smokeCommand('comments-window-reader-state'),
+        (s) => s.theme === theme && s.activityRows?.some((row) => row.id === REWARD_MESSAGE_ID),
+        5000
+      )
+      const rows = state.last?.activityRows ?? []
+      const tintOf = (match) => rows.find(match)?.rowTint
+      assertProbe(
+        state.ok &&
+          tintOf((row) => row.id === REWARD_MESSAGE_ID) === 'reward' &&
+          tintOf((row) => row.id === TIP_MESSAGE_ID) === 'paid' &&
+          tintOf((row) => row.kind === 'watch-streak') === null,
+        `${tag}: a reward paints the reward tint, a tip the paid tint, a streak none`,
+        JSON.stringify(rows)
+      )
+      const cut = rows.filter((row) => !row.menuInside || !row.menuOnTop)
+      assertProbe(
+        state.ok && rows.length > 0 && cut.length === 0,
+        `${tag}: every Activity row's ⋯ sits whole inside the pane`,
+        JSON.stringify(cut.length ? cut : rows)
+      )
+      assertProbe(
+        state.ok && state.last.scrollOverflow?.length === 0,
+        `${tag}: no list is wider than its pane`,
+        JSON.stringify(state.last?.scrollOverflow)
+      )
+    }
+    await layoutAt(1280)
+    await captureState(`activity-rows-${theme}`, `Activity rows, ${theme}`, 1280, 720)
+  }
   const menu = await smokeCommand('comments-window-context-click-link', {
     messageId: LINK_MESSAGE_ID
   })
@@ -808,7 +853,7 @@ async function probeNarrowWidths() {
         metrics.wideTabs &&
           !metrics.narrowTabs &&
           metrics.panes.chat &&
-          (metrics.panes.activity || metrics.panes.orcle),
+          (metrics.panes.activity || metrics.panes.buddy),
         `${tag}: Wide shows Chat and the right pane`,
         JSON.stringify({ panes: metrics.panes, wide: metrics.wideTabs })
       )
@@ -892,21 +937,30 @@ async function probeNarrowWidths() {
 }
 
 async function layoutAt(width, options = {}) {
-  await smokeCommand('comments-window-set-bounds', { width, height: 640 })
-  await waitFor(
-    () => smokeCommand('comments-window-state'),
-    (s) => s.bounds && Math.abs(s.bounds.width - width) <= 1,
-    5000
-  )
-  // One layout pass after the resize event, then measure.
-  await sleep(250)
-  const metrics = await smokeCommand('comments-window-layout-metrics', options)
+  // A single setBounds from a much smaller frame can land 2px wide on Linux
+  // without a window manager (420 → 1280 measured 1282). Ask again; a second
+  // setBounds at the same size is what later passes already do.
+  let laidOut = { ok: false, last: null }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await smokeCommand('comments-window-set-bounds', { width, height: 640 })
+    await waitFor(
+      () => smokeCommand('comments-window-state'),
+      (s) => s.bounds && Math.abs(s.bounds.width - width) <= 1,
+      5000
+    )
+    laidOut = await waitFor(
+      () => smokeCommand('comments-window-layout-metrics', options),
+      (metrics) => Math.abs(metrics.windowWidth - width) <= 1,
+      attempt === 0 ? 800 : 2500
+    )
+    if (laidOut.ok) break
+  }
   assertProbe(
-    Math.abs(metrics.windowWidth - width) <= 1,
+    laidOut.ok,
     `narrow ${width}px: renderer laid out at the requested width`,
-    String(metrics.windowWidth)
+    String(laidOut.last?.windowWidth)
   )
-  return metrics
+  return laidOut.last
 }
 
 function assertHeaderFits(metrics, tag) {
@@ -1301,10 +1355,50 @@ function linksAndStreakSnapshot() {
           at: '2026-07-10T10:00:05Z'
         }),
         authorRoles: ['member']
-      }
+      },
+      {
+        ...messageFixture({
+          id: REWARD_MESSAGE_ID,
+          platform: 'twitch',
+          sessionId: NEXT_LIVE_SESSION_ID,
+          authorName: 'radiumcoders',
+          messageText: 'radiumcoders redeemed Hydrate the Orc before the raid',
+          at: '2026-07-10T10:00:06Z'
+        }),
+        eventType: 'redemption',
+        rawProviderType: 'channel.channel_points_custom_reward_redemption.add',
+        fragments: [],
+        details: {
+          kind: 'redemption',
+          reward: 'custom',
+          channelPoints: 1000,
+          title: 'Hydrate the Orc before the raid',
+          pointsName: 'Orc Gold'
+        }
+      },
+      {
+        ...messageFixture({
+          id: TIP_MESSAGE_ID,
+          platform: 'twitch',
+          sessionId: NEXT_LIVE_SESSION_ID,
+          authorName: 'sarzdotmd',
+          messageText: 'Cheer500 that transition was clean',
+          at: '2026-07-10T10:00:07Z'
+        }),
+        eventType: 'paid',
+        details: { kind: 'cheer', bits: 500 }
+      },
+      messageFixture({
+        id: `${NEXT_LIVE_SESSION_ID}:twitch:probe-long-link`,
+        platform: 'twitch',
+        sessionId: NEXT_LIVE_SESSION_ID,
+        authorName: 'Long Link',
+        messageText: LONG_LINK,
+        at: '2026-07-10T10:00:08Z'
+      })
     ],
     unreadCount: 4,
-    updatedAt: '2026-07-10T10:00:06Z'
+    updatedAt: '2026-07-10T10:00:09Z'
   }
 }
 

@@ -110,7 +110,7 @@ export async function runSystemPermissionAction({
   const snapshot = await refreshMediaAccess()
   if ((pane === 'camera' || pane === 'microphone') && !snapshot) {
     const label = pane === 'camera' ? 'Camera' : 'Microphone'
-    toast.error(`Could not check ${label} permission.`, {
+    toast.error(`Couldn't check ${label} permission`, {
       description: 'Try again before changing access.'
     })
     return
@@ -143,7 +143,7 @@ export async function runSystemPermissionAction({
 
   const requestMediaAccess = window.videorc?.requestMediaAccess
   if (!requestMediaAccess || (pane !== 'camera' && pane !== 'microphone')) {
-    toast.error('Permission request is unavailable outside Electron.')
+    console.warn('[permissions] no media access request in this renderer')
     return
   }
 

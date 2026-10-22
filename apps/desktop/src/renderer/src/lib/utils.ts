@@ -16,6 +16,11 @@ const twMerge = createTailwindMerge(getDefaultConfig, (config) => {
     'control',
     'gutter'
   ]
+  // The type tokens and radius tiers (plan 174 S1.6a): without them
+  // `text-meta` reads as a colour and loses to `text-muted-foreground`, and a
+  // call site's `rounded-full` cannot override a primitive's `rounded-tag`.
+  config.theme.text = [...config.theme.text, 'label', 'section', 'meta']
+  config.theme.radius = [...config.theme.radius, 'panel', 'row', 'chip', 'tag']
   return config
 })
 

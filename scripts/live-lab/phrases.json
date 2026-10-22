@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "about": "Scripted speech for the live lab (plan 178 U7 / plan 176 L3). Command phrases are copied word for word from the voice command parsers' own Rust tests, so the lab and the code agree on wording; lib/phrases.test.mjs fails if a phrase or its expected parse drifts. Caption phrases contain no wake word or command verb. 'context' is the parser state the phrase needs: 'plain' (no card open) or 'answering' (a confirm card is open). 'destructive' phrases act on real chat (Remove deletes a message) and need a scenario that opts in and targets the lab viewer bot's own message.",
+  "commands": [
+    {
+      "id": "highlight-last",
+      "text": "Buddy, show the last comment",
+      "parser": "cohost_command",
+      "context": "plain",
+      "expect": { "kind": "highlight", "target": "last", "question": false }
+    },
+    {
+      "id": "highlight-last-question",
+      "text": "Hey Buddy, can you show the last question please?",
+      "parser": "cohost_command",
+      "context": "plain",
+      "expect": { "kind": "highlight", "target": "last", "question": true }
+    },
+    {
+      "id": "highlight-this",
+      "text": "Buddy, put it on stream",
+      "parser": "cohost_command",
+      "context": "plain",
+      "expect": { "kind": "highlight", "target": "deixis", "question": false }
+    },
+    {
+      "id": "clear-highlight",
+      "text": "Buddy, clear the highlight",
+      "parser": "cohost_command",
+      "context": "plain",
+      "expect": { "kind": "clear", "target": "none", "question": false }
+    },
+    {
+      "id": "clear-take-down",
+      "text": "Buddy, take it down",
+      "parser": "cohost_command",
+      "context": "plain",
+      "expect": { "kind": "clear", "target": "deixis", "question": false }
+    },
+    {
+      "id": "clear-overlay",
+      "text": "Buddy, hide the overlay",
+      "parser": "cohost_command",
+      "context": "plain",
+      "expect": { "kind": "clear", "target": "none", "question": false }
+    },
+    {
+      "id": "remove-last",
+      "text": "Buddy, remove the last message from chat",
+      "parser": "cohost_command",
+      "context": "plain",
+      "destructive": true,
+      "expect": { "kind": "remove", "target": "last", "question": false }
+    },
+    {
+      "id": "confirm-yes",
+      "text": "Yes, do it.",
+      "parser": "cohost_command",
+      "context": "answering",
+      "expect": { "kind": "confirm", "target": "none", "question": false }
+    },
+    {
+      "id": "cancel-keep",
+      "text": "No, keep it.",
+      "parser": "cohost_command",
+      "context": "answering",
+      "expect": { "kind": "cancel", "target": "none", "question": false }
+    },
+    {
+      "id": "cancel-buddy",
+      "text": "Buddy, cancel",
+      "parser": "cohost_command",
+      "context": "plain",
+      "expect": { "kind": "cancel", "target": "none", "question": false }
+    },
+    {
+      "id": "clip-that",
+      "text": "okay clip that",
+      "parser": "clip_marks",
+      "context": "plain",
+      "expect": { "phrase": "clip that" }
+    },
+    {
+      "id": "clip-make",
+      "text": "we should make a clip of that",
+      "parser": "clip_marks",
+      "context": "plain",
+      "expect": { "phrase": "make a clip" }
+    }
+  ],
+  "captions": [
+    { "id": "caption-pangram", "text": "The quick brown fox jumps over the lazy dog." },
+    { "id": "caption-count", "text": "Caption check for the lab stream, one two three four five." },
+    {
+      "id": "caption-weather",
+      "text": "It is a calm and sunny morning, and the coffee is still warm."
+    },
+    {
+      "id": "caption-latency",
+      "text": "This sentence is here to measure how long captions need to appear."
+    },
+    {
+      "id": "caption-numbers",
+      "text": "Seven hundred and twenty frames went by in twelve seconds."
+    }
+  ]
+}

@@ -134,9 +134,32 @@ export function chatSendFailures(
       reason:
         destination.reason ??
         (destination.phase === 'timed-out-unknown'
-          ? 'Delivery is unknown; Videorc did not retry.'
+          ? "Delivery is unknown; Videorc didn't retry."
           : 'Send failed.')
     }))
+}
+
+/**
+ * What Retry does after a failed send (plan 174 S3.16a, H-26). A send that
+ * reached nobody (a transport failure, or every destination failed) puts the
+ * draft back in the composer and retries as sent; a partial failure retries
+ * only the destinations that failed, so the ones that posted never post
+ * twice. Null when nothing failed.
+ */
+export function chatSendRetryPlan(
+  operation: CommentsSendOperation | null | undefined,
+  failures: readonly ChatSendFailure[]
+): { destinationIds: string[] | null; restoreDraft: boolean } | null {
+  if (failures.length === 0) return null
+  const sent = operation?.destinations.some((destination) => destination.phase === 'sent') ?? false
+  if (!sent) return { destinationIds: null, restoreDraft: true }
+  const ids = failures
+    .map((failure) => failure.destinationId)
+    .filter(
+      (id) =>
+        operation?.destinations.some((destination) => destination.destinationId === id) ?? false
+    )
+  return { destinationIds: ids, restoreDraft: false }
 }
 
 export function destinationDelivery(

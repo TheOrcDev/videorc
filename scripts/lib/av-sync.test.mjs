@@ -20,9 +20,10 @@ import {
   parseSignalstatsYavg,
   recommendMicrophoneSyncOffsetMs
 } from './av-sync.mjs'
-import { ffmpegAvailable } from './ffmpeg-available.mjs'
+import { ffmpegAvailable, fixtureH264EncoderArgs } from './ffmpeg-available.mjs'
 
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+const videoCodecArgs = fixtureH264EncoderArgs(ffmpegPath)
 
 // --- Unit tests (pure) ---
 
@@ -188,7 +189,7 @@ describe('buildAvSyncRecommendationReport', () => {
 
 function generate(outputPath, opts) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(ffmpegPath, flashClickFixtureArgs(outputPath, opts))
+    const child = spawn(ffmpegPath, flashClickFixtureArgs(outputPath, { videoCodecArgs, ...opts }))
     let stderr = ''
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (t) => (stderr += t))

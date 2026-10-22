@@ -5,8 +5,9 @@ import type {
   StreamTargetMetadataDraft,
   StreamTargetSettings
 } from '@/lib/backend'
+import { destinationLabel } from '@/lib/platform-copy'
 
-/** The platforms that carry a per-destination row in Broadcast info. */
+/** The platforms that carry a per-destination row in Stream details. */
 export type MetadataPlatform = 'youtube' | 'twitch' | 'kick' | 'x'
 
 export function isMetadataPlatform(platform: StreamPlatform): platform is MetadataPlatform {
@@ -39,11 +40,11 @@ export interface VisibleMetadataOverride {
 }
 
 /**
- * The per-destination rows Broadcast info draws: one per native platform that
- * has at least one destination in the Destinations list AND a row in the
- * draft, in Destinations order (first appearance). A Custom RTMP-only setup
- * yields nothing, and so does a draft with no rows (the backend backfills
- * them, but the renderer must not invent one).
+ * The per-destination rows Stream details draws: one per native platform that
+ * has at least one destination turned on (in use, plan 174 S3.5b, D-18) AND
+ * a row in the draft, in Destinations order (first appearance). A Custom
+ * RTMP-only setup yields nothing, and so does a draft with no rows (the
+ * backend backfills them, but the renderer must not invent one).
  */
 export function visibleMetadataOverrides(
   targets: readonly StreamTargetSettings[],
@@ -52,7 +53,7 @@ export function visibleMetadataOverrides(
   const seen = new Set<MetadataPlatform>()
   const visible: VisibleMetadataOverride[] = []
   for (const target of targets) {
-    if (!isMetadataPlatform(target.platform) || seen.has(target.platform)) {
+    if (!target.enabled || !isMetadataPlatform(target.platform) || seen.has(target.platform)) {
       continue
     }
     seen.add(target.platform)
@@ -62,7 +63,7 @@ export function visibleMetadataOverrides(
     }
     visible.push({
       override,
-      label: target.label.trim() || metadataPlatformLabel(target.platform)
+      label: destinationLabel(target.label.trim()) || metadataPlatformLabel(target.platform)
     })
   }
   return visible
@@ -87,7 +88,7 @@ export function metadataOverrideSummary(
   draft: Pick<StreamMetadataDraft, 'defaultPrivacy'>,
   override: StreamTargetMetadataDraft
 ): string {
-  const parts: string[] = [override.customize ? 'Custom title' : 'Global title']
+  const parts: string[] = [override.customize ? 'Own title' : 'Shared title']
   switch (override.platform) {
     case 'youtube': {
       parts.push(privacyLabel(override.customize ? override.privacy : draft.defaultPrivacy))
@@ -122,4 +123,31 @@ export function metadataOverrideSummary(
       break
   }
   return parts.join(' · ')
+}
+
+/**
+ * Stream details' one state word (plan 174 S3.5b, D-5): edits not saved yet,
+ * saved and checked, or saved with details that need attention. Nothing
+ * before the first check: a fresh page is not "ready" by default.
+ */
+export function streamDetailsStatus({
+  dirty,
+  validation
+}: {
+  dirty: boolean
+  validation: { valid: boolean; issues: readonly unknown[] } | null
+}): { tone: 'good' | 'warn' | 'neutral'; label: string } | null {
+  if (dirty) return { tone: 'neutral', label: 'Unsaved changes' }
+  if (!validation) return null
+  if (validation.valid) return { tone: 'good', label: 'Checked' }
+  const count = validation.issues.length
+  return {
+    tone: 'warn',
+    label:
+      count === 1
+        ? '1 detail needs attention'
+        : count > 1
+          ? `${count} details need attention`
+          : 'Needs attention'
+  }
 }

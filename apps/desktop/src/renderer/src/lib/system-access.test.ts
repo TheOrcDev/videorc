@@ -283,7 +283,7 @@ describe('systemAccessRows', () => {
     expect(rows[1].state).toBe('not-granted')
     expect(rows[1].detail).toMatch(/System Settings/)
     expect(rows[2].state).toBe('first-use')
-    expect(rows[2].detail).toMatch(/mic check/)
+    expect(rows[2].detail).toMatch(/test the microphone/)
   })
 
   it('omits the Screen Recording row on Windows (no per-app screen permission)', () => {

@@ -1,0 +1,146 @@
+import { useEffect, useRef, useState, type ReactElement } from 'react'
+
+import { BuddyAvatarSection, type BuddyAvatarView } from '@/components/buddy-avatar-section'
+import { BuddyLookSection } from '@/components/buddy-look-section'
+import { BuddyMotionSection } from '@/components/buddy-motion-section'
+import type { BuddyPetPreviewHandle, BuddyPetPreviewInfo } from '@/components/buddy-pet-preview'
+import { BuddyReactionsSection } from '@/components/buddy-reactions-section'
+import { ConfigGrid } from '@/components/page'
+import { useBuddyLibrary } from '@/hooks/use-buddy-library'
+import { useBuddyLook, useBuddyLookClient } from '@/hooks/use-buddy-look'
+import { useBuddyPets, type BuddyPets } from '@/hooks/use-buddy-pets'
+import { useStudioCore } from '@/hooks/use-studio'
+import type { BuddyLibraryState, CohostPersona, BuddyPetImportResult } from '@/lib/backend'
+import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
+import { buddyPackToWear, writeBuddyWornPack } from '@/lib/buddy-worn-pack'
+import { BUDDY_STILL_REACTION_IDS, type BuddyMotionSettings } from '../../../shared/buddy-pet'
+
+/**
+ * The living Buddy's settings on the Buddy tab (plan 168 S-D2): Avatar with
+ * the preview, then Reactions beside Motion. One owner for what the three
+ * share: the pack list, the preview (Try plays in it) and the Motion draft
+ * (the preview follows the slider before it is saved).
+ */
+export function BuddyPetSettings({
+  pets: injectedPets,
+  library: injectedLibrary,
+  importFolder
+}: {
+  /** Tests inject the pack list; the app reads `cohost.pet.list`. */
+  pets?: BuddyPets
+  /** Tests inject the account library; the app shares the Buddy tab's client. */
+  library?: BuddyLibraryState | null
+  importFolder?: (personaId: string) => Promise<BuddyPetImportResult | null>
+}): ReactElement | null {
+  const { cohostSettings, patchCohostSettings } = useStudioCore()
+  const connectedPets = useBuddyPets()
+  const pets = injectedPets ?? connectedPets
+  const client = useBuddyLookClient()
+  const { state: libraryState } = useBuddyLibrary(injectedLibrary === undefined ? client : null)
+  const library = injectedLibrary === undefined ? libraryState.library : injectedLibrary
+  const persona = cohostSettings?.persona ?? null
+  // The pack the account keeps for the linked Buddy (plan 172 D10): removing
+  // it here removes it there too, and the confirm says so.
+  const accountPackId =
+    (persona?.libraryAvatarId &&
+      library?.mine?.find((entry) => entry.id === persona.libraryAvatarId)?.alive?.packId) ||
+    null
+  // The Still panel's look (shared with My Buddies): Alive says when a new
+  // one is being drawn or waits under Still (plan 174 G-10).
+  const { state: look } = useBuddyLook(client)
+  const lookPending =
+    look.pending === 'create' || look.running?.kind === 'create'
+      ? 'working'
+      : look.draft
+        ? 'draft'
+        : null
+  const previewRef = useRef<BuddyPetPreviewHandle>(null)
+  // Alive picked with nothing to wear yet: the empty state, unsaved (the
+  // wire's Alive always names a pack).
+  const [aliveDraft, setAliveDraft] = useState(false)
+  const [motionDraft, setMotionDraft] = useState<BuddyMotionSettings | null>(null)
+  const [previewInfo, setPreviewInfo] = useState<BuddyPetPreviewInfo | null>(null)
+  // The list is read when the tab opens, but the backend also installs packs
+  // by itself: an official Buddy's first use downloads its pack, a library
+  // Buddy brings its own, the creator saves one. When the Buddy wears a pack
+  // the list does not have, list again (once for that pack), so its row
+  // shows checked and Remove works without reopening the tab.
+  const wornNow = persona?.avatar.kind === 'alive' ? persona.avatar.packId : null
+  const unlistedPackId =
+    wornNow !== null && pets.packs !== null && !pets.packs.some((pack) => pack.packId === wornNow)
+      ? wornNow
+      : null
+  const relistPets = pets.refresh
+  useEffect(() => {
+    if (unlistedPackId) void relistPets()
+  }, [unlistedPackId, relistPets])
+  if (!persona) return null
+
+  const save = (next: CohostPersona): Promise<void> => patchCohostSettings({ persona: next })
+  const wornPackId = persona.avatar.kind === 'alive' ? persona.avatar.packId : null
+  const view: BuddyAvatarView = wornPackId || aliveDraft ? 'alive' : 'still'
+  const previewPackId = view === 'still' ? BUDDY_STILL_PACK_ID : wornPackId
+
+  const wear = async (packId: string): Promise<void> => {
+    await save({ ...persona, avatar: { kind: 'alive', packId } })
+    // Still forgets the pack on the wire; Alive comes back to this one (G-10).
+    writeBuddyWornPack(persona.id, packId)
+    setAliveDraft(false)
+  }
+  const changeView = async (next: BuddyAvatarView): Promise<void> => {
+    if (next === view) return
+    if (next === 'still') {
+      setAliveDraft(false)
+      if (persona.avatar.kind !== 'still') await save({ ...persona, avatar: { kind: 'still' } })
+      return
+    }
+    // Alive wears a pack at once when there is one (the one worn last, else
+    // the first own pack); else the empty state.
+    const pack = buddyPackToWear(persona.id, pets.packs ?? [])
+    if (!pack) {
+      setAliveDraft(true)
+      return
+    }
+    await wear(pack.packId)
+  }
+
+  const activeReactions: readonly string[] =
+    view === 'still'
+      ? BUDDY_STILL_REACTION_IDS
+      : (pets.packs?.find((pack) => pack.packId === wornPackId)?.reactions ??
+        (previewInfo?.packId === wornPackId ? previewInfo.reactions : []))
+
+  return (
+    <>
+      <BuddyAvatarSection
+        accountPackId={accountPackId}
+        importFolder={importFolder}
+        lookPending={lookPending}
+        motion={motionDraft ?? persona.motion}
+        persona={persona}
+        pets={pets}
+        previewPackId={previewPackId}
+        previewRef={previewRef}
+        stillPanel={<BuddyLookSection />}
+        view={view}
+        onPreviewLoad={setPreviewInfo}
+        onUnwear={async () => {
+          await save({ ...persona, avatar: { kind: 'still' } })
+          setAliveDraft(true)
+        }}
+        onViewChange={changeView}
+        onWear={wear}
+      />
+      {/* One hairline under both columns, as the column pair ends level. */}
+      <ConfigGrid className="border-b border-border lg:[&>*]:border-b-0">
+        <BuddyReactionsSection
+          persona={persona}
+          reactions={activeReactions}
+          onSave={save}
+          onTry={previewPackId ? (reaction) => previewRef.current?.react(reaction) ?? false : null}
+        />
+        <BuddyMotionSection persona={persona} onDraft={setMotionDraft} onSave={save} />
+      </ConfigGrid>
+    </>
+  )
+}

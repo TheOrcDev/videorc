@@ -8,15 +8,28 @@ const render = (props: Parameters<typeof NotesWindow>[0] = {}): string =>
   renderToStaticMarkup(createElement(NotesWindow, props))
 
 describe('NotesWindow', () => {
-  it('renders the window-family header: title, text size and keep-on-top', () => {
+  it('renders the window-family header with the title only', () => {
     const markup = render()
-    expect(markup).toContain('>Notes<')
-    expect(markup).toContain('aria-label="Text size"')
-    for (const label of ['S text', 'M text', 'L text']) {
-      expect(markup).toContain(`aria-label="${label}"`)
-    }
-    expect(markup).toContain('aria-label="Keep notes in front of all apps"')
+    // Plan 174 S1.6b (I-29): the shared window header, its title an h1.
+    expect(markup).toContain('data-slot="window-header-title">Notes</h1>')
     expect(markup).toContain('[-webkit-app-region:drag]')
+    // Plan 174 S3.19: no controls in the title row.
+    expect(markup).not.toContain('data-slot="window-header-actions"')
+    const header = markup.slice(markup.indexOf('<header'), markup.indexOf('</header>'))
+    expect(header).not.toContain('radiogroup')
+    expect(header).not.toContain('Keep on top')
+  })
+
+  it('puts text size and keep-on-top in the footer status line', () => {
+    const markup = render()
+    const footer = markup.slice(markup.indexOf('<footer'), markup.indexOf('</footer>'))
+    expect(footer).toContain('aria-label="Text size"')
+    // One segmented control (plan 174 S1.7), each size named in full (I-24).
+    expect(footer).toContain('role="radiogroup"')
+    for (const label of ['Small text', 'Medium text', 'Large text']) {
+      expect(footer).toContain(`aria-label="${label}"`)
+    }
+    expect(footer).toContain('aria-label="Keep on top"')
   })
 
   it('keeps the teleprompter private and bounded', () => {
@@ -32,6 +45,8 @@ describe('NotesWindow', () => {
   it('shows word count and save state in the status line', () => {
     const markup = render()
     expect(markup).toContain('>0 words<')
+    // Visual only (I-24): a live region here announced every keystroke.
+    expect(markup).not.toContain('aria-live')
     // Line height survives the font-size merge.
     expect(markup).toContain('leading-[1.45]')
     expect(markup).toContain('field-sizing-fixed')

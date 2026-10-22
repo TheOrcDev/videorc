@@ -1,0 +1,248 @@
+import { DeleteIcon, SparkleIcon } from '@/components/icons'
+import { useState, type KeyboardEvent, type ReactElement } from 'react'
+
+import { ConfirmDialog } from '@/components/confirm-dialog'
+
+import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
+import {
+  BUDDY_LOOK_TILES_COPY,
+  BuddyLookWorkingLine,
+  BuddyPoseTile,
+  BuddyPoseTiles
+} from '@/components/buddy-look-tiles'
+import { Alert, AlertTitle } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { Skeleton } from '@/components/ui/skeleton'
+import { useBuddyLook, useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
+import { useStudioCore } from '@/hooks/use-studio'
+import { COHOST_AVATAR_STATES } from '@/lib/backend'
+import { buddyImagesLeftLine, buddyLookRedoGate } from '@/lib/buddy-create-gate'
+import { BUDDY_DEFAULT_PACK, buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import { buddyLookDraftImages } from '@/lib/buddy-look-view'
+import { BUDDY_ONBOARDING_STEP4 } from '@/lib/buddy-onboarding-copy'
+import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
+import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
+import { inlineUserError } from '@/lib/user-error'
+
+/** The draft's living preview: big enough to read the pose, small beside the actions. */
+const DRAFT_PREVIEW_PX = 112
+
+type LookView = 'working' | 'draft' | 'current'
+
+/**
+ * "Your Buddy's look" (plan 169 D10 to D13), the Avatar section's Still
+ * panel. Since plan 170 a new look is made in the four-step onboarding
+ * (New Buddy, under My Buddies); this panel shows the active look and, while
+ * a look is being made or waits as a draft (the onboarding closed before
+ * deciding), the same four tiles: Cancel while it is drawn (plan 174 G-14),
+ * Redo for one image (R on a focused tile), Keep this look (⌘↵) and Delete.
+ * Make it Alive opens the Alive creator with the current look. Nothing
+ * toasts: the tiles are the confirmation.
+ */
+export interface BuddyLookSectionProps {
+  /** Tests inject the backend; the app shares the Buddy tab's client. */
+  client?: BuddyLookClient | null
+}
+
+export function BuddyLookSection({
+  client: injectedClient
+}: BuddyLookSectionProps): ReactElement | null {
+  const {
+    account,
+    aiCapabilities,
+    aiConsent,
+    cohostGate,
+    cohostSettings,
+    patchCohostSettings,
+    runtimeInfo
+  } = useStudioCore()
+  const connected = useBuddyLookClient()
+  const client = injectedClient !== undefined ? injectedClient : connected
+  const { state, controller } = useBuddyLook(client)
+  const persona = cohostSettings?.persona ?? null
+  const capabilities = state.capabilities ?? aiCapabilities ?? null
+  const redoGate = buddyLookRedoGate({
+    signedIn: account?.status === 'signed-in',
+    gate: cohostGate,
+    consented: aiConsent,
+    capabilities
+  })
+  const platform = runtimeInfo?.platform
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+
+  if (!persona) return null
+
+  const creating = state.pending === 'create' || state.running?.kind === 'create'
+  const busy = state.pending !== null || state.running !== null
+  const view: LookView = creating ? 'working' : state.draft ? 'draft' : 'current'
+
+  const keep = async (): Promise<void> => {
+    if (!controller) return
+    setSaveError(null)
+    const settings = await controller.keep()
+    if (!settings) return
+    // The provider's copy of the persona follows the backend's.
+    await patchCohostSettings({ persona: settings.persona }).catch((error: unknown) =>
+      setSaveError(inlineUserError(error, { action: 'save', object: "Buddy's look" }, 'buddy-look'))
+    )
+  }
+  const keepAllowed = Boolean(controller) && view === 'draft' && !busy
+
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return
+    if (view !== 'draft') return
+    event.preventDefault()
+    if (keepAllowed) void keep()
+  }
+
+  const problem = state.problem?.message ?? saveError
+
+  return (
+    <div data-testid="buddy-look" data-view={view} onKeyDown={onKeyDown}>
+      <FieldGroup variant="grouped">
+        <Field>
+          <FieldLabel>
+            {view === 'working'
+              ? 'Making the new look…'
+              : view === 'draft'
+                ? 'Your new look'
+                : 'Current look'}
+          </FieldLabel>
+          <FieldDescription>
+            {view === 'working'
+              ? 'Idle first, then talk, laugh and think from it.'
+              : view === 'draft'
+                ? `Use it to give ${persona.name} this look. Redo remakes one pose from this idle.`
+                : persona.source === 'default'
+                  ? 'The default Buddy until you create your own.'
+                  : `What ${persona.name} wears on stream.`}
+          </FieldDescription>
+          {view === 'current' ? (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-testid="buddy-look-tiles">
+              {COHOST_AVATAR_STATES.map((avatarState) => {
+                const url = buddyStateImageUrl(persona, avatarState)
+                const bundled = url === BUDDY_DEFAULT_PACK[avatarState]
+                const fallsBack = !bundled && !persona.images[avatarState]
+                return (
+                  <BuddyPoseTile
+                    key={avatarState}
+                    badge={bundled ? 'Default' : fallsBack ? 'Uses idle' : undefined}
+                    label={BUDDY_LOOK_TILES_COPY.labels[avatarState]}
+                    state={avatarState}
+                    url={url}
+                  />
+                )
+              })}
+            </div>
+          ) : (
+            <BuddyPoseTiles
+              busy={busy}
+              controller={controller}
+              copy={BUDDY_LOOK_TILES_COPY}
+              imagesLeft={buddyImagesLeftLine(capabilities)}
+              redoAllowed={redoGate === null}
+              redoReason={redoGate?.reason ?? null}
+              state={state}
+              view={view}
+            />
+          )}
+          {view === 'working' ? (
+            <BuddyLookWorkingLine
+              cancelling={state.pending === 'cancel'}
+              line={BUDDY_ONBOARDING_STEP4.working}
+              startedAt={state.startedAt}
+              testId="buddy-look-working"
+              onCancel={controller ? () => void controller.cancel() : undefined}
+            />
+          ) : null}
+          {view === 'draft' && state.draft ? (
+            <div
+              className="flex flex-wrap items-center gap-4"
+              data-testid="buddy-look-draft-actions"
+            >
+              <LazyBuddyPetPreview
+                className="rounded-row border border-border bg-inset"
+                label={`${persona.name}, new look`}
+                motion={persona.motion}
+                packId={BUDDY_STILL_PACK_ID}
+                personaId={persona.id}
+                placeholder={<Skeleton className="size-full rounded-row" />}
+                size={DRAFT_PREVIEW_PX}
+                stillImages={buddyLookDraftImages(state.draft, state.revision)}
+              />
+              <div className="flex min-w-48 flex-1 flex-col gap-2">
+                <p className="text-xs text-muted-foreground">
+                  The new look in motion. Click it to react.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    data-testid="buddy-look-keep"
+                    disabled={!keepAllowed}
+                    type="button"
+                    onClick={() => void keep()}
+                  >
+                    {BUDDY_ONBOARDING_STEP4.use}
+                    <ShortcutKeys
+                      accelerator="CmdOrCtrl+Enter"
+                      className="ml-0.5"
+                      platform={platform}
+                    />
+                  </Button>
+                  <Button
+                    data-testid="buddy-look-discard"
+                    disabled={!controller || busy}
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setDeleteOpen(true)}
+                  >
+                    <DeleteIcon data-icon="inline-start" />
+                    Delete…
+                  </Button>
+                  {/* Plan 174 S0.3 (G-1): the draft is saved to the library
+                      as soon as it is made, so throwing it away asks. */}
+                  <ConfirmDialog
+                    cancelLabel="Keep it"
+                    confirmLabel="Delete look"
+                    description={`Its pictures are removed from your Videorc account. ${persona.name} keeps the current look.`}
+                    open={deleteOpen}
+                    testId="buddy-look-delete"
+                    title="Delete the new look?"
+                    onCancel={() => setDeleteOpen(false)}
+                    onConfirm={() => {
+                      setDeleteOpen(false)
+                      void controller?.discard()
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {view === 'current' && persona.source !== 'default' ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Button
+                data-testid="buddy-look-make-alive"
+                type="button"
+                variant="outline"
+                onClick={() => openBuddyPetCreator({ reference: 'persona-idle' })}
+              >
+                <SparkleIcon data-icon="inline-start" />
+                Make it Alive
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                The same character, moving: it looks around and reacts.
+              </span>
+            </div>
+          ) : null}
+          {problem ? (
+            <Alert data-testid="buddy-look-error" variant="destructive">
+              <AlertTitle>{problem}</AlertTitle>
+            </Alert>
+          ) : null}
+        </Field>
+      </FieldGroup>
+    </div>
+  )
+}

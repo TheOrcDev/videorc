@@ -47,6 +47,9 @@ fn inputs(snapshot: Option<&CompositorSceneSnapshot>) -> CompositorRenderInputs<
         screen_frame: None,
         caption_overlay: None,
         highlight_overlay: None,
+        buddy_overlay: None,
+        buddy_leg: None,
+        banners: &[],
     }
 }
 
@@ -245,6 +248,8 @@ async fn publish(
         None,
         None,
         None,
+        false,
+        false,
         false,
         false,
         false,
@@ -603,6 +608,8 @@ async fn scene_switch_artifact_fixture() {
                 false,
                 false,
                 false,
+                false,
+                false,
             )
             .await;
             if metal {
@@ -745,6 +752,8 @@ async fn source_iso_artifact_fixture() {
                 }),
                 iso_screen_gpu.as_mut(),
                 iso_camera_gpu.as_mut(),
+                false,
+                false,
                 false,
                 false,
                 false,
@@ -1266,6 +1275,8 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             false,
             false,
             false,
+            false,
+            false,
         )
         .await;
         let snapshot = state
@@ -1452,6 +1463,8 @@ async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_revea
             None,
             None,
             None,
+            false,
+            false,
             false,
             false,
             false,

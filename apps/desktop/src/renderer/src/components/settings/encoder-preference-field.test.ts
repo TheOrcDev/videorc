@@ -32,7 +32,7 @@ describe('EncoderPreferenceField (plan 090 C5)', () => {
       quickSyncAvailable: true,
       envOverride: true
     })
-    expect(markup).toContain('VIDEORC_WINDOWS_H264_ENCODER')
+    expect(markup).toContain('Set by a launch setting for this run.')
     expect(markup).toContain('disabled=""')
   })
 })

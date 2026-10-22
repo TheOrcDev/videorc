@@ -86,7 +86,7 @@ export function AvatarCircle({
     <span
       aria-hidden
       className={cn(
-        'grid size-6 shrink-0 select-none place-items-center overflow-hidden rounded-full border border-border bg-muted/40 text-[10px] font-semibold text-muted-foreground',
+        'grid size-6 shrink-0 select-none place-items-center overflow-hidden rounded-full border border-border bg-muted/40 text-[11px] font-semibold text-muted-foreground',
         className
       )}
     >

@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react'
+import { useRef, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -12,20 +12,40 @@ import {
 import { openVideorcWebLink, releaseNotesUrl } from '@/lib/videorc-web-links'
 import { formatChangelogVersion, type ChangelogEntry } from '@/lib/whats-new'
 
+/**
+ * The line under the highlights when the update also brought releases the
+ * streamer never saw (plan 174 S3.21, A-19): the dialog shows the newest and
+ * names the rest. Here, not in lib/whats-new.ts, which is in the eager bundle.
+ */
+export function skippedReleasesLine(versions: readonly string[]): string | null {
+  if (versions.length === 0) return null
+  const names = versions.map(formatChangelogVersion)
+  const list =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  return `Also includes ${list}.`
+}
+
 // Post-update changelog highlights. Chrome stays monochrome per the design
 // language — the glass Dialog primitive carries the styling.
 export function WhatsNewDialog({
   entry,
+  skippedVersions = [],
   open,
   onClose
 }: {
   entry: ChangelogEntry | null
+  /** Releases between the last seen one and `entry`, newest first (plan 174 A-19). */
+  skippedVersions?: readonly string[]
   open: boolean
   onClose: () => void
 }): ReactElement | null {
+  const continueRef = useRef<HTMLButtonElement>(null)
   if (!entry) {
     return null
   }
+  const skipped = skippedReleasesLine(skippedVersions)
 
   return (
     <Dialog
@@ -36,7 +56,14 @@ export function WhatsNewDialog({
         }
       }}
     >
-      <DialogContent className="max-w-md">
+      {/* Continue takes the focus (plan 174 S3.21, A-19): Return closes the
+          dialog instead of sending the first button's link to the browser. */}
+      <DialogContent
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          continueRef.current?.focus()
+        }}
+      >
         <DialogHeader>
           <DialogTitle>
             What&apos;s new in Videorc {formatChangelogVersion(entry.version)}
@@ -54,15 +81,19 @@ export function WhatsNewDialog({
             </li>
           ))}
         </ul>
+        {skipped ? (
+          <p className="text-xs text-muted-foreground" data-testid="whats-new-skipped">
+            {skipped}
+          </p>
+        ) : null}
         <DialogFooter>
           <Button
-            size="sm"
             variant="ghost"
             onClick={() => openVideorcWebLink(releaseNotesUrl(entry.version))}
           >
             Full release notes
           </Button>
-          <Button size="sm" onClick={onClose}>
+          <Button ref={continueRef} onClick={onClose}>
             Continue
           </Button>
         </DialogFooter>

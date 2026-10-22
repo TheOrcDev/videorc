@@ -40,7 +40,7 @@ export interface CleanCutClient {
 }
 
 /**
- * Clean cut in the Orcle tab (plan 119 S14). Like the stream report, it opens
+ * Clean cut in the Buddy tab (plan 119 S14). Like the stream report, it opens
  * its own backend client while the tab is mounted, so Clean cut adds nothing
  * to the main window's startup bundle or its provider. The client follows
  * the studio's connection, so a backend restart reconnects it.

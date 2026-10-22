@@ -49,7 +49,7 @@ function harness(handler: (method: string, params: unknown) => Promise<CohostSta
   }
 }
 
-describe('the Stream Manager answers Orcle (plan 140, S6 part B)', () => {
+describe('the Stream Manager answers Buddy (plan 140, S6 part B)', () => {
   it('maps each answer to its cohost.command call and commits the state', async () => {
     const test = harness(async () => state)
     await test.send({

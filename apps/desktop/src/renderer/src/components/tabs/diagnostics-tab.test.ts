@@ -23,7 +23,7 @@ describe('Diagnostics WebSocket queue copy', () => {
         coalescedCount: 0,
         evictedOrDroppedCount: 0
       })
-    ).toBe('0/4 current/max · -- oldest · 0 coalesced · 0 evicted/dropped')
+    ).toBe('0/4 current/max · – oldest · 0 coalesced · 0 evicted/dropped')
   })
 })
 
@@ -44,6 +44,6 @@ describe('Diagnostics record latency copy', () => {
   })
 
   it('keeps the placeholder when no timeline has been published', () => {
-    expect(formatSlowestPhase(undefined)).toBe('--')
+    expect(formatSlowestPhase(undefined)).toBe('–')
   })
 })

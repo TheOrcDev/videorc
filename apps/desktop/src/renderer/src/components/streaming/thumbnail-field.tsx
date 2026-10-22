@@ -81,13 +81,12 @@ export function ThumbnailField({
         </FieldDescription>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        <Button disabled={disabled} size="sm" variant="outline" onClick={choose}>
-          {assetId ? 'Replace thumbnail' : 'Choose thumbnail'}
+        <Button disabled={disabled} variant="outline" onClick={choose}>
+          {assetId ? 'Replace thumbnail…' : 'Choose thumbnail…'}
         </Button>
         {assetId && removable ? (
           <Button
             disabled={disabled}
-            size="sm"
             variant="ghost"
             onClick={() => {
               setError('')
@@ -100,7 +99,7 @@ export function ThumbnailField({
       </div>
       {error ? <FieldDescription role="alert">{error}</FieldDescription> : null}
       {measured && !isSixteenByNine(measured.width, measured.height) ? (
-        <FieldDescription>This image is not 16:9. YouTube will add bars.</FieldDescription>
+        <FieldDescription>This image isn't 16:9. YouTube will add bars.</FieldDescription>
       ) : null}
       <FieldDescription>{hint}</FieldDescription>
     </Field>

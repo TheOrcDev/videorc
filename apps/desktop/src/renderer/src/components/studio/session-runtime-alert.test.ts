@@ -81,11 +81,36 @@ describe('SessionRuntimeAlert', () => {
       })
     )
 
-    expect(failureMarkup).toContain('Live session stopped unexpectedly')
+    expect(failureMarkup).toContain('Livestream stopped unexpectedly')
     expect(failureMarkup).not.toContain('Recording stopped unexpectedly')
-    expect(microphoneMarkup).toContain('Microphone stopped: live session continues with silence')
+    expect(microphoneMarkup).toContain('Microphone stopped: livestream continues with silence')
     expect(microphoneMarkup).not.toContain('recording continues')
     expect(failureMarkup).not.toContain('Open Library')
+  })
+
+  // Plan 174 B-6: Go Live records too, so its failure speaks of the live
+  // session and still opens the saved file.
+  it('uses live-session copy for Go Live and keeps the saved file actions', () => {
+    const markup = renderToStaticMarkup(
+      createElement(SessionRuntimeAlert, {
+        notice: {
+          kind: 'recording-failed',
+          sessionId: 'go-live',
+          outputPath: '/recordings/go-live.mkv',
+          activity: 'record+stream',
+          message: 'The encoder stopped.',
+          at: 7
+        },
+        onDismiss: vi.fn(),
+        onOpenLibrary: vi.fn(),
+        onRevealOutput: vi.fn()
+      })
+    )
+
+    expect(markup).toContain('Livestream stopped unexpectedly')
+    expect(markup).not.toContain('Recording stopped unexpectedly')
+    expect(markup).toContain('Open Library')
+    expect(markup).toContain(revealInFileManagerLabel())
   })
 
   it('switches a persistent microphone warning to past tense after a take is saved', () => {

@@ -1,15 +1,17 @@
 import type { CohostQuestion, CohostState } from './backend'
+import { plural } from './format'
 import {
   cohostErrorDetail,
   cohostErrorDetailText,
   cohostListeningView,
-  cohostReasonLabel
+  cohostReasonLabel,
+  cohostRetryReasonLabel
 } from './cohost-view'
 
 // Co-host presence (W2). One pure derivation of `cohost.state` that every
 // surface renders: the Comments window header, the pane's segment header and
 // the Studio session panel. Presence is UNCONDITIONAL — a null or off-shaped
-// state is a state ("Orcle off"), never an absence.
+// state is a state ("Buddy off"), never an absence.
 //
 // Color discipline (videorc-design): the live accent is earned ONLY by an
 // engine that is actually listening; destructive red ONLY by a real error.
@@ -22,6 +24,9 @@ export type CohostPresenceKind =
   | 'reading'
   | 'thinking'
   | 'paused'
+  /** A tick failed and the next attempt is scheduled (`retryAt`): Buddy is
+   * still there, so it reads calm, never as stopped. */
+  | 'retrying'
   | 'error'
 
 export interface CohostPresenceView {
@@ -80,16 +85,14 @@ function nonNegative(value: number | undefined): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
 }
 
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`
-}
-
 function presenceKind(
   state: CohostState | null,
   options: CohostPresenceOptions
 ): CohostPresenceKind {
   if (!state || state.status === 'off') return options.starting ? 'starting' : 'off'
-  if (state.status === 'error') return 'error'
+  // A failed tick with its next attempt scheduled is a retry, not a stop:
+  // the engine only publishes `retryAt` while its backoff still climbs.
+  if (state.status === 'error') return state.retryAt ? 'retrying' : 'error'
   if (state.status === 'paused') return 'paused'
   // Listening. Thinking outranks reading: a tick is already carrying whatever
   // was pending, so "thinking…" is the truthful newer fact.
@@ -98,6 +101,11 @@ function presenceKind(
   return 'listening'
 }
 
+/**
+ * The one status vocabulary (plan 174 F-20): the Stream Manager's Buddy pane,
+ * the Studio's Buddy row and the Buddy page say the same words. Never
+ * "Buddy" in front: every surface already names Buddy beside its status.
+ */
 function presenceLabel(
   kind: CohostPresenceKind,
   state: CohostState | null,
@@ -105,24 +113,39 @@ function presenceLabel(
 ): string {
   switch (kind) {
     case 'off':
-      return 'Orcle off'
+      return 'Off'
     case 'starting':
-      return 'Orcle starting'
-    case 'reading': {
-      const pending = nonNegative(state?.pendingMessages)
-      return `Orcle · reading ${pending} new…`
-    }
+      return 'Starting…'
+    case 'reading':
+      return `Reading ${nonNegative(state?.pendingMessages)} new…`
     case 'thinking':
-      return 'Orcle · thinking…'
+      return 'Thinking…'
     case 'listening':
-      return openCount > 0 ? `Orcle · ${openCount} q` : 'Orcle is reading chat'
+      return openCount > 0 ? plural(openCount, 'question') : 'Reading chat'
     case 'paused': {
       const reason = cohostReasonLabel(state?.reason ?? null)
-      return reason ? `Orcle paused · ${reason}` : 'Orcle paused'
+      return reason ? `Paused: ${reason}` : 'Paused'
     }
-    case 'error':
-      return 'Orcle error'
+    case 'retrying': {
+      const reason = cohostRetryReasonLabel(state?.reason ?? null)
+      return reason ? `Retrying: ${reason}` : 'Retrying'
+    }
+    case 'error': {
+      const reason = cohostReasonLabel(state?.reason ?? null)
+      return reason ? `Stopped: ${reason}` : 'Stopped'
+    }
   }
+}
+
+/**
+ * Buddy's status word alone, for a surface without a clock or a dot (the
+ * Buddy page's status row): the same words as `cohostPresenceView`.
+ */
+export function cohostStatusLabel(
+  state: CohostState | null,
+  options: CohostPresenceOptions = {}
+): string {
+  return presenceLabel(presenceKind(state, options), state, state?.questions.length ?? 0)
 }
 
 function presenceTooltip(
@@ -133,37 +156,41 @@ function presenceTooltip(
 ): string[] {
   const lines: string[] = []
   if (kind === 'off') {
-    lines.push('Orcle is off. It reads live chat, groups questions and drafts replies.')
+    lines.push('Buddy is off. It reads live chat, groups questions and drafts replies.')
   }
   if (kind === 'starting') {
-    lines.push('Orcle is starting. Waiting for the first pass.')
+    lines.push('Buddy is starting. Waiting for the first pass.')
   }
 
   const lastPass = cohostAgoLabel(state?.lastTickAt ?? null, nowMs)
   if (lastPass) lines.push(`last pass ${lastPass}`)
 
   const seen = nonNegative(state?.messagesSeen)
-  if (seen > 0) lines.push(`${seen} ${plural(seen, 'message')} read`)
+  if (seen > 0) lines.push(`${plural(seen, 'message')} read`)
 
   const total = nonNegative(state?.questionsTotal)
   if (total > 0) {
-    lines.push(`${total} ${plural(total, 'question')} found (${openCount} open)`)
+    lines.push(`${plural(total, 'question')} found (${openCount} open)`)
   } else if (openCount > 0) {
-    lines.push(`${openCount} ${plural(openCount, 'question')} open`)
+    lines.push(`${plural(openCount, 'question')} open`)
   }
 
   const nextPass = cohostNextPassLabel(state?.nextTickAt ?? null, nowMs)
   if (nextPass) lines.push(`next pass in ${nextPass}`)
 
+  // A retry is a promise the engine made (`retryAt`), so it is said in time.
+  const nextTry = kind === 'retrying' ? cohostNextPassLabel(state?.retryAt ?? null, nowMs) : null
+  if (nextTry) lines.push(`next try in ${nextTry}`)
+
   if (state?.partial === true) lines.push('Chat outran one AI pass; the newest messages were used.')
 
-  // Whether Orcle hears the streamer (plan 068): a sentence, never a second dot.
+  // Whether Buddy hears the streamer (plan 068): a sentence, never a second dot.
   const listening = cohostListeningView(state?.listening)
   if (listening) lines.push(listening.detail)
 
   // The failed tick in the server's own words — the one thing a streamer can
   // paste into a bug report. Only ever shown on a state that actually failed.
-  if (kind === 'error' || kind === 'paused') {
+  if (kind === 'error' || kind === 'retrying' || kind === 'paused') {
     const detail = cohostErrorDetailText(cohostErrorDetail(state))
     if (detail) lines.push(detail)
   }
@@ -193,7 +220,9 @@ export function cohostPresenceView(
         : kind === 'listening' || kind === 'reading' || kind === 'thinking'
           ? 'live'
           : 'muted',
-    pulse: kind === 'starting' || kind === 'thinking',
+    // A retry pulses like a start: the engine is doing something the
+    // streamer cannot see yet. The dot stays chrome; red is for a real stop.
+    pulse: kind === 'starting' || kind === 'thinking' || kind === 'retrying',
     dots: kind === 'reading' || kind === 'thinking',
     tooltipLines: presenceTooltip(kind, state, openCount, now),
     openCount,
@@ -206,12 +235,15 @@ export function cohostPresenceView(
 export function cohostEmptyStateCopy(view: CohostPresenceView, state: CohostState | null): string {
   if (view.kind === 'reading') {
     const pending = nonNegative(state?.pendingMessages)
-    return `Reading ${pending} new ${plural(pending, 'message')}…`
+    return `Reading ${plural(pending, 'new message')}…`
   }
   if (view.kind === 'thinking') return 'Thinking about the last batch…'
   if (view.kind === 'listening') return 'Reading chat. Questions will appear here.'
   if (view.kind === 'starting') return 'Starting. Questions from chat will appear here.'
-  return 'Questions from chat will appear here once Orcle is reading chat again.'
+  if (view.kind === 'retrying') {
+    return "Videorc AI didn't answer. Buddy is trying again; questions will appear here."
+  }
+  return 'Questions from chat will appear here once Buddy is reading chat again.'
 }
 
 /**
@@ -232,7 +264,7 @@ export function cohostGroupedDeltaFlash(
   const known = new Set(previous.questions.map((question) => question.id))
   const added = next.questions.filter((question) => !known.has(question.id)).length
   if (added <= 0) return null
-  return `grouped ${added} ${plural(added, 'question')}`
+  return `grouped ${plural(added, 'question')}`
 }
 
 /** Question ids in a stable shape for the unread reducer and the toast. */

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import {
   classifyProcess,
+  classifyProcessInTable,
   collectProcessCensus,
   collectProcessResourceDetails,
   collectStableProcessResourceCheckpoint,
@@ -770,3 +771,45 @@ function completeResourceCheckpoint(rows) {
     }
   }
 }
+
+test('classifies a Linux dev Electron tree by ancestry (Linux plan 0020)', () => {
+  const electron =
+    '/home/u/videorc/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron'
+  const rows = [
+    { pid: 10, ppid: 1, command: 'electron', args: `${electron} .` },
+    {
+      pid: 11,
+      ppid: 10,
+      command: 'electron',
+      args: `${electron} --type=zygote --no-zygote-sandbox`
+    },
+    { pid: 12, ppid: 10, command: 'electron', args: `${electron} --type=zygote` },
+    { pid: 13, ppid: 12, command: 'electron', args: `${electron} --type=zygote` },
+    {
+      pid: 14,
+      ppid: 11,
+      command: 'electron',
+      args: `${electron} --type=zygote --no-zygote-sandbox`
+    },
+    { pid: 15, ppid: 13, command: 'electron', args: `${electron} --type=zygote` },
+    {
+      pid: 16,
+      ppid: 10,
+      command: 'electron',
+      args: '/proc/self/exe --type=utility --utility-sub-type=network.mojom.NetworkService'
+    }
+  ]
+  const byPid = new Map(rows.map((row) => [row.pid, row]))
+  assert.deepEqual(
+    rows.map((row) => classifyProcessInTable(row, byPid)),
+    [
+      'electron-main',
+      'electron-child',
+      'electron-child',
+      'electron-child',
+      'electron-gpu',
+      'electron-renderer',
+      'electron-child'
+    ]
+  )
+})

@@ -212,7 +212,7 @@ try {
     await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
     const back = await device.intent({ kind: 'systemAudioToggle' })
     if (!back.ok) fail(`systemAudioToggle back was refused: ${back.message}`)
-  } else if (systemAudio.ok || systemAudio.message !== 'System audio is not available.') {
+  } else if (systemAudio.ok || systemAudio.message !== "System audio isn't available.") {
     fail(`systemAudioToggle without the device: ${JSON.stringify(systemAudio)}`)
   }
   console.log(

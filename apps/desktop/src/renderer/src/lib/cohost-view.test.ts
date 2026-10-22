@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type {
-  CohostErrorDetail,
-  CohostFlag,
-  CohostQuestion,
-  CohostReason,
-  CohostState
-} from '@/lib/backend'
+import type { CohostErrorDetail, CohostFlag, CohostQuestion, CohostState } from '@/lib/backend'
 import {
   activeCohostSpotlight,
   cohostCommentMarks,
@@ -26,7 +20,6 @@ import {
   cohostSensitivityFromStorage,
   cohostStateForSensitivity,
   cohostAskersLabel,
-  cohostChipView,
   cohostErrorDetailText,
   cohostErrorToast,
   cohostErrorToastKey,
@@ -59,9 +52,10 @@ import {
   sortedCohostFlags,
   sortedCohostQuestions,
   trimDraftToCap,
+  BUDDY_HEARS_YOU_USE,
   COHOST_CHAT_CONSENT_SENTENCE,
-  COHOST_CONSENT_SENTENCE,
   COHOST_LISTEN_CONSENT_SENTENCE,
+  COHOST_LISTEN_DISCLOSURE,
   COHOST_LISTEN_PROMPT_STORAGE_KEY,
   COHOST_QUESTION_TOAST_THROTTLE_MS,
   EMPTY_COHOST_STATE,
@@ -109,13 +103,13 @@ function state(overrides: Partial<CohostState> = {}): CohostState {
 /** The 2026-08-23 incident envelope: web answered 502 `ai-gateway-error`. */
 const GATEWAY_502: CohostErrorDetail = {
   code: 'ai-gateway-error',
-  message: 'The Orcle tick failed on every configured model.',
+  message: 'The Buddy tick failed on every configured model.',
   status: 502
 }
 
 const TIMEOUT: CohostErrorDetail = {
   code: 'timeout',
-  message: 'Orcle did not answer within 12 s.',
+  message: 'Buddy did not answer within 12 s.',
   status: null
 }
 
@@ -188,100 +182,15 @@ describe('ordering', () => {
   })
 })
 
-describe('cohostChipView', () => {
-  it('hides entirely without state', () => {
-    expect(cohostChipView(null)).toBeNull()
-  })
-
-  it('is the only chip that earns the live accent while listening', () => {
-    expect(cohostChipView(state({ questions: [question(), question({ id: 'q-2' })] }))).toEqual({
-      label: 'Orcle: listening · 2 q',
-      tone: 'live',
-      detail: null
-    })
-    expect(cohostChipView(state({ questions: [] }))).toEqual({
-      label: 'Orcle: listening',
-      tone: 'live',
-      detail: null
-    })
-  })
-
-  it('names every paused reason in the destination strip vocabulary', () => {
-    const cases: Array<[CohostReason, string]> = [
-      ['premium-required', 'Orcle: paused · Premium'],
-      ['consent-required', 'Orcle: paused · consent'],
-      ['quota-exhausted', 'Orcle: paused · quota'],
-      ['session-expired', 'Orcle: paused · session expired'],
-      ['signed-out', 'Orcle: paused · signed out'],
-      ['server-unconfigured', 'Orcle: paused · unavailable'],
-      ['network', 'Orcle: paused · offline'],
-      ['gateway-error', 'Orcle: paused · AI error']
-    ]
-    for (const [reason, label] of cases) {
-      expect(cohostChipView(state({ status: 'paused', reason }))).toEqual({
-        label,
-        tone: 'muted',
-        detail: null
-      })
-    }
-  })
-
-  it('stays monochrome for off and error', () => {
-    expect(cohostChipView(state({ status: 'off', reason: null }))).toEqual({
-      label: 'Orcle: off',
-      tone: 'muted',
-      detail: null
-    })
-    expect(cohostChipView(state({ status: 'error', reason: 'gateway-error' }))).toEqual({
-      label: 'Orcle: error · AI error',
-      tone: 'muted',
-      detail: null
-    })
-    expect(cohostChipView(state({ status: 'error', reason: null }))).toEqual({
-      label: 'Orcle: error',
-      tone: 'muted',
-      detail: null
-    })
-  })
-
-  it("carries the failed tick in the server's own words as the chip detail", () => {
-    expect(
-      cohostChipView(state({ status: 'error', reason: 'gateway-error', detail: GATEWAY_502 }))
-    ).toEqual({
-      label: 'Orcle: error · AI error',
-      tone: 'muted',
-      detail: 'ai-gateway-error (HTTP 502): The Orcle tick failed on every configured model.'
-    })
-    // No HTTP status for a desktop-side failure.
-    expect(
-      cohostChipView(state({ status: 'error', reason: 'network', detail: TIMEOUT }))?.detail
-    ).toBe('timeout: Orcle did not answer within 12 s.')
-    // A server-side pause (quota) carries its detail too...
-    expect(
-      cohostChipView(
-        state({
-          status: 'paused',
-          reason: 'quota-exhausted',
-          detail: { code: 'quota-exhausted', message: 'Resets at midnight UTC.', status: 429 }
-        })
-      )?.detail
-    ).toBe('quota-exhausted (HTTP 429): Resets at midnight UTC.')
-    // ...but a stale detail never leaks onto a listening or off chip.
-    expect(cohostChipView(state({ detail: GATEWAY_502 }))?.detail).toBeNull()
-    expect(cohostChipView(state({ status: 'off', detail: GATEWAY_502 }))?.detail).toBeNull()
-    // Optional on the wire: an older backend omits the key entirely.
-    const { detail: _omitted, ...legacy } = state({ status: 'error', reason: 'gateway-error' })
-    expect(cohostChipView(legacy as CohostState)?.detail).toBeNull()
-  })
-})
-
 describe('cohostErrorDetailText', () => {
   it('formats code, status and message, degrading when parts are missing', () => {
     expect(cohostErrorDetailText(null)).toBeNull()
     expect(cohostErrorDetailText(undefined)).toBeNull()
     expect(cohostErrorDetailText(GATEWAY_502)).toBe(
-      'ai-gateway-error (HTTP 502): The Orcle tick failed on every configured model.'
+      'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
     )
+    // No HTTP status for a desktop-side failure.
+    expect(cohostErrorDetailText(TIMEOUT)).toBe('timeout: Buddy did not answer within 12 s.')
     expect(cohostErrorDetailText({ code: 'ai-gateway-error', message: '  ', status: 502 })).toBe(
       'ai-gateway-error (HTTP 502)'
     )
@@ -296,7 +205,7 @@ describe('cohostPaneMode', () => {
   const locked = {
     allowed: false as const,
     featureId: 'live-cohost' as const,
-    reason: 'Orcle requires Videorc Premium.',
+    reason: 'Buddy requires Videorc Premium.',
     upgradeUrl: 'https://www.videorc.com/premium'
   }
 
@@ -308,23 +217,18 @@ describe('cohostPaneMode', () => {
     })
   })
 
-  it('asks for cloud-AI consent before the engine can run', () => {
-    expect(cohostPaneMode({ gate: { allowed: true }, consented: false, enabled: true }).kind).toBe(
-      'consent'
-    )
+  it('asks for cloud-AI consent before the engine can run, with no line of its own', () => {
+    // The pane draws the one disclosure from CLOUD_AI_USES (plan 174 S0.2).
+    expect(cohostPaneMode({ gate: { allowed: true }, consented: false, enabled: true })).toEqual({
+      kind: 'consent'
+    })
   })
 
-  it('hides itself when the streamer turned the feature off', () => {
-    expect(cohostPaneMode({ gate: { allowed: true }, consented: true, enabled: false }).kind).toBe(
-      'disabled'
-    )
-  })
-
-  it('points a disabled Orcle at the Orcle tab, its one home since Settings lost it', () => {
-    const mode = cohostPaneMode({ gate: { allowed: true }, consented: true, enabled: false })
-    expect(mode.kind === 'disabled' ? mode.reason : null).toMatch(
-      /^Orcle is off\. Turn it on in the Orcle tab \((?:⌘|Ctrl\+)9\)\.$/
-    )
+  it('hides itself when the streamer turned Buddy Live off: the header switch says so', () => {
+    // Plan 174 S3.14a: no pointer at the Chat control, which never turns Buddy on.
+    expect(cohostPaneMode({ gate: { allowed: true }, consented: true, enabled: false })).toEqual({
+      kind: 'disabled'
+    })
   })
 
   it('renders the pane once Premium, consent, and the toggle all agree', () => {
@@ -445,7 +349,7 @@ describe('cohostErrorToast', () => {
     expect(cohostErrorToast(state(), errored)).toEqual({
       reason: 'gateway-error',
       key: 'gateway-error:',
-      message: 'Orcle stopped: Videorc AI returned an error.'
+      message: 'Buddy stopped: Videorc AI returned an error.'
     })
     expect(cohostErrorToast(errored, errored)).toBeNull()
   })
@@ -462,10 +366,10 @@ describe('cohostErrorToast', () => {
       reason: 'gateway-error',
       key: 'gateway-error:ai-gateway-error',
       message:
-        'Orcle stopped: Videorc AI returned an error (ai-gateway-error: The Orcle tick failed on every configured model).'
+        'Buddy stopped: Videorc AI returned an error (ai-gateway-error: The Buddy tick failed on every configured model).'
     })
     expect(cohostErrorToastMessage('network', TIMEOUT)).toBe(
-      'Orcle stopped: no connection to Videorc AI (timeout: Orcle did not answer within 12 s).'
+      'Buddy stopped: no connection to Videorc AI (timeout: Buddy did not answer within 12 s).'
     )
     // A code without a message still names itself; no detail keeps the base copy.
     expect(
@@ -474,12 +378,12 @@ describe('cohostErrorToast', () => {
         message: '',
         status: 502
       })
-    ).toBe('Orcle stopped: Videorc AI returned an error (ai-gateway-error).')
+    ).toBe('Buddy stopped: Videorc AI returned an error (ai-gateway-error).')
     expect(cohostErrorToastMessage('gateway-error', null)).toBe(
-      'Orcle stopped: Videorc AI returned an error.'
+      'Buddy stopped: Videorc AI returned an error.'
     )
     expect(cohostErrorToastMessage('gateway-error', undefined)).toBe(
-      'Orcle stopped: Videorc AI returned an error.'
+      'Buddy stopped: Videorc AI returned an error.'
     )
   })
 
@@ -524,13 +428,13 @@ describe('cohostStoppedToast', () => {
   const stoppedForPremium = state({ sessionId: null, status: 'off', reason: 'premium-required' })
 
   it('says one plain line when the backend ends a running session', () => {
-    expect(cohostStoppedToast(state(), stoppedForPremium)).toBe('Orcle stopped. Premium ended.')
+    expect(cohostStoppedToast(state(), stoppedForPremium)).toBe('Buddy stopped. Premium ended.')
     expect(
       cohostStoppedToast(
         state({ status: 'paused', reason: 'consent-required' }),
         state({ sessionId: null, status: 'off', reason: 'signed-out' })
       )
-    ).toBe('Orcle stopped. You signed out.')
+    ).toBe('Buddy stopped. You signed out.')
     // It is never the error toast: an off state has no error key.
     expect(cohostErrorToast(state(), stoppedForPremium)).toBeNull()
   })
@@ -598,8 +502,9 @@ describe('cohostQuestionToast', () => {
       lastToastAtMs: null,
       nowMs: 1_000
     })
-    expect(raised?.message).toContain('Orcle:')
-    expect(raised?.message).toContain('⌘J')
+    expect(raised?.message).toContain('Buddy:')
+    // The host's own key (not a Mac in this test): Ctrl+J, never a Mac glyph.
+    expect(raised?.message).toContain('Ctrl+J')
     expect(raised?.atMs).toBe(1_000)
   })
 
@@ -675,16 +580,46 @@ describe('cohostQuestionToast', () => {
 
   it('names how many people are asking', () => {
     expect(
-      cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }))
-    ).toBe('Orcle: 5 people asking: What keyboard is that? · ⌘J')
-    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
-      'Orcle: Ada is asking: What keyboard is that? · ⌘J'
+      cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }), '⌘J')
+    ).toBe('Buddy: 5 people asking: What keyboard is that? · ⌘J')
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), '⌘J')).toBe(
+      'Buddy: Ada is asking: What keyboard is that? · ⌘J'
     )
+  })
+
+  it("speaks as the streamer's Buddy when the window knows its name (plan 174 J2-20)", () => {
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo'] }), '⌘J', 'Grum')).toBe(
+      'Grum: 2 people asking: What keyboard is that? · ⌘J'
+    )
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), '⌘J', '  ')).toBe(
+      'Buddy: Ada is asking: What keyboard is that? · ⌘J'
+    )
+    expect(
+      cohostQuestionToast({
+        previous: null,
+        next: {
+          ...EMPTY_COHOST_STATE,
+          sessionId: 'live-1',
+          status: 'listening',
+          questions: [question({ askers: ['Ada'], priority: 'high' })]
+        },
+        paneOpen: false,
+        lastToastAtMs: null,
+        nowMs: 1_000,
+        shortcut: '⌘J',
+        name: 'Grum'
+      })?.message
+    ).toBe('Grum: Ada is asking: What keyboard is that? · ⌘J')
   })
 
   it('writes the shortcut the way the platform does (Ctrl+J on Windows)', () => {
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), 'Ctrl+J')).toBe(
-      'Orcle: Ada is asking: What keyboard is that? · Ctrl+J'
+      'Buddy: Ada is asking: What keyboard is that? · Ctrl+J'
+    )
+    // Plan 174 H-22: by default, the platform every shortcut prints for (no
+    // user agent regex); this test runs on a host that is not a Mac.
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
+      'Buddy: Ada is asking: What keyboard is that? · Ctrl+J'
     )
   })
 })
@@ -748,7 +683,8 @@ describe('tick wire v2 view', () => {
 
   it('labels a suggested action without ever being one', () => {
     expect(cohostFlagActionLabel(flag())).toBeNull()
-    expect(cohostFlagActionLabel(flag({ action: 'timeout' }))).toBe('Suggests timeout')
+    expect(cohostFlagActionLabel(flag({ action: 'timeout' }))).toBe('Suggests removing')
+    expect(cohostFlagActionLabel(flag({ action: 'ban' }))).toBe('Suggests removing')
     expect(cohostFlagDetail(flag({ alsoKinds: ['scam', 'unknown'] }))).toBe(
       'Repeated link drop.\nAlso: Scam, Flagged'
     )
@@ -866,15 +802,15 @@ describe('listening (plan 068)', () => {
     expect(cohostListeningView({ state: 'on' })).toEqual({
       state: 'on',
       label: 'Listening',
-      detail: 'Orcle hears your microphone as text.'
+      detail: 'Buddy hears your microphone as text.'
     })
     expect(cohostListeningView({ state: 'on', remainingSeconds: 7_200 })?.detail).toBe(
-      'Orcle hears your microphone as text. 2 h of listening left this month.'
+      'Buddy hears your microphone as text. 2 h of listening left this month.'
     )
     expect(cohostListeningView({ state: 'starting' })).toEqual({
       state: 'starting',
       label: 'Starting to listen',
-      detail: 'Orcle is starting to hear your microphone.'
+      detail: 'Buddy is starting to hear your microphone.'
     })
   })
 
@@ -887,7 +823,7 @@ describe('listening (plan 068)', () => {
     expect(label('listen-monthly-quota-exhausted')).toBe(
       'Not listening: monthly listening time used up'
     )
-    expect(label('consent-required')).toBe('Not listening: turn on cloud AI')
+    expect(label('consent-required')).toBe('Not listening: allow cloud AI')
     expect(label('no-capture')).toBe('Not listening: not live')
     expect(label('service-unavailable')).toBe("Not listening: can't reach Videorc")
     expect(label('signing-out')).toBe('Not listening: signing out')
@@ -898,10 +834,10 @@ describe('listening (plan 068)', () => {
     const blocked = cohostListeningView({
       state: 'blocked',
       reasonCode: 'no-microphone',
-      message: 'Select a microphone so Orcle can hear you.'
+      message: 'Select a microphone so Buddy can hear you.'
     })
     expect(blocked?.state).toBe('blocked')
-    expect(blocked?.detail).toBe('Select a microphone so Orcle can hear you.')
+    expect(blocked?.detail).toBe('Select a microphone so Buddy can hear you.')
   })
 
   it('reads an unknown or missing reason as a bare Not listening', () => {
@@ -913,7 +849,7 @@ describe('listening (plan 068)', () => {
       'Not listening'
     )
     expect(cohostListeningView({ state: 'blocked' })?.detail).toBe(
-      "Orcle can't hear you right now."
+      "Buddy can't hear you right now."
     )
   })
 
@@ -956,7 +892,7 @@ describe('listening (plan 068)', () => {
     ).toBe('10 min of listening left this month.')
   })
 
-  it('offers the one-time card only to an Orcle user with listening off', () => {
+  it('offers the one-time card only to a Buddy user with listening off', () => {
     const base = { enabled: true, listen: false, dismissed: false }
     expect(cohostListenPromptVisible(base)).toBe(true)
     expect(cohostListenPromptVisible({ ...base, enabled: false })).toBe(false)
@@ -991,22 +927,22 @@ describe('listening (plan 068)', () => {
   })
 
   it('names the cloud step, the transcript and what is kept in the consent copy', () => {
-    expect(COHOST_CONSENT_SENTENCE.startsWith(COHOST_CHAT_CONSENT_SENTENCE)).toBe(true)
-    // Turning Orcle on turns listening on (plan 119), so hearing is not an option.
-    expect(COHOST_CONSENT_SENTENCE).toContain("While you're live it also hears you")
-    expect(COHOST_CONSENT_SENTENCE).not.toContain('If you turn on listening')
-    for (const sentence of [COHOST_CONSENT_SENTENCE, COHOST_LISTEN_CONSENT_SENTENCE]) {
+    // Plan 174 S3.14a (D7): listening is its own choice, so no sentence says
+    // turning Buddy on also makes it hear you.
+    expect(COHOST_CHAT_CONSENT_SENTENCE).not.toContain('hears you')
+    expect(COHOST_LISTEN_CONSENT_SENTENCE).not.toContain('If you turn on listening')
+    // Plan 174 F-26: the microphone is disclosed in one wording everywhere.
+    for (const sentence of [COHOST_LISTEN_CONSENT_SENTENCE, COHOST_LISTEN_DISCLOSURE]) {
       expect(sentence).toContain('microphone audio')
       expect(sentence).toContain("goes to Videorc's cloud speech-to-text")
-      expect(sentence).toContain('turned into text')
+      expect(sentence).toContain('comes back as text')
       expect(sentence).toContain("Videorc servers don't keep it.")
       expect(sentence).toContain('The transcript is saved with your recording on this computer.')
       expect(sentence).not.toContain('never stored as audio')
     }
-    expect(cohostPaneMode({ gate: { allowed: true }, consented: false, enabled: true })).toEqual({
-      kind: 'consent',
-      reason: `${COHOST_CONSENT_SENTENCE} Turn on cloud AI to use it.`
-    })
+    expect(BUDDY_HEARS_YOU_USE).toBe(
+      "Buddy hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text."
+    )
   })
 })
 
@@ -1082,7 +1018,7 @@ describe('applyCohostState: voice commands (plan 140, S6)', () => {
   const base = { ...EMPTY_COHOST_STATE, sessionId: 's1', status: 'listening' as const, tickSeq: 4 }
   const command = (status: 'confirm' | 'done', at: string) => ({
     id: 'cmd-1',
-    heard: 'orcle highlight the comment from coders x',
+    heard: 'buddy highlight the comment from coders x',
     kind: 'highlight' as const,
     status,
     message: status === 'done' ? "Highlighted coders_x's comment." : 'Show it anyway?',

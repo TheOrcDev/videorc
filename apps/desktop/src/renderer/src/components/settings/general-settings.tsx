@@ -1,56 +1,119 @@
-import { DownloadIcon, RefreshIcon } from '@/components/icons'
+import {
+  AccountIcon,
+  BuddyIcon,
+  DownloadIcon,
+  HealthIcon,
+  LivestreamIcon,
+  OutputIcon,
+  RefreshIcon
+} from '@/components/icons'
 import { useTheme } from 'next-themes'
 import { useState, type ReactElement } from 'react'
 
+import { GroupedList } from '@/components/list-row'
+import { NavigableRow } from '@/components/navigable-row'
 import { ObsImportDialog } from '@/components/obs-import-dialog'
+import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { ChatEmoteSettingsFields } from '@/components/settings/seventv-emotes-field'
+import { PrivacySettingsSection } from '@/components/settings/usage-stats-field'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
-import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { FieldGroup, SettingsRow } from '@/components/ui/field'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { workspaceTabLabel } from '@/components/workspace-nav'
+import { useVideorcAccount } from '@/hooks/use-account'
 import { useStudioCore } from '@/hooks/use-studio'
+import { accountDisplayName, isSignedIn } from '@/lib/account'
 import type { RuntimeInfo } from '@/lib/backend'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
+import { platformCopy } from '@/lib/platform-copy'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
-/** Settings → General: how Videorc looks and behaves, and bringing setups across. */
+const THEME_OPTIONS = [
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'system', label: 'System' }
+]
+
+/**
+ * Settings → General (plan 174 S3.17, I-27): how Videorc looks, the Stream
+ * Manager, bringing a setup across, what Videorc shares, and where every
+ * other setting lives. Five sections in two columns: Appearance over Stream
+ * Manager, Import over Privacy over Elsewhere, so they stack in that order on
+ * a narrow window.
+ */
 export function GeneralSettings(): ReactElement {
   const { settings, setSettings, runtimeInfo, scheduleHardwareAccelerationRetry } = useStudioCore()
   const { theme, setTheme } = useTheme()
   const [obsImportOpen, setObsImportOpen] = useState(false)
+  const { deviceNoun } = platformCopy(runtimeInfo?.platform)
 
   return (
     <>
-      <PanelSection
-        description="How Videorc looks and behaves on this device."
-        title="Appearance & behavior"
-      >
-        <FieldGroup variant="grouped">
-          <Field>
-            <FieldLabel>Theme</FieldLabel>
-            <ToggleGroup
-              type="single"
-              value={theme ?? 'system'}
-              variant="outline"
-              onValueChange={(value) => value && setTheme(value)}
+      {/* Stacked, the hairline under this column splits it from the next;
+          side by side, the pair drops it for the column rule. */}
+      <PageStack className="border-b">
+        <PanelSection description="How Videorc looks on this device." title="Appearance">
+          <FieldGroup variant="grouped">
+            <SettingsRow
+              description={`System follows your ${deviceNoun}'s light or dark appearance.`}
+              label="Theme"
             >
-              <ToggleGroupItem value="light">Light</ToggleGroupItem>
-              <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
-              <ToggleGroupItem value="system">System</ToggleGroupItem>
-            </ToggleGroup>
-          </Field>
-          {runtimeInfo?.commentsWindowEnabled !== false ? (
-            <Field>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 flex-col gap-0.5">
-                  <FieldLabel htmlFor="open-stream-manager-on-live">
-                    Open Stream Manager when I go live
-                  </FieldLabel>
-                  <p className="text-xs text-muted-foreground">
-                    Chat, viewers, followers and activity for the whole stream, in their own window.
-                  </p>
+              <SegmentedControl
+                options={THEME_OPTIONS}
+                value={theme ?? 'system'}
+                onValueChange={setTheme}
+              />
+            </SettingsRow>
+            {/* "Animate scene changes" changes what viewers see, so its one home
+                is the Scene page (plan 174 S3.9, D17); this row points there. */}
+            <NavigableRow
+              className="rounded-none"
+              label="Animate scene changes"
+              value="Scene"
+              onNavigate={() => openWorkspaceTab('layouts')}
+            />
+            {runtimeInfo?.platform === 'win32' ? (
+              <SettingsRow
+                description={graphicsAccelerationDescription(runtimeInfo)}
+                label="Graphics acceleration"
+              >
+                <div className="flex shrink-0 flex-col items-end gap-2">
+                  <StatusBadge
+                    tone={runtimeInfo.hardwareAccelerationDisabled ? 'warn' : 'good'}
+                    value={gpuRenderingLabel(runtimeInfo)}
+                  />
+                  {runtimeInfo.hardwareAccelerationDisabled &&
+                  runtimeInfo.gpuFallback.source !== 'env' ? (
+                    <Button
+                      disabled={runtimeInfo.gpuFallback.retryScheduled}
+                      variant="outline"
+                      onClick={() => void scheduleHardwareAccelerationRetry()}
+                    >
+                      <RefreshIcon data-icon="inline-start" />
+                      {runtimeInfo.gpuFallback.retryScheduled
+                        ? 'Retry scheduled'
+                        : 'Retry on next launch'}
+                    </Button>
+                  ) : null}
                 </div>
+              </SettingsRow>
+            ) : null}
+          </FieldGroup>
+        </PanelSection>
+
+        {runtimeInfo?.commentsWindowEnabled !== false ? (
+          <PanelSection
+            description="The live dashboard window: chat, activity and Buddy."
+            title="Stream Manager"
+          >
+            <ChatEmoteSettingsFields>
+              <SettingsRow
+                description="Chat, viewers, followers and activity for the whole stream, in their own window."
+                label="Open Stream Manager when you go live"
+              >
                 <Switch
                   checked={settings.openStreamManagerOnLive === true}
                   id="open-stream-manager-on-live"
@@ -58,77 +121,83 @@ export function GeneralSettings(): ReactElement {
                     setSettings((current) => ({ ...current, openStreamManagerOnLive: checked }))
                   }
                 />
-              </div>
-            </Field>
-          ) : null}
-          {runtimeInfo?.commentsWindowEnabled !== false ? <ChatEmoteSettingsFields /> : null}
-          {/* Plan 064: a studio behavior, not a storage setting, so it moved
-              here from Recording. */}
-          <Field>
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex min-w-0 flex-col gap-0.5">
-                <FieldLabel htmlFor="animate-scene-changes">Animate scene changes</FieldLabel>
-                <p className="text-xs text-muted-foreground">
-                  Layout switches glide into place instead of cutting, visible live on stream and in
-                  recordings.
-                </p>
-              </div>
-              <Switch
-                checked={settings.animateSceneChanges === true}
-                id="animate-scene-changes"
-                onCheckedChange={(checked) =>
-                  setSettings((current) => ({ ...current, animateSceneChanges: checked }))
-                }
-              />
-            </div>
-          </Field>
-          {runtimeInfo?.platform === 'win32' ? (
-            <Field>
-              <div className="flex items-center justify-between gap-3">
-                <FieldLabel>Graphics acceleration</FieldLabel>
-                <StatusBadge
-                  tone={runtimeInfo.hardwareAccelerationDisabled ? 'warn' : 'good'}
-                  value={gpuRenderingLabel(runtimeInfo)}
-                />
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {graphicsAccelerationDescription(runtimeInfo)}
-              </p>
-              {runtimeInfo.hardwareAccelerationDisabled &&
-              runtimeInfo.gpuFallback.source !== 'env' ? (
-                <Button
-                  className="w-fit"
-                  disabled={runtimeInfo.gpuFallback.retryScheduled}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void scheduleHardwareAccelerationRetry()}
-                >
-                  <RefreshIcon data-icon="inline-start" />
-                  {runtimeInfo.gpuFallback.retryScheduled
-                    ? 'Retry scheduled'
-                    : 'Retry on next launch'}
-                </Button>
-              ) : null}
-            </Field>
-          ) : null}
-        </FieldGroup>
-      </PanelSection>
+              </SettingsRow>
+            </ChatEmoteSettingsFields>
+          </PanelSection>
+        ) : null}
+      </PageStack>
 
-      <PanelSection
-        description="Coming from OBS Studio? Bring your scenes and settings across."
-        title="Import"
-      >
-        {/* O4 (OBS import plan): the wizard previews the truthful
-            imported/approximated/skipped report BEFORE anything applies. */}
-        <div>
-          <Button size="sm" variant="outline" onClick={() => setObsImportOpen(true)}>
-            <DownloadIcon data-icon="inline-start" />
-            Import from OBS…
-          </Button>
-        </div>
-        <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
-      </PanelSection>
+      <PageStack>
+        <PanelSection
+          description="Coming from OBS Studio? Bring your scenes and settings across."
+          title="Import"
+        >
+          {/* O4 (OBS import plan): the wizard previews the truthful
+              imported/approximated/skipped report BEFORE anything applies. */}
+          <FieldGroup variant="grouped">
+            <SettingsRow
+              description="You see what comes across, and what doesn't, before anything changes."
+              label="OBS Studio"
+            >
+              <Button variant="outline" onClick={() => setObsImportOpen(true)}>
+                <DownloadIcon data-icon="inline-start" />
+                Import from OBS…
+              </Button>
+            </SettingsRow>
+          </FieldGroup>
+          <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
+        </PanelSection>
+
+        <PrivacySettingsSection />
+
+        <PanelSection description="Settings that live with the page they change." title="Elsewhere">
+          <ElsewhereList />
+        </PanelSection>
+      </PageStack>
     </>
+  )
+}
+
+/**
+ * Pointers to the settings that live on their own pages (plan 174 I-27):
+ * Settings is where a streamer looks first, so it says where the rest went.
+ */
+function ElsewhereList(): ReactElement {
+  const { account, signIn, openAccount } = useVideorcAccount()
+  const signedIn = isSignedIn(account)
+  return (
+    <GroupedList aria-label="Settings on other pages" data-testid="settings-elsewhere">
+      <NavigableRow
+        icon={AccountIcon}
+        label="Account and Premium"
+        value={signedIn ? accountDisplayName(account) : 'Sign in'}
+        onNavigate={signedIn ? openAccount : signIn}
+      />
+      <NavigableRow
+        icon={BuddyIcon}
+        label="Buddy, chat posting and Clean cut"
+        value={workspaceTabLabel('ai')}
+        onNavigate={() => openWorkspaceTab('ai')}
+      />
+      <NavigableRow
+        icon={OutputIcon}
+        label="Recording quality and files"
+        value={workspaceTabLabel('recording')}
+        onNavigate={() => openWorkspaceTab('recording')}
+      />
+      <NavigableRow
+        icon={LivestreamIcon}
+        label="Destinations and stream details"
+        value={workspaceTabLabel('live')}
+        onNavigate={() => openWorkspaceTab('live')}
+      />
+      <NavigableRow
+        icon={HealthIcon}
+        label="Checks and the support bundle"
+        value={workspaceTabLabel('diagnostics')}
+        onNavigate={() => openWorkspaceTab('diagnostics')}
+      />
+    </GroupedList>
   )
 }
 
@@ -137,16 +206,16 @@ function graphicsAccelerationDescription(runtimeInfo: RuntimeInfo): string {
   const fallbackAge = age ? ` ${age}` : ''
 
   if (runtimeInfo.gpuFallback.source === 'retry') {
-    return `This launch is testing hardware acceleration after a fallback${fallbackAge}. Two GPU-process crashes restore software rendering automatically; a stable minute clears the fallback.`
+    return `This launch is testing hardware acceleration after a fallback${fallbackAge}. Two graphics crashes restore software rendering automatically; a stable minute clears the fallback.`
   }
   if (runtimeInfo.gpuFallback.source === 'env') {
-    return 'Software rendering was requested with VIDEORC_DISABLE_GPU. Remove that environment override and reopen Videorc to use hardware acceleration.'
+    return 'Software rendering was requested when Videorc started. Remove that launch setting and reopen Videorc to use hardware acceleration.'
   }
   if (runtimeInfo.hardwareAccelerationDisabled) {
     if (runtimeInfo.gpuFallback.retryScheduled) {
-      return `The GPU fallback began${fallbackAge}. Hardware acceleration will be retried after you quit and reopen Videorc; this launch stays in software rendering mode.`
+      return `The fallback began${fallbackAge}. Hardware acceleration is retried after you quit and reopen Videorc; this launch stays in software rendering.`
     }
-    return `Videorc switched to software rendering${fallbackAge} after ${runtimeInfo.gpuFallback.crashCount} GPU-process crashes. A retry affects only the next launch, and repeated crashes restore this safe mode.`
+    return `Videorc switched to software rendering${fallbackAge} after ${runtimeInfo.gpuFallback.crashCount} graphics crashes. A retry affects only the next launch, and repeated crashes restore this safe mode.`
   }
-  return 'Chromium hardware acceleration is active. Repeated GPU-process crashes still fall back to software rendering on the next launch.'
+  return 'Hardware acceleration is on. If graphics keep crashing, Videorc switches to software rendering on the next launch.'
 }

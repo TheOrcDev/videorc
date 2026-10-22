@@ -66,6 +66,10 @@ pub enum StreamTargetState {
     Connecting,
     Live,
     Warning,
+    /// A live leg lost its connection and FFmpeg's fifo is retrying it every
+    /// few seconds (plan 161). Viewers on that platform see nothing until it
+    /// is back; the other destinations keep streaming.
+    Reconnecting,
     Failed,
     Stopped,
 }
@@ -570,7 +574,7 @@ pub(crate) fn stream_platform_label(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Youtube => "YouTube",
         StreamPlatform::Twitch => "Twitch",
         StreamPlatform::Kick => "Kick",
-        StreamPlatform::X => "X / Twitter",
+        StreamPlatform::X => "X",
         StreamPlatform::Tiktok => "TikTok",
         StreamPlatform::Instagram => "Instagram",
         StreamPlatform::Custom => "Custom RTMP",
@@ -662,7 +666,7 @@ pub fn default_stream_targets() -> Vec<StreamTargetSettings> {
             "Kick",
             "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app",
         ),
-        default_stream_target(StreamPlatform::X, "X / Twitter", ""),
+        default_stream_target(StreamPlatform::X, "X", ""),
         default_stream_target_with_id(
             "youtube-vertical",
             StreamPlatform::Youtube,

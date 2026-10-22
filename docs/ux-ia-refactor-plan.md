@@ -10,13 +10,38 @@ on Studio, 5 controls duplicated across 2+ surfaces, Diagnostics reachable
 only via ⌘K, sources diagnostics list unbounded
 (`sources-tab.tsx:449-467`).
 
+> **Where things stand (plan 174, 2026-10).** This is the 2026-06 plan. The
+> app has moved on, and this note wins where the two differ. The design
+> skill's "Where things live" (`.claude/skills/videorc-design/SKILL.md`)
+> keeps the current map.
+>
+> - **Sidebar**: Studio ⌘1, then Buddy ⌘9 directly under it (owner call
+>   2026-10-10: the page sells Premium and keeps Clean cut, so it never
+>   moves), then Setup (Sources ⌘2, Scene ⌘3, Assets ⌘4, Livestream ⌘5,
+>   Captions ⌘6, Output ⌘7), Library ⌘8, and Settings ⌘, in a bottom block.
+>   Health has no row: the status bar's state opens it.
+> - **Devices**: Sources is the home of every screen, window, camera,
+>   microphone and system audio source. Studio mirrors the few needed
+>   mid-session, editing the same state: its Sources section (Screen,
+>   Camera, System audio, with Open Sources) and its Microphone section
+>   (picker, level, mute).
+> - **Takeovers** (the "Screens" below) live on the Assets page, Assets →
+>   Takeovers, which manages them; Studio's Takeover section puts one on stream.
+>   They never moved to the Scene page.
+> - **Space** works only on the Studio page: Record when idle, Stop recording
+>   while recording, and the End livestream confirmation while live, with
+>   "Keep streaming" focused. It never starts Go Live (plan 174 D1).
+> - **Names**: Destinations became Livestream, Recording became Output, AI
+>   became Buddy, and the live chat rail became the Stream Manager window
+>   (⇧⌘J).
+
 ## The organizing idea
 
 **Studio is a stage, not a settings hub.** Everything in the app falls into
 one of four zones, and the sidebar mirrors them exactly:
 
 1. **Stage** — the live surface. Preview, transport, on-air state, and the
-   few controls you genuinely need *mid-session* without leaving the stage.
+   few controls you genuinely need _mid-session_ without leaving the stage.
 2. **Setup** — pages you configure between sessions. Each owns its domain
    exclusively.
 3. **After** — everything post-session: files, repair, AI.
@@ -25,7 +50,7 @@ one of four zones, and the sidebar mirrors them exactly:
 Two laws make the UX coherent everywhere:
 
 - **One home per control.** Every setting has exactly one owning page.
-  Anywhere else it appears as a *summary chip* that shows state and
+  Anywhere else it appears as a _summary chip_ that shows state and
   deep-links to the home. This dissolves all five duplications (layout
   presets ×2, audio mixer ×2, preview ×2, screens ×3, presets-as-defaults).
 - **Bounded panels.** Any list that can grow (devices, logs, artifacts,
@@ -33,6 +58,8 @@ Two laws make the UX coherent everywhere:
   header. Pages never scroll because a diagnostic list pushed them down.
 
 ## Sidebar (the answer to "what lives there")
+
+_Historical: the shipped sidebar is in "Where things stand" above._
 
 Sectioned list per the design language (tertiary-gray labels, 8px-radius
 rows, kbd chips right-aligned). The "Studio is a page AND a group" confusion
@@ -68,10 +95,13 @@ session state; "Recording" collided with the act and the artifacts;
 "Diagnostics" hid an actionable page behind jargon. (Naming is taste —
 flagged as an approval point at the end.)
 
-Keyboard map (app-shell global): `⌘1–⌘9` pages as above, `Space`
-record/stop (exists), `⌘P` preview window (exists), `⌘K` palette (exists),
-`D` theme (exists), `Esc` dismiss. The palette mirrors every sidebar entry
-plus actions; nothing is palette-only anymore.
+Keyboard map (app-shell global): `⌘1–⌘9` pages as above, `⌘P` preview
+window (exists), `⌘K` palette (exists), `D` theme (exists), `Esc` dismiss.
+The palette mirrors every sidebar entry plus actions; nothing is
+palette-only anymore. `Space` is not app-wide any more (plan 174 D1): it
+works only on the Studio page, where it records when idle, stops a
+recording, and while live opens the End livestream confirmation. It never
+starts Go Live, and it yields to a focused control, an open dialog or menu.
 
 ## Page-by-page
 
@@ -79,25 +109,25 @@ plus actions; nothing is palette-only anymore.
 
 Delete all six accordions. The page becomes three fixed bands:
 
-1. **Preview** — dominant, top. The only preview users *watch* (Scene owns
-   the preview users *edit*).
+1. **Preview** — dominant, top. The only preview users _watch_ (Scene owns
+   the preview users _edit_).
 2. **Transport bar** — status dot + elapsed, Record (Space), Go Live, Stop,
    output target line, preview-health badge. Kept from today's action bar,
    minus the embedded layout-preset grid.
 3. **Session strip** — ONE row of compact stateful chips replacing every
    accordion. Chip anatomy = design-language row in miniature: 16px icon,
    primary label, secondary state text, optional status dot. Click = jump to
-   the owning page. At most one *inline* affordance per chip — only for
+   the owning page. At most one _inline_ affordance per chip — only for
    things needed mid-session:
 
-   | Chip | Shows | Inline affordance | Click target |
-   |---|---|---|---|
-   | Source | screen · camera · mic names | — | Sources |
-   | Mic | mic name + mute state | mute toggle | Sources |
-   | Layout | active preset name | popover: 4 presets (live-safe switch) | Scene |
-   | Takeover | active Screen or "—" (hidden if none exist) | popover: pick/clear Screen | Scene → Screens section |
-   | Destinations | per-target chips (exist today) | — | Destinations |
-   | Output | "MP4 · 1440p30 · ~/Movies/…" or "stream-only" | — | Output |
+   | Chip         | Shows                                         | Inline affordance                     | Click target       |
+   | ------------ | --------------------------------------------- | ------------------------------------- | ------------------ |
+   | Source       | screen · camera · mic names                   | —                                     | Sources            |
+   | Mic          | mic name + mute state                         | mute toggle                           | Sources            |
+   | Layout       | active preset name                            | popover: 4 presets (live-safe switch) | Scene              |
+   | Takeover     | active Screen or "—" (hidden if none exist)   | popover: pick/clear Screen            | Assets → Takeovers |
+   | Destinations | per-target chips (exist today)                | —                                     | Destinations       |
+   | Output       | "MP4 · 1440p30 · ~/Movies/…" or "stream-only" | —                                     | Output             |
 
 4. **Live chat** — not an accordion: a collapsible right rail that exists
    ONLY while a session with chat-capable destinations is live (`⌘J`
@@ -113,8 +143,10 @@ The Go Live dialog is unchanged — it is already the right pattern
 
 ### 2. Sources — unchanged scope, bounded diagnostics
 
-Keeps its 2026-06-10 charter: the single home for screen/window, camera,
-microphone, and the full mixer (gain, sync offset, meter, check-mic).
+Keeps its 2026-06-10 charter: the home for screen/window, camera,
+microphone, and the full mixer (gain, sync offset, meter, check-mic). It is
+the home, not the only place: Studio's Sources and Microphone sections
+mirror the devices needed mid-session and edit the same state.
 
 The owner's explicit fix — the device diagnostics block:
 
@@ -137,6 +169,8 @@ The owner's explicit fix — the device diagnostics block:
   existing tile grid), ending the stacked double-page render in
   `app-shell.tsx:135-140` and the third copy inside Studio. Takeover images
   replace the screen source — they are scene content; this is their home.
+  _Not built this way: takeovers live on the Assets page (Assets →
+  Takeovers), and Studio's Takeover section puts them on stream._
 - Camera framing controls regroup into two labeled clusters ("Placement":
   corner/size/shape/margin · "Lens": fit/mirror/zoom/pan) so related
   ToggleGroups stop reading as a scattered pile.
@@ -176,12 +210,16 @@ metadata each. Restructure into the design language's master pattern:
 ### 7. AI — unchanged
 
 Already coherent (session picker → artifacts). Reached from sidebar ⌘7 and
-per-session from Library. The consent panel stays — it is a real decision,
+per-session from Library. _Now the Buddy page, second in the sidebar on ⌘9;
+Clean cut is its last tab._ The consent panel stays — it is a real decision,
 not noise.
 
 ### 8. Health (was Diagnostics) — into the sidebar, grouped
 
 - Joins SYSTEM in the sidebar (⌘9); the footer status dot deep-links here.
+  _Superseded: Health left the sidebar (plan 174 D9). The status bar's
+  state is its door, with "Open Health" on degraded alerts and error
+  toasts, and Settings → About._
   An actionable page (permission warnings live here) must not be
   palette-only.
 - The 50+ flat metrics regroup into collapsible sections with the summary
@@ -207,17 +245,20 @@ Gains `⌘,` (macOS convention) alongside ⌘8.
 
 ## Route map (every way to reach every page)
 
-| Page | Sidebar | Kbd | Palette | In-app paths |
-|---|---|---|---|---|
-| Studio | ✓ | ⌘1 | ✓ | everywhere "back to stage" |
-| Sources | ✓ | ⌘2 | ✓ | Studio Source/Mic chips · device toasts |
-| Scene | ✓ | ⌘3 | ✓ | Studio Layout/Takeover chips |
-| Destinations | ✓ | ⌘4 | ✓ | Studio destination chips · Go Live dialog resolve buttons |
-| Output | ✓ | ⌘5 | ✓ | Studio Output chip |
-| Library | ✓ | ⌘6 | ✓ | post-session toast ("Recording saved → Library") |
-| AI | ✓ | ⌘7 | ✓ | Library row "Open in AI" |
-| Settings | ✓ | ⌘8 ⌘, | ✓ | Health permission warnings → Permissions |
-| Health | ✓ | ⌘9 | ✓ | footer status dot · preview-health badge on transport |
+_Historical: the shortcuts and names below are the 2026-06 plan. See "Where
+things stand" at the top._
+
+| Page         | Sidebar | Kbd   | Palette | In-app paths                                              |
+| ------------ | ------- | ----- | ------- | --------------------------------------------------------- |
+| Studio       | ✓       | ⌘1    | ✓       | everywhere "back to stage"                                |
+| Sources      | ✓       | ⌘2    | ✓       | Studio Source/Mic chips · device toasts                   |
+| Scene        | ✓       | ⌘3    | ✓       | Studio Layout/Takeover chips                              |
+| Destinations | ✓       | ⌘4    | ✓       | Studio destination chips · Go Live dialog resolve buttons |
+| Output       | ✓       | ⌘5    | ✓       | Studio Output chip                                        |
+| Library      | ✓       | ⌘6    | ✓       | post-session toast ("Recording saved → Library")          |
+| AI           | ✓       | ⌘7    | ✓       | Library row "Open in AI"                                  |
+| Settings     | ✓       | ⌘8 ⌘, | ✓       | Health permission warnings → Permissions                  |
+| Health       | ✓       | ⌘9    | ✓       | footer status dot · preview-health badge on transport     |
 
 ## Migration slices (sized for /cut-it)
 
@@ -288,4 +329,5 @@ Questions stress-tested against the code; corrections applied above:
 - **Takeover popover replicates an existing live-safe action** — the Studio
   screens accordion already switches takeovers mid-session; management
   (upload/rename/delete) stays session-locked on the Scene page exactly as
-  the Screens tab behaves today.
+  the Screens tab behaves today. _Now on the Assets page (Assets →
+  Takeovers)._

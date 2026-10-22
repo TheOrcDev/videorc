@@ -11,6 +11,7 @@ import { matchStrictAudioInput } from './mic-device-label'
 import { matchMicrophoneDeviceId } from './mic-meter'
 
 import { registerVisualMicrophoneOwner } from './mic-visual-ownership'
+import { microphoneAccessOpen } from './mic-visual-gate'
 export {
   closeVisualMicrophoneStreams,
   registerVisualMicrophoneSuspension,
@@ -114,12 +115,15 @@ export function micStreamFailureFromError(error: unknown): MicStreamFailure {
  * Renderer microphone visuals must never become an implicit OS permission
  * request. Only a user-resolved, exact `granted` status may reach
  * getUserMedia; loading, denied, restricted, and unknown states remain idle.
+ * Linux reports `not-applicable`: it has no OS grant to request, so
+ * getUserMedia's own result is the truth there (Linux plan 0011: the level
+ * never showed on Linux).
  */
 export function microphoneStreamAcquisitionEnabled(
   requested: boolean,
   permissionStatus: MediaAccessStatus | undefined
 ): boolean {
-  return requested && permissionStatus === 'granted'
+  return requested && microphoneAccessOpen(permissionStatus)
 }
 
 export function createMicStreamController<S extends MicMediaStreamLike>(

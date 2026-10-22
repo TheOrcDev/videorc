@@ -31,6 +31,38 @@ describe('named marker trust boundaries', () => {
       text: 'docs /marker https://ui.shadcn.com'
     })
   })
+  it('turns /banner into a local show or hide, never chat (plan 186 S7)', () => {
+    const banners = [
+      { id: 'sponsor', name: 'Sponsor', shown: false },
+      { id: 'spring', name: 'Spring sale', shown: true }
+    ]
+    expect(classifyComposerDraft('/banner sponsor', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'show', id: 'sponsor' }
+    })
+    expect(classifyComposerDraft(' /BANNER spring ', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'hide', id: 'spring' }
+    })
+    expect(classifyComposerDraft('/banner off', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'hideAll' }
+    })
+    expect(classifyComposerDraft('/banner acme', banners)).toEqual({
+      kind: 'error',
+      message: 'No banner called “acme”.'
+    })
+    expect(classifyComposerDraft('/banner sp', banners)).toEqual({
+      kind: 'error',
+      message: '“sp” matches Sponsor and Spring sale.'
+    })
+    expect(classifyComposerDraft('/banner', banners)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('/bannerx', banners)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('//banner off', banners)).toEqual({
+      kind: 'chat',
+      text: '/banner off'
+    })
+  })
   it('validates Unicode code points without truncation or losing punctuation', () => {
     expect(markerLabel('  Shadcn / 新 Library  ')).toBe('Shadcn / 新 Library')
     expect(markerLabel('😀'.repeat(120))).toBe('😀'.repeat(120))
@@ -69,7 +101,11 @@ describe('named marker trust boundaries', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:marker-result-push')).toBe(false)
     expect(roleCanInvokeChannel('notes', 'comments-window:marker')).toBe(false)
   })
-  it('formats stream timeline times', () => expect(markerTime(3672.7)).toBe('01:01:12'))
+  it('formats stream timeline times as the one timecode (plan 174 S1.4)', () => {
+    expect(markerTime(3672.7)).toBe('1:01:12')
+    expect(markerTime(12)).toBe('0:12')
+    expect(markerTime(125)).toBe('2:05')
+  })
   it('accepts the renamed marker RPC receipt and separate change event shape', () => {
     const marker = {
       id: 'm1',

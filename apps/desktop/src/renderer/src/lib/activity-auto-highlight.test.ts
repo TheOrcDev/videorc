@@ -89,6 +89,25 @@ const celebrations: { label: string; message: LiveChatMessage }[] = [
   {
     label: 'watch-streak',
     message: row('twitch', 'w', 'membership', { kind: 'watch-streak', streakCount: 5 })
+  },
+  {
+    label: 'power-up',
+    message: row('twitch', 'p', 'power-up', {
+      kind: 'power-up',
+      bits: 300,
+      powerUp: 'celebration'
+    })
+  },
+  // Plan 163: channel point redemptions auto-show like tips.
+  {
+    label: 'redemption',
+    message: row('twitch', 'v', 'redemption', {
+      kind: 'redemption',
+      reward: 'custom',
+      channelPoints: 500,
+      title: 'Hydrate',
+      pointsName: 'Orc Gold'
+    })
   }
 ]
 

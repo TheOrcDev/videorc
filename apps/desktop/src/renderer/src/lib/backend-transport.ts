@@ -1,3 +1,4 @@
+import { ENGINE_CONNECTION_CLOSED, ENGINE_NOT_CONNECTED, ENGINE_UNREACHABLE } from '@/backendClient'
 import type { WsStatus } from '@/lib/capture'
 
 // Backend transport error classification (plan 024 S1).
@@ -13,9 +14,9 @@ import type { WsStatus } from '@/lib/capture'
 
 /** The exact strings `BackendClient` mints for a down/absent transport. */
 const TRANSIENT_BACKEND_ERRORS = new Set([
-  'Backend WebSocket is not connected.', // request() with a non-OPEN ws
-  'Backend connection closed.', // in-flight requests on ws.onclose
-  'Could not connect to the Rust backend.' // ws.onerror during connect()
+  ENGINE_NOT_CONNECTED,
+  ENGINE_CONNECTION_CLOSED,
+  ENGINE_UNREACHABLE
 ])
 
 export function isTransientBackendError(message: string): boolean {
@@ -26,7 +27,7 @@ export function isTransientBackendError(message: string): boolean {
  * Whether an error message should surface a toast at all.
  *
  * A transient transport error while the socket is NOT connected is suppressed
- * outright — the "Connecting…" / "Backend offline" badge covers that window, so
+ * outright — the "Connecting…" / "Videorc is reconnecting…" badge covers that window, so
  * a red card is redundant noise (and stacks). Everything else toasts: genuine
  * RPC errors at any status, and a transient error during a CONNECTED-state blip
  * (surfaced once via a keyed id by the caller).

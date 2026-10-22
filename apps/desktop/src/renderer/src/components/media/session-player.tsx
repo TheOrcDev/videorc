@@ -12,23 +12,33 @@ import {
 
 import { MarkerPins } from './marker-pins'
 import type { SessionMarker } from '@/lib/backend'
-import { PauseIcon, PlayIcon } from '@/components/icons'
+import { PauseIcon, PlayIcon, SpeakerOffIcon, SpeakerOnIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle
+} from '@/components/ui/empty'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { Slider } from '@/components/ui/slider'
 import type { SessionMediaGrantRefusal } from '@/lib/backend'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
+import { revealInFileManagerLabel } from '@/lib/platform'
 import {
   PLAYER_SCRUB_STEP_MS,
-  PLAYER_SEEK_STEP_MS,
   clampSeekMs,
   formatMediaTime,
   grantRenewalDelayMs,
   mediaErrorCopy,
   mediaTimeHasHours,
   playerKeyAction,
+  playerKeyTargetMs,
+  playheadValueText,
   sessionMediaRefusalCopy
 } from '@/lib/session-player-view'
+import { toast } from '@/lib/toast'
 import { normalizeSkipRanges, skipTargetMs, type SkipRange } from '@/lib/skip-ranges'
 import { cn } from '@/lib/utils'
 
@@ -41,11 +51,13 @@ import { cn } from '@/lib/utils'
  *
  * It asks main for a session media grant and plays the recording through the
  * Range-aware `videorc-asset://session-media/` host, so a 2-hour file seeks
- * instantly. Controls are the app's own (play/pause, scrubber, times; Space
- * and the arrow keys when the player has focus): there is no fullscreen, the
- * permission stays denied. `skipRanges` turns it into the virtual preview of
- * a cut: whenever a presented frame falls inside a removed span, playback
- * jumps to the span's end.
+ * instantly. Controls are the app's own (play/pause, scrubber, times, mute;
+ * a click on the picture plays or pauses; while the player has focus, Space
+ * and K, the arrows, J and L, Home and End, and M): there is no fullscreen,
+ * the permission stays denied. Markers sit on the scrubber itself.
+ * `skipRanges` turns it into the virtual preview of a cut: whenever a
+ * presented frame falls inside a removed span, playback jumps to the span's
+ * end.
  */
 export type SessionPlayerProps = {
   sessionId: string
@@ -91,6 +103,7 @@ export function SessionPlayer({
   const [positionMs, setPositionMs] = useState(0)
   const [durationMs, setDurationMs] = useState(0)
   const [scrubMs, setScrubMs] = useState<number | null>(null)
+  const [muted, setMuted] = useState(false)
 
   // The frame loop lives outside render, so it reads the ranges through a ref.
   const ranges = useMemo(
@@ -125,7 +138,7 @@ export function SessionPlayer({
     setScrubMs(null)
     const requestGrant = window.videorc?.grantSessionMedia
     if (!requestGrant) {
-      setGrant({ kind: 'error', message: 'Playback is not available in this window.' })
+      setGrant({ kind: 'error', message: "Playback isn't available in this window." })
       return
     }
     const request = async (): Promise<void> => {
@@ -240,11 +253,25 @@ export function SessionPlayer({
     [seekTo, togglePlayback]
   )
 
+  const toggleMute = (): void => {
+    const video = videoRef.current
+    if (!video) return
+    video.muted = !video.muted
+    setMuted(video.muted)
+  }
+
+  // The player's keys answer only while it has focus (plan 174 S3.12, E-30).
+  // React bubbles keys out of portals, so a marker chooser's menu (its Home,
+  // End and type-ahead) reaches here too: only keys on the player's own DOM,
+  // and none a control already handled, count.
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.defaultPrevented) return
+    if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return
     const target = event.target instanceof HTMLElement ? event.target : null
     const action = playerKeyAction(
       event.key,
-      target ? { tagName: target.tagName, role: target.getAttribute('role') } : null
+      target ? { tagName: target.tagName, role: target.getAttribute('role') } : null,
+      event
     )
     if (!action) return
     event.preventDefault()
@@ -252,9 +279,26 @@ export function SessionPlayer({
       togglePlayback()
       return
     }
+    if (action === 'mute') {
+      toggleMute()
+      return
+    }
     const video = videoRef.current
     const currentMs = video ? video.currentTime * 1000 : 0
-    seekTo(currentMs + (action === 'seek-back' ? -PLAYER_SEEK_STEP_MS : PLAYER_SEEK_STEP_MS))
+    const destination = playerKeyTargetMs(action, currentMs, durationMs)
+    if (destination !== null) seekTo(destination)
+  }
+
+  const openExternally = (): void => {
+    void window.videorc
+      ?.openSession?.(sessionId)
+      .then((problem) => {
+        if (problem) toast.error(problem)
+      })
+      .catch(() => undefined)
+  }
+  const revealFile = (): void => {
+    void window.videorc?.revealSession?.(sessionId)
   }
 
   const readPosition = (): number => {
@@ -345,6 +389,8 @@ export function SessionPlayer({
           }}
           onTimeUpdate={handleTimeUpdate}
           onSeeked={handleSeeked}
+          onVolumeChange={() => setMuted(videoRef.current?.muted ?? false)}
+          onClick={togglePlayback}
           onPlay={() => {
             setPlaying(true)
             startFrameLoop()
@@ -359,21 +405,24 @@ export function SessionPlayer({
           }}
           onError={handleError}
         />
-        <SessionPlayerStatus grant={grant} mediaError={mediaError} onRetry={retry} />
-      </div>
-      {markers?.length ? (
-        <MarkerPins
-          markers={markers}
-          durationMs={durationMs}
-          onSelect={(marker) => seekTo(marker.atSeconds * 1000)}
+        <SessionPlayerStatus
+          grant={grant}
+          mediaError={mediaError}
+          onOpenExternally={openExternally}
+          onReveal={revealFile}
+          onRetry={retry}
         />
-      ) : null}
+      </div>
       <SessionPlayerControls
         playing={playing}
+        muted={muted}
         positionMs={scrubMs ?? positionMs}
         durationMs={durationMs}
         disabled={!ready}
+        markers={markers}
+        onSelectMarker={(marker) => seekTo(marker.atSeconds * 1000)}
         onToggle={togglePlayback}
+        onToggleMute={toggleMute}
         onScrub={(ms) => {
           setScrubMs(ms)
           seekTo(ms)
@@ -391,11 +440,17 @@ export function SessionPlayer({
 export function SessionPlayerStatus({
   grant,
   mediaError,
-  onRetry
+  onRetry,
+  onOpenExternally,
+  onReveal
 }: {
   grant: SessionPlayerGrantState
   mediaError: string | null
   onRetry: () => void
+  /** "Open in default player": the OS player may play what this one can't. */
+  onOpenExternally?: () => void
+  /** Show the file in Finder (Explorer). */
+  onReveal?: () => void
 }): ReactElement | null {
   if (grant.kind === 'granted' && mediaError === null) {
     return null
@@ -406,7 +461,7 @@ export function SessionPlayerStatus({
         data-slot="session-player-status"
         className="absolute inset-0 flex items-center justify-center"
       >
-        <span className="text-xs text-video-ground-muted">Loading recording</span>
+        <span className="text-xs text-video-ground-muted">Loading recording…</span>
       </div>
     )
   }
@@ -418,6 +473,11 @@ export function SessionPlayerStatus({
           description: grant.kind === 'error' ? grant.message : (mediaError ?? '')
         }
   const retryable = grant.kind !== 'refused'
+  // A refusal or a failure says what to do instead (plan 174 S3.12, E-30):
+  // another player for a file this one can't play, the file itself, a retry.
+  const externally =
+    onOpenExternally && (retryable || (grant.kind === 'refused' && grant.error === 'not-mp4'))
+  const reveal = onReveal && grant.kind === 'refused' && grant.error === 'not-mp4'
   return (
     <div
       data-slot="session-player-status"
@@ -425,36 +485,61 @@ export function SessionPlayerStatus({
     >
       <Empty className="gap-3 p-0">
         <EmptyHeader className="gap-1">
-          <EmptyTitle className="text-sm text-video-ground-foreground">{copy.title}</EmptyTitle>
-          <EmptyDescription className="text-xs text-video-ground-muted">
+          <EmptyTitle className="text-video-ground-foreground">{copy.title}</EmptyTitle>
+          <EmptyDescription className="text-video-ground-muted">
             {copy.description}
           </EmptyDescription>
         </EmptyHeader>
-        {retryable ? (
-          <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
-            Try again
-          </Button>
+        {retryable || externally || reveal ? (
+          <EmptyContent className="flex-row flex-wrap justify-center gap-2">
+            {retryable ? (
+              <Button type="button" variant="secondary" onClick={onRetry}>
+                Try again
+              </Button>
+            ) : null}
+            {externally ? (
+              <Button type="button" variant="secondary" onClick={onOpenExternally}>
+                Open in default player
+              </Button>
+            ) : null}
+            {reveal ? (
+              <Button type="button" variant="secondary" onClick={onReveal}>
+                {revealInFileManagerLabel()}
+              </Button>
+            ) : null}
+          </EmptyContent>
         ) : null}
       </Empty>
     </div>
   )
 }
 
-/** Play/pause, the playhead, the scrubber and the duration, on one 28 px row. */
+/**
+ * Play/pause, the playhead, the scrubber with its marker pins, the duration
+ * and mute, on one 28 px row.
+ */
 export function SessionPlayerControls({
   playing,
+  muted,
   positionMs,
   durationMs,
   disabled,
+  markers,
+  onSelectMarker,
   onToggle,
+  onToggleMute,
   onScrub,
   onScrubCommit
 }: {
   playing: boolean
+  muted: boolean
   positionMs: number
   durationMs: number
   disabled: boolean
+  markers?: readonly SessionMarker[]
+  onSelectMarker?: (marker: SessionMarker) => void
   onToggle: () => void
+  onToggleMute: () => void
   onScrub: (ms: number) => void
   onScrubCommit: (ms: number) => void
 }): ReactElement {
@@ -463,40 +548,65 @@ export function SessionPlayerControls({
   const max = Math.max(durationMs, PLAYER_SCRUB_STEP_MS)
   return (
     <div data-slot="session-player-controls" className="flex h-control items-center gap-2">
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        aria-label={playing ? 'Pause' : 'Play'}
-        title={playing ? 'Pause (Space)' : 'Play (Space)'}
-        disabled={disabled}
-        onClick={onToggle}
-      >
-        {playing ? <PauseIcon weight="fill" /> : <PlayIcon weight="fill" />}
-      </Button>
+      <ShortcutTooltip accelerator="Space" label={playing ? 'Pause' : 'Play'}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label={playing ? 'Pause' : 'Play'}
+          disabled={disabled}
+          onClick={onToggle}
+        >
+          {playing ? <PauseIcon weight="fill" /> : <PlayIcon weight="fill" />}
+        </Button>
+      </ShortcutTooltip>
       <span
         data-slot="session-player-time"
         className={cn('text-right text-xs text-muted-foreground tabular-nums', timeWidth)}
       >
         {formatMediaTime(positionMs, withHours)}
       </span>
-      <Slider
-        aria-label="Playhead"
-        className="flex-1"
-        min={0}
-        max={max}
-        step={PLAYER_SCRUB_STEP_MS}
-        value={[Math.min(Math.max(0, positionMs), max)]}
-        disabled={disabled}
-        onValueChange={(values) => onScrub(values[0] ?? 0)}
-        onValueCommit={(values) => onScrubCommit(values[0] ?? 0)}
-      />
+      {/* The pins sit on the scrubber's own box, so each lines up with the
+          playhead at its time (plan 174 S3.12, E-7). */}
+      <div className="relative flex min-w-0 flex-1 items-center">
+        <Slider
+          aria-label="Playhead"
+          aria-valuetext={playheadValueText(positionMs, durationMs)}
+          min={0}
+          max={max}
+          step={PLAYER_SCRUB_STEP_MS}
+          value={[Math.min(Math.max(0, positionMs), max)]}
+          disabled={disabled}
+          onValueChange={(values) => onScrub(values[0] ?? 0)}
+          onValueCommit={(values) => onScrubCommit(values[0] ?? 0)}
+        />
+        {markers?.length && onSelectMarker ? (
+          <MarkerPins
+            durationMs={durationMs}
+            markers={markers}
+            variant="overlay"
+            onSelect={onSelectMarker}
+          />
+        ) : null}
+      </div>
       <span
         data-slot="session-player-duration"
         className={cn('text-xs text-muted-foreground tabular-nums', timeWidth)}
       >
         {formatMediaTime(durationMs, withHours)}
       </span>
+      <ShortcutTooltip accelerator="M" label={muted ? 'Unmute' : 'Mute'}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label={muted ? 'Unmute' : 'Mute'}
+          disabled={disabled}
+          onClick={onToggleMute}
+        >
+          {muted ? <SpeakerOffIcon /> : <SpeakerOnIcon />}
+        </Button>
+      </ShortcutTooltip>
     </div>
   )
 }

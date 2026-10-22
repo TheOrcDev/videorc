@@ -1804,6 +1804,8 @@ async fn reconcile_live_preview_compositor_with_hook(
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await
@@ -1881,6 +1883,8 @@ pub(crate) async fn ensure_preview_compositor_after_scene_commit(state: &AppStat
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         },
     )
     .await;
@@ -3367,6 +3371,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -3808,6 +3814,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -3948,6 +3956,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -4030,6 +4040,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await
@@ -4129,6 +4141,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;

@@ -11,6 +11,18 @@ ordered checkpoints, human gates, and resuming partial releases. Follow its
 linked runbooks; do not invent a shorter release path from package scripts.
 An explanation or edit of the release process is not permission to publish.
 
+## Live Tests On YouTube
+
+Only when the user explicitly asks for a real live test ("test it live",
+"live lab", "go live on the test channel", "test PR #N live"), read
+`.agents/skills/videorc-live-lab/SKILL.md` first. Ordinary e2e and smoke
+verification never goes live. Attended runs on the owner's Mac need the
+owner's go in the current session. Unattended runs on the lab machine are
+allowed only when the owner's policy file allows them (`canStart` in
+`scripts/live-lab/lib/policy.mjs`, plan 178); never edit or loosen
+`policy.json` or `control.json`, and report a refusal instead of working
+around it.
+
 ## Verification Gates
 
 Use the smallest gate that proves the change, then run the broader gate before handing off risky work.
@@ -42,6 +54,7 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 - It must also cover the maintained preview reliability smokes: layout/source preview liveness, backend-owned scene commits, main pump diagnostics, click/focus continuity, detached lifecycle, and detached native preview surface reattach.
 - The dev-app all-layout recording smoke must inspect the finished recording artifacts with ffprobe/ffmpeg. A file-size-only recording smoke is not enough.
 - Run `pnpm smoke:record-latency` for changes touching session start/stop (`start_session`, `stop_recording`, `monitor_session`), the startup or camera-cadence barriers, microphone warm-up, encoder-bridge/muxer bring-up, or recording finalization: it drives real Record/Stop cycles through the renderer via remote-control intents, verifies every artifact with the analyzer and startup-resolution gates, and reports cold/warm click→recording and click→idle percentiles against the OBS-parity budgets in `scripts/lib/record-latency-gate.mjs`. `pnpm smoke:record-latency:gate` enforces them (calibrated in `docs/acceptance/2026-09-16-record-latency-calibration.md`; part of `smoke:recording-studio` and `smoke:local-gates`). The dev app has no camera TCC grant, so the smoke seeds a screen-only scene; a real-camera run needs the packaged app.
+- Run `pnpm smoke:captions-contract` and `pnpm smoke:captions-live` for changes touching live captions (`captions.rs`, the caption API client, `scripts/lib/fake-caption-service.mjs`, or caption status copy). The contract smoke drives the real debug backend against the local fake Gateway in the streaming-transcription dialect (plan 175): lease mint with `transport: "transcription"`, the `transcription-stream.start` frame with the server's `providerOptions`, binary PCM, partial/final upsert, lease handover and settlement, voice-dialect and assistant-response fallback, chunk fallback, and listen-only Buddy uploads. The live smoke proves the kill-switch path end to end through the renderer, compositor and RTMP. Never point either at a real gateway; `pnpm probe:caption-stt` is the owner-only real-model latency probe and needs `AI_GATEWAY_API_KEY` in the shell.
 - Run `pnpm smoke:remote-control` for changes touching the remote-control surface (backend remote role, intents, discovery file, renderer intent executor, global shortcuts): it pairs a fake client through the real discovery file and enforces the allowlist, filter lock, intent round trips against confirmed state, debounce, and regenerate-cuts-clients. It is part of `smoke:local-gates`. Protocol doc: docs/remote-control.md.
 - Run `pnpm smoke:youtube-quota` for changes touching YouTube chat, the quota breaker (`youtube_quota.rs`), YouTube viewer or subscriber polling, YouTube OAuth connect/validate, Go Live prepare/transition, or any provider-paused copy: it drives the dev app through a full YouTube Data API outage against the local fake in `scripts/lib/fake-youtube-api.mjs` (routed with the dev-only `VIDEORC_YOUTUBE_API_BASE_URL`, refused in packaged builds) and enforces one paused notice, chat Waiting with `retryAt`, zero YouTube requests while paused, output still advancing, automatic resume after the forced expiry, Stop then Record during the outage, Go Live refused for YouTube OAuth with the stream-key copy while other destinations go live, and a terminal single-toast connect. It is part of `smoke:local-gates`. Every new YouTube Data API call must use `youtube_quota::send_attempt` for per-attempt admission and metering; only the owned reset probe may bypass the pause, and it must still count its actual attempt.
 - Run `pnpm smoke:remote-lan` for changes touching Phone remote (the LAN listener and its router, pairing/handshake/signed frames in `remote_lan*.rs`, the chat/highlight projection, or `crates/videorc-backend/remote_web/`): it pairs the reference client over the machine's LAN address and enforces router isolation, token refusal, single-use pairing, signed intents, the allowlist, no renderer credential on remote sockets, per-device revoke, and port close on disable. Never add a route to the LAN router or an event to `LAN_EVENTS` without a leak argument in the PR. It is part of `smoke:local-gates`.

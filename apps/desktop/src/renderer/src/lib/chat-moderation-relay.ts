@@ -15,6 +15,7 @@ import {
   type RemovalToastView
 } from '@/lib/chat-removal-view'
 import { toast } from '@/lib/toast'
+import { userErrorMessage, type UserError } from '@/lib/user-error'
 import {
   COMMENTS_MODERATION_TIMING_CONTRACT,
   mergeModerationOperations,
@@ -33,7 +34,7 @@ import {
 // - The relay: the Stream Manager's "Remove from chat" and its card answers
 //   arrive as `comments-window:moderation-request`. A removal always goes to
 //   the backend as `source: 'manual'`, whatever asked.
-// - The toast: an open Orcle removal card is mirrored as a plain toast in the
+// - The toast: an open Buddy removal card is mirrored as a plain toast in the
 //   main window while the Stream Manager is closed or hidden, and it leaves
 //   when the operation ends. Nothing here ever removes on its own.
 
@@ -54,7 +55,8 @@ export interface RemovalToastSurface {
   show: (id: string, view: RemovalToastView, onAnswer: (answer: RemovalAnswer) => void) => void
   dismiss: (id: string) => void
   outcome: (id: string, outcome: RemovalOutcomeToast) => void
-  error: (id: string, message: string) => void
+  /** A failed answer, already in copy (plan 174 S2.4): never the raw text. */
+  error: (id: string, copy: Pick<UserError, 'title' | 'description' | 'tone'>) => void
 }
 
 export interface ChatModerationRelayOptions {
@@ -78,7 +80,7 @@ export interface ChatModerationRelay {
   dispose: () => void
 }
 
-// Loaded in the same chunk: answers to Orcle's voice command cards.
+// Loaded in the same chunk: answers to Buddy's voice command cards.
 export { startCohostCommandRelay } from '@/lib/cohost-command-relay'
 
 export const REMOVAL_TOAST_ID_PREFIX = 'chat-removal:'
@@ -124,8 +126,9 @@ function sonnerSurface(): RemovalToastSurface {
       const show = outcome.kind === 'message' ? toast : toast[outcome.kind]
       show(outcome.text, { id })
     },
-    error: (id, message) => {
-      toast.error(message, { id })
+    error: (id, copy) => {
+      const show = copy.tone === 'warning' ? toast.warning : toast.error
+      show(copy.title, { id, description: copy.description })
     }
   }
 }
@@ -230,12 +233,16 @@ export function startChatModerationRelay(options: ChatModerationRelayOptions): C
     answered.add(operationId)
     void answerRequest(operationId, answer)
       .then((operation) => accept([operation]))
-      .catch((error: unknown) =>
-        surface.error(
-          removalToastId(operationId, 'outcome'),
-          errorMessage(error, 'Could not answer the removal.')
+      .catch((error: unknown) => {
+        const copy = userErrorMessage(
+          error,
+          answer === 'confirm'
+            ? { action: 'remove', object: 'the message' }
+            : { action: 'keep', object: 'the message' }
         )
-      )
+        console.warn('[chat-removal] answer failed:', copy.raw)
+        surface.error(removalToastId(operationId, 'outcome'), copy)
+      })
   }
 
   const syncSession = (sessionId: string | null | undefined): void => {
@@ -307,7 +314,7 @@ export function startChatModerationRelay(options: ChatModerationRelayOptions): C
         await api.pushModerationResult?.({
           requestId: command.requestId,
           ok: false,
-          error: errorMessage(error, 'Could not remove the message.')
+          error: errorMessage(error, "Couldn't remove the message.")
         })
       })
       .catch(() => undefined)

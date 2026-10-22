@@ -14,14 +14,14 @@ describe('clip mark clock', () => {
 })
 
 describe('clip marked toast', () => {
-  it('points every saved mark at the stream report in Orcle (plan 119 S3)', () => {
-    expect(CLIP_MARK_IN_REPORT).toBe("It's in your stream report in Orcle.")
+  it('points every saved mark at the stream report in Buddy (plan 119 S3)', () => {
+    expect(CLIP_MARK_IN_REPORT).toBe("It's in your stream report in Buddy.")
     expect(
       clipMarkedToast({ sessionId: 's', atSeconds: 754.2, source: 'manual', saved: true })
     ).toEqual({
       kind: 'success',
       title: 'Clip marked at 12:34',
-      description: "It's in your stream report in Orcle."
+      description: "It's in your stream report in Buddy."
     })
     expect(
       clipMarkedToast(
@@ -31,7 +31,7 @@ describe('clip marked toast', () => {
     ).toEqual({
       kind: 'success',
       title: 'Clip marked at 1:02:05',
-      description: "It's in your stream report in Orcle."
+      description: "It's in your stream report in Buddy."
     })
   })
 
@@ -55,7 +55,7 @@ describe('clip marked toast', () => {
     expect(toast).toEqual({
       kind: 'warning',
       title: "Recording is off, so this clip can't be saved.",
-      description: 'Turn on Record in the Studio to keep clips from a stream.'
+      description: 'Turn on Save local recording on the Output page.'
     })
   })
 })

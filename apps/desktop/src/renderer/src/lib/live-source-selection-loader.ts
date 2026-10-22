@@ -73,7 +73,7 @@ export class LazyLiveSourceSelectionController {
           snapshot: null,
           pending: null,
           checking: true,
-          error: 'Source controls could not load. Retry status.'
+          error: "Source controls couldn't load. Check again."
         })
     }
   }
@@ -93,7 +93,7 @@ export class LazyLiveSourceSelectionController {
           snapshot: null,
           pending: null,
           checking: true,
-          error: 'Source controls could not load. Retry status.'
+          error: "Source controls couldn't load. Check again."
         })
     }
   }

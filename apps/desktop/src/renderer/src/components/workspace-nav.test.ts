@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { OrcleIcon } from './icons'
+import { BuddyIcon } from './icons'
 import {
   STUDIO_PANELS,
   WORKSPACE_SHORTCUTS,
@@ -10,6 +10,7 @@ import {
   shortcutDigitFor,
   sidebarOrderFor,
   workspaceTabLabel,
+  workspaceWindowTitle,
   type WorkspaceTab
 } from './workspace-nav'
 
@@ -85,20 +86,20 @@ describe('workspace navigation', () => {
     expect(WORKSPACE_SHORTCUTS).toHaveLength(reachable.length - noDigit.length)
   })
 
-  // Plan 119: Orcle sits right under Studio. Its id is `ai`, the id ⌘9, deep
+  // Plan 119: Buddy sits right under Studio. Its id is `ai`, the id ⌘9, deep
   // links, smokes and data-videorc-tab-trigger use.
-  it('shows Orcle under Studio in the stage row, on id ai and ⌘9', () => {
-    const orcle = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
-    expect(orcle).toEqual({ id: 'ai', label: 'Orcle', icon: OrcleIcon, group: 'stage' })
+  it('shows Buddy under Studio in the stage row, on id ai and ⌘9', () => {
+    const buddy = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
+    expect(buddy).toEqual({ id: 'ai', label: 'Buddy', icon: BuddyIcon, group: 'stage' })
     expect(WORKSPACE_TABS.filter((tab) => tab.group === 'stage').map((tab) => tab.id)).toEqual([
       'studio',
       'ai'
     ])
     expect(shortcutDigitFor('ai')).toBe('9')
-    expect(workspaceTabLabel('ai')).toBe('Orcle')
+    expect(workspaceTabLabel('ai')).toBe('Buddy')
   })
 
-  it('cascades the shortcut chips down the sidebar, so Orcle (⌘9) arrives second', () => {
+  it('cascades the shortcut chips down the sidebar, so Buddy (⌘9) arrives second', () => {
     const rows: WorkspaceTab[] = [
       'studio',
       'ai',
@@ -114,6 +115,15 @@ describe('workspace navigation', () => {
     expect(rows.map((tab) => sidebarOrderFor(tab))).toEqual(rows.map((_, index) => index))
     // Health has no sidebar row.
     expect(sidebarOrderFor('diagnostics')).toBe(0)
+  })
+
+  // Plan 174 S3.21 (A-18): the window is named after its page, with no em
+  // dash (the copy rules).
+  it('titles the window after the page', () => {
+    expect(workspaceWindowTitle('studio')).toBe('Studio – Videorc')
+    expect(workspaceWindowTitle('recording')).toBe('Output – Videorc')
+    expect(workspaceWindowTitle('diagnostics')).toBe('Health – Videorc')
+    expect(workspaceWindowTitle('ai')).not.toContain('—')
   })
 
   it('classifies Assets and Captions as Studio panels and labels them', () => {

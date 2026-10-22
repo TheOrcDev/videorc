@@ -14,7 +14,15 @@ const sonner = vi.hoisted(() => {
 })
 vi.mock('sonner', () => ({ toast: sonner }))
 
-import { TOAST_DETAILS_IN_DIAGNOSTICS, guardToastText, toast } from '@/lib/toast'
+import {
+  SUPPORT_BUNDLE_LABEL,
+  TOAST_DETAILS_SAVED,
+  TOAST_WITH_DESCRIPTION_MS,
+  defaultToastDuration,
+  guardToastText,
+  registerSupportBundleExport,
+  toast
+} from '@/lib/toast'
 
 // The exact texts from the owner's 2026-10-02 screenshot (Stop) and the
 // other user's screen recording (YouTube connect).
@@ -24,9 +32,9 @@ const CONNECT_BODY =
   'OAuth account preparation failed and will be retried from its protected token checkpoint: YouTube profile lookup failed with HTTP 403 Forbidden: quotaExceeded: The request cannot be completed because you have exceeded your &lt;a href=&quot;/youtube/v3/getting-started#quota&quot;&gt;quota&lt;/a&gt;.'
 
 describe('guardToastText (plan 094, S3)', () => {
-  it('replaces a JSON blob with the diagnostics pointer', () => {
+  it('replaces a JSON blob with the support pointer', () => {
     const guarded = guardToastText(OWNER_STOP_BODY)
-    expect(guarded.text).toBe(TOAST_DETAILS_IN_DIAGNOSTICS)
+    expect(guarded.text).toBe(TOAST_DETAILS_SAVED)
     expect(guarded.text).not.toContain('{"error"')
     expect(guarded.text).not.toContain('<')
     expect(guarded.withheld).toBe(OWNER_STOP_BODY)
@@ -47,7 +55,7 @@ describe('guardToastText (plan 094, S3)', () => {
       'Please reconnect YouTube.'
     )
     expect(guardToastText('<html><body>boom</body></html>').text).toBe('boom')
-    expect(guardToastText('<br/>').text).toBe(TOAST_DETAILS_IN_DIAGNOSTICS)
+    expect(guardToastText('<br/>').text).toBe(TOAST_DETAILS_SAVED)
     const clean = "Couldn't end the YouTube broadcast."
     expect(guardToastText(clean)).toEqual({ text: clean, withheld: null })
     expect(
@@ -65,7 +73,8 @@ describe('toast wrapper', () => {
   it('guards the description and the title on every kind', () => {
     toast.error('Could not complete YouTube on YouTube.', { description: OWNER_STOP_BODY })
     expect(sonner.error).toHaveBeenCalledWith('Could not complete YouTube on YouTube.', {
-      description: TOAST_DETAILS_IN_DIAGNOSTICS
+      description: TOAST_DETAILS_SAVED,
+      duration: TOAST_WITH_DESCRIPTION_MS
     })
     toast.warning(CONNECT_BODY, { id: 'x' })
     const [title, options] = sonner.warning.mock.calls[0] as [string, { id: string }]
@@ -78,5 +87,94 @@ describe('toast wrapper', () => {
     toast.dismiss('p')
     expect(sonner.dismiss).toHaveBeenCalledWith('p')
     expect(console.warn).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('withheld details offer the support bundle (plan 174 A-20)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  })
+
+  it('says the details were saved, never "diagnostics"', () => {
+    expect(TOAST_DETAILS_SAVED).toBe('Details were saved for support.')
+    expect(guardToastText(OWNER_STOP_BODY).text).not.toMatch(/diagnostics/i)
+  })
+
+  it('adds Export support bundle once an exporter is registered, and keeps a toast’s own action', () => {
+    const exporter = vi.fn()
+    registerSupportBundleExport(exporter)
+    try {
+      toast.error("Couldn't end the YouTube broadcast", { description: OWNER_STOP_BODY })
+      const [, options] = sonner.error.mock.calls[0] as [
+        string,
+        { description: string; action: { label: string; onClick: () => void } }
+      ]
+      expect(options.description).toBe(TOAST_DETAILS_SAVED)
+      expect(options.action.label).toBe(SUPPORT_BUNDLE_LABEL)
+      // An offered action keeps the toast up, like any toast with an action.
+      expect(options).toMatchObject({ duration: Infinity })
+      options.action.onClick()
+      expect(exporter).toHaveBeenCalledOnce()
+
+      const own = { label: 'Retry', onClick: vi.fn() }
+      toast.error("Couldn't end the YouTube broadcast", {
+        description: OWNER_STOP_BODY,
+        action: own
+      })
+      expect(sonner.error.mock.calls[1][1]).toMatchObject({ action: own })
+
+      toast.success('Account connected.')
+      expect(sonner.success).toHaveBeenCalledWith('Account connected.')
+    } finally {
+      registerSupportBundleExport(null)
+    }
+  })
+})
+
+describe('the IPC wrapper backstop (plan 174 S2.4)', () => {
+  it("strips Electron's remote-method wrapper and keeps the handler's words", () => {
+    expect(
+      guardToastText("Error invoking remote method 'comments-window:clear': Error: Clear failed.")
+    ).toEqual({
+      text: 'Clear failed.',
+      withheld: "Error invoking remote method 'comments-window:clear': Error: Clear failed."
+    })
+  })
+})
+
+describe('toast durations by shape (plan 174 S2.4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('keeps 4 s for a one-liner, 8 s with a description, and stays with an action', () => {
+    expect(defaultToastDuration(undefined)).toBeUndefined()
+    expect(defaultToastDuration({ id: 'x' })).toBeUndefined()
+    expect(defaultToastDuration({ description: 'Why.' })).toBe(8_000)
+    expect(defaultToastDuration({ action: { label: 'Retry', onClick: () => {} } })).toBe(Infinity)
+    expect(defaultToastDuration({ cancel: { label: 'Show', onClick: () => {} } })).toBe(Infinity)
+    expect(defaultToastDuration({ description: 'Why.', duration: 12_000 })).toBe(12_000)
+  })
+
+  it('applies them on every kind but loading, and never overrides an explicit duration', () => {
+    toast.warning('Degraded', { description: 'Why.' })
+    expect(sonner.warning).toHaveBeenCalledWith('Degraded', {
+      description: 'Why.',
+      duration: 8_000
+    })
+    toast.loading('Saving…', { id: 'l', description: 'Long recordings take minutes.' })
+    expect(sonner.loading).toHaveBeenCalledWith('Saving…', {
+      id: 'l',
+      description: 'Long recordings take minutes.'
+    })
+    toast.success('Recording saved', {
+      duration: 12_000,
+      action: { label: 'Play', onClick: () => {} }
+    })
+    expect(sonner.success).toHaveBeenCalledWith('Recording saved', {
+      duration: 12_000,
+      action: expect.objectContaining({ label: 'Play' })
+    })
   })
 })

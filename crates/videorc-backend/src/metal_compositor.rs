@@ -67,6 +67,9 @@ struct FragParams {
     // color.rs. If these drift, the CPU and GPU keyers disagree.
     float4 chroma_key;
     float4 chroma_key2;
+    // (opacity, reserved, reserved, reserved): multiplies the quad's alpha
+    // (plan 168 S-B2, the Buddy sprite); 1 for every other quad.
+    float4 layer;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -159,6 +162,7 @@ fragment float4 f_main(VOut in [[stage_in]],
         }
         color.a *= alpha;
     }
+    color.a *= params.layer.x;
     return color;
 }
 "#;
@@ -180,6 +184,8 @@ struct FragParams {
     chroma_key: [f32; 4],
     /// (band, spill, spill_is_blue, reserved).
     chroma_key2: [f32; 4],
+    /// (opacity, reserved, reserved, reserved); see the MSL comment.
+    layer: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -259,6 +265,72 @@ pub struct GpuSource<'a> {
     /// Chroma key applied in the fragment shader (camera green screen). The
     /// caller must also set `blend` or the computed alpha is ignored.
     pub chroma_key: Option<GpuChromaKey>,
+    /// A turned quad (plan 168 S-B2, the Buddy sprite): the source's corners
+    /// in normalized [0,1] canvas coords, top-left origin, in the order
+    /// top-left, top-right, bottom-left, bottom-right of the (cropped)
+    /// source. `None` draws the axis-aligned `dest` rect.
+    pub corners: Option<[[f32; 2]; 4]>,
+    /// Which sampler this quad reads with.
+    pub sampler: GpuSourceSampler,
+    /// Multiplies the quad's alpha (needs `blend`); 1 for everything but
+    /// the Buddy sprite.
+    pub opacity: f32,
+}
+
+/// The sampler a quad reads with (plan 168 D7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuSourceSampler {
+    /// The compositor's scene sampler: nearest on recording compositors (exact
+    /// crop edges at ~1:1), linear on preview compositors.
+    Scene,
+    /// Always linear: the Buddy sprite, which is scaled, turned and squashed.
+    Linear,
+}
+
+/// Content namespaces whose texture lives in a key-addressed slot rather than
+/// the per-index cache (plan 168 D8): a layer whose index shifts (a caption
+/// appearing below it) never re-uploads.
+/// Namespace 7 is the Buddy sprite atlas (`buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE`),
+/// one slot whatever its key's `variant`. Namespace 9 is the banners (plan
+/// 186 S3, `banner_prepare::BANNER_METAL_NAMESPACE`): one slot per `variant`
+/// (the banner's slot id), at most `BANNER_KEYED_TEXTURE_SLOTS` of them, the
+/// least recently drawn evicted first. The compositor asserts both at compile
+/// time.
+pub const KEYED_TEXTURE_NAMESPACES: [u64; 2] = [7, 9];
+/// The banners showing at once (D7), so four slots never evict each other.
+pub const BANNER_KEYED_TEXTURE_SLOTS: usize = 4;
+
+/// Which key-addressed slot a source draws from: `(namespace, slot)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyedSlotId {
+    namespace: u64,
+    slot: u64,
+}
+
+/// How many slots a keyed namespace may hold.
+fn keyed_slot_capacity(namespace: u64) -> usize {
+    if namespace == KEYED_TEXTURE_NAMESPACES[1] {
+        BANNER_KEYED_TEXTURE_SLOTS
+    } else {
+        1
+    }
+}
+
+fn keyed_slot_id(source: &GpuSource<'_>) -> Option<KeyedSlotId> {
+    let key = source.content_key?;
+    if !KEYED_TEXTURE_NAMESPACES.contains(&key.namespace) {
+        return None;
+    }
+    // A one-slot namespace ignores the variant: the Buddy keeps its slot.
+    let slot = if keyed_slot_capacity(key.namespace) > 1 {
+        key.variant
+    } else {
+        0
+    };
+    Some(KeyedSlotId {
+        namespace: key.namespace,
+        slot,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -750,6 +822,8 @@ pub struct MetalSceneCompositor {
     /// for `GpuSource::blend` overlays (caption bar, comment highlight).
     blend_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
+    /// Always linear, for quads that ask for it (`GpuSourceSampler::Linear`).
+    linear_sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
     smooth_scaling: bool,
     targets: Vec<CachedTargetTexture>,
     // Index of the LAST-RENDERED slot; advanced at the start of each compose.
@@ -758,6 +832,14 @@ pub struct MetalSceneCompositor {
     target_width: usize,
     target_height: usize,
     source_textures: Vec<Option<CachedSourceTexture>>,
+    /// Key-addressed slots (`KEYED_TEXTURE_NAMESPACES`): one per namespace,
+    /// or per `(namespace, variant)` for a multi-slot namespace.
+    keyed_textures: Vec<KeyedSourceTexture>,
+    /// Advances on every keyed use; the eviction order of a full namespace.
+    keyed_texture_clock: u64,
+    /// Byte uploads into the key-addressed slots, for the "uploads once"
+    /// contract (plan 168 S-B2).
+    keyed_texture_uploads: u64,
     source_texture_cache: Option<MetalSourceTextureCache>,
     pending_source_import_stats: PendingMetalSourceImportStats,
     retention_counters: Arc<MetalRetentionCounters>,
@@ -787,6 +869,14 @@ struct CachedSourceTexture {
     height: usize,
     content_key: Option<GpuSourceContentKey>,
     _retention: Option<MetalRetentionLease>,
+}
+
+/// One key-addressed slot: which `(namespace, slot)` it serves and when it
+/// was last drawn from.
+struct KeyedSourceTexture {
+    id: KeyedSlotId,
+    cached: CachedSourceTexture,
+    used_at: u64,
 }
 
 enum CachedSourceBacking {
@@ -1114,6 +1204,7 @@ impl MetalSceneCompositor {
         } else {
             build_sampler(&device)?
         };
+        let linear_sampler = build_preview_sampler(&device)?;
         let source_texture_cache = make_texture_cache(&device).map(MetalSourceTextureCache::new);
         let retention_counters = Arc::new(MetalRetentionCounters::default());
         let retention_lifetime =
@@ -1126,6 +1217,7 @@ impl MetalSceneCompositor {
             pipeline,
             blend_pipeline,
             sampler,
+            linear_sampler,
             smooth_scaling,
             targets: Vec::new(),
             target_cursor: 0,
@@ -1133,6 +1225,9 @@ impl MetalSceneCompositor {
             target_width: 0,
             target_height: 0,
             source_textures: Vec::new(),
+            keyed_textures: Vec::new(),
+            keyed_texture_clock: 0,
+            keyed_texture_uploads: 0,
             source_texture_cache,
             pending_source_import_stats: PendingMetalSourceImportStats::default(),
             retention_counters,
@@ -1241,6 +1336,7 @@ impl MetalSceneCompositor {
         let mut command_encode_ms = 0.0;
         let mut encode_segment_started_at = Instant::now();
         let mut encoder_blend = false;
+        let mut encoder_sampler = GpuSourceSampler::Scene;
         let mut encode_result: Result<(), ()> = Ok(());
         for (source_index, source) in sources.iter().enumerate() {
             if source.blend != encoder_blend {
@@ -1251,7 +1347,18 @@ impl MetalSceneCompositor {
                 });
                 encoder_blend = source.blend;
             }
-            let vertices = quad_vertices(source.dest);
+            if source.sampler != encoder_sampler {
+                let sampler = match source.sampler {
+                    GpuSourceSampler::Scene => &self.sampler,
+                    GpuSourceSampler::Linear => &self.linear_sampler,
+                };
+                unsafe { encoder.setFragmentSamplerState_atIndex(Some(sampler), 0) };
+                encoder_sampler = source.sampler;
+            }
+            let vertices = match source.corners {
+                Some(corners) => quad_vertices_corners(corners),
+                None => quad_vertices(source.dest),
+            };
             let Some(vertices_ptr) = NonNull::new(vertices.as_ptr() as *mut c_void) else {
                 encode_result = Err(());
                 break;
@@ -1284,6 +1391,7 @@ impl MetalSceneCompositor {
                 radius: source.mask.shader_radius(),
                 chroma_key,
                 chroma_key2,
+                layer: [source.opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
             };
             command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
             let source_texture_started_at = Instant::now();
@@ -1305,10 +1413,13 @@ impl MetalSceneCompositor {
                     break;
                 }
             }
-            let Some(texture) = self.source_textures[source_index]
-                .as_ref()
-                .map(|cached| &cached.texture)
-            else {
+            let texture = match keyed_slot_id(source) {
+                Some(id) => self.keyed_texture(id),
+                None => self.source_textures[source_index]
+                    .as_ref()
+                    .map(|cached| &*cached.texture),
+            };
+            let Some(texture) = texture else {
                 encode_result = Err(());
                 break;
             };
@@ -1508,11 +1619,130 @@ impl MetalSceneCompositor {
         self.targets.get(self.target_cursor)
     }
 
+    /// The texture of a key-addressed slot.
+    fn keyed_texture(&self, id: KeyedSlotId) -> Option<&MetalTexture> {
+        self.keyed_textures
+            .iter()
+            .find(|slot| slot.id == id)
+            .map(|slot| &*slot.cached.texture)
+    }
+
+    /// Plan 168 D8: an immutable source addressed by its content key, not its
+    /// layer index. Its slot is reused while the key (and size) holds; a new
+    /// revision uploads once into it. A namespace at its slot capacity gives
+    /// a new slot id the least recently drawn slot (plan 186: four banners).
+    fn ensure_keyed_texture(
+        &mut self,
+        id: KeyedSlotId,
+        source: &GpuSource<'_>,
+    ) -> Result<SourceTextureReady, SourceImportFailures> {
+        let failures = SourceImportFailures::default();
+        self.keyed_texture_clock = self.keyed_texture_clock.wrapping_add(1);
+        let now = self.keyed_texture_clock;
+        let position = self.keyed_textures.iter().position(|slot| slot.id == id);
+        if let Some(index) = position {
+            let slot = &mut self.keyed_textures[index];
+            if slot.cached.width == source.width
+                && slot.cached.height == source.height
+                && slot.cached.content_key == source.content_key
+            {
+                slot.used_at = now;
+                return Ok(SourceTextureReady {
+                    outcome: SourceImportOutcome::ImmutableByteReused,
+                    failures,
+                });
+            }
+        }
+        let reusable = position.filter(|index| {
+            let cached = &self.keyed_textures[*index].cached;
+            cached.width == source.width && cached.height == source.height
+        });
+        let index = match reusable {
+            Some(index) => index,
+            None => {
+                let texture = make_texture(
+                    &self.device,
+                    source.width,
+                    source.height,
+                    MTLTextureUsage::ShaderRead,
+                )
+                .ok_or(failures)?;
+                let slot = KeyedSourceTexture {
+                    id,
+                    cached: CachedSourceTexture {
+                        texture,
+                        backing: CachedSourceBacking::ByteUpload,
+                        width: source.width,
+                        height: source.height,
+                        content_key: None,
+                        _retention: None,
+                    },
+                    used_at: now,
+                };
+                match position.or_else(|| self.keyed_slot_to_evict(id.namespace)) {
+                    Some(index) => {
+                        self.keyed_textures[index] = slot;
+                        index
+                    }
+                    None => {
+                        self.keyed_textures.push(slot);
+                        self.keyed_textures.len() - 1
+                    }
+                }
+            }
+        };
+        let slot = &mut self.keyed_textures[index];
+        upload_bgra_to_texture(&slot.cached.texture, source).ok_or(failures)?;
+        // The slot id stays on the slot even before the first key lands.
+        slot.cached.content_key = source.content_key;
+        slot.used_at = now;
+        self.keyed_texture_uploads = self.keyed_texture_uploads.saturating_add(1);
+        Ok(SourceTextureReady {
+            outcome: SourceImportOutcome::ImmutableByteUploaded,
+            failures,
+        })
+    }
+
+    /// The slot a new id in `namespace` replaces: the least recently drawn
+    /// one once the namespace holds its capacity, else none (append).
+    fn keyed_slot_to_evict(&self, namespace: u64) -> Option<usize> {
+        let in_namespace = self
+            .keyed_textures
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.id.namespace == namespace)
+            .collect::<Vec<_>>();
+        if in_namespace.len() < keyed_slot_capacity(namespace) {
+            return None;
+        }
+        in_namespace
+            .into_iter()
+            .min_by_key(|(_, slot)| slot.used_at)
+            .map(|(index, _)| index)
+    }
+
+    /// How many key-addressed slots `namespace` holds now.
+    #[cfg(test)]
+    pub(crate) fn keyed_slot_count(&self, namespace: u64) -> usize {
+        self.keyed_textures
+            .iter()
+            .filter(|slot| slot.id.namespace == namespace)
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keyed_texture_uploads(&self) -> u64 {
+        self.keyed_texture_uploads
+    }
+
     fn ensure_source_texture(
         &mut self,
         index: usize,
         source: &GpuSource<'_>,
     ) -> Result<SourceTextureReady, SourceImportFailures> {
+        if let Some(id) = keyed_slot_id(source) {
+            return self.ensure_keyed_texture(id, source);
+        }
         if self.source_textures.len() <= index {
             self.source_textures.resize_with(index + 1, || None);
         }
@@ -2367,6 +2597,7 @@ fn encode_texture_present(
         radius: 0.0,
         chroma_key: [0.0; 4],
         chroma_key2: [0.0; 4],
+        layer: [1.0, 0.0, 0.0, 0.0],
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -2451,6 +2682,41 @@ fn quad_vertices(dest: [f32; 4]) -> [f32; 24] {
         x1, y0, 1.0, 0.0, // top-right
         x0, y1, 0.0, 1.0, // bottom-left
         x1, y1, 1.0, 1.0, // bottom-right
+    ]
+}
+
+/// [`quad_vertices`] for a turned quad (plan 168 S-B2): `corners` are the
+/// source's top-left, top-right, bottom-left and bottom-right in top-left
+/// origin [0,1] space; the triangles and UVs are the same as the
+/// axis-aligned quad's, so the crop and every mask read the same `uv`.
+fn quad_vertices_corners(corners: [[f32; 2]; 4]) -> [f32; 24] {
+    let ndc = |[x, y]: [f32; 2]| [2.0 * x - 1.0, 1.0 - 2.0 * y];
+    let [top_left, top_right, bottom_left, bottom_right] = corners.map(ndc);
+    [
+        top_left[0],
+        top_left[1],
+        0.0,
+        0.0,
+        bottom_left[0],
+        bottom_left[1],
+        0.0,
+        1.0,
+        top_right[0],
+        top_right[1],
+        1.0,
+        0.0,
+        top_right[0],
+        top_right[1],
+        1.0,
+        0.0,
+        bottom_left[0],
+        bottom_left[1],
+        0.0,
+        1.0,
+        bottom_right[0],
+        bottom_right[1],
+        1.0,
+        1.0,
     ]
 }
 
@@ -2596,6 +2862,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         let yuv = compositor.compose_yuv420p(4, 4, &sources).unwrap();
         assert_eq!(yuv.len(), 16 + 2 * 4);
@@ -3157,6 +3426,9 @@ mod tests {
             mask,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }
     }
 
@@ -3337,6 +3609,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             },
             GpuSource {
                 kind: GpuSourceKind::Camera,
@@ -3352,6 +3627,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             },
         ];
         let yuv = compositor.compose_yuv420p(1920, 1080, &sources).unwrap();
@@ -3380,6 +3658,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             },
             GpuSource {
                 kind: GpuSourceKind::Camera,
@@ -3395,6 +3676,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             },
         ];
 
@@ -3494,6 +3778,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
 
         let first = compositor
@@ -3539,6 +3826,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
 
         let first = compositor
@@ -3628,6 +3918,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             };
             let imported = compositor
                 .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[source])
@@ -3784,6 +4077,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
 
         compositor.force_next_pixel_buffer_import_failure();
@@ -3887,6 +4183,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
 
         let output = compositor
@@ -3934,6 +4233,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
 
         let output = compositor
@@ -4119,6 +4421,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         let pixels = composite_sources(out, out, [0.0, 0.0, 1.0, 1.0], &sources).unwrap();
         assert_eq!(pixels.len(), out * out * 4);

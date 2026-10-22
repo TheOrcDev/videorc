@@ -1,6 +1,6 @@
 import type { CohostFlag, CohostSpotlight, CohostState } from './backend'
 
-// Orcle's marks on chat rows (flag, suggested, talking about this). Only the
+// Buddy's marks on chat rows (flag, suggested, talking about this). Only the
 // Stream Manager reads them, so they live apart from cohost-view.ts: that
 // module is in the main window's eager bundle, this one is not.
 
