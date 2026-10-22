@@ -30,6 +30,11 @@ links to Markers. A stream without a local recording retains its timestamp
 list; it cannot play a local video. Markers refer to the original capture and
 are not remapped onto a Clean Cut export.
 
+The composer has two more local commands: `/banner <name>` and
+`/banner off` show and hide banners ([banners.md](banners.md)), and
+`/poll Question? Answer | Answer` starts a poll (`/poll` alone opens the
+form; `/poll end`, `/poll cancel`; see [polls.md](polls.md)).
+
 `/help` displays local command help. Unknown leading slash commands produce a
 local error. Start a chat message with `//` to send a literal leading slash;
 for example, `//marker example` sends `/marker example` to the selected chat

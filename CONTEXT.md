@@ -102,6 +102,14 @@ stays over a takeover and under captions, Buddy and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
 name)
 
+**Poll**:
+A question with two to five answers that viewers vote on by typing the
+answer's number in any chat Videorc reads; every vote lands in one tally
+that shows on stream. Stream Manager's Poll button or `/poll` starts one
+("Start poll", "End now", "Cancel poll", "Show result again").
+_Avoid_: vote (as the feature's name), survey, prediction (Twitch's betting
+feature)
+
 **Off**:
 A source or a feature the streamer turned off ("Camera: Off"). When there
 is nothing to pick, say so: "No camera found"; while looking, "Finding
