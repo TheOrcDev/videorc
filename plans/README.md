@@ -1,5 +1,16 @@
 # Implementation Plans
 
+- 2026-10-22: [Plan 187](187-discord-go-live-announcement.md), Discord
+  go-live announcement (issue #634). One Discord webhook, free, automatic:
+  the first ticked destination confirmed live posts one message sent as the
+  streamer (name + avatar), with the title, the thumbnail, a ping (none /
+  @here / @everyone) and a link button per live platform. It edits itself
+  as more legs join and turns into "Was live · 1h 42m" on Stop. Public only
+  (unlisted/private YouTube skipped), a 15-minute restart window never
+  pings twice, and crash recovery is included. The backend owns the secret
+  and the trigger; the Discord section sits on the Livestream page after
+  Stream details. 14 owner decisions (D1–D14), 7 slices. **PLANNED**.
+
 - 2026-10-20: [Plan 186](186-banners-on-the-picture.md), Banners. The
   owner wants their own images (a sponsor strip, "Follow me", a logo, a
   full-frame frame) placed anywhere on the picture, with recommended sizes.
