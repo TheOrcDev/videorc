@@ -116,12 +116,6 @@ try {
     if (!health?.ffmpeg?.available) {
       throw new Error(health?.ffmpeg?.message ?? 'FFmpeg is unavailable for the Discord smoke.')
     }
-    const recordingDirectory = await requestSmokeCommand(
-      smoke,
-      'authorize-smoke-resource',
-      { kind: 'output-directory', path: outputDirectory },
-      { timeoutMs }
-    )
     await request(ws, timeoutMs, 'streamTargets.metadata.update', {
       title: 'Discord smoke stream',
       description: 'Plan 187 smoke.',
@@ -192,7 +186,7 @@ try {
     startListeners()
     await sleep(listenerBindMs)
     let mark = fake.announcements().length
-    await startSession(ws, recordingDirectory.capabilityId)
+    await startSession(ws, smoke)
     const firstPost = await waitForAnnouncement(mark, postBudgetMs)
     check(firstPost?.method === 'POST', 'Go Live posts')
     check(
@@ -251,7 +245,7 @@ try {
     await restartListeners()
     await sleep(listenerBindMs)
     mark = fake.announcements().length
-    await startSession(ws, recordingDirectory.capabilityId)
+    await startSession(ws, smoke)
     const revived = await waitForAnnouncement(mark, postBudgetMs)
     check(
       revived?.method === 'PATCH' && String(revived?.body?.content ?? '').includes('Live now'),
@@ -281,7 +275,7 @@ try {
     await restartListeners()
     await sleep(listenerBindMs)
     mark = fake.requests.length
-    await startSession(ws, recordingDirectory.capabilityId)
+    await startSession(ws, smoke)
     await sleep(15000)
     await stopSession(ws)
     await sleep(3000)
@@ -296,7 +290,7 @@ try {
     await sleep(listenerBindMs)
     mark = fake.announcements().length
     const snapshotsBefore = discordSnapshots.length
-    await startSession(ws, recordingDirectory.capabilityId)
+    await startSession(ws, smoke)
     await waitFor(() => fake.announcements().length >= mark + 2, postBudgetMs)
     await sleep(8000)
     const deletion = fake.announcements().slice(mark)
@@ -344,8 +338,20 @@ function linkTargets() {
   }))
 }
 
-async function startSession(ws, capabilityId) {
-  const started = await request(ws, timeoutMs, 'session.start', sessionParams(capabilityId))
+async function startSession(ws, smoke) {
+  // An output-directory capability is single use: one per session.
+  const recordingDirectory = await requestSmokeCommand(
+    smoke,
+    'authorize-smoke-resource',
+    { kind: 'output-directory', path: outputDirectory },
+    { timeoutMs }
+  )
+  const started = await request(
+    ws,
+    timeoutMs,
+    'session.start',
+    sessionParams(recordingDirectory.capabilityId)
+  )
   if (started.state !== 'recording') {
     throw new Error(`Expected recording state after start, got ${started.state}.`)
   }
