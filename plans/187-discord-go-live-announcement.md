@@ -423,7 +423,7 @@ RPCs (Rust handler, `websocket_method_execution_policy`,
 | `discord.announce.update` | Mutation | partial `{enabled, ping, branding, postAs, excludedTargetIds, linkOverrides}` | snapshot |
 | `discord.webhook.save` | Mutation | `{url}` | snapshot, or the typed error `discord-invalid-url` / `discord-webhook-not-found` / `discord-unreachable` |
 | `discord.webhook.remove` | Mutation | — | snapshot (deletes the secret and `lastMessage`) |
-| `discord.webhook.test` | Mutation | `{targets}` (as for preview) | `{ok, messageUrl?}` or a typed error |
+| `discord.webhook.sendTest` | Mutation | `{targets}` (as for preview) | `{ok, messageUrl?}` or a typed error |
 | `discord.links.preview` | Observation | `{targets: [...]}` | `[{targetId, link?, linkKind: auto|typed|at-go-live|none, reason?}]` |
 
 Event `discord.announce.changed` carries the snapshot. The renderer

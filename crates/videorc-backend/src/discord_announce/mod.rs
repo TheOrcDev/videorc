@@ -227,7 +227,7 @@ pub struct SaveWebhookParams {
     pub url: String,
 }
 
-/// `discord.links.preview` and `discord.webhook.test`: the configured
+/// `discord.links.preview` and `discord.webhook.sendTest`: the configured
 /// destinations, as the Livestream page has them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -277,9 +277,11 @@ impl RpcError {
                 "Couldn't reach Discord. Check your connection and try again.",
             ),
             SendError::MessageGone | SendError::ComponentsRefused | SendError::Rejected { .. } => {
+                // The status and Discord's code go to the log, never the copy.
+                tracing::info!("[discord] refused: {}", error.describe());
                 Self::new(
                     "discord-rejected",
-                    format!("Discord refused it: {}.", error.describe()),
+                    "Discord refused it. Check the webhook in Discord, or paste a new one.",
                 )
             }
         }

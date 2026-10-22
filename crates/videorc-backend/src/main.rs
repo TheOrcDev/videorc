@@ -5641,7 +5641,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "discord.announce.update"
         | "discord.webhook.save"
         | "discord.webhook.remove"
-        | "discord.webhook.test" => Some(DEFAULT_MUTATION_POLICY),
+        | "discord.webhook.sendTest" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -11558,7 +11558,7 @@ async fn handle_text_message_with_role(
         "discord.webhook.remove" => {
             discord_rpc(command.id, discord_announce::remove_webhook(state).await)
         }
-        "discord.webhook.test" => {
+        "discord.webhook.sendTest" => {
             match serde_json::from_value::<discord_announce::TargetsParams>(command.params) {
                 Ok(params) => {
                     discord_rpc(command.id, discord_announce::send_test(state, params).await)

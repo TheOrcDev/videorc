@@ -246,3 +246,22 @@ async fn sessions_without_destinations_send_no_fact() {
         Ok(HookFact::YouTubeLive { .. })
     ));
 }
+
+#[test]
+fn remote_clients_cannot_reach_the_discord_methods() {
+    use crate::backend_authority::{BackendRole, authorize_backend_method};
+    for method in [
+        "discord.announce.get",
+        "discord.announce.update",
+        "discord.webhook.save",
+        "discord.webhook.remove",
+        "discord.webhook.sendTest",
+        "discord.links.preview",
+    ] {
+        assert!(
+            authorize_backend_method(BackendRole::Remote, method, false).is_err(),
+            "{method}"
+        );
+        assert!(authorize_backend_method(BackendRole::Renderer, method, false).is_ok());
+    }
+}

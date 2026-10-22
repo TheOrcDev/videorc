@@ -2851,4 +2851,98 @@ describe('banner backend wire contract (plan 186)', () => {
     })
     expect(() => validateBackendRpcParams('banners.hide', { id: null })).toThrow()
   })
+
+  it('validates the secret-free Discord announcement surface (plan 187)', () => {
+    const snapshot = {
+      webhookPresent: true,
+      webhookHint: '…/9xyz',
+      webhookName: 'Stream alerts',
+      enabled: true,
+      ping: 'everyone',
+      branding: true,
+      postAs: { kind: 'platform', accountId: 'acct-1' },
+      excludedTargetIds: ['youtube-1'],
+      linkOverrides: { tiktok: 'https://www.tiktok.com/@orc/live' },
+      identities: [
+        {
+          postAs: { kind: 'platform', accountId: 'acct-1' },
+          name: 'OrcDev',
+          platform: 'twitch',
+          avatarUrl: 'https://static-cdn.jtvnw.net/a.png'
+        },
+        { postAs: { kind: 'videorc' }, name: 'Orc' }
+      ],
+      lastPost: {
+        at: '2026-10-22T18:02:00+00:00',
+        messageUrl: 'https://discord.com/channels/1/2/3',
+        state: 'live'
+      },
+      lastError: { code: 'unreachable', at: '2026-10-22T18:03:00+00:00' }
+    }
+    for (const method of [
+      'discord.announce.get',
+      'discord.announce.update',
+      'discord.webhook.save',
+      'discord.webhook.remove'
+    ] as const) {
+      expect(validateBackendRpcResult(method, snapshot)).toStrictEqual(snapshot)
+    }
+    expect(validateBackendEventPayload('discord.announce.changed', snapshot)).toStrictEqual(
+      snapshot
+    )
+    // Rust omits None; a null would mean the serde trap is back.
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', { ...snapshot, webhookHint: null })
+    ).toThrow()
+    // The webhook URL never travels back to the renderer.
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhookUrl: 'https://discord.com/api/webhooks/1/secret'
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('discord.announce.update', { url: 'https://discord.com/x' })
+    ).toThrow()
+    expect(
+      validateBackendRpcParams('discord.announce.update', { linkOverride: { targetId: 't' } })
+    ).toStrictEqual({ linkOverride: { targetId: 't' } })
+    expect(() =>
+      validateBackendRpcParams('discord.announce.update', { postAs: { kind: 'someone' } })
+    ).toThrow()
+
+    const targets = {
+      targets: [
+        {
+          id: 'yt',
+          platform: 'youtube',
+          label: 'YouTube',
+          authMode: 'oauth',
+          outputOrientation: 'vertical',
+          platformBroadcastId: 'abc'
+        }
+      ]
+    }
+    expect(validateBackendRpcParams('discord.links.preview', targets)).toStrictEqual(targets)
+    expect(() =>
+      validateBackendRpcParams('discord.links.preview', {
+        targets: [{ ...targets.targets[0], streamKey: 'live_123' }]
+      })
+    ).toThrow()
+    const preview = {
+      links: [
+        { targetId: 'yt', label: 'YouTube · Vertical', linkKind: 'at-go-live', included: true },
+        {
+          targetId: 'tw',
+          label: 'Twitch',
+          linkKind: 'auto',
+          link: 'https://www.twitch.tv/orcdev',
+          included: true
+        }
+      ],
+      sender: { name: 'OrcDev' }
+    }
+    expect(validateBackendRpcResult('discord.links.preview', preview)).toStrictEqual(preview)
+    expect(validateBackendRpcResult('discord.webhook.sendTest', {})).toStrictEqual({})
+  })
 })
