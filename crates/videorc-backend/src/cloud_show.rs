@@ -850,6 +850,10 @@ pub struct RunnerState {
     /// it only grows. `None` from a runner older than the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restarts: Option<u32>,
+    /// This runner process holds a custom hold image (the agent hands a
+    /// restarted runner the last one it relayed). `None` from an older runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_image_set: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1003,6 +1007,9 @@ struct ActiveShow {
     /// The runner acked `destinations` for this show: from then on a state
     /// without legs means it restarted and lost them.
     handed_over: bool,
+    /// The hold image this computer handed over, in memory only: a runner
+    /// that restarts draws its default card until it gets it again.
+    hold_image_png_base64: Option<String>,
     /// Set by a resume until the runner reports live again.
     resuming: bool,
 }
@@ -1367,6 +1374,9 @@ fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
         generation,
         restart_seen_on_socket: false,
         resend: None,
+        resend_hold_image: None,
+        // The hand-over that installs this socket sends the image itself.
+        hold_image_sent_on_socket: true,
     };
     tokio::spawn(task.run(transport, rx));
     tx
@@ -1382,6 +1392,10 @@ struct ControlLoop<W: CloudWebApi, C: ControlConnector> {
     restart_seen_on_socket: bool,
     /// Destinations to send again on the current socket (a runner restart).
     resend: Option<Vec<HandoverDestination>>,
+    /// The hold image to send again on the current socket (a runner restart).
+    resend_hold_image: Option<String>,
+    /// The hold image went (or was queued) on this socket: at most once each.
+    hold_image_sent_on_socket: bool,
 }
 
 /// A runner that restarted mid-show (plan 184 "When things break"). The
@@ -1547,6 +1561,15 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 self.send_destinations_again(transport, pending, &destinations)
                     .await?;
             }
+            // After the destinations, best effort: the runner acks it, and a
+            // refusal leaves the default card, as at the hand-over.
+            if let Some(png) = self.resend_hold_image.take() {
+                let id = new_intent_id();
+                transport
+                    .send(json!({ "t": "intent", "id": id, "kind": "hold.image.set", "pngBase64": png }))
+                    .await
+                    .map_err(|_| ())?;
+            }
             tokio::select! {
                 frame = transport.recv() => {
                     match frame {
@@ -1652,6 +1675,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             {
                 open.destinations_resent = true;
             }
+            let mut restarted = false;
             if let Some(restart) = restart {
                 self.restart_seen_on_socket = true;
                 if let Some(rows) = restart_leg_rows(&restart, &previous_legs) {
@@ -1676,6 +1700,21 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 if let RunnerRestart::Resend(destinations) = restart {
                     self.resend = Some(destinations);
                 }
+                restarted = true;
+            }
+            // A restarted runner draws its default card until it gets the
+            // image again; the agent hands it back (`holdImageSet`), and when
+            // it could not (it restarted too) this computer sends its own.
+            if ((restarted && state.hold_image_set != Some(true))
+                || state.hold_image_set == Some(false))
+                && !self.hold_image_sent_on_socket
+                && let Some(png) = runtime
+                    .show
+                    .as_ref()
+                    .and_then(|show| show.hold_image_png_base64.clone())
+            {
+                self.resend_hold_image = Some(png);
+                self.hold_image_sent_on_socket = true;
             }
             runtime.runner = Some(state);
             runtime.connected = true;
@@ -1745,6 +1784,8 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 Ok((transport, welcome)) => {
                     self.restart_seen_on_socket = false;
                     self.resend = None;
+                    self.resend_hold_image = None;
+                    self.hold_image_sent_on_socket = false;
                     self.absorb_state(welcome);
                     return Ok(transport);
                 }
@@ -2105,6 +2146,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 session_id: Some(session_id.to_string()),
                 destinations: destinations.clone(),
                 handed_over: false,
+                hold_image_png_base64: None,
                 resuming: false,
             });
             runtime.end_reason = None;
@@ -2163,6 +2205,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                         session_id: None,
                         destinations: Vec::new(),
                         handed_over: false,
+                        hold_image_png_base64: None,
                         resuming: false,
                     });
                     runtime.bump_generation();
@@ -2267,6 +2310,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             .filter(|show| show.record.id == show_id)
         {
             show.handed_over = true;
+            show.hold_image_png_base64 = hold_image_png_base64.clone();
         }
         send_hold_image(tx, hold_image_png_base64).await;
         Ok(())
@@ -2380,7 +2424,16 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             // No destinations.set: the runner keeps every leg (and key) it
             // holds, so the platforms never see a restart.
-            None => send_hold_image(&tx, hold_image_png_base64).await,
+            None => {
+                if let Some(show) = lock(&self.slot)
+                    .show
+                    .as_mut()
+                    .filter(|show| show.record.id == show_id)
+                {
+                    show.hold_image_png_base64 = hold_image_png_base64.clone();
+                }
+                send_hold_image(&tx, hold_image_png_base64).await
+            }
         }
         Ok(ResumeOutcome::Resumed(PrepareOutcome::Cloud(
             SessionHandover {
@@ -2471,6 +2524,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 session_id: None,
                 destinations: Vec::new(),
                 handed_over: false,
+                hold_image_png_base64: None,
                 resuming: false,
             });
             runtime.bump_generation();
@@ -3546,6 +3600,12 @@ mod tests {
     /// Go Live through the cloud up to the runner live with both legs, and
     /// the node's end of the socket.
     async fn live_show(harness: &Harness) -> FakeServer {
+        live_show_with_hold_image(harness, None).await
+    }
+
+    async fn live_show_with_hold_image(harness: &Harness, png: Option<&str>) -> FakeServer {
+        let png = png.map(str::to_string);
+        let sent_png = png.clone();
         *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
         let context = harness.context.clone();
         let prepare = tokio::spawn(async move {
@@ -3562,7 +3622,7 @@ mod tests {
                         audio_kbps: 160,
                     }],
                     destinations(),
-                    None,
+                    sent_png,
                 )
                 .await
         });
@@ -3572,6 +3632,11 @@ mod tests {
         let set = server.next_frame().await;
         assert_eq!(set["kind"], "destinations.set");
         server.send(ack(&set["id"]));
+        if png.is_some() {
+            let image = server.next_frame().await;
+            assert_eq!(image["kind"], "hold.image.set");
+            server.send(ack(&image["id"]));
+        }
         assert!(matches!(
             prepare.await.unwrap().unwrap(),
             PrepareOutcome::Cloud(_)
@@ -4240,6 +4305,71 @@ mod tests {
         assert_eq!(server.next_frame().await["t"], "ping");
     }
 
+    // The hold image lives in the runner's memory too: a restarted runner
+    // draws its default card until the desktop sends the user's again.
+    #[tokio::test(start_paused = true)]
+    async fn a_restarted_runner_gets_the_hold_image_again_after_the_destinations() {
+        let harness = harness(true);
+        let server = live_show_with_hold_image(&harness, Some("iVBORw0KGgoHOLD")).await;
+        server.drop_socket();
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(json!({ "t": "welcome", "state": {
+            "phase": "hold", "liveSeconds": 30, "feeds": [], "legs": [],
+            "destinationsSet": false, "restarts": 1
+        }}));
+        let set = server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        let image = server.next_frame().await;
+        assert_eq!(image["kind"], "hold.image.set");
+        assert_eq!(image["pngBase64"], "iVBORw0KGgoHOLD");
+        server.send(ack(&set["id"]));
+        server.send(ack(&image["id"]));
+        // A runner the node already gave its destinations back still gets the
+        // image: the node never had it.
+        server.drop_socket();
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(json!({ "t": "welcome", "state": {
+            "phase": "live", "liveSeconds": 60, "feeds": [], "legs": live_legs(),
+            "destinationsSet": true, "restarts": 2
+        }}));
+        let image = server.next_frame().await;
+        assert_eq!(image["kind"], "hold.image.set");
+        assert_eq!(image["pngBase64"], "iVBORw0KGgoHOLD");
+        // The runner says it holds no image (the agent could not hand it
+        // back): this computer sends its own, once on this socket.
+        server.drop_socket();
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(json!({ "t": "welcome", "state": {
+            "phase": "live", "liveSeconds": 61, "feeds": [], "legs": live_legs(),
+            "destinationsSet": true, "restarts": 2, "holdImageSet": false
+        }}));
+        let image = server.next_frame().await;
+        assert_eq!(image["kind"], "hold.image.set");
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 62, "feeds": [], "legs": live_legs(),
+            "destinationsSet": true, "restarts": 2, "holdImageSet": false
+        }}));
+        tokio::time::advance(Duration::from_millis(5_100)).await;
+        assert_eq!(server.next_frame().await["t"], "ping");
+        // A plain reconnect to the same runner, image held, sends nothing.
+        server.drop_socket();
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(json!({ "t": "welcome", "state": {
+            "phase": "live", "liveSeconds": 63, "feeds": [], "legs": live_legs(),
+            "destinationsSet": true, "restarts": 2, "holdImageSet": true
+        }}));
+        tokio::time::advance(Duration::from_millis(5_100)).await;
+        assert_eq!(server.next_frame().await["t"], "ping");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_restarted_runner_that_refuses_the_destinations_is_reported_unrecovered() {
         let harness = harness(true);
@@ -4285,6 +4415,7 @@ mod tests {
             session_id: Some("session-1".to_string()),
             destinations,
             handed_over,
+            hold_image_png_base64: None,
             resuming: false,
         };
         let state = |value: Value| -> RunnerState { serde_json::from_value(value).unwrap() };
@@ -5532,6 +5663,7 @@ mod tests {
             session_id: None,
             destinations: Vec::new(),
             handed_over: false,
+            hold_image_png_base64: None,
             resuming: false,
         });
         assert_eq!(
