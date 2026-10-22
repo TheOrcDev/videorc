@@ -9,7 +9,10 @@
   (unlisted/private YouTube skipped), a 15-minute restart window never
   pings twice, and crash recovery is included. The backend owns the secret
   and the trigger; the Discord section sits on the Livestream page after
-  Stream details. 14 owner decisions (D1–D14), 7 slices. **PLANNED**.
+  Stream details. 14 owner decisions (D1–D14), 7 slices. **EXECUTED**
+  2026-10-22 (whole plan) on `plan-187-discord-go-live`: gates and
+  smoke:discord-announce pass; the test RPC is `discord.webhook.sendTest`
+  (`.test` names are admin-only); real-Discord check and owner by-eye owed.
 
 - 2026-10-20: [Plan 186](186-banners-on-the-picture.md), Banners. The
   owner wants their own images (a sponsor strip, "Follow me", a logo, a

@@ -753,6 +753,64 @@ The S2 state machine is the only subtle part. If S2's tests pass but the S5
 smoke finds a double post or a missed post, re-run S2 on `fable-5` with the
 failing smoke log, rather than patching in the smoke.
 
-## As built
+## As built (2026-10-22, branch `plan-187-discord-go-live`)
 
-_Not started._
+The whole plan was executed in one pass, S1 to S7. The deviations:
+
+- **The RPC is `discord.webhook.sendTest`, not `discord.webhook.test`.**
+  `backend_authority.rs` treats any method ending in `.test` as a smoke/test
+  method: admin-only, and only in debug builds with smoke RPCs on. The test
+  button would have been refused in the shipped app. A new test
+  (`remote_clients_cannot_reach_the_discord_methods`, which also checks that
+  the renderer is admitted) caught it.
+- **The leak check moved.** `smoke:streaming-secrets` tests the renderer's
+  capture-config persistence, which never holds the webhook, so extending it
+  would prove nothing. The leak check lives in `smoke:discord-announce`: the
+  token is never in the app log, never in an answer, and never in an event
+  on the renderer socket. The Rust unit tests add two more checks:
+  `WebhookUrl`'s `Debug` and every `SendError::describe` are token-free.
+- **Links-row toggles are trailing `Switch`es, not checkboxes.** The design
+  skill puts a boolean on a `Switch`, and destination rows already end in
+  one.
+- **The failure toast lives in the lazy `session-runtime-recovery` module.**
+  The main studio hook only forwards a snapshot that carries an error, so
+  the eager bundle doesn't grow. `check-renderer-asset-budget` passes.
+- **Two copy changes from the by-eye pass.**
+  - "Post as" reads "Automatic" when it resolves to nobody. The trigger cut
+    "the webhook's name".
+  - TikTok and Instagram buttons drop " · Vertical". Both platforms are
+    vertical-only.
+- **No Discord refusal copy carries internals.** A Discord refusal reads
+  "Discord refused it. Check the webhook in Discord, or paste a new one." The
+  HTTP status and Discord's code go to the log.
+- **The `privacyStatus` parse covers both transition paths.**
+  `redundantTransition` re-reads the broadcast with `part=status`, and
+  `get_youtube_broadcast_status` returns both fields. Neither path costs
+  extra quota.
+
+Gates (2026-10-22, this Mac):
+
+- `cargo fmt --check --all`
+- `cargo clippy -p videorc-backend -- -D warnings`
+- `cargo test -p videorc-backend -- discord_announce youtube x_live execution_policy`: 213 passed
+- `pnpm typecheck`
+- `pnpm lint`: 0 errors. The one `exhaustive-deps` warning at `use-studio.tsx` ~11851 was already on main.
+- `pnpm format:check`
+- `pnpm --filter @videorc/desktop test`: 5075 passed
+- `pnpm test:scripts`: 2464 passed
+- `pnpm build` and `check-renderer-asset-budget`
+- `smoke:discord-announce`: passed twice in a row (27 checks)
+- `smoke:youtube-quota`: passed (the transition now also parses `privacyStatus`)
+- `smoke:streaming-secrets`: passed
+
+Screenshots of the section were taken in both themes from the dev app:
+empty, connected, a failed post with its toast, and the error state. They
+were reviewed by eye and not committed (AGENTS.md: no generated media).
+
+**Owed:**
+
+- **The real-Discord check (S7 step 2).** It needs a webhook in a private
+  test server from the owner. The open question is whether
+  `with_components=true` link buttons render on a user-created webhook.
+  If they don't, the fallback (links in the embed) is built and unit-tested.
+- **The owner's by-eye pass** in both themes.
