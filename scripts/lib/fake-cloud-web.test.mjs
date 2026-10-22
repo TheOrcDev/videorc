@@ -1044,18 +1044,36 @@ describe('fake cloud web: what the web changed after the cloud test (plan 184)',
 })
 
 describe('fake cloud web: the create rate limit (C-W6)', () => {
-  it('refuses the 13th show an hour, failed creates included, after the open-show check', async () => {
+  it('refuses the 13th show a node took in an hour; a refused create never counts', async () => {
     const secret = Buffer.alloc(32, 7)
     const { privateKey } = newShowSigningKey()
     let refuse = true
     const agent = createServer(async (req, res) => {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
-      // Every create fails on the node, so no show stays open.
-      res.writeHead(refuse && req.url === '/v1/shows' ? 400 : 200, {
-        'content-type': 'application/json'
-      })
-      res.end(JSON.stringify({ ok: true }))
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+      if (req.url === '/v1/shows' && refuse) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 'bad-request', message: 'no' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify(
+          req.url === '/v1/shows'
+            ? {
+                ingest: [
+                  {
+                    orientation: 'horizontal',
+                    serverUrl: 'rtmps://localhost:19360/live',
+                    streamKey: `${body.showId}-h?key=${body.ingestKey}`
+                  }
+                ],
+                controlUrl: `ws://127.0.0.1:9443/v1/shows/${body.showId}/control`
+              }
+            : { ok: true }
+        )
+      )
     })
     await new Promise((resolveListen) => agent.listen(0, '127.0.0.1', resolveListen))
     const web = await startFakeCloudWeb({
@@ -1063,10 +1081,11 @@ describe('fake cloud web: the create rate limit (C-W6)', () => {
       node: { id: 'local-1', secret, agentUrl: `http://127.0.0.1:${agent.address().port}` },
       signingKey: privateKey
     })
+    const bearer = { authorization: 'Bearer session-token', 'content-type': 'application/json' }
     const create = (kind = 'solo') =>
       fetch(`${web.httpOrigin}/api/cloud/shows`, {
         method: 'POST',
-        headers: { authorization: 'Bearer session-token', 'content-type': 'application/json' },
+        headers: bearer,
         body: JSON.stringify({
           kind,
           outputs: [
@@ -1082,10 +1101,23 @@ describe('fake cloud web: the create rate limit (C-W6)', () => {
         })
       })
     try {
-      for (let index = 0; index < 12; index += 1) {
+      // The node refuses: never counted (web 52038614, C-W6 update).
+      for (let index = 0; index < 13; index += 1) {
         const failed = await create()
         assert.equal(failed.status, 502)
         assert.equal((await failed.json()).error.code, 'cloud-node-rejected')
+      }
+      // Twelve shows the node took, each ended, count; the thirteenth is refused.
+      refuse = false
+      for (let index = 0; index < 12; index += 1) {
+        const taken = await create()
+        assert.equal(taken.status, 201)
+        const { show } = await taken.json()
+        const ended = await fetch(`${web.httpOrigin}/api/cloud/shows/${show.id}/end`, {
+          method: 'POST',
+          headers: bearer
+        })
+        assert.equal(ended.status, 200)
       }
       const thirteenth = await create()
       assert.equal(thirteenth.status, 429)
@@ -1093,8 +1125,7 @@ describe('fake cloud web: the create rate limit (C-W6)', () => {
       assert.equal(body.error.code, 'cloud-show-limit')
       assert.ok(Date.parse(body.resetAt) > Date.now())
       // A test keeps its own limit and still runs.
-      refuse = false
-      assert.notEqual((await create('test')).status, 429)
+      assert.equal((await create('test')).status, 201)
     } finally {
       await web.close()
       await new Promise((resolveClose) => agent.close(resolveClose))

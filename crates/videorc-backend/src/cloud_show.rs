@@ -4001,6 +4001,60 @@ mod tests {
         );
     }
 
+    // The web's create rate limit (C-W6): the 13th Go Live in an hour streams
+    // directly and says why. Nothing connects and nothing is ended.
+    #[tokio::test(start_paused = true)]
+    async fn a_go_live_past_the_hours_show_limit_streams_directly_with_its_reason() {
+        let harness = harness(true);
+        *harness.context.web.create.lock().unwrap() = Some(Err(CloudApiError::ShowLimit {
+            reset_at: Some("2026-10-22T01:00:00Z".to_string()),
+        }));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-13",
+                Some("bearer".to_string()),
+                Vec::new(),
+                destinations(),
+                None,
+            )
+            .await
+            .expect("the limit is a fallback, never a failed start");
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        let status = lock(&harness.context.slot).status();
+        let fallback = status.fallback.expect("the reason is kept for the toast");
+        assert_eq!(fallback.reason, CloudFallbackReason::CloudShowLimit);
+        assert_eq!(fallback.session_id, "session-13");
+        assert_eq!(status.phase, CloudPhase::Off);
+        assert_eq!(status.show, None);
+        // The next Go Live asks the web again: the limit is the web's to lift.
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        let context = harness.context.clone();
+        let next = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-14",
+                    Some("bearer".to_string()),
+                    Vec::new(),
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(welcome("starting"));
+        let set = server.next_frame().await;
+        server.send(ack(&set["id"]));
+        assert!(matches!(
+            next.await.unwrap().unwrap(),
+            PrepareOutcome::Cloud(_)
+        ));
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 2);
+    }
+
     // The ingest is checked before the socket opens: a node this computer
     // can't feed securely never receives a key, so direct is safe.
     #[tokio::test(start_paused = true)]

@@ -953,7 +953,7 @@ export async function startFakeCloudWeb({
         const limit = evaluateTestShowLimit({
           now,
           recentCreatedAt: [...state.shows.values()]
-            .filter((show) => show.userId === userId && isTestShow(show))
+            .filter((show) => show.userId === userId && isTestShow(show) && !show.nodeRefused)
             .map((show) => show.createdAt)
         })
         if (!limit.ok) {
@@ -969,12 +969,14 @@ export async function startFakeCloudWeb({
         })
       }
       // The web's create rate limit (lane 5 S8): after the one-open-show
-      // check, failed creates included; a test keeps its own limit.
+      // check, every show a node took, however it ended; a create the node
+      // refused or never answered doesn't count (web 52038614, C-W6). A test
+      // keeps its own limit.
       if (!isTest) {
         const limit = evaluateTestShowLimit({
           now,
           recentCreatedAt: [...state.shows.values()]
-            .filter((show) => show.userId === userId && !isTestShow(show))
+            .filter((show) => show.userId === userId && !isTestShow(show) && !show.nodeRefused)
             .map((show) => show.createdAt),
           limit: SHOWS_PER_HOUR,
           windowMs: SHOW_WINDOW_MS
@@ -1043,6 +1045,7 @@ export async function startFakeCloudWeb({
         show.status = 'ended'
         show.endedAt = now
         show.endReason = failure.endReason
+        show.nodeRefused = true
         return fail(failure.status, failure.code, failure.message)
       }
       show.controlUrl = value.controlUrl
