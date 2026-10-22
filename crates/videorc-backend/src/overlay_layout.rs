@@ -1,6 +1,6 @@
 //! Overlay layout (plan 164, Phase B): where the comment-highlight card, the
-//! caption bar and the Buddy sit on each output orientation, and which outputs
-//! (stream, recording) carry them.
+//! caption bar, the Buddy and the poll card (plan 188) sit on each output
+//! orientation, and which outputs (stream, recording) carry them.
 //!
 //! Backend-owned, stored under one `app_settings` row (`overlayLayout`) and
 //! served through `overlays.layout.get` / `overlays.layout.set`. Placement is
@@ -99,13 +99,18 @@ pub struct OverlayItemLayout {
     pub show_in_recording: bool,
 }
 
-/// The three placeable overlay items. `buddy` is carried from Phase B on so
-/// the leg plan and the canvas already know it; Phase C adds its slot.
+/// The four placeable overlay items. `buddy` is carried from Phase B on so
+/// the leg plan and the canvas already know it; Phase C adds its slot. `poll`
+/// (plan 188 S3) has a serde default: a layout stored before it loads with
+/// its three placements intact and the poll at its default, instead of
+/// failing to parse and resetting everyone to defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OverlayLayout {
     pub highlight: OverlayItemLayout,
     pub captions: OverlayItemLayout,
     pub buddy: OverlayItemLayout,
+    #[serde(default = "default_poll_item")]
+    pub poll: OverlayItemLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,13 +119,16 @@ pub enum OverlayItem {
     Highlight,
     Captions,
     Buddy,
+    /// The poll card (plan 188): between the Buddy and the highlight card.
+    Poll,
 }
 
 impl OverlayItem {
-    pub const ALL: [OverlayItem; 3] = [
+    pub const ALL: [OverlayItem; 4] = [
         OverlayItem::Highlight,
         OverlayItem::Captions,
         OverlayItem::Buddy,
+        OverlayItem::Poll,
     ];
 
     /// How the Go Live sheet names the item mid-sentence.
@@ -129,6 +137,7 @@ impl OverlayItem {
             OverlayItem::Highlight => "highlights",
             OverlayItem::Captions => "captions",
             OverlayItem::Buddy => "the Buddy",
+            OverlayItem::Poll => "polls",
         }
     }
 }
@@ -186,7 +195,9 @@ impl From<CommentHighlightAnchor> for OverlaySnap {
 /// Default size `(w, h)` of an item on an orientation, in canvas units. The
 /// highlight and caption widths are the rasterizers' width fractions
 /// (`lib/comment-highlight.ts`, `lib/caption-overlay.ts`); their heights bound
-/// a content-driven bitmap. The Buddy is a square in pixels.
+/// a content-driven bitmap. The Buddy is a square in pixels. The poll card
+/// (plan 188 D12) is rasterized to the rect's width; its height bounds a card
+/// of up to seven rows (`lib/poll-card.ts`).
 pub fn overlay_default_size(item: OverlayItem, orientation: OverlayOrientation) -> (f64, f64) {
     match (item, orientation) {
         (OverlayItem::Highlight, OverlayOrientation::Horizontal) => (0.60, 0.26),
@@ -195,6 +206,8 @@ pub fn overlay_default_size(item: OverlayItem, orientation: OverlayOrientation) 
         (OverlayItem::Captions, OverlayOrientation::Vertical) => (0.76, 0.14),
         (OverlayItem::Buddy, OverlayOrientation::Horizontal) => (0.18, 0.18 * 16.0 / 9.0),
         (OverlayItem::Buddy, OverlayOrientation::Vertical) => (0.32, 0.32 * 9.0 / 16.0),
+        (OverlayItem::Poll, OverlayOrientation::Horizontal) => (0.30, 0.40),
+        (OverlayItem::Poll, OverlayOrientation::Vertical) => (0.78, 0.30),
     }
 }
 
@@ -251,11 +264,34 @@ fn snapped_item(
     }
 }
 
+/// The poll card's default place (plan 188 D12): top left on landscape (the
+/// one free corner: the highlight sits bottom left, the Buddy bottom right and
+/// the camera usually top right), top centre inside the portrait safe area on
+/// a vertical canvas, on both outputs. Also the serde default of
+/// `OverlayLayout::poll`, so a layout stored before plan 188 loads.
+fn default_poll_item() -> OverlayItemLayout {
+    OverlayItemLayout {
+        horizontal: overlay_snap_rect(
+            OverlayItem::Poll,
+            OverlayOrientation::Horizontal,
+            OverlaySnap::TopLeft,
+        ),
+        vertical: overlay_snap_rect(
+            OverlayItem::Poll,
+            OverlayOrientation::Vertical,
+            OverlaySnap::TopCenter,
+        ),
+        show_on_stream: true,
+        show_in_recording: true,
+    }
+}
+
 impl Default for OverlayLayout {
     /// Highlight: the pre-plan-164 default corner (bottom left), on both
     /// outputs. Captions: the bottom bar; their switches mirror the shipped
     /// `burnTarget` default (`off`), so a fresh install burns nothing until
-    /// the streamer turns captions on. Buddy: bottom right, on both.
+    /// the streamer turns captions on. Buddy: bottom right, on both. Poll:
+    /// top left (top centre on portrait), on both (plan 188 D12).
     fn default() -> Self {
         Self {
             highlight: snapped_item(
@@ -271,6 +307,7 @@ impl Default for OverlayLayout {
                 false,
             ),
             buddy: snapped_item(OverlayItem::Buddy, OverlaySnap::BottomRight, false, false),
+            poll: default_poll_item(),
         }
     }
 }
@@ -281,6 +318,7 @@ impl OverlayLayout {
             OverlayItem::Highlight => &self.highlight,
             OverlayItem::Captions => &self.captions,
             OverlayItem::Buddy => &self.buddy,
+            OverlayItem::Poll => &self.poll,
         }
     }
 
@@ -388,7 +426,8 @@ pub fn overlay_blit_layout(
 // --- Leg plan (plan 164, D12) ------------------------------------------------
 
 /// What a session's auxiliary compositor leg carries, as far as overlays are
-/// concerned. One leg plan serves captions, the highlight card and the Buddy.
+/// concerned. One leg plan serves captions, the highlight card, the Buddy and
+/// the poll card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayAuxLeg {
     /// One leg: the primary carries every output.
@@ -501,13 +540,15 @@ pub struct OverlaySessionShape {
 
 /// Per-item plans for the session, with the D13 fallbacks already applied:
 /// an item whose switches disagree on a shared leg burns on that leg
-/// (`highlight`, `buddy`). Captions keep their own path
+/// (`highlight`, `buddy`, `poll`). Captions keep their own path
 /// (`captions::caption_overlay_leg_plan_with_vertical_leg`), so the plan here
-/// is what the compositor flags are built from for the other two items.
+/// is what the compositor flags are built from for the other three items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlaySessionPlans {
     pub highlight: OverlayLegPlan,
     pub buddy: OverlayLegPlan,
+    /// The poll card (plan 188 S3): the same plan shape as the Buddy's.
+    pub poll: OverlayLegPlan,
 }
 
 impl OverlaySessionPlans {
@@ -516,6 +557,7 @@ impl OverlaySessionPlans {
         match item {
             OverlayItem::Highlight => Some(self.highlight),
             OverlayItem::Buddy => Some(self.buddy),
+            OverlayItem::Poll => Some(self.poll),
             OverlayItem::Captions => None,
         }
     }
@@ -543,6 +585,7 @@ pub fn overlay_session_plans(
     OverlaySessionPlans {
         highlight: resolved_item_plan(shape, &layout.highlight),
         buddy: resolved_item_plan(shape, &layout.buddy),
+        poll: resolved_item_plan(shape, &layout.poll),
     }
 }
 
@@ -563,7 +606,7 @@ pub fn overlay_layout_needs_split(shape: OverlaySessionShape, layout: &OverlayLa
     })
 }
 
-/// What a start notice names: one of the three placeable items, or every
+/// What a start notice names: one of the four placeable items, or every
 /// shown banner as one item (plan 186 D6, mid-sentence label `banners`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -571,6 +614,8 @@ pub enum OverlayNoticeItem {
     Highlight,
     Captions,
     Buddy,
+    /// Plan 188 D14: the poll card, mid-sentence label `polls`.
+    Poll,
     Banners,
 }
 
@@ -580,6 +625,7 @@ impl From<OverlayItem> for OverlayNoticeItem {
             OverlayItem::Highlight => OverlayNoticeItem::Highlight,
             OverlayItem::Captions => OverlayNoticeItem::Captions,
             OverlayItem::Buddy => OverlayNoticeItem::Buddy,
+            OverlayItem::Poll => OverlayNoticeItem::Poll,
         }
     }
 }
@@ -591,6 +637,7 @@ impl OverlayNoticeItem {
             OverlayNoticeItem::Highlight => OverlayItem::Highlight.label(),
             OverlayNoticeItem::Captions => OverlayItem::Captions.label(),
             OverlayNoticeItem::Buddy => OverlayItem::Buddy.label(),
+            OverlayNoticeItem::Poll => OverlayItem::Poll.label(),
             OverlayNoticeItem::Banners => "banners",
         }
     }
@@ -648,7 +695,7 @@ fn start_notice_sentence(
 /// decided before start and never silent. Captions on a shared encode keep
 /// the plan 090 block instead of a notice, so they never appear here. The
 /// shown banners (plan 186 D6) act as one item labelled `banners`, after the
-/// three items; each sentence any of them yields appears once.
+/// four items; each sentence any of them yields appears once.
 pub fn overlay_start_notices(
     shape: OverlaySessionShape,
     layout: &OverlayLayout,
@@ -838,11 +885,143 @@ mod tests {
             layout.buddy.vertical.w * 9.0,
             layout.buddy.vertical.h * 16.0,
         );
+        // Poll (plan 188 D12): top left on landscape, 43 px of 1920 from the
+        // side and 4% off the top; top centre inside the portrait safe area.
+        assert_eq!(
+            layout.poll.horizontal,
+            OverlayRect::new(0.0225, 0.04, 0.30, 0.40)
+        );
+        assert_eq!(layout.poll.vertical, OverlayRect::new(0.11, 0.08, 0.78, 0.30));
+        assert!(layout.poll.show_on_stream && layout.poll.show_in_recording);
         layout.validate().expect("defaults validate");
         for item in OverlayItem::ALL {
-            assert!(layout.item(item).horizontal.bottom_gravity());
-            assert!(layout.item(item).vertical.bottom_gravity());
+            let bottom = item != OverlayItem::Poll;
+            assert_eq!(layout.item(item).horizontal.bottom_gravity(), bottom);
+            assert_eq!(layout.item(item).vertical.bottom_gravity(), bottom);
         }
+    }
+
+    /// Plan 188 D12: the poll's snaps on both orientations, and the defaults
+    /// the TS twin (`lib/overlay-layout.ts`) must mirror: horizontal `TopLeft`
+    /// at (0.30, 0.40), vertical `TopCenter` at (0.78, 0.30) inside the 8% /
+    /// 22% portrait safe area. Both hug the top (top gravity).
+    #[test]
+    fn poll_snaps_sit_top_left_on_landscape_and_top_centre_on_portrait() {
+        assert_eq!(
+            overlay_default_size(OverlayItem::Poll, OverlayOrientation::Horizontal),
+            (0.30, 0.40)
+        );
+        assert_eq!(
+            overlay_default_size(OverlayItem::Poll, OverlayOrientation::Vertical),
+            (0.78, 0.30)
+        );
+        let top_left = overlay_snap_rect(
+            OverlayItem::Poll,
+            OverlayOrientation::Horizontal,
+            OverlaySnap::TopLeft,
+        );
+        assert_eq!(top_left, OverlayRect::new(0.0225, 0.04, 0.30, 0.40));
+        assert!(!top_left.bottom_gravity());
+        assert_eq!(top_left.horizontal_gravity(), OverlayHorizontalGravity::Left);
+        // 1920x1080: the card's bitmap lands 43 px in and 43 px down.
+        assert_eq!(
+            overlay_blit_layout(576, 300, 1920, 1080, top_left, 0),
+            (0, 43, 43, 576)
+        );
+        let top_centre = overlay_snap_rect(
+            OverlayItem::Poll,
+            OverlayOrientation::Vertical,
+            OverlaySnap::TopCenter,
+        );
+        assert_eq!(top_centre, OverlayRect::new(0.11, 0.08, 0.78, 0.30));
+        assert!(!top_centre.bottom_gravity());
+        assert_eq!(
+            top_centre.horizontal_gravity(),
+            OverlayHorizontalGravity::Center
+        );
+        // Inside the portrait safe area: below the 8% top band, well above
+        // the 22% bottom band.
+        assert!(top_centre.y >= PORTRAIT_TOP_MARGIN - RECT_EPSILON);
+        assert!(top_centre.y + top_centre.h <= 1.0 - PORTRAIT_BOTTOM_MARGIN + RECT_EPSILON);
+        // 1080x1920: centred, 154 px down.
+        assert_eq!(
+            overlay_blit_layout(842, 400, 1080, 1920, top_centre, 0),
+            (0, (1080 - 842) / 2, 154, 842)
+        );
+        let defaults = OverlayLayout::default();
+        assert_eq!(defaults.poll.horizontal, top_left);
+        assert_eq!(defaults.poll.vertical, top_centre);
+        // The other snaps place the poll too, inside the canvas.
+        for orientation in [OverlayOrientation::Horizontal, OverlayOrientation::Vertical] {
+            for snap in [
+                OverlaySnap::TopRight,
+                OverlaySnap::BottomLeft,
+                OverlaySnap::BottomRight,
+                OverlaySnap::BottomCenter,
+            ] {
+                overlay_snap_rect(OverlayItem::Poll, orientation, snap)
+                    .validate(OverlayItem::Poll, orientation)
+                    .unwrap();
+            }
+        }
+    }
+
+    /// Plan 188 S3, the quiet trap: a layout stored before the poll existed
+    /// (three items, no `poll` key) must load with the streamer's three
+    /// placements intact and the poll at its default. `load_overlay_layout`
+    /// falls back to the defaults on any parse error, so without the serde
+    /// default every placement would silently reset.
+    #[test]
+    fn an_old_stored_layout_without_poll_keeps_its_placements() {
+        const STORED_BEFORE_PLAN_188: &str = r#"{
+            "highlight": {
+                "horizontal": { "x": 0.05, "y": 0.05, "w": 0.4, "h": 0.2 },
+                "vertical": { "x": 0.1, "y": 0.1, "w": 0.8, "h": 0.15 },
+                "showOnStream": true,
+                "showInRecording": false
+            },
+            "captions": {
+                "horizontal": { "x": 0.04, "y": 0.02, "w": 0.92, "h": 0.16 },
+                "vertical": { "x": 0.12, "y": 0.64, "w": 0.76, "h": 0.14 },
+                "showOnStream": true,
+                "showInRecording": true
+            },
+            "buddy": {
+                "horizontal": { "x": 0.1, "y": 0.2, "w": 0.25, "h": 0.2 },
+                "vertical": { "x": 0.6, "y": 0.6, "w": 0.32, "h": 0.18 },
+                "showOnStream": false,
+                "showInRecording": true
+            }
+        }"#;
+        let parsed: OverlayLayout = serde_json::from_str(STORED_BEFORE_PLAN_188).unwrap();
+        assert_eq!(
+            parsed.highlight.horizontal,
+            OverlayRect::new(0.05, 0.05, 0.4, 0.2)
+        );
+        assert!(parsed.highlight.show_on_stream && !parsed.highlight.show_in_recording);
+        assert_eq!(
+            parsed.captions.horizontal,
+            OverlayRect::new(0.04, 0.02, 0.92, 0.16)
+        );
+        assert!(parsed.captions.show_on_stream && parsed.captions.show_in_recording);
+        assert_eq!(parsed.buddy.horizontal, OverlayRect::new(0.1, 0.2, 0.25, 0.2));
+        assert!(!parsed.buddy.show_on_stream && parsed.buddy.show_in_recording);
+        assert_eq!(parsed.poll, default_poll_item());
+        parsed.validate().unwrap();
+
+        // Through the store: the row is read back whole, not reset.
+        let database = Database::open_in_memory_for_tests();
+        let stored: serde_json::Value = serde_json::from_str(STORED_BEFORE_PLAN_188).unwrap();
+        database.save_setting(OVERLAY_LAYOUT_KEY, &stored).unwrap();
+        let loaded = load_overlay_layout(&database);
+        assert_eq!(loaded, parsed);
+        assert_ne!(loaded, OverlayLayout::default(), "the placements survived");
+        // The next save writes the poll with the rest.
+        save_overlay_layout(&database, &loaded).unwrap();
+        let raw: serde_json::Value = database.load_setting(OVERLAY_LAYOUT_KEY).unwrap().unwrap();
+        assert_eq!(raw["poll"]["showOnStream"], true);
+        assert_eq!(raw["poll"]["horizontal"]["x"], 0.0225);
+        assert_eq!(load_overlay_layout(&database), loaded);
     }
 
     #[test]
@@ -1036,6 +1215,18 @@ mod tests {
         assert_eq!(plans.buddy.primary, true);
         assert!(overlay_layout_needs_split(shared, &layout));
         assert_eq!(plans.plan(OverlayItem::Captions), None);
+        // The poll ships on/on (plan 188 D12), so it routes like the Buddy:
+        // the shared leg burns it, no split needed for it.
+        assert!(layout.poll.show_on_stream && layout.poll.show_in_recording);
+        assert_eq!(
+            plans.poll,
+            OverlayLegPlan {
+                primary: true,
+                aux: false,
+                needs_split: false
+            }
+        );
+        assert_eq!(plans.plan(OverlayItem::Poll), Some(plans.poll));
 
         let split = shape(true, true, OverlayAuxLeg::Stream);
         let plans = overlay_session_plans(split, &layout);
@@ -1043,6 +1234,7 @@ mod tests {
             (plans.highlight.primary, plans.highlight.aux),
             (false, true)
         );
+        assert_eq!((plans.poll.primary, plans.poll.aux), (true, true));
         assert!(!overlay_layout_needs_split(split, &layout));
 
         layout.highlight.show_in_recording = true;
@@ -1050,6 +1242,35 @@ mod tests {
         // Captions count too: stream-only captions on a shared leg need a split.
         layout.captions.show_on_stream = true;
         assert!(overlay_layout_needs_split(shared, &layout));
+        layout.captions.show_on_stream = false;
+        // And the poll: a stream-only poll on a shared leg asks for the split
+        // and falls back to the shared leg, exactly like the Buddy.
+        layout.poll.show_in_recording = false;
+        assert!(overlay_layout_needs_split(shared, &layout));
+        let plans = overlay_session_plans(shared, &layout);
+        assert_eq!(
+            plans.poll,
+            OverlayLegPlan {
+                primary: true,
+                aux: false,
+                needs_split: false
+            }
+        );
+        assert_eq!(
+            plans.poll,
+            overlay_session_plans(shared, &layout).buddy,
+            "the poll and the Buddy resolve the same switch pair the same way"
+        );
+        let vertical = overlay_session_plans(
+            shape(true, true, OverlayAuxLeg::VerticalSimulcast),
+            &layout,
+        );
+        assert_eq!((vertical.poll.primary, vertical.poll.aux), (true, true));
+        assert_eq!(
+            overlay_session_plans(shape(true, false, OverlayAuxLeg::None), &layout).poll,
+            OverlayLegPlan::NONE,
+            "record-only: a stream-only poll burns nowhere"
+        );
     }
 
     #[test]
@@ -1061,6 +1282,8 @@ mod tests {
         layout.highlight.show_in_recording = false;
         layout.buddy.show_in_recording = true;
         layout.captions.show_on_stream = true;
+        // Plan 188 D14: a stream-only poll, labelled `polls`, after the Buddy.
+        layout.poll.show_in_recording = false;
         // A split leg honours everything.
         assert!(
             overlay_start_notices(shape(true, true, OverlayAuxLeg::Stream), &layout, &[])
@@ -1073,7 +1296,7 @@ mod tests {
         assert!(
             overlay_start_notices(shape(true, false, OverlayAuxLeg::None), &layout, &[]).is_empty()
         );
-        // Shared encode: highlight and Buddy burn on both; captions keep the block.
+        // Shared encode: highlight, Buddy and poll burn on both; captions keep the block.
         let shared = overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout, &[]);
         assert_eq!(
             shared,
@@ -1086,8 +1309,13 @@ mod tests {
                     item: OverlayNoticeItem::Buddy,
                     notice: "Both the stream and the recording will include the Buddy: this computer shares one encode for them.".to_string(),
                 },
+                OverlayStartNotice {
+                    item: OverlayNoticeItem::Poll,
+                    notice: "Both the stream and the recording will include polls: this computer shares one encode for them.".to_string(),
+                },
             ]
         );
+        assert_eq!(serde_json::to_value(&shared[2]).unwrap()["item"], "poll");
         // Vertical simulcast: the recording shares the horizontal pixels.
         let vertical = overlay_start_notices(
             shape(true, true, OverlayAuxLeg::VerticalSimulcast),
@@ -1103,11 +1331,39 @@ mod tests {
                 "Recording will include highlights while streaming vertical.",
                 "Recording will include captions while streaming vertical.",
                 "The horizontal stream will include the Buddy while streaming vertical.",
+                "Recording will include polls while streaming vertical.",
             ]
         );
         assert_eq!(
             serde_json::to_value(&vertical[0]).unwrap()["item"],
             "highlight"
+        );
+        // The poll's sentence sits exactly where the highlight's would for
+        // the same switch pair: a recording-only poll says what a
+        // recording-only highlight says, with its own label.
+        let mut mirrored = OverlayLayout::default();
+        mirrored.highlight.show_on_stream = false;
+        mirrored.poll.show_on_stream = false;
+        let notices = overlay_start_notices(
+            shape(true, true, OverlayAuxLeg::VerticalSimulcast),
+            &mirrored,
+            &[],
+        );
+        assert_eq!(
+            notices
+                .iter()
+                .map(|notice| (notice.item, notice.notice.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    OverlayNoticeItem::Highlight,
+                    "The horizontal stream will include highlights while streaming vertical."
+                ),
+                (
+                    OverlayNoticeItem::Poll,
+                    "The horizontal stream will include polls while streaming vertical."
+                ),
+            ]
         );
     }
 
@@ -1333,9 +1589,31 @@ mod tests {
         assert!(highlight["showInRecording"].is_boolean());
         assert!(highlight["horizontal"]["x"].is_number());
         assert_eq!(highlight.as_object().unwrap().len(), 4);
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert_eq!(value["poll"].as_object().unwrap().len(), 4);
         let round_trip: OverlayLayout = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip, OverlayLayout::default());
+        // A fully placed layout, poll included, round-trips byte for byte.
+        let mut placed = OverlayLayout::default();
+        placed.poll.horizontal = OverlayRect::new(0.6, 0.1, 0.3, 0.4);
+        placed.poll.vertical = OverlayRect::new(0.11, 0.5, 0.78, 0.3);
+        placed.poll.show_in_recording = false;
+        placed.validate().unwrap();
+        let wire = serde_json::to_value(placed).unwrap();
+        assert_eq!(wire["poll"]["horizontal"]["x"], 0.6);
+        assert_eq!(wire["poll"]["showInRecording"], false);
+        let round_trip: OverlayLayout = serde_json::from_value(wire).unwrap();
+        assert_eq!(round_trip, placed);
+        // Validation covers the poll like any item.
+        let mut invalid = placed;
+        invalid.poll.vertical = OverlayRect::new(0.5, 0.5, 0.78, 0.3);
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .starts_with("polls vertical rect")
+        );
     }
 
     #[test]
