@@ -17554,7 +17554,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                 );
             }
         }
-        (None, [single]) => args.extend(plain_flv_output_args(single)),
+        (None, [single]) => args.extend(lone_stream_output_args(single)),
         (None, targets) if !targets.is_empty() => {
             args.extend(tee_output_args(stream_legs.join("|")));
         }
@@ -18029,21 +18029,14 @@ fn fifo_flv_output_args(target: &StreamTarget) -> Vec<String> {
     args
 }
 
-/// A lone stream with no recording: a plain FLV output (the proven path). A
-/// cloud feed's TLS check goes first, as CLI protocol options (C1c).
-fn plain_flv_output_args(target: &StreamTarget) -> Vec<String> {
-    let mut args = target
-        .tls_verification
-        .as_ref()
-        .map(tls_verification_cli_args)
-        .unwrap_or_default();
-    args.extend([
-        "-flvflags".to_string(),
-        "no_duration_filesize".to_string(),
-        "-f".to_string(),
-        "flv".to_string(),
-        target.url.clone(),
-    ]);
+/// A lone stream with no recording: the same fifo-wrapped FLV output as an
+/// encoded bridge leg, so it reconnects by itself after a drop (a plain
+/// `-f flv` output ended for good on the first broken pipe; cloud test on
+/// ogre, 2026-10-22). The encode carries `+global_header`, which the fifo
+/// needs: without it each reopen published a stream the server dropped.
+fn lone_stream_output_args(target: &StreamTarget) -> Vec<String> {
+    let mut args = vec!["-flvflags".to_string(), "no_duration_filesize".to_string()];
+    args.extend(fifo_flv_output_args(target));
     args
 }
 
@@ -18119,35 +18112,30 @@ fn append_bridge_audio_input_args(
 /// (owner report, 2026-08-19). Steady-state overflow is already handled by
 /// the fifo wrapper's drop_pkts_on_overflow; this bounds the CLOSE.
 /// A cloud feed adds its TLS check to the slave's options (plan 184 C1c); the
-/// tee hands them to the slave's protocol open, through the fifo when it
-/// wraps one.
+/// tee hands them to the slave's protocol open, through the fifo that wraps
+/// it.
 ///
-/// A cloud feed must come back by itself after a network drop, while the
-/// runner holds the platforms (plan 184), and the raw path's tee has no
-/// recovery of its own: a dropped slave stayed gone for the whole session
-/// (cloud test on ogre, 2026-10-21). So a cloud feed's slave runs inside the
-/// fifo muxer with the per-leg recovery (`use_fifo`); the slave's own options,
-/// the TLS check included, apply to every reopen. `fifo_options` is a
-/// dictionary inside the slave's dictionary, so its separators are escaped
-/// twice. Direct platform legs are unchanged.
+/// Every RTMP leg comes back by itself after a network drop, like an encoded
+/// bridge leg (plan 161): the tee's own fifo (`tee_output_args`) only queues,
+/// so a dropped slave stayed gone for the whole session (cloud test on ogre,
+/// 2026-10-21 for the cloud feed, 2026-10-22 for platform legs). Each RTMP
+/// slave sets its own `fifo_options` with the per-leg recovery; the MKV slave
+/// keeps the tee's, so a failing recording still aborts and is never
+/// reopened. `fifo_options` is a dictionary inside the slave's dictionary, so
+/// its separators are escaped twice.
 fn rtmp_tee_leg(target: &StreamTarget) -> String {
     let tls = target
         .tls_verification
         .as_ref()
         .map(|tls| format!(":{}", tls_verification_dict(tls)))
         .unwrap_or_default();
-    let fifo = if is_cloud_feed_target(&target.target_id) {
-        let options = FIFO_RECOVERY_OPTIONS
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join("\\\\:");
-        format!(":use_fifo=1:fifo_options={options}")
-    } else {
-        String::new()
-    };
+    let recovery = FIFO_RECOVERY_OPTIONS
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("\\\\:");
     format!(
-        "[f=flv:onfail=ignore{fifo}:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}{tls}]{}",
+        "[f=flv:onfail=ignore:use_fifo=1:fifo_options={recovery}:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}{tls}]{}",
         escape_tee_target(&target.url)
     )
 }
@@ -18276,7 +18264,7 @@ fn ffmpeg_args_with_encoder(
             args.extend(tee_output_args(legs.join("|")));
         }
         // A single stream uses a plain FLV output (the proven path).
-        (None, [single]) => args.extend(plain_flv_output_args(single)),
+        (None, [single]) => args.extend(lone_stream_output_args(single)),
         // Multiple streams without local recording: tee of FLV legs only.
         (None, targets) if !targets.is_empty() => {
             args.extend(tee_output_args(stream_legs.join("|")));
@@ -22986,21 +22974,11 @@ mod cloud_seam_tests {
         );
         assert!(tee.ends_with(&feed.url));
 
-        // A lone plain FLV output: CLI protocol options first.
-        let plain = plain_flv_output_args(&feed);
-        assert_eq!(
-            &plain[..4],
-            [
-                "-tls_verify",
-                "1",
-                "-ca_file",
-                "/Users/me/Library/Application Support/Videorc/cloud-feed-roots.pem"
-            ]
-        );
-        assert_eq!(
-            &plain[4..],
-            ["-flvflags", "no_duration_filesize", "-f", "flv", &feed.url]
-        );
+        // A lone stream: the fifo output, its TLS check in `format_opts` so
+        // every reopen checks again.
+        let lone = lone_stream_output_args(&feed);
+        assert_eq!(&lone[..2], ["-flvflags", "no_duration_filesize"]);
+        assert_eq!(&lone[2..], fifo_flv_output_args(&feed).as_slice());
 
         // Windows: Schannel checks against the Windows store, no ca_file.
         let windows = FeedTlsVerification { ca_file: None };
@@ -23017,17 +22995,20 @@ mod cloud_seam_tests {
         );
         assert_eq!(fifo.last(), Some(&youtube.url));
         assert!(!rtmp_tee_leg(youtube).contains("tls_verify"));
-        assert!(!rtmp_tee_leg(youtube).contains("use_fifo"));
+        // ... and it reconnects by itself like the feed (raw path, 2026-10-22).
         assert_eq!(
-            plain_flv_output_args(youtube),
-            [
-                "-flvflags",
-                "no_duration_filesize",
-                "-f",
-                "flv",
-                &youtube.url
-            ]
+            rtmp_tee_leg(youtube),
+            rtmp_tee_leg(&feed)
+                .replace(&format!(":{dict}"), "")
+                .replace(&feed.url, &youtube.url)
         );
+        let lone = lone_stream_output_args(youtube);
+        assert_eq!(
+            &lone[..4],
+            ["-flvflags", "no_duration_filesize", "-f", "fifo"]
+        );
+        assert!(lone.iter().any(|arg| arg == "-attempt_recovery"));
+        assert_eq!(lone.last(), Some(&youtube.url));
     }
 
     // C6b: the Test cloud's push is a stream leg's encode of a noisy test card
@@ -31559,8 +31540,10 @@ mod tests {
         );
     }
 
+    // A lone stream skips the tee, inside the fifo so it reconnects by itself
+    // (raw path, 2026-10-22): the encode carries the global header it needs.
     #[test]
-    fn single_stream_only_uses_plain_flv_output() {
+    fn single_stream_only_uses_a_reconnecting_fifo_flv_output() {
         let params = base_params(false, true);
         let targets = vec![build_stream_url(&params.output.rtmp).unwrap()];
         let args = ffmpeg_args(
@@ -31577,10 +31560,19 @@ mod tests {
         .unwrap();
 
         assert!(!args.contains(&"tee".to_string()));
-        assert!(
-            args.windows(2)
-                .any(|window| window[0] == "-f" && window[1] == "flv")
-        );
+        for (flag, value) in [
+            ("-f", "fifo"),
+            ("-fifo_format", "flv"),
+            ("-attempt_recovery", "1"),
+            ("-recover_any_error", "1"),
+            ("-flags", "+global_header"),
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|window| window[0] == flag && window[1] == value),
+                "{flag} {value}"
+            );
+        }
         assert!(args.contains(&"rtmp://a.rtmp.youtube.com/live2/abc123".to_string()));
     }
 
@@ -34027,8 +34019,8 @@ mod tests {
             tls_verification: None,
         };
         let leg = rtmp_tee_leg(&target);
-        assert!(leg.starts_with("[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout="));
-        assert!(leg.contains(":rw_timeout=8000000]"));
+        assert!(leg.starts_with("[f=flv:onfail=ignore:use_fifo=1:fifo_options="));
+        assert!(leg.contains(":flvflags=no_duration_filesize:rw_timeout=8000000]"));
         assert!(leg.ends_with("rtmp://live.twitch.tv/app/streamkey"));
     }
 
