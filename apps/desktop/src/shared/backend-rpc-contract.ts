@@ -121,6 +121,12 @@ import type {
   MetricsJournalState,
   UsageStatsSetParams,
   UsageStatsState,
+  DiscordAnnounceSnapshot,
+  DiscordAnnounceUpdateParams,
+  DiscordLinksPreview,
+  DiscordTargetsParams,
+  DiscordTestResult,
+  DiscordWebhookSaveParams,
   PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
@@ -342,6 +348,16 @@ export interface BackendRpcMethodMap {
   >
   'usageStats.get': BackendRpcDefinition<undefined, UsageStatsState>
   'usageStats.set': BackendRpcDefinition<UsageStatsSetParams, UsageStatsState>
+  // --- Discord go-live announcement (plan 187) ---
+  'discord.announce.get': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
+  'discord.announce.update': BackendRpcDefinition<
+    DiscordAnnounceUpdateParams,
+    DiscordAnnounceSnapshot
+  >
+  'discord.webhook.save': BackendRpcDefinition<DiscordWebhookSaveParams, DiscordAnnounceSnapshot>
+  'discord.webhook.remove': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
+  'discord.webhook.sendTest': BackendRpcDefinition<DiscordTargetsParams, DiscordTestResult>
+  'discord.links.preview': BackendRpcDefinition<DiscordTargetsParams, DiscordLinksPreview>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
@@ -572,6 +588,7 @@ export interface BackendEventMap {
   'liveChat.emotes': ChatEmotesSettings
   'liveChat.moderationOperation': ModerationOperation
   'youtube.quota': YouTubeQuotaStatus
+  'discord.announce.changed': DiscordAnnounceSnapshot
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -950,6 +967,137 @@ const STREAM_PLATFORMS = [
   'custom'
 ] as const
 const streamPlatformSchema = enumSchema(STREAM_PLATFORMS) as RuntimeSchema<StreamPlatform>
+
+// --- Discord go-live announcement (plan 187) ---
+const DISCORD_MAX_TARGETS = 64
+const discordIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const discordShortText = stringSchema({ maxLength: 512 })
+const discordPingSchema = enumSchema(['none', 'here', 'everyone'])
+const discordPostAsSchema = unionSchema([
+  objectSchema({ kind: literalSchema('automatic') }, { allowUnknown: false }),
+  objectSchema(
+    { kind: literalSchema('platform'), accountId: discordIdSchema },
+    { allowUnknown: false }
+  ),
+  objectSchema({ kind: literalSchema('videorc') }, { allowUnknown: false }),
+  objectSchema({ kind: literalSchema('webhook') }, { allowUnknown: false })
+])
+const discordAnnounceSnapshotSchema = objectSchema(
+  {
+    webhookPresent: booleanSchema,
+    webhookHint: optionalSchema(discordShortText),
+    webhookName: optionalSchema(discordShortText),
+    enabled: booleanSchema,
+    ping: discordPingSchema,
+    branding: booleanSchema,
+    postAs: discordPostAsSchema,
+    excludedTargetIds: arraySchema(discordIdSchema, { maxLength: DISCORD_MAX_TARGETS }),
+    linkOverrides: recordSchema(discordShortText, { maxKeys: DISCORD_MAX_TARGETS }),
+    identities: arraySchema(
+      objectSchema(
+        {
+          postAs: discordPostAsSchema,
+          name: discordShortText,
+          platform: optionalSchema(streamPlatformSchema),
+          avatarUrl: optionalSchema(stringSchema({ maxLength: 4096 }))
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 64 }
+    ),
+    lastPost: optionalSchema(
+      objectSchema(
+        {
+          at: discordShortText,
+          messageUrl: optionalSchema(discordShortText),
+          state: enumSchema(['live', 'ended'])
+        },
+        { allowUnknown: false }
+      )
+    ),
+    lastError: optionalSchema(
+      objectSchema(
+        {
+          code: enumSchema(['webhook-deleted', 'unreachable', 'rejected']),
+          at: discordShortText
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordAnnounceSnapshot>
+const discordAnnounceUpdateParamsSchema = objectSchema(
+  {
+    enabled: optionalSchema(booleanSchema),
+    ping: optionalSchema(discordPingSchema),
+    branding: optionalSchema(booleanSchema),
+    postAs: optionalSchema(discordPostAsSchema),
+    excludedTargetIds: optionalSchema(
+      arraySchema(discordIdSchema, { maxLength: DISCORD_MAX_TARGETS })
+    ),
+    linkOverride: optionalSchema(
+      objectSchema(
+        { targetId: discordIdSchema, link: optionalSchema(discordShortText) },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordAnnounceUpdateParams>
+const discordWebhookSaveParamsSchema = objectSchema(
+  { url: stringSchema({ minLength: 1, maxLength: 2048 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordWebhookSaveParams>
+const discordTargetsParamsSchema = objectSchema(
+  {
+    targets: arraySchema(
+      objectSchema(
+        {
+          id: discordIdSchema,
+          platform: streamPlatformSchema,
+          label: discordShortText,
+          authMode: enumSchema(['manual-rtmp', 'oauth']),
+          accountId: optionalSchema(discordIdSchema),
+          outputOrientation: optionalSchema(enumSchema(['horizontal', 'vertical'])),
+          platformBroadcastId: optionalSchema(discordShortText)
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: DISCORD_MAX_TARGETS }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordTargetsParams>
+const discordLinksPreviewSchema = objectSchema(
+  {
+    links: arraySchema(
+      objectSchema(
+        {
+          targetId: discordIdSchema,
+          label: discordShortText,
+          linkKind: enumSchema(['auto', 'typed', 'at-go-live', 'none']),
+          link: optionalSchema(discordShortText),
+          included: booleanSchema
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: DISCORD_MAX_TARGETS }
+    ),
+    sender: optionalSchema(
+      objectSchema(
+        { name: discordShortText, avatarUrl: optionalSchema(stringSchema({ maxLength: 4096 })) },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordLinksPreview>
+const discordTestResultSchema = objectSchema(
+  { messageUrl: optionalSchema(discordShortText) },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordTestResult>
+// --- end Discord go-live announcement (plan 187) ---
 
 const audienceSnapshotSchema = objectSchema(
   {
@@ -4179,6 +4327,24 @@ const runtimeContracts = {
   },
   'usageStats.get': { params: undefinedSchema, result: usageStatsStateSchema },
   'usageStats.set': { params: usageStatsSetParamsSchema, result: usageStatsStateSchema },
+  'discord.announce.get': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
+  'discord.announce.update': {
+    params: discordAnnounceUpdateParamsSchema,
+    result: discordAnnounceSnapshotSchema
+  },
+  'discord.webhook.save': {
+    params: discordWebhookSaveParamsSchema,
+    result: discordAnnounceSnapshotSchema
+  },
+  'discord.webhook.remove': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
+  'discord.webhook.sendTest': {
+    params: discordTargetsParamsSchema,
+    result: discordTestResultSchema
+  },
+  'discord.links.preview': {
+    params: discordTargetsParamsSchema,
+    result: discordLinksPreviewSchema
+  },
   'stream.targets.snapshot': {
     params: undefinedSchema,
     result: streamTargetsSnapshotSchema
@@ -4613,7 +4779,8 @@ const runtimeEventSchemas = {
   'liveChat.emotes': chatEmotesSettingsSchema,
   'liveChat.moderationOperation': moderationOperationSchema,
   'youtube.quota': youtubeQuotaStatusSchema,
-  'liveChat.totals': sessionChatTotalsSchema
+  'liveChat.totals': sessionChatTotalsSchema,
+  'discord.announce.changed': discordAnnounceSnapshotSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

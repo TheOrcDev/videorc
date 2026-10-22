@@ -15,6 +15,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { BroadcastInfoFields } from '@/components/streaming/broadcast-info-fields'
 import { CategoryCombobox } from '@/components/streaming/category-combobox'
 import { DestinationCard } from '@/components/streaming/destination-card'
+import { DiscordSection } from '@/components/streaming/discord-section'
 import { youtubeQuotaPausedUntil } from '@/lib/youtube-quota'
 import { GoLivePanel } from '@/components/streaming/go-live-panel'
 import { ThumbnailField } from '@/components/streaming/thumbnail-field'
@@ -353,6 +354,9 @@ function StreamingSetup(): ReactElement {
           onSearchTwitchCategories={searchTwitchCategories}
           onSearchKickCategories={searchKickCategories}
         />
+        {/* Plan 187: tell the streamer's Discord server when they go live. It
+            stays editable while live; changes apply to the next stream. */}
+        <DiscordSection sessionActive={isSessionActive} targets={streaming.targets} />
       </div>
 
       <GoLivePanel onOpenDestination={openDestination} />

@@ -1181,6 +1181,8 @@ export interface YouTubeBroadcastTransitionResult {
   broadcastId: string
   requestedStatus: YouTubeBroadcastTransitionStatus
   lifecycleStatus?: string
+  /** YouTube's own privacy for the broadcast (plan 187: only public is announced). */
+  privacyStatus?: StreamPrivacy
   message: string
 }
 
@@ -1780,6 +1782,116 @@ export interface MetricsJournalState {
 export interface MetricsJournalSetParams {
   enabled: boolean
 }
+
+// --- Discord go-live announcement (plan 187) ---
+
+/** Who the Discord post pings. Edits and the test message never ping. */
+export type DiscordPing = 'none' | 'here' | 'everyone'
+
+/** "Post as": whose name and avatar the go-live post carries. */
+export type DiscordPostAs =
+  | { kind: 'automatic' }
+  | { kind: 'platform'; accountId: string }
+  | { kind: 'videorc' }
+  | { kind: 'webhook' }
+
+export interface DiscordPostAsIdentity {
+  postAs: DiscordPostAs
+  name: string
+  platform?: StreamPlatform
+  avatarUrl?: string
+}
+
+export type DiscordAnnounceErrorCode = 'webhook-deleted' | 'unreachable' | 'rejected'
+
+export interface DiscordAnnounceError {
+  code: DiscordAnnounceErrorCode
+  at: string
+}
+
+export interface DiscordLastPost {
+  at: string
+  /** Opens the message in Discord; absent when the server is unknown. */
+  messageUrl?: string
+  state: 'live' | 'ended'
+}
+
+/**
+ * `discord.announce.get` and the `discord.announce.changed` event. Never
+ * carries the webhook URL: only whether one is saved and its masked tail.
+ */
+export interface DiscordAnnounceSnapshot {
+  webhookPresent: boolean
+  webhookHint?: string
+  webhookName?: string
+  enabled: boolean
+  ping: DiscordPing
+  branding: boolean
+  postAs: DiscordPostAs
+  excludedTargetIds: string[]
+  /** Typed links by destination id. */
+  linkOverrides: Record<string, string>
+  identities: DiscordPostAsIdentity[]
+  lastPost?: DiscordLastPost
+  lastError?: DiscordAnnounceError
+}
+
+/** `discord.announce.update`. `linkOverride` without `link` removes it. */
+export interface DiscordAnnounceUpdateParams {
+  enabled?: boolean
+  ping?: DiscordPing
+  branding?: boolean
+  postAs?: DiscordPostAs
+  excludedTargetIds?: string[]
+  linkOverride?: { targetId: string; link?: string }
+}
+
+export interface DiscordWebhookSaveParams {
+  url: string
+}
+
+/** A configured destination, as `discord.links.preview` and the test read it. */
+export interface DiscordLinkTarget {
+  id: string
+  platform: StreamPlatform
+  label: string
+  authMode: StreamAuthMode
+  accountId?: string
+  outputOrientation?: StreamOutputOrientation
+  platformBroadcastId?: string
+}
+
+export interface DiscordTargetsParams {
+  targets: DiscordLinkTarget[]
+}
+
+/** Built from the account, typed by the streamer, made at Go Live, or none. */
+export type DiscordLinkKind = 'auto' | 'typed' | 'at-go-live' | 'none'
+
+export interface DiscordLinkPreview {
+  targetId: string
+  label: string
+  linkKind: DiscordLinkKind
+  link?: string
+  included: boolean
+}
+
+export interface DiscordSender {
+  name: string
+  avatarUrl?: string
+}
+
+export interface DiscordLinksPreview {
+  links: DiscordLinkPreview[]
+  /** Who the post would be sent as; absent = the webhook's own name. */
+  sender?: DiscordSender
+}
+
+export interface DiscordTestResult {
+  messageUrl?: string
+}
+
+// --- end Discord go-live announcement (plan 187) ---
 
 /**
  * `usageStats.get` / `.set`: Settings → General → Privacy → "Share anonymous

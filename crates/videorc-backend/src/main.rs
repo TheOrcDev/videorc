@@ -42,6 +42,7 @@ mod compositor;
 mod compositor_synthetic;
 mod devices;
 mod diagnostics;
+mod discord_announce;
 mod echo_guard;
 mod editor_chrome;
 mod encoder_bridge;
@@ -664,6 +665,8 @@ async fn run_backend() -> Result<()> {
     // Anonymous usage stats: one event per session start and stop, off the
     // recording path; on unless Settings → General → Privacy turned it off.
     usage_stats::spawn(&state);
+    // Plan 187: the Discord go-live announcement (free, off until a webhook is set).
+    discord_announce::spawn(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
@@ -4063,6 +4066,17 @@ async fn prepare_x_native_live(
     Ok(prepared)
 }
 
+/// Plan 187: maps a Discord RPC outcome to the wire, refusals by their code.
+fn discord_rpc<T: serde::Serialize>(
+    id: String,
+    result: Result<T, discord_announce::RpcError>,
+) -> ServerResponse {
+    match result {
+        Ok(value) => ServerResponse::ok(id, value),
+        Err(error) => ServerResponse::error(id, error.code, error.message),
+    }
+}
+
 async fn publish_x_native_live(
     state: &AppState,
     params: XPublishParams,
@@ -5623,7 +5637,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "performance.check.cancel"
         | "encoder.preference.set"
         | "diagnostics.metricsJournal.set"
-        | "usageStats.set" => Some(DEFAULT_MUTATION_POLICY),
+        | "usageStats.set"
+        | "discord.announce.update"
+        | "discord.webhook.save"
+        | "discord.webhook.remove"
+        | "discord.webhook.sendTest" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -5700,6 +5718,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.xCommentsReadiness"
         | "liveChat.emotes.get"
         | "usageStats.get"
+        | "discord.announce.get"
+        | "discord.links.preview"
         | "streamTargets.metadata.get"
         | "streamTargets.metadata.validate"
         | "streamTargets.manualKey.inspect"
@@ -10960,6 +10980,12 @@ async fn handle_text_message_with_role(
                     let attach_live_chat = session_attaches_live_chat(&params);
                     match start_session(state.clone(), params).await {
                         Ok(status) => {
+                            // Plan 187: a fact for the announcer; never waits.
+                            discord_announce::on_session_started(
+                                state,
+                                &status,
+                                streaming.as_ref(),
+                            );
                             if attach_live_chat
                                 && let Some(streaming) = streaming.as_ref()
                                 && let Some(session_id) = status.session_id.as_deref()
@@ -11500,6 +11526,59 @@ async fn handle_text_message_with_role(
             ServerResponse::ok(command.id, live_chat::current_diagnostics(state).await)
         }
         // Settings → General → Privacy → "Share anonymous usage stats".
+        // Plan 187: the Discord go-live announcement. The webhook URL goes in
+        // through `discord.webhook.save` and never comes back out.
+        "discord.announce.get" => {
+            ServerResponse::ok(command.id, discord_announce::snapshot(state).await)
+        }
+        "discord.announce.update" => {
+            match serde_json::from_value::<discord_announce::UpdateParams>(command.params) {
+                Ok(params) => {
+                    discord_rpc(command.id, discord_announce::update(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "discord.webhook.save" => {
+            match serde_json::from_value::<discord_announce::SaveWebhookParams>(command.params) {
+                Ok(params) => discord_rpc(
+                    command.id,
+                    discord_announce::save_webhook(state, params).await,
+                ),
+                // Never echo the params: they hold the webhook URL.
+                Err(_) => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected { url }.".to_string(),
+                ),
+            }
+        }
+        "discord.webhook.remove" => {
+            discord_rpc(command.id, discord_announce::remove_webhook(state).await)
+        }
+        "discord.webhook.sendTest" => {
+            match serde_json::from_value::<discord_announce::TargetsParams>(command.params) {
+                Ok(params) => {
+                    discord_rpc(command.id, discord_announce::send_test(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "discord.links.preview" => {
+            match serde_json::from_value::<discord_announce::TargetsParams>(command.params) {
+                Ok(params) => discord_rpc(
+                    command.id,
+                    discord_announce::preview_links(state, params).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "usageStats.get" => ServerResponse::ok(command.id, usage_stats::current_state(state)),
         "usageStats.set" => {
             match serde_json::from_value::<usage_stats::UsageStatsSetParams>(command.params) {
@@ -12094,7 +12173,18 @@ async fn handle_text_message_with_role(
                         _ => youtube::YouTubeFailureStep::TransitionLive,
                     };
                     match transition_youtube_stream_target(state, params).await {
-                        Ok(result) => ServerResponse::ok(command.id, result),
+                        Ok(result) => {
+                            if result.requested_status
+                                == youtube::YouTubeBroadcastTransitionStatus::Live
+                            {
+                                discord_announce::on_youtube_live(
+                                    state,
+                                    &result.broadcast_id,
+                                    result.privacy_status,
+                                );
+                            }
+                            ServerResponse::ok(command.id, result)
+                        }
                         Err(error) => {
                             tracing::warn!("[youtube-transition] failed: {error:#}");
                             let (code, message) = youtube::youtube_failure_response(&error, step);
@@ -12276,8 +12366,15 @@ async fn handle_text_message_with_role(
         }
         "streamTargets.x.publish" => {
             match serde_json::from_value::<XPublishParams>(command.params) {
-                Ok(params) => match publish_x_native_live(state, params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
+                Ok(params) => match publish_x_native_live(state, params.clone()).await {
+                    Ok(result) => {
+                        discord_announce::on_x_published(
+                            state,
+                            params.session_id.as_deref(),
+                            &result.share_url,
+                        );
+                        ServerResponse::ok(command.id, result)
+                    }
                     Err(error) => {
                         ServerResponse::error(command.id, "x-publish-failed", error.to_string())
                     }

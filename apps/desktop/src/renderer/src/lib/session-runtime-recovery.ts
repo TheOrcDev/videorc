@@ -1,5 +1,6 @@
 import type {
   AutomaticSourceFallbackEvent,
+  DiscordAnnounceSnapshot,
   BackendLifecycleEvent,
   HealthEvent,
   OAuthCallbackResult,
@@ -27,6 +28,7 @@ import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifyOnce } from '@/lib/notify-once'
 import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { discordFailureToast } from '@/lib/discord-announce'
 import { openHealthToastAction } from '@/lib/health-door'
 import type { StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
 import {
@@ -51,6 +53,25 @@ export function showYouTubeBroadcastToast(
   toast.warning(broadcastToast.title, {
     id: `youtube-broadcast-${step}:${target.id}`,
     description: broadcastToast.description
+  })
+}
+
+/** The Discord announcement failure already toasted (plan 187, D13). */
+let discordFailureToastedAt: string | null = null
+
+/**
+ * A go-live post that failed: one toast per failure, wherever the streamer
+ * is, with the way to fix it. An old failure riding a settings change stays
+ * quiet (`discordFailureToast`).
+ */
+export function showDiscordAnnounceFailure(snapshot: DiscordAnnounceSnapshot): void {
+  const failure = discordFailureToast(discordFailureToastedAt, snapshot, Date.now())
+  if (!failure) return
+  discordFailureToastedAt = failure.at
+  toast[failure.type](failure.title, {
+    id: 'discord-announce-failure',
+    description: failure.description,
+    action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live', 'setup') }
   })
 }
 

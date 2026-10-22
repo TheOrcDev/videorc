@@ -7553,6 +7553,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             runtime.showYouTubeThumbnailFailure(nextClient, failure)
         })
       }),
+      // Plan 187: a go-live post that failed is news wherever the streamer
+      // is (D13). Success stays quiet; Livestream shows "Last post".
+      nextClient.on('discord.announce.changed', (snapshot) => {
+        if (!snapshot.lastError) return
+        void loadSessionRuntimeRecovery().then((runtime) => {
+          if (generationIsCurrent()) runtime.showDiscordAnnounceFailure(snapshot)
+        })
+      }),
       nextClient.on('youtube.quota', (payload) => {
         const status = payload as YouTubeQuotaStatus
         const previous = youtubeQuotaRef.current
