@@ -155,6 +155,16 @@ fn leg_plans_keep_ticked_linkable_legs_in_order() {
 }
 
 #[test]
+fn only_platforms_with_both_orientations_say_vertical() {
+    let mut tiktok = target("t", StreamPlatform::Tiktok, StreamAuthMode::ManualRtmp);
+    tiktok.output_orientation = Some(StreamOutputOrientation::Vertical);
+    assert_eq!(button_label(&tiktok), "TikTok");
+    let mut youtube = target("y", StreamPlatform::Youtube, StreamAuthMode::Oauth);
+    youtube.output_orientation = Some(StreamOutputOrientation::Vertical);
+    assert_eq!(button_label(&youtube), "YouTube · Vertical");
+}
+
+#[test]
 fn custom_destinations_use_their_own_name() {
     let mut custom = target("c", StreamPlatform::Custom, StreamAuthMode::ManualRtmp);
     custom.label = "My site".to_string();

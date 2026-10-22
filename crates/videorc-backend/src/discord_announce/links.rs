@@ -199,7 +199,12 @@ pub fn button_label(target: &LinkTarget) -> String {
         }
         platform => stream_platform_label(platform).to_string(),
     };
-    if target.output_orientation == Some(StreamOutputOrientation::Vertical) {
+    // TikTok and Instagram are vertical-only: the suffix would be noise.
+    let vertical_only = matches!(
+        target.platform,
+        StreamPlatform::Tiktok | StreamPlatform::Instagram
+    );
+    if target.output_orientation == Some(StreamOutputOrientation::Vertical) && !vertical_only {
         format!("{base} · Vertical")
     } else {
         base

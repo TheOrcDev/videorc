@@ -179,11 +179,7 @@ function ConnectedDiscord({
   // Automatic is the choice.
   const automatic = snapshot.postAs.kind === 'automatic'
   const sender = automatic ? discord.preview?.sender : undefined
-  const automaticLabel = !automatic
-    ? 'Automatic'
-    : sender
-      ? `Automatic · ${sender.name}`
-      : "Automatic · the webhook's name"
+  const automaticLabel = sender ? `Automatic · ${sender.name}` : 'Automatic'
 
   const sendTest = async (): Promise<void> => {
     setTestState({ kind: 'sending' })
@@ -207,15 +203,17 @@ function ConnectedDiscord({
           label={snapshot.webhookName ?? 'Webhook'}
         >
           <div className="flex shrink-0 items-center gap-2">
-            <Button
-              data-testid="discord-send-test"
-              disabled={testState.kind === 'sending' || deleted}
-              variant="outline"
-              onClick={() => void sendTest()}
-            >
-              <SendIcon data-icon="inline-start" />
-              {testState.kind === 'sending' ? 'Sending…' : 'Send test message'}
-            </Button>
+            <DisabledReason reason={deleted ? 'Paste a new webhook URL first.' : undefined}>
+              <Button
+                data-testid="discord-send-test"
+                disabled={testState.kind === 'sending' || deleted}
+                variant="outline"
+                onClick={() => void sendTest()}
+              >
+                <SendIcon data-icon="inline-start" />
+                {testState.kind === 'sending' ? 'Sending…' : 'Send test message'}
+              </Button>
+            </DisabledReason>
             <Button
               data-testid="discord-webhook-remove"
               variant="ghost"
