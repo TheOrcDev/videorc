@@ -175,8 +175,15 @@ function ConnectedDiscord({
     | { kind: 'failed'; error: string }
   >({ kind: 'idle' })
   const deleted = snapshot.lastError?.code === 'webhook-deleted'
-  const sender = discord.preview?.sender
-  const automaticLabel = sender ? `Automatic · ${sender.name}` : "Automatic · the webhook's name"
+  // The preview resolves the current choice, so it names Automatic only while
+  // Automatic is the choice.
+  const automatic = snapshot.postAs.kind === 'automatic'
+  const sender = automatic ? discord.preview?.sender : undefined
+  const automaticLabel = !automatic
+    ? 'Automatic'
+    : sender
+      ? `Automatic · ${sender.name}`
+      : "Automatic · the webhook's name"
 
   const sendTest = async (): Promise<void> => {
     setTestState({ kind: 'sending' })
