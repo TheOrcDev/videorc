@@ -17433,7 +17433,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
-        "warning".to_string(),
+        stream_loglevel(!stream_targets.is_empty()).to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
         FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
@@ -18207,7 +18207,7 @@ fn ffmpeg_args_with_encoder(
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
-        "warning".to_string(),
+        stream_loglevel(!stream_targets.is_empty()).to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
         FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
@@ -24676,6 +24676,17 @@ fn emit_session_log(
 
 /// The bridge FFmpeg's log level: every `av_log` line tagged with its level.
 const BRIDGE_FFMPEG_LOGLEVEL: &str = "level+info";
+
+/// The raw path's session FFmpeg: `level+info` while it streams, so each
+/// leg's fifo reports its recovery ("Recovery successful" is INFO) and the
+/// row goes back to live; recording-only sessions keep `warning`.
+fn stream_loglevel(streaming: bool) -> &'static str {
+    if streaming {
+        BRIDGE_FFMPEG_LOGLEVEL
+    } else {
+        "warning"
+    }
+}
 
 /// An `av_log` level as printed by `-loglevel level+…` (`get_level_str` in
 /// libavutil/log.c), least to most severe.
@@ -31574,6 +31585,11 @@ mod tests {
             );
         }
         assert!(args.contains(&"rtmp://a.rtmp.youtube.com/live2/abc123".to_string()));
+        // The fifo's "Recovery successful" is INFO: a streaming session logs
+        // at level+info so the row goes back to live; recording only stays
+        // at warning.
+        assert_eq!(arg_value(&args, "-loglevel"), Some("level+info"));
+        assert_eq!(stream_loglevel(false), "warning");
     }
 
     #[test]
