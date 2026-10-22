@@ -8251,6 +8251,10 @@ async fn publish_compositor_frame(
     );
     let mut bytes;
     let mut retain_previous_native_frame = false;
+    // Native preview with no GPU publishes a metadata frame by design (#680):
+    // the proof surface draws the source layers itself, so that frame is the
+    // tick's output even though it carries no pixels.
+    let mut metadata_only_preview = false;
     {
         let inputs = CompositorRenderInputs {
             sequence,
@@ -8317,6 +8321,7 @@ async fn publish_compositor_frame(
                 {
                     compositor_backend = CompositorBackend::Cpu;
                     compositor_fallback_reason = None;
+                    metadata_only_preview = true;
                     let _ = reason;
                 } else if cfg!(target_os = "macos") {
                     compositor_fallback_reason = Some(reason.to_string());
@@ -8371,7 +8376,8 @@ async fn publish_compositor_frame(
             frame.sequence == sequence
                 && (!frame.bytes.is_empty()
                     || frame.metadata.has_metal_iosurface_target()
-                    || frame.metadata.has_d3d11_texture())
+                    || frame.metadata.has_d3d11_texture()
+                    || metadata_only_preview)
         });
     let auxiliary_required = stream_output.is_some();
     let mut auxiliary_proof = None;
@@ -12537,6 +12543,54 @@ mod tests {
 
         assert!(frame.pixel_format.has_metal_iosurface_target());
         assert!(frame.export_handle.has_metal_iosurface_target());
+    }
+
+    #[tokio::test]
+    async fn no_gpu_native_preview_metadata_frame_counts_as_published() {
+        // With no GPU (every Linux run, Windows without D3D11) the idle preview
+        // publishes a pixel-less metadata frame (#680). It is still the tick's
+        // output: if it never counted, frame evidence froze and every wait for
+        // a preview frame hung on Linux and Windows CI.
+        let state = test_state();
+        state.compositor.lock().await.run_id = Some("metadata-preview-test".into());
+        let mut live_sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        let store = compositor_frame_store(&state).await;
+        for sequence in 1..=3 {
+            let result = publish_compositor_frame(
+                &state,
+                "metadata-preview-test",
+                sequence,
+                8,
+                4,
+                &mut live_sources,
+                &mut cache,
+                None,
+                CompositorFrameConsumer::NativePreview,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+            .await;
+            let frame = store.lock().unwrap().latest().expect("metadata frame");
+            assert_eq!(frame.sequence, sequence);
+            assert!(frame.bytes.is_empty(), "native preview never CPU-composes");
+            assert!(result.primary_published);
+            assert_eq!(
+                compositor_latest_frame_evidence(&state)
+                    .await
+                    .map(|evidence| evidence.sequence),
+                Some(sequence)
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
