@@ -18,6 +18,7 @@ import {
   type BannerRelayAction,
   type BannerSummary
 } from './banner-commands'
+import { classifyPollCommand, type PollComposerAction } from './poll-commands'
 
 export interface SessionMarker {
   id: string
@@ -216,6 +217,8 @@ export type ComposerCommand =
   | { kind: 'marker'; label?: string }
   /** Plan 186: show or hide a banner; never posts to chat. */
   | { kind: 'banner'; action: BannerRelayAction }
+  /** Plan 188: open, start, end or cancel a poll; never posts to chat. */
+  | { kind: 'poll'; poll: PollComposerAction }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 /**
@@ -241,10 +244,12 @@ export function classifyComposerDraft(
   }
   const banner = /^\/banner(?:\s+([\s\S]*))?$/i.exec(text)
   if (banner) return classifyBannerCommand(banner[1] ?? '', banners)
+  const poll = /^\/poll(?:\s+([\s\S]*))?$/i.exec(text)
+  if (poll) return classifyPollCommand(poll[1] ?? '')
   return {
     kind: 'error',
     message:
-      'Unknown command. Use /marker [title], /banner [name], or /help. To send a literal slash, start with //.'
+      'Unknown command. Use /marker [title], /banner [name], /poll, or /help. To send a literal slash, start with //.'
   }
 }
 /** A marker's place in the recording as the one timecode: "2:05", "1:02:05" (plan 174 S1.4). */
