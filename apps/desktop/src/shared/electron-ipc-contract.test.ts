@@ -32,6 +32,7 @@ import {
   type ElectronInvokeMappingInvariant,
   type ElectronInvokeResult
 } from './electron-ipc-contract'
+import { SCREEN_IMAGE_BATCH_MAX } from './screen-image-files'
 
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
@@ -61,8 +62,9 @@ describe('Electron IPC contract', () => {
     // 134: plan 186 adds banners:pick-image (Assets → Banners → Import image…).
     // 138: plan 186 S7 adds the Stream Manager's banner list (get, push) and
     // its show or hide relay pair.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(138)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(138)
+    // 139: screens:authorize-dropped-images (images dropped on Takeovers).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(139)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(139)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -284,6 +286,20 @@ describe('Electron IPC contract', () => {
     expect(() =>
       validateElectronInvokeArgs('resource:trash-session-deletion', ['x'.repeat(1025)])
     ).toThrow('at most 1024')
+  })
+
+  it('carries dropped takeover images as a bounded list of paths', () => {
+    expectTypeOf<ElectronInvokeArgs<'screens:authorize-dropped-images'>>().toEqualTypeOf<
+      [paths: string[]]
+    >()
+    const paths = ['/Users/me/a.png', '/Users/me/b.webp']
+    expect(validateElectronInvokeArgs('screens:authorize-dropped-images', [paths])).toEqual([paths])
+    expect(() => validateElectronInvokeArgs('screens:authorize-dropped-images', [['']])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('screens:authorize-dropped-images', [
+        Array.from({ length: SCREEN_IMAGE_BATCH_MAX + 1 }, (_, index) => `/tmp/${index}.png`)
+      ])
+    ).toThrow(`at most ${SCREEN_IMAGE_BATCH_MAX} items`)
   })
 
   it('validates the docked-preview slot report at runtime, including the slot enum', () => {

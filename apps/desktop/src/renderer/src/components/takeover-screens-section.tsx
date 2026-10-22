@@ -10,7 +10,15 @@ import {
   ImageIcon,
   SaveIcon
 } from '@/components/icons'
-import { useEffect, useState, type DragEvent, type KeyboardEvent, type ReactElement } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type DragEvent,
+  type KeyboardEvent,
+  type ReactElement
+} from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { OfflineAlert } from '@/components/lock-alert'
@@ -22,6 +30,7 @@ import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { StreamScreen } from '@/lib/backend'
 import { MediaCard } from '@/components/media-card'
@@ -67,13 +76,15 @@ export function TakeoverScreensSection(): ReactElement {
   const {
     activeScreen,
     deleteScreen,
-    importScreenImage,
+    importDroppedScreenImages,
+    importScreenImages,
     isSessionActive,
     reorderScreen,
     renameScreen,
     runtimeInfo,
     screenImportPending,
     screenImportPhase,
+    pendingScreenImports,
     screens,
     screensLoaded,
     wsStatus
@@ -90,6 +101,10 @@ export function TakeoverScreensSection(): ReactElement {
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   // Plan 174 S0.3 (C-1): a delete removes the image file too, so it asks.
   const [deleting, setDeleting] = useState<StreamScreen | null>(null)
+  const fileDrop = useFileDrop({
+    disabled: importDisabled,
+    onDrop: (files) => void importDroppedScreenImages(files)
+  })
 
   return (
     <>
@@ -108,7 +123,7 @@ export function TakeoverScreensSection(): ReactElement {
               data-testid="takeover-import"
               disabled={importDisabled}
               variant="outline"
-              onClick={() => void importScreenImage()}
+              onClick={() => void importScreenImages()}
             >
               {screenImportPending ? (
                 <Spinner aria-hidden data-icon="inline-start" />
@@ -116,16 +131,19 @@ export function TakeoverScreensSection(): ReactElement {
                 <ImageIcon data-icon="inline-start" />
               )}
               {screenImportPhase === 'choosing'
-                ? 'Choosing image…'
+                ? 'Choosing images…'
                 : screenImportPending
                   ? 'Importing…'
-                  : 'Import image…'}
+                  : 'Import images…'}
             </Button>
           </DisabledReason>
         }
-        description="Full-frame images that cover the output, turned on from the Studio. Turning one on mutes your microphone until you turn it off."
+        className={cn('flex-1', fileDrop.active && 'bg-accent')}
+        data-videorc-file-drop-active={fileDrop.active ? '' : undefined}
+        description="Full-frame images that cover the output, turned on from the Studio. Turning one on mutes your microphone until you turn it off. Drop images here to import them."
         icon={FrameIcon}
         title="Takeovers"
+        {...fileDrop.handlers}
       >
         {offline ? (
           <OfflineAlert />
@@ -137,7 +155,7 @@ export function TakeoverScreensSection(): ReactElement {
             </AlertDescription>
           </Alert>
         ) : null}
-        {screens.length > 0 ? (
+        {screens.length > 0 || pendingScreenImports.length > 0 ? (
           // Bounded section: the grid scrolls inside the Assets page stack.
           // The padding keeps the in-use rim inside the scroll area's clip.
           <ScrollArea className="max-h-[28rem] overflow-y-auto pr-3">
@@ -179,6 +197,9 @@ export function TakeoverScreensSection(): ReactElement {
                   onRename={(name) => void renameScreen(screen.id, name)}
                 />
               ))}
+              {pendingScreenImports.map((selection) => (
+                <ImportingTile key={selection.capabilityId} name={selection.displayName} />
+              ))}
             </Gallery>
           </ScrollArea>
         ) : !screensLoaded ? (
@@ -193,7 +214,7 @@ export function TakeoverScreensSection(): ReactElement {
           <Empty className="py-12">
             <EmptyTitle>No takeovers yet</EmptyTitle>
             <EmptyDescription>
-              Import a PNG, JPEG or WebP image to make the first one.
+              Import or drop PNG, JPEG or WebP images to make the first ones.
             </EmptyDescription>
           </Empty>
         )}
@@ -212,6 +233,58 @@ export function TakeoverScreensSection(): ReactElement {
       />
     </>
   )
+}
+
+// Tile reorder drags carry no files, so only drags from Finder or Explorer
+// light up the section and reach onDrop.
+function useFileDrop({
+  disabled,
+  onDrop
+}: {
+  disabled: boolean
+  onDrop: (files: File[]) => void
+}): {
+  active: boolean
+  handlers: Pick<ComponentProps<'section'>, 'onDragEnter' | 'onDragLeave' | 'onDragOver' | 'onDrop'>
+} {
+  const depth = useRef(0)
+  const [active, setActive] = useState(false)
+  const carriesFiles = (event: DragEvent): boolean => event.dataTransfer.types.includes('Files')
+  const reset = (): void => {
+    depth.current = 0
+    setActive(false)
+  }
+  // Tiles come and go under the pointer while an import runs, and a removed
+  // tile never sends dragleave, so the drag count drifts. Start over when
+  // import turns on or off.
+  useEffect(reset, [disabled])
+
+  return {
+    active: active && !disabled,
+    handlers: {
+      onDragEnter: (event) => {
+        if (!carriesFiles(event)) return
+        depth.current += 1
+        setActive(true)
+      },
+      onDragLeave: (event) => {
+        if (!carriesFiles(event)) return
+        depth.current -= 1
+        if (depth.current <= 0) reset()
+      },
+      onDragOver: (event) => {
+        if (disabled || !carriesFiles(event)) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      },
+      onDrop: (event) => {
+        if (!carriesFiles(event)) return
+        event.preventDefault()
+        reset()
+        if (!disabled) onDrop([...event.dataTransfer.files])
+      }
+    }
+  }
 }
 
 function ScreenTile({
@@ -298,8 +371,8 @@ function ScreenTile({
       onDragEnd={onDragEnd}
       onDragEnter={onDragEnter}
       onDragOver={(event: DragEvent<HTMLDivElement>) => {
-        // Allow this tile to be a drop target.
-        event.preventDefault()
+        // File drags are the section's to accept or refuse.
+        if (!event.dataTransfer.types.includes('Files')) event.preventDefault()
       }}
       onDragStart={(event: DragEvent<HTMLDivElement>) => {
         event.dataTransfer.effectAllowed = 'move'
@@ -442,4 +515,18 @@ function managedScreenAssetUrl(path: string): string {
   const normalized = path.replace(/\\/g, '/')
   const basename = normalized.slice(normalized.lastIndexOf('/') + 1)
   return `videorc-asset://screen/${encodeURIComponent(basename)}`
+}
+
+function ImportingTile({ name }: { name: string }): ReactElement {
+  return (
+    <MediaCard className="overflow-hidden" data-videorc-takeover-importing="">
+      <Skeleton className="aspect-video rounded-none" />
+      <div className="flex flex-col gap-2 p-3">
+        <div className="flex h-control min-w-0 items-center">
+          <p className="truncate text-meta text-muted-foreground">{name}</p>
+        </div>
+        <Skeleton className="h-control" />
+      </div>
+    </MediaCard>
+  )
 }

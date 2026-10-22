@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 import type { VideorcApi } from '../shared/backend'
 import {
@@ -13,6 +13,7 @@ import {
 } from '../shared/electron-ipc-contract'
 import { rendererRoleFromArguments } from '../shared/renderer-security-policy'
 import { apiForRendererRole } from './api-policy'
+import { droppedFilePaths } from './dropped-file-paths'
 
 async function invoke<TChannel extends ElectronInvokeChannel>(
   channel: TChannel,
@@ -40,7 +41,12 @@ const api: VideorcApi = {
   getRuntimeInfo: () => invoke('app:get-runtime-info'),
   retryHardwareAcceleration: () => invoke('app:retry-hardware-acceleration'),
   exitApp: (kind) => invoke('app:exit', kind),
-  pickScreenImage: () => invoke('screens:pick-image'),
+  pickScreenImages: () => invoke('screens:pick-images'),
+  authorizeDroppedScreenImages: async (files) =>
+    invoke(
+      'screens:authorize-dropped-images',
+      droppedFilePaths(files, (file) => webUtils.getPathForFile(file))
+    ),
   pickBannerImage: () => invoke('banners:pick-image'),
   importBackgroundImage: () => invoke('backgrounds:import-image'),
   importScheduledThumbnail: () => invoke('scheduled-streams:import-thumbnail'),

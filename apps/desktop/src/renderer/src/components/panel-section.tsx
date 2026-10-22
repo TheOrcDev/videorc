@@ -1,5 +1,5 @@
 import { AppIcon } from '@/components/icons'
-import type { ReactElement, ReactNode } from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 
@@ -18,8 +18,9 @@ export function PanelSection({
   children,
   className,
   contentClassName,
-  headingLevel = 2
-}: {
+  headingLevel = 2,
+  ...sectionProps
+}: Omit<ComponentProps<'section'>, 'title'> & {
   // Optional: a titleless section is just padded content (no header row), for
   // when the surrounding layout already names it.
   title?: string
@@ -42,6 +43,7 @@ export function PanelSection({
         className
       )}
       data-slot="panel-section"
+      {...sectionProps}
     >
       {hasHeader ? (
         <header className="flex min-h-6 items-start justify-between gap-3">
