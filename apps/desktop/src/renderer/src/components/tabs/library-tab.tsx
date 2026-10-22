@@ -81,6 +81,7 @@ import {
   finalizingBadgeLabel,
   isFinalizingSession
 } from '@/lib/session-finalization'
+import { recordingRoleLabel, recordingRoleRowNote } from '@/lib/separate-source-recordings-view'
 import {
   dayLabel,
   durationMsLabel,
@@ -991,11 +992,18 @@ function LibraryRow({
                 ? ` · cleaned from ${session.sourceTitle}`
                 : ''}
               {cleanCutMode && session.sourceTitle ? ` · cut from ${session.sourceTitle}` : ''}
+              {session.recordingRole ? ` · ${recordingRoleRowNote(session.recordingRole)}` : ''}
             </p>
           </div>
         </div>
         <div className="min-w-0" role="gridcell">
-          {session.processingKind === 'noise-cleanup' ? (
+          {session.recordingRole ? (
+            // Plan 157: a take's Screen or Camera file says its role where a
+            // Combined file says its scene.
+            <Badge data-recording-role={session.recordingRole} variant="outline">
+              {recordingRoleLabel(session.recordingRole)}
+            </Badge>
+          ) : session.processingKind === 'noise-cleanup' ? (
             <Badge variant="outline">Noise cleaned</Badge>
           ) : cleanCutMode ? (
             <Badge data-clean-cut={cleanCutMode} variant="outline">

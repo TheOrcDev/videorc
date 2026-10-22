@@ -930,6 +930,38 @@ fn processed_capture_frame_with_handle(
     processed_capture_frame(input, source_channels, settings.load(), timestamp_micros)
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn test_controlled_native_audio_source() -> (
+    NativeAudioSource,
+    mpsc::SyncSender<AudioFrame>,
+    Arc<AudioCaptureStats>,
+) {
+    let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
+    let stats = Arc::new(AudioCaptureStats::default());
+    let stop = Arc::new(AtomicBool::new(false));
+    (
+        NativeAudioSource {
+            device_id: 42,
+            device_name: "Test microphone".to_string(),
+            receiver: Some(receiver),
+            stats: stats.clone(),
+            processing_settings: AudioProcessingSettingsHandle::new(
+                AudioProcessingSettings::default(),
+            ),
+            stop,
+            stop_on_drop: true,
+            #[cfg(debug_assertions)]
+            caption_contract_test_injector: None,
+            #[cfg(debug_assertions)]
+            caption_contract_test_producer: None,
+            #[cfg(target_os = "macos")]
+            audio_unit: None,
+        },
+        sender,
+        stats,
+    )
+}
+
 /// Test seam: a hardware-free native source (the caption-contract producer)
 /// for warm-microphone and handoff tests.
 #[cfg(test)]
@@ -1554,30 +1586,7 @@ mod tests {
         mpsc::SyncSender<AudioFrame>,
         Arc<AudioCaptureStats>,
     ) {
-        let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
-        let stats = Arc::new(AudioCaptureStats::default());
-        let stop = Arc::new(AtomicBool::new(false));
-        (
-            NativeAudioSource {
-                device_id: 42,
-                device_name: "Test microphone".to_string(),
-                receiver: Some(receiver),
-                stats: stats.clone(),
-                processing_settings: AudioProcessingSettingsHandle::new(
-                    AudioProcessingSettings::default(),
-                ),
-                stop,
-                stop_on_drop: true,
-                #[cfg(debug_assertions)]
-                caption_contract_test_injector: None,
-                #[cfg(debug_assertions)]
-                caption_contract_test_producer: None,
-                #[cfg(target_os = "macos")]
-                audio_unit: None,
-            },
-            sender,
-            stats,
-        )
+        test_controlled_native_audio_source()
     }
 
     #[cfg(unix)]

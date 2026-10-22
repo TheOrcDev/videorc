@@ -944,6 +944,20 @@ async fn start_preview_camera_with_owner(
     mut admission_ready: Option<oneshot::Sender<Option<PreviewCameraStartingIdentity>>>,
     wait: PreviewCameraStartWait,
 ) -> PreviewCameraLayoutStart {
+    #[cfg(test)]
+    if params.sources.camera_id.as_deref() == Some("camera:iso-runtime") {
+        if preview_camera_frame_source(&state).await.is_none() {
+            test_install_live_camera_for_layout(
+                &state,
+                "camera:iso-runtime",
+                &params.layout,
+                &params.video,
+            )
+            .await;
+        }
+        signal_camera_layout_admission(&mut admission_ready, None);
+        return PreviewCameraLayoutStart::without_admission(preview_camera_status(&state).await);
+    }
     if state.process_shutdown_requested() {
         let status = camera_start_rejected_for_shutdown(preview_camera_status(&state).await);
         signal_camera_layout_admission(&mut admission_ready, None);
@@ -3592,18 +3606,51 @@ pub(crate) async fn test_publish_camera_pixels(
     sequence: u64,
     pixel: [u8; 4],
     captured_at: Instant,
-) {
-    let slot = state.preview_camera.lock().await;
-    let active = slot.active.as_ref().expect("installed camera fixture");
-    let mut shared = active.shared.lock().unwrap();
+) -> [u64; 4] {
+    let began = Instant::now();
+    let (width, height, shared, fixture_camera) = {
+        let slot = state.preview_camera.lock().await;
+        let Some(active) = slot.active.as_ref() else {
+            return [0; 4];
+        };
+        let video = &active.video;
+        (
+            video.width,
+            video.height,
+            Arc::clone(&active.shared),
+            active.camera_id == "camera:iso-runtime",
+        )
+    };
+    let admitted = Instant::now();
+    let bytes = pixel.repeat((width * height) as usize);
+    // Native callbacks own this generation's shared store and never retain
+    // the admission authority while publishing. A replaced generation may
+    // finish its callback, but cannot publish into the replacement's store.
+    let allocated = Instant::now();
+    let mut shared = shared.lock().unwrap();
+    let locked = Instant::now();
+    if fixture_camera {
+        shared.capture_timings.record_callback_at(captured_at);
+        shared
+            .capture_timings
+            .record_sample_pts(Some(sequence as f64 / 100.0));
+        shared.source_fps = Some(100.0);
+    }
     shared.frame_store.publish(
         sequence,
-        active.video.width,
-        active.video.height,
+        width,
+        height,
         PreviewCameraPixelFormat::Bgra8,
         captured_at,
-        pixel.repeat((active.video.width * active.video.height) as usize),
+        bytes,
     );
+    let published = Instant::now();
+    [
+        admitted.duration_since(began).as_micros() as u64,
+        allocated.duration_since(admitted).as_micros() as u64,
+        locked.duration_since(allocated).as_micros() as u64,
+        published.duration_since(locked).as_micros() as u64,
+    ]
 }
 
 /// Test-only: register a fully identified Starting generation without touching

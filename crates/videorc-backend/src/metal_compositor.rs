@@ -828,6 +828,7 @@ pub struct MetalSceneCompositor {
     targets: Vec<CachedTargetTexture>,
     // Index of the LAST-RENDERED slot; advanced at the start of each compose.
     target_cursor: usize,
+    target_ring_busy: bool,
     target_width: usize,
     target_height: usize,
     source_textures: Vec<Option<CachedSourceTexture>>,
@@ -1220,6 +1221,7 @@ impl MetalSceneCompositor {
             smooth_scaling,
             targets: Vec::new(),
             target_cursor: 0,
+            target_ring_busy: false,
             target_width: 0,
             target_height: 0,
             source_textures: Vec::new(),
@@ -1551,10 +1553,17 @@ impl MetalSceneCompositor {
         })
     }
 
+    /// The last compose could not acquire a slot because native encoders
+    /// still retained the entire bounded ring, rather than a GPU failure.
+    pub fn target_ring_busy(&self) -> bool {
+        self.target_ring_busy
+    }
+
     // Advance to the next ring slot and make sure it exists at the requested
     // size. Called once at the start of each compose; after it returns,
     // `latest_target()` is the slot this frame renders into.
     fn ensure_target_texture(&mut self, width: usize, height: usize) -> Option<()> {
+        self.target_ring_busy = false;
         if self.target_width != width || self.target_height != height {
             self.targets.clear();
             self.target_cursor = 0;
@@ -1599,6 +1608,7 @@ impl MetalSceneCompositor {
         }
         // Pathological: every slot (including growth headroom) is held.
         // Skipping this compose is strictly better than corrupting frames.
+        self.target_ring_busy = true;
         None
     }
 
