@@ -446,6 +446,7 @@ import {
   offCohostState
 } from '@/lib/backend'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
+import { soundboard } from '@/lib/soundboard-store'
 import {
   appendCaptionLine,
   captionDwellMs,
@@ -2408,6 +2409,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       bannerList && bannerList.map(({ id, name, shown }) => ({ id, name, shown }))
     )
   }, [bannerList])
+  // Plan 189: the soundboard's monitor, its Stream Manager copy and the
+  // starter seeding run here, in the main window, whatever page is in front.
+  // Their own chunk, loaded at once: the eager bundle carries only the store.
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let disposed = false
+    void import('@/lib/soundboard-host').then(({ startSoundboardHost }) => {
+      if (!disposed) stop = startSoundboardHost(soundboard)
+    })
+    return () => {
+      disposed = true
+      stop?.()
+    }
+  }, [])
   const [platformAccounts, setPlatformAccounts] = useState<PlatformAccount[]>([])
   const [platformAccountValidations, setPlatformAccountValidations] = useState<
     PlatformAccountValidation[]
@@ -7382,6 +7397,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bannerListEventRevision.current += 1
         setBanners(payload)
       }),
+      // Plan 189: the soundboard lives outside React (lib/soundboard-store).
+      nextClient.on('sounds.changed', (payload) => soundboard.acceptBoard(payload)),
+      nextClient.on('sounds.playback', (payload) => soundboard.acceptPlayback(payload)),
       nextClient.on('platformAccounts.changed', (payload) => {
         // The authorization link toast is persistent; retire it as soon
         // as the connection resolves.
@@ -7648,7 +7666,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           duration: TOAST_WITH_DESCRIPTION_MS
         })
       }),
-      nextClient.on('connection.closed', () => setWsStatus('closed'))
+      nextClient.on('connection.closed', () => {
+        soundboard.disconnect(nextClient)
+        setWsStatus('closed')
+      })
     ]
 
     nextClient
@@ -7658,6 +7679,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
         setWsStatus('connected')
+        // Plan 189: the soundboard reads its board on this connection,
+        // outside the batch: nothing on startup waits for it.
+        soundboard.connect(nextClient)
         // Seed the Stream Manager's GIF mode relay outside the bootstrap
         // batch: nothing on startup waits for it, and a failure costs only
         // the default (Animated) until the next liveChat.emotes event.
@@ -8099,6 +8123,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         remoteSurfacePublisherRef.current = null
       }
       setRemoteControlStatus(null)
+      soundboard.disconnect(nextClient)
       nextClient.close()
       setClient(null)
       if (captureRecoveryConnectionGenerationRef.current === generation) {

@@ -45,11 +45,12 @@ export function useStudioMicVisualSource(): FrameSource<VisualFrame> {
 /**
  * Plan 092 Phase C: the backend's post-gain levels during a session, one
  * stable source per bus tap: the processed microphone, the gained system
- * audio, and the mix as written.
+ * audio, the soundboard's sounds as mixed (plan 189), and the mix as written.
  */
 export const backendLevelSources = Object.freeze({
   microphone: createBackendLevelSource(backendAudioLevels, 'microphone'),
   systemAudio: createBackendLevelSource(backendAudioLevels, 'systemAudio'),
+  sounds: createBackendLevelSource(backendAudioLevels, 'sounds'),
   master: createBackendLevelSource(backendAudioLevels, 'master')
 })
 
