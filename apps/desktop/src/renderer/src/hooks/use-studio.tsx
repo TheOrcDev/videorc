@@ -2415,9 +2415,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     let stop: (() => void) | undefined
     let disposed = false
-    void import('@/lib/soundboard-host').then(({ startSoundboardHost }) => {
-      if (!disposed) stop = startSoundboardHost(soundboard)
-    })
+    void import('@/lib/soundboard-host').then(
+      ({ startSoundboardHost }) => {
+        if (!disposed) stop = startSoundboardHost(soundboard)
+      },
+      (error: unknown) => console.warn('[sounds] the soundboard did not start:', error)
+    )
     return () => {
       disposed = true
       stop?.()
