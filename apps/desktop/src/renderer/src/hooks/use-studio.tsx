@@ -2388,6 +2388,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sessionDetailLiveEntriesRef = useRef(
     new Map<string, { healthEvents: HealthEvent[]; sessionLogs: SessionLogEntry[] }>()
   )
+  // Plan 0007 (release test 146): the latest finalization-driven totals read
+  // wins, so an older answer never replaces a newer total.
+  const sessionStorageTotalsReadRef = useRef(0)
   const [sessionStorageTotals, setSessionStorageTotals] = useState<SessionStorageTotals | null>(
     null
   )
@@ -6923,6 +6926,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         if (finalizationEventNeedsRefresh(sessionsRef.current, event)) {
           void refreshSessions(nextClient)
+        } else if (event.state === 'finalized' || event.state === 'failed') {
+          // Plan 0007 (release test 146): the event patches the row's size,
+          // but "N recordings · X MB" only moved on a full refresh, so a take
+          // that finished while Library was loaded kept the old total.
+          const read = ++sessionStorageTotalsReadRef.current
+          void nextClient.request<SessionStorageTotals>('sessions.storage').then(
+            (totals) => {
+              if (
+                clientRef.current === nextClient &&
+                sessionStorageTotalsReadRef.current === read
+              ) {
+                setSessionStorageTotals(totals)
+              }
+            },
+            () => undefined
+          )
         }
         if (
           event.state === 'finalized' &&
