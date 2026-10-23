@@ -11,7 +11,11 @@
   the level and "Hear sounds yourself" (a main-window Web Audio monitor).
   Phase 2 in the same PR: Stream Manager, `/sound`, ⌘K, Stream Deck and the
   phone. 9 decisions (D1–D9), taken on the recommended defaults because the
-  owner asked to execute the whole plan and open a PR.
+  owner asked to execute the whole plan and open a PR. **EXECUTED**
+  2026-10-23 (both phases) on `plan-189-soundboard`: every gate and both
+  soundboard smokes pass; brand marks moved to files to keep the eager
+  bundle under its unchanged ceiling; the owner's by-ear on the starters and
+  a live take are owed.
 
 - 2026-10-22: [Plan 187](187-discord-go-live-announcement.md), Discord
   go-live announcement (issue #634). One Discord webhook, free, automatic:

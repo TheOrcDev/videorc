@@ -700,6 +700,65 @@ S2 and S3 run on `fable-5` in their own worktree; S5–S7 and S9 on
 `opus-4.8` in another; the orchestrator owns S0, S1, S4 (the pinned
 contract, first), S8, S10 wiring, the integration and the gates.
 
-## As built
+## As built (2026-10-23, branch `plan-189-soundboard`)
 
-(Filled in at the end.)
+Every slice, both phases, on the recommended defaults (D1–D9). Three
+worktrees were merged: the backend (S2, S3, the S10 intents and the S8
+fixture smoke), the main process and renderer (S4 main side, S5–S7, S9,
+S10), and the starters, app smoke and docs (S1, S8).
+
+**Differences from the plan:**
+- Starters seed through `sounds.import` with `starter`, then
+  `sounds.settings {startersSeeded}`, instead of a separate
+  `sounds.seedStarters`. Main adds `sounds:starter-list`, so "Restore starter
+  sounds" can find the missing slugs without issuing twelve capabilities.
+- Dropping files to import is out of scope: no drop bridge exists.
+- The 50 MB refusal reads "This file is too large. Use one under 50 MB."
+  The backend's "Sound not found." shows as "That sound isn't available
+  anymore."
+- The Sources fader reads "Level", like System audio's fader. `CONTEXT.md`
+  calls a fader "Gain"; both audio rows match each other, not the glossary.
+- A While held sound pressed from the Stream Deck or the phone plays to its
+  end: `describe` carries no mode, so a remote has no release to send.
+- The monitor keeps at most 64 MB of decoded audio, least recently played out
+  first.
+- **Eager budget.** Main already sat 196 bytes under the 390,000 gzip ceiling,
+  and this branch added 1,175. The limits were not raised. The YouTube icon
+  and the six X kit files now load as files in the React marks
+  (`?no-inline`). The highlight card, which reads its canvas back on a
+  file:// page, keeps data URIs through the lazy `lib/brand-mark-data.ts`.
+  Eager JS: main 1,945,136 raw / 389,804 gzip; this branch 1,943,019 /
+  389,295.
+- On the both-theme by-eye, "Stop all"'s outline stop square read as a
+  checkbox. It now uses the filled weight, like Stop recording.
+
+**Gates (this Mac, 2026-10-23):**
+- typecheck, lint (0 errors; one existing warning in untouched captions
+  code), format:check: pass.
+- `test:scripts`: 2,473 pass.
+- Desktop: 5,172 pass.
+- `build` and `check:renderer-assets`: pass.
+- Rust: `cargo fmt --check` and clippy `-D warnings` pass. The targeted
+  `cargo test` (sound, session_audio, source_audio_tap, storage,
+  remote_control, remote_lan, protocol, websocket, audio_levels) passes 405.
+  The mic-only golden SHA tests are unchanged, and a session with the board
+  armed but no press writes the same bytes.
+- `smoke:soundboard-fixture`: PASS. The press was placed at its exact sample
+  (48,109); after AAC the onset is 42 frames from it; the Microphone file is
+  silent.
+- `smoke:soundboard`: PASS on all three cases:
+  - idle: monitor only;
+  - on-air: starts 3 ms after the press and lasts 600 ms;
+  - system-audio: ran with the grant, and the sound is not doubled.
+- `smoke:separate-source-fixture`, `smoke:remote-control`,
+  `smoke:remote-lan`, `probe:comments-window`,
+  `smoke:record-latency:gate` and `smoke:comment-highlight-stream`: PASS.
+- Stream Deck plugin: tests and build pass.
+
+**Owed:**
+- The owner's by-ear pass on the twelve starters and the −18 LUFS target.
+- A by-eye of the Stream Manager's Sounds popover in both themes. Studio,
+  Assets and Sources were checked in both.
+- A packaged-app take, and a real livestream with a pad pressed.
+- Windows and Linux on-device runs: the bus code is shared and CI compiles
+  and tests it, but no soundboard run has happened off macOS.
