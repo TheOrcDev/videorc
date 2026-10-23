@@ -3129,30 +3129,109 @@ fn variant_u32(value: u32) -> VARIANT {
 /// because the encoder is going away regardless.
 unsafe fn shutdown_async_transform(transform: &IMFTransform, drained: bool) {
     unsafe {
-        if !drained {
-            let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-        }
-        let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-        let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+        stop_async_transform_streaming(transform, drained);
         if let Ok(shutdown) = transform.cast::<IMFShutdown>() {
             let _ = shutdown.Shutdown();
         }
     }
 }
 
+unsafe fn stop_async_transform_streaming(transform: &IMFTransform, drained: bool) {
+    unsafe {
+        if !drained {
+            let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        }
+        let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+        let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+    }
+}
+
+/// How long a stopped hardware MFT stays fully alive before its final
+/// Shutdown/ShutdownObject/Release. Session-stop teardown of the NVIDIA async
+/// H.264 MFT crashed 0.7-3.5 s later on the MFT's own RTWorkQ work item
+/// (`nvEncMFTH264x.dll` -> `RTWorkQ.dll` -> `mfplat.dll`, null+0x24 write;
+/// minidumps 2026-10-23, 0.9.147), even with the documented IMFShutdown
+/// sequence. Streaming is stopped immediately; only the destruction waits,
+/// so a straggling driver work item runs against a live object.
+const RETIRED_TRANSFORM_GRACE: Duration = Duration::from_secs(15);
+
+struct RetiredTransform {
+    release_at: Instant,
+    activation: IMFActivate,
+    events: IMFMediaEventGenerator,
+    transform: IMFTransform,
+    d3d11_input: Option<D3D11SurfaceInput>,
+    d3d11_cpu_upload: Option<D3D11CpuUploadInput>,
+}
+
+// SAFETY: async MFTs, their activation and event generator are free-threaded
+// MTA objects (the process holds the MTA for its lifetime, see
+// windows_com_lifetime.rs), and D3D11 objects are free-threaded for
+// AddRef/Release. The reaper only shuts down and releases them.
+unsafe impl Send for RetiredTransform {}
+
+impl RetiredTransform {
+    fn destroy(self) {
+        unsafe {
+            if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
+                let _ = shutdown.Shutdown();
+            }
+            let _ = self.activation.ShutdownObject();
+        }
+        drop(self.events);
+        drop(self.transform);
+        drop(self.activation);
+        drop(self.d3d11_input);
+        drop(self.d3d11_cpu_upload);
+    }
+}
+
+fn retire_transform(retired: RetiredTransform) {
+    static REAPER: std::sync::OnceLock<
+        Option<std::sync::Mutex<std::sync::mpsc::Sender<RetiredTransform>>>,
+    > = std::sync::OnceLock::new();
+    let sender = REAPER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<RetiredTransform>();
+        std::thread::Builder::new()
+            .name("videorc-mft-reaper".to_string())
+            .spawn(move || {
+                // Items arrive in release order (same grace for every item).
+                while let Ok(retired) = receiver.recv() {
+                    let now = Instant::now();
+                    if retired.release_at > now {
+                        std::thread::sleep(retired.release_at - now);
+                    }
+                    retired.destroy();
+                }
+            })
+            .ok()
+            .map(|_| std::sync::Mutex::new(sender))
+    });
+    let unsent = match sender {
+        Some(sender) => match sender.lock() {
+            Ok(sender) => sender.send(retired).err().map(|error| error.0),
+            Err(_) => Some(retired),
+        },
+        None => Some(retired),
+    };
+    // No reaper thread: fall back to immediate destruction.
+    if let Some(retired) = unsent {
+        retired.destroy();
+    }
+}
+
 impl Drop for MediaFoundationH264Encoder {
     fn drop(&mut self) {
         unsafe {
-            shutdown_async_transform(&self.transform, self.drained);
-            let activation = ManuallyDrop::take(&mut self.activation);
-            let events = ManuallyDrop::take(&mut self.events);
-            let transform = ManuallyDrop::take(&mut self.transform);
-            let _ = activation.ShutdownObject();
-            drop(events);
-            drop(transform);
-            drop(activation);
-            drop(self.d3d11_input.take());
-            drop(self.d3d11_cpu_upload.take());
+            stop_async_transform_streaming(&self.transform, self.drained);
+            retire_transform(RetiredTransform {
+                release_at: Instant::now() + RETIRED_TRANSFORM_GRACE,
+                activation: ManuallyDrop::take(&mut self.activation),
+                events: ManuallyDrop::take(&mut self.events),
+                transform: ManuallyDrop::take(&mut self.transform),
+                d3d11_input: self.d3d11_input.take(),
+                d3d11_cpu_upload: self.d3d11_cpu_upload.take(),
+            });
             if self.mf_started {
                 let _ = MFShutdown();
                 self.mf_started = false;
