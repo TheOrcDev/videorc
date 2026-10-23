@@ -5,6 +5,8 @@ import {
   MONITOR_IDLE_SUSPEND_MS,
   MONITOR_LATE_JOIN_MS,
   createSoundMonitor,
+  decodedSoundBytes,
+  MONITOR_CACHE_BYTES,
   dbToGain,
   monitorHears,
   monitorPlan,
@@ -218,6 +220,25 @@ describe('the monitor (plan 189)', () => {
     )
     await flush()
     expect(deps.fetchBytes).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps at most 64 MB of decoded audio, least recently played out first', async () => {
+    const { deps, monitor } = monitorWithFakes()
+    // Six 30 s sounds are about 69 MB decoded: the first one played leaves.
+    const sounds = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => sound(id, { durationMs: 30_000 }))
+    expect(decodedSoundBytes(sounds[0]) * 6).toBeGreaterThan(MONITOR_CACHE_BYTES)
+    for (const [index, entry] of sounds.entries()) {
+      monitor.update(snapshot([voice(`v-${index}`, entry.id)], { sounds }))
+      await flush()
+    }
+    expect(deps.fetchBytes).toHaveBeenCalledTimes(6)
+    monitor.update(snapshot([voice('v-f2', 'f')], { sounds }))
+    await flush()
+    expect(deps.fetchBytes).toHaveBeenCalledTimes(6)
+    monitor.update(snapshot([voice('v-a2', 'a')], { sounds }))
+    await flush()
+    expect(deps.fetchBytes).toHaveBeenCalledTimes(7)
+    expect(deps.fetchBytes).toHaveBeenLastCalledWith('videorc-asset://sound/a.wav')
   })
 
   it('stays quiet for an on-air voice with the monitor off, and glides a level change', async () => {

@@ -32,9 +32,13 @@ export const SOUND_REFUSALS: readonly string[] = [
   'This file has no sound Videorc can play.',
   'Sounds can be up to 30 seconds. Trim this one and try again.',
   'This file is silent.',
+  'This file is too large. Use one under 50 MB.',
   SOUND_COUNT_LIMIT_REASON,
   SOUND_TOTAL_LIMIT_REASON
 ]
+
+/** The backend's answer for an id it no longer has (`sound_by_id_locked`). */
+const SOUND_NOT_FOUND = 'Sound not found.'
 
 /** The refusals that stop a batch: no later file can get in either. */
 const LIMIT_REFUSALS = new Set([SOUND_COUNT_LIMIT_REASON, SOUND_TOTAL_LIMIT_REASON])
@@ -56,9 +60,12 @@ export function isSoundLimitRefusal(sentence: string | null): boolean {
  * it is, for the usual copy.
  */
 export function soundActionError(error: unknown): unknown {
+  const raw = ipcErrorMessage(error)
   const sentence =
     soundRefusal(error) ??
-    (ipcErrorMessage(error).includes(SOUND_ACTION_COPY.missing) ? SOUND_ACTION_COPY.missing : null)
+    (raw.includes(SOUND_ACTION_COPY.missing) || raw.includes(SOUND_NOT_FOUND)
+      ? SOUND_ACTION_COPY.missing
+      : null)
   return sentence ? new UserFacingError(sentence, 'warning') : error
 }
 

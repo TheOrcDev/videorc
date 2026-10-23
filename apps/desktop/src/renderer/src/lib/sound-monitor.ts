@@ -22,6 +22,18 @@ export const MONITOR_GAIN_GLIDE_SECONDS = 0.01
 export const MONITOR_LATE_JOIN_MS = 300
 /** With nothing playing this long, the context suspends and lets the output go. */
 export const MONITOR_IDLE_SUSPEND_MS = 5_000
+/**
+ * Decoded audio kept for the next press, least recently played first out:
+ * about 170 s of 48 kHz stereo float. Five minutes of sounds would otherwise
+ * hold about 115 MB. A playing voice keeps its own buffer, so an eviction
+ * never cuts one off; the next press of that sound decodes again.
+ */
+export const MONITOR_CACHE_BYTES = 64 * 1024 * 1024
+
+/** A sound's decoded size as Web Audio holds it: 48 kHz stereo float. */
+export function decodedSoundBytes(sound: Pick<Sound, 'durationMs'>): number {
+  return Math.ceil((sound.durationMs * 48_000) / 1000) * 2 * 4
+}
 
 /** Decibels as linear gain. */
 export function dbToGain(db: number): number {
@@ -113,7 +125,8 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
   let latest: SoundboardSnapshot | null = null
   let disposed = false
   let idleTimer: unknown = null
-  const buffers = new Map<string, { key: string; buffer: Promise<AudioBuffer> }>()
+  // Insertion order is recency: a hit moves its entry to the end.
+  const buffers = new Map<string, { key: string; bytes: number; buffer: Promise<AudioBuffer> }>()
   const playing = new Map<string, PlayingVoice>()
   const loading = new Set<string>()
   const warned = new Set<string>()
@@ -145,11 +158,23 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
   const bufferFor = (sound: Sound): Promise<AudioBuffer> => {
     const key = bufferKey(sound)
     const cached = buffers.get(sound.id)
-    if (cached?.key === key) return cached.buffer
+    if (cached?.key === key) {
+      buffers.delete(sound.id)
+      buffers.set(sound.id, cached)
+      return cached.buffer
+    }
     const buffer = deps
       .fetchBytes(soundAssetUrl(sound.file))
       .then((bytes) => audio().decodeAudioData(bytes))
-    buffers.set(sound.id, { key, buffer })
+    buffers.delete(sound.id)
+    buffers.set(sound.id, { key, bytes: decodedSoundBytes(sound), buffer })
+    let total = 0
+    for (const entry of buffers.values()) total += entry.bytes
+    for (const [soundId, entry] of buffers) {
+      if (total <= MONITOR_CACHE_BYTES || soundId === sound.id) break
+      buffers.delete(soundId)
+      total -= entry.bytes
+    }
     // A failed read or decode is tried again on the next press.
     buffer.catch(() => {
       if (buffers.get(sound.id)?.buffer === buffer) buffers.delete(sound.id)

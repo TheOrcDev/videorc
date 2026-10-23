@@ -77,6 +77,21 @@ describe('soundboard refusals', () => {
     const raw = new Error('voice table poisoned')
     expect(soundActionError(raw)).toBe(raw)
     expect(soundActionError(new Error(SOUND_ACTION_COPY.missing))).toBeInstanceOf(UserFacingError)
+    // The backend's own words for an id it no longer has, and its 50 MB cap.
+    expect(
+      userErrorMessage(
+        soundActionError(new BackendRequestError('sound-play-failed', 'Sound not found.')),
+        soundActionContext('play')
+      )
+    ).toMatchObject({ tone: 'warning', description: SOUND_ACTION_COPY.missing })
+    expect(
+      soundRefusal(
+        new BackendRequestError(
+          'sound-import-failed',
+          'This file is too large. Use one under 50 MB.'
+        )
+      )
+    ).toBe('This file is too large. Use one under 50 MB.')
     expect(isSoundLimitRefusal(SOUND_TOTAL_LIMIT_REASON)).toBe(true)
     expect(isSoundLimitRefusal('This file is silent.')).toBe(false)
     expect(isSoundLimitRefusal(null)).toBe(false)
