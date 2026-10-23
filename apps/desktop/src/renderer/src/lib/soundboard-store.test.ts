@@ -83,6 +83,20 @@ describe('the soundboard store (plan 189)', () => {
     expect(store.getSnapshot().board?.sounds).toHaveLength(1)
   })
 
+  it('follows whether a running session can carry sounds (release test 147)', () => {
+    const store = createSoundboardStore()
+    const client = deferredClient()
+    store.connect(client)
+    expect(store.getSnapshot().sessionWithoutSounds).toBe(false)
+    store.acceptPlayback({ voices: [], sessionWithoutSounds: true })
+    expect(store.getSnapshot().sessionWithoutSounds).toBe(true)
+    store.acceptPlayback({ voices: [voice] })
+    expect(store.getSnapshot().sessionWithoutSounds).toBe(false)
+    store.acceptPlayback({ voices: [], sessionWithoutSounds: true })
+    store.disconnect(client)
+    expect(store.getSnapshot().sessionWithoutSounds).toBe(false)
+  })
+
   it('tells its listeners about every change', () => {
     const store = createSoundboardStore()
     const listener = vi.fn()

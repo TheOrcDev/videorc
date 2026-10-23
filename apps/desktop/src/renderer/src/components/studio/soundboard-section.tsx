@@ -42,7 +42,7 @@ export function SoundboardSection(): ReactElement {
         />
       }
       data-videorc-soundboard=""
-      description={soundboardDescription(sessionActive, board.monitor)}
+      description={soundboardDescription(sessionActive, board.monitor, board.sessionWithoutSounds)}
       title="Soundboard"
     >
       {board.sounds.length > 0 ? (

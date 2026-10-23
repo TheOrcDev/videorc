@@ -2135,6 +2135,7 @@
         }
       ]
     },
-    "pressStopped": { "onAir": true }
+    "pressStopped": { "onAir": true },
+    "playbackWithoutSounds": { "voices": [], "sessionWithoutSounds": true }
   }
 }

@@ -37,6 +37,8 @@ export interface SoundboardView {
   monitor: boolean
   /** The board's Level, whole dB. */
   volumeDb: number
+  /** A recording or stream runs that sounds can't reach (release test 147). */
+  sessionWithoutSounds: boolean
 }
 
 export function soundboardView(snapshot: SoundboardSnapshot): SoundboardView {
@@ -51,7 +53,8 @@ export function soundboardView(snapshot: SoundboardSnapshot): SoundboardView {
     voices: snapshot.voices,
     voiceBySound,
     monitor: board?.monitor ?? true,
-    volumeDb: board?.volumeDb ?? 0
+    volumeDb: board?.volumeDb ?? 0,
+    sessionWithoutSounds: snapshot.sessionWithoutSounds
   }
 }
 

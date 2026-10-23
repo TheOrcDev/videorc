@@ -3279,7 +3279,8 @@ const soundsPlaybackSchema = objectSchema(
         { allowUnknown: false }
       ),
       { maxLength: SOUND_MAX_VOICES }
-    )
+    ),
+    sessionWithoutSounds: optionalSchema(literalSchema(true))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<SoundsPlayback>

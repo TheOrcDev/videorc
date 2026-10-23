@@ -168,7 +168,8 @@ const snapshot = (
   },
   voices,
   hidden: new Set(),
-  online: true
+  online: true,
+  sessionWithoutSounds: false
 })
 
 const flush = async (): Promise<void> => {
