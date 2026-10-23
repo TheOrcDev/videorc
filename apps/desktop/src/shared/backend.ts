@@ -5862,6 +5862,9 @@ export interface SoundVoice {
 /** `sounds.playback` and `sounds.stop`: every playing sound, oldest first. */
 export interface SoundsPlayback {
   voices: SoundVoice[]
+  /** A recording or stream runs that sounds can't reach (release test 147,
+   * plan 0001). Omitted when false. */
+  sessionWithoutSounds?: true
 }
 // --- end soundboard (plan 189) -----------------------------------------------
 

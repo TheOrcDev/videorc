@@ -4999,6 +4999,12 @@ pub struct SoundVoice {
 #[serde(rename_all = "camelCase")]
 pub struct SoundsPlayback {
     pub voices: Vec<SoundVoice>,
+    /// A recording or stream is running that sounds can't reach: its audio
+    /// doesn't go through the session bus (a Linux microphone FFmpeg had to
+    /// open directly), so a press is heard only here (release test 147, plan
+    /// 0001). Omitted when false, never `false` or null on the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_without_sounds: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -6262,6 +6268,14 @@ mod tests {
             fixture["playback"]
         );
         assert!(playback.voices[1].r#loop);
+        assert!(!playback.session_without_sounds);
+        let without: SoundsPlayback =
+            serde_json::from_value(fixture["playbackWithoutSounds"].clone()).unwrap();
+        assert!(without.session_without_sounds);
+        assert_eq!(
+            serde_json::to_value(&without).unwrap(),
+            fixture["playbackWithoutSounds"]
+        );
         let stopped: SoundPressResult =
             serde_json::from_value(fixture["pressStopped"].clone()).unwrap();
         assert_eq!(stopped.voice_id, None);

@@ -16,6 +16,7 @@ import {
   soundOrderAfterMove,
   soundPadLabel,
   soundRefusal,
+  SOUNDS_CANT_REACH_SESSION,
   soundboardDescription,
   soundsSectionDescription
 } from './sounds'
@@ -40,6 +41,13 @@ describe('soundboard copy (plan 189)', () => {
     expect(soundboardDescription(true, true)).toBe('Sounds play in your recording and stream.')
     expect(soundboardDescription(true, false)).toBe(
       "Sounds play in your recording and stream. You don't hear them yourself."
+    )
+    // Release test 147, plan 0001: never claim a session sounds can't reach.
+    for (const monitor of [true, false]) {
+      expect(soundboardDescription(true, monitor, true)).toBe(SOUNDS_CANT_REACH_SESSION)
+    }
+    expect(soundboardDescription(false, true, true)).toBe(
+      'Only you hear sounds until you record or go live.'
     )
     expect(soundsSectionDescription(12)).toBe(
       '12 sounds · up to 30 seconds each · WAV, MP3, M4A, OGG or FLAC.'

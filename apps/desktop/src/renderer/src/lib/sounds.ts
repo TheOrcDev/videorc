@@ -123,8 +123,18 @@ export async function runSoundAction(
 export const STOP_ALL_IDLE_REASON = 'No sound is playing.'
 
 /** Studio's line under Soundboard: where a press goes right now (plan 189 Copy). */
-export function soundboardDescription(sessionActive: boolean, monitor: boolean): string {
+/** Studio's line while a recording or stream runs that sounds can't reach. */
+export const SOUNDS_CANT_REACH_SESSION =
+  "Sounds can't reach this recording or stream. Only you hear them."
+
+export function soundboardDescription(
+  sessionActive: boolean,
+  monitor: boolean,
+  sessionWithoutSounds = false
+): string {
   if (!sessionActive) return 'Only you hear sounds until you record or go live.'
+  // Release test 147, plan 0001: never claim sounds reach a session they can't.
+  if (sessionWithoutSounds) return SOUNDS_CANT_REACH_SESSION
   return monitor
     ? 'Sounds play in your recording and stream.'
     : "Sounds play in your recording and stream. You don't hear them yourself."

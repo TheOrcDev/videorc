@@ -166,6 +166,13 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
     expect(container.textContent).toContain(
       "Sounds play in your recording and stream. You don't hear them yourself."
     )
+    // Release test 147, plan 0001: a session sounds can't reach says so.
+    setBoard({ monitor: true, sessionWithoutSounds: true })
+    await render()
+    expect(container.textContent).toContain(
+      "Sounds can't reach this recording or stream. Only you hear them."
+    )
+    expect(container.textContent).not.toContain('Sounds play in your recording and stream.')
   })
 
   it('presses a sound by its key, stops a While held one on release, and yields to fields', async () => {

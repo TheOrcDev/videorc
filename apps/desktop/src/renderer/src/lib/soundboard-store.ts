@@ -21,6 +21,8 @@ export interface SoundboardSnapshot {
   hidden: ReadonlySet<string>
   /** Studio's backend connection is up. */
   online: boolean
+  /** A recording or stream runs that sounds can't reach (release test 147). */
+  sessionWithoutSounds: boolean
 }
 
 export interface SoundboardStore {
@@ -47,7 +49,8 @@ export function createSoundboardStore(): SoundboardStore {
     board: null,
     voices: NO_VOICES,
     hidden: NOTHING_HIDDEN,
-    online: false
+    online: false,
+    sessionWithoutSounds: false
   }
   let current: SoundboardClient | null = null
   // Bumped by every board that arrives, so a `sounds.list` answer older than
@@ -86,10 +89,14 @@ export function createSoundboardStore(): SoundboardStore {
     disconnect: (client) => {
       if (current !== client) return
       current = null
-      publish({ online: false, voices: NO_VOICES })
+      publish({ online: false, voices: NO_VOICES, sessionWithoutSounds: false })
     },
     acceptBoard,
-    acceptPlayback: (playback) => publish({ voices: playback.voices }),
+    acceptPlayback: (playback) =>
+      publish({
+        voices: playback.voices,
+        sessionWithoutSounds: playback.sessionWithoutSounds === true
+      }),
     setHidden: (hidden) => publish({ hidden })
   }
 }
