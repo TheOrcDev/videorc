@@ -136,10 +136,17 @@ describe('Assets → Sounds (plan 189 S7)', () => {
     expect(board().stop).toHaveBeenCalledWith('gong')
   })
 
-  it('imports from the header, and says why not at 24 sounds', async () => {
+  it('imports from the header', async () => {
     await render()
     await act(async () => button('Import sounds…').click())
     expect(board().importSounds).toHaveBeenCalled()
+  })
+
+  // A full board renders 24 rows, each with its mode Select, volume Fader, key
+  // Select and menu: about 3 s in happy-dom on an idle laptop, so it timed out
+  // at the default 5 s under load (release test 147, plan 0007). It has its own
+  // test, mounted once, with a budget that says why.
+  it('says why not at 24 sounds', { timeout: 20_000 }, async () => {
     setBoard({ sounds: Array.from({ length: 24 }, (_, index) => sound(`s${index}`)) })
     await render()
     const importButton = button('Import sounds…')

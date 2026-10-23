@@ -255,6 +255,29 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
     expect(board().press).toHaveBeenCalledTimes(2)
   })
 
+  it('reads the number row by its physical key, so AZERTY presses and releases (release test 147)', async () => {
+    await render()
+    // French AZERTY: the unshifted number row types "&" and "'" on Digit1 and Digit3.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '&', code: 'Digit1' }))
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: '&', code: 'Digit1' }))
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: "'", code: 'Digit3' }))
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: "'", code: 'Digit3' }))
+    })
+    expect(board().press).toHaveBeenCalledWith('airhorn')
+    expect(board().press).toHaveBeenCalledWith('drumroll')
+    expect(board().stop).toHaveBeenCalledWith('drumroll')
+    // The numpad presses too; Shift on the number row still yields.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', code: 'Numpad2' }))
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: '1', code: 'Digit1', shiftKey: true })
+      )
+    })
+    expect(board().press).toHaveBeenCalledWith('applause')
+    expect(board().press).toHaveBeenCalledTimes(3)
+  })
+
   it('plays nothing while Videorc reconnects, and says so', async () => {
     mocked.shell = { wsStatus: 'closed' }
     await render()

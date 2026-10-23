@@ -9,7 +9,7 @@ import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useSoundboard } from '@/hooks/use-soundboard'
 import { useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
 import type { Sound } from '@/lib/backend'
-import { soundForKey, soundKeyBlocked } from '@/lib/sound-keys'
+import { soundForKey, soundKeyBlocked, soundKeyDigit } from '@/lib/sound-keys'
 import { soundboardDescription } from '@/lib/sounds'
 import { connectionBlockedReason } from '@/lib/state-labels'
 import { sessionOwnsTransport } from '../../../../shared/capture-state'
@@ -94,10 +94,11 @@ function useSoundKeys(
 ): void {
   const onKeyDown = useEffectEvent((event: KeyboardEvent, held: Map<string, Sound>): void => {
     if (!enabled || soundKeyBlocked(event, document)) return
-    const sound = soundForKey(event.key, sounds)
+    const digit = soundKeyDigit(event)
+    const sound = digit ? soundForKey(digit, sounds) : undefined
     if (!sound) return
     event.preventDefault()
-    held.set(event.key, sound)
+    held.set(heldKey(event), sound)
     void press(sound.id)
   })
   const release = useEffectEvent((sound: Sound): void => {
@@ -107,9 +108,9 @@ function useSoundKeys(
     const held = new Map<string, Sound>()
     const down = (event: KeyboardEvent): void => onKeyDown(event, held)
     const up = (event: KeyboardEvent): void => {
-      const sound = held.get(event.key)
+      const sound = held.get(heldKey(event))
       if (!sound) return
-      held.delete(event.key)
+      held.delete(heldKey(event))
       release(sound)
     }
     const releaseAll = (): void => {
@@ -126,4 +127,9 @@ function useSoundKeys(
       releaseAll()
     }
   }, [])
+}
+
+/** A held key's identity: the physical key, so its release matches on any layout. */
+function heldKey(event: KeyboardEvent): string {
+  return event.code || event.key
 }

@@ -4,12 +4,12 @@
 // `input-file` capabilities (index.ts), never a path. Pure: no fs or
 // electron, so the rules are verified in node.
 
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 
 import { SOUND_HOTKEYS, SOUND_MAX_COUNT, SOUND_NAME_MAX_CHARS } from '../shared/backend'
-import type { SoundHotkey } from '../shared/backend'
+import type { ResourceSelection, SoundHotkey } from '../shared/backend'
 import { isSoundStarterSlug } from '../shared/sound-assets'
-import type { StarterSound } from '../shared/sound-commands'
+import type { SoundPickResult, StarterSound } from '../shared/sound-commands'
 
 /** What Import sounds… offers: everything the bundled FFmpeg decodes that people have. */
 export const SOUND_IMPORT_EXTENSIONS = [
@@ -26,6 +26,35 @@ export const SOUND_IMPORT_EXTENSIONS = [
 
 /** One pick imports at most a full board; the backend refuses past its own limits. */
 export const SOUND_PICK_MAX_FILES = SOUND_MAX_COUNT
+
+/**
+ * What a picked file that main couldn't hand over says (release test 147,
+ * plan 0006). The backend's own reason stays in the log: it can name a path.
+ */
+export const SOUND_PICK_LEFT_OUT_REASON =
+  "Videorc couldn't open this file. It may have been moved or deleted."
+
+/**
+ * Each picked path as a single-use capability, at most a full board, and the
+ * ones whose capability couldn't be issued, by file name. Pure apart from the
+ * injected issuer, so the rule is verified in node.
+ */
+export async function soundPickResult(
+  paths: readonly string[],
+  issue: (path: string) => Promise<ResourceSelection>,
+  onLeftOut: (path: string, error: unknown) => void = () => undefined
+): Promise<SoundPickResult> {
+  const result: SoundPickResult = { selections: [], leftOut: [] }
+  for (const path of paths.slice(0, SOUND_PICK_MAX_FILES)) {
+    try {
+      result.selections.push(await issue(path))
+    } catch (error) {
+      onLeftOut(path, error)
+      result.leftOut.push({ displayName: basename(path), reason: SOUND_PICK_LEFT_OUT_REASON })
+    }
+  }
+  return result
+}
 
 /** The manifest beside the starter files (plan 189 S1). */
 export const STARTER_SOUNDS_MANIFEST = 'manifest.json'

@@ -46,6 +46,21 @@ export type SoundRelayAction =
 /** Stream Manager → main → Studio: one sound action with main's request id. */
 export type SoundRelayCommand = SoundRelayAction & { requestId: string }
 
+/**
+ * Import sounds… (plan 189): the picked files main could hand over, and the
+ * ones it couldn't (release test 147, plan 0006), by name only, never a path,
+ * so the renderer says why instead of dropping them in silence.
+ */
+export interface SoundPickResult {
+  selections: ResourceSelection[]
+  leftOut: SoundPickLeftOut[]
+}
+
+export interface SoundPickLeftOut {
+  displayName: string
+  reason: string
+}
+
 /** A starter sound as main reads it from the bundled manifest. */
 export interface StarterSound {
   slug: string
@@ -65,8 +80,9 @@ export interface StarterSoundFile extends StarterSound {
 declare module './backend' {
   interface VideorcApi {
     /** Assets → Sounds → Import sounds…: one `input-file` capability per picked
-     * file, for `sounds.import`; empty when canceled. */
-    pickSoundFiles: () => Promise<ResourceSelection[]>
+     * file, for `sounds.import`, and the files it couldn't open; both empty
+     * when canceled. */
+    pickSoundFiles: () => Promise<SoundPickResult>
     /** The bundled starter sounds' slugs, names and keys: no capability, no path. */
     getStarterSounds: () => Promise<StarterSound[]>
     /** The starter sounds with one capability each; only `slugs` when given. */

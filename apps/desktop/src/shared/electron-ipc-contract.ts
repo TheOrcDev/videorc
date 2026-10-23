@@ -1686,9 +1686,26 @@ const specificRuntimeInvokeContracts = {
   'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
   // Plan 189: Import sounds… (several files at once, none on cancel), and the
   // starter sounds the main window seeds and restores.
+  // Release test 147, plan 0006: the files main couldn't open come back by
+  // name with a fixed sentence, so the renderer can say so.
   'sounds:pick-files': invokeContract(
     noArgs,
-    arraySchema(inputFileSelectionSchema, { maxLength: SOUND_MAX_COUNT })
+    objectSchema(
+      {
+        selections: arraySchema(inputFileSelectionSchema, { maxLength: SOUND_MAX_COUNT }),
+        leftOut: arraySchema(
+          objectSchema(
+            {
+              displayName: stringSchema({ maxLength: 32_768 }),
+              reason: stringSchema({ minLength: 1, maxLength: 512 })
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: SOUND_MAX_COUNT }
+        )
+      },
+      { allowUnknown: false }
+    )
   ),
   'sounds:starter-list': invokeContract(noArgs, starterSoundsSchema),
   'sounds:starter-files': invokeContract(
