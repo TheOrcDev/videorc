@@ -551,6 +551,7 @@ import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
 import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
+import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
 import {
   confirmedSystemAudioMix,
   systemAudioIssueFromHealthEvent,
@@ -2324,7 +2325,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // imperative change-detection, debounce, and retry behavior.
   const remoteSurfacePublisherRef = useRef<RemoteSurfacePublisher | null>(null)
   const remoteSurfaceValuesRef = useRef<RemoteSurfaceValues | null>(null)
-  const remoteIntentTailRef = useRef<Promise<void>>(Promise.resolve())
   const globalShortcutsRegistrarRef = useRef<GlobalShortcutsRegistrar | null>(null)
   const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
@@ -7030,6 +7030,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .catch((error: unknown) => {
         if (!disposed) reportError(error)
       })
+    const remoteIntents = createRemoteIntentQueue({
+      run: async (payload) => {
+        if (!disposed) await handleRemoteIntent(payload)
+      },
+      refuseStale: async (payload) => {
+        const intentId = (payload as { intentId?: unknown } | null)?.intentId
+        if (disposed || typeof intentId !== 'string') return
+        await nextClient
+          .request('remote.intent.ack', {
+            intentId,
+            ok: false,
+            message: REMOTE_SOUND_STALE_MESSAGE
+          })
+          .catch(() => undefined)
+      }
+    })
     const unsubscribers = [
       nextClient.on('session.sources.changed', () => {
         // Read the complete current authority; event delivery can race RPC completion.
@@ -7052,17 +7068,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .catch(reportError)
       }),
       // Remote-control intents (Stream Deck et al) arrive as events relayed
-      // by the backend. Preserve arrival order across asynchronous handlers:
-      // each executor samples authoritative session truth only when its turn
-      // begins, and a failed predecessor cannot poison the tail.
+      // by the backend and run in arrival order (lib/remote-intent-queue.ts);
+      // sound presses on a lane of their own, so a slow scene switch never
+      // holds an airhorn back (release test 147, plan 0003).
       nextClient.on('remote.intent', (payload) => {
-        const result = remoteIntentTailRef.current
-          .catch(() => undefined)
-          .then(() => (disposed ? undefined : handleRemoteIntent(payload)))
-        remoteIntentTailRef.current = result.then(
-          () => undefined,
-          () => undefined
-        )
+        remoteIntents.enqueue(payload).catch((error: unknown) => {
+          if (!disposed) reportError(error)
+        })
       }),
       nextClient.on('remote.control.status', (payload) => {
         setRemoteControlStatus(payload as RemoteControlStatus)
