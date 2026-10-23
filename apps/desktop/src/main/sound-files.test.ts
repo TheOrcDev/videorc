@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -18,14 +18,14 @@ describe('the starter sound folder (plan 189)', () => {
         resourcesPath: '/Applications/Videorc.app/Contents/Resources',
         workspaceRoot: '/Applications/Videorc.app/Contents'
       })
-    ).toBe('/Applications/Videorc.app/Contents/Resources/sounds/starter')
+    ).toBe(join('/Applications/Videorc.app/Contents/Resources', 'sounds', 'starter'))
     expect(
       starterSoundsDirectory({
         packaged: false,
         resourcesPath: '/repo/node_modules/electron/dist/Electron.app/Contents/Resources',
         workspaceRoot: '/repo'
       })
-    ).toBe('/repo/apps/desktop/resources/sounds/starter')
+    ).toBe(resolve('/repo', 'apps/desktop/resources/sounds/starter'))
   })
 })
 

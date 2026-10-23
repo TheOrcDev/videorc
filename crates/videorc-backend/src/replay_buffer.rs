@@ -1944,24 +1944,34 @@ mod pure_tests {
     #[test]
     fn concat_list_quotes_paths_and_carries_durations() {
         let selection = select_segments(&[segment(7, 14.0, 16.0), segment(8, 16.0, 18.0)], 4);
-        let script = concat_list(&selection, Path::new("/tmp/it's a ring"));
+        let dir = Path::new("/tmp/it's a ring");
+        let script = concat_list(&selection, dir);
+        // `join` writes the platform's separator (a backslash on Windows).
+        let quoted = |name: &str| dir.join(name).display().to_string().replace('\'', "'\\''");
         assert_eq!(
             script,
-            "ffconcat version 1.0\nfile '/tmp/it'\\''s a ring/seg-000007.ts'\nduration 2.000000\nfile '/tmp/it'\\''s a ring/seg-000008.ts'\nduration 2.000000\n"
+            format!(
+                "ffconcat version 1.0\nfile '{}'\nduration 2.000000\nfile '{}'\nduration 2.000000\n",
+                quoted("seg-000007.ts"),
+                quoted("seg-000008.ts")
+            )
         );
     }
 
     #[test]
     fn segment_muxer_args_describe_a_live_csv_ring() {
-        let args = segment_muxer_args(Path::new("/ring"), 30);
+        let ring = Path::new("/ring");
+        let args = segment_muxer_args(ring, 30);
         let joined = args.join(" ");
+        let list = ring.join("segments.csv").display().to_string();
+        let pattern = ring.join("seg-%06d.ts").display().to_string();
         assert!(
             joined.starts_with(
                 "-f segment -segment_format mpegts -segment_time 2 -reset_timestamps 0"
             )
         );
-        assert!(joined.contains("-segment_list /ring/segments.csv -segment_list_type csv -segment_list_size 17 -segment_list_flags +live"));
-        assert_eq!(args.last().map(String::as_str), Some("/ring/seg-%06d.ts"));
+        assert!(joined.contains(&format!("-segment_list {list} -segment_list_type csv -segment_list_size 17 -segment_list_flags +live")));
+        assert_eq!(args.last(), Some(&pattern));
     }
 
     #[test]
