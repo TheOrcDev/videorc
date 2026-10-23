@@ -2623,12 +2623,42 @@ impl Database {
     }
 
     pub fn fail_uncommitted_source_iso_sessions(&self, take_id: &str) -> Result<()> {
-        self.lock()?.execute(
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        // Release test 146, plan 0003: a reservation that never bound a
+        // capture has no media to recover, so it must not list as a failed
+        // "MP4 failed" recording. Only those rows go; anything that opened a
+        // capture keeps today's recovery path.
+        let unbound =
+            "take_id = ?1 AND recording_role IN ('screen', 'camera') AND status = 'running'
+             AND output_path IS NULL
+             AND json_extract(output_json, '$.sourceIsoOwnership') IS NULL
+             AND json_extract(output_json, '$.sourceIsoCaptureDirectory') IS NULL";
+        transaction.execute(
+            &format!(
+                "DELETE FROM session_chat_totals WHERE session_id IN (SELECT id FROM sessions WHERE {unbound})"
+            ),
+            params![take_id],
+        )?;
+        transaction.execute(
+            &format!("DELETE FROM sessions WHERE {unbound}"),
+            params![take_id],
+        )?;
+        transaction.execute(
             "UPDATE sessions SET status = 'failed', ended_at = ?2, finalization_state = 'failed',
              finalization_error = 'Session startup did not commit; any partial media was retained for recovery.'
              WHERE take_id = ?1 AND recording_role IN ('screen', 'camera') AND status = 'running'",
             params![take_id, Utc::now().to_rfc3339()],
         )?;
+        // With no role sibling left, the Combined row is an ordinary refused
+        // start, not a "combined take".
+        transaction.execute(
+            "UPDATE sessions SET take_id = NULL, recording_role = NULL
+             WHERE id = ?1 AND recording_role = 'combined'
+             AND NOT EXISTS (SELECT 1 FROM sessions WHERE take_id = ?1 AND recording_role IN ('screen', 'camera'))",
+            params![take_id],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -10634,6 +10664,104 @@ mod tests {
                 .is_some(),
             "every row owns a chat-totals record"
         );
+    }
+
+    #[test]
+    fn a_take_refused_before_any_iso_media_leaves_one_ordinary_failed_row() {
+        // Release test 146, plan 0003: a Separate source take refused before
+        // its writers opened listed three failed rows ("combined take" plus
+        // two red "MP4 failed" with no file). Role reservations that never
+        // bound a capture go away; the Combined row is an ordinary refused
+        // start again.
+        let database = Database::open_in_memory_for_tests();
+        database
+            .create_session(&sample_session("take-refused"))
+            .unwrap();
+        database
+            .reserve_source_iso_sessions(
+                "take-refused",
+                &[
+                    ("screen", "Screen", "/tmp/take-refused-screen.mkv".into()),
+                    ("camera", "Camera", "/tmp/take-refused-camera.mkv".into()),
+                ],
+            )
+            .unwrap();
+        database
+            .fail_uncommitted_source_iso_sessions("take-refused")
+            .unwrap();
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["take-refused"]
+        );
+        assert_eq!(page.items[0].take_id, None);
+        assert_eq!(page.items[0].recording_role, None);
+        assert!(
+            database
+                .session_chat_totals("take-refused-screen")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_take_failed_after_an_iso_capture_opened_keeps_that_row_for_recovery() {
+        let dir = std::env::temp_dir().join(format!("videorc-iso-bound-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_file_for_tests(&dir.join("take.sqlite3"));
+        database
+            .create_session(&sample_session("take-bound"))
+            .unwrap();
+        database
+            .reserve_source_iso_sessions(
+                "take-bound",
+                &[
+                    (
+                        "screen",
+                        "Screen",
+                        dir.join("screen.mkv").display().to_string(),
+                    ),
+                    (
+                        "camera",
+                        "Camera",
+                        dir.join("camera.mkv").display().to_string(),
+                    ),
+                ],
+            )
+            .unwrap();
+        let capture = dir.join("screen.mkv");
+        std::fs::write(&capture, b"partial").unwrap();
+        database
+            .set_source_iso_capture_path("take-bound-screen", &capture)
+            .unwrap();
+        database
+            .fail_uncommitted_source_iso_sessions("take-bound")
+            .unwrap();
+        let page = database.list_session_items_page(None, 10).unwrap();
+        let mut ids = page
+            .items
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["take-bound", "take-bound-screen"]);
+        let screen = page
+            .items
+            .iter()
+            .find(|row| row.id == "take-bound-screen")
+            .unwrap();
+        assert_eq!(screen.status, "failed");
+        assert_eq!(screen.take_id.as_deref(), Some("take-bound"));
+        let combined = page
+            .items
+            .iter()
+            .find(|row| row.id == "take-bound")
+            .unwrap();
+        assert_eq!(combined.recording_role.as_deref(), Some("combined"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
