@@ -56,7 +56,11 @@ Phone remote and every Stream Deck with it.
   at 80 ms instead of 150 ms so a fast drummer still gets every press. One
   whose sound is gone acks "That sound isn't available anymore."; a refusal
   acks the desktop's sentence; any other failure "Couldn't play the sound.",
-  "Couldn't stop the sound." or "Couldn't stop the sounds.".
+  "Couldn't stop the sound." or "Couldn't stop the sounds.". The renderer
+  runs sound intents in order among themselves but never behind another kind
+  of intent (a slow scene switch can't hold an airhorn back); a sound intent
+  that still waited over a second acks "That sound was pressed too long ago,
+  so it didn't play." instead of playing late.
 
 ## Requests
 
