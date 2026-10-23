@@ -853,8 +853,9 @@ mod tests {
         assert_eq!(database.count_sounds().unwrap(), 3);
         assert_eq!(database.total_sound_duration_ms().unwrap(), 3_000);
         let ids: Vec<String> = database
-            .list_sounds()
+            .soundboard_state()
             .unwrap()
+            .sounds
             .iter()
             .map(|sound| sound.id.clone())
             .collect();

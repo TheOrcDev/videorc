@@ -7000,12 +7000,6 @@ impl Database {
 
     // --- Sounds (plan 189) ---------------------------------------------------
 
-    /// Every sound in board order.
-    pub(crate) fn list_sounds(&self) -> Result<Vec<Sound>> {
-        let conn = self.lock()?;
-        list_sounds_locked(&conn)
-    }
-
     pub(crate) fn sound_by_id(&self, id: &str) -> Result<Sound> {
         let conn = self.lock()?;
         sound_by_id_locked(&conn, id)

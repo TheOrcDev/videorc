@@ -83,6 +83,7 @@ impl SoundVoices {
     }
 
     /// Nothing to render: the bus keeps its mic-only write path.
+    #[cfg(test)]
     pub(crate) fn is_idle(&self) -> bool {
         self.voices.is_empty()
     }

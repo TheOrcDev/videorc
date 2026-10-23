@@ -13,9 +13,9 @@
 /// The sample rate the filter coefficients are tabulated for.
 pub(crate) const SAMPLE_RATE: u32 = 48_000;
 /// A gating block: 400 ms.
-const BLOCK_FRAMES: usize = 19_200;
+const BLOCK_FRAMES: usize = SAMPLE_RATE as usize * 400 / 1_000;
 /// Block hop at 75 % overlap: 100 ms.
-const HOP_FRAMES: usize = 4_800;
+const HOP_FRAMES: usize = SAMPLE_RATE as usize * 100 / 1_000;
 /// The absolute gate (BS.1770-4 §4.3).
 const ABSOLUTE_GATE_LKFS: f64 = -70.0;
 /// The relative gate sits this far under the absolutely gated mean.
