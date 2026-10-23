@@ -18,7 +18,7 @@ controls stayed, the channel strips gave way to Sources rows.
 | `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Studio Microphone section and the Sources rows (`MicLevelMeter`)              |
 | `bar-visualizer`                                                                                | `components/ui/`            | Session mic sliver                                                            |
 | `mixer`                                                                                         | `components/ui/`            | Sources Audio column: meter range, Cmd+Up/Down between rows (plans 093, 173)  |
-| `fader`                                                                                         | `components/ui/`            | Sources: Microphone Gain, System audio Level                                  |
+| `fader`                                                                                         | `components/ui/`            | Sources: Microphone Gain, System audio and Sounds Level, Assets → Sounds      |
 | `parameter-slider`                                                                              | `components/ui/`            | Sources: Microphone Sync                                                      |
 | `channel-toggle`                                                                                | `components/ui/`            | Sources: Microphone Mute (`MuteToggle`)                                       |
 | `sound-pad`                                                                                     | `components/ui/`            | Studio → Soundboard and the Stream Manager's Sounds popover (plan 189)        |

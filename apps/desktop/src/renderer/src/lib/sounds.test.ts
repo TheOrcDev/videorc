@@ -47,6 +47,9 @@ describe('soundboard copy (plan 189)', () => {
     expect(soundsSectionDescription(1)).toBe(
       '1 sound · up to 30 seconds each · WAV, MP3, M4A, OGG or FLAC.'
     )
+    expect(soundsSectionDescription(null)).toBe(
+      'Sounds up to 30 seconds each · WAV, MP3, M4A, OGG or FLAC.'
+    )
     expect(formatSoundDuration(1610)).toBe('1.6 s')
     expect(formatSoundDuration(30_000)).toBe('30.0 s')
     expect(soundPadLabel('Airhorn', false)).toBe('Play Airhorn')

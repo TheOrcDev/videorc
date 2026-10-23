@@ -15,6 +15,7 @@ import {
   MicrophoneChannel,
   SyncCalibrationView,
   syncOffsetTag,
+  SoundsSettings,
   SystemAudioSettings
 } from './sources-audio-mixer'
 
@@ -438,5 +439,58 @@ describe('Sync calibration (plan 093, D3)', () => {
   it('offers the pnpm stimulus only in development builds', () => {
     expect(renderCalibration({ defaultOpen: true })).not.toContain('Stimulus')
     expect(renderCalibration({ defaultOpen: true, developer: true })).toContain('Stimulus')
+  })
+})
+
+describe('Sources Sounds row (plan 189 S7)', () => {
+  const renderSounds = (props: Partial<Parameters<typeof SoundsSettings>[0]> = {}): string =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(SoundsSettings, {
+          volumeDb: 0,
+          monitor: true,
+          meter: NO_READING,
+          disabled: false,
+          onVolumeChange: noop,
+          onMonitorChange: noop,
+          ...props
+        })
+      )
+    )
+
+  it('is one row: the Level fader, the meter line and Hear sounds yourself, on by default', () => {
+    const markup = renderSounds()
+    expect(markup).toContain('data-slot="source-item"')
+    expect(markup).toContain('data-videorc-sounds-source-row=""')
+    expect(markup).toContain('>Sounds<')
+    expect(markup).toContain('aria-label="Sounds level"')
+    expect(markup).toContain('>Level<')
+    expect(markup).toContain('Hear sounds yourself')
+    expect(markup).toContain('Use headphones, or your microphone may pick the sound up again.')
+    expect(markup).toMatch(
+      /role="switch"[^>]*aria-checked="true"|aria-checked="true"[^>]*role="switch"/
+    )
+    // No dead meter outside a session (plan 173).
+    expect(markup).toContain('Level shows while recording or live.')
+  })
+
+  it('draws the meter once the bus mixes sounds, and resets Level off its default', () => {
+    const source = createFrameEmitter<MeterFrame>()
+    const markup = renderSounds({ meter: { kind: 'source', source }, volumeDb: -6 })
+    expect(markup).toContain('data-videorc-sounds-visualizer=""')
+    expect(markup).not.toContain('Level shows while recording or live.')
+    expect(markup).toContain('Reset to 0.0 dB')
+    expect(markup).toContain('−6.0 dB')
+  })
+
+  it('turns off with Hear sounds yourself off, and locks while Videorc reconnects', () => {
+    expect(renderSounds({ monitor: false })).toMatch(
+      /role="switch"[^>]*aria-checked="false"|aria-checked="false"[^>]*role="switch"/
+    )
+    const locked = renderSounds({ disabled: true, volumeDb: 3 })
+    expect(locked).toContain('data-disabled="true"')
+    expect(locked).not.toContain('Reset to 0.0 dB')
   })
 })

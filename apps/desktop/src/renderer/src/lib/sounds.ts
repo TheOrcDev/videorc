@@ -120,9 +120,13 @@ export function soundboardDescription(sessionActive: boolean, monitor: boolean):
     : "Sounds play in your recording and stream. You don't hear them yourself."
 }
 
-/** Assets → Sounds: the count and the rules (plan 189 Copy, D8). */
-export function soundsSectionDescription(count: number): string {
-  return `${plural(count, 'sound')} · up to 30 seconds each · WAV, MP3, M4A, OGG or FLAC.`
+/**
+ * Assets → Sounds: the count and the rules (plan 189 Copy, D8). Without a
+ * count (the board hasn't loaded) it never claims none (J2-8).
+ */
+export function soundsSectionDescription(count: number | null): string {
+  const rules = 'up to 30 seconds each · WAV, MP3, M4A, OGG or FLAC.'
+  return count === null ? `Sounds ${rules}` : `${plural(count, 'sound')} · ${rules}`
 }
 
 /** A sound's length in Assets: "1.6 s", "30.0 s". */
