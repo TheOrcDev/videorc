@@ -19,6 +19,8 @@ export function buildStartSessionParams(input: {
   sceneEditMode?: boolean
   settings: SettingsState
   suppressCaptionsForSession?: boolean
+  /** `process.platform` from runtime info: Separate source recordings are macOS-only. */
+  platform?: string
 }): StartSessionParams {
   const {
     captureConfig,
@@ -58,7 +60,7 @@ export function buildStartSessionParams(input: {
       keepOriginalMkv: settings.keepOriginalRecording,
       // Only sent when armed, so an ISO-off session's params stay byte-identical
       // to pre-157 renderers.
-      separateSourceRecordings: separateSourceRecordingsForSession(captureConfig),
+      separateSourceRecordings: separateSourceRecordingsForSession(captureConfig, input.platform),
       video: captureConfig.video,
       rtmp: {
         preset: captureConfig.rtmpPreset,

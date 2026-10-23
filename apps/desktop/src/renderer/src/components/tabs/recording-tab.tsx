@@ -34,6 +34,7 @@ import {
   resolutionOptionsForOrientation,
   separateSourceRecordingsIneligibility,
   separateSourceRecordingsIneligibilityCopy,
+  separateSourceRecordingsSupported,
   videoProfileCompatibility,
   type LayoutOrientation
 } from '@/lib/capture'
@@ -78,7 +79,8 @@ function LocalRecordingSection(): ReactElement {
     performanceCheckProgress,
     runPerformanceCheck,
     encoderPreference,
-    setEncoderPreference
+    setEncoderPreference,
+    runtimeInfo
   } = useStudioCore()
   const { video } = captureConfig
   // One-click resolutions so nobody has to remember pixel counts; picking one
@@ -91,9 +93,14 @@ function LocalRecordingSection(): ReactElement {
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   // Plan 157: the switch stays available; when the current selection cannot
   // produce both files the copy says so and the session records Combined only.
-  const separateIneligibility = captureConfig.separateSourceRecordings.enabled
-    ? separateSourceRecordingsIneligibility(captureConfig)
-    : null
+  // Release test 146, plan 0001: only macOS can write the Screen and Camera
+  // files, so elsewhere the switch is off, locked and says why.
+  const separateUnsupported = !separateSourceRecordingsSupported(runtimeInfo?.platform)
+  const separateIneligibility = separateUnsupported
+    ? 'unsupported-platform'
+    : captureConfig.separateSourceRecordings.enabled
+      ? separateSourceRecordingsIneligibility(captureConfig, runtimeInfo?.platform)
+      : null
   const profileGate = videoProfileEntitlementGate({ entitlements, kind: 'recording', video })
   const profileEntitlementMessage = profileGate.allowed ? null : profileGate.reason
   const checkLine = performanceCheckLine({
@@ -157,8 +164,8 @@ function LocalRecordingSection(): ReactElement {
           label="Separate source recordings"
         >
           <Switch
-            checked={captureConfig.separateSourceRecordings.enabled}
-            disabled={qualityLocked}
+            checked={!separateUnsupported && captureConfig.separateSourceRecordings.enabled}
+            disabled={qualityLocked || separateUnsupported}
             id="separate-source-recordings"
             onCheckedChange={(checked) =>
               setCaptureConfig((current) => ({

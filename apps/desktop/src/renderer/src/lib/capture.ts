@@ -163,9 +163,20 @@ export function normalizeSeparateSourceRecordings(
 
 /** Stable reasons mirrored from `crates/videorc-backend/src/source_iso.rs`. */
 export type SeparateSourceRecordingsIneligibility =
+  | 'unsupported-platform'
   | 'record-disabled'
   | 'missing-camera'
   | 'missing-screen'
+
+/**
+ * Release test 146, plan 0001: the ISO writers need the VideoToolbox MPEG-TS
+ * bridge, so only macOS can save the Screen and Camera files. An unknown
+ * platform (runtime info not loaded yet) is not refused here; the backend
+ * refuses an unsupported start before any Library row exists.
+ */
+export function separateSourceRecordingsSupported(platform: string | undefined): boolean {
+  return platform === undefined || platform === 'darwin'
+}
 
 /**
  * Why Separate source recordings cannot arm for this config, or null when it
@@ -173,8 +184,10 @@ export type SeparateSourceRecordingsIneligibility =
  * tab can explain the refusal before Record is pressed.
  */
 export function separateSourceRecordingsIneligibility(
-  config: Pick<CaptureConfig, 'recordEnabled' | 'sources'>
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources'>,
+  platform?: string
 ): SeparateSourceRecordingsIneligibility | null {
+  if (!separateSourceRecordingsSupported(platform)) return 'unsupported-platform'
   if (!config.recordEnabled) return 'record-disabled'
   if (!config.sources.cameraId?.trim()) return 'missing-camera'
   if (!config.sources.screenId?.trim() && !config.sources.windowId?.trim()) {
@@ -188,6 +201,8 @@ export function separateSourceRecordingsIneligibilityCopy(
   reason: SeparateSourceRecordingsIneligibility
 ): string {
   switch (reason) {
+    case 'unsupported-platform':
+      return 'Works on Mac only for now. On this computer every recording is the Combined file.'
     case 'record-disabled':
       return 'Turn on local recording to save separate source files.'
     case 'missing-camera':
@@ -203,10 +218,11 @@ export function separateSourceRecordingsIneligibilityCopy(
  * Record (the Recording tab shows the exact reason instead).
  */
 export function separateSourceRecordingsForSession(
-  config: Pick<CaptureConfig, 'recordEnabled' | 'sources' | 'separateSourceRecordings'>
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources' | 'separateSourceRecordings'>,
+  platform?: string
 ): SeparateSourceRecordingsSettings | undefined {
   if (!config.separateSourceRecordings.enabled) return undefined
-  if (separateSourceRecordingsIneligibility(config)) return undefined
+  if (separateSourceRecordingsIneligibility(config, platform)) return undefined
   return config.separateSourceRecordings
 }
 

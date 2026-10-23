@@ -35,6 +35,12 @@ pub const REFUSAL_RECORD_DISABLED: &str = "separate-source-recordings-record-dis
 pub const REFUSAL_MISSING_CAMERA: &str = "separate-source-recordings-missing-camera";
 pub const REFUSAL_MISSING_SCREEN: &str = "separate-source-recordings-missing-screen";
 pub const REFUSAL_DROP_COMBINED: &str = "separate-source-recordings-drop-combined-unsupported";
+/// Release test 146, plan 0001: the ISO writers are VideoToolbox-only, so
+/// the take is refused up front, before any Library row exists.
+pub const REFUSAL_UNSUPPORTED_PLATFORM: &str = "separate-source-recordings-unsupported-platform";
+/// Where Separate source recordings can run: the ISO legs need the
+/// timestamped VideoToolbox MPEG-TS bridge, which only macOS has.
+pub const SEPARATE_SOURCE_RECORDINGS_SUPPORTED: bool = cfg!(target_os = "macos");
 /// Health code when a session asked for ISO legs but the capture path cannot
 /// carry them (legacy FFmpeg capture, raw YUV bridge, Windows D3D11 pump).
 pub const HEALTH_UNAVAILABLE: &str = "separate-source-recordings-unavailable";
@@ -165,9 +171,21 @@ impl SourceIsoPlan {
 /// Combined master must be kept (decision D1; dropping it is a protocol
 /// reservation, not a shipped behavior — refuse rather than silently keep).
 pub fn validate_separate_source_recordings(params: &StartSessionParams) -> Result<()> {
+    validate_separate_source_recordings_on(params, SEPARATE_SOURCE_RECORDINGS_SUPPORTED)
+}
+
+fn validate_separate_source_recordings_on(
+    params: &StartSessionParams,
+    platform_supported: bool,
+) -> Result<()> {
     let settings = separate_settings(&params.output);
     if !settings.enabled {
         return Ok(());
+    }
+    if !platform_supported {
+        bail!(
+            "{REFUSAL_UNSUPPORTED_PLATFORM}: Separate source recordings work on Mac only for now. Turn them off in Output to record."
+        );
     }
     if !params.output.record_enabled {
         bail!(
@@ -2113,14 +2131,14 @@ mod tests {
             keep_combined: true,
         });
         params.sources.camera_id = None;
-        assert!(validate_separate_source_recordings(&params).is_ok());
+        assert!(validate_separate_source_recordings_on(&params, true).is_ok());
     }
 
     #[test]
     fn iso_requires_local_recording() {
         let mut params = base_params();
         params.output.record_enabled = false;
-        let err = validate_separate_source_recordings(&params)
+        let err = validate_separate_source_recordings_on(&params, true)
             .expect_err("must refuse")
             .to_string();
         assert!(err.contains(REFUSAL_RECORD_DISABLED), "{err}");
@@ -2130,7 +2148,7 @@ mod tests {
     fn iso_requires_camera() {
         let mut params = base_params();
         params.sources.camera_id = None;
-        let err = validate_separate_source_recordings(&params)
+        let err = validate_separate_source_recordings_on(&params, true)
             .expect_err("must refuse")
             .to_string();
         assert!(err.contains(REFUSAL_MISSING_CAMERA), "{err}");
@@ -2141,7 +2159,7 @@ mod tests {
         let mut params = base_params();
         params.sources.screen_id = None;
         params.sources.window_id = None;
-        let err = validate_separate_source_recordings(&params)
+        let err = validate_separate_source_recordings_on(&params, true)
             .expect_err("must refuse")
             .to_string();
         assert!(err.contains(REFUSAL_MISSING_SCREEN), "{err}");
@@ -2154,7 +2172,7 @@ mod tests {
             enabled: true,
             keep_combined: false,
         });
-        let err = validate_separate_source_recordings(&params)
+        let err = validate_separate_source_recordings_on(&params, true)
             .expect_err("must refuse")
             .to_string();
         assert!(err.contains(REFUSAL_DROP_COMBINED), "{err}");
@@ -2165,7 +2183,29 @@ mod tests {
         let mut params = base_params();
         params.sources.screen_id = None;
         params.sources.window_id = Some("window:1".into());
-        assert!(validate_separate_source_recordings(&params).is_ok());
+        assert!(validate_separate_source_recordings_on(&params, true).is_ok());
+    }
+
+    #[test]
+    fn iso_is_refused_up_front_where_the_platform_cannot_write_it() {
+        // Release test 146, plan 0001: Linux and Windows showed the switch and
+        // then refused Record after the take's rows existed.
+        let params = base_params();
+        assert!(validate_separate_source_recordings_on(&params, true).is_ok());
+        let err = validate_separate_source_recordings_on(&params, false)
+            .expect_err("must refuse")
+            .to_string();
+        assert!(err.contains(REFUSAL_UNSUPPORTED_PLATFORM), "{err}");
+        let mut off = base_params();
+        off.output.separate_source_recordings = Some(SeparateSourceRecordingsSettings {
+            enabled: false,
+            keep_combined: true,
+        });
+        assert!(validate_separate_source_recordings_on(&off, false).is_ok());
+        assert_eq!(
+            SEPARATE_SOURCE_RECORDINGS_SUPPORTED,
+            cfg!(target_os = "macos")
+        );
     }
 
     #[test]
