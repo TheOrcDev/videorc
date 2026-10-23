@@ -13629,7 +13629,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             scene: sceneWithBackground,
             sceneEditMode,
             settings,
-            suppressCaptionsForSession
+            suppressCaptionsForSession,
+            platform: runtimeInfo?.platform
           })
           const authorizedOutput = {
             ...sessionParams.output,
@@ -13860,6 +13861,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshSessions,
       reportError,
       reportSessionStartFailure,
+      runtimeInfo?.platform,
       sceneEditMode,
       sceneWithBackground,
       settings,

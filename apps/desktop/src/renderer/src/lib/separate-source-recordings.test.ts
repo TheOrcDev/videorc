@@ -132,6 +132,26 @@ describe('separate source recordings (plan 157)', () => {
     expect(params.output.recordEnabled).toBe(true)
   })
 
+  it('never arms on Linux or Windows, and says why (release test 146, plan 0001)', () => {
+    const armed = config({ separateSourceRecordings: { enabled: true, keepCombined: true } })
+    for (const platform of ['linux', 'win32']) {
+      expect(separateSourceRecordingsIneligibility(armed, platform)).toBe('unsupported-platform')
+      expect(separateSourceRecordingsForSession(armed, platform)).toBeUndefined()
+      expect(
+        buildStartSessionParams({ captureConfig: armed, scene, settings, platform }).output
+          .separateSourceRecordings
+      ).toBeUndefined()
+    }
+    expect(separateSourceRecordingsIneligibilityCopy('unsupported-platform')).toContain('Mac only')
+    // macOS, and a start before runtime info arrived, behave as before.
+    expect(separateSourceRecordingsIneligibility(armed, 'darwin')).toBeNull()
+    expect(separateSourceRecordingsForSession(armed, 'darwin')).toEqual({
+      enabled: true,
+      keepCombined: true
+    })
+    expect(separateSourceRecordingsForSession(armed)).toEqual({ enabled: true, keepCombined: true })
+  })
+
   it('labels take rows and orders siblings Combined → Screen → Camera', () => {
     expect(recordingRoleLabel('combined')).toBe('Combined')
     expect(recordingRoleLabel('screen')).toBe('Screen')
