@@ -32876,15 +32876,16 @@ mod tests {
             assert_eq!(args[segment - 1], "-f");
             // The ring ends with its file pattern; a preview or stream output
             // may follow it on the legacy and split builders.
-            let pattern = position(args, "/tmp/videorc-ring/seg-%06d.ts");
+            // The ring builds its paths with `join`, so Windows reads backslashes.
+            let ring_dir = ring().dir;
+            let pattern_arg = ring_dir.join("seg-%06d.ts").display().to_string();
+            let list_arg = ring_dir.join("segments.csv").display().to_string();
+            let pattern = position(args, &pattern_arg);
             assert!(pattern > segment, "{args:?}");
             let tail = &args[segment..=pattern];
             assert_eq!(arg_value(tail, "-segment_format"), Some("mpegts"));
             assert_eq!(arg_value(tail, "-segment_time"), Some("2"));
-            assert_eq!(
-                arg_value(tail, "-segment_list"),
-                Some("/tmp/videorc-ring/segments.csv")
-            );
+            assert_eq!(arg_value(tail, "-segment_list"), Some(list_arg.as_str()));
             assert_eq!(arg_value(tail, "-segment_list_type"), Some("csv"));
             assert_eq!(arg_value(tail, "-segment_list_size"), Some("17"));
             assert_eq!(arg_value(tail, "-segment_list_flags"), Some("+live"));
