@@ -7,7 +7,7 @@ import type { SoundboardSummary } from '../../../../shared/sound-commands'
 import { StreamManagerStatusBar } from './stream-manager-status-bar'
 
 // Plan 189 S9: the Sounds action opens the same pads as Studio, four to a
-// row, with Stop all; below 640 px it folds into the ⋯ menu as Sounds….
+// row, with Stop all while one plays; below 640 px it folds into the ⋯ menu as Sounds….
 
 let root: Root
 let container: HTMLDivElement
@@ -85,8 +85,20 @@ describe('StreamManagerStatusBar Sounds (plan 189 S9)', () => {
     const stopAll = [...popover.querySelectorAll('button')].find(
       (button) => button.textContent === 'Stop all'
     )!
+    expect(stopAll.closest('[data-videorc-stop-all-sounds]')!.hasAttribute('data-playing')).toBe(
+      true
+    )
     await act(async () => stopAll.click())
     expect(onSound).toHaveBeenLastCalledWith({ action: 'stopAll' })
+    // Studio's board comes back silent: Stop all goes until the next sound.
+    await render({ ...board, voices: [] }, onSound)
+    const slot = document.querySelector<HTMLElement>('[data-videorc-stop-all-sounds]')!
+    expect(slot.hasAttribute('data-playing')).toBe(false)
+    expect(slot.inert).toBe(true)
+    await render(board, onSound)
+    expect(
+      document.querySelector('[data-videorc-stop-all-sounds]')!.hasAttribute('data-playing')
+    ).toBe(true)
   })
 
   it('says the board is loading or empty', async () => {
@@ -97,10 +109,11 @@ describe('StreamManagerStatusBar Sounds (plan 189 S9)', () => {
     await render({ sounds: [], voices: [] })
     const empty = await openSounds()
     expect(empty.textContent).toContain('No sounds yet. Add sounds in Assets.')
-    const stopAll = [...empty.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Stop all'
-    )!
-    expect(stopAll.disabled).toBe(true)
+    // Nothing plays: Stop all keeps its place but isn't there.
+    const stopAll = empty.querySelector<HTMLElement>('[data-videorc-stop-all-sounds]')!
+    expect(stopAll.hasAttribute('data-playing')).toBe(false)
+    expect(stopAll.className).toContain('invisible')
+    expect(stopAll.inert).toBe(true)
   })
 
   it('folds into the narrow ⋯ menu as Sounds…, and leaves both out without a relay', async () => {

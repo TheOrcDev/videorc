@@ -1,18 +1,15 @@
 import { useMemo, type ReactElement } from 'react'
 
-import { StopIcon } from '@/components/icons'
 import { SoundPadBoard } from '@/components/sound-pad-board'
-import { Button } from '@/components/ui/button'
-import { DisabledReason } from '@/components/ui/disabled-reason'
-import { STOP_ALL_IDLE_REASON } from '@/lib/sounds'
+import { StopAllSoundsButton } from '@/components/stop-all-sounds-button'
 import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
 
 /**
  * The Stream Manager's Sounds popover (plan 189 S9): the same pads as Studio,
- * four to a row, and Stop all. Each press relays to Studio, which owns the
- * backend socket; the ring and the progress come back with the board. No
- * keys here: 1 to 9 belong to the Studio page. Its own chunk, so audiocn's
- * pad loads with the first open.
+ * four to a row, and Stop all while one plays. Each press relays to Studio,
+ * which owns the backend socket; the ring and the progress come back with
+ * the board. No keys here: 1 to 9 belong to the Studio page. Its own chunk,
+ * so audiocn's pad loads with the first open.
  */
 export default function SoundsPopoverBody({
   board,
@@ -26,23 +23,15 @@ export default function SoundsPopoverBody({
     () => new Map((board?.voices ?? []).map((voice) => [voice.soundId, voice])),
     [board]
   )
-  const playing = (board?.voices.length ?? 0) > 0
   return (
     <div className="flex flex-col gap-3" data-videorc-sounds-popover="">
       <div className="flex items-center justify-between gap-2">
         <span className="text-section font-semibold text-foreground">Sounds</span>
-        <DisabledReason reason={playing ? null : STOP_ALL_IDLE_REASON}>
-          <Button
-            disabled={!playing}
-            size="xs"
-            variant="ghost"
-            onClick={() => onSound({ action: 'stopAll' })}
-          >
-            {/* Filled, like Stop recording: the outline square read as a checkbox. */}
-            <StopIcon data-icon="inline-start" weight="fill" />
-            Stop all
-          </Button>
-        </DisabledReason>
+        <StopAllSoundsButton
+          playing={(board?.voices.length ?? 0) > 0}
+          size="xs"
+          onStopAll={() => onSound({ action: 'stopAll' })}
+        />
       </div>
       {!board ? (
         <p className="text-xs text-muted-foreground">Loading sounds…</p>
