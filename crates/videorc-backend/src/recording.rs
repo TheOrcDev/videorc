@@ -16687,8 +16687,72 @@ static WINDOWS_NATIVE_ENCODED_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<std::collections::HashMap<WindowsNativeEncodedProbeKey, Option<String>>>,
 > = std::sync::OnceLock::new();
 
+/// Successful hardware probes, kept for the process lifetime.
+///
+/// Each probe builds a throwaway hardware MFT, encodes a few frames, and
+/// destroys it. Re-probing on every recording start churned the NVIDIA async
+/// H.264 MFT (18 nvEncodeAPI64.dll load/unload cycles in 13 minutes), and its
+/// teardown races the MFT's own RTWorkQ work item: three minidumps on
+/// 2026-10-23 (0.9.147) crash on `nvEncMFTH264x.dll` -> `RTWorkQ.dll` ->
+/// `mfplat.dll` (null+0x24 write) 0.3-0.8 s after a record-start probe, with
+/// `probe_hardware_encoder`'s encoder drop in flight in the first one. The
+/// race is inside the driver, so the fix is to stop re-creating and destroying
+/// the MFT when nothing it depends on has changed. The key carries the GPU
+/// driver identity, so a driver update re-probes; failures keep using the
+/// existing TTL'd rejection cache.
+#[cfg(target_os = "windows")]
+type WindowsNativeEncodedProbeSuccessKey = (String, String, &'static str, u32, u32, u32, u32);
+
+#[cfg(target_os = "windows")]
+static WINDOWS_NATIVE_ENCODED_PROBE_SUCCESSES: std::sync::OnceLock<
+    StdMutex<
+        std::collections::HashMap<
+            WindowsNativeEncodedProbeSuccessKey,
+            crate::windows_media_foundation_encoder::MediaFoundationProbe,
+        >,
+    >,
+> = std::sync::OnceLock::new();
+
 #[cfg(target_os = "windows")]
 async fn probe_windows_native_encoded_bridge(
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+    topology: &'static str,
+    graphics_adapter_driver_identity: &str,
+) -> Result<crate::windows_media_foundation_encoder::MediaFoundationProbe> {
+    let success_key: WindowsNativeEncodedProbeSuccessKey = (
+        graphics_adapter_driver_identity.to_string(),
+        ffmpeg_path.to_string(),
+        topology,
+        video.width,
+        video.height,
+        video.fps,
+        video.bitrate_kbps,
+    );
+    let successes = WINDOWS_NATIVE_ENCODED_PROBE_SUCCESSES
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
+    if let Some(probe) = successes
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&success_key).cloned())
+    {
+        return Ok(probe);
+    }
+    let probe = probe_windows_native_encoded_bridge_uncached(
+        ffmpeg_path,
+        video,
+        topology,
+        graphics_adapter_driver_identity,
+    )
+    .await?;
+    if let Ok(mut cache) = successes.lock() {
+        cache.insert(success_key, probe.clone());
+    }
+    Ok(probe)
+}
+
+#[cfg(target_os = "windows")]
+async fn probe_windows_native_encoded_bridge_uncached(
     ffmpeg_path: &str,
     video: &VideoSettings,
     topology: &'static str,
