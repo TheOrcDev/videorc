@@ -9,8 +9,10 @@ import { createQuotaLedger } from './quota-ledger.mjs'
 import { createEventBus } from './step-engine.mjs'
 import { createYoutubeSide, isLiveJournalState } from './youtube-side.mjs'
 
-// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
-const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
 
 const NOW = new Date('2026-10-12T15:00:00Z')
 
@@ -158,7 +160,7 @@ test('clip pulls are skipped and recorded when the policy has clipPull off', asy
 
 test(
   'with clipPull on, pulls go to the run folder and incidents are recorded',
-  macOnly,
+  posixOnly,
   async () => {
     const { side, runDir, pulls, cleanup } = await rig({
       clipPull: true,

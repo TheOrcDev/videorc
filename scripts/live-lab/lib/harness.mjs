@@ -38,6 +38,17 @@ import {
 //   (U11); invalid JSON is exit 2 `REFUSED (bad-scenario-params)`. They reach
 //   steps as ctx.params and may size plannedMinutes / estimatedQuotaUnits.
 
+// Plan 179: what an install record's `source` counts as for the policy's
+// allowedBuilds. Only a build checked against the public feed (macOS: also
+// notarized) is a release. A Linux `file:` AppImage is checked only against a
+// hash that sits next to it and a `local-build` against nothing, so both are
+// candidates; an owner who allows only releases keeps them off the air.
+export function buildKindOf(source) {
+  if (source === 'release') return 'release'
+  if (source === 'candidate' || source === 'file' || source === 'local-build') return 'candidate'
+  return null
+}
+
 export const EXIT = Object.freeze({ ok: 0, failed: 1, refused: 2, stopped: 3 })
 export const MANIFEST_SCHEMA = 1
 export const KILL_SWITCH_TICK_MS = 15_000
@@ -209,6 +220,7 @@ export function buildManifest({
     ]),
     harness: machine?.harness ?? null,
     macOS: machine?.macOS ?? null,
+    ...(machine?.linux ? { linux: machine.linux } : {}),
     hardware: machine?.hardware ?? null,
     policy: policyFile ? { sha256: policyFile.sha256 } : null,
     startedAt: new Date(startedAtMs).toISOString(),
@@ -234,8 +246,39 @@ async function run(exec, command, args) {
   }
 }
 
+// Plan 179: `PRETTY_NAME` from /etc/os-release (pure).
+export function osReleaseName(text) {
+  const match = /^PRETTY_NAME="?([^"\n]*)"?$/m.exec(String(text ?? ''))
+  return match ? match[1].trim() || null : null
+}
+
 /** Build, OS and hardware facts for the manifest. */
-export async function gatherMachineFacts({ repoRoot, exec = execFileAsync }) {
+export async function gatherMachineFacts({
+  repoRoot,
+  exec = execFileAsync,
+  platform = process.platform,
+  readText = (path) => readFile(path, 'utf8').catch(() => null)
+}) {
+  if (platform === 'linux') {
+    const [commit, status, kernel, osRelease, model] = await Promise.all([
+      run(exec, 'git', ['-C', repoRoot, 'rev-parse', 'HEAD']),
+      run(exec, 'git', ['-C', repoRoot, 'status', '--porcelain', '--untracked-files=no']),
+      run(exec, 'uname', ['-r']),
+      readText('/etc/os-release'),
+      readText('/sys/class/dmi/id/product_name')
+    ])
+    return {
+      harness: { commit, dirty: status === null ? null : status.length > 0 },
+      macOS: null,
+      linux: { distro: osReleaseName(osRelease), kernel },
+      hardware: {
+        model: model?.trim() || null,
+        chip: cpus()[0]?.model ?? null,
+        memoryBytes: totalmem(),
+        logicalCpus: cpus().length
+      }
+    }
+  }
   const [commit, status, productVersion, buildVersion, model, chip, memsize] = await Promise.all([
     run(exec, 'git', ['-C', repoRoot, 'rev-parse', 'HEAD']),
     run(exec, 'git', ['-C', repoRoot, 'status', '--porcelain', '--untracked-files=no']),
@@ -311,10 +354,12 @@ export async function executeRun({ argv, deps }) {
 
   const install = await deps.readInstallRecord()
   if (!install) return refuse('no installed build recorded; run pnpm live:install first')
-  const build = request.build ?? install.source
-  if (request.build && install.source !== request.build) {
+  const installedKind = buildKindOf(install.source)
+  if (!installedKind) return refuse(`installed build has an unknown source ${install.source}`)
+  const build = request.build ?? installedKind
+  if (request.build && installedKind !== request.build) {
     return refuse(
-      `installed build is ${install.source}, not ${request.build}; run pnpm live:install --build ${request.build}`
+      `installed build is ${install.source}${installedKind === install.source ? '' : ` (${installedKind})`}, not ${request.build}; run pnpm live:install --build ${request.build}`
     )
   }
 

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
-import { mkdir, readdir } from 'node:fs/promises'
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { ownedProcessLedgerPaths } from '../../lib/process-census.mjs'
 import {
@@ -17,10 +17,26 @@ import {
   labProfileDirs,
   launchApp,
   buildLaunchEnv,
+  inhibitorHeld,
+  isMacAppBundle,
+  linuxCardBrowserArgs,
   startCaffeinate,
   startCardBrowser,
-  startLocalSink
+  startLocalSink,
+  startSleepInhibitor
 } from './launch.mjs'
+import {
+  CHROME_NAMES,
+  LAB_SPEECH_SINK,
+  findOnPath,
+  focusLabOutput,
+  labSessionEnv,
+  linuxLabOutputBounds,
+  placeCardWindow,
+  portalPickPath,
+  sessionProblems
+} from './linux-desktop.mjs'
+import { isLinux } from './platform.mjs'
 import { createQuotaLedger } from './quota-ledger.mjs'
 import { seedProfile } from './seed.mjs'
 import { createSpeechRig } from './speech-rig.mjs'
@@ -38,6 +54,33 @@ import { createYoutubeSide, isLiveJournalState } from './youtube-side.mjs'
 const RPC_TIMEOUT_MS = 30_000
 const READY_DEADLINE_MS = 30_000
 
+// Plan 179: Linux Videorc captures the screen only through the ScreenCast
+// portal, and a restore token is opaque: one saved from a hand pick could
+// point at the real desktop. So every Linux run starts with no token, and the
+// only grant it can get is the lab share picker's, which names the lab output
+// written to portalPickPath() (config/live-lab/linux/videorc-lab-share-picker).
+export function portalRestoreTokensPath(appDataDir) {
+  return join(appDataDir, 'linux-portal', 'restore-tokens.json')
+}
+
+export async function preparePortalGrant({ appDataDir, outputName, pickPath = portalPickPath() }) {
+  if (!/^[A-Za-z0-9_.-]+$/.test(String(outputName ?? ''))) {
+    throw new Error(`The lab output name "${outputName}" is not one the share picker accepts.`)
+  }
+  await rm(portalRestoreTokensPath(appDataDir), { force: true })
+  await mkdir(dirname(pickPath), { recursive: true })
+  await writeFile(pickPath, `${outputName}\n`, { mode: 0o600 })
+  return {
+    label: 'portal-pick',
+    pid: null,
+    path: pickPath,
+    stop: async () => {
+      await rm(pickPath, { force: true })
+      return { state: 'removed' }
+    }
+  }
+}
+
 export async function freeLoopbackPort() {
   return new Promise((resolvePort, rejectPort) => {
     const server = createServer()
@@ -49,12 +92,16 @@ export async function freeLoopbackPort() {
   })
 }
 
-/** The owned-process ledgers of a packaged app (workspace root = <app>/Contents). */
+/**
+ * The owned-process ledgers of a packaged app (workspace root = <app>/Contents
+ * for a macOS bundle, the app directory on Linux). The whole ledger folder is
+ * read too, so a different workspace key never hides a ledger.
+ */
 export async function ledgerPathsFor(dirs, appPath) {
   const paths = ownedProcessLedgerPaths({
     appDataDir: dirs.appDataDir,
     userDataDir: dirs.userDataDir,
-    workspaceRoot: join(appPath, 'Contents')
+    workspaceRoot: isMacAppBundle(appPath) ? join(appPath, 'Contents') : appPath
   })
   try {
     for (const name of await readdir(join(dirs.userDataDir, 'owned-processes'))) {
@@ -200,8 +247,11 @@ export function createSessionStarter({
   // Plan 178 U9: the YouTube side (U8 observer, viewer bot, clip pulls) and
   // the speech rig (U7), both injectable for tests.
   youtubeSide = createYoutubeSide,
-  speechRig = createSpeechRig
+  speechRig = createSpeechRig,
+  platform = process.platform,
+  sessionEnvFor = labSessionEnv
 }) {
+  const linux = isLinux(platform)
   return async function startSession({ runInfo, scenario, policy, runDir, bus, signal, log }) {
     const dirs = labProfileDirs(workDir, scenario.destination)
     for (const dir of [dirs.appDataDir, dirs.userDataDir, dirs.launchStateDir])
@@ -226,7 +276,7 @@ export function createSessionStarter({
         quitApp: parts.app?.stop,
         ledgerPaths: parts.app ? () => ledgerPathsFor(dirs, install.appPath) : [],
         rootPid: parts.appPid ?? undefined,
-        helpers: [parts.browser, parts.sink, parts.caffeinate],
+        helpers: [parts.browser, parts.sink, parts.caffeinate, parts.portalPick],
         collect: () =>
           collectArtifacts({
             runDir,
@@ -245,7 +295,21 @@ export function createSessionStarter({
       })
 
     try {
-      parts.caffeinate = startCaffeinate()
+      const sessionEnv = linux ? await sessionEnvFor() : null
+      if (linux) {
+        const problems = sessionProblems(sessionEnv)
+        if (problems.length) {
+          throw new Error(
+            `No Hyprland session to run in (${problems.join(', ')}); the lab user must be logged in (auto-login).`
+          )
+        }
+      }
+      parts.caffeinate = linux ? startSleepInhibitor({ env: sessionEnv }) : startCaffeinate()
+      if (linux && !(await inhibitorHeld(parts.caffeinate))) {
+        log(
+          'systemd-inhibit exited at once (polkit refuses block inhibitors outside the active seat session); relying on the masked sleep targets and on hypridle being off.'
+        )
+      }
       parts.card = await startCardServer({
         runInfo: {
           runId: runInfo.runId,
@@ -255,14 +319,53 @@ export function createSessionStarter({
         },
         onDropped: (fields) => log(`Card dropped fields: ${fields.join(', ')}`)
       })
-      const bounds = await labDisplayBounds(config?.labDisplay?.name)
-      parts.browser = startCardBrowser({
-        url: parts.card.url,
-        bounds,
-        profileDir: join(workDir, 'card-browser'),
-        chromePath
-      })
-      log(`Test card on the lab display (${bounds.width}x${bounds.height}).`)
+      if (linux) {
+        const bounds = await linuxLabOutputBounds(config?.labDisplay?.name, { sessionEnv })
+        parts.portalPick = await preparePortalGrant({
+          appDataDir: dirs.appDataDir,
+          outputName: bounds.name
+        })
+        log(`Portal grant: no restore token; the lab share picker answers with "${bounds.name}".`)
+        const browserPath = chromePath ?? (await findOnPath(CHROME_NAMES))
+        if (!browserPath) {
+          throw new Error(`No Chrome or Chromium on PATH (${CHROME_NAMES.join(', ')}).`)
+        }
+        const previousOutput = await focusLabOutput(bounds, { sessionEnv })
+        parts.browser = startCardBrowser({
+          url: parts.card.url,
+          bounds,
+          profileDir: join(workDir, 'card-browser'),
+          chromePath: browserPath,
+          args: linuxCardBrowserArgs({
+            url: parts.card.url,
+            profileDir: join(workDir, 'card-browser')
+          }),
+          env: { ...sessionEnv, PULSE_SINK: LAB_SPEECH_SINK }
+        })
+        const placed = await placeCardWindow({
+          pid: parts.browser.pid,
+          bounds,
+          previousOutput,
+          sessionEnv
+        })
+        if (!placed.onLabOutput || !placed.fullscreen) {
+          throw new Error(
+            `The test card window is ${placed.onLabOutput ? 'not fullscreen on' : 'not on'} the lab output "${bounds.name}".`
+          )
+        }
+        log(
+          `Test card fullscreen on the lab output ${bounds.name} (${bounds.width}x${bounds.height}).`
+        )
+      } else {
+        const bounds = await labDisplayBounds(config?.labDisplay?.name)
+        parts.browser = startCardBrowser({
+          url: parts.card.url,
+          bounds,
+          profileDir: join(workDir, 'card-browser'),
+          chromePath
+        })
+        log(`Test card on the lab display (${bounds.width}x${bounds.height}).`)
+      }
 
       if (scenario.destination === 'local-sink') {
         parts.sink = startLocalSink({
@@ -274,7 +377,7 @@ export function createSessionStarter({
         log(`Local RTMP sink on 127.0.0.1:${parts.sink.port} (nothing leaves this machine).`)
       }
 
-      const env = buildLaunchEnv({ dirs, config, scenario })
+      const env = { ...(sessionEnv ?? {}), ...buildLaunchEnv({ dirs, config, scenario }) }
       parts.app = await launchApp({ appPath: install.appPath, env, dirs, launcher })
       parts.appPid = (await parts.app.appPid()) ?? undefined
       log(`Videorc launched from ${install.appPath}.`)
@@ -306,6 +409,7 @@ export function createSessionStarter({
         config,
         sink: parts.sink ?? null,
         titlePrefix: policy.titlePrefix,
+        platform,
         log
       })
 
@@ -366,7 +470,7 @@ export function createSessionStarter({
         observe.incidents = () => parts.youtube.observer.incidents()
         await parts.youtube.start()
       }
-      parts.speech = speechRig({ runDir, ffmpegPath, log })
+      parts.speech = speechRig({ runDir, ffmpegPath, log, platform })
 
       const ledgerPaths = await ledgerPathsFor(dirs, install.appPath)
       return {

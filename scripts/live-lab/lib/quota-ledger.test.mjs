@@ -13,8 +13,10 @@ import {
   pacificDay
 } from './quota-ledger.mjs'
 
-// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
-const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
 
 async function withDir(work) {
   const dir = await mkdtemp(join(tmpdir(), 'videorc-quota-ledger-'))
@@ -58,7 +60,7 @@ test('Pacific day follows midnight Pacific, across DST', () => {
   assert.equal(pacificDay(new Date('2026-12-01T08:00:00Z')), '2026-12-01')
 })
 
-test('charges persist per day in a 0600 file and refuse past the cap', macOnly, async () => {
+test('charges persist per day in a 0600 file and refuse past the cap', posixOnly, async () => {
   await withDir(async (dir) => {
     let clock = new Date('2026-10-12T15:00:00Z')
     const ledger = createQuotaLedger({ dir, maxUnitsPerDay: 120, now: () => clock })

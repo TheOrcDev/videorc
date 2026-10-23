@@ -115,6 +115,12 @@ export function validateBuild(value) {
     throw new RemoteUsageError(error.message)
   }
   if (spec.kind === 'release') return { text: 'release', kind: 'release', id: null }
+  if (spec.kind !== 'candidate') {
+    // Plan 179: file:/local: name a path on the Linux lab itself.
+    throw new RemoteUsageError(
+      `--build ${spec.kind}: is not a remote build; run pnpm live:install --build ${spec.kind}:<path> on the lab, then live:remote without --build.`
+    )
+  }
   const id = spec.runId ?? spec.sha
   return { text: `candidate:${id}`, kind: 'candidate', id }
 }
