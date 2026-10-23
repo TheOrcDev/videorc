@@ -212,8 +212,10 @@ import {
   observeBackendOwnershipMarker,
   parseBackendBootstrap,
   parseBackendProcessOwnership,
-  publicBackendConnectionJson
+  publicBackendConnectionJson,
+  type ManagedAssetRoots
 } from './backend-bootstrap'
+import { managedBackendAssetRootCandidates } from './managed-asset-roots'
 import { trashPaths } from './trash-paths'
 import {
   MainResourceCapabilityRegistry,
@@ -841,6 +843,8 @@ let ownedProcessRegistry: OwnedProcessRegistry | null = null
 let ownedProcessRegistryLockDepth = 0
 let backendConnection: BackendConnection | null = null
 let backendAdminConnection: BackendConnection | null = null
+// The backend's Screens and Banners folders from its READY (plan 0005).
+let backendManagedAssetRoots: ManagedAssetRoots | null = null
 let backendAuthorityReady: Promise<void> = Promise.resolve()
 const mainResourceCapabilities = new MainResourceCapabilityRegistry()
 let mainCaptureState: MainCaptureState = 'unknown'
@@ -9983,6 +9987,7 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
         evidence.adminConnection = bootstrap.admin
         backendConnection = bootstrap.renderer
         backendAdminConnection = bootstrap.admin
+        backendManagedAssetRoots = bootstrap.managedAssetRoots
         logBackend('info', `Backend ready on ${backendConnection.host}:${backendConnection.port}`)
         refreshSpawnedBackendIdentity(runtime)
         if (runtime.state === 'awaiting-shutdown-receipt') {
@@ -14253,10 +14258,11 @@ function readChatAvatar(localUrl: unknown): Uint8Array | null {
 // (raw file:// subresource loads are blocked and branded every upload
 // "Missing" — the background bug all over again).
 function resolveManagedScreenFile(fileName: string): string | null {
-  if (!fileName || fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
-    return null
-  }
-  return resolveRegularFileInsideRoot(join(app.getPath('userData'), 'Screens'), fileName)
+  return resolveManagedBackendAssetFile(
+    backendManagedAssetRoots?.screens ?? null,
+    'Screens',
+    fileName
+  )
 }
 
 // Banner images (plan 186) live in the backend-managed Banners dir beside
@@ -14264,10 +14270,35 @@ function resolveManagedScreenFile(fileName: string): string | null {
 // (`videorc-asset://banner/<file>`), resolved with the same realpath, no
 // symlink, regular-file checks.
 function resolveManagedBannerFile(fileName: string): string | null {
+  return resolveManagedBackendAssetFile(
+    backendManagedAssetRoots?.banners ?? null,
+    BANNERS_FOLDER,
+    fileName
+  )
+}
+
+// Release test 146, plan 0005: Screens and Banners are backend-owned and live
+// beside the backend's database, which READY names. On Linux that is
+// `~/.videorc`, not Electron's `~/.config/Videorc`, so every takeover read
+// "Missing" and no banner drew in the preview. The userData folder stays a
+// fallback (requests before READY, files an older build left there).
+function resolveManagedBackendAssetFile(
+  backendRoot: string | null,
+  folder: string,
+  fileName: string
+): string | null {
   if (!fileName || fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
     return null
   }
-  return resolveRegularFileInsideRoot(join(app.getPath('userData'), BANNERS_FOLDER), fileName)
+  for (const root of managedBackendAssetRootCandidates({
+    backendRoot,
+    userDataDir: app.getPath('userData'),
+    folder
+  })) {
+    const candidate = resolveRegularFileInsideRoot(root, fileName)
+    if (candidate) return candidate
+  }
+  return null
 }
 
 async function withBuddyCorsHeader(pending: Promise<Response>): Promise<Response> {

@@ -7280,7 +7280,7 @@ impl Database {
         Ok(())
     }
 
-    fn screen_assets_dir(&self) -> PathBuf {
+    pub(crate) fn screen_assets_dir(&self) -> PathBuf {
         if let Some(parent) = self
             .path
             .parent()

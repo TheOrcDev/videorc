@@ -981,6 +981,15 @@ fn backend_bootstrap(state: &AppState) -> BackendBootstrap {
         admin_token: state.admin_token.clone(),
         pid: std::process::id(),
         parent_pid: current_parent_pid(),
+        managed_asset_roots: managed_asset_roots(&state.database),
+    }
+}
+
+/// The folders behind `videorc-asset://screen|banner/<file>` (plan 0005).
+fn managed_asset_roots(database: &Database) -> backend_authority::ManagedAssetRoots {
+    backend_authority::ManagedAssetRoots {
+        screens: database.screen_assets_dir().to_string_lossy().into_owned(),
+        banners: database.banner_assets_dir().to_string_lossy().into_owned(),
     }
 }
 
@@ -13600,6 +13609,29 @@ async fn ffmpeg_status(ffmpeg_path: &str) -> ToolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_names_the_screens_and_banners_folders_beside_the_database() {
+        // Release test 146, plan 0005: main serves videorc-asset://screen and
+        // ://banner from these roots, so they must be the backend's own.
+        let directory =
+            std::env::temp_dir().join(format!("videorc-asset-roots-{}", Uuid::new_v4()));
+        let database = Database::open_file_for_tests(&directory.join("videorc.sqlite3"));
+        let roots = managed_asset_roots(&database);
+        assert_eq!(
+            std::path::PathBuf::from(&roots.screens),
+            directory.join("Screens")
+        );
+        assert_eq!(
+            std::path::PathBuf::from(&roots.banners),
+            directory.join("Banners")
+        );
+        assert_eq!(
+            serde_json::to_value(&roots).unwrap(),
+            json!({ "screens": roots.screens, "banners": roots.banners })
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
     use serde_json::json;
     use std::time::Instant;
     use tokio::sync::broadcast;

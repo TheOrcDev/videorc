@@ -54,6 +54,20 @@ pub struct BackendBootstrap {
     pub pid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_pid: Option<u32>,
+    /// Where this backend keeps the files the renderer shows by basename
+    /// (`videorc-asset://screen|banner/<file>`). Main serves those hosts from
+    /// these roots instead of re-deriving them: on Linux the backend's data
+    /// dir is `~/.videorc` while Electron's userData is `~/.config/Videorc`,
+    /// so every takeover read "Missing" and banners never drew in the preview
+    /// (release test 146, plan 0005).
+    pub managed_asset_roots: ManagedAssetRoots,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAssetRoots {
+    pub screens: String,
+    pub banners: String,
 }
 
 pub fn authenticate_backend_token(
