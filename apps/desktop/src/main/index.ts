@@ -204,6 +204,17 @@ import {
   withPreviewSurfaceBanners
 } from './preview-surface-banners'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
+import { SOUND_ASSET_HOST, SOUNDS_FOLDER, isSoundFileName } from '../shared/sound-assets'
+import type { SoundboardSummary, StarterSound, StarterSoundFile } from '../shared/sound-commands'
+import {
+  SOUND_IMPORT_EXTENSIONS,
+  SOUND_PICK_MAX_FILES,
+  STARTER_SOUNDS_MANIFEST,
+  starterSoundRows,
+  starterSoundRowsFor,
+  starterSoundsDirectory,
+  type StarterSoundRow
+} from './sound-files'
 import { safeConsole } from './safe-console'
 import {
   BACKEND_PROCESS_OWNERSHIP_PREFIX,
@@ -719,6 +730,9 @@ let markerContext: import('../shared/session-markers').MarkerContext | null = nu
 /** The banner list the Stream Manager shows (plan 186 S7): `{id, name, shown}`
  * from the Studio renderer, null until it has read the list. */
 let latestCommentsBanners: import('../shared/banner-commands').BannerSummary[] | null = null
+/** The soundboard the Stream Manager shows (plan 189 S9): `{id, name, mode}`
+ * and what plays, from the Studio renderer; null until it has read the board. */
+let latestCommentsSounds: SoundboardSummary | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -2189,7 +2203,11 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('main'),
-      backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy)
+      backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy),
+      // Plan 189: the soundboard's monitor plays a press from a Stream Deck,
+      // the phone or Stream Manager, none of which is a gesture in this
+      // window. Electron's default, stated so it can't drift.
+      autoplayPolicy: 'no-user-gesture-required'
     }
   })
   finishGlassWindow(mainWindow, 'main', glassMode)
@@ -13800,6 +13818,93 @@ async function pickBannerImage(): Promise<ResourceSelection | null> {
   return path ? issueResourceCapability(path, 'input-file') : null
 }
 
+// Assets → Sounds → Import sounds… (plan 189): several files at once, each
+// its own single-use input-file capability; the backend decodes, trims and
+// levels each one. A file whose capability can't be issued is left out.
+async function pickSoundFiles(): Promise<ResourceSelection[]> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose sounds',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Sounds', extensions: [...SOUND_IMPORT_EXTENSIONS] }]
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled) {
+    return []
+  }
+  const selections: ResourceSelection[] = []
+  for (const path of result.filePaths.slice(0, SOUND_PICK_MAX_FILES)) {
+    try {
+      selections.push(await issueResourceCapability(path, 'input-file'))
+    } catch (error) {
+      logBackend('warn', `A picked sound was left out: ${errorMessageText(error)}`)
+    }
+  }
+  return selections
+}
+
+// The starter sounds (plan 189 S1): the manifest beside the bundled .ogg
+// files. Only rows naming a bare .ogg that is a regular file in that folder
+// are offered; the rest are logged and skipped.
+function starterSoundFolder(): string {
+  return starterSoundsDirectory({
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    workspaceRoot: workspaceRoot()
+  })
+}
+
+async function readStarterSoundRows(): Promise<Array<{ row: StarterSoundRow; path: string }>> {
+  const folder = starterSoundFolder()
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(await fsPromises.readFile(join(folder, STARTER_SOUNDS_MANIFEST), 'utf8'))
+  } catch (error) {
+    logBackend('warn', `The starter sounds manifest could not be read: ${errorMessageText(error)}`)
+    return []
+  }
+  const { rows, refused } = starterSoundRows(manifest)
+  for (const reason of refused) logBackend('warn', `Starter sound skipped. ${reason}`)
+  const offered: Array<{ row: StarterSoundRow; path: string }> = []
+  for (const row of rows) {
+    const path = resolveRegularFileInsideRoot(folder, row.file)
+    if (path) offered.push({ row, path })
+    else logBackend('warn', `Starter sound skipped: ${row.file} is missing.`)
+  }
+  return offered
+}
+
+async function starterSounds(): Promise<StarterSound[]> {
+  return (await readStarterSoundRows()).map(({ row: { slug, name, hotkey } }) => ({
+    slug,
+    name,
+    ...(hotkey ? { hotkey } : {})
+  }))
+}
+
+async function starterSoundFiles(slugs: string[] | undefined): Promise<StarterSoundFile[]> {
+  const offered = await readStarterSoundRows()
+  const wanted = new Set(
+    starterSoundRowsFor(
+      offered.map(({ row }) => row),
+      slugs
+    )
+  )
+  const files: StarterSoundFile[] = []
+  for (const { row, path } of offered) {
+    if (!wanted.has(row)) continue
+    const { slug, name, hotkey } = row
+    files.push({
+      slug,
+      name,
+      ...(hotkey ? { hotkey } : {}),
+      selection: await issueResourceCapability(path, 'input-file')
+    })
+  }
+  return files
+}
+
 // Native directory picker + directory facts for the Settings output-directory
 // row (ST2): Browse, exists/writable validation, create-on-demand, free space.
 async function pickDirectoryPath(): Promise<ResourceSelection | null> {
@@ -14270,7 +14375,18 @@ function resolveManagedBannerFile(fileName: string): string | null {
   return resolveRegularFileInsideRoot(join(app.getPath('userData'), BANNERS_FOLDER), fileName)
 }
 
-async function withBuddyCorsHeader(pending: Promise<Response>): Promise<Response> {
+// Sound files (plan 189) live in the backend-managed Sounds dir beside
+// Screens and Banners; the main window's monitor fetches them by bare `.wav`
+// basename (`videorc-asset://sound/<file>`), with the same realpath, no
+// symlink, regular-file checks.
+function resolveManagedSoundFile(fileName: string): string | null {
+  if (!isSoundFileName(fileName)) {
+    return null
+  }
+  return resolveRegularFileInsideRoot(join(app.getPath('userData'), SOUNDS_FOLDER), fileName)
+}
+
+async function withCorsReadHeader(pending: Promise<Response>): Promise<Response> {
   const response = await pending
   const headers = new Headers(response.headers)
   headers.set('Access-Control-Allow-Origin', '*')
@@ -14310,17 +14426,20 @@ function registerManagedAssetProtocol(): void {
                 ? resolveManagedScreenFile(fileName)
                 : url.host === BANNER_ASSET_HOST
                   ? resolveManagedBannerFile(fileName)
-                  : url.host === 'buddy'
-                    ? resolveManagedBuddyFile(fileName)
-                    : null
+                  : url.host === SOUND_ASSET_HOST
+                    ? resolveManagedSoundFile(fileName)
+                    : url.host === 'buddy'
+                      ? resolveManagedBuddyFile(fileName)
+                      : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
-      if (url.host === 'buddy') {
+      if (url.host === 'buddy' || url.host === SOUND_ASSET_HOST) {
         // Buddy pictures (persona looks, drafts, the library cache) are read
-        // back on a canvas by the living preview, so they allow CORS reads.
-        // Only files inside the managed Buddy roots reach this branch.
-        return withBuddyCorsHeader(net.fetch(pathToFileURL(resolved).toString()))
+        // back on a canvas by the living preview, and the soundboard's
+        // monitor fetches and decodes its sounds (plan 189), so both allow
+        // CORS reads. Only files inside their managed roots reach this branch.
+        return withCorsReadHeader(net.fetch(pathToFileURL(resolved).toString()))
       }
       return net.fetch(pathToFileURL(resolved).toString())
     } catch {
@@ -14962,6 +15081,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('screens:pick-image', () => pickScreenImage())
   secureIpcHandle('banners:pick-image', () => pickBannerImage())
+  secureIpcHandle('sounds:pick-files', () => pickSoundFiles())
+  secureIpcHandle('sounds:starter-list', () => starterSounds())
+  secureIpcHandle('sounds:starter-files', (_event, slugs) => starterSoundFiles(slugs))
   secureIpcHandle('system:pick-file', () => pickFilePath())
   secureIpcHandle('system:pick-directory', () => pickDirectoryPath())
   secureIpcHandle('system:check-directory', (_event, capabilityId: unknown) =>
@@ -15539,6 +15661,32 @@ app.whenReady().then(async () => {
     })
   })
   secureIpcHandle('comments-window:banner-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
+  // Sounds (plan 189 S9): the same relay as banners. Studio pushes the
+  // read-only board and the Stream Manager follows it; a pad, `/sound` or
+  // Stop all from the window relays to the MAIN renderer, which owns the
+  // `sounds.*` RPCs and the one monitor.
+  secureIpcHandle('comments-window:sounds-get', () => latestCommentsSounds)
+  secureIpcHandle('comments-window:sounds-push', (event, board) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    latestCommentsSounds = board
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:sounds', board)
+    return true
+  })
+  secureIpcHandle('comments-window:sound', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can play sounds here.'))
+    }
+    return commentsCommandBroker.request<true>(command.requestId, () => {
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      sendElectronEvent(mainWindow.webContents, 'comments-window:sound-request', command)
+      return true
+    })
+  })
+  secureIpcHandle('comments-window:sound-result-push', (event, resolution) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
     return commentsCommandBroker.resolve(resolution)
   })
