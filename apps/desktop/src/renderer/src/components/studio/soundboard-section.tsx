@@ -1,17 +1,16 @@
 import { useEffect, useEffectEvent, type ReactElement } from 'react'
 
-import { StopIcon } from '@/components/icons'
 import { PanelSection } from '@/components/panel-section'
 import { SoundPadBoard } from '@/components/sound-pad-board'
+import { StopAllSoundsButton } from '@/components/stop-all-sounds-button'
 import { Button } from '@/components/ui/button'
-import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Empty, EmptyContent, EmptyTitle } from '@/components/ui/empty'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useSoundboard } from '@/hooks/use-soundboard'
 import { useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
 import type { Sound } from '@/lib/backend'
 import { soundForKey, soundKeyBlocked } from '@/lib/sound-keys'
-import { STOP_ALL_IDLE_REASON, soundboardDescription } from '@/lib/sounds'
+import { soundboardDescription } from '@/lib/sounds'
 import { connectionBlockedReason } from '@/lib/state-labels'
 import { sessionOwnsTransport } from '../../../../shared/capture-state'
 
@@ -32,23 +31,15 @@ export function SoundboardSection(): ReactElement {
   // the sounds for a clip, but only the streamer hears them now.
   const sessionActive = sessionOwnsTransport(recording)
   useSoundKeys(board.sounds, board.press, board.stop, disconnectedReason === null)
-  const playing = board.voices.length > 0
-  const stopReason = disconnectedReason ?? (playing ? null : STOP_ALL_IDLE_REASON)
 
   return (
     <PanelSection
       action={
-        <DisabledReason reason={stopReason}>
-          <Button
-            disabled={stopReason !== null}
-            variant="ghost"
-            onClick={() => void board.stopAll()}
-          >
-            {/* Filled, like Stop recording: the outline square read as a checkbox. */}
-            <StopIcon data-icon="inline-start" weight="fill" />
-            Stop all
-          </Button>
-        </DisabledReason>
+        <StopAllSoundsButton
+          disabledReason={disconnectedReason}
+          playing={board.voices.length > 0}
+          onStopAll={() => void board.stopAll()}
+        />
       }
       data-videorc-soundboard=""
       description={soundboardDescription(sessionActive, board.monitor)}
