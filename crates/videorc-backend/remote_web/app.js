@@ -594,11 +594,37 @@ function renderDeck() {
       })
     )
   )
+
+  // Plan 189: the soundboard by name only (never a file, a path or audio).
+  // A tap is a press, so each sound plays the way its mode says on the
+  // desktop; Stop all sounds stops every one.
+  const sounds = describe.sounds ?? []
+  $('sounds-label').hidden = sounds.length === 0
+  $('deck-sounds').replaceChildren(
+    ...sounds.map((sound) =>
+      key({
+        name: sound.name,
+        hint: sound.playing ? 'Playing' : undefined,
+        on: sound.playing,
+        onTap: () => send({ kind: 'soundPlay', soundId: sound.id })
+      })
+    ),
+    ...(sounds.length
+      ? [
+          key({
+            name: 'Stop all sounds',
+            disabled: !sounds.some((sound) => sound.playing),
+            onTap: () => send({ kind: 'soundStop' })
+          })
+        ]
+      : [])
+  )
 }
 
-// A banner shown or hidden changes describe, not state (plan 186), and every
-// change the desktop publishes arrives as remote.state: re-read describe
-// after each one, one read at a time, keeping the newer state from events.
+// A banner shown or hidden (plan 186) or a sound that starts or stops (plan
+// 189) changes describe, not state, and every change the desktop publishes
+// arrives as remote.state: re-read describe after each one, one read at a
+// time, keeping the newer state from events.
 let describeReading = false
 let describeStale = false
 async function refreshDescribe() {

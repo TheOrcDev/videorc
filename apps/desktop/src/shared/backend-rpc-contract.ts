@@ -46,6 +46,17 @@ import type {
   OverlayLayout,
   Banner,
   BannerHideParams,
+  Sound,
+  SoundboardSettingsParams,
+  SoundboardState,
+  SoundIdParams,
+  SoundImportParams,
+  SoundPlayResult,
+  SoundPressResult,
+  SoundReorderParams,
+  SoundsPlayback,
+  SoundStopParams,
+  SoundUpdateParams,
   BannerIdParams,
   BannerImportImageParams,
   BannerReorderParams,
@@ -161,9 +172,22 @@ import {
   BANNER_MAX_COUNT,
   BANNER_OPACITY_MAX,
   BANNER_OPACITY_MIN,
-  LAYOUT_PRESET_VALUES
+  LAYOUT_PRESET_VALUES,
+  SOUND_HOTKEYS,
+  SOUND_LEVEL_DB_MAX,
+  SOUND_LEVEL_DB_MIN,
+  SOUND_MAX_COUNT,
+  SOUND_MAX_DURATION_MS,
+  SOUND_MAX_VOICES,
+  SOUND_MODES,
+  SOUND_NAME_MAX_CHARS,
+  SOUND_VOLUME_DB_MAX,
+  SOUND_VOLUME_DB_MIN,
+  SOUNDBOARD_VOLUME_DB_MAX,
+  SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
 import { isBuddyPackId, parseBuddyDraftPath } from './buddy-assets'
 import {
@@ -456,6 +480,21 @@ export interface BackendRpcMethodMap {
   /** No `id` hides every banner. */
   'banners.hide': BackendRpcDefinition<BannerHideParams, Banner[]>
   // --- end banners (plan 186) ---
+  // --- Soundboard (plan 189) ---
+  'sounds.list': BackendRpcDefinition<undefined, SoundboardState>
+  'sounds.import': BackendRpcDefinition<SoundImportParams, Sound>
+  'sounds.update': BackendRpcDefinition<SoundUpdateParams, Sound>
+  'sounds.reorder': BackendRpcDefinition<SoundReorderParams, Sound[]>
+  /** The remaining sounds. */
+  'sounds.delete': BackendRpcDefinition<SoundIdParams, Sound[]>
+  'sounds.settings': BackendRpcDefinition<SoundboardSettingsParams, SoundboardState>
+  /** Start (or restart) the sound: the pad already applied its mode. */
+  'sounds.play': BackendRpcDefinition<SoundIdParams, SoundPlayResult>
+  /** A key, remote or `/sound` press: the backend applies the sound's mode. */
+  'sounds.press': BackendRpcDefinition<SoundIdParams, SoundPressResult>
+  /** No `id` stops every sound. The voices still playing. */
+  'sounds.stop': BackendRpcDefinition<SoundStopParams, SoundsPlayback>
+  // --- end soundboard (plan 189) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': BackendRpcDefinition<CohostAvatarCreateParams, CohostAvatarAccepted>
   'cohost.avatar.redo': BackendRpcDefinition<CohostAvatarRedoParams, CohostAvatarAccepted>
@@ -560,6 +599,9 @@ export interface BackendEventMap {
   // --- end overlay layout (plan 164) ---
   // --- Banners (plan 186): the full list, to every window ---
   'banners.changed': Banner[]
+  // --- Soundboard (plan 189): the whole state and the playing voices, to every window ---
+  'sounds.changed': SoundboardState
+  'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
   'cohost.avatar.draft': CohostAvatarDraft
@@ -3038,6 +3080,145 @@ const bannerHideParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<BannerHideParams>
 // --- end banners (plan 186) ---
+
+// --- Soundboard (plan 189) ---
+// Exact: the pinned `sound` fixtures. Optional fields (`hotkey`, `starter`,
+// `voiceId` on a press that stopped) are omitted when absent
+// (`skip_serializing_if`); a `null` is refused, the serde null trap.
+const soundIdSchema = runtimeSchema<string>('a sound id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a sound id')
+  }
+  return value
+})
+const soundFileNameSchema = runtimeSchema<string>('a sound file basename', (value, path) => {
+  if (!isSoundFileName(value)) throw new RuntimeSchemaError(path, 'a sound file basename')
+  return value
+})
+const soundStarterSlugSchema = runtimeSchema<string>('a starter sound slug', (value, path) => {
+  if (!isSoundStarterSlug(value)) throw new RuntimeSchemaError(path, 'a starter sound slug')
+  return value
+})
+const soundNameSchema = stringSchema({ minLength: 1, maxLength: SOUND_NAME_MAX_CHARS })
+const soundHotkeySchema = enumSchema(SOUND_HOTKEYS)
+const soundModeSchema = enumSchema(SOUND_MODES)
+const soundVolumeDbSchema = numberSchema({
+  integer: true,
+  min: SOUND_VOLUME_DB_MIN,
+  max: SOUND_VOLUME_DB_MAX
+})
+const soundboardVolumeDbSchema = numberSchema({
+  integer: true,
+  min: SOUNDBOARD_VOLUME_DB_MIN,
+  max: SOUNDBOARD_VOLUME_DB_MAX
+})
+const soundTimestampSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const soundSchema = objectSchema(
+  {
+    id: soundIdSchema,
+    name: soundNameSchema,
+    file: soundFileNameSchema,
+    durationMs: numberSchema({ integer: true, min: 1, max: SOUND_MAX_DURATION_MS }),
+    loudnessLufs: numberSchema({ min: -120, max: 24 }),
+    levelDb: numberSchema({ min: SOUND_LEVEL_DB_MIN, max: SOUND_LEVEL_DB_MAX }),
+    volumeDb: soundVolumeDbSchema,
+    mode: soundModeSchema,
+    hotkey: optionalSchema(soundHotkeySchema),
+    starter: optionalSchema(soundStarterSlugSchema),
+    sortOrder: numberSchema({ integer: true }),
+    createdAt: soundTimestampSchema,
+    updatedAt: soundTimestampSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<Sound>
+const soundListSchema = arraySchema(soundSchema, {
+  maxLength: SOUND_MAX_COUNT
+}) as RuntimeSchema<Sound[]>
+const soundboardStateSchema = objectSchema(
+  {
+    sounds: soundListSchema,
+    volumeDb: soundboardVolumeDbSchema,
+    monitor: booleanSchema,
+    startersSeeded: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundboardState>
+const soundImportParamsSchema = objectSchema(
+  {
+    sourceCapability: stringSchema({ minLength: 1, maxLength: 1024 }),
+    starter: optionalSchema(
+      objectSchema(
+        {
+          slug: soundStarterSlugSchema,
+          name: soundNameSchema,
+          hotkey: optionalSchema(soundHotkeySchema)
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundImportParams>
+const soundUpdateParamsSchema = objectSchema(
+  {
+    id: soundIdSchema,
+    name: optionalSchema(soundNameSchema),
+    volumeDb: optionalSchema(soundVolumeDbSchema),
+    mode: optionalSchema(soundModeSchema),
+    // `''` clears the key.
+    hotkey: optionalSchema(enumSchema([...SOUND_HOTKEYS, ''] as const))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundUpdateParams>
+const soundReorderParamsSchema = objectSchema(
+  { ids: arraySchema(soundIdSchema, { maxLength: SOUND_MAX_COUNT }) },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundReorderParams>
+const soundIdParamsSchema = objectSchema(
+  { id: soundIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundIdParams>
+const soundStopParamsSchema = objectSchema(
+  { id: optionalSchema(soundIdSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundStopParams>
+const soundboardSettingsParamsSchema = objectSchema(
+  {
+    volumeDb: optionalSchema(soundboardVolumeDbSchema),
+    monitor: optionalSchema(booleanSchema),
+    startersSeeded: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundboardSettingsParams>
+const soundVoiceIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const soundPlayResultSchema = objectSchema(
+  { voiceId: soundVoiceIdSchema, onAir: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundPlayResult>
+const soundPressResultSchema = objectSchema(
+  { voiceId: optionalSchema(soundVoiceIdSchema), onAir: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundPressResult>
+const soundsPlaybackSchema = objectSchema(
+  {
+    voices: arraySchema(
+      objectSchema(
+        {
+          voiceId: soundVoiceIdSchema,
+          soundId: soundIdSchema,
+          startedAtMs: numberSchema({ integer: true, min: 0 }),
+          durationMs: numberSchema({ integer: true, min: 1, max: SOUND_MAX_DURATION_MS }),
+          loop: booleanSchema,
+          onAir: booleanSchema
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: SOUND_MAX_VOICES }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundsPlayback>
+// --- end soundboard (plan 189) ---
 // Plan 089: Settings → General → "Show 7TV emotes in chat".
 const sevenTvStatusSchema = objectSchema(
   {
@@ -3256,6 +3437,8 @@ const audioLevelsEventSchema = objectSchema(
     sessionId: optionalSchema(boundedString),
     microphone: optionalSchema(audioLevelReadingSchema),
     systemAudio: optionalSchema(audioLevelReadingSchema),
+    // Plan 189: the soundboard's sounds as mixed.
+    sounds: optionalSchema(audioLevelReadingSchema),
     master: optionalSchema(audioLevelReadingSchema),
     masterClippedSamples: nonNegativeInteger
   },
@@ -4573,6 +4756,17 @@ const runtimeContracts = {
   'banners.show': { params: bannerIdParamsSchema, result: bannerSchema },
   'banners.hide': { params: bannerHideParamsSchema, result: bannerListSchema },
   // --- end banners (plan 186) ---
+  // --- Soundboard (plan 189) ---
+  'sounds.list': { params: undefinedSchema, result: soundboardStateSchema },
+  'sounds.import': { params: soundImportParamsSchema, result: soundSchema },
+  'sounds.update': { params: soundUpdateParamsSchema, result: soundSchema },
+  'sounds.reorder': { params: soundReorderParamsSchema, result: soundListSchema },
+  'sounds.delete': { params: soundIdParamsSchema, result: soundListSchema },
+  'sounds.settings': { params: soundboardSettingsParamsSchema, result: soundboardStateSchema },
+  'sounds.play': { params: soundIdParamsSchema, result: soundPlayResultSchema },
+  'sounds.press': { params: soundIdParamsSchema, result: soundPressResultSchema },
+  'sounds.stop': { params: soundStopParamsSchema, result: soundsPlaybackSchema },
+  // --- end soundboard (plan 189) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': {
     params: cohostAvatarCreateParamsSchema,
@@ -4748,6 +4942,8 @@ const runtimeEventSchemas = {
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
   'banners.changed': bannerListSchema,
+  'sounds.changed': soundboardStateSchema,
+  'sounds.playback': soundsPlaybackSchema,
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,
   'cohost.avatar.draft': cohostAvatarDraftSchema,

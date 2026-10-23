@@ -77,6 +77,7 @@ import {
 } from '../../shared/comments-snapshot-delta'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../shared/sound-commands'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -163,6 +164,43 @@ function CommentsWindowApp(): ReactElement {
         ({ bannerActionContext, bannerActionError }) =>
           toastUserError(bannerActionError(error), bannerActionContext(action.action), options),
         () => toastUserError(error, { action: 'change', object: 'the banner' }, options)
+      )
+      return false
+    }
+  }, [])
+  // Sounds (plan 189 S9): the read-only board Studio pushes through main.
+  // A push that lands before the seed answers wins over the seed.
+  const [sounds, setSounds] = useState<SoundboardSummary | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsSounds?.((board) => {
+      pushed = true
+      setSounds(board)
+    })
+    void window.videorc?.getCommentsSounds?.().then((board) => {
+      if (!disposed && !pushed) setSounds(board)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // One pad, `/sound` or Stop all, relayed to Studio, which plays it. Nothing
+  // says so when it works (the pad's ring is the confirmation); a refusal is
+  // a warning with its own sentence. The sound rules load only then.
+  const runSound = useCallback(async (action: SoundRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.soundFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.soundFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'sound-refusal' }
+      await import('@/lib/sounds').then(
+        ({ soundActionContext, soundActionError }) =>
+          toastUserError(soundActionError(error), soundActionContext(action.action), options),
+        () => toastUserError(error, { action: 'play', object: 'the sound' }, options)
       )
       return false
     }
@@ -792,6 +830,8 @@ function CommentsWindowApp(): ReactElement {
           }
           banners={banners}
           onBanner={runBanner}
+          sounds={sounds}
+          onSound={runSound}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onShowFollowNames={() => {
             void window.videorc

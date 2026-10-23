@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react'
+import { lazy, Suspense, useRef, useState, type ReactElement } from 'react'
 
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { ConfirmDialog } from '@/components/confirm-dialog'
@@ -24,6 +24,7 @@ import {
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { STAT_NAMES } from '@/components/stream-manager/stats-bar'
@@ -41,7 +42,11 @@ import {
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
 import { cn } from '@/lib/utils'
+
+// The Sounds popover's pads (plan 189 S9): audiocn's pad loads with the first open.
+const SoundsPopoverBody = lazy(() => import('@/components/stream-manager/sounds-popover'))
 
 // The Stream Manager's status bar (plan 055, D6): each provider's chat state
 // on the left, the window's quiet controls on the right. The title row keeps
@@ -175,6 +180,8 @@ export function StreamManagerStatusBar({
   onMarkClip,
   banners = null,
   onBanner,
+  sounds = null,
+  onSound,
   onOpenPreview,
   onSearchChat,
   onFocusComposer,
@@ -196,6 +203,10 @@ export function StreamManagerStatusBar({
    * recordings too). `banners` is null until Studio has read the list. */
   banners?: readonly BannerSummary[] | null
   onBanner?: (action: BannerRelayAction) => unknown
+  /** Plan 189 S9: the Sounds popover, on air or not (sounds matter in
+   * recordings too). `sounds` is null until Studio has read the board. */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => unknown
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
    * is still clickable; below 800 px only the key shows, below 640 px they
@@ -216,6 +227,12 @@ export function StreamManagerStatusBar({
   // cannot be undone, so both its homes (the button, the ⋯ menu) ask first.
   const [confirmingClear, setConfirmingClear] = useState(false)
   const requestClear = onClear ? () => setConfirmingClear(true) : undefined
+  // One Sounds popover for both homes: the action above 640 px, the ⋯ menu's
+  // Sounds… below it. It anchors on the controls, which are always on screen.
+  const [soundsOpen, setSoundsOpen] = useState(false)
+  // The ⋯ menu's Sounds… opens the popover once the menu has let the focus
+  // go, so the menu's focus return never dismisses what it opened.
+  const soundsAfterMenu = useRef(false)
   const bannerItems = onBanner ? (
     <BannerMenuItems banners={banners} onBanner={(action) => void onBanner(action)} />
   ) : null
@@ -323,201 +340,261 @@ export function StreamManagerStatusBar({
           </span>
         }
       >
-        <div
-          className={cn('items-center gap-0.5 [-webkit-app-region:no-drag]', 'flex', ABOVE_NARROW)}
-          data-slot="stream-manager-actions"
-        >
-          {hints.map((hint) => (
-            <StatusBarHint
-              key={hint.id}
-              accelerator={shortcutAccelerator(hint.id)}
-              label={hint.label}
-              labelClassName={COMPACT_LABEL}
-              onClick={hint.run}
-            />
-          ))}
-          {onToggleAlwaysOnTop ? (
-            <PinWindowButton
-              pinned={alwaysOnTop}
-              variant="status-bar"
-              onPinnedChange={() => onToggleAlwaysOnTop()}
-            />
-          ) : null}
-          {anchorControl ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <StatusBarAction
-                  hint={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
-                  icon={<FrameIcon aria-hidden />}
-                  label="Highlight position"
-                />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" side="top">
-                <HighlightAnchorOptions {...anchorControl} />
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
-          {onMarkClip ? (
-            <StatusBarAction
-              hint="Mark this moment for a clip (or say “clip that”)"
-              icon={<ClipIcon aria-hidden />}
-              label="Mark clip"
-              text="Mark clip"
-              onClick={onMarkClip}
-            />
-          ) : null}
-          {bannerItems ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                {/* The word alone, like Clear: no icon glyph rides into this
+        <Popover open={soundsOpen} onOpenChange={setSoundsOpen}>
+          <PopoverAnchor asChild>
+            <div className="flex min-w-0 items-center" data-slot="stream-manager-controls">
+              <div
+                className={cn(
+                  'items-center gap-0.5 [-webkit-app-region:no-drag]',
+                  'flex',
+                  ABOVE_NARROW
+                )}
+                data-slot="stream-manager-actions"
+              >
+                {hints.map((hint) => (
+                  <StatusBarHint
+                    key={hint.id}
+                    accelerator={shortcutAccelerator(hint.id)}
+                    label={hint.label}
+                    labelClassName={COMPACT_LABEL}
+                    onClick={hint.run}
+                  />
+                ))}
+                {onToggleAlwaysOnTop ? (
+                  <PinWindowButton
+                    pinned={alwaysOnTop}
+                    variant="status-bar"
+                    onPinnedChange={() => onToggleAlwaysOnTop()}
+                  />
+                ) : null}
+                {anchorControl ? (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <StatusBarAction
+                        hint={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
+                        icon={<FrameIcon aria-hidden />}
+                        label="Highlight position"
+                      />
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" side="top">
+                      <HighlightAnchorOptions {...anchorControl} />
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : null}
+                {onMarkClip ? (
+                  <StatusBarAction
+                    hint="Mark this moment for a clip (or say “clip that”)"
+                    icon={<ClipIcon aria-hidden />}
+                    label="Mark clip"
+                    text="Mark clip"
+                    onClick={onMarkClip}
+                  />
+                ) : null}
+                {bannerItems ? (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      {/* The word alone, like Clear: no icon glyph rides into this
                     window's bundle for it. */}
-                <StatusBarAction
-                  hint="Show or hide your banners (or type /banner)"
-                  label="Banners"
-                  text="Banners"
-                />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56" side="top">
-                {bannerItems}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
-          {requestClear ? (
-            <StatusBarAction
-              hint="Clear view (keeps Library history)"
-              label="Clear view"
-              text="Clear"
-              onClick={requestClear}
-            />
-          ) : null}
-          {onOpenPreview ? (
-            <StatusBarAction
-              icon={<PreviewIcon aria-hidden />}
-              label={`Open ${WINDOW_NAMES.preview}`}
-              onClick={onOpenPreview}
-            />
-          ) : null}
-        </div>
-        <DropdownMenu>
-          {/* The menu's trigger outside the tooltip's: the menu's open state
+                      <StatusBarAction
+                        hint="Show or hide your banners (or type /banner)"
+                        label="Banners"
+                        text="Banners"
+                      />
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-56" side="top">
+                      {bannerItems}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : null}
+                {onSound ? (
+                  <PopoverTrigger asChild>
+                    {/* The word alone, like Banners. */}
+                    <StatusBarAction
+                      hint="Play a sound (or type /sound)"
+                      label="Sounds"
+                      text="Sounds"
+                    />
+                  </PopoverTrigger>
+                ) : null}
+                {requestClear ? (
+                  <StatusBarAction
+                    hint="Clear view (keeps Library history)"
+                    label="Clear view"
+                    text="Clear"
+                    onClick={requestClear}
+                  />
+                ) : null}
+                {onOpenPreview ? (
+                  <StatusBarAction
+                    icon={<PreviewIcon aria-hidden />}
+                    label={`Open ${WINDOW_NAMES.preview}`}
+                    onClick={onOpenPreview}
+                  />
+                ) : null}
+              </div>
+              <DropdownMenu>
+                {/* The menu's trigger outside the tooltip's: the menu's open state
               is the one the button carries. */}
-          <Tooltip>
-            <DropdownMenuTrigger asChild>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label="More Stream Manager actions"
-                  className={NARROW_ONLY}
-                  size="icon-xs"
-                  type="button"
-                  variant="ghost"
-                >
-                  <MoreIcon data-icon="inline-start" weight="bold" />
-                </Button>
-              </TooltipTrigger>
-            </DropdownMenuTrigger>
-            <TooltipContent side="top">More Stream Manager actions</TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent align="end" className="w-56" side="top">
-            {hints.length > 0 ? (
-              <>
-                <DropdownMenuGroup>
-                  {hints.map((hint) => (
-                    <DropdownMenuItem key={hint.id} onSelect={hint.run}>
-                      {hint.menuLabel}
-                      <DropdownMenuShortcut>
-                        <ShortcutKeys accelerator={shortcutAccelerator(hint.id)} variant="text" />
-                      </DropdownMenuShortcut>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-              </>
-            ) : null}
-            <DropdownMenuGroup>
-              {anchorControl ? (
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>
-                    <FrameIcon />
-                    Highlight position
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent>
-                    <HighlightAnchorOptions {...anchorControl} />
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-              ) : null}
-              {onToggleAlwaysOnTop ? (
-                <DropdownMenuCheckboxItem
-                  checked={alwaysOnTop}
-                  onCheckedChange={() => onToggleAlwaysOnTop()}
-                >
-                  {PIN_WINDOW_LABEL}
-                </DropdownMenuCheckboxItem>
-              ) : null}
-              {onMarkClip ? (
-                <DropdownMenuItem onSelect={onMarkClip}>
-                  <ClipIcon />
-                  Mark clip
-                </DropdownMenuItem>
-              ) : null}
-              {bannerItems ? (
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>Banners</DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent className="w-56">{bannerItems}</DropdownMenuSubContent>
-                </DropdownMenuSub>
-              ) : null}
-              {onOpenPreview ? (
-                <DropdownMenuItem onSelect={onOpenPreview}>
-                  <PreviewIcon />
-                  {`Open ${WINDOW_NAMES.preview}`}
-                </DropdownMenuItem>
-              ) : null}
-              {statsLayout && onStatsLayoutChange ? (
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>Show or hide stats</DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent>
-                    {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
-                      <DropdownMenuCheckboxItem
-                        key={id}
-                        checked={!statsLayout.hidden.includes(id)}
-                        onCheckedChange={(checked) =>
-                          onStatsLayoutChange(setStatHidden(statsLayout, id, checked !== true))
-                        }
-                        onSelect={(event) => event.preventDefault()}
+                <Tooltip>
+                  <DropdownMenuTrigger asChild>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label="More Stream Manager actions"
+                        className={NARROW_ONLY}
+                        size="icon-xs"
+                        type="button"
+                        variant="ghost"
                       >
-                        {STAT_NAMES[id]}
+                        <MoreIcon data-icon="inline-start" weight="bold" />
+                      </Button>
+                    </TooltipTrigger>
+                  </DropdownMenuTrigger>
+                  <TooltipContent side="top">More Stream Manager actions</TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent
+                  align="end"
+                  className="w-56"
+                  side="top"
+                  onCloseAutoFocus={(event) => {
+                    if (!soundsAfterMenu.current) return
+                    soundsAfterMenu.current = false
+                    event.preventDefault()
+                    setSoundsOpen(true)
+                  }}
+                >
+                  {hints.length > 0 ? (
+                    <>
+                      <DropdownMenuGroup>
+                        {hints.map((hint) => (
+                          <DropdownMenuItem key={hint.id} onSelect={hint.run}>
+                            {hint.menuLabel}
+                            <DropdownMenuShortcut>
+                              <ShortcutKeys
+                                accelerator={shortcutAccelerator(hint.id)}
+                                variant="text"
+                              />
+                            </DropdownMenuShortcut>
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuGroup>
+                      <DropdownMenuSeparator />
+                    </>
+                  ) : null}
+                  <DropdownMenuGroup>
+                    {anchorControl ? (
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger>
+                          <FrameIcon />
+                          Highlight position
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent>
+                          <HighlightAnchorOptions {...anchorControl} />
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    ) : null}
+                    {onToggleAlwaysOnTop ? (
+                      <DropdownMenuCheckboxItem
+                        checked={alwaysOnTop}
+                        onCheckedChange={() => onToggleAlwaysOnTop()}
+                      >
+                        {PIN_WINDOW_LABEL}
                       </DropdownMenuCheckboxItem>
-                    ))}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      disabled={
-                        statsLayout.hidden.length === 0 &&
-                        statsLayout.order.every(
-                          (id, index) => id === DEFAULT_STATS_LAYOUT.order[index]
-                        )
-                      }
-                      onSelect={() => onStatsLayoutChange(DEFAULT_STATS_LAYOUT)}
-                    >
-                      Reset stats
-                    </DropdownMenuItem>
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-              ) : null}
-            </DropdownMenuGroup>
-            {requestClear ? (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={requestClear}>
-                  <span className="flex flex-col">
-                    <span>Clear view</span>
-                    <span className="text-[11px] text-muted-foreground">
-                      Keeps Library history.
-                    </span>
-                  </span>
-                </DropdownMenuItem>
-              </>
-            ) : null}
-          </DropdownMenuContent>
-        </DropdownMenu>
+                    ) : null}
+                    {onMarkClip ? (
+                      <DropdownMenuItem onSelect={onMarkClip}>
+                        <ClipIcon />
+                        Mark clip
+                      </DropdownMenuItem>
+                    ) : null}
+                    {bannerItems ? (
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger>Banners</DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent className="w-56">
+                          {bannerItems}
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    ) : null}
+                    {onSound ? (
+                      <DropdownMenuItem
+                        onSelect={() => {
+                          soundsAfterMenu.current = true
+                        }}
+                      >
+                        Sounds…
+                      </DropdownMenuItem>
+                    ) : null}
+                    {onOpenPreview ? (
+                      <DropdownMenuItem onSelect={onOpenPreview}>
+                        <PreviewIcon />
+                        {`Open ${WINDOW_NAMES.preview}`}
+                      </DropdownMenuItem>
+                    ) : null}
+                    {statsLayout && onStatsLayoutChange ? (
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger>Show or hide stats</DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent>
+                          {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
+                            <DropdownMenuCheckboxItem
+                              key={id}
+                              checked={!statsLayout.hidden.includes(id)}
+                              onCheckedChange={(checked) =>
+                                onStatsLayoutChange(
+                                  setStatHidden(statsLayout, id, checked !== true)
+                                )
+                              }
+                              onSelect={(event) => event.preventDefault()}
+                            >
+                              {STAT_NAMES[id]}
+                            </DropdownMenuCheckboxItem>
+                          ))}
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            disabled={
+                              statsLayout.hidden.length === 0 &&
+                              statsLayout.order.every(
+                                (id, index) => id === DEFAULT_STATS_LAYOUT.order[index]
+                              )
+                            }
+                            onSelect={() => onStatsLayoutChange(DEFAULT_STATS_LAYOUT)}
+                          >
+                            Reset stats
+                          </DropdownMenuItem>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    ) : null}
+                  </DropdownMenuGroup>
+                  {requestClear ? (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onSelect={requestClear}>
+                        <span className="flex flex-col">
+                          <span>Clear view</span>
+                          <span className="text-[11px] text-muted-foreground">
+                            Keeps Library history.
+                          </span>
+                        </span>
+                      </DropdownMenuItem>
+                    </>
+                  ) : null}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </PopoverAnchor>
+          {onSound ? (
+            <PopoverContent
+              align="end"
+              className="w-[26rem] max-w-[calc(100vw-1rem)]"
+              data-testid="stream-manager-sounds"
+              side="top"
+            >
+              <Suspense fallback={<p className="text-xs text-muted-foreground">Loading sounds…</p>}>
+                {soundsOpen ? (
+                  <SoundsPopoverBody board={sounds} onSound={(action) => void onSound(action)} />
+                ) : null}
+              </Suspense>
+            </PopoverContent>
+          ) : null}
+        </Popover>
       </StatusBar>
       <ConfirmDialog
         confirmLabel="Clear view"

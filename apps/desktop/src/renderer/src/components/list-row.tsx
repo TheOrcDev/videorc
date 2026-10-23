@@ -5,6 +5,8 @@ import { cn } from '@/lib/utils'
 
 /** What every ListRow draws, whatever element it renders as. */
 type ListRowOwnProps = {
+  /** A control before the title (a sound's play button, plan 189), never clipped like the icon tile. */
+  leading?: ReactNode
   /** The icon tile content (app/source icon: the colourful slot). */
   icon?: ReactNode
   title: ReactNode
@@ -56,6 +58,7 @@ type ListRowAsButtonProps = ListRowOwnProps & { as: 'button' } & Omit<
 export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactElement {
   const {
     as = 'div',
+    leading,
     icon,
     title,
     context,
@@ -80,6 +83,7 @@ export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactEle
   )
   const body = (
     <>
+      {leading}
       {icon ? (
         <span
           data-slot="list-row-icon"

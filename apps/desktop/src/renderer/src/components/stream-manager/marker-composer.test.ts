@@ -302,3 +302,91 @@ describe('/banner in the composer (plan 186 S7)', () => {
     expect(completionList().some((text) => text?.startsWith('/banner'))).toBe(false)
   })
 })
+
+describe('/sound in the composer (plan 189 S9)', () => {
+  const sounds = {
+    sounds: [
+      { id: 'airhorn', name: 'Airhorn', mode: 'oneShot' as const },
+      { id: 'applause', name: 'Applause', mode: 'toggle' as const }
+    ],
+    voices: [{ soundId: 'applause', startedAtMs: 1, durationMs: 5000, loop: false }]
+  }
+  async function mountSounds(onSound = vi.fn(async () => true)): Promise<typeof onSound> {
+    onSend.mockClear()
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          providers: [
+            {
+              id: 'youtube',
+              platform: 'youtube',
+              read: 'ready',
+              write: 'ready',
+              state: 'connected',
+              message: 'Connected'
+            }
+          ],
+          pending: false,
+          failures: [],
+          operation: null,
+          prefill: null,
+          cohostNudge: false,
+          markerContext: { sessionId: 's1', available: true },
+          onSend,
+          onMarker: vi.fn(async () => marker),
+          sounds,
+          onSound
+        })
+      )
+    )
+    return onSound
+  }
+  const input = () => container.querySelector('input')!
+  const completionList = () =>
+    [...container.querySelectorAll('[aria-label="Local commands"] [cmdk-item]')].map(
+      (item) => item.textContent
+    )
+  const run = () => container.querySelector<HTMLButtonElement>('[aria-label="Run local command"]')!
+
+  it('presses the first sound a name starts, stops them all, and never posts to chat', async () => {
+    const onSound = await mountSounds()
+    await type('/sound air')
+    await act(async () => run().click())
+    expect(onSound).toHaveBeenCalledExactlyOnceWith({ action: 'press', id: 'airhorn' })
+    expect(input().value).toBe('')
+    await type('/sound stop')
+    await enter()
+    expect(onSound).toHaveBeenLastCalledWith({ action: 'stopAll' })
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('says when no sound has that name, and keeps the draft', async () => {
+    const onSound = await mountSounds()
+    await type('/sound gong')
+    await act(async () => run().click())
+    expect(container.textContent).toContain('No sound called “gong”.')
+    expect(input().value).toBe('/sound gong')
+    expect(onSound).not.toHaveBeenCalled()
+  })
+
+  it('offers /sound, then the sounds with what Enter does', async () => {
+    await mountSounds()
+    await type('/so')
+    expect(completionList()).toEqual(['/sound [name] · Play a sound'])
+    await act(async () =>
+      input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    )
+    expect(input().value).toBe('/sound ')
+    expect(completionList()).toEqual([
+      '/sound Airhorn · Play',
+      '/sound Applause · Stop',
+      '/sound stop · Stop all sounds'
+    ])
+  })
+
+  it('leaves /sound out where the window cannot play sounds', async () => {
+    await mount()
+    await type('/')
+    expect(completionList().some((text) => text?.startsWith('/sound'))).toBe(false)
+  })
+})

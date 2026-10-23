@@ -54,6 +54,7 @@ import {
   type PendingBackgroundReplace
 } from '@/components/background-replace-dialog'
 import { BannersSection } from '@/components/banners-section'
+import { SoundsSection } from '@/components/sounds-section'
 import {
   IN_USE_RING,
   InUseChip,
@@ -311,6 +312,8 @@ export function AssetsTab(): ReactElement {
       />
       <BannersSection />
       <TakeoverScreensSection />
+      {/* Plan 189: the soundboard's sounds, after the pictures. */}
+      <SoundsSection />
       <BackgroundReplaceDialog
         pending={pendingReplace}
         registry={registry}

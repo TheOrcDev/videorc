@@ -119,6 +119,10 @@ mod session_markers;
 mod session_ops;
 mod session_token;
 mod seventv;
+mod sound_loudness;
+mod sound_mix;
+mod sound_player;
+mod sound_store;
 mod source_audio_tap;
 mod source_iso;
 mod source_mask;
@@ -5552,6 +5556,13 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "banners.delete"
         | "banners.show"
         | "banners.hide"
+        | "sounds.update"
+        | "sounds.reorder"
+        | "sounds.delete"
+        | "sounds.settings"
+        | "sounds.play"
+        | "sounds.press"
+        | "sounds.stop"
         | "preview.live.start"
         | "preview.live.stop" => Some(DEFAULT_MUTATION_POLICY),
 
@@ -5568,7 +5579,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         "sessions.delete"
         | "sessions.delete.complete"
         | "screens.importImage"
-        | "banners.importImage" => Some(Mutation {
+        | "banners.importImage"
+        | "sounds.import" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
@@ -5731,6 +5743,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.x.capability"
         | "screens.list"
         | "banners.list"
+        | "sounds.list"
         | "repair.assess_file"
         | "noiseCleanup.list"
         | "cleanCut.get"
@@ -5771,8 +5784,9 @@ enum WebSocketIsolatedCommandLaneKind {
 fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
     let command = serde_json::from_str::<ClientCommand>(text).ok()?;
     match command.method.as_str() {
-        // Plan 186: one image import process-wide, takeovers and banners alike.
-        "screens.importImage" | "banners.importImage" => {
+        // Plan 186: one image import process-wide, takeovers and banners
+        // alike; plan 189: a sound decode shares the lane.
+        "screens.importImage" | "banners.importImage" | "sounds.import" => {
             Some(WebSocketIsolatedCommandLaneKind::AssetImport)
         }
         "account.refresh"
@@ -5793,6 +5807,9 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "screens.delete"
         | "banners.show"
         | "banners.hide"
+        | "sounds.play"
+        | "sounds.press"
+        | "sounds.stop"
         | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD
         | "capture.recovery.retry"
         | CAPTURE_RECOVERY_SMOKE_INJECT_METHOD
@@ -8451,6 +8468,16 @@ fn resolve_screen_import_resource(
 /// as `screens.importImage` (main's picker issues an `input-file` capability;
 /// a raw `path` is accepted from the admin role only).
 fn resolve_banner_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    resolve_screen_import_resource(state, params, role)
+}
+
+/// Plan 189: `sounds.import` makes the same exchange; main's picker (and the
+/// starter seed) issue one single-use `input-file` capability per file.
+fn resolve_sound_import_resource(
     state: &AppState,
     params: &mut serde_json::Value,
     role: BackendRole,
@@ -12566,6 +12593,198 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 189: the soundboard. Every store mutation ends in
+        // `sound_store::on_sounds_changed`, which republishes the board;
+        // every playback change ends in `sounds.playback` from the player.
+        // Refusals come back as the verbatim sentences from the plan.
+        "sounds.list" => match state.database.soundboard_state() {
+            Ok(board) => ServerResponse::ok(command.id, board),
+            Err(error) => {
+                ServerResponse::error(command.id, "sounds-list-failed", error.to_string())
+            }
+        },
+        "sounds.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_sound_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<protocol::ImportSoundParams>(params_value) {
+                Ok(params) => {
+                    let database = state.database.clone();
+                    // The import never takes a caller's binary: the bundled
+                    // FFmpeg, or the default, decodes every sound.
+                    let ffmpeg_path = ffmpeg::resolve_ffmpeg_path(None);
+                    // Decode, trim and measure off the async workers; the
+                    // AssetImport lane keeps admission until this finishes.
+                    let result = tokio::task::spawn_blocking(move || {
+                        sound_store::import_sound(
+                            &database,
+                            std::path::Path::new(&params.path),
+                            params.starter,
+                            &ffmpeg_path,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!("Sound import worker failed: {error}"))
+                    });
+                    match result {
+                        Ok(sound) => {
+                            let _ = sound_store::on_sounds_changed(state);
+                            ServerResponse::ok(command.id, sound)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-import-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.update" => {
+            match serde_json::from_value::<protocol::UpdateSoundParams>(command.params) {
+                Ok(params) => {
+                    let update = match sound_store::SoundUpdate::from_params(&params) {
+                        Ok(update) => update,
+                        Err(error) => {
+                            return ServerResponse::error(
+                                command.id,
+                                "sound-update-failed",
+                                error.to_string(),
+                            );
+                        }
+                    };
+                    match state.database.update_sound(&params.id, update) {
+                        Ok(sound) => {
+                            let _ = sound_store::on_sounds_changed(state);
+                            ServerResponse::ok(command.id, sound)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-update-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.reorder" => {
+            match serde_json::from_value::<protocol::ReorderSoundsParams>(command.params) {
+                Ok(params) => match state.database.reorder_sounds(&params.ids) {
+                    Ok(sounds) => {
+                        let _ = sound_store::on_sounds_changed(state);
+                        ServerResponse::ok(command.id, sounds)
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "sound-reorder-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.delete" => {
+            match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+                Ok(params) => {
+                    // Its voices stop first, so a deleted sound never plays on.
+                    state.soundboard.evict(state, &params.id);
+                    match sound_store::delete_sound(&state.database, &params.id) {
+                        Ok(()) => match sound_store::on_sounds_changed(state) {
+                            Ok(board) => ServerResponse::ok(command.id, board.sounds),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "sounds-list-failed",
+                                error.to_string(),
+                            ),
+                        },
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-delete-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.settings" => {
+            match serde_json::from_value::<protocol::SoundboardSettingsParams>(command.params) {
+                Ok(params) => {
+                    if let Err(error) = sound_store::validate_soundboard_settings(&params) {
+                        return ServerResponse::error(
+                            command.id,
+                            "sound-settings-failed",
+                            error.to_string(),
+                        );
+                    }
+                    match state.database.update_sound_settings(&params) {
+                        Ok(settings) => {
+                            // The running bus follows the fader at once.
+                            state.soundboard.set_board_volume_db(settings.volume_db);
+                            match sound_store::on_sounds_changed(state) {
+                                Ok(board) => ServerResponse::ok(command.id, board),
+                                Err(error) => ServerResponse::error(
+                                    command.id,
+                                    "sounds-list-failed",
+                                    error.to_string(),
+                                ),
+                            }
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-settings-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.play" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+            Ok(params) => match state.soundboard.play(state, &params.id).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "sounds.press" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+            Ok(params) => match state.soundboard.press(state, &params.id).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "sounds.stop" => {
+            match serde_json::from_value::<protocol::StopSoundParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    state.soundboard.stop(state, params.id.as_deref()),
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "screens.list" => match state.database.list_stream_screens() {
             Ok(screens) => ServerResponse::ok(command.id, screens),
             Err(error) => {
@@ -15748,6 +15967,7 @@ mod tests {
             "sessions.comments.totals",
             "screens.list",
             "banners.list",
+            "sounds.list",
             "recording.status",
             "capture.recovery.status",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
@@ -15787,6 +16007,9 @@ mod tests {
             "screens.delete",
             "banners.show",
             "banners.hide",
+            "sounds.play",
+            "sounds.press",
+            "sounds.stop",
             "captions.start",
             "captions.stop",
             "captions.style.set",
@@ -15962,6 +16185,7 @@ mod tests {
         for method in [
             "screens.importImage",
             "banners.importImage",
+            "sounds.import",
             "sessions.delete",
             "sessions.delete.complete",
         ] {

@@ -44,6 +44,8 @@ import {
   markerRelayResultSchema
 } from './session-markers'
 import type { BannerRelayCommand, BannerSummary } from './banner-commands'
+import type { SoundRelayCommand, SoundboardSummary } from './sound-commands'
+import { isSoundStarterSlug } from './sound-assets'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
 import { sessionChatTotalsSchema } from './session-chat-totals'
@@ -52,7 +54,13 @@ import {
   BANNER_MAX_COUNT,
   COMMENT_HIGHLIGHT_ANCHORS,
   DOCK_SLOTS,
-  LAYOUT_PRESET_VALUES
+  LAYOUT_PRESET_VALUES,
+  SOUND_HOTKEYS,
+  SOUND_MAX_COUNT,
+  SOUND_MAX_DURATION_MS,
+  SOUND_MAX_VOICES,
+  SOUND_MODES,
+  SOUND_NAME_MAX_CHARS
 } from './backend'
 import {
   CHAT_AVATAR_MAX_BYTES,
@@ -105,6 +113,9 @@ export const electronInvokeApiMethods = {
   'app:exit': 'exitApp',
   'screens:pick-image': 'pickScreenImage',
   'banners:pick-image': 'pickBannerImage',
+  'sounds:pick-files': 'pickSoundFiles',
+  'sounds:starter-list': 'getStarterSounds',
+  'sounds:starter-files': 'getStarterSoundFiles',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
   'buddy-assets:remove': 'removeBuddyPersona',
@@ -187,6 +198,10 @@ export const electronInvokeApiMethods = {
   'comments-window:banners-push': 'pushCommentsBanners',
   'comments-window:banner': 'bannerFromCommentsWindow',
   'comments-window:banner-result-push': 'pushBannerResult',
+  'comments-window:sounds-get': 'getCommentsSounds',
+  'comments-window:sounds-push': 'pushCommentsSounds',
+  'comments-window:sound': 'soundFromCommentsWindow',
+  'comments-window:sound-result-push': 'pushSoundResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
@@ -285,6 +300,8 @@ export interface ElectronIpcEventMap {
   'comments-window:clip-mark-request': ClipMarkCommand
   'comments-window:banners': BannerSummary[] | null
   'comments-window:banner-request': BannerRelayCommand
+  'comments-window:sounds': SoundboardSummary | null
+  'comments-window:sound-request': SoundRelayCommand
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
@@ -334,6 +351,8 @@ export const electronEventChannels = [
   'comments-window:clip-mark-request',
   'comments-window:banners',
   'comments-window:banner-request',
+  'comments-window:sounds',
+  'comments-window:sound-request',
   'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
@@ -1335,6 +1354,88 @@ const bannerRelayResolutionSchema = unionSchema([
     bannerStrict
   )
 ])
+// Sounds in the Stream Manager (plan 189 S9): the board as `{id, name,
+// mode}` plus what plays, and one action by id. Never a file, a path or audio.
+const soundStrict = { allowUnknown: false } as const
+/** The backend's sound id rule (`backend-rpc-contract.ts`): an opaque token. */
+const soundIdSchema = runtimeSchema<string>('a sound id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a sound id')
+  }
+  return value
+})
+const soundRequestIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const soundNameSchema = stringSchema({ minLength: 1, maxLength: SOUND_NAME_MAX_CHARS })
+const soundboardSummarySchema = objectSchema(
+  {
+    sounds: arraySchema(
+      objectSchema(
+        { id: soundIdSchema, name: soundNameSchema, mode: enumSchema(SOUND_MODES) },
+        soundStrict
+      ),
+      { maxLength: SOUND_MAX_COUNT }
+    ),
+    voices: arraySchema(
+      objectSchema(
+        {
+          soundId: soundIdSchema,
+          startedAtMs: numberSchema({ integer: true, min: 0 }),
+          durationMs: numberSchema({ integer: true, min: 1, max: SOUND_MAX_DURATION_MS }),
+          loop: booleanSchema
+        },
+        soundStrict
+      ),
+      { maxLength: SOUND_MAX_VOICES }
+    )
+  },
+  soundStrict
+)
+/** Null until Studio has read the board once. */
+const soundboardSummaryOrNullSchema = nullableSchema(soundboardSummarySchema)
+const soundRelayCommandSchema = unionSchema([
+  objectSchema(
+    {
+      requestId: soundRequestIdSchema,
+      action: enumSchema(['play', 'stop', 'press']),
+      id: soundIdSchema
+    },
+    soundStrict
+  ),
+  objectSchema({ requestId: soundRequestIdSchema, action: literalSchema('stopAll') }, soundStrict)
+])
+/** Studio's answer: done, or the sentence that says why not. */
+const soundRelayResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: soundRequestIdSchema, ok: literalSchema(true), value: literalSchema(true) },
+    soundStrict
+  ),
+  objectSchema(
+    {
+      requestId: soundRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    soundStrict
+  )
+])
+// Plan 189: the bundled starter sounds, by slug, name and key; with a file,
+// only as a single-use input-file capability.
+const starterSoundSlugSchema = runtimeSchema<string>('a starter sound slug', (value, path) => {
+  if (!isSoundStarterSlug(value)) throw new RuntimeSchemaError(path, 'a starter sound slug')
+  return value
+})
+const starterSoundFields = {
+  slug: starterSoundSlugSchema,
+  name: soundNameSchema,
+  hotkey: optionalSchema(enumSchema(SOUND_HOTKEYS))
+}
+const starterSoundsSchema = arraySchema(objectSchema(starterSoundFields, soundStrict), {
+  maxLength: SOUND_MAX_COUNT
+})
+const starterSoundFilesSchema = arraySchema(
+  objectSchema({ ...starterSoundFields, selection: inputFileSelectionSchema }, soundStrict),
+  { maxLength: SOUND_MAX_COUNT }
+)
 
 const specificRuntimeInvokeContracts = {
   'comments-window:marker-context-get': invokeContract(noArgs, markerContextSchema),
@@ -1364,6 +1465,21 @@ const specificRuntimeInvokeContracts = {
   ),
   'comments-window:banner-result-push': invokeContract(
     tupleSchema([bannerRelayResolutionSchema]),
+    booleanSchema
+  ),
+  // Sounds in the Stream Manager (plan 189 S9): the read-only board one way,
+  // and one pad press, `/sound` or Stop all the other. Never a file or a path.
+  'comments-window:sounds-get': invokeContract(noArgs, soundboardSummaryOrNullSchema),
+  'comments-window:sounds-push': invokeContract(
+    tupleSchema([soundboardSummaryOrNullSchema]),
+    booleanSchema
+  ),
+  'comments-window:sound': invokeContract(
+    tupleSchema([soundRelayCommandSchema]),
+    literalSchema(true)
+  ),
+  'comments-window:sound-result-push': invokeContract(
+    tupleSchema([soundRelayResolutionSchema]),
     booleanSchema
   ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
@@ -1567,7 +1683,20 @@ const specificRuntimeInvokeContracts = {
   // one of two words, nothing else.
   'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema),
   // Plan 186: no arguments; null on cancel, else an input-file capability.
-  'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema))
+  'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
+  // Plan 189: Import sounds… (several files at once, none on cancel), and the
+  // starter sounds the main window seeds and restores.
+  'sounds:pick-files': invokeContract(
+    noArgs,
+    arraySchema(inputFileSelectionSchema, { maxLength: SOUND_MAX_COUNT })
+  ),
+  'sounds:starter-list': invokeContract(noArgs, starterSoundsSchema),
+  'sounds:starter-files': invokeContract(
+    tupleSchema([
+      optionalSchema(arraySchema(starterSoundSlugSchema, { maxLength: SOUND_MAX_COUNT }))
+    ]),
+    starterSoundFilesSchema
+  )
 } satisfies Partial<Record<ElectronInvokeChannel, IpcRuntimeContract>>
 
 /** Channels deliberately using structural bounds instead of a semantic schema.
@@ -1709,6 +1838,8 @@ const specificRuntimeEventSchemas = {
   'comments-window:dashboard': dashboardSchema,
   'comments-window:banners': bannerSummariesSchema,
   'comments-window:banner-request': bannerRelayCommandSchema,
+  'comments-window:sounds': soundboardSummaryOrNullSchema,
+  'comments-window:sound-request': soundRelayCommandSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,

@@ -18,7 +18,8 @@ export function PanelSection({
   children,
   className,
   contentClassName,
-  headingLevel = 2
+  headingLevel = 2,
+  ...data
 }: {
   // Optional: a titleless section is just padded content (no header row), for
   // when the surrounding layout already names it.
@@ -32,7 +33,8 @@ export function PanelSection({
   contentClassName?: string
   /** The outline level of the title: 2 (the default) under the page, 3 when nested. */
   headingLevel?: 2 | 3
-}): ReactElement {
+  // `data-*` hooks for smokes and probes (plan 189: `data-videorc-soundboard`).
+} & Record<`data-${string}`, string | undefined>): ReactElement {
   const Heading = headingLevel === 3 ? 'h3' : 'h2'
   const hasHeader = Boolean(title || description || action)
   return (
@@ -42,6 +44,7 @@ export function PanelSection({
         className
       )}
       data-slot="panel-section"
+      {...data}
     >
       {hasHeader ? (
         <header className="flex min-h-6 items-start justify-between gap-3">

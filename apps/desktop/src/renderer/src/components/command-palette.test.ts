@@ -17,6 +17,7 @@ import { CommandPalette } from './command-palette'
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
   banners: {} as Record<string, unknown>,
+  soundboard: {} as Record<string, unknown>,
   recording: { state: 'idle' } as Record<string, unknown>,
   theme: 'dark' as string | undefined,
   setTheme: vi.fn()
@@ -26,6 +27,7 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioBanners: () => mocked.banners,
   useStudioRecordingState: () => ({ recording: mocked.recording })
 }))
+vi.mock('@/hooks/use-soundboard', () => ({ useSoundboard: () => mocked.soundboard }))
 vi.mock('next-themes', () => ({
   useTheme: () => ({ theme: mocked.theme, setTheme: mocked.setTheme })
 }))
@@ -50,6 +52,12 @@ beforeEach(() => {
     banners: [],
     showBanner: vi.fn(async () => true),
     hideBanner: vi.fn(async () => true)
+  }
+  mocked.soundboard = {
+    sounds: [],
+    voices: [],
+    play: vi.fn(async () => true),
+    stopAll: vi.fn(async () => true)
   }
   mocked.core = {
     runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false, captionsWindowEnabled: false },
@@ -360,5 +368,39 @@ describe('CommandPalette banners (plan 186 S7)', () => {
     mocked.banners.banners = []
     await render()
     expect(headings()).not.toContain('Banners')
+  })
+})
+
+describe('CommandPalette sounds (plan 189 S10)', () => {
+  it('plays each sound by name with its Studio key, then Stop all sounds while any plays', async () => {
+    mocked.soundboard.sounds = [
+      { id: 'airhorn', name: 'Airhorn', hotkey: '1' },
+      { id: 'gong', name: 'Gong' }
+    ]
+    mocked.soundboard.voices = [{ soundId: 'gong' }]
+    await render()
+    expect(headings()).toContain('Sounds')
+    expect(groupValues('Sounds')).toEqual([
+      'Play sound: Airhorn',
+      'Play sound: Gong',
+      'Stop all sounds'
+    ])
+    expect(item('Play sound: Airhorn').querySelector('kbd')?.textContent).toBe('1')
+    await act(async () => item('Play sound: Airhorn').click())
+    expect(mocked.soundboard.play).toHaveBeenCalledExactlyOnceWith('airhorn')
+    await render()
+    await act(async () => item('Stop all sounds').click())
+    expect(mocked.soundboard.stopAll).toHaveBeenCalledOnce()
+  })
+
+  it('finds sounds by the word, and leaves Stop all out while nothing plays', async () => {
+    mocked.soundboard.sounds = [{ id: 'airhorn', name: 'Airhorn' }]
+    await render()
+    expect(groupValues('Sounds')).toEqual(['Play sound: Airhorn'])
+    await search('soundboard')
+    expect(values()).toContain('Play sound: Airhorn')
+    mocked.soundboard.sounds = []
+    await render()
+    expect(headings()).not.toContain('Sounds')
   })
 })

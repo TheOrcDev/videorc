@@ -1,9 +1,11 @@
-import xLockupDarkUrl from '../assets/brand/x/x-logo-lockup-white-on-black.svg'
-import xLockupLightUrl from '../assets/brand/x/x-logo-lockup-black-on-white.svg'
-import xLogoWhiteUrl from '../assets/brand/x/x-logo-white.svg'
-import verifiedBusinessUrl from '../assets/brand/x/verified-business-gold.svg'
-import verifiedGovernmentUrl from '../assets/brand/x/verified-government-gray.svg'
-import verifiedPremiumUrl from '../assets/brand/x/verified-premium-blue.svg'
+// Files, never data URIs (plan 189): the eager bundle had carried all six as
+// data URIs. The highlight card's canvas copies are in brand-mark-data.ts.
+import xLockupDarkUrl from '../assets/brand/x/x-logo-lockup-white-on-black.svg?no-inline'
+import xLockupLightUrl from '../assets/brand/x/x-logo-lockup-black-on-white.svg?no-inline'
+import xLogoWhiteUrl from '../assets/brand/x/x-logo-white.svg?no-inline'
+import verifiedBusinessUrl from '../assets/brand/x/verified-business-gold.svg?no-inline'
+import verifiedGovernmentUrl from '../assets/brand/x/verified-government-gray.svg?no-inline'
+import verifiedPremiumUrl from '../assets/brand/x/verified-premium-blue.svg?no-inline'
 
 import type { LiveChatAuthorVerified } from '@/lib/backend'
 

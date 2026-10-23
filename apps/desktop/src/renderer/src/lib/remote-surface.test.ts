@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { createSoundboardStore } from './soundboard-store'
 import {
   executeRemoteIntent,
   remoteLayoutLabels,
@@ -723,6 +724,160 @@ describe('banner intents (plan 186 S7)', () => {
       expect(described.banners).toEqual([{ id: 'sponsor', name: 'Sponsor', shown: true }])
       expect(JSON.stringify(published)).not.toMatch(/\.png|horizontal/)
       publisher.detach()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('sounds on the remotes (plan 189 S10)', () => {
+  const sounds = [{ id: 'airhorn' }, { id: 'applause' }]
+  const calls = (requests: Array<{ method: string; params: unknown }>) =>
+    requests
+      .filter(({ method }) => method !== 'remote.intent.ack')
+      .map(({ method, params }) => [method, params])
+  const acks = (requests: Array<{ method: string; params: unknown }>) =>
+    requests.filter(({ method }) => method === 'remote.intent.ack').map(({ params }) => params)
+
+  it('presses a sound by id, stops one, and stops them all without an id', async () => {
+    const { context, requests } = remoteIntentContext({ sounds })
+    for (const [intentId, intent] of [
+      ['s-1', { kind: 'soundPlay', soundId: 'airhorn' }],
+      ['s-2', { kind: 'soundStop', soundId: 'applause' }],
+      ['s-3', { kind: 'soundStop' }]
+    ] as const) {
+      await executeRemoteIntent({ intentId, intent }, context)
+    }
+    expect(calls(requests)).toEqual([
+      ['sounds.press', { id: 'airhorn' }],
+      ['sounds.stop', { id: 'applause' }],
+      ['sounds.stop', {}]
+    ])
+    expect(acks(requests)).toEqual(
+      ['s-1', 's-2', 's-3'].map((intentId) => ({ intentId, ok: true }))
+    )
+  })
+
+  it('refuses a sound the board no longer has, or a play with no sound, without the backend', async () => {
+    const { context, requests } = remoteIntentContext({ sounds })
+    for (const [intentId, intent] of [
+      ['gone-1', { kind: 'soundPlay', soundId: 'deleted' }],
+      ['gone-2', { kind: 'soundStop', soundId: 'deleted' }],
+      ['gone-3', { kind: 'soundPlay' }]
+    ] as const) {
+      await executeRemoteIntent({ intentId, intent }, context)
+    }
+    expect(calls(requests)).toEqual([])
+    expect(acks(requests)).toEqual(
+      ['gone-1', 'gone-2', 'gone-3'].map((intentId) => ({
+        intentId,
+        ok: false,
+        message: "That sound isn't available anymore."
+      }))
+    )
+  })
+
+  it("sends a refusal's own sentence back, and the plain words for anything else", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const refused = remoteIntentContext({
+      sounds,
+      client: {
+        request: async (method, params) => {
+          if (method === 'sounds.press') throw new Error('This file is silent.')
+          if (method === 'sounds.stop') throw new Error('bus gone')
+          refused.requests.push({ method, params })
+          return undefined as never
+        }
+      }
+    })
+    await executeRemoteIntent(
+      { intentId: 'r-1', intent: { kind: 'soundPlay', soundId: 'airhorn' } },
+      refused.context
+    )
+    await executeRemoteIntent({ intentId: 'r-2', intent: { kind: 'soundStop' } }, refused.context)
+    expect(acks(refused.requests)).toEqual([
+      { intentId: 'r-1', ok: false, message: 'This file is silent.' },
+      { intentId: 'r-2', ok: false, message: "Couldn't stop the sounds." }
+    ])
+    vi.mocked(console.warn).mockRestore()
+  })
+
+  it('describes the board as id, name and playing only, and follows it as it changes', async () => {
+    vi.useFakeTimers()
+    try {
+      const published: unknown[] = []
+      const store = createSoundboardStore()
+      const publisher = new RemoteSurfacePublisher(store)
+      publisher.attach({
+        request: async (_method, params) => {
+          published.push(params)
+          return undefined as never
+        }
+      })
+      publisher.markConnected()
+      publisher.syncValues([
+        'idle',
+        false,
+        true,
+        false,
+        false,
+        'screen-camera',
+        null,
+        false,
+        false,
+        false,
+        ['screen-camera'],
+        [],
+        undefined,
+        false,
+        []
+      ])
+      await vi.runAllTimersAsync()
+      const described = () =>
+        (published.at(-1) as { describe: { sounds: unknown } }).describe.sounds
+      expect(described()).toEqual([])
+      store.acceptBoard({
+        sounds: [
+          {
+            id: 'airhorn',
+            name: 'Airhorn',
+            file: 'airhorn.wav',
+            durationMs: 1610,
+            loudnessLufs: -15,
+            levelDb: -3,
+            volumeDb: 0,
+            mode: 'oneShot',
+            hotkey: '1',
+            starter: 'airhorn',
+            sortOrder: 0,
+            createdAt: '2026-10-23T09:00:00Z',
+            updatedAt: '2026-10-23T09:00:00Z'
+          }
+        ],
+        volumeDb: 0,
+        monitor: true,
+        startersSeeded: true
+      })
+      store.acceptPlayback({
+        voices: [
+          {
+            voiceId: 'v-1',
+            soundId: 'airhorn',
+            startedAtMs: 1,
+            durationMs: 1610,
+            loop: false,
+            onAir: true
+          }
+        ]
+      })
+      await vi.runAllTimersAsync()
+      expect(described()).toEqual([{ id: 'airhorn', name: 'Airhorn', playing: true }])
+      // Names only: no file, path or voice ever reaches a remote.
+      expect(JSON.stringify(published)).not.toMatch(/\.wav|v-1|levelDb/)
+      publisher.detach()
+      store.acceptPlayback({ voices: [] })
+      await vi.runAllTimersAsync()
+      expect(described()).toEqual([{ id: 'airhorn', name: 'Airhorn', playing: true }])
     } finally {
       vi.useRealTimers()
     }

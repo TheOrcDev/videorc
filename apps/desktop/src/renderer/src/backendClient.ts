@@ -139,6 +139,8 @@ const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   'screens.importImage': 45_000,
   // Plan 186: the same AssetImport lane as a takeover image.
   'banners.importImage': 45_000,
+  // Plan 189: a sound decodes with FFmpeg (20 s deadline) on the same lane.
+  'sounds.import': 45_000,
   'sessions.delete': 45_000,
   'stream.output.topology.probe': 120_000,
   'session.start': 120_000,

@@ -2684,6 +2684,8 @@ export interface AudioLevelsEvent {
   sessionId?: string
   microphone?: AudioLevelReading
   systemAudio?: AudioLevelReading
+  /** Plan 189: the soundboard's sounds as mixed (after every gain). */
+  sounds?: AudioLevelReading
   /** The mix written to the recording and the stream. */
   master?: AudioLevelReading
   /** Samples the mix clipped since the previous event. */
@@ -5626,6 +5628,154 @@ export interface BannerHideParams {
   id?: string
 }
 // --- end banners (plan 186) -------------------------------------------------
+
+// --- Soundboard (plan 189) ---------------------------------------------------
+// Short sounds the streamer plays into the recording and every stream.
+// Backend-owned (SQLite `sounds` and `sound_settings`, files in the managed
+// `Sounds` dir as 48 kHz stereo s16 WAV, trimmed). The backend mixes a
+// playing sound into the session audio bus at the press instant; the main
+// window's monitor plays the same file to the streamer. Pinned by
+// `protocol-fixtures/high-risk-contracts.json` → `sound`.
+
+/** At most this many sounds (plan 189 D8). */
+export const SOUND_MAX_COUNT = 24
+/** The longest sound, after the trim (D8). */
+export const SOUND_MAX_DURATION_MS = 30_000
+/** All sounds together (D8): bounds the backend's resident PCM. */
+export const SOUND_TOTAL_MAX_DURATION_MS = 300_000
+/** At most this many sounds playing at once; a ninth stops the oldest. */
+export const SOUND_MAX_VOICES = 8
+/** A sound's own volume trim, whole dB. */
+export const SOUND_VOLUME_DB_MIN = -24
+export const SOUND_VOLUME_DB_MAX = 6
+/** The soundboard's level on Sources, whole dB. */
+export const SOUNDBOARD_VOLUME_DB_MIN = -24
+export const SOUNDBOARD_VOLUME_DB_MAX = 12
+/** The auto-level gain the import computes (D5): never more than +12 dB. */
+export const SOUND_LEVEL_DB_MIN = -60
+export const SOUND_LEVEL_DB_MAX = 12
+export const SOUND_NAME_MAX_CHARS = 64
+/** The keys a sound can take in Studio. */
+export const SOUND_HOTKEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const
+export type SoundHotkey = (typeof SOUND_HOTKEYS)[number]
+
+/**
+ * How a press plays the sound (the audiocn pad modes): Play once restarts on a
+ * second press (D7), Play/stop and Loop stop a playing sound, While held plays
+ * until release.
+ */
+export const SOUND_MODES = ['oneShot', 'toggle', 'loop', 'hold'] as const
+export type SoundMode = (typeof SOUND_MODES)[number]
+
+export interface Sound {
+  /** Stable UUID, used by remotes, the Stream Deck and `/sound`. */
+  id: string
+  name: string
+  /** Basename in the managed Sounds dir, `<id>.wav`. Never a path. */
+  file: string
+  /** After the trim, 1..30,000. */
+  durationMs: number
+  /** Integrated loudness measured at import (BS.1770). */
+  loudnessLufs: number
+  /** The auto-level gain from the import (D5), read-only. */
+  levelDb: number
+  /** The streamer's trim, whole dB, -24..+6. */
+  volumeDb: number
+  mode: SoundMode
+  /** Omitted when the sound has no key, never `null`. */
+  hotkey?: SoundHotkey
+  /** The starter slug; omitted for the streamer's own sounds. */
+  starter?: string
+  /** Board order. */
+  sortOrder: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SoundboardState {
+  sounds: Sound[]
+  /** The soundboard's level, whole dB, -24..+12. */
+  volumeDb: number
+  /** "Hear sounds yourself": the monitor plays while recording or live. */
+  monitor: boolean
+  /** The starter sounds were imported once for this profile. */
+  startersSeeded: boolean
+}
+
+/** A starter sound being imported (`sounds.import`). */
+export interface SoundStarterImport {
+  slug: string
+  name: string
+  hotkey?: SoundHotkey
+}
+
+/** `sounds.import`: a main-issued `input-file` capability. */
+export interface SoundImportParams {
+  sourceCapability: string
+  /** Set only while seeding or restoring the starters. */
+  starter?: SoundStarterImport
+}
+
+/** `sounds.update`: only the fields to change. `hotkey: ''` clears the key. */
+export interface SoundUpdateParams {
+  id: string
+  name?: string
+  volumeDb?: number
+  mode?: SoundMode
+  hotkey?: SoundHotkey | ''
+}
+
+/** `sounds.reorder`: every sound id in the new board order. */
+export interface SoundReorderParams {
+  ids: string[]
+}
+
+/** `sounds.delete`, `sounds.play` and `sounds.press`. */
+export interface SoundIdParams {
+  id: string
+}
+
+/** `sounds.stop`: one sound, or every sound when `id` is absent. */
+export interface SoundStopParams {
+  id?: string
+}
+
+/** `sounds.settings`: only the fields to change. */
+export interface SoundboardSettingsParams {
+  volumeDb?: number
+  monitor?: boolean
+  startersSeeded?: boolean
+}
+
+export interface SoundPlayResult {
+  voiceId: string
+  /** The sound went into a running session's mix. */
+  onAir: boolean
+}
+
+export interface SoundPressResult {
+  /** Omitted when the press stopped the sound. */
+  voiceId?: string
+  onAir: boolean
+}
+
+/** One playing sound. */
+export interface SoundVoice {
+  voiceId: string
+  soundId: string
+  /** Wall clock, epoch ms, when the press arrived. */
+  startedAtMs: number
+  durationMs: number
+  loop: boolean
+  /** In a running session's mix; false means only the monitor plays it. */
+  onAir: boolean
+}
+
+/** `sounds.playback` and `sounds.stop`: every playing sound, oldest first. */
+export interface SoundsPlayback {
+  voices: SoundVoice[]
+}
+// --- end soundboard (plan 189) -----------------------------------------------
 
 // --- Buddy overlay (plan 164) ---------------------------------------------
 // The Buddy on stream (Phase C): the backend owns which avatar state shows

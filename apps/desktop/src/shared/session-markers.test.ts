@@ -31,6 +31,34 @@ describe('named marker trust boundaries', () => {
       text: 'docs /marker https://ui.shadcn.com'
     })
   })
+  it('turns /sound into a local press or Stop all, never chat (plan 189 S9)', () => {
+    const sounds = [
+      { id: 'airhorn', name: 'Airhorn', mode: 'oneShot' as const },
+      { id: 'applause', name: 'Applause', mode: 'toggle' as const }
+    ]
+    expect(classifyComposerDraft('/sound air', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'press', id: 'airhorn' }
+    })
+    expect(classifyComposerDraft(' /SOUND a ', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'press', id: 'airhorn' }
+    })
+    expect(classifyComposerDraft('/sound stop', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'stopAll' }
+    })
+    expect(classifyComposerDraft('/sound gong', [], sounds)).toEqual({
+      kind: 'error',
+      message: 'No sound called “gong”.'
+    })
+    expect(classifyComposerDraft('/soundx', [], sounds)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('//sound stop', [], sounds)).toEqual({
+      kind: 'chat',
+      text: '/sound stop'
+    })
+  })
+
   it('turns /banner into a local show or hide, never chat (plan 186 S7)', () => {
     const banners = [
       { id: 'sponsor', name: 'Sponsor', shown: false },

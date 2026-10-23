@@ -1,10 +1,12 @@
-import youtubeIconUrl from '../assets/brand/youtube/youtube-icon-red.svg'
+// A file, never a data URI (plan 189): the eager bundle had carried it as one.
+// The highlight card's canvas copy is in brand-mark-data.ts.
+import youtubeIconUrl from '../assets/brand/youtube/youtube-icon-red.svg?no-inline'
 
 // YouTube's official icon (plan 165, Google's ToS report III.F.2a): the file,
 // its geometry and the 20 px floor, shared by the React mark (`YoutubeIcon`)
 // and the on-stream highlight card. See assets/brand/youtube/README.md.
 
-/** The official full-colour icon, unmodified (Vite inlines it as a data URI). */
+/** The official full-colour icon, unmodified, as a file. */
 export const YOUTUBE_ICON_URL: string = youtubeIconUrl
 
 /** The mark is never drawn shorter than this (YouTube Branding Guidelines:

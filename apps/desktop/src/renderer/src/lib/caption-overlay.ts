@@ -17,8 +17,12 @@ import {
   type HighlightEmoteSizer
 } from '@/lib/comment-highlight-layout'
 import { activityItems } from '@/lib/stream-activity'
-import { YOUTUBE_ARTBOARD, YOUTUBE_ICON_URL, YOUTUBE_MARK } from '@/lib/youtube-mark'
-import { X_LOGO_WHITE_URL, X_VERIFIED_URL } from '@/lib/x-mark'
+import { YOUTUBE_ARTBOARD, YOUTUBE_MARK } from '@/lib/youtube-mark'
+import {
+  X_LOGO_WHITE_DATA_URL,
+  X_VERIFIED_DATA_URL,
+  YOUTUBE_ICON_DATA_URL
+} from '@/lib/brand-mark-data'
 import { plural } from '@/lib/format'
 import { canvasToBase64Png } from '@/lib/canvas-png'
 import type { CaptionStyleId, LiveChatMessageFragment, OverlayRect } from '@/lib/backend'
@@ -572,7 +576,7 @@ function loadBrandMarkImage(url: string, name = 'platform mark'): Promise<Highli
 }
 
 function loadYoutubeMarkImage(): Promise<HighlightBitmap | null> {
-  return loadBrandMarkImage(YOUTUBE_ICON_URL, 'YouTube icon')
+  return loadBrandMarkImage(YOUTUBE_ICON_DATA_URL, 'YouTube icon')
 }
 
 const defaultHighlightImageReader: HighlightImageReader = (localUrl) =>
@@ -687,11 +691,11 @@ export async function renderCommentHighlightCards(
     message.platform === 'youtube'
       ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
       : message.platform === 'x'
-        ? loadBrandMark(X_LOGO_WHITE_URL).catch(() => null)
+        ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null)
         : null,
     // Plan 167: X's own check, only for the verified type X sent.
     message.authorVerified
-      ? loadBrandMark(X_VERIFIED_URL[message.authorVerified]).catch(() => null)
+      ? loadBrandMark(X_VERIFIED_DATA_URL[message.authorVerified]).catch(() => null)
       : null
   ])
   const text = commentHighlightCardText(message)

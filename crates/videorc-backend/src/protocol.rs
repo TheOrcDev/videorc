@@ -1580,6 +1580,9 @@ pub struct AudioLevelsEvent {
     pub microphone: Option<AudioLevelReading>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_audio: Option<AudioLevelReading>,
+    /// Plan 189: the soundboard's sounds as mixed (after every gain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sounds: Option<AudioLevelReading>,
     /// The mix written to the recording and the stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub master: Option<AudioLevelReading>,
@@ -4718,6 +4721,172 @@ pub struct UpdateBannerParams {
     pub repeat_every_min: Option<u32>,
 }
 
+/// How a press plays a sound (plan 189): the audiocn pad modes. Play once
+/// restarts on a second press (D7); Play/stop and Loop stop a playing sound;
+/// While held plays until release.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SoundMode {
+    #[default]
+    OneShot,
+    Toggle,
+    Loop,
+    Hold,
+}
+
+/// A soundboard sound on the wire (plan 189, pinned in
+/// `protocol-fixtures/high-risk-contracts.json` → `sound`). Only the basename
+/// crosses the wire: the monitor builds `videorc-asset://sound/<file>`.
+/// `hotkey` and `starter` are the only optionals and are omitted when absent,
+/// never `null` (the serde null trap).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Sound {
+    pub id: String,
+    pub name: String,
+    /// `<id>.wav` in the managed `Sounds` dir: 48 kHz stereo s16, trimmed.
+    pub file: String,
+    pub duration_ms: u32,
+    /// Integrated loudness measured at import (BS.1770-4).
+    pub loudness_lufs: f64,
+    /// The auto-level gain (D5): toward -18 LUFS, at most +12 dB, peak at or
+    /// under -1 dBFS.
+    pub level_db: f64,
+    /// The streamer's trim, whole dB, -24..+6.
+    pub volume_db: i32,
+    pub mode: SoundMode,
+    /// `"1"`..`"9"`, unique across sounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
+    /// The starter slug (`"airhorn"`); absent for the streamer's own sounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter: Option<String>,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `sounds.list` and `sounds.changed`: the whole soundboard.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardState {
+    pub sounds: Vec<Sound>,
+    /// The soundboard's level on Sources, whole dB, -24..+12.
+    pub volume_db: i32,
+    /// "Hear sounds yourself": the main window's monitor plays while
+    /// recording or live.
+    pub monitor: bool,
+    pub starters_seeded: bool,
+}
+
+/// A starter sound being seeded or restored through `sounds.import`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundStarterImport {
+    pub slug: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
+}
+
+/// `sounds.import` after main's `sourceCapability` has been resolved to a
+/// path (the same exchange `banners.importImage` makes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSoundParams {
+    pub path: String,
+    #[serde(default)]
+    pub starter: Option<SoundStarterImport>,
+}
+
+/// `sounds.update`: every field but `id` is optional and leaves the stored
+/// value alone when absent. `hotkey: ""` clears the key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSoundParams {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub volume_db: Option<i32>,
+    #[serde(default)]
+    pub mode: Option<SoundMode>,
+    #[serde(default)]
+    pub hotkey: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderSoundsParams {
+    pub ids: Vec<String>,
+}
+
+/// `sounds.delete`, `sounds.play` and `sounds.press`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundIdParams {
+    pub id: String,
+}
+
+/// `sounds.stop`: no `id` stops every sound.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopSoundParams {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// `sounds.settings`: only the fields to change.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardSettingsParams {
+    #[serde(default)]
+    pub volume_db: Option<i32>,
+    #[serde(default)]
+    pub monitor: Option<bool>,
+    #[serde(default)]
+    pub starters_seeded: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundPlayResult {
+    pub voice_id: String,
+    /// The sound went into a running session's mix.
+    pub on_air: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundPressResult {
+    /// Omitted when the press stopped the sound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_id: Option<String>,
+    pub on_air: bool,
+}
+
+/// One playing sound.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundVoice {
+    pub voice_id: String,
+    pub sound_id: String,
+    /// Wall clock, epoch ms, when the press arrived.
+    pub started_at_ms: u64,
+    pub duration_ms: u32,
+    pub r#loop: bool,
+    /// In a running session's mix; false means only the monitor plays it.
+    pub on_air: bool,
+}
+
+/// `sounds.playback` and the `sounds.stop` result: every playing sound,
+/// oldest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundsPlayback {
+    pub voices: Vec<SoundVoice>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionPane {
@@ -5948,6 +6117,50 @@ impl ServerEvent {
 
 #[cfg(test)]
 mod tests {
+    /// Plan 189: the soundboard wire shapes match the pinned fixtures exactly,
+    /// in both directions, and absent optionals are omitted, never null.
+    #[test]
+    fn soundboard_wire_shapes_match_the_pinned_fixtures() {
+        use super::{SoundMode, SoundPressResult, SoundboardState, SoundsPlayback};
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/high-risk-contracts.json"
+        ))
+        .unwrap();
+        let fixture = &fixtures["sound"];
+        for name in ["minimal", "starter"] {
+            let sound: super::Sound = serde_json::from_value(fixture[name].clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&sound).unwrap(),
+                fixture[name],
+                "{name}"
+            );
+        }
+        let minimal: super::Sound = serde_json::from_value(fixture["minimal"].clone()).unwrap();
+        assert_eq!(minimal.mode, SoundMode::Toggle);
+        assert_eq!(minimal.hotkey, None);
+        let mut board = fixture["state"].clone();
+        board["sounds"] = serde_json::json!([fixture["starter"], fixture["minimal"]]);
+        let state: SoundboardState = serde_json::from_value(board.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&state).unwrap(), board);
+        let playback: SoundsPlayback = serde_json::from_value(fixture["playback"].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&playback).unwrap(),
+            fixture["playback"]
+        );
+        assert!(playback.voices[1].r#loop);
+        let stopped: SoundPressResult =
+            serde_json::from_value(fixture["pressStopped"].clone()).unwrap();
+        assert_eq!(stopped.voice_id, None);
+        assert_eq!(
+            serde_json::to_value(&stopped).unwrap(),
+            fixture["pressStopped"]
+        );
+        assert_eq!(
+            serde_json::to_value(SoundMode::OneShot).unwrap(),
+            serde_json::json!("oneShot")
+        );
+    }
+
     #[test]
     fn audio_level_readings_floor_silence_and_omit_missing_sources() {
         use super::{
@@ -5979,6 +6192,7 @@ mod tests {
             session_id: Some("session-1".into()),
             microphone: Some(sine),
             system_audio: None,
+            sounds: None,
             master: None,
             master_clipped_samples: 0,
         };

@@ -1,5 +1,22 @@
 # Implementation Plans
 
+- 2026-10-23: [Plan 189](189-soundboard.md), Soundboard. The owner wants
+  a soundboard in Studio on audiocn's sound pads, with the sounds streamers
+  use most built in. Sounds join the session audio bus as a third mix
+  ingredient after every tap (never in the Microphone ISO file, captions,
+  Buddy or the echo guard), placed at the press instant; a session with no
+  sound played writes byte-identical PCM. Import decodes, trims and levels
+  each sound to -18 LUFS with the bundled FFmpeg; twelve CC0 starters ship
+  in the app. Studio plays, Assets → Sounds manages, Sources → Sounds holds
+  the level and "Hear sounds yourself" (a main-window Web Audio monitor).
+  Phase 2 in the same PR: Stream Manager, `/sound`, ⌘K, Stream Deck and the
+  phone. 9 decisions (D1–D9), taken on the recommended defaults because the
+  owner asked to execute the whole plan and open a PR. **EXECUTED**
+  2026-10-23 (both phases) on `plan-189-soundboard`: every gate and both
+  soundboard smokes pass; brand marks moved to files to keep the eager
+  bundle under its unchanged ceiling; the owner's by-ear on the starters and
+  a live take are owed.
+
 - 2026-10-22: [Plan 187](187-discord-go-live-announcement.md), Discord
   go-live announcement (issue #634). One Discord webhook, free, automatic:
   the first ticked destination confirmed live posts one message sent as the

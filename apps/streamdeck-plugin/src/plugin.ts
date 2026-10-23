@@ -17,6 +17,8 @@ import {
   VideorcClient,
   bannerKeyIntent,
   bannerKeyTitle,
+  soundKeyIntent,
+  soundKeyTitle,
   type RemoteState
 } from './videorc-client.js'
 
@@ -52,7 +54,8 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
     client.on('state', this.refresh)
     client.on('connected', this.refresh)
     client.on('describe', this.pushInspectorOptions)
-    // Banner keys render `shown` from describe (plan 186).
+    // Banner and sound keys render `shown` and `playing` from describe
+    // (plans 186, 189).
     client.on('describe', this.refresh)
     client.on('disconnected', this.refresh)
   }
@@ -235,6 +238,27 @@ class BannerToggle extends VideorcAction<BannerSettings> {
   }
 }
 
+type SoundSettings = { soundId?: string }
+
+// Plan 189: one of the streamer's sounds, picked in the property inspector.
+// The key shows its name, with ON while it plays (`playing` from describe),
+// and a press plays it the way its mode says. A sound that is gone says
+// Sound, and a press alerts: Videorc refuses it.
+@action({ UUID: 'com.videorc.streamdeck.sound-play' })
+class SoundPlay extends VideorcAction<SoundSettings> {
+  protected renderTitle: TitleRenderer<SoundSettings> = (_state, connected, settings) =>
+    soundKeyTitle(client.describe, settings.soundId, connected)
+  protected intentFor(settings: SoundSettings): Record<string, unknown> | null {
+    return soundKeyIntent(settings.soundId)
+  }
+  protected override inspectorOptions(): InspectorOption[] {
+    return (client.describe?.sounds ?? []).map((sound) => ({
+      value: sound.id,
+      label: sound.name
+    }))
+  }
+}
+
 type WindowSettings = { window?: 'notes' | 'comments' | 'preview' }
 
 @action({ UUID: 'com.videorc.streamdeck.window-front' })
@@ -262,6 +286,7 @@ streamDeck.actions.registerAction(new SystemAudioToggle())
 streamDeck.actions.registerAction(new SceneApply())
 streamDeck.actions.registerAction(new TakeoverToggle())
 streamDeck.actions.registerAction(new BannerToggle())
+streamDeck.actions.registerAction(new SoundPlay())
 streamDeck.actions.registerAction(new WindowFront())
 
 client.start()

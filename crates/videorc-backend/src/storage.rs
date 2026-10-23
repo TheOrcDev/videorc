@@ -33,9 +33,15 @@ use crate::protocol::{
     DiagnosticStats, HealthEvent, HealthLevel, LayoutSettings, NoiseCleanupJob,
     NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage, SessionHealthEventsPage,
     SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage, SessionStorageTotals,
-    SessionSummary, SourceSelection, StreamScreen, StreamScreenStatus,
+    SessionSummary, Sound, SoundMode, SoundboardSettingsParams, SoundboardState, SourceSelection,
+    StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
+use crate::sound_store::{
+    NewSound, REFUSAL_SOUND_TOO_MANY, REFUSAL_SOUNDS_TOTAL_TOO_LONG, SOUND_MAX_COUNT,
+    SOUND_TOTAL_MAX_DURATION_MS, SoundSettings, SoundUpdate, lowest_free_hotkey, sound_file_name,
+    starter_hotkey,
+};
 use crate::streaming::{
     PlatformAccount, PlatformAccountStatus, StreamMetadataDraft, StreamPlatform,
     UpsertPlatformAccount, default_stream_metadata_draft, normalize_stream_metadata_draft,
@@ -6992,6 +6998,237 @@ impl Database {
         Ok(())
     }
 
+    // --- Sounds (plan 189) ---------------------------------------------------
+
+    pub(crate) fn sound_by_id(&self, id: &str) -> Result<Sound> {
+        let conn = self.lock()?;
+        sound_by_id_locked(&conn, id)
+    }
+
+    /// The sound seeded from a starter slug, if the streamer still has it.
+    pub(crate) fn sound_by_starter(&self, slug: &str) -> Result<Option<Sound>> {
+        let conn = self.lock()?;
+        sound_by_starter_locked(&conn, slug)
+    }
+
+    pub(crate) fn count_sounds(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM sounds", [], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// Every sound's duration added up (D8: 5 minutes in all).
+    pub(crate) fn total_sound_duration_ms(&self) -> Result<u64> {
+        let conn = self.lock()?;
+        total_sound_duration_ms_locked(&conn)
+    }
+
+    /// Inserts an imported sound last in board order with its key: a user
+    /// import takes the lowest free key 1-9, a starter its manifest key when
+    /// free, else none. Both caps (D8) are checked again inside the
+    /// transaction so two imports can never exceed them. A starter whose slug
+    /// is already present returns the existing sound, so a rerun of the seed
+    /// never duplicates.
+    pub(crate) fn insert_sound(&self, new: NewSound) -> Result<Sound> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        if let Some(slug) = new.starter.as_deref()
+            && let Some(existing) = sound_by_starter_locked(&transaction, slug)?
+        {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        let count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM sounds", [], |row| row.get(0))?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= SOUND_MAX_COUNT {
+            bail!(REFUSAL_SOUND_TOO_MANY);
+        }
+        let total = total_sound_duration_ms_locked(&transaction)?;
+        if total.saturating_add(u64::from(new.duration_ms)) > SOUND_TOTAL_MAX_DURATION_MS {
+            bail!(REFUSAL_SOUNDS_TOTAL_TOO_LONG);
+        }
+        let next_order: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM sounds",
+            [],
+            |row| row.get(0),
+        )?;
+        let taken = {
+            let mut stmt =
+                transaction.prepare("SELECT hotkey FROM sounds WHERE hotkey IS NOT NULL")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let hotkey = if new.starter.is_some() {
+            starter_hotkey(new.hotkey.as_deref(), &taken)
+        } else {
+            lowest_free_hotkey(&taken)
+        };
+        let sound = Sound {
+            file: sound_file_name(&new.id),
+            id: new.id,
+            name: new.name,
+            duration_ms: new.duration_ms,
+            loudness_lufs: new.loudness_lufs,
+            level_db: new.level_db,
+            volume_db: 0,
+            mode: SoundMode::OneShot,
+            hotkey,
+            starter: new.starter,
+            sort_order: next_order,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        transaction.execute(
+            "INSERT INTO sounds (
+                id, name, file, duration_ms, loudness_lufs, level_db, volume_db, mode,
+                hotkey, starter, sort_order, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                sound.id,
+                sound.name,
+                sound.file,
+                sound.duration_ms,
+                sound.loudness_lufs,
+                sound.level_db,
+                sound.volume_db,
+                sound_mode_to_db(sound.mode),
+                sound.hotkey,
+                sound.starter,
+                sound.sort_order,
+                sound.created_at,
+                sound.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(sound)
+    }
+
+    /// Applies a validated `sounds.update`. A field left `None` keeps its
+    /// value; a key another sound holds moves to this one.
+    pub(crate) fn update_sound(&self, id: &str, update: SoundUpdate) -> Result<Sound> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut sound = sound_by_id_locked(&transaction, id)?;
+        if let Some(name) = update.name {
+            sound.name = name;
+        }
+        if let Some(volume_db) = update.volume_db {
+            sound.volume_db = volume_db;
+        }
+        if let Some(mode) = update.mode {
+            sound.mode = mode;
+        }
+        sound.updated_at = Utc::now().to_rfc3339();
+        if let Some(hotkey) = update.hotkey {
+            if let Some(key) = hotkey.as_deref() {
+                transaction.execute(
+                    "UPDATE sounds SET hotkey = NULL, updated_at = ?2 WHERE hotkey = ?1 AND id != ?3",
+                    params![key, sound.updated_at, sound.id],
+                )?;
+            }
+            sound.hotkey = hotkey;
+        }
+        transaction.execute(
+            "UPDATE sounds SET name = ?2, volume_db = ?3, mode = ?4, hotkey = ?5, updated_at = ?6
+             WHERE id = ?1",
+            params![
+                sound.id,
+                sound.name,
+                sound.volume_db,
+                sound_mode_to_db(sound.mode),
+                sound.hotkey,
+                sound.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(sound)
+    }
+
+    /// `ids` is the new board order and must name every sound exactly once.
+    pub(crate) fn reorder_sounds(&self, ids: &[String]) -> Result<Vec<Sound>> {
+        let conn = self.lock()?;
+        let existing_ids = {
+            let mut stmt = conn.prepare("SELECT id FROM sounds")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let existing = existing_ids.iter().collect::<HashSet<_>>();
+        let requested = ids.iter().collect::<HashSet<_>>();
+        if existing.len() != requested.len()
+            || existing_ids.len() != ids.len()
+            || existing != requested
+        {
+            bail!("Sound reorder must include every sound exactly once.");
+        }
+        let updated_at = Utc::now().to_rfc3339();
+        for (index, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE sounds SET sort_order = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, index as i64, updated_at],
+            )?;
+        }
+        list_sounds_locked(&conn)
+    }
+
+    /// The row only. `sound_store::delete_sound` owns the voices, the path
+    /// guard and the file, and calls this once SQLite may commit.
+    pub(crate) fn delete_sound_row(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute("DELETE FROM sounds WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            bail!("Sound not found.");
+        }
+        Ok(())
+    }
+
+    /// The one-row `sound_settings` table.
+    pub(crate) fn sound_settings(&self) -> Result<SoundSettings> {
+        let conn = self.lock()?;
+        sound_settings_locked(&conn)
+    }
+
+    /// Applies a validated `sounds.settings`: only the fields present change.
+    pub(crate) fn update_sound_settings(
+        &self,
+        params: &SoundboardSettingsParams,
+    ) -> Result<SoundSettings> {
+        let conn = self.lock()?;
+        let mut settings = sound_settings_locked(&conn)?;
+        if let Some(volume_db) = params.volume_db {
+            settings.volume_db = volume_db;
+        }
+        if let Some(monitor) = params.monitor {
+            settings.monitor = monitor;
+        }
+        if let Some(seeded) = params.starters_seeded {
+            settings.starters_seeded = seeded;
+        }
+        conn.execute(
+            "UPDATE sound_settings SET volume_db = ?1, monitor = ?2, starters_seeded = ?3
+             WHERE id = 1",
+            params![
+                settings.volume_db,
+                settings.monitor,
+                settings.starters_seeded
+            ],
+        )?;
+        Ok(settings)
+    }
+
+    /// `sounds.list` and `sounds.changed`: the sounds and the settings in one
+    /// read.
+    pub(crate) fn soundboard_state(&self) -> Result<SoundboardState> {
+        let conn = self.lock()?;
+        let settings = sound_settings_locked(&conn)?;
+        Ok(SoundboardState {
+            sounds: list_sounds_locked(&conn)?,
+            volume_db: settings.volume_db,
+            monitor: settings.monitor,
+            starters_seeded: settings.starters_seeded,
+        })
+    }
+
     pub(crate) fn active_stream_screen_selection(&self) -> Result<ActiveStreamScreenSelection> {
         let conn = self.lock()?;
         let Some(screen_id) = self.active_screen_id_locked(&conn)? else {
@@ -7307,6 +7544,22 @@ impl Database {
         std::env::temp_dir().join("videorc-banners")
     }
 
+    /// The managed `Sounds` directory beside `Screens` and `Banners` (plan
+    /// 189). Only basenames reach the renderer; main's
+    /// `videorc-asset://sound/<file>` resolver and the player join them onto
+    /// this root.
+    pub(crate) fn sound_assets_dir(&self) -> PathBuf {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return parent.join("Sounds");
+        }
+
+        std::env::temp_dir().join("videorc-sounds")
+    }
+
     #[cfg(test)]
     pub(crate) fn migrate_for_marker_test(&self) {
         self.migrate().unwrap();
@@ -7490,6 +7743,34 @@ impl Database {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS sounds (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                file TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                loudness_lufs REAL NOT NULL,
+                level_db REAL NOT NULL,
+                volume_db INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                hotkey TEXT,
+                starter TEXT,
+                sort_order INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS sounds_hotkey
+                ON sounds(hotkey) WHERE hotkey IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS sounds_starter
+                ON sounds(starter) WHERE starter IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS sound_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                volume_db INTEGER NOT NULL,
+                monitor INTEGER NOT NULL,
+                starters_seeded INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO sound_settings (id, volume_db, monitor, starters_seeded)
+                VALUES (1, 0, 1, 0);
 
             CREATE TABLE IF NOT EXISTS platform_accounts (
                 id TEXT PRIMARY KEY,
@@ -8027,6 +8308,94 @@ fn stream_screen_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamScr
 const BANNER_COLUMNS: &str = "id, name, image_file, thumbnail_file, width, height, has_alpha, \
      sort_order, shown, horizontal_json, vertical_json, show_on_stream, show_in_recording, \
      opacity, hide_after_sec, repeat_every_min, created_at, updated_at";
+
+/// The `sounds` columns in `sound_from_row` order (plan 189).
+const SOUND_COLUMNS: &str = "id, name, file, duration_ms, loudness_lufs, level_db, volume_db, \
+     mode, hotkey, starter, sort_order, created_at, updated_at";
+
+/// The wire string of a mode (`oneShot`), the form the `mode` column holds.
+fn sound_mode_to_db(mode: SoundMode) -> String {
+    serde_json::to_value(mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "oneShot".to_string())
+}
+
+fn sound_mode_from_db(value: &str) -> SoundMode {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap_or_default()
+}
+
+fn list_sounds_locked(conn: &Connection) -> Result<Vec<Sound>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SOUND_COLUMNS} FROM sounds ORDER BY sort_order ASC, created_at ASC"
+    ))?;
+    let rows = stmt.query_map([], sound_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn sound_by_id_locked(conn: &Connection, id: &str) -> Result<Sound> {
+    conn.query_row(
+        &format!("SELECT {SOUND_COLUMNS} FROM sounds WHERE id = ?1"),
+        params![id],
+        sound_from_row,
+    )
+    .optional()?
+    .context("Sound not found.")
+}
+
+fn sound_by_starter_locked(conn: &Connection, slug: &str) -> Result<Option<Sound>> {
+    conn.query_row(
+        &format!("SELECT {SOUND_COLUMNS} FROM sounds WHERE starter = ?1"),
+        params![slug],
+        sound_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn total_sound_duration_ms_locked(conn: &Connection) -> Result<u64> {
+    let total: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(duration_ms), 0) FROM sounds",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(u64::try_from(total).unwrap_or(0))
+}
+
+fn sound_settings_locked(conn: &Connection) -> Result<SoundSettings> {
+    conn.query_row(
+        "SELECT volume_db, monitor, starters_seeded FROM sound_settings WHERE id = 1",
+        [],
+        |row| {
+            Ok(SoundSettings {
+                volume_db: row.get(0)?,
+                monitor: row.get(1)?,
+                starters_seeded: row.get(2)?,
+            })
+        },
+    )
+    .optional()?
+    .context("Sound settings row is missing.")
+}
+
+fn sound_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sound> {
+    let mode: String = row.get(7)?;
+    Ok(Sound {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        file: row.get(2)?,
+        duration_ms: row.get(3)?,
+        loudness_lufs: row.get(4)?,
+        level_db: row.get(5)?,
+        volume_db: row.get(6)?,
+        mode: sound_mode_from_db(&mode),
+        hotkey: row.get(8)?,
+        starter: row.get(9)?,
+        sort_order: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
 
 fn banner_by_id_locked(conn: &Connection, id: &str) -> Result<Banner> {
     conn.query_row(

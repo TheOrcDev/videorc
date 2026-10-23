@@ -52,6 +52,11 @@ Phone remote and every Stream Deck with it.
   the desktop's own sentence ("Four banners are showing. Hide one first.");
   any other failure "Couldn't show the banner.", "Couldn't hide the banner."
   or "Couldn't hide the banners.".
+- The two sound intents (plan 189) are a family of their own too, debounced
+  at 80 ms instead of 150 ms so a fast drummer still gets every press. One
+  whose sound is gone acks "That sound isn't available anymore."; a refusal
+  acks the desktop's sentence; any other failure "Couldn't play the sound.",
+  "Couldn't stop the sound." or "Couldn't stop the sounds.".
 
 ## Requests
 
@@ -60,10 +65,11 @@ where `describe` lists `layoutPresets`, `layoutLabels` (each preset id's
 name as the desktop shows it, `{ "screen-camera": "Screen + camera" }`,
 since plan 174 S2.3a; absent from older apps), `takeovers` (`{id, name}`),
 `banners` (`{id, name, shown}` in Assets order, since plan 186; absent from
-older apps), and `windows`.
+older apps), `sounds` (`{id, name, playing}` in board order, since plan 189;
+absent from older apps), and `windows`.
 
-`describe` changes too: a banner shown or hidden flips its `shown` there, not
-in `remote.state`. Every change the desktop publishes arrives as a
+`describe` changes too: a banner shown or hidden flips its `shown` there, and
+a sound starting or ending flips its `playing`, not in `remote.state`. Every change the desktop publishes arrives as a
 `remote.state` event, so a client that renders banners re-reads
 `remote.describe` after each one (one read at a time). The official Stream
 Deck plugin and the phone page both do.
@@ -86,6 +92,8 @@ Intent params (`kind` + fields):
 | `bannerShow`                                             | `bannerId`                               | show that banner (plan 186; explicit, idempotent)                                 |
 | `bannerHide`                                             | `bannerId?`                              | hide that banner; without `bannerId`, hide every banner                           |
 | `bannerToggle`                                           | `bannerId`                               | show or hide that banner, from its `shown` in `describe` (for one deck key)       |
+| `soundPlay`                                              | `soundId`                                | press that sound (plan 189): the sound's own mode decides, like its key in Studio |
+| `soundStop`                                              | `soundId?`                               | stop that sound; without `soundId`, stop every sound                              |
 | `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                           |
 | `commentHighlight`                                       | `messageId`                              | put that live-chat comment on stream (explicit show, idempotent — never a toggle) |
 | `commentHighlightClear`                                  | —                                        | take the on-stream comment down                                                   |
@@ -310,6 +318,24 @@ and what a paired phone can do is send `bannerShow`, `bannerHide` or
 The worst a paired device can do is what the Studio's Show and Hide do:
 put one of the streamer's own banners on the picture, or take it off. A
 show past the four-at-once cap is refused with the desktop's sentence.
+
+### Sounds on the phone (plan 189 leak argument)
+
+The phone lists the soundboard's sounds by name under Controls → Sounds;
+each key presses one, and "Stop all sounds" stops them. What crosses the LAN
+socket is one more field in `remote.describe`, `sounds: [{id, name,
+playing}]`, and what a paired phone can do is send `soundPlay` or
+`soundStop` through the existing `remote.intent`:
+
+- Ids are opaque UUIDs.
+- Names are labels the streamer typed for sounds they play to viewers.
+- No file paths and no audio bytes cross the LAN.
+- No route is added to the LAN router and nothing is added to `LAN_EVENTS`.
+
+The worst a paired device can do is what a pad in Studio does: play one of
+the streamer's own sounds into the stream, or stop it. A While held sound
+pressed from a remote plays to its end: `describe` carries no mode, so a
+remote has no release to send.
 
 The phone's other words now match the desktop too, with no protocol change:
 the tabs read Chat and Controls, the header reads ON AIR while a livestream

@@ -22,6 +22,11 @@ import {
   type BannerSummary,
   type ComposerCompletion
 } from '../../../../shared/banner-commands'
+import {
+  soundCompletions,
+  type SoundRelayAction,
+  type SoundboardSummary
+} from '../../../../shared/sound-commands'
 import type { MarkerContext, SessionMarker } from '@/lib/backend'
 import { Command, CommandItem, CommandList } from '@/components/ui/command'
 import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platform-icon'
@@ -130,6 +135,8 @@ export function ChatPane({
   onUndoMarker,
   banners,
   onBanner,
+  sounds,
+  onSound,
   prefill = null,
   cohostNudge = false,
   onCohostNudgeTurnOn,
@@ -176,6 +183,9 @@ export function ChatPane({
   /** Plan 186 S7: the banners `/banner` reads, and its show or hide. */
   banners?: readonly BannerSummary[] | null
   onBanner?: (action: BannerRelayAction) => Promise<boolean>
+  /** Plan 189 S9: the board `/sound` reads, and its press or Stop all. */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => Promise<boolean>
   onSend?: (text: string, options?: ChatSendOptions) => void
   prefill?: ChatPrefill | null
   cohostNudge?: boolean
@@ -630,6 +640,8 @@ export function ChatPane({
           onUndoMarker={onUndoMarker}
           banners={banners}
           onBanner={onBanner}
+          sounds={sounds}
+          onSound={onSound}
           cohostNudge={cohostNudge}
           failures={sendFailures}
           focusSignal={composerFocusSignal + composerFocus}
@@ -650,8 +662,16 @@ export function ChatPane({
 const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
   { value: '/marker', hint: ' [title] · Save a timeline point' },
   { value: '/banner', hint: ' [name] · Show or hide a banner' },
+  { value: '/sound', hint: ' [name] · Play a sound' },
   { value: '/help', hint: ' · Command help' }
 ]
+
+/** The commands that take an argument, and go on to its completions. */
+const COMMANDS_WITH_ARGUMENT = new Set(['/marker', '/banner', '/sound'])
+/** The commands whose completions are names (plans 186, 189). */
+const COMMANDS_WITH_NAMES = new Set(['/banner', '/sound'])
+/** No sounds before Studio has read the board: the same empty board. */
+const NO_SOUNDBOARD: SoundboardSummary = { sounds: [], voices: [] }
 
 export function Composer({
   providers,
@@ -668,7 +688,9 @@ export function Composer({
   onMarker,
   onUndoMarker,
   banners,
-  onBanner
+  onBanner,
+  sounds,
+  onSound
 }: {
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
@@ -680,6 +702,13 @@ export function Composer({
    */
   banners?: readonly BannerSummary[] | null
   onBanner?: (action: BannerRelayAction) => Promise<boolean>
+  /**
+   * Plan 189 S9: `/sound <name>` presses the first sound whose name starts
+   * with it, `/sound stop` stops them all. Resolves false when it didn't
+   * happen; the window has said why. Never posts to chat.
+   */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => Promise<boolean>
   providers: readonly LiveChatProviderState[]
   pending: boolean
   failures: ChatSendFailure[]
@@ -729,30 +758,32 @@ export function Composer({
   // The draft must fit the STRICTEST destination it reaches (140 with X).
   const maxChars = chatDraftMaxChars(targetPlatforms)
   const bannerList = onBanner ? (banners ?? []) : null
-  const command = classifyComposerDraft(draft, bannerList ?? [])
+  const soundBoard = onSound ? (sounds ?? NO_SOUNDBOARD) : null
+  const command = classifyComposerDraft(draft, bannerList ?? [], soundBoard?.sounds ?? [])
   const local = command.kind !== 'chat'
   const canSend = local
     ? !localPending &&
       (command.kind !== 'marker' ||
         Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker))
     : targets.length > 0 && !pending
-  // Under `/banner`, the banner names (plan 186); otherwise the commands.
+  // Under `/banner` and `/sound`, the names (plans 186, 189); otherwise the commands.
   const completions: readonly ComposerCompletion[] =
     (bannerList && bannerCompletions(draft, bannerList)) ??
+    (soundBoard && soundCompletions(draft, soundBoard)) ??
     COMPOSER_COMMANDS.filter(
       (entry) =>
         draft.startsWith('/') &&
         !draft.includes(' ') &&
         (bannerList || entry.value !== '/banner') &&
+        (soundBoard || entry.value !== '/sound') &&
         entry.value.startsWith(draft.toLowerCase())
     )
   const showCompletions = completions.length > 0 && !completionDismissed
   const selectedCompletion = completions[completionIndex] ?? completions[0]
   const complete = (value: string): void => {
-    const takesArgument = value === '/marker' || value === '/banner'
-    setDraft(value + (takesArgument ? ' ' : ''))
-    // `/banner` goes straight on to the banner names (plan 186).
-    setCompletionDismissed(value !== '/banner')
+    setDraft(value + (COMMANDS_WITH_ARGUMENT.has(value) ? ' ' : ''))
+    // `/banner` and `/sound` go straight on to the names (plans 186, 189).
+    setCompletionDismissed(!COMMANDS_WITH_NAMES.has(value))
     setCompletionIndex(0)
     inputRef.current?.focus()
   }
@@ -802,7 +833,7 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        `/marker [title] saves a point on this recording or livestream.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/marker [title] saves a point on this recording or livestream.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
       return
     }
@@ -814,6 +845,23 @@ export function Composer({
       setNotice(null)
       // The picture is the confirmation; a refusal is the window's toast.
       void onBanner(command.action)
+        .then((done) => {
+          if (done && draftRef.current === submitted) setDraft('')
+        })
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
+      return
+    }
+    if (command.kind === 'sound') {
+      if (!onSound) return
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(null)
+      // The pad's ring is the confirmation; a refusal is the window's toast.
+      void onSound(command.action)
         .then((done) => {
           if (done && draftRef.current === submitted) setDraft('')
         })

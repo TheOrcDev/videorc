@@ -38,6 +38,7 @@ import { Switch } from '@/components/ui/switch'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { AudioConfigProvider } from '@/hooks/use-audio-config'
+import { useSoundboard } from '@/hooks/use-soundboard'
 import { useStudioCore } from '@/hooks/use-studio'
 import {
   backendLevelSources,
@@ -46,6 +47,8 @@ import {
 } from '@/hooks/use-studio-mic-sources'
 import { formatDb } from '@/lib/audio/decibels'
 import {
+  SOUNDBOARD_VOLUME_DB_MAX,
+  SOUNDBOARD_VOLUME_DB_MIN,
   SYSTEM_AUDIO_GAIN_DB_DEFAULT,
   SYSTEM_AUDIO_GAIN_DB_MAX,
   SYSTEM_AUDIO_GAIN_DB_MIN,
@@ -66,6 +69,7 @@ import {
 import {
   meterHasNoReading,
   micLevelUnavailableCopy,
+  soundsMeterInput,
   systemAudioMeterInput,
   type MeterInput
 } from '@/lib/mic-meter-input'
@@ -87,8 +91,9 @@ import {
   type SystemAudioSwitchView
 } from '@/lib/system-audio'
 
-// Plan 173: the Sources page's Audio column. Microphone and System audio are
-// SourceItems (the shape every Sources row takes) inside one grouped list.
+// Plan 173: the Sources page's Audio column. Microphone, System audio and the
+// soundboard's Sounds (plan 189) are SourceItems (the shape every Sources row
+// takes) inside one grouped list.
 // The audiocn controls stay what plan 093 chose (Fader, MuteToggle,
 // ParameterSlider, the level meter); Videorc styles the vendored parts from
 // outside, never by editing them (docs/audiocn.md). The audiocn Mixer stays
@@ -165,7 +170,7 @@ export function keepMicrophoneReadyHint(platform: string | undefined): string {
   return `Opens the microphone while Studio is on screen, so Record starts at once. ${microphoneIndicatorCopy(platform)} while it's open; hiding the window releases it.`
 }
 
-/** The Sources "Audio" column: the Microphone, then System audio. */
+/** The Sources "Audio" column: the Microphone, System audio, then the soundboard's Sounds. */
 export function SourcesAudioMixer(): ReactElement {
   const {
     deviceList,
@@ -318,6 +323,12 @@ export function SourcesAudioMixer(): ReactElement {
                 />
               </MixerRow>
             ) : null}
+            <MixerRow>
+              <SoundsSourceRow
+                backendLevelsLive={backendLevelsLive}
+                sessionActive={isSessionActive}
+              />
+            </MixerRow>
           </GroupedList>
         </MixerChannels>
       </Mixer>
@@ -817,6 +828,137 @@ export function SystemAudioSettings({
             ) : null}
           </Alert>
         ) : null}
+      </SourceItem>
+    </AudioConfigProvider>
+  )
+}
+
+/** The board's Level default, and where its reset goes. */
+const SOUNDBOARD_VOLUME_DB_DEFAULT = 0
+const SOUNDBOARD_VOLUME_DETENTS = [SOUNDBOARD_VOLUME_DB_DEFAULT]
+
+/** Sources → Sounds, on the soundboard's own state (plan 189 S7). */
+function SoundsSourceRow({
+  sessionActive,
+  backendLevelsLive
+}: {
+  sessionActive: boolean
+  backendLevelsLive: boolean
+}): ReactElement {
+  const board = useSoundboard()
+  return (
+    <SoundsSettings
+      disabled={board.offline || !board.loaded}
+      meter={soundsMeterInput({
+        sessionActive,
+        backendLevelsLive,
+        source: backendLevelSources.sounds
+      })}
+      monitor={board.monitor}
+      volumeDb={board.volumeDb}
+      onMonitorChange={(monitor) => void board.changeSettings({ monitor })}
+      onVolumeChange={(volumeDb) => void board.changeSettings({ volumeDb })}
+    />
+  )
+}
+
+/**
+ * The Sounds row (plan 189): the soundboard's level beside the other audio
+ * sources (the owner's 2026-10-02 call: audio controls live on Sources). Its
+ * meter reads the sounds as mixed while recording or live; Level trims every
+ * sound at once; Hear sounds yourself is the monitor, on by default (D2).
+ * Markup from props, so the tests render it.
+ */
+export function SoundsSettings({
+  volumeDb,
+  monitor,
+  meter,
+  disabled,
+  onVolumeChange,
+  onMonitorChange
+}: {
+  volumeDb: number
+  monitor: boolean
+  /** The sounds as mixed while a session runs; no reading otherwise. */
+  meter: MeterInput
+  /** Videorc is reconnecting, or the board hasn't loaded. */
+  disabled: boolean
+  /** Fires once per change: when a drag lets go, a key or a reset. */
+  onVolumeChange: (volumeDb: number) => void
+  onMonitorChange: (monitor: boolean) => void
+}): ReactElement {
+  // The fader follows the drag here and saves once, when it lets go.
+  const [draft, setDraft] = useState<number | null>(null)
+  const level = draft ?? volumeDb
+  return (
+    <AudioConfigProvider value={{ disabled }}>
+      <SourceItem
+        data-videorc-sounds-source-row=""
+        disabled={disabled}
+        icon={SpeakerOnIcon}
+        id="sounds"
+        title="Sounds"
+      >
+        {/* No dead meter (plan 173): the level only exists while a session
+            mixes sounds, so outside one the row says when it moves. */}
+        {meterHasNoReading(meter) ? (
+          <p className="text-xs text-muted-foreground" data-videorc-sounds-idle="">
+            Level shows while recording or live.
+          </p>
+        ) : (
+          <div className="flex min-w-0" data-videorc-sounds-visualizer="">
+            <MicLevelMeter
+              aria-label="Sounds level"
+              className="min-w-0 flex-1"
+              meter={meter}
+              orientation="horizontal"
+              variant="segmented"
+            />
+          </div>
+        )}
+        <SourceControlRow
+          label="Level"
+          reset={disabled ? null : gainReset(level, SOUNDBOARD_VOLUME_DB_DEFAULT, onVolumeChange)}
+          value={formatDb(level)}
+        >
+          <Fader
+            aria-label="Sounds level"
+            className="w-full"
+            detents={SOUNDBOARD_VOLUME_DETENTS}
+            disabled={disabled}
+            fineStep={1}
+            largeStep={6}
+            max={SOUNDBOARD_VOLUME_DB_MAX}
+            min={SOUNDBOARD_VOLUME_DB_MIN}
+            origin={0}
+            resetValue={SOUNDBOARD_VOLUME_DB_DEFAULT}
+            step={1}
+            value={level}
+            onValueChange={(value) => setDraft(Math.round(value))}
+            onValueCommitted={(value) => {
+              const next = Math.round(value)
+              setDraft(null)
+              if (next !== volumeDb) onVolumeChange(next)
+            }}
+          >
+            <FaderTrack>
+              <FaderRange />
+              <FaderThumb className={FADER_THUMB} />
+            </FaderTrack>
+          </Fader>
+        </SourceControlRow>
+        <SettingsRow
+          data-videorc-sounds-monitor=""
+          description="Use headphones, or your microphone may pick the sound up again."
+          label="Hear sounds yourself"
+        >
+          <Switch
+            checked={monitor}
+            disabled={disabled}
+            size="sm"
+            onCheckedChange={onMonitorChange}
+          />
+        </SettingsRow>
       </SourceItem>
     </AudioConfigProvider>
   )

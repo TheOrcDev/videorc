@@ -102,6 +102,20 @@ stays over a takeover and under captions, Buddy and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
 name)
 
+**Sound**:
+A short audio file (up to 30 seconds) the streamer plays into the recording
+and every stream from the Soundboard: an airhorn, applause, a laugh.
+Assets → Sounds imports and manages them; Sources → Sounds sets their level
+and whether the streamer hears them.
+_Avoid_: clip (a clip is a stretch of a recording), sample, SFX, sound effect
+(as the feature's name), jingle
+
+**Soundboard**:
+Studio's grid of pads, one per sound, under Scenes. A click or the sound's
+key (1–9) plays it; the Stream Manager, `/sound`, ⌘K, the Stream Deck and
+the phone play the same sounds.
+_Avoid_: sound pad (in copy; it is the component's name), sampler
+
 **Off**:
 A source or a feature the streamer turned off ("Camera: Off"). When there
 is nothing to pick, say so: "No camera found"; while looking, "Finding
