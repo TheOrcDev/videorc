@@ -41,7 +41,8 @@ export function SoundboardSection(): ReactElement {
             variant="ghost"
             onClick={() => void board.stopAll()}
           >
-            <StopIcon data-icon="inline-start" />
+            {/* Filled, like Stop recording: the outline square read as a checkbox. */}
+            <StopIcon data-icon="inline-start" weight="fill" />
             Stop all
           </Button>
         </DisabledReason>
