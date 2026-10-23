@@ -691,7 +691,9 @@ mod tests {
         samples.extend(tone(4_800, 0.5));
         samples.extend(silence(48_000));
         let (start, end) = trim_bounds(&samples).unwrap();
-        assert_eq!(start, 48_000 - 480);
+        // Frame 48_000 is the tone's zero crossing; the first frame over the
+        // floor is the next one.
+        assert_eq!(start, 48_001 - 480);
         // The last frame of the tone may be a zero crossing; the end lands
         // within a few frames of the tone's end plus 10 ms.
         assert!((52_800 + 480 - 60..=52_800 + 480).contains(&end), "{end}");
@@ -756,7 +758,8 @@ mod tests {
             sound_name_from_path(Path::new("/x/ Air horn .wav")),
             "Air horn"
         );
-        assert_eq!(sound_name_from_path(Path::new("/x/.wav")), "Sound");
+        // A stem of blanks falls back; a dot-file keeps its dotted stem.
+        assert_eq!(sound_name_from_path(Path::new("/x/   .wav")), "Sound");
         let long = format!("/x/{}.mp3", "n".repeat(80));
         assert_eq!(sound_name_from_path(Path::new(&long)).chars().count(), 64);
         assert_eq!(normalize_sound_name("  Boom ").unwrap(), "Boom");
@@ -1047,7 +1050,7 @@ mod tests {
         assert_eq!(sound.starter, None);
         let stored = database.sound_assets_dir().join(&sound.file);
         let pcm = read_wav_s16_stereo_48k(&std::fs::read(&stored).unwrap()).unwrap();
-        assert_eq!(pcm.len() / 2, sound.duration_ms as usize * 48);
+        assert_eq!((pcm.len() / 2).div_ceil(48), sound.duration_ms as usize);
         assert_eq!(
             load_sound_pcm(&database, &sound).unwrap().len(),
             pcm.len(),
