@@ -1,5 +1,22 @@
 # Implementation Plans
 
+- 2026-10-24: [Plan 190](190-live-backgrounds.md), Live backgrounds. The
+  owner wants five animated React Bits backgrounds (Silk, Side Rays, Plasma
+  Wave, Liquid Chrome, Line Waves) behind the screen and camera, free, on
+  macOS, Windows and Linux in one plan, with no cost to anyone who doesn't
+  turn one on. A live background is a bundled poster picture with a shader
+  attached. The GLSL from React Bits is the source of truth. Metal and D3D11
+  run hand ports, checked against golden grids. Linux runs the GLSL through
+  EGL/GLES on a latest-wins readback thread, under `linux_vaapi.rs`'s
+  render-node rules, because a CPU renderer measured far too slow. The two
+  Electron previews run it in WebGL2. A budget guard drops to half size,
+  then to the poster. Measured on an M4: 0.3–1.7 ms GPU per 1080p frame (a
+  still is 0.05–0.08 ms), 0–1 MB extra for four of the five, about 13 MB for
+  Plasma Wave. S1 is a hard cost gate on all three machines before any
+  product code. S9 proves zero cost when off with an A/B against
+  `origin/main`. Licence: the creator gave permission. D2–D6 answered.
+  **PLANNED** 2026-10-24.
+
 - 2026-10-23: [Plan 189](189-soundboard.md), Soundboard. The owner wants
   a soundboard in Studio on audiocn's sound pads, with the sounds streamers
   use most built in. Sounds join the session audio bus as a third mix
