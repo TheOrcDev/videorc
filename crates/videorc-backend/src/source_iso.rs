@@ -2082,6 +2082,7 @@ mod tests {
         let mut layout = default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenCamera;
         StartSessionParams {
+            replay: None,
             sources: SourceSelection {
                 screen_id: Some("screen:1".into()),
                 window_id: None,

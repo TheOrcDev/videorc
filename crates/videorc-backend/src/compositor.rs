@@ -11131,6 +11131,7 @@ mod tests {
                 batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
             };
             let mut cache = CompositorRenderCache {
+                drafts_follow_capture: false,
                 frame_store: stores.screen.clone(),
                 stream_frame_store: None,
                 source_iso_frame_stores: Some(stores.clone()),

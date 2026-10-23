@@ -228,6 +228,7 @@ async fn sessions_without_destinations_send_no_fact() {
     let (sender, mut receiver) = mpsc::channel(4);
     state.discord_announce.facts.set(sender).unwrap();
     let status = RecordingStatus {
+        replay_only: false,
         state: RecordingState::Recording,
         session_id: Some("s1".to_string()),
         output_path: None,
