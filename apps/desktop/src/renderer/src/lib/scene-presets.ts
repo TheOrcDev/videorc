@@ -22,6 +22,7 @@ export type VisualSources = Pick<
   | 'cameraId'
   | 'cameraName'
   | 'cameraOff'
+  | 'captureOff'
   | 'screenId'
   | 'screenName'
   | 'windowId'
@@ -59,6 +60,8 @@ export function visualSources(sources: VisualSources): VisualSources {
     // Legacy absent flags remain automatic selection, never inferred Off.
     // Always project a boolean so apply/checkpoint restore clears prior Off.
     cameraOff: sources.cameraOff === true && !sources.cameraId,
+    // Plan 0002 (release test 146): the same projection for a screen set to None.
+    captureOff: sources.captureOff === true && !sources.screenId && !sources.windowId,
     screenId: sources.screenId,
     screenName: sources.screenName,
     windowId: sources.windowId,
@@ -144,6 +147,8 @@ export function normalizeSceneVisual(raw: unknown): SceneVisual {
     throw new Error('Invalid source visibility')
   if (data.sources.cameraOff !== undefined && typeof data.sources.cameraOff !== 'boolean')
     throw new Error('Invalid camera Off intent')
+  if (data.sources.captureOff !== undefined && typeof data.sources.captureOff !== 'boolean')
+    throw new Error('Invalid screen None intent')
   for (const key of ['cameraId', 'screenId', 'windowId'] as const) {
     if (
       data.sources[key] !== undefined &&

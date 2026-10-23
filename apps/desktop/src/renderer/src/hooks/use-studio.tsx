@@ -9743,6 +9743,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : { ...current, sources: { ...current.sources, cameraOff: sources.cameraOff } }
         )
       }
+      if (sourceKind === 'capture') {
+        // Plan 0002 (release test 146): the same for a screen set to None.
+        setCaptureConfig((current) =>
+          current.sources.captureOff === sources.captureOff
+            ? current
+            : { ...current, sources: { ...current.sources, captureOff: sources.captureOff } }
+        )
+      }
       if (sourceKind === 'microphone') {
         // Plan 0027: the same for a microphone set to None.
         setCaptureConfig((current) =>

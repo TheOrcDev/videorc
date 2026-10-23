@@ -1264,6 +1264,7 @@ const sourceSelectionSchema = objectSchema(
     screenName: optionalText,
     windowId: optionalText,
     windowName: optionalText,
+    captureOff: optionalSchema(booleanSchema),
     cameraId: optionalText,
     cameraName: optionalText,
     cameraOff: optionalSchema(booleanSchema),

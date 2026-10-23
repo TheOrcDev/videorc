@@ -81,6 +81,55 @@ function captureConfigFixture(): CaptureConfig {
 }
 
 describe('reconcileSourceSelection', () => {
+  describe('screen None (release test 146, plan 0002)', () => {
+    // Linux: the only screen rows are the portal entries, and selecting one
+    // asks the compositor for a share, so None must survive reconcile.
+    const devices = [
+      { id: 'screen:portal:monitor', name: 'Screen (portal)', kind: 'screen', status: 'available' },
+      { id: 'window:portal:window', name: 'Window (portal)', kind: 'window', status: 'available' },
+      { id: 'camera:1', name: 'FaceTime HD Camera', kind: 'camera', status: 'available' }
+    ] as const satisfies Device[]
+
+    it('keeps an explicit None through every device refresh and layout transaction', () => {
+      const none = buildCaptureSources(
+        { screenId: 'screen:portal:monitor', screenName: 'Screen (portal)', cameraId: 'camera:1' },
+        [...devices],
+        undefined
+      )
+      expect(none).toMatchObject({ screenId: undefined, windowId: undefined, captureOff: true })
+      const once = reconcileSourceSelection(none, [...devices])
+      expect(once.screenId).toBeUndefined()
+      expect(once.windowId).toBeUndefined()
+      expect(once.captureOff).toBe(true)
+      expect(reconcileSourceSelection(once, [...devices])).toEqual(once)
+      expect(reconcileSourceSelectionForLayoutTransaction(once, [...devices])).toEqual(once)
+    })
+
+    it('still picks the first screen when none was ever chosen', () => {
+      const next = reconcileSourceSelection({ cameraId: 'camera:1' }, [...devices])
+      expect(next.screenId).toBe('screen:portal:monitor')
+      expect(next.captureOff).toBeUndefined()
+    })
+
+    it('choosing a screen or window clears None, and a stale None never hides a chosen one', () => {
+      const none = buildCaptureSources({ cameraId: 'camera:1' }, [...devices], undefined)
+      expect(buildCaptureSources(none, [...devices], 'window:portal:window')).toMatchObject({
+        windowId: 'window:portal:window',
+        captureOff: undefined
+      })
+      expect(
+        reconcileSourceSelection({ screenId: 'screen:portal:monitor', captureOff: true }, [
+          ...devices
+        ])
+      ).toMatchObject({ screenId: 'screen:portal:monitor', captureOff: undefined })
+    })
+
+    it('leaves the dev test pattern alone', () => {
+      const next = reconcileSourceSelection({ testPattern: true, captureOff: true }, [...devices])
+      expect(next).toMatchObject({ testPattern: true, screenId: undefined, windowId: undefined })
+    })
+  })
+
   describe('camera Off (plan 080 S4)', () => {
     const devices = [
       { id: 'screen:1', name: 'Display 1', kind: 'screen', status: 'available' },

@@ -525,6 +525,15 @@ export interface SourceSelection {
   screenName?: string
   windowId?: string
   windowName?: string
+  /**
+   * The user chose no screen or window (release test 146, plan 0002), the
+   * capture twin of `cameraOff`: without it None reads as "never chosen" and
+   * any scene click or device refresh selects the first screen again, which on
+   * Linux asks the compositor for a share. Renderer intent only: the backend
+   * ignores it. Meaningless once a `screenId` or `windowId` is set, and
+   * reconcile drops it then.
+   */
+  captureOff?: boolean
   cameraId?: string
   cameraName?: string
   /**
