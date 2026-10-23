@@ -686,7 +686,10 @@ const OFF_TIER_RADIUS_ALLOWLIST = new Set([
   'src/components/ui/chart.tsx',
   'src/components/ui/checkbox.tsx',
   // audiocn (plan 092): the mixer's dashed empty well.
-  'src/components/ui/mixer.tsx'
+  'src/components/ui/mixer.tsx',
+  // audiocn (plan 189): the pad root's `rounded-xl`; Videorc passes
+  // `rounded-row` from outside (docs/audiocn.md), so no pad shows it.
+  'src/components/ui/sound-pad.tsx'
 ])
 
 describe('guardrails consolidated (plan 174 S4.1)', SOURCE_SCAN_TIMEOUT, () => {

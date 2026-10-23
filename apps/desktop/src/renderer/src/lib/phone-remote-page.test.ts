@@ -24,6 +24,7 @@ const remote = vi.hoisted(() => ({
   client: null as FakeClient | null,
   state: {} as State,
   banners: [] as Array<{ id: string; name: string; shown: boolean }>,
+  sounds: [] as Array<{ id: string; name: string; playing: boolean }>,
   describeCalls: 0
 }))
 
@@ -71,7 +72,8 @@ vi.mock(
               layoutPresets: ['screen-only', 'vertical-split'],
               layoutLabels: { 'screen-only': 'Screen only', 'vertical-split': 'Vertical split' },
               takeovers: [],
-              banners: remote.banners
+              banners: remote.banners,
+              sounds: remote.sounds
             },
             state: remote.state
           }
@@ -122,6 +124,7 @@ beforeEach(async () => {
   vi.useFakeTimers()
   remote.client = null
   remote.banners = []
+  remote.sounds = []
   remote.describeCalls = 0
   remote.state = {
     sessionState: 'recording',
@@ -528,5 +531,52 @@ describe('shipping phone remote banners (plan 186 S7)', () => {
     ])
     // Names only: no image or path ever reaches the page.
     expect(page.document.querySelector('#deck-banners img')).toBeNull()
+  })
+})
+
+describe('shipping phone remote sounds (plan 189 S10)', () => {
+  const soundKeys = () =>
+    [...page.document.querySelectorAll<HTMLButtonElement>('#deck-sounds .key')].map((key) => ({
+      name: key.querySelector('.name')!.textContent,
+      hint: key.querySelector('.hint')?.textContent ?? null,
+      disabled: key.disabled
+    }))
+  const settle = async () => {
+    for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  }
+
+  it('lists sounds by name, presses each by id, and stops them all', async () => {
+    expect((page.document.getElementById('sounds-label') as unknown as HTMLElement).hidden).toBe(
+      true
+    )
+    remote.sounds = [
+      { id: 'airhorn', name: 'Airhorn', playing: false },
+      { id: 'applause', name: 'Applause', playing: true }
+    ]
+    stateUpdate({})
+    await settle()
+    expect((page.document.getElementById('sounds-label') as unknown as HTMLElement).hidden).toBe(
+      false
+    )
+    expect(soundKeys()).toEqual([
+      { name: 'Airhorn', hint: null, disabled: false },
+      { name: 'Applause', hint: 'Playing', disabled: false },
+      { name: 'Stop all sounds', hint: null, disabled: false }
+    ])
+    const keys = page.document.querySelectorAll<HTMLButtonElement>('#deck-sounds .key')
+    keys[0].click()
+    keys[2].click()
+    expect(client().intent.mock.calls.map(([intent]) => intent)).toEqual([
+      { kind: 'soundPlay', soundId: 'airhorn' },
+      { kind: 'soundStop' }
+    ])
+    // Names only: no file or path ever reaches the page.
+    expect(page.document.querySelector('#deck-sounds')?.innerHTML).not.toMatch(/\.wav|src=|href=/)
+
+    // Nothing plays: Stop all sounds waits.
+    remote.sounds = [{ id: 'airhorn', name: 'Airhorn', playing: false }]
+    stateUpdate({})
+    await settle()
+    expect(soundKeys().at(-1)).toEqual({ name: 'Stop all sounds', hint: null, disabled: true })
   })
 })

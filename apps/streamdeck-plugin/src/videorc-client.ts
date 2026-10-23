@@ -31,6 +31,8 @@ export interface RemoteDescribe {
   takeovers?: Array<{ id: string; name: string }>
   /** Plan 186; absent from apps that predate banners. */
   banners?: Array<{ id: string; name: string; shown: boolean }>
+  /** Plan 189; absent from apps that predate the soundboard. */
+  sounds?: Array<{ id: string; name: string; playing: boolean }>
   windows?: string[]
 }
 
@@ -59,6 +61,37 @@ export function bannerKeyTitle(
 /** A Banner key's intent: a toggle by id, or nothing until one is picked. */
 export function bannerKeyIntent(bannerId: string | undefined): Record<string, unknown> | null {
   return bannerId ? { kind: 'bannerToggle', bannerId } : null
+}
+
+/** Longest sound name a key title shows before it ends in "…". */
+const SOUND_TITLE_MAX_CHARS = 10
+
+/**
+ * A Play sound key's title (plan 189): the sound's name, with ON while it
+ * plays. A key whose sound is gone, or not picked yet, says Sound.
+ */
+export function soundKeyTitle(
+  describe: RemoteDescribe | null,
+  soundId: string | undefined,
+  connected: boolean
+): string {
+  if (!connected) return 'Videorc\noffline'
+  const sound = describe?.sounds?.find((candidate) => candidate.id === soundId)
+  if (!sound) return 'Sound'
+  const name =
+    sound.name.length > SOUND_TITLE_MAX_CHARS
+      ? `${sound.name.slice(0, SOUND_TITLE_MAX_CHARS - 1).trimEnd()}…`
+      : sound.name
+  return sound.playing ? `${name}\nON` : name
+}
+
+/**
+ * A Play sound key's intent: a press by id, so the sound plays the way its
+ * mode says (Play once restarts, Play/stop and Loop stop a playing sound),
+ * or nothing until one is picked.
+ */
+export function soundKeyIntent(soundId: string | undefined): Record<string, unknown> | null {
+  return soundId ? { kind: 'soundPlay', soundId } : null
 }
 
 interface Discovery {

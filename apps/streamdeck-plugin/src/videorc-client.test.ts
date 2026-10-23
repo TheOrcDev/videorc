@@ -11,6 +11,8 @@ import {
   bannerKeyIntent,
   bannerKeyTitle,
   defaultDiscoveryPath,
+  soundKeyIntent,
+  soundKeyTitle,
   readDiscovery
 } from './videorc-client.js'
 
@@ -142,4 +144,26 @@ test('VideorcClient re-reads describe after each remote.state, one read at a tim
     await new Promise<void>((resolve) => server.close(() => resolve()))
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// Plan 189: a Play sound key names its sound and says ON while it plays.
+test('soundKeyTitle names the picked sound, ON while it plays, and says so when it is gone', () => {
+  const describe = {
+    sounds: [
+      { id: 'airhorn', name: 'Airhorn', playing: true },
+      { id: 'trombone', name: 'Sad trombone', playing: false }
+    ]
+  }
+  assert.equal(soundKeyTitle(describe, 'airhorn', true), 'Airhorn\nON')
+  assert.equal(soundKeyTitle(describe, 'trombone', true), 'Sad tromb…')
+  assert.equal(soundKeyTitle(describe, 'deleted', true), 'Sound')
+  assert.equal(soundKeyTitle(describe, undefined, true), 'Sound')
+  assert.equal(soundKeyTitle({}, 'airhorn', true), 'Sound')
+  assert.equal(soundKeyTitle(describe, 'airhorn', false), 'Videorc\noffline')
+})
+
+test('soundKeyIntent presses the picked sound by id, and nothing before one is picked', () => {
+  assert.deepEqual(soundKeyIntent('airhorn'), { kind: 'soundPlay', soundId: 'airhorn' })
+  assert.equal(soundKeyIntent(undefined), null)
+  assert.equal(soundKeyIntent(''), null)
 })

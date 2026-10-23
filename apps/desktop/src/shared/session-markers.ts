@@ -18,6 +18,7 @@ import {
   type BannerRelayAction,
   type BannerSummary
 } from './banner-commands'
+import { classifySoundCommand, type SoundRelayAction, type SoundSummary } from './sound-commands'
 
 export interface SessionMarker {
   id: string
@@ -216,16 +217,19 @@ export type ComposerCommand =
   | { kind: 'marker'; label?: string }
   /** Plan 186: show or hide a banner; never posts to chat. */
   | { kind: 'banner'; action: BannerRelayAction }
+  /** Plan 189: press a sound or stop them all; never posts to chat. */
+  | { kind: 'sound'; action: SoundRelayAction }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 /**
  * Leading slash commands never reach a provider. Double slash escapes once.
- * `banners` is what the window knows (plan 186): `/banner <name>` resolves
- * against it.
+ * `banners` and `sounds` are what the window knows (plans 186, 189):
+ * `/banner <name>` and `/sound <name>` resolve against them.
  */
 export function classifyComposerDraft(
   raw: string,
-  banners: readonly BannerSummary[] = []
+  banners: readonly BannerSummary[] = [],
+  sounds: readonly SoundSummary[] = []
 ): ComposerCommand {
   const text = raw.trim()
   if (!text.startsWith('/')) return { kind: 'chat', text }
@@ -241,10 +245,12 @@ export function classifyComposerDraft(
   }
   const banner = /^\/banner(?:\s+([\s\S]*))?$/i.exec(text)
   if (banner) return classifyBannerCommand(banner[1] ?? '', banners)
+  const sound = /^\/sound(?:\s+([\s\S]*))?$/i.exec(text)
+  if (sound) return classifySoundCommand(sound[1] ?? '', sounds)
   return {
     kind: 'error',
     message:
-      'Unknown command. Use /marker [title], /banner [name], or /help. To send a literal slash, start with //.'
+      'Unknown command. Use /marker [title], /banner [name], /sound [name], or /help. To send a literal slash, start with //.'
   }
 }
 /** A marker's place in the recording as the one timecode: "2:05", "1:02:05" (plan 174 S1.4). */

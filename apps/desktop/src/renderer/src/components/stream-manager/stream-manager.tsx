@@ -126,6 +126,7 @@ import {
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
@@ -292,6 +293,15 @@ export interface StreamManagerProps {
    */
   banners?: readonly BannerSummary[] | null
   onBanner?: (action: BannerRelayAction) => Promise<boolean>
+  /**
+   * Sounds (plan 189 S9): the board Studio pushed (null until it loads) and
+   * one pad, `/sound` or Stop all, relayed to Studio. The status bar's Sounds
+   * popover and the composer's `/sound` use them, on air or not: sounds
+   * matter in recordings too. Resolves false when it didn't happen, already
+   * said.
+   */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => Promise<boolean>
   onOpenPreview?: () => void
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
@@ -400,6 +410,8 @@ export function StreamManager({
   onMarkClip,
   banners,
   onBanner,
+  sounds,
+  onSound,
   markerContext,
   onMarker,
   onUndoMarker,
@@ -1214,6 +1226,8 @@ export function StreamManager({
             onUndoMarker={inHistory ? undefined : onUndoMarker}
             banners={banners}
             onBanner={inHistory ? undefined : onBanner}
+            sounds={sounds}
+            onSound={inHistory ? undefined : onSound}
             onSend={onSend}
           />
         </div>
@@ -1263,6 +1277,8 @@ export function StreamManager({
         onMarkClip={onAir ? onMarkClip : undefined}
         banners={banners}
         onBanner={onBanner}
+        sounds={sounds}
+        onSound={onSound}
         onOpenPreview={onOpenPreview}
         onSearchChat={searchChat}
         onStatsLayoutChange={changeStatsLayout}

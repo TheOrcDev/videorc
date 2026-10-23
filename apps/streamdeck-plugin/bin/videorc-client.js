@@ -31,6 +31,31 @@ export function bannerKeyTitle(describe, bannerId, connected) {
 export function bannerKeyIntent(bannerId) {
     return bannerId ? { kind: 'bannerToggle', bannerId } : null;
 }
+/** Longest sound name a key title shows before it ends in "…". */
+const SOUND_TITLE_MAX_CHARS = 10;
+/**
+ * A Play sound key's title (plan 189): the sound's name, with ON while it
+ * plays. A key whose sound is gone, or not picked yet, says Sound.
+ */
+export function soundKeyTitle(describe, soundId, connected) {
+    if (!connected)
+        return 'Videorc\noffline';
+    const sound = describe?.sounds?.find((candidate) => candidate.id === soundId);
+    if (!sound)
+        return 'Sound';
+    const name = sound.name.length > SOUND_TITLE_MAX_CHARS
+        ? `${sound.name.slice(0, SOUND_TITLE_MAX_CHARS - 1).trimEnd()}…`
+        : sound.name;
+    return sound.playing ? `${name}\nON` : name;
+}
+/**
+ * A Play sound key's intent: a press by id, so the sound plays the way its
+ * mode says (Play once restarts, Play/stop and Loop stop a playing sound),
+ * or nothing until one is picked.
+ */
+export function soundKeyIntent(soundId) {
+    return soundId ? { kind: 'soundPlay', soundId } : null;
+}
 const RECONNECT_DELAY_MS = 2_000;
 /** An intent that neither acked nor failed within this window counts as
  * failed — the deck key must never hang waiting for feedback. */
