@@ -10070,18 +10070,16 @@ mod mix_tests {
         // Three seconds: a silent second, the tone, a silent second.
         const FRAMES: usize = 144_000;
         let epoch = Instant::now() + Duration::from_millis(500);
-        let mut observation = MixTestObservation::new(epoch, system_options().playout_delay);
-        observation.fixture_gate = Some(Arc::new(MixFixtureGate::default()));
-        let evidence = Arc::new(std::sync::Mutex::new(observation));
-        let bus = start_bus_observed(
+        // No fixture gate: it coordinates two unequal packet streams, and a
+        // silent microphone has nothing to line up. A packet discarded at the
+        // start is silence either way.
+        let bus = start_bus(
             epoch,
             Some(signal_packets(epoch, 0, FRAMES + 48_000, 512, |_| {
                 (0.0, 0.0)
             })),
             AudioProcessingSettings::default(),
             system_options(),
-            None,
-            Some(evidence.clone()),
         )
         .await;
         let plan =
