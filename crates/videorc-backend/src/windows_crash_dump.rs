@@ -16,6 +16,7 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE};
 use windows::Win32::Storage::FileSystem::{
@@ -27,7 +28,8 @@ use windows::Win32::System::Diagnostics::Debug::{
     MiniDumpWriteDump, SetUnhandledExceptionFilter,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+    CreateThread, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+    THREAD_CREATION_FLAGS, WaitForSingleObject,
 };
 use windows::core::PCWSTR;
 
@@ -65,48 +67,82 @@ pub fn install() {
     tracing::info!(path = %path.display(), "[crash-dump] native crash dumps enabled");
 }
 
+/// Longest the crashing thread waits for the dump. A crash can happen while
+/// the loader or heap lock is held, and `MiniDumpWriteDump` (or even starting
+/// the writer thread) then deadlocks: an earlier in-filter version turned a
+/// crash into a permanent hang with a 0-byte dump (2026-10-23 18:52), so the
+/// supervisor never restarted the backend. The dump is now written on its own
+/// thread and abandoned after this bound, so the process always terminates.
+const DUMP_WRITE_TIMEOUT_MS: u32 = 20_000;
+
+static CRASH_EXCEPTION: AtomicPtr<EXCEPTION_POINTERS> = AtomicPtr::new(std::ptr::null_mut());
+static CRASH_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
 unsafe extern "system" fn write_dump_filter(info: *const EXCEPTION_POINTERS) -> i32 {
-    if let Some(path) = DUMP_PATH.get() {
-        // SAFETY: path is a NUL-terminated wide string owned by a static.
-        let file = unsafe {
-            CreateFileW(
-                PCWSTR(path.as_ptr()),
-                GENERIC_WRITE.0,
-                FILE_SHARE_MODE(0),
-                None,
-                CREATE_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )
-        };
-        if let Ok(file) = file {
-            let exception = MINIDUMP_EXCEPTION_INFORMATION {
-                ThreadId: unsafe { GetCurrentThreadId() },
-                ExceptionPointers: info as *mut EXCEPTION_POINTERS,
-                ClientPointers: false.into(),
-            };
-            let dump_type = MiniDumpWithUnloadedModules
-                | MiniDumpWithThreadInfo
-                | MiniDumpWithIndirectlyReferencedMemory;
-            // SAFETY: valid process/file handles; exception info points at
-            // the live exception record for this thread.
-            let _ = unsafe {
-                MiniDumpWriteDump(
-                    GetCurrentProcess(),
-                    GetCurrentProcessId(),
-                    file,
-                    dump_type,
-                    Some(&exception),
-                    None,
-                    None,
-                )
-            };
-            let _ = unsafe { CloseHandle(file) };
-        }
+    CRASH_EXCEPTION.store(info as *mut EXCEPTION_POINTERS, Ordering::SeqCst);
+    CRASH_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+    // SAFETY: the writer only reads the statics above and the dump path; the
+    // crashing thread (and its exception record) stays parked in this filter
+    // until the wait below returns.
+    if let Ok(writer) = unsafe {
+        CreateThread(
+            None,
+            0,
+            Some(dump_writer_thread),
+            None,
+            THREAD_CREATION_FLAGS(0),
+            None,
+        )
+    } {
+        let _ = unsafe { WaitForSingleObject(writer, DUMP_WRITE_TIMEOUT_MS) };
+        let _ = unsafe { CloseHandle(writer) };
     }
     match PREVIOUS_FILTER.get().copied().flatten() {
         // SAFETY: chaining to whatever filter was installed before ours.
         Some(previous) => unsafe { previous(info) },
         None => EXCEPTION_CONTINUE_SEARCH,
     }
+}
+
+unsafe extern "system" fn dump_writer_thread(_: *mut core::ffi::c_void) -> u32 {
+    let Some(path) = DUMP_PATH.get() else {
+        return 1;
+    };
+    // SAFETY: path is a NUL-terminated wide string owned by a static.
+    let Ok(file) = (unsafe {
+        CreateFileW(
+            PCWSTR(path.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_MODE(0),
+            None,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }) else {
+        return 1;
+    };
+    let exception = MINIDUMP_EXCEPTION_INFORMATION {
+        ThreadId: CRASH_THREAD_ID.load(Ordering::SeqCst),
+        ExceptionPointers: CRASH_EXCEPTION.load(Ordering::SeqCst),
+        ClientPointers: false.into(),
+    };
+    let dump_type = MiniDumpWithUnloadedModules
+        | MiniDumpWithThreadInfo
+        | MiniDumpWithIndirectlyReferencedMemory;
+    // SAFETY: valid process/file handles; the exception pointers belong to
+    // the crashing thread, which is blocked waiting for this thread.
+    let _ = unsafe {
+        MiniDumpWriteDump(
+            GetCurrentProcess(),
+            GetCurrentProcessId(),
+            file,
+            dump_type,
+            Some(&exception),
+            None,
+            None,
+        )
+    };
+    let _ = unsafe { CloseHandle(file) };
+    0
 }
