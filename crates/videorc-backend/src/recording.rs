@@ -9027,6 +9027,7 @@ fn audio_levels_event(
         session_id: Some(session_id.to_string()),
         microphone: levels.microphone,
         system_audio: levels.system_audio,
+        sounds: None,
         master: levels.master,
         master_clipped_samples: levels.master_clipped_samples,
     })
