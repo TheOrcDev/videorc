@@ -992,11 +992,13 @@ fn backend_bootstrap(state: &AppState) -> BackendBootstrap {
     }
 }
 
-/// The folders behind `videorc-asset://screen|banner/<file>` (plan 0005).
+/// The folders behind `videorc-asset://screen|banner|sound/<file>` (release
+/// test 146 plan 0005, release test 147 plan 0002).
 fn managed_asset_roots(database: &Database) -> backend_authority::ManagedAssetRoots {
     backend_authority::ManagedAssetRoots {
         screens: database.screen_assets_dir().to_string_lossy().into_owned(),
         banners: database.banner_assets_dir().to_string_lossy().into_owned(),
+        sounds: database.sound_assets_dir().to_string_lossy().into_owned(),
     }
 }
 
@@ -13853,7 +13855,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ready_names_the_screens_and_banners_folders_beside_the_database() {
+    fn ready_names_the_screens_banners_and_sounds_folders_beside_the_database() {
         // Release test 146, plan 0005: main serves videorc-asset://screen and
         // ://banner from these roots, so they must be the backend's own.
         let directory =
@@ -13868,9 +13870,18 @@ mod tests {
             std::path::PathBuf::from(&roots.banners),
             directory.join("Banners")
         );
+        // Release test 147, plan 0002: the monitor's sounds too.
+        assert_eq!(
+            std::path::PathBuf::from(&roots.sounds),
+            directory.join("Sounds")
+        );
+        assert_eq!(
+            std::path::PathBuf::from(&roots.sounds),
+            database.sound_assets_dir()
+        );
         assert_eq!(
             serde_json::to_value(&roots).unwrap(),
-            json!({ "screens": roots.screens, "banners": roots.banners })
+            json!({ "screens": roots.screens, "banners": roots.banners, "sounds": roots.sounds })
         );
         let _ = std::fs::remove_dir_all(&directory);
     }

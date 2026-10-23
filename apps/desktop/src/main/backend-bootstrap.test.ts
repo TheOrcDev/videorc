@@ -23,12 +23,14 @@ describe('backend managed asset roots (release test 146, plan 0005)', () => {
       ...base,
       managedAssetRoots: {
         screens: '/home/u/.videorc/Screens',
-        banners: '/home/u/.videorc/Banners'
+        banners: '/home/u/.videorc/Banners',
+        sounds: '/home/u/.videorc/Sounds'
       }
     })
     expect(parsed.managedAssetRoots).toEqual({
       screens: '/home/u/.videorc/Screens',
-      banners: '/home/u/.videorc/Banners'
+      banners: '/home/u/.videorc/Banners',
+      sounds: '/home/u/.videorc/Sounds'
     })
     expect(JSON.stringify(parsed.renderer)).not.toContain('.videorc')
     expect(publicBackendConnectionJson(parsed.renderer)).not.toContain('.videorc')
@@ -45,6 +47,17 @@ describe('backend managed asset roots (release test 146, plan 0005)', () => {
         .managedAssetRoots
     ).toBeNull()
     expect(parseBackendBootstrap({ ...base, managedAssetRoots: 'nope' }).renderer.port).toBe(9876)
+  })
+
+  it('keeps screens and banners when sounds is missing or relative (release test 147)', () => {
+    for (const sounds of [undefined, 'Sounds', 7]) {
+      expect(
+        parseBackendBootstrap({
+          ...base,
+          managedAssetRoots: { screens: '/s', banners: '/b', sounds }
+        }).managedAssetRoots
+      ).toEqual({ screens: '/s', banners: '/b' })
+    }
   })
 })
 

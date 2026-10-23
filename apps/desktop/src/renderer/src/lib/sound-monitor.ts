@@ -9,6 +9,7 @@
 import { soundAssetUrl } from '../../../shared/sound-assets'
 import type { Sound, SoundVoice } from './backend'
 import type { SoundboardSnapshot } from './soundboard-store'
+import { toast } from './toast'
 
 /** A stop or a restart fades the old voice out over 5 ms, like the bus. */
 export const MONITOR_RAMP_SECONDS = 0.005
@@ -95,6 +96,20 @@ export interface SoundMonitorDeps {
   now: () => number
   setTimer: (callback: () => void, delayMs: number) => unknown
   clearTimer: (handle: unknown) => void
+  /**
+   * Said once per sound and edit when its file can't be read or decoded
+   * (release test 147, plan 0002: a 404 left the monitor silent with only a
+   * console line). Defaults to a warning toast.
+   */
+  onUnplayable?: (sound: Sound) => void
+}
+
+/** The warning when the monitor can't play a sound here. */
+export function monitorUnplayableToast(sound: Pick<Sound, 'id' | 'name'>): void {
+  toast.warning(`Couldn't play ${sound.name} on this computer`, {
+    id: `sound-monitor:${sound.id}`,
+    description: "Only your own speakers miss it. Recordings and streams aren't affected."
+  })
 }
 
 const browserDeps: SoundMonitorDeps = {
@@ -231,11 +246,15 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
         source.start(0, monitorStartOffsetSeconds(voice, deps.now(), buffer.duration))
       },
       (error: unknown) => {
-        loading.delete(voice.voiceId)
+        // A load the monitor stopped waiting for (the voice ended, the
+        // monitor went away) failing is nobody's news: only an active one
+        // warns, and a later one for the same sound still can.
+        const active = loading.delete(voice.voiceId) && !disposed
         const key = bufferKey(sound)
-        if (!warned.has(key)) {
+        if (active && !warned.has(key)) {
           warned.add(key)
           console.warn(`[sounds] the monitor couldn't play ${sound.name}:`, error)
+          ;(deps.onUnplayable ?? monitorUnplayableToast)(sound)
         }
         watchIdle()
       }

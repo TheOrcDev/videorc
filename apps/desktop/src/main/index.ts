@@ -14409,12 +14409,18 @@ function resolveManagedBackendAssetFile(
 // Sound files (plan 189) live in the backend-managed Sounds dir beside
 // Screens and Banners; the main window's monitor fetches them by bare `.wav`
 // basename (`videorc-asset://sound/<file>`), with the same realpath, no
-// symlink, regular-file checks.
+// symlink, regular-file checks. Like Screens and Banners they are found in the
+// folder READY names first: on Linux that is `~/.videorc/Sounds`, not
+// userData, and the monitor was silent (release test 147, plan 0002).
 function resolveManagedSoundFile(fileName: string): string | null {
   if (!isSoundFileName(fileName)) {
     return null
   }
-  return resolveRegularFileInsideRoot(join(app.getPath('userData'), SOUNDS_FOLDER), fileName)
+  return resolveManagedBackendAssetFile(
+    backendManagedAssetRoots?.sounds ?? null,
+    SOUNDS_FOLDER,
+    fileName
+  )
 }
 
 async function withCorsReadHeader(pending: Promise<Response>): Promise<Response> {

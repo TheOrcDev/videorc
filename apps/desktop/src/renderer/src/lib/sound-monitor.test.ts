@@ -271,4 +271,50 @@ describe('the monitor (plan 189)', () => {
     monitor.dispose()
     expect(audio.context.close).toHaveBeenCalled()
   })
+
+  it('says once per sound when it cannot play one, instead of only logging (release test 147)', async () => {
+    const { deps } = monitorWithFakes()
+    const unplayable = vi.fn()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const monitor = createSoundMonitor({
+      ...deps,
+      fetchBytes: vi.fn(async () => {
+        throw new Error('The sound file answered 404.')
+      }),
+      onUnplayable: unplayable
+    })
+    monitor.update(snapshot([voice('v-1', 'a')]))
+    await flush()
+    monitor.update(snapshot([]))
+    monitor.update(snapshot([voice('v-2', 'a')]))
+    await flush()
+    expect(unplayable).toHaveBeenCalledTimes(1)
+    expect(unplayable.mock.calls[0][0]).toMatchObject({ id: 'a', name: 'a' })
+    warn.mockRestore()
+  })
+
+  it('says nothing for a load it stopped waiting for', async () => {
+    const { deps } = monitorWithFakes()
+    const unplayable = vi.fn()
+    let fail!: (error: Error) => void
+    const monitor = createSoundMonitor({
+      ...deps,
+      fetchBytes: vi.fn(() => new Promise<ArrayBuffer>((_resolve, reject) => (fail = reject))),
+      onUnplayable: unplayable
+    })
+    monitor.update(snapshot([voice('v-1', 'a')]))
+    await flush()
+    // The voice ends before its file fails to load.
+    monitor.update(snapshot([]))
+    fail(new Error('The sound file answered 404.'))
+    await flush()
+    expect(unplayable).not.toHaveBeenCalled()
+    // After dispose, a failing load says nothing either.
+    monitor.update(snapshot([voice('v-2', 'b')]))
+    await flush()
+    monitor.dispose()
+    fail(new Error('The sound file answered 404.'))
+    await flush()
+    expect(unplayable).not.toHaveBeenCalled()
+  })
 })
