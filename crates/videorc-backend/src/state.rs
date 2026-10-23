@@ -1067,6 +1067,9 @@ pub struct AppState {
     pub banner_list_publication: Arc<StdMutex<()>>,
     /// Wakes the banner timer task (plan 186 S10) after any banner change.
     pub banner_timer_wake: Arc<tokio::sync::Notify>,
+    /// The same for sounds (plan 189): `sounds.changed` snapshots leave in
+    /// order, never behind an import's decode.
+    pub sound_list_publication: Arc<StdMutex<()>>,
     /// Completion truth for layout/live-control mutations across reconnects.
     pub operator_command_fence: Arc<CommandCompletionFence>,
     /// Physical camera/screen transition completion, independent from the
@@ -1355,6 +1358,7 @@ impl AppState {
             screen_list_publication: Arc::new(StdMutex::new(())),
             banner_list_publication: Arc::new(StdMutex::new(())),
             banner_timer_wake: Arc::new(tokio::sync::Notify::new()),
+            sound_list_publication: Arc::new(StdMutex::new(())),
             operator_command_fence: Arc::new(CommandCompletionFence::default()),
             source_transition_fence: Arc::new(CommandCompletionFence::default()),
             live_control_command_order: Arc::new(CommandCompletionFence::default()),
