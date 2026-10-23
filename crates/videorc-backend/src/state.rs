@@ -1070,6 +1070,9 @@ pub struct AppState {
     /// The same for sounds (plan 189): `sounds.changed` snapshots leave in
     /// order, never behind an import's decode.
     pub sound_list_publication: Arc<StdMutex<()>>,
+    /// The soundboard player (plan 189): the decoded library, the playing
+    /// voices and the session bus they go into.
+    pub soundboard: Arc<crate::sound_player::SoundPlayer>,
     /// Completion truth for layout/live-control mutations across reconnects.
     pub operator_command_fence: Arc<CommandCompletionFence>,
     /// Physical camera/screen transition completion, independent from the
@@ -1359,6 +1362,7 @@ impl AppState {
             banner_list_publication: Arc::new(StdMutex::new(())),
             banner_timer_wake: Arc::new(tokio::sync::Notify::new()),
             sound_list_publication: Arc::new(StdMutex::new(())),
+            soundboard: Arc::new(crate::sound_player::SoundPlayer::default()),
             operator_command_fence: Arc::new(CommandCompletionFence::default()),
             source_transition_fence: Arc::new(CommandCompletionFence::default()),
             live_control_command_order: Arc::new(CommandCompletionFence::default()),

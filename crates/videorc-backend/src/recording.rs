@@ -5419,6 +5419,11 @@ async fn start_session_with_timeline(
     if let (Some(audio), Some(taps)) = (attached_native_audio.as_ref(), source_iso_taps.as_ref()) {
         audio.set_source_taps(taps.clone());
     }
+    // Plan 189: the soundboard's voices go into this bus once the session is
+    // published; until then, and without a bus, a press is monitor only.
+    let session_soundboard = attached_native_audio
+        .as_ref()
+        .map(|audio| audio.soundboard());
     // The System audio switch (plan 069 S4). It opens nothing here: an On
     // setting is requested only after the session is published, so capture
     // never delays Record (decision 12).
@@ -6437,6 +6442,16 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
+        if let Some(handle) = session_soundboard {
+            let volume_db = state
+                .database
+                .sound_settings()
+                .map(|settings| settings.volume_db)
+                .unwrap_or(0);
+            state
+                .soundboard
+                .session_started(&session_id, handle, volume_db);
+        }
         // Buddy's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
         let listen_state = state.clone();
@@ -6997,6 +7012,9 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     let _ =
         crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &wait_session_id)
             .await;
+    // Plan 189: the bus ends every voice as it drains; the player's list
+    // follows now, so a pad never claims "on air" past Stop.
+    state.soundboard.session_ended(&state, &wait_session_id);
     drop(guard);
 
     #[cfg(target_os = "windows")]
@@ -9027,7 +9045,7 @@ fn audio_levels_event(
         session_id: Some(session_id.to_string()),
         microphone: levels.microphone,
         system_audio: levels.system_audio,
-        sounds: None,
+        sounds: levels.sounds,
         master: levels.master,
         master_clipped_samples: levels.master_clipped_samples,
     })
@@ -9923,6 +9941,7 @@ async fn monitor_session(
     // session's card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &session_id)
         .await;
+    state.soundboard.session_ended(&state, &session_id);
 
     if let Some(native_audio_stats) = monitored_recording.native_audio_stats {
         let diagnostic_stats = {
@@ -24271,6 +24290,7 @@ mod tests {
             crate::session_audio::BusLevels {
                 microphone: Some(reading),
                 system_audio: None,
+                sounds: None,
                 master: Some(reading),
                 master_clipped_samples: 3,
             },

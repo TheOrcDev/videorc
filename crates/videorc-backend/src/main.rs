@@ -120,6 +120,8 @@ mod session_ops;
 mod session_token;
 mod seventv;
 mod sound_loudness;
+mod sound_mix;
+mod sound_player;
 mod sound_store;
 mod source_audio_tap;
 mod source_iso;
@@ -5558,6 +5560,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sounds.reorder"
         | "sounds.delete"
         | "sounds.settings"
+        | "sounds.play"
+        | "sounds.press"
+        | "sounds.stop"
         | "preview.live.start"
         | "preview.live.stop" => Some(DEFAULT_MUTATION_POLICY),
 
@@ -5802,6 +5807,9 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "screens.delete"
         | "banners.show"
         | "banners.hide"
+        | "sounds.play"
+        | "sounds.press"
+        | "sounds.stop"
         | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD
         | "capture.recovery.retry"
         | CAPTURE_RECOVERY_SMOKE_INJECT_METHOD
@@ -12587,6 +12595,7 @@ async fn handle_text_message_with_role(
         }
         // Plan 189: the soundboard. Every store mutation ends in
         // `sound_store::on_sounds_changed`, which republishes the board;
+        // every playback change ends in `sounds.playback` from the player.
         // Refusals come back as the verbatim sentences from the plan.
         "sounds.list" => match state.database.soundboard_state() {
             Ok(board) => ServerResponse::ok(command.id, board),
@@ -12689,6 +12698,8 @@ async fn handle_text_message_with_role(
         "sounds.delete" => {
             match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
                 Ok(params) => {
+                    // Its voices stop first, so a deleted sound never plays on.
+                    state.soundboard.evict(state, &params.id);
                     match sound_store::delete_sound(&state.database, &params.id) {
                         Ok(()) => match sound_store::on_sounds_changed(state) {
                             Ok(board) => ServerResponse::ok(command.id, board.sounds),
@@ -12722,6 +12733,8 @@ async fn handle_text_message_with_role(
                     }
                     match state.database.update_sound_settings(&params) {
                         Ok(settings) => {
+                            // The running bus follows the fader at once.
+                            state.soundboard.set_board_volume_db(settings.volume_db);
                             match sound_store::on_sounds_changed(state) {
                                 Ok(board) => ServerResponse::ok(command.id, board),
                                 Err(error) => ServerResponse::error(
@@ -12738,6 +12751,35 @@ async fn handle_text_message_with_role(
                         ),
                     }
                 }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.play" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+            Ok(params) => match state.soundboard.play(state, &params.id).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "sounds.press" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+            Ok(params) => match state.soundboard.press(state, &params.id).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "sounds.stop" => {
+            match serde_json::from_value::<protocol::StopSoundParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    state.soundboard.stop(state, params.id.as_deref()),
+                ),
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -15965,6 +16007,9 @@ mod tests {
             "screens.delete",
             "banners.show",
             "banners.hide",
+            "sounds.play",
+            "sounds.press",
+            "sounds.stop",
             "captions.start",
             "captions.stop",
             "captions.style.set",
