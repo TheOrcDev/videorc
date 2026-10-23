@@ -81,6 +81,8 @@ import {
   applyCommentsSnapshotDelta
 } from '../../shared/comments-snapshot-delta'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
+import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../shared/sound-commands'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -144,6 +146,80 @@ function CommentsWindowApp(): ReactElement {
     return () => {
       disposed = true
       off?.()
+    }
+  }, [])
+  // Banners (plan 186 S7): the read-only list Studio pushes through main.
+  // A push that lands before the seed answers wins over the seed.
+  const [banners, setBanners] = useState<BannerSummary[] | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsBanners?.((list) => {
+      pushed = true
+      setBanners(list)
+    })
+    void window.videorc?.getCommentsBanners?.().then((list) => {
+      if (!disposed && !pushed) setBanners(list)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // One show or hide, relayed to Studio. Nothing says so when it works (the
+  // picture and the menu's check are the confirmation); a refusal is a
+  // warning with its own sentence. The banner rules load only then.
+  const runBanner = useCallback(async (action: BannerRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.bannerFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.bannerFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'banner-refusal' }
+      await import('@/lib/banners').then(
+        ({ bannerActionContext, bannerActionError }) =>
+          toastUserError(bannerActionError(error), bannerActionContext(action.action), options),
+        () => toastUserError(error, { action: 'change', object: 'the banner' }, options)
+      )
+      return false
+    }
+  }, [])
+  // Sounds (plan 189 S9): the read-only board Studio pushes through main.
+  // A push that lands before the seed answers wins over the seed.
+  const [sounds, setSounds] = useState<SoundboardSummary | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsSounds?.((board) => {
+      pushed = true
+      setSounds(board)
+    })
+    void window.videorc?.getCommentsSounds?.().then((board) => {
+      if (!disposed && !pushed) setSounds(board)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // One pad, `/sound` or Stop all, relayed to Studio, which plays it. Nothing
+  // says so when it works (the pad's ring is the confirmation); a refusal is
+  // a warning with its own sentence. The sound rules load only then.
+  const runSound = useCallback(async (action: SoundRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.soundFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.soundFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'sound-refusal' }
+      await import('@/lib/sounds').then(
+        ({ soundActionContext, soundActionError }) =>
+          toastUserError(soundActionError(error), soundActionContext(action.action), options),
+        () => toastUserError(error, { action: 'play', object: 'the sound' }, options)
+      )
+      return false
     }
   }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
@@ -760,6 +836,10 @@ function CommentsWindowApp(): ReactElement {
               )
           }}
           onClip={() => saveClip().then((copy) => copy.title)}
+          banners={banners}
+          onBanner={runBanner}
+          sounds={sounds}
+          onSound={runSound}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onShowFollowNames={() => {
             void window.videorc

@@ -25,6 +25,7 @@ import {
   buddyTriggerOutcome,
   withBuddyTriggerReaction
 } from '@/lib/buddy-pet-view'
+import { inlineUserError } from '@/lib/user-error'
 import { BUDDY_REACTION_NONE } from '../../../shared/buddy-pet'
 
 export interface BuddyReactionsSectionProps {
@@ -56,7 +57,9 @@ export function BuddyReactionsSection({
     setError(null)
     const next = withBuddyTriggerReaction(table, trigger, value)
     onSave({ ...persona, reactions: next }).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : "Couldn't save the reactions.")
+      setError(
+        inlineUserError(failure, { action: 'save', object: 'the reactions' }, 'buddy-reactions')
+      )
     )
   }
   return (

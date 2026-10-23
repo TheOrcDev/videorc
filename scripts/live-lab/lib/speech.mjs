@@ -3,6 +3,9 @@ import { appendFile, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { LAB_SPEECH_SINK, parsePulseDevices } from './linux-desktop.mjs'
+import { isLinux } from './platform.mjs'
+
 // Plan 178 U7 (plan 176 L3 step 2). Scripted speech for the live lab:
 // `say -o` renders a phrase to an AIFF file once, then the harness plays it
 // into the BlackHole virtual device, which Videorc uses as its microphone.
@@ -15,6 +18,19 @@ import { fileURLToPath } from 'node:url'
 // system output with SwitchAudioSource would also move the card's click.
 
 export const DEFAULT_DEVICE = 'BlackHole 2ch'
+// Plan 179: on Linux `espeak-ng -w` renders a WAV and ffmpeg's PulseAudio
+// output plays it into the lab speech sink, whose remap source is the lab
+// mic (linux-desktop.mjs). The sink is named, so no index lookup is needed.
+export const LINUX_DEFAULT_DEVICE = LAB_SPEECH_SINK
+
+export function defaultSpeechDevice(platform = process.platform) {
+  return isLinux(platform) ? LINUX_DEFAULT_DEVICE : DEFAULT_DEVICE
+}
+
+/** File extension of a rendered phrase: AIFF from say, WAV from espeak-ng. */
+export function speechFileExtension(platform = process.platform) {
+  return isLinux(platform) ? 'wav' : 'aiff'
+}
 export const PHRASES_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'phrases.json')
 
 export const PULSE_INTERVAL_MS = 10_000
@@ -67,8 +83,24 @@ export async function loadPhrases(path = PHRASES_PATH) {
  * Renders `text` to `outPath` (AIFF) with macOS `say`. `voice` and `rate`
  * (words per minute) are optional; the default system voice is fine.
  */
-export async function renderPhrase(text, outPath, { runner = defaultRunner, voice, rate } = {}) {
+export async function renderPhrase(
+  text,
+  outPath,
+  { runner = defaultRunner, voice, rate, platform = process.platform } = {}
+) {
   if (typeof text !== 'string' || text.trim() === '') throw new Error('phrase text is empty')
+  if (isLinux(platform)) {
+    const args = ['-w', outPath, '-v', voice ?? 'en-us']
+    if (Number.isFinite(rate)) args.push('-s', String(rate))
+    args.push('--', text)
+    const result = await runner('espeak-ng', args)
+    if (result.code !== 0) {
+      throw new Error(
+        `espeak-ng exited ${result.code}: ${String(result.stderr).trim().slice(0, 200)}`
+      )
+    }
+    return { file: outPath, text }
+  }
   const args = ['-o', outPath]
   if (voice) args.push('-v', voice)
   if (Number.isFinite(rate)) args.push('-r', String(rate))
@@ -134,6 +166,25 @@ export async function findAudioDeviceIndex(
 }
 
 /**
+ * Plan 179: throws unless ffmpeg's PulseAudio output lists `sink` (the lab
+ * speech sink), with the fix in the message.
+ */
+export async function assertPulseSink(
+  sink = LINUX_DEFAULT_DEVICE,
+  { runner = defaultRunner, ffmpegPath = 'ffmpeg' } = {}
+) {
+  const result = await runner(ffmpegPath, ['-hide_banner', '-sinks', 'pulse'])
+  const sinks = parsePulseDevices(`${result.stdout}\n${result.stderr}`, { dropMonitors: false })
+  if (!sinks.some((entry) => entry.name === sink)) {
+    const known = sinks.map((entry) => entry.name).join(', ') || 'none'
+    throw new Error(
+      `PulseAudio sink "${sink}" not found (ffmpeg sees: ${known}). Load it from config/live-lab/linux/pipewire-pulse.videorc-lab.conf.`
+    )
+  }
+  return sink
+}
+
+/**
  * Plays a rendered phrase into `device` in real time and logs
  * `{ phraseId, text, playedAt, endedAt, device }`. `playedAt` is taken just
  * before ffmpeg starts; audio follows within ffmpeg's startup (under ~150 ms
@@ -151,12 +202,18 @@ export async function playPhrase({
   runner = defaultRunner,
   ffmpegPath = 'ffmpeg',
   now = () => new Date(),
-  log
+  log,
+  platform = process.platform
 }) {
   if (typeof file !== 'string' || file === '') throw new Error('playPhrase needs a rendered file')
-  const index = Number.isInteger(deviceIndex)
-    ? deviceIndex
-    : await findAudioDeviceIndex(device, { runner, ffmpegPath })
+  const linux = isLinux(platform)
+  const index =
+    linux || Number.isInteger(deviceIndex)
+      ? deviceIndex
+      : await findAudioDeviceIndex(device, { runner, ffmpegPath })
+  const output = linux
+    ? ['-f', 'pulse', '-device', device, 'videorc-lab-speech']
+    : ['-f', 'audiotoolbox', '-audio_device_index', String(index), '-']
   const playedAt = now().toISOString()
   const result = await runner(ffmpegPath, [
     '-hide_banner',
@@ -170,11 +227,7 @@ export async function playPhrase({
     '48000',
     '-ac',
     '2',
-    '-f',
-    'audiotoolbox',
-    '-audio_device_index',
-    String(index),
-    '-'
+    ...output
   ])
   if (result.code !== 0) {
     throw new Error(

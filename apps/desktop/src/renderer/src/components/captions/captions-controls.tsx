@@ -54,7 +54,12 @@ import {
   captionsPlacementSummary,
   captionsStatusDetail
 } from '@/lib/captions-page-view'
-import { livestreamCaptionsBlockerFor } from '@/lib/captions-preflight'
+import {
+  CAPTIONS_LINUX_DETAIL,
+  CAPTIONS_LINUX_TITLE,
+  captionsPlatformUnavailableReason,
+  livestreamCaptionsBlockerFor
+} from '@/lib/captions-preflight'
 import {
   layoutPresetOrientation,
   simulcastArmed,
@@ -146,8 +151,11 @@ export function CaptionsControls(): ReactElement {
   const verticalLegArmed = simulcastArmed(captureConfig)
   // The rule a livestream would break today, said here before Go Live does
   // (plan 174 S3.4, D-9).
-  const livestreamBlocker = captions.enabled ? livestreamCaptionsBlockerFor(captureConfig) : null
-  const canEnable = gate.allowed || captions.enabled
+  // Linux can't caption at all yet: one reason, and nothing to turn on.
+  const platformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
+  const livestreamBlocker =
+    captions.enabled && !platformUnavailable ? livestreamCaptionsBlockerFor(captureConfig) : null
+  const canEnable = (gate.allowed && !platformUnavailable) || captions.enabled
   const showRetry =
     captions.enabled &&
     isSessionActive &&
@@ -234,6 +242,12 @@ export function CaptionsControls(): ReactElement {
             </div>
           </SettingsRow>
         </FieldGroup>
+        {platformUnavailable ? (
+          <Alert data-testid="captions-platform-unavailable" variant="warning">
+            <AlertTitle>{CAPTIONS_LINUX_TITLE}</AlertTitle>
+            <AlertDescription>{CAPTIONS_LINUX_DETAIL}</AlertDescription>
+          </Alert>
+        ) : null}
         {livestreamBlocker ? (
           <Alert data-testid="captions-livestream-blocker" variant="warning">
             <AlertTitle>Captions can&apos;t go out on your next livestream</AlertTitle>

@@ -113,6 +113,28 @@ Assets → Takeovers manages them; Studio's Takeover section puts one on
 stream.
 _Avoid_: screen, takeover screen
 
+**Banner**:
+An image the streamer places anywhere on the picture: a sponsor, their
+socials, a logo, a frame. Assets → Banners imports and manages them; the
+Scene page places them and shows or hides them ("Show", "Hide"). A banner
+stays over a takeover and under captions, Buddy and the highlight card.
+_Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
+name)
+
+**Sound**:
+A short audio file (up to 30 seconds) the streamer plays into the recording
+and every stream from the Soundboard: an airhorn, applause, a laugh.
+Assets → Sounds imports and manages them; Sources → Sounds sets their level
+and whether the streamer hears them.
+_Avoid_: clip (a clip is a stretch of a recording), sample, SFX, sound effect
+(as the feature's name), jingle
+
+**Soundboard**:
+Studio's grid of pads, one per sound, under Scenes. A click or the sound's
+key (1–9) plays it; the Stream Manager, `/sound`, ⌘K, the Stream Deck and
+the phone play the same sounds.
+_Avoid_: sound pad (in copy; it is the component's name), sampler
+
 **Off**:
 A source or a feature the streamer turned off ("Camera: Off"). When there
 is nothing to pick, say so: "No camera found"; while looking, "Finding
@@ -175,6 +197,18 @@ _Avoid_: receive-only
 What a destination or a chat needs after its connection dropped, and the
 action that fixes it ("Twitch: reconnect to send").
 _Avoid_: re-auth, re-authorize
+
+**Discord announcement**:
+The one message Videorc posts to the streamer's Discord channel when they go
+live, through the webhook they pasted in Livestream → Setup → Discord. It
+links each live destination and becomes "Was live" at the stop (plan 187).
+_Avoid_: notification, alert, ping (a ping is only the @here or @everyone it
+carries)
+
+**Webhook**:
+The Discord URL that lets Videorc post to one channel. It is a secret:
+Videorc shows only its last four characters.
+_Avoid_: hook, integration, bot
 
 ### Windows and pages
 

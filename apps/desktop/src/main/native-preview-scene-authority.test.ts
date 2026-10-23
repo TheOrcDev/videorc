@@ -59,6 +59,44 @@ describe('native preview compositor scene authority', () => {
     ).toBe(false)
   })
 
+  it('never treats a banner change at the same revision as a conflicting scene (plan 186)', () => {
+    const committed = scene(9, 'screen-camera')
+    const bannerLayer = {
+      id: 'banner:sponsor',
+      name: 'Sponsor',
+      kind: 'banner' as const,
+      transform: transform(),
+      visible: true,
+      imageUrl: 'videorc-asset://banner/sponsor.png',
+      fit: 'fill' as const,
+      mirror: false,
+      opacity: 0.5
+    }
+    const withBanner = {
+      ...committed,
+      sources: [...committed.sources, bannerLayer],
+      bannerCanvas: { width: 1280, height: 720 }
+    }
+    const authority = { committedRunId: 'run-a', candidateRunId: 'run-a' }
+
+    expect(compositorSceneConflictsWithCommitted(committed, withBanner, authority)).toBe(false)
+    expect(
+      compositorSceneConflictsWithCommitted(
+        withBanner,
+        { ...withBanner, sources: [...committed.sources, { ...bannerLayer, opacity: 1 }] },
+        authority
+      )
+    ).toBe(false)
+    // Real scene content still conflicts with banners present on both sides.
+    expect(
+      compositorSceneConflictsWithCommitted(
+        withBanner,
+        { ...scene(9, 'side-by-side'), sources: [bannerLayer] },
+        authority
+      )
+    ).toBe(true)
+  })
+
   it('requires an attached in-process present at or beyond the committed revision', () => {
     const status = {
       state: 'live',

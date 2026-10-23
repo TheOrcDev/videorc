@@ -14,6 +14,7 @@ import type {
   LayoutSettings,
   RtmpPreset,
   SceneConfigParams,
+  SeparateSourceRecordingsSettings,
   SideBySideSplit,
   SimulcastParams,
   StreamOutputOrientation,
@@ -126,6 +127,12 @@ export type CaptureConfig = {
    */
   simulcastFollowsProgram: boolean
   recordEnabled: boolean
+  /**
+   * Separate source recordings (Plan 157): also save a clean Screen (+ system
+   * audio) take and a Camera (+ microphone) take. Needs recordEnabled plus a
+   * camera and a screen/window; the backend refuses otherwise.
+   */
+  separateSourceRecordings: SeparateSourceRecordingsSettings
   streamEnabled: boolean
   rtmpPreset: RtmpPreset
   rtmpServerUrl: string
@@ -165,6 +172,91 @@ export function normalizeReplayBufferSettings(value: unknown): ReplayBufferSetti
     enabled: typeof loaded.enabled === 'boolean' ? loaded.enabled : true,
     explicit: typeof loaded.explicit === 'boolean' ? loaded.explicit : false
   }
+}
+
+export function defaultSeparateSourceRecordings(): SeparateSourceRecordingsSettings {
+  return { enabled: false, keepCombined: true }
+}
+
+/**
+ * `keepCombined` is a reserved setting: this release has no control for it and
+ * the backend refuses `false`, so a stored `false` (a future build, a hand
+ * edit) is normalized back to `true` instead of turning Record into a refusal
+ * the Recording tab cannot explain.
+ */
+export function normalizeSeparateSourceRecordings(
+  loaded: Partial<SeparateSourceRecordingsSettings> | undefined
+): SeparateSourceRecordingsSettings {
+  const defaults = defaultSeparateSourceRecordings()
+  return {
+    enabled: loaded?.enabled === true,
+    keepCombined: defaults.keepCombined
+  }
+}
+
+/** Stable reasons mirrored from `crates/videorc-backend/src/source_iso.rs`. */
+export type SeparateSourceRecordingsIneligibility =
+  | 'unsupported-platform'
+  | 'record-disabled'
+  | 'missing-camera'
+  | 'missing-screen'
+
+/**
+ * Release test 146, plan 0001: the ISO writers need the VideoToolbox MPEG-TS
+ * bridge, so only macOS can save the Screen and Camera files. An unknown
+ * platform (runtime info not loaded yet) is not refused here; the backend
+ * refuses an unsupported start before any Library row exists.
+ */
+export function separateSourceRecordingsSupported(platform: string | undefined): boolean {
+  return platform === undefined || platform === 'darwin'
+}
+
+/**
+ * Why Separate source recordings cannot arm for this config, or null when it
+ * can. Pure mirror of the backend start-session validation so the Recording
+ * tab can explain the refusal before Record is pressed.
+ */
+export function separateSourceRecordingsIneligibility(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources'>,
+  platform?: string
+): SeparateSourceRecordingsIneligibility | null {
+  if (!separateSourceRecordingsSupported(platform)) return 'unsupported-platform'
+  if (!config.recordEnabled) return 'record-disabled'
+  if (!config.sources.cameraId?.trim()) return 'missing-camera'
+  if (!config.sources.screenId?.trim() && !config.sources.windowId?.trim()) {
+    return 'missing-screen'
+  }
+  return null
+}
+
+/** Recording-tab copy for an ineligible selection; the next session records Combined only. */
+export function separateSourceRecordingsIneligibilityCopy(
+  reason: SeparateSourceRecordingsIneligibility
+): string {
+  switch (reason) {
+    case 'unsupported-platform':
+      return 'Works on Mac only for now. On this computer every recording is the Combined file.'
+    case 'record-disabled':
+      return 'Turn on local recording to save separate source files.'
+    case 'missing-camera':
+      return 'Needs a camera source. Without one the next session records the Combined file only.'
+    case 'missing-screen':
+      return 'Needs a screen or window source. Without one the next session records the Combined file only.'
+  }
+}
+
+/**
+ * The settings the start request carries: present only when the switch is on
+ * AND the selection can produce both files, so a stale switch never blocks
+ * Record (the Recording tab shows the exact reason instead).
+ */
+export function separateSourceRecordingsForSession(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources' | 'separateSourceRecordings'>,
+  platform?: string
+): SeparateSourceRecordingsSettings | undefined {
+  if (!config.separateSourceRecordings.enabled) return undefined
+  if (separateSourceRecordingsIneligibility(config, platform)) return undefined
+  return config.separateSourceRecordings
 }
 
 /** The vertical simulcast leg's user-facing settings. */
@@ -1330,6 +1422,7 @@ export const defaultCaptureConfig: CaptureConfig = {
   // 1440p default sent an Intel UHD 600 into a 0.28x software encode.
   video: videoPresets['tutorial-1080p30'],
   recordEnabled: true,
+  separateSourceRecordings: { enabled: false, keepCombined: true },
   streamEnabled: false,
   rtmpPreset: 'youtube',
   rtmpServerUrl: rtmpDefaults.youtube,
@@ -1449,6 +1542,7 @@ export function loadCaptureConfig(): CaptureConfig {
       typeof loaded.recordEnabled === 'boolean'
         ? loaded.recordEnabled
         : defaultCaptureConfig.recordEnabled,
+    separateSourceRecordings: normalizeSeparateSourceRecordings(loaded.separateSourceRecordings),
     streamEnabled:
       typeof loaded.streamEnabled === 'boolean'
         ? loaded.streamEnabled
@@ -2602,6 +2696,9 @@ export function buildCaptureSources(
     screenName: selected?.kind === 'screen' ? selected.name : undefined,
     windowId: selected?.kind === 'window' ? captureId : undefined,
     windowName: selected?.kind === 'window' ? selected.name : undefined,
+    // Plan 0002 (release test 146): None is a choice that must outlive
+    // reconcile, the way camera Off is (plan 080 S4).
+    captureOff: captureId ? undefined : true,
     testPattern: false
   }
 }
@@ -2631,7 +2728,7 @@ export function buildMicrophoneSources(
 }
 
 const SOURCE_KIND_FIELDS = {
-  capture: ['screenId', 'screenName', 'windowId', 'windowName', 'testPattern'],
+  capture: ['screenId', 'screenName', 'windowId', 'windowName', 'captureOff', 'testPattern'],
   camera: ['cameraId', 'cameraName', 'cameraOff'],
   microphone: ['microphoneId', 'microphoneName', 'microphoneOff']
 } as const satisfies Record<string, readonly (keyof SourceSelection)[]>
@@ -2717,6 +2814,12 @@ export function reconcileSourceSelection(
     nextSources.screenName = undefined
     nextSources.windowId = undefined
     nextSources.windowName = undefined
+  } else if (nextSources.captureOff === true && !nextSources.screenId && !nextSources.windowId) {
+    // Plan 0002 (release test 146): an explicit None stays None. Falling back
+    // to the first screen here re-selected it on every scene click and device
+    // refresh, and on Linux that opened the compositor's share dialog.
+    nextSources.screenName = undefined
+    nextSources.windowName = undefined
   } else {
     const selectedCapture = nextSources.windowId
       ? (findRememberedSource(
@@ -2733,6 +2836,7 @@ export function reconcileSourceSelection(
     nextSources.screenName = selectedCapture?.kind === 'screen' ? selectedCapture.name : undefined
     nextSources.windowId = selectedCapture?.kind === 'window' ? selectedCapture.id : undefined
     nextSources.windowName = selectedCapture?.kind === 'window' ? selectedCapture.name : undefined
+    nextSources.captureOff = undefined
   }
 
   // Plan 080 S4: an explicit Off stays off. Only a camera that was never

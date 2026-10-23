@@ -16,6 +16,17 @@ import {
 } from 'react'
 
 import { classifyComposerDraft, markerTime } from '../../../../shared/session-markers'
+import {
+  bannerCompletions,
+  type BannerRelayAction,
+  type BannerSummary,
+  type ComposerCompletion
+} from '../../../../shared/banner-commands'
+import {
+  soundCompletions,
+  type SoundRelayAction,
+  type SoundboardSummary
+} from '../../../../shared/sound-commands'
 import type { ClipContext, MarkerContext, SessionMarker } from '@/lib/backend'
 import { clipLengthWords } from '../../../../shared/clip-marks'
 
@@ -46,7 +57,7 @@ import {
   PlatformFilter,
   PlatformFilterMenuItems
 } from '@/components/stream-manager/platform-filter'
-import { AlertIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
+import { AlertIcon, ArrowDownIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -92,20 +103,16 @@ import {
   validateChatDraft,
   type ChatSendFailure
 } from '@/lib/chat-send'
+import { useChatFollow } from '@/hooks/use-chat-follow'
 import {
   chatPaneMessages,
-  followChatOnResize,
   pickedSendProviders,
-  spotlightScrollAllowed,
   writableProviders,
   type ChatPaneFilter
 } from '@/lib/stream-manager-chat'
 import { liveChatEmptyMessage } from '@/lib/live-chat-view'
 import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { cn } from '@/lib/utils'
-
-const BOTTOM_THRESHOLD_PX = 64
-const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
 
 export interface ChatPrefill {
   seq: number
@@ -147,6 +154,10 @@ export function ChatPane({
   onMarker,
   onClip,
   onUndoMarker,
+  banners,
+  onBanner,
+  sounds,
+  onSound,
   prefill = null,
   cohostNudge = false,
   onCohostNudgeTurnOn,
@@ -168,7 +179,10 @@ export function ChatPane({
   highlightFailure?: { messageId: string; reason: string } | null
   cohostFlags?: ReadonlyMap<string, CohostFlag>
   cohostSuggested?: ReadonlySet<string>
-  /** The message the streamer is talking about: marked, and pulled into view. */
+  /**
+   * The message the streamer is talking about: marked "Talking about this",
+   * never scrolled to. The list stays on the newest message (2026-10-21).
+   */
   cohostSpotlight?: string | null
   /** Messages behind Buddy's open questions (the Questions filter). */
   questionMessageIds: ReadonlySet<string>
@@ -189,6 +203,12 @@ export function ChatPane({
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
   /** `/clip` (plan 181 R4): the Clip button's action, answered with its words. */
   onClip?: () => Promise<string>
+  /** Plan 186 S7: the banners `/banner` reads, and its show or hide. */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => Promise<boolean>
+  /** Plan 189 S9: the board `/sound` reads, and its press or Stop all. */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => Promise<boolean>
   onSend?: (text: string, options?: ChatSendOptions) => void
   prefill?: ChatPrefill | null
   cohostNudge?: boolean
@@ -257,58 +277,19 @@ export function ChatPane({
     getItemKey: (index) => shown[index]?.id ?? index
   })
 
-  const [pinned, setPinned] = useState(true)
   const [unread, setUnread] = useState(0)
-  const pinnedRef = useRef(true)
   const [incomplete, setIncomplete] = useState(false)
   const arrivalRef = useRef({ key: arrivalKey, cursor: deliveryCursor(delivery) })
-  // When the streamer last scrolled by hand (wheel, touch, keys, the
-  // scrollbar); programmatic follow and jump scrolls never count.
-  const lastUserScrollAtRef = useRef<number | null>(null)
-  useEffect(() => {
-    if (!viewport) return
-    const onScroll = (): void => {
-      const atBottom =
-        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= BOTTOM_THRESHOLD_PX
-      pinnedRef.current = atBottom
-      setPinned(atBottom)
-      if (atBottom) {
-        setUnread(0)
-        setIncomplete(false)
-      }
-    }
-    const onUserScroll = (): void => {
-      lastUserScrollAtRef.current = Date.now()
-    }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (SCROLL_KEYS.has(event.key)) onUserScroll()
-    }
-    const onPointerDown = (event: PointerEvent): void => {
-      if ((event.target as Element | null)?.closest?.('[data-slot="scroll-area-scrollbar"]')) {
-        onUserScroll()
-      }
-    }
-    const root = rootRef.current
-    viewport.addEventListener('scroll', onScroll, { passive: true })
-    viewport.addEventListener('wheel', onUserScroll, { passive: true })
-    viewport.addEventListener('touchmove', onUserScroll, { passive: true })
-    viewport.addEventListener('keydown', onKeyDown)
-    root?.addEventListener('pointerdown', onPointerDown)
-    return () => {
-      viewport.removeEventListener('scroll', onScroll)
-      viewport.removeEventListener('wheel', onUserScroll)
-      viewport.removeEventListener('touchmove', onUserScroll)
-      viewport.removeEventListener('keydown', onKeyDown)
-      root?.removeEventListener('pointerdown', onPointerDown)
-    }
-  }, [viewport])
-
-  // A resize (the window, the composer's notes, a row whose emotes loaded)
-  // keeps a pinned chat on its newest row (plan 057, P4).
-  useEffect(() => {
-    if (!viewport || typeof ResizeObserver === 'undefined') return
-    return followChatOnResize(viewport, () => pinnedRef.current)
-  }, [viewport])
+  // Newest at the bottom, and the list stays there (hooks/use-chat-follow.ts):
+  // only the streamer scrolling up stops it, and reaching the bottom (or the
+  // jump chip) follows again with nothing unread.
+  const clearUnread = useCallback((): void => {
+    setUnread(0)
+    setIncomplete(false)
+  }, [])
+  const { pinned, pinnedRef, stick, follow, release } = useChatFollow(viewport, {
+    onFollow: clearUnread
+  })
 
   // Paint retention and filter refreshes are not delivery evidence.
   useEffect(() => {
@@ -327,22 +308,18 @@ export function ChatPane({
       setUnread((value) => value + progress.count)
       if (progress.incomplete) setIncomplete(true)
     }
-  }, [arrivalKey, delivery, filter, mentionNames, questionMessageIds])
+  }, [arrivalKey, delivery, filter, mentionNames, pinnedRef, questionMessageIds])
+  // A new newest message while following: show it before the frame paints.
+  // The bottom of the viewport, not the virtualizer's index scroll, whose
+  // settle loop could pull a streamer who just scrolled up back down.
   const newestId = shown.at(-1)?.id
-  useEffect(() => {
-    if (pinnedRef.current && shown.length > 0)
-      virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
-  }, [newestId, shown.length, virtualizer])
-
-  const jumpToLatest = useCallback((): void => {
-    pinnedRef.current = true
-    setPinned(true)
-    setUnread(0)
-    setIncomplete(false)
-    if (shown.length > 0) virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
-  }, [shown.length, virtualizer])
+  useLayoutEffect(() => {
+    if (pinnedRef.current) stick()
+  }, [newestId, pinnedRef, shown.length, stick])
 
   // Buddy's "jump to message": clear filters that hide it, then scroll there.
+  // The streamer asked for it, so the list stops following until they come
+  // back down or press the jump chip.
   const handledJumpSeqRef = useRef<number | null>(null)
   useEffect(() => {
     if (!jumpTo || handledJumpSeqRef.current === jumpTo.seq) return
@@ -356,44 +333,9 @@ export function ChatPane({
       return
     }
     handledJumpSeqRef.current = jumpTo.seq
-    pinnedRef.current = false
-    setPinned(false)
+    release()
     virtualizer.scrollToIndex(index, { align: 'center' })
-  }, [filtering, jumpTo, shown, virtualizer])
-
-  // Buddy's pull-up: scroll the comment being talked about into view once per
-  // spotlight, unless the streamer is reading back (spotlightScrollAllowed).
-  // If it took them away from the latest, they go back there when it ends,
-  // unless they scrolled in the meantime.
-  const handledSpotlightRef = useRef<string | null>(null)
-  const spotlightLeftLatestAtRef = useRef<number | null>(null)
-  useEffect(() => {
-    if (!cohostSpotlight) {
-      handledSpotlightRef.current = null
-      const leftAt = spotlightLeftLatestAtRef.current
-      spotlightLeftLatestAtRef.current = null
-      if (leftAt !== null && (lastUserScrollAtRef.current ?? 0) < leftAt) jumpToLatest()
-      return
-    }
-    if (handledSpotlightRef.current === cohostSpotlight) return
-    const index = shown.findIndex((message) => message.id === cohostSpotlight)
-    if (index < 0) return
-    handledSpotlightRef.current = cohostSpotlight
-    const nowMs = Date.now()
-    if (
-      !spotlightScrollAllowed({
-        pinned: pinnedRef.current,
-        lastUserScrollAtMs: lastUserScrollAtRef.current,
-        nowMs
-      })
-    ) {
-      return
-    }
-    if (pinnedRef.current) spotlightLeftLatestAtRef.current = nowMs
-    pinnedRef.current = false
-    setPinned(false)
-    virtualizer.scrollToIndex(index, { align: 'center' })
-  }, [cohostSpotlight, jumpToLatest, shown, virtualizer])
+  }, [filtering, jumpTo, release, shown, virtualizer])
 
   const searchRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -616,7 +558,13 @@ export function ChatPane({
       </div>
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <ScrollArea ref={rootRef} className="min-h-0 flex-1 px-2 py-1">
+        {/* The follow owns this scroll position, so the browser's own scroll
+            anchoring stays out of it. */}
+        <ScrollArea
+          ref={rootRef}
+          className="min-h-0 flex-1 px-2 py-1"
+          viewportClassName="[overflow-anchor:none]"
+        >
           {shown.length === 0 ? (
             filtering ? (
               <Empty className="h-full">
@@ -690,17 +638,19 @@ export function ChatPane({
             </ol>
           )}
         </ScrollArea>
-        {!pinned && (unread > 0 || incomplete) ? (
+        {!pinned ? (
+          // Whenever the list is not on the newest message, one way back.
           // A glass chip, not an ad-hoc pill (plan 174 H-17): the Badge is
           // the button.
           <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto">
             <button
-              aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
+              aria-label={`Chat paused: ${incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'reading back'}. Jump to the newest`}
               data-testid="chat-paused"
               type="button"
-              onClick={jumpToLatest}
+              onClick={follow}
             >
-              {incomplete ? 'New chat' : `${unread} new`} ↓
+              {incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'Latest'}
+              <ArrowDownIcon data-icon="inline-end" />
             </button>
           </Badge>
         ) : null}
@@ -712,6 +662,10 @@ export function ChatPane({
           onMarker={onMarker}
           onUndoMarker={onUndoMarker}
           onClip={onClip}
+          banners={banners}
+          onBanner={onBanner}
+          sounds={sounds}
+          onSound={onSound}
           cohostNudge={cohostNudge}
           failures={sendFailures}
           focusSignal={composerFocusSignal + composerFocus}
@@ -728,6 +682,22 @@ export function ChatPane({
   )
 }
 
+/** The composer's own commands, in the order the completion list offers them. */
+const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
+  { value: '/marker', hint: ' [title] · Save a timeline point' },
+  { value: '/clip', hint: ' · Save the last seconds as a clip' },
+  { value: '/banner', hint: ' [name] · Show or hide a banner' },
+  { value: '/sound', hint: ' [name] · Play a sound' },
+  { value: '/help', hint: ' · Command help' }
+]
+
+/** The commands that take an argument, and go on to its completions. */
+const COMMANDS_WITH_ARGUMENT = new Set(['/marker', '/banner', '/sound'])
+/** The commands whose completions are names (plans 186, 189). */
+const COMMANDS_WITH_NAMES = new Set(['/banner', '/sound'])
+/** No sounds before Studio has read the board: the same empty board. */
+const NO_SOUNDBOARD: SoundboardSummary = { sounds: [], voices: [] }
+
 export function Composer({
   providers,
   pending,
@@ -742,12 +712,30 @@ export function Composer({
   markerContext,
   onMarker,
   onUndoMarker,
-  onClip
+  onClip,
+  banners,
+  onBanner,
+  sounds,
+  onSound
 }: {
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
   onClip?: () => Promise<string>
+  /**
+   * Plan 186 S7: `/banner <name>` shows or hides one of these, `/banner off`
+   * hides them all. Resolves false when it didn't happen; the window has
+   * said why. Never posts to chat.
+   */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => Promise<boolean>
+  /**
+   * Plan 189 S9: `/sound <name>` presses the first sound whose name starts
+   * with it, `/sound stop` stops them all. Resolves false when it didn't
+   * happen; the window has said why. Never posts to chat.
+   */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => Promise<boolean>
   providers: readonly LiveChatProviderState[]
   pending: boolean
   failures: ChatSendFailure[]
@@ -796,7 +784,9 @@ export function Composer({
   const targetPlatforms = [...new Set(targets.map((provider) => provider.platform))]
   // The draft must fit the STRICTEST destination it reaches (140 with X).
   const maxChars = chatDraftMaxChars(targetPlatforms)
-  const command = classifyComposerDraft(draft)
+  const bannerList = onBanner ? (banners ?? []) : null
+  const soundBoard = onSound ? (sounds ?? NO_SOUNDBOARD) : null
+  const command = classifyComposerDraft(draft, bannerList ?? [], soundBoard?.sounds ?? [])
   const local = command.kind !== 'chat'
   const clipContext = markerContext?.clip
   const canSend = local
@@ -805,14 +795,25 @@ export function Composer({
         Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker)) &&
       (command.kind !== 'clip' || Boolean(clipContext?.available && onClip))
     : targets.length > 0 && !pending
-  const completions = ['/marker', '/clip', '/help'].filter(
-    (value) =>
-      draft.startsWith('/') && !draft.includes(' ') && value.startsWith(draft.toLowerCase())
-  )
+  // Under `/banner` and `/sound`, the names (plans 186, 189); otherwise the commands.
+  const completions: readonly ComposerCompletion[] =
+    (bannerList && bannerCompletions(draft, bannerList)) ??
+    (soundBoard && soundCompletions(draft, soundBoard)) ??
+    COMPOSER_COMMANDS.filter(
+      (entry) =>
+        draft.startsWith('/') &&
+        !draft.includes(' ') &&
+        (bannerList || entry.value !== '/banner') &&
+        (soundBoard || entry.value !== '/sound') &&
+        entry.value.startsWith(draft.toLowerCase())
+    )
   const showCompletions = completions.length > 0 && !completionDismissed
+  const selectedCompletion = completions[completionIndex] ?? completions[0]
   const complete = (value: string): void => {
-    setDraft(value + (value === '/marker' ? ' ' : ''))
-    setCompletionDismissed(true)
+    setDraft(value + (COMMANDS_WITH_ARGUMENT.has(value) ? ' ' : ''))
+    // `/banner` and `/sound` go straight on to the names (plans 186, 189).
+    setCompletionDismissed(!COMMANDS_WITH_NAMES.has(value))
+    setCompletionIndex(0)
     inputRef.current?.focus()
   }
 
@@ -861,7 +862,7 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip. // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
       return
     }
@@ -884,6 +885,40 @@ export function Composer({
         .catch((error) =>
           setNotice(error instanceof Error ? error.message : "Couldn't save the clip.")
         )
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
+      return
+    }
+    if (command.kind === 'banner') {
+      if (!onBanner) return
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(null)
+      // The picture is the confirmation; a refusal is the window's toast.
+      void onBanner(command.action)
+        .then((done) => {
+          if (done && draftRef.current === submitted) setDraft('')
+        })
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
+      return
+    }
+    if (command.kind === 'sound') {
+      if (!onSound) return
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(null)
+      // The pad's ring is the confirmation; a refusal is the window's toast.
+      void onSound(command.action)
+        .then((done) => {
+          if (done && draftRef.current === submitted) setDraft('')
+        })
         .finally(() => {
           localPendingRef.current = false
           setLocalPending(false)
@@ -1032,10 +1067,11 @@ export function Composer({
               if (
                 showCompletions &&
                 (event.key === 'Tab' ||
-                  (event.key === 'Enter' && draft !== completions[completionIndex]))
+                  (event.key === 'Enter' &&
+                    draft.trim().toLowerCase() !== selectedCompletion.value.toLowerCase()))
               ) {
                 event.preventDefault()
-                complete(completions[completionIndex] ?? completions[0])
+                complete(selectedCompletion.value)
                 return
               }
               if (event.key === 'Enter') {
@@ -1091,19 +1127,17 @@ export function Composer({
         {showCompletions ? (
           <Command
             shouldFilter={false}
-            value={completions[completionIndex]}
+            value={selectedCompletion.value}
             className="mt-1"
             aria-label="Local commands"
           >
             <CommandList>
-              {completions.map((value) => (
+              {completions.map(({ value, hint }) => (
                 <CommandItem key={value} value={value} onSelect={() => complete(value)}>
                   {value}
-                  {value === '/marker'
-                    ? ' [title] · Save a timeline point'
-                    : value === '/clip'
-                      ? ` · Save the last ${clipSeconds(clipContext)} as a clip`
-                      : ' · Command help'}
+                  {value === '/clip'
+                    ? ` · Save the last ${clipSeconds(clipContext)} as a clip`
+                    : hint}
                 </CommandItem>
               ))}
             </CommandList>

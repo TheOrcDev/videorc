@@ -24,6 +24,7 @@ import {
   COHOST_SENSITIVITY_LABELS,
   cohostListenAllowanceLabel
 } from '@/lib/cohost-view'
+import { inlineUserError } from '@/lib/user-error'
 
 /** Mirrors the backend caps (`COHOST_RULES_MAX` / `COHOST_RULE_MAX_CHARS`). */
 export const COHOST_RULES_MAX = 10
@@ -91,7 +92,9 @@ function useCohostSettingsSave(lockedByTab = false): {
   const save = (patch: CohostSettingsPatch): void => {
     setError(null)
     void patchCohostSettings(patch).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : "Couldn't save Buddy settings.")
+      setError(
+        inlineUserError(failure, { action: 'save', object: 'Buddy settings' }, 'buddy-settings')
+      )
     )
   }
   return {

@@ -2,7 +2,8 @@ import { access, readFile, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { dirname } from 'node:path'
 
-import { formatMode } from './config.mjs'
+import { LAB_USER, formatMode } from './config.mjs'
+import { LINUX, LINUX_LAB_ETC, labPlatform } from './platform.mjs'
 
 // Plan 178 U4. The owner's policy file is the standing authorization for
 // every unattended run. The harness (and any agent logged in as the lab user)
@@ -13,6 +14,8 @@ import { formatMode } from './config.mjs'
 
 export const POLICY_VERSION = 1
 export const DEFAULT_POLICY_PATH = '/Library/Application Support/VideorcLab/policy.json'
+// Plan 179: the Linux lab's policy, root:root 0644 in a root-owned 0755 dir.
+export const LINUX_POLICY_PATH = `${LINUX_LAB_ETC}/policy.json`
 export const CONTROL_UNREACHABLE_LIMIT_MS = 5 * 60 * 1000
 
 export const TRIGGERS = Object.freeze(['schedule', 'on-demand', 'manual'])
@@ -38,15 +41,18 @@ const TOP_LEVEL_KEYS = Object.freeze([
 // until the owner turns it on here.
 // `triage` (plan 178 U12) lets the headless Claude triage run after a publish;
 // off until the owner turns it on, like clipPull.
-const OPTIONAL_KEYS = Object.freeze({ clipPull: false, triage: false })
+// `labUser` (plan 179) names the account that runs the lab; the schedule
+// installs only for it. Default the dedicated `videorc-lab` account.
+const OPTIONAL_KEYS = Object.freeze({ clipPull: false, triage: false, labUser: LAB_USER })
 
 // VIDEORC_LIVE_LAB_POLICY exists for the unit tests and for a doctor run on
 // a machine that is not the lab machine. A run never honours a policy that
 // the harness itself could have written, whatever its path: loadPolicy's
 // ownership check applies to the override too.
-export function policyPath(env = process.env) {
+export function policyPath(env = process.env, platform = process.platform) {
   const override = env.VIDEORC_LIVE_LAB_POLICY?.trim()
-  return override ? override : DEFAULT_POLICY_PATH
+  if (override) return override
+  return labPlatform(platform) === LINUX ? LINUX_POLICY_PATH : DEFAULT_POLICY_PATH
 }
 
 function isObject(value) {
@@ -198,6 +204,12 @@ export function validatePolicy(parsed) {
   }
   if (has('triage') && typeof parsed.triage !== 'boolean') {
     problems.push('triage must be true or false')
+  }
+  if (
+    has('labUser') &&
+    (typeof parsed.labUser !== 'string' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(parsed.labUser))
+  ) {
+    problems.push('labUser must be a login name such as videorc-lab')
   }
   if (has('killSwitchUrl')) validateKillSwitchUrl(parsed.killSwitchUrl, problems)
 

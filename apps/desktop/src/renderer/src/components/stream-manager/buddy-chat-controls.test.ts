@@ -48,7 +48,7 @@ afterEach(async () => {
 
 async function render(
   current: CohostAutoChat,
-  { name, link = true }: { name?: string; link?: boolean } = {}
+  { name, picture, link = true }: { name?: string; picture?: string; link?: boolean } = {}
 ): Promise<void> {
   await act(async () =>
     root.render(
@@ -58,6 +58,7 @@ async function render(
         createElement(BuddyChatControls, {
           autoChat: current,
           name,
+          picture,
           onModeChange,
           ...(link ? { onOpenChatSettings } : {})
         })
@@ -143,6 +144,23 @@ describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
     expect(dialog()?.textContent).toContain('Let Grum post as you?')
     expect(dialog()?.textContent).toContain(buddyPostingConsentSentence('Grum'))
     expect(dialog()?.textContent).not.toMatch(/the Buddy/i)
+  })
+
+  it('shows the Buddy it names, not the emblem, when it has its own picture', async () => {
+    const orc = 'videorc-asset://buddy/official-orc/idle.png'
+    await render(autoChat(), { name: 'Golmar', picture: orc })
+    await press(modeButton('suggest'))
+    expect(dialog()?.textContent).toContain('Let Golmar post as you?')
+    const picture = dialog()?.querySelector('[data-slot="buddy-chat-consent-picture"]')
+    expect(picture?.getAttribute('src')).toBe(orc)
+    expect(dialog()?.querySelector('[data-slot="buddy-emblem"]')).toBeNull()
+  })
+
+  it('keeps the emblem when the Buddy has no picture to show', async () => {
+    await render(autoChat(), { name: 'Buddy' })
+    await press(modeButton('suggest'))
+    expect(dialog()?.querySelector('[data-slot="buddy-emblem"]')).toBeTruthy()
+    expect(dialog()?.querySelector('[data-slot="buddy-chat-consent-picture"]')).toBeNull()
   })
 
   it('turns Off without asking, and Off only stops posting (D7)', async () => {

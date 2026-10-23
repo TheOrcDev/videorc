@@ -5,47 +5,37 @@ import type {
   LiveChatProviderState,
   PlatformAudience,
   StreamPlatform,
-  StreamTargetRuntime,
-  StreamTargetState,
   ViewerSample,
   SessionChatTotals
 } from '@/lib/backend'
 import { NO_VALUE, plural } from '@/lib/format'
 import { formatTimecode } from '@/lib/format-time'
-import { formatBitrate } from '@/lib/format-video'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { chatActivity, type ActivityTotals } from '@/lib/stream-activity'
 import { formatViewerCount, viewerSampleStale } from '@/lib/viewer-count-view'
-import { destinationLabel } from '@/lib/platform-copy'
-import { destinationStateLabel } from '@/lib/state-labels'
 
 import type { LiveDashboardState } from '../../../shared/live-dashboard'
 
 // The Stream Manager's stats bar (plan 057, D1), as pure item models. A stat
 // exists only when its source exists for this session, and a value is never
 // a zero nobody measured: a platform that cannot report says why on hover.
-// Quiet when fine, specific when not: health shows the bitrate until
-// something needs the streamer, then it names the problem instead.
 
-export type StatId = 'session' | 'viewers' | 'health' | 'followers' | 'supporters' | 'tips' | 'chat'
+export type StatId = 'session' | 'viewers' | 'followers' | 'supporters' | 'tips' | 'chat'
 
 export type StatTone = 'neutral' | 'subtle' | 'good' | 'warning' | 'error'
 export type SessionBadge = 'live' | 'recording' | 'off-air' | 'history'
-export type StatDot = 'good' | 'warn' | 'error' | 'neutral'
 
 /** One row of a stat's hover card. */
 export interface StatDetailRow {
   label: string
   value: string
   platform?: StreamPlatform
-  /** A destination's state, drawn as a status dot. */
-  dot?: StatDot
   note?: string
 }
 
 export interface StatItemModel {
   id: StatId
-  /** The hover card's heading: "Viewers", "Stream health". */
+  /** The hover card's heading: "Viewers", "Followers". */
   label: string
   /** What the bar shows: the number, or the problem when there is one. */
   value: string
@@ -88,7 +78,6 @@ function confirmedTotals(input: StatsInput): SessionChatTotals | null {
 export const DEFAULT_STAT_ORDER: readonly StatId[] = [
   'session',
   'viewers',
-  'health',
   'followers',
   'supporters',
   'tips',
@@ -240,100 +229,6 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
       ? `${count} ${latest.total === 1 ? 'viewer' : 'viewers'}${peak !== null ? `, peak ${formatViewerCount(peak)}` : ''}`
       : 'No viewer count yet'
   } satisfies StatItemModel
-}
-
-const TARGET_DOTS: Partial<Record<StreamTargetState, StatDot>> = {
-  live: 'good',
-  connecting: 'warn',
-  warning: 'error',
-  reconnecting: 'error',
-  failed: 'error'
-}
-
-/**
- * The one health reading the bar shows, most urgent first: a failed
- * destination, one reconnecting, one its platform says isn't receiving the
- * stream (plan 161: viewers there see nothing, so these outrank dropped
- * frames), dropped frames, a sagging bitrate, a destination still
- * connecting. Healthy is just the bitrate.
- */
-function healthReading(
-  targets: readonly StreamTargetRuntime[],
-  droppedLastMinute: number,
-  sagging: boolean,
-  bitrate: string
-): { value: string; tone: StatTone } {
-  const failed = targets.filter((target) => target.state === 'failed')
-  if (failed.length === 1) {
-    return { value: `${destinationLabel(failed[0].label)} failed`, tone: 'error' }
-  }
-  if (failed.length > 1) return { value: `${failed.length} failed`, tone: 'error' }
-  const down = targets.filter(
-    (target) => target.state === 'reconnecting' || target.state === 'warning'
-  )
-  if (down.length > 1) return { value: `${down.length} not live`, tone: 'error' }
-  if (down.length === 1) {
-    const [target] = down
-    return {
-      value: `${destinationLabel(target.label)} ${target.state === 'reconnecting' ? 'reconnecting' : 'not receiving'}`,
-      tone: 'error'
-    }
-  }
-  if (droppedLastMinute > 0) return { value: `${droppedLastMinute} dropped/min`, tone: 'warning' }
-  if (sagging) return { value: 'Low bitrate', tone: 'warning' }
-  if (targets.some((target) => target.state === 'connecting')) {
-    return { value: 'Connecting', tone: 'warning' }
-  }
-  return { value: bitrate, tone: bitrate === NO_VALUE ? 'neutral' : 'good' }
-}
-
-function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatItemModel | null {
-  if (dashboard?.session.state !== 'live') return null
-  const health = dashboard.health
-  const latest = health?.latest
-  const points = health?.bitrateHistory ?? []
-  const minuteAgo = points.find((point) => Date.parse(point.at) >= nowMs - 60_000)
-  const droppedLastMinute =
-    typeof latest?.droppedFrames === 'number' && typeof minuteAgo?.droppedFrames === 'number'
-      ? Math.max(0, latest.droppedFrames - minuteAgo.droppedFrames)
-      : 0
-  const recent = points.slice(-150).map((point) => point.kbps)
-  const typical = recent.length
-    ? [...recent].sort((a, b) => a - b)[Math.floor(recent.length / 2)]
-    : 0
-  const kbps = latest?.bitrateKbps
-  const sagging = typeof kbps === 'number' && typical > 0 && kbps < typical * 0.7
-  // One bitrate spelling (plan 174 S1.4), and a placeholder that says why (H-10).
-  const bitrate = formatBitrate(kbps) || NO_VALUE
-  const bitrateReason = bitrate === NO_VALUE ? 'Not reported yet' : undefined
-  const reading = healthReading(dashboard.targets, droppedLastMinute, sagging, bitrate)
-  const fps = typeof latest?.fps === 'number' ? `${Math.round(latest.fps)} fps` : null
-  const dropped = droppedLastMinute > 0 ? `${droppedLastMinute} in the last minute` : 'None'
-  return {
-    id: 'health',
-    label: 'Stream health',
-    value: reading.value,
-    tone: reading.tone,
-    spark: points.map((point) => point.kbps),
-    details: [
-      { label: 'Bitrate', value: bitrate, ...(bitrateReason ? { note: bitrateReason } : {}) },
-      ...(fps ? [{ label: 'Frame rate', value: fps }] : []),
-      { label: 'Dropped frames', value: dropped },
-      ...dashboard.targets.map((target) => ({
-        label: destinationLabel(target.label),
-        value: destinationStateLabel(target.state),
-        platform: target.platform,
-        dot: TARGET_DOTS[target.state] ?? 'neutral',
-        ...(target.message ? { note: target.message } : {})
-      }))
-    ],
-    description:
-      reading.value === bitrate
-        ? bitrateReason
-          ? `Stream health: bitrate ${bitrateReason.toLowerCase()}`
-          : `Stream health: ${[bitrate, fps, droppedLastMinute > 0 ? `${dropped} dropped` : 'no dropped frames'].filter(Boolean).join(', ')}`
-        : `Stream health: ${reading.value}`
-  }
 }
 
 const METRIC_LABELS: Record<PlatformAudience['metric'], string> = {
@@ -541,7 +436,6 @@ export function statItems(input: StatsInput): StatItemModel[] {
   const items: (StatItemModel | null)[] = [
     sessionItem(input),
     viewersItem(input, livePlatforms),
-    input.history ? null : healthItem(dashboard, input.nowMs),
     followersItem(
       input.history ? (input.history.stats?.audience ?? null) : (dashboard?.audience ?? null)
     )

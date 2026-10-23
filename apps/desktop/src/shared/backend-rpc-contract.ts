@@ -44,6 +44,23 @@ import type {
   BuddyReactionTable,
   MigrateHighlightAnchorParams,
   OverlayLayout,
+  Banner,
+  BannerHideParams,
+  Sound,
+  SoundboardSettingsParams,
+  SoundboardState,
+  SoundIdParams,
+  SoundImportParams,
+  SoundPlayResult,
+  SoundPressResult,
+  SoundReorderParams,
+  SoundsPlayback,
+  SoundStopParams,
+  SoundUpdateParams,
+  BannerIdParams,
+  BannerImportImageParams,
+  BannerReorderParams,
+  BannerUpdateParams,
   BuddyOverlaySnapshot,
   OverlayTargetsInfo,
   SetBuddyOverlayParams,
@@ -113,6 +130,14 @@ import type {
   EncoderPreferenceState,
   MetricsJournalSetParams,
   MetricsJournalState,
+  UsageStatsSetParams,
+  UsageStatsState,
+  DiscordAnnounceSnapshot,
+  DiscordAnnounceUpdateParams,
+  DiscordLinksPreview,
+  DiscordTargetsParams,
+  DiscordTestResult,
+  DiscordWebhookSaveParams,
   PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
@@ -143,7 +168,26 @@ import {
 } from './session-markers'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
-import { LAYOUT_PRESET_VALUES } from './backend'
+import {
+  BANNER_MAX_COUNT,
+  BANNER_OPACITY_MAX,
+  BANNER_OPACITY_MIN,
+  LAYOUT_PRESET_VALUES,
+  SOUND_HOTKEYS,
+  SOUND_LEVEL_DB_MAX,
+  SOUND_LEVEL_DB_MIN,
+  SOUND_MAX_COUNT,
+  SOUND_MAX_DURATION_MS,
+  SOUND_MAX_VOICES,
+  SOUND_MODES,
+  SOUND_NAME_MAX_CHARS,
+  SOUND_VOLUME_DB_MAX,
+  SOUND_VOLUME_DB_MIN,
+  SOUNDBOARD_VOLUME_DB_MAX,
+  SOUNDBOARD_VOLUME_DB_MIN
+} from './backend'
+import { isBannerFileName } from './banner-assets'
+import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
 import { isBuddyPackId, parseBuddyDraftPath } from './buddy-assets'
 import {
@@ -326,6 +370,18 @@ export interface BackendRpcMethodMap {
     MetricsJournalSetParams,
     MetricsJournalState
   >
+  'usageStats.get': BackendRpcDefinition<undefined, UsageStatsState>
+  'usageStats.set': BackendRpcDefinition<UsageStatsSetParams, UsageStatsState>
+  // --- Discord go-live announcement (plan 187) ---
+  'discord.announce.get': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
+  'discord.announce.update': BackendRpcDefinition<
+    DiscordAnnounceUpdateParams,
+    DiscordAnnounceSnapshot
+  >
+  'discord.webhook.save': BackendRpcDefinition<DiscordWebhookSaveParams, DiscordAnnounceSnapshot>
+  'discord.webhook.remove': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
+  'discord.webhook.sendTest': BackendRpcDefinition<DiscordTargetsParams, DiscordTestResult>
+  'discord.links.preview': BackendRpcDefinition<DiscordTargetsParams, DiscordLinksPreview>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
@@ -413,6 +469,32 @@ export interface BackendRpcMethodMap {
     OverlayLayout
   >
   // --- end overlay layout (plan 164) ---
+  // --- Banners (plan 186) ---
+  'banners.list': BackendRpcDefinition<undefined, Banner[]>
+  'banners.importImage': BackendRpcDefinition<BannerImportImageParams, Banner>
+  'banners.update': BackendRpcDefinition<BannerUpdateParams, Banner>
+  'banners.reorder': BackendRpcDefinition<BannerReorderParams, Banner[]>
+  /** The remaining list. */
+  'banners.delete': BackendRpcDefinition<BannerIdParams, Banner[]>
+  'banners.show': BackendRpcDefinition<BannerIdParams, Banner>
+  /** No `id` hides every banner. */
+  'banners.hide': BackendRpcDefinition<BannerHideParams, Banner[]>
+  // --- end banners (plan 186) ---
+  // --- Soundboard (plan 189) ---
+  'sounds.list': BackendRpcDefinition<undefined, SoundboardState>
+  'sounds.import': BackendRpcDefinition<SoundImportParams, Sound>
+  'sounds.update': BackendRpcDefinition<SoundUpdateParams, Sound>
+  'sounds.reorder': BackendRpcDefinition<SoundReorderParams, Sound[]>
+  /** The remaining sounds. */
+  'sounds.delete': BackendRpcDefinition<SoundIdParams, Sound[]>
+  'sounds.settings': BackendRpcDefinition<SoundboardSettingsParams, SoundboardState>
+  /** Start (or restart) the sound: the pad already applied its mode. */
+  'sounds.play': BackendRpcDefinition<SoundIdParams, SoundPlayResult>
+  /** A key, remote or `/sound` press: the backend applies the sound's mode. */
+  'sounds.press': BackendRpcDefinition<SoundIdParams, SoundPressResult>
+  /** No `id` stops every sound. The voices still playing. */
+  'sounds.stop': BackendRpcDefinition<SoundStopParams, SoundsPlayback>
+  // --- end soundboard (plan 189) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': BackendRpcDefinition<CohostAvatarCreateParams, CohostAvatarAccepted>
   'cohost.avatar.redo': BackendRpcDefinition<CohostAvatarRedoParams, CohostAvatarAccepted>
@@ -519,6 +601,11 @@ export interface BackendEventMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
+  // --- Banners (plan 186): the full list, to every window ---
+  'banners.changed': Banner[]
+  // --- Soundboard (plan 189): the whole state and the playing voices, to every window ---
+  'sounds.changed': SoundboardState
+  'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
   'cohost.avatar.draft': CohostAvatarDraft
@@ -552,6 +639,7 @@ export interface BackendEventMap {
   'liveChat.emotes': ChatEmotesSettings
   'liveChat.moderationOperation': ModerationOperation
   'youtube.quota': YouTubeQuotaStatus
+  'discord.announce.changed': DiscordAnnounceSnapshot
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -835,6 +923,14 @@ const metricsJournalSetParamsSchema = objectSchema(
   { enabled: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<MetricsJournalSetParams>
+const usageStatsStateSchema = objectSchema(
+  { enabled: booleanSchema, envDisabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<UsageStatsState>
+const usageStatsSetParamsSchema = objectSchema(
+  { enabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<UsageStatsSetParams>
 const streamOutputTopologyProbeStateSchema = enumSchema([
   'not-required',
   'passed',
@@ -975,6 +1071,137 @@ const STREAM_PLATFORMS = [
   'custom'
 ] as const
 const streamPlatformSchema = enumSchema(STREAM_PLATFORMS) as RuntimeSchema<StreamPlatform>
+
+// --- Discord go-live announcement (plan 187) ---
+const DISCORD_MAX_TARGETS = 64
+const discordIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const discordShortText = stringSchema({ maxLength: 512 })
+const discordPingSchema = enumSchema(['none', 'here', 'everyone'])
+const discordPostAsSchema = unionSchema([
+  objectSchema({ kind: literalSchema('automatic') }, { allowUnknown: false }),
+  objectSchema(
+    { kind: literalSchema('platform'), accountId: discordIdSchema },
+    { allowUnknown: false }
+  ),
+  objectSchema({ kind: literalSchema('videorc') }, { allowUnknown: false }),
+  objectSchema({ kind: literalSchema('webhook') }, { allowUnknown: false })
+])
+const discordAnnounceSnapshotSchema = objectSchema(
+  {
+    webhookPresent: booleanSchema,
+    webhookHint: optionalSchema(discordShortText),
+    webhookName: optionalSchema(discordShortText),
+    enabled: booleanSchema,
+    ping: discordPingSchema,
+    branding: booleanSchema,
+    postAs: discordPostAsSchema,
+    excludedTargetIds: arraySchema(discordIdSchema, { maxLength: DISCORD_MAX_TARGETS }),
+    linkOverrides: recordSchema(discordShortText, { maxKeys: DISCORD_MAX_TARGETS }),
+    identities: arraySchema(
+      objectSchema(
+        {
+          postAs: discordPostAsSchema,
+          name: discordShortText,
+          platform: optionalSchema(streamPlatformSchema),
+          avatarUrl: optionalSchema(stringSchema({ maxLength: 4096 }))
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 64 }
+    ),
+    lastPost: optionalSchema(
+      objectSchema(
+        {
+          at: discordShortText,
+          messageUrl: optionalSchema(discordShortText),
+          state: enumSchema(['live', 'ended'])
+        },
+        { allowUnknown: false }
+      )
+    ),
+    lastError: optionalSchema(
+      objectSchema(
+        {
+          code: enumSchema(['webhook-deleted', 'unreachable', 'rejected']),
+          at: discordShortText
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordAnnounceSnapshot>
+const discordAnnounceUpdateParamsSchema = objectSchema(
+  {
+    enabled: optionalSchema(booleanSchema),
+    ping: optionalSchema(discordPingSchema),
+    branding: optionalSchema(booleanSchema),
+    postAs: optionalSchema(discordPostAsSchema),
+    excludedTargetIds: optionalSchema(
+      arraySchema(discordIdSchema, { maxLength: DISCORD_MAX_TARGETS })
+    ),
+    linkOverride: optionalSchema(
+      objectSchema(
+        { targetId: discordIdSchema, link: optionalSchema(discordShortText) },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordAnnounceUpdateParams>
+const discordWebhookSaveParamsSchema = objectSchema(
+  { url: stringSchema({ minLength: 1, maxLength: 2048 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordWebhookSaveParams>
+const discordTargetsParamsSchema = objectSchema(
+  {
+    targets: arraySchema(
+      objectSchema(
+        {
+          id: discordIdSchema,
+          platform: streamPlatformSchema,
+          label: discordShortText,
+          authMode: enumSchema(['manual-rtmp', 'oauth']),
+          accountId: optionalSchema(discordIdSchema),
+          outputOrientation: optionalSchema(enumSchema(['horizontal', 'vertical'])),
+          platformBroadcastId: optionalSchema(discordShortText)
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: DISCORD_MAX_TARGETS }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordTargetsParams>
+const discordLinksPreviewSchema = objectSchema(
+  {
+    links: arraySchema(
+      objectSchema(
+        {
+          targetId: discordIdSchema,
+          label: discordShortText,
+          linkKind: enumSchema(['auto', 'typed', 'at-go-live', 'none']),
+          link: optionalSchema(discordShortText),
+          included: booleanSchema
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: DISCORD_MAX_TARGETS }
+    ),
+    sender: optionalSchema(
+      objectSchema(
+        { name: discordShortText, avatarUrl: optionalSchema(stringSchema({ maxLength: 4096 })) },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordLinksPreview>
+const discordTestResultSchema = objectSchema(
+  { messageUrl: optionalSchema(discordShortText) },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordTestResult>
+// --- end Discord go-live announcement (plan 187) ---
 
 const audienceSnapshotSchema = objectSchema(
   {
@@ -1141,6 +1368,7 @@ const sourceSelectionSchema = objectSchema(
     screenName: optionalText,
     windowId: optionalText,
     windowName: optionalText,
+    captureOff: optionalSchema(booleanSchema),
     cameraId: optionalText,
     cameraName: optionalText,
     cameraOff: optionalSchema(booleanSchema),
@@ -1939,7 +2167,10 @@ const sessionSummarySchema = boundedSemanticValue(
       cleanCutMode: optionalSchema(enumSchema(['clean', 'condensed'])),
       finalizationState: optionalSchema(recordingFinalizationStateSchema),
       finalizationProgressPercent: optionalSchema(numberSchema({ min: 0, max: 100 })),
-      finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 }))
+      finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 })),
+      // Plan 157: separate-source take membership.
+      takeId: optionalSchema(boundedString),
+      recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera']))
     },
     { allowUnknown: false }
   )
@@ -2299,6 +2530,12 @@ const sessionStartParamsSchema = objectSchema(
         streamEnabled: booleanSchema,
         outputDirectoryCapability: optionalSchema(boundedString),
         keepOriginalMkv: optionalSchema(booleanSchema),
+        separateSourceRecordings: optionalSchema(
+          objectSchema(
+            { enabled: booleanSchema, keepCombined: booleanSchema },
+            { allowUnknown: false }
+          )
+        ),
         video: boundedBackendParamValueSchema,
         rtmp: boundedBackendParamValueSchema
       },
@@ -2833,6 +3070,220 @@ const migrateHighlightAnchorParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<MigrateHighlightAnchorParams>
 // --- end overlay layout (plan 164) ---
+// --- Banners (plan 186) ---
+// Exact: the pinned `banner` fixture. The only optional fields are the Phase 2
+// timer, omitted when off (`skip_serializing_if`); a `null` is refused, the
+// serde null trap. Ids are opaque tokens that also name the image files.
+const bannerIdSchema = runtimeSchema<string>('a banner id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a banner id')
+  }
+  return value
+})
+const bannerFileNameSchema = runtimeSchema<string>('a banner file basename', (value, path) => {
+  if (!isBannerFileName(value)) throw new RuntimeSchemaError(path, 'a banner file basename')
+  return value
+})
+const bannerNameSchema = stringSchema({ minLength: 1, maxLength: 256 })
+const bannerPixelSizeSchema = numberSchema({ integer: true, min: 1, max: 65_536 })
+const bannerTimestampSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const bannerSchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    name: bannerNameSchema,
+    imageFile: bannerFileNameSchema,
+    thumbnailFile: bannerFileNameSchema,
+    width: bannerPixelSizeSchema,
+    height: bannerPixelSizeSchema,
+    hasAlpha: booleanSchema,
+    sortOrder: numberSchema({ integer: true }),
+    shown: booleanSchema,
+    horizontal: overlayRectSchema,
+    vertical: overlayRectSchema,
+    showOnStream: booleanSchema,
+    showInRecording: booleanSchema,
+    opacity: numberSchema({ min: 0, max: BANNER_OPACITY_MAX }),
+    hideAfterSec: optionalSchema(numberSchema({ integer: true, min: 1, max: 86_400 })),
+    repeatEveryMin: optionalSchema(numberSchema({ integer: true, min: 1, max: 1_440 })),
+    createdAt: bannerTimestampSchema,
+    updatedAt: bannerTimestampSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<Banner>
+const bannerListSchema = arraySchema(bannerSchema, {
+  maxLength: BANNER_MAX_COUNT
+}) as RuntimeSchema<Banner[]>
+const bannerImportImageParamsSchema = objectSchema(
+  { sourceCapability: stringSchema({ minLength: 1, maxLength: 1024 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerImportImageParams>
+const bannerUpdateParamsSchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    name: optionalSchema(bannerNameSchema),
+    horizontal: optionalSchema(overlayRectSchema),
+    vertical: optionalSchema(overlayRectSchema),
+    showOnStream: optionalSchema(booleanSchema),
+    showInRecording: optionalSchema(booleanSchema),
+    opacity: optionalSchema(numberSchema({ min: BANNER_OPACITY_MIN, max: BANNER_OPACITY_MAX })),
+    // `0` turns a timer off.
+    hideAfterSec: optionalSchema(numberSchema({ integer: true, min: 0, max: 86_400 })),
+    repeatEveryMin: optionalSchema(numberSchema({ integer: true, min: 0, max: 1_440 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerUpdateParams>
+const bannerReorderParamsSchema = objectSchema(
+  { ids: arraySchema(bannerIdSchema, { maxLength: BANNER_MAX_COUNT }) },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerReorderParams>
+const bannerIdParamsSchema = objectSchema(
+  { id: bannerIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerIdParams>
+const bannerHideParamsSchema = objectSchema(
+  { id: optionalSchema(bannerIdSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerHideParams>
+// --- end banners (plan 186) ---
+
+// --- Soundboard (plan 189) ---
+// Exact: the pinned `sound` fixtures. Optional fields (`hotkey`, `starter`,
+// `voiceId` on a press that stopped) are omitted when absent
+// (`skip_serializing_if`); a `null` is refused, the serde null trap.
+const soundIdSchema = runtimeSchema<string>('a sound id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a sound id')
+  }
+  return value
+})
+const soundFileNameSchema = runtimeSchema<string>('a sound file basename', (value, path) => {
+  if (!isSoundFileName(value)) throw new RuntimeSchemaError(path, 'a sound file basename')
+  return value
+})
+const soundStarterSlugSchema = runtimeSchema<string>('a starter sound slug', (value, path) => {
+  if (!isSoundStarterSlug(value)) throw new RuntimeSchemaError(path, 'a starter sound slug')
+  return value
+})
+const soundNameSchema = stringSchema({ minLength: 1, maxLength: SOUND_NAME_MAX_CHARS })
+const soundHotkeySchema = enumSchema(SOUND_HOTKEYS)
+const soundModeSchema = enumSchema(SOUND_MODES)
+const soundVolumeDbSchema = numberSchema({
+  integer: true,
+  min: SOUND_VOLUME_DB_MIN,
+  max: SOUND_VOLUME_DB_MAX
+})
+const soundboardVolumeDbSchema = numberSchema({
+  integer: true,
+  min: SOUNDBOARD_VOLUME_DB_MIN,
+  max: SOUNDBOARD_VOLUME_DB_MAX
+})
+const soundTimestampSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const soundSchema = objectSchema(
+  {
+    id: soundIdSchema,
+    name: soundNameSchema,
+    file: soundFileNameSchema,
+    durationMs: numberSchema({ integer: true, min: 1, max: SOUND_MAX_DURATION_MS }),
+    loudnessLufs: numberSchema({ min: -120, max: 24 }),
+    levelDb: numberSchema({ min: SOUND_LEVEL_DB_MIN, max: SOUND_LEVEL_DB_MAX }),
+    volumeDb: soundVolumeDbSchema,
+    mode: soundModeSchema,
+    hotkey: optionalSchema(soundHotkeySchema),
+    starter: optionalSchema(soundStarterSlugSchema),
+    sortOrder: numberSchema({ integer: true }),
+    createdAt: soundTimestampSchema,
+    updatedAt: soundTimestampSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<Sound>
+const soundListSchema = arraySchema(soundSchema, {
+  maxLength: SOUND_MAX_COUNT
+}) as RuntimeSchema<Sound[]>
+const soundboardStateSchema = objectSchema(
+  {
+    sounds: soundListSchema,
+    volumeDb: soundboardVolumeDbSchema,
+    monitor: booleanSchema,
+    startersSeeded: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundboardState>
+const soundImportParamsSchema = objectSchema(
+  {
+    sourceCapability: stringSchema({ minLength: 1, maxLength: 1024 }),
+    starter: optionalSchema(
+      objectSchema(
+        {
+          slug: soundStarterSlugSchema,
+          name: soundNameSchema,
+          hotkey: optionalSchema(soundHotkeySchema)
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundImportParams>
+const soundUpdateParamsSchema = objectSchema(
+  {
+    id: soundIdSchema,
+    name: optionalSchema(soundNameSchema),
+    volumeDb: optionalSchema(soundVolumeDbSchema),
+    mode: optionalSchema(soundModeSchema),
+    // `''` clears the key.
+    hotkey: optionalSchema(enumSchema([...SOUND_HOTKEYS, ''] as const))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundUpdateParams>
+const soundReorderParamsSchema = objectSchema(
+  { ids: arraySchema(soundIdSchema, { maxLength: SOUND_MAX_COUNT }) },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundReorderParams>
+const soundIdParamsSchema = objectSchema(
+  { id: soundIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundIdParams>
+const soundStopParamsSchema = objectSchema(
+  { id: optionalSchema(soundIdSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundStopParams>
+const soundboardSettingsParamsSchema = objectSchema(
+  {
+    volumeDb: optionalSchema(soundboardVolumeDbSchema),
+    monitor: optionalSchema(booleanSchema),
+    startersSeeded: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundboardSettingsParams>
+const soundVoiceIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const soundPlayResultSchema = objectSchema(
+  { voiceId: soundVoiceIdSchema, onAir: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundPlayResult>
+const soundPressResultSchema = objectSchema(
+  { voiceId: optionalSchema(soundVoiceIdSchema), onAir: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundPressResult>
+const soundsPlaybackSchema = objectSchema(
+  {
+    voices: arraySchema(
+      objectSchema(
+        {
+          voiceId: soundVoiceIdSchema,
+          soundId: soundIdSchema,
+          startedAtMs: numberSchema({ integer: true, min: 0 }),
+          durationMs: numberSchema({ integer: true, min: 1, max: SOUND_MAX_DURATION_MS }),
+          loop: booleanSchema,
+          onAir: booleanSchema
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: SOUND_MAX_VOICES }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SoundsPlayback>
+// --- end soundboard (plan 189) ---
 // Plan 089: Settings → General → "Show 7TV emotes in chat".
 const sevenTvStatusSchema = objectSchema(
   {
@@ -3051,6 +3502,8 @@ const audioLevelsEventSchema = objectSchema(
     sessionId: optionalSchema(boundedString),
     microphone: optionalSchema(audioLevelReadingSchema),
     systemAudio: optionalSchema(audioLevelReadingSchema),
+    // Plan 189: the soundboard's sounds as mixed.
+    sounds: optionalSchema(audioLevelReadingSchema),
     master: optionalSchema(audioLevelReadingSchema),
     masterClippedSamples: nonNegativeInteger
   },
@@ -3094,7 +3547,19 @@ const cohostCommandSchema = objectSchema(
   {
     id: boundedString,
     heard: stringSchema({ maxLength: 1000 }),
-    kind: enumSchema(['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']),
+    kind: enumSchema([
+      'highlight',
+      'clear',
+      'remove',
+      'confirm',
+      'cancel',
+      'unknown',
+      'show-banner',
+      'hide-banner',
+      'hide-banners',
+      'show-buddy',
+      'hide-buddy'
+    ]),
     status: enumSchema([
       'done',
       'not-found',
@@ -3172,6 +3637,7 @@ const cohostStateSchema = objectSchema(
     tickInFlight: optionalSchema(booleanSchema),
     pendingMessages: optionalSchema(nonNegativeInteger),
     nextTickAt: optionalSchema(nullableSchema(timestamp)),
+    retryAt: optionalSchema(nullableSchema(timestamp)),
     messagesSeen: optionalSchema(nonNegativeInteger),
     questionsTotal: optionalSchema(nonNegativeInteger),
     // Tick wire v2: omitted by the backend while empty.
@@ -4107,6 +4573,26 @@ const runtimeContracts = {
     params: metricsJournalSetParamsSchema,
     result: metricsJournalStateSchema
   },
+  'usageStats.get': { params: undefinedSchema, result: usageStatsStateSchema },
+  'usageStats.set': { params: usageStatsSetParamsSchema, result: usageStatsStateSchema },
+  'discord.announce.get': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
+  'discord.announce.update': {
+    params: discordAnnounceUpdateParamsSchema,
+    result: discordAnnounceSnapshotSchema
+  },
+  'discord.webhook.save': {
+    params: discordWebhookSaveParamsSchema,
+    result: discordAnnounceSnapshotSchema
+  },
+  'discord.webhook.remove': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
+  'discord.webhook.sendTest': {
+    params: discordTargetsParamsSchema,
+    result: discordTestResultSchema
+  },
+  'discord.links.preview': {
+    params: discordTargetsParamsSchema,
+    result: discordLinksPreviewSchema
+  },
   'stream.targets.snapshot': {
     params: undefinedSchema,
     result: streamTargetsSnapshotSchema
@@ -4326,6 +4812,26 @@ const runtimeContracts = {
     result: overlayLayoutSchema
   },
   // --- end overlay layout (plan 164) ---
+  // --- Banners (plan 186) ---
+  'banners.list': { params: undefinedSchema, result: bannerListSchema },
+  'banners.importImage': { params: bannerImportImageParamsSchema, result: bannerSchema },
+  'banners.update': { params: bannerUpdateParamsSchema, result: bannerSchema },
+  'banners.reorder': { params: bannerReorderParamsSchema, result: bannerListSchema },
+  'banners.delete': { params: bannerIdParamsSchema, result: bannerListSchema },
+  'banners.show': { params: bannerIdParamsSchema, result: bannerSchema },
+  'banners.hide': { params: bannerHideParamsSchema, result: bannerListSchema },
+  // --- end banners (plan 186) ---
+  // --- Soundboard (plan 189) ---
+  'sounds.list': { params: undefinedSchema, result: soundboardStateSchema },
+  'sounds.import': { params: soundImportParamsSchema, result: soundSchema },
+  'sounds.update': { params: soundUpdateParamsSchema, result: soundSchema },
+  'sounds.reorder': { params: soundReorderParamsSchema, result: soundListSchema },
+  'sounds.delete': { params: soundIdParamsSchema, result: soundListSchema },
+  'sounds.settings': { params: soundboardSettingsParamsSchema, result: soundboardStateSchema },
+  'sounds.play': { params: soundIdParamsSchema, result: soundPlayResultSchema },
+  'sounds.press': { params: soundIdParamsSchema, result: soundPressResultSchema },
+  'sounds.stop': { params: soundStopParamsSchema, result: soundsPlaybackSchema },
+  // --- end soundboard (plan 189) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': {
     params: cohostAvatarCreateParamsSchema,
@@ -4504,6 +5010,9 @@ const runtimeEventSchemas = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
+  'banners.changed': bannerListSchema,
+  'sounds.changed': soundboardStateSchema,
+  'sounds.playback': soundsPlaybackSchema,
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,
   'cohost.avatar.draft': cohostAvatarDraftSchema,
@@ -4540,7 +5049,8 @@ const runtimeEventSchemas = {
   'liveChat.emotes': chatEmotesSettingsSchema,
   'liveChat.moderationOperation': moderationOperationSchema,
   'youtube.quota': youtubeQuotaStatusSchema,
-  'liveChat.totals': sessionChatTotalsSchema
+  'liveChat.totals': sessionChatTotalsSchema,
+  'discord.announce.changed': discordAnnounceSnapshotSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

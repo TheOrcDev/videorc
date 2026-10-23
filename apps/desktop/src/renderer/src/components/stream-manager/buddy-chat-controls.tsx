@@ -41,6 +41,7 @@ import {
 export function BuddyChatControls({
   autoChat,
   name = null,
+  picture = null,
   disabled = false,
   onModeChange,
   onOpenChatSettings
@@ -48,6 +49,11 @@ export function BuddyChatControls({
   autoChat: CohostAutoChat
   /** The streamer's name for Buddy: the consent dialog asks in its name. */
   name?: string | null
+  /**
+   * That Buddy's own picture (its idle pose): the consent dialog shows the
+   * Buddy it names, not the feature emblem. Absent, the emblem.
+   */
+  picture?: string | null
   disabled?: boolean
   onModeChange: (mode: CohostAutoChatMode) => void
   /** Opens Buddy → Chat in the main window. Absent, the chips are inert. */
@@ -163,7 +169,19 @@ export function BuddyChatControls({
         <DialogContent showCloseButton={false}>
           <DialogHeader>
             <div className="flex items-center gap-3">
-              <BuddyEmblem size="lg" />
+              {picture ? (
+                <img
+                  alt=""
+                  aria-hidden
+                  className="size-14 shrink-0 select-none object-contain"
+                  data-slot="buddy-chat-consent-picture"
+                  decoding="async"
+                  draggable={false}
+                  src={picture}
+                />
+              ) : (
+                <BuddyEmblem size="lg" />
+              )}
               <div className="flex flex-col gap-1">
                 <DialogTitle>
                   {step === 'confirm-auto' ? 'Turn on Auto?' : buddyPostingConsentTitle(name)}

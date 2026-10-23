@@ -372,7 +372,7 @@ impl SevenTvClient {
     pub(crate) fn with_endpoint(endpoint: impl Into<String>) -> Self {
         Self {
             http: reqwest::Client::builder()
-                .user_agent(concat!("Videorc-Desktop/", env!("CARGO_PKG_VERSION")))
+                .user_agent(crate::performance_check::desktop_user_agent())
                 .timeout(SEVENTV_REQUEST_TIMEOUT)
                 .connect_timeout(SEVENTV_CONNECT_TIMEOUT)
                 .build()

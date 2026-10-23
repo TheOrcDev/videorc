@@ -247,7 +247,9 @@ async function main() {
   const dismissed = await smokeCommand('eval-js', {
     code: `
       for (let i = 0; i < 25; i++) {
-        const scrim = document.querySelector('[data-slot="dialog-overlay"][data-state="open"]')
+        const scrim = document.querySelector(
+          '[data-slot="dialog-overlay"][data-state="open"], [data-slot="alert-dialog-overlay"][data-state="open"]'
+        )
         if (!scrim) return { dismissed: true }
         document.querySelectorAll('[data-slot="dialog-close"]').forEach((button) => button.click())
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -380,6 +382,44 @@ async function main() {
   )
   await smokeCommand('preview-window-set-dock-overlay', { open: false })
   await waitForDockedSurfaceAtSlot('dock-overlay-close: surface returns when the overlay closes')
+
+  // The REAL watcher, per overlay kind (owner, 2026-10-21): the End
+  // livestream question is an ALERT dialog, and it once opened under the
+  // surface because the watcher knew only the plain dialog's scrim. Each
+  // stand-in carries the slot and state its ui primitive renders.
+  for (const [kind, markup] of [
+    ['alert-dialog', '<div data-slot="alert-dialog-overlay" data-state="open"></div>'],
+    ['dialog', '<div data-slot="dialog-overlay" data-state="open"></div>']
+  ]) {
+    await smokeCommand('eval-js', {
+      code: `
+        const host = document.createElement('div')
+        host.setAttribute('data-videorc-probe-overlay', '')
+        host.innerHTML = ${JSON.stringify(markup)}
+        document.body.appendChild(host)
+        return { injected: true }
+      `
+    })
+    const realOverlayHidden = await waitFor(
+      async () => smokeCommand('preview-window-state'),
+      (s) => s.visible === false && s.dockHiddenReason === 'overlay-open',
+      8000
+    )
+    assertProbe(
+      realOverlayHidden.ok,
+      `dock-overlay-${kind}: the renderer watcher hides the surface under an open ${kind}`,
+      JSON.stringify(realOverlayHidden.last)
+    )
+    await smokeCommand('eval-js', {
+      code: `
+        document.querySelectorAll('[data-videorc-probe-overlay]').forEach((node) => node.remove())
+        return { removed: true }
+      `
+    })
+    await waitForDockedSurfaceAtSlot(
+      `dock-overlay-${kind}-close: surface returns when the ${kind} closes`
+    )
+  }
 
   // Scrolled-away slots hide with a stated reason instead of clipping. Drive
   // the REAL reporter — actually scroll the slot's pane — rather than

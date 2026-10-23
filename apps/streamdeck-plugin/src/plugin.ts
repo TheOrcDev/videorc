@@ -5,13 +5,32 @@
 // Settings, every key shows an alert glyph on press and the title says so.
 
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck'
-import type { JsonObject, KeyDownEvent, WillAppearEvent } from '@elgato/streamdeck'
+import type {
+  DidReceiveSettingsEvent,
+  JsonObject,
+  KeyDownEvent,
+  WillAppearEvent,
+  WillDisappearEvent
+} from '@elgato/streamdeck'
 
-import { VideorcClient, type RemoteState } from './videorc-client.js'
+import {
+  VideorcClient,
+  bannerKeyIntent,
+  bannerKeyTitle,
+  soundKeyIntent,
+  soundKeyTitle,
+  type RemoteState
+} from './videorc-client.js'
 
 const client = new VideorcClient()
 
-type TitleRenderer = (state: RemoteState | null, connected: boolean) => string
+/** A key's title from the confirmed state; a key that names one thing (a
+ * banner) reads its own settings too. */
+type TitleRenderer<TSettings extends JsonObject = JsonObject> = (
+  state: RemoteState | null,
+  connected: boolean,
+  settings: TSettings
+) => string
 
 type InspectorOption = {
   value: string
@@ -19,7 +38,9 @@ type InspectorOption = {
 }
 
 abstract class VideorcAction<TSettings extends JsonObject> extends SingletonAction<TSettings> {
-  protected abstract renderTitle: TitleRenderer
+  protected abstract renderTitle: TitleRenderer<TSettings>
+  /** Each visible key's settings, so a refresh can title every key on its own. */
+  private readonly settingsById = new Map<string, TSettings>()
   protected abstract intentFor(settings: TSettings, state: RemoteState | null): Record<
     string,
     unknown
@@ -33,12 +54,16 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
     client.on('state', this.refresh)
     client.on('connected', this.refresh)
     client.on('describe', this.pushInspectorOptions)
+    // Banner and sound keys render `shown` and `playing` from describe
+    // (plans 186, 189).
+    client.on('describe', this.refresh)
     client.on('disconnected', this.refresh)
   }
 
   private refresh = (): void => {
     for (const visible of this.actions) {
-      void visible.setTitle(this.renderTitle(client.state, client.connected))
+      const settings = this.settingsById.get(visible.id) ?? ({} as TSettings)
+      void visible.setTitle(this.renderTitle(client.state, client.connected, settings))
     }
   }
 
@@ -56,7 +81,18 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
   }
 
   override onWillAppear(ev: WillAppearEvent<TSettings>): void {
-    void ev.action.setTitle(this.renderTitle(client.state, client.connected))
+    this.settingsById.set(ev.action.id, ev.payload.settings)
+    void ev.action.setTitle(this.renderTitle(client.state, client.connected, ev.payload.settings))
+  }
+
+  override onWillDisappear(ev: WillDisappearEvent<TSettings>): void {
+    this.settingsById.delete(ev.action.id)
+  }
+
+  /** The property inspector picked something: the title follows at once. */
+  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<TSettings>): void {
+    this.settingsById.set(ev.action.id, ev.payload.settings)
+    void ev.action.setTitle(this.renderTitle(client.state, client.connected, ev.payload.settings))
   }
 
   /** The property inspector asks for options when it opens. */
@@ -181,6 +217,48 @@ class TakeoverToggle extends VideorcAction<TakeoverSettings> {
   }
 }
 
+type BannerSettings = { bannerId?: string }
+
+// Plan 186: one of the streamer's banners, picked in the property inspector.
+// The key shows its name, with ON while it shows (`shown` from describe),
+// and a press toggles it. A banner that is gone says Banner, and a press
+// alerts: Videorc refuses it.
+@action({ UUID: 'com.videorc.streamdeck.banner-toggle' })
+class BannerToggle extends VideorcAction<BannerSettings> {
+  protected renderTitle: TitleRenderer<BannerSettings> = (_state, connected, settings) =>
+    bannerKeyTitle(client.describe, settings.bannerId, connected)
+  protected intentFor(settings: BannerSettings): Record<string, unknown> | null {
+    return bannerKeyIntent(settings.bannerId)
+  }
+  protected override inspectorOptions(): InspectorOption[] {
+    return (client.describe?.banners ?? []).map((banner) => ({
+      value: banner.id,
+      label: banner.name
+    }))
+  }
+}
+
+type SoundSettings = { soundId?: string }
+
+// Plan 189: one of the streamer's sounds, picked in the property inspector.
+// The key shows its name, with ON while it plays (`playing` from describe),
+// and a press plays it the way its mode says. A sound that is gone says
+// Sound, and a press alerts: Videorc refuses it.
+@action({ UUID: 'com.videorc.streamdeck.sound-play' })
+class SoundPlay extends VideorcAction<SoundSettings> {
+  protected renderTitle: TitleRenderer<SoundSettings> = (_state, connected, settings) =>
+    soundKeyTitle(client.describe, settings.soundId, connected)
+  protected intentFor(settings: SoundSettings): Record<string, unknown> | null {
+    return soundKeyIntent(settings.soundId)
+  }
+  protected override inspectorOptions(): InspectorOption[] {
+    return (client.describe?.sounds ?? []).map((sound) => ({
+      value: sound.id,
+      label: sound.name
+    }))
+  }
+}
+
 type WindowSettings = { window?: 'notes' | 'comments' | 'preview' }
 
 @action({ UUID: 'com.videorc.streamdeck.window-front' })
@@ -207,6 +285,8 @@ streamDeck.actions.registerAction(new MicToggle())
 streamDeck.actions.registerAction(new SystemAudioToggle())
 streamDeck.actions.registerAction(new SceneApply())
 streamDeck.actions.registerAction(new TakeoverToggle())
+streamDeck.actions.registerAction(new BannerToggle())
+streamDeck.actions.registerAction(new SoundPlay())
 streamDeck.actions.registerAction(new WindowFront())
 
 client.start()

@@ -1,6 +1,15 @@
+// @vitest-environment happy-dom
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import {
+  DOCK_BLOCKING_POPPER_SELECTOR,
+  DOCK_BLOCKING_POPPER_SLOTS,
+  DOCK_BLOCKING_SCRIM_SELECTOR,
+  DOCK_BLOCKING_SCRIM_SLOTS,
+  DOCK_NON_BLOCKING_SLOTS,
   buildDockSlotReport,
   clipRectOf,
   dockSlotReportChanged,
@@ -131,5 +140,54 @@ describe('overlay occlusion', () => {
 
   it('rectsIntersect treats touching edges as non-overlapping', () => {
     expect(rectsIntersect(slot, { x: 240 + 800, y: 96, width: 10, height: 10 })).toBe(false)
+  })
+})
+
+// Owner, 2026-10-21: the End livestream question (an alert dialog) opened
+// UNDER the docked preview mid-stream, because only the plain dialog's scrim
+// was listed. Every overlay the app can portal must be classified.
+describe('overlay coverage', () => {
+  // happy-dom swaps import.meta.url's scheme, so the path comes from __dirname.
+  const uiDir = join(__dirname, '../components/ui')
+  const portalledSlots = readdirSync(uiDir)
+    .filter((file) => file.endsWith('.tsx') && !file.includes('.test.'))
+    .map((file) => readFileSync(join(uiDir, file), 'utf8'))
+    .filter((source) => /Primitive\.Portal\b/.test(source))
+    .flatMap((source) =>
+      Array.from(source.matchAll(/data-slot="([a-z-]+-(?:overlay|content))"/g), (match) => match[1])
+    )
+
+  it('finds the portalled slots it guards', () => {
+    expect(portalledSlots).toEqual(
+      expect.arrayContaining(['dialog-overlay', 'alert-dialog-overlay', 'popover-content'])
+    )
+  })
+
+  it('classifies every portalled overlay and content slot', () => {
+    const classified = new Set<string>([
+      ...DOCK_BLOCKING_SCRIM_SLOTS,
+      ...DOCK_BLOCKING_POPPER_SLOTS,
+      ...Object.keys(DOCK_NON_BLOCKING_SLOTS)
+    ])
+    expect(portalledSlots.filter((name) => !classified.has(name))).toEqual([])
+  })
+
+  it('an open alert dialog blocks the docked preview', () => {
+    document.body.innerHTML =
+      '<div data-slot="alert-dialog-overlay" data-state="open"></div>' +
+      '<div data-slot="dialog-overlay" data-state="closed"></div>'
+    expect(document.querySelectorAll(DOCK_BLOCKING_SCRIM_SELECTOR)).toHaveLength(1)
+  })
+
+  it('menus, hover cards and shown toasts are floating blockers; tooltips are not', () => {
+    document.body.innerHTML = [
+      '<div data-slot="context-menu-content" data-state="open"></div>',
+      '<div data-slot="hover-card-content" data-state="open"></div>',
+      '<div data-slot="tooltip-content" data-state="delayed-open"></div>',
+      '<li data-sonner-toast data-visible="true" data-removed="false"></li>',
+      '<li data-sonner-toast data-visible="false" data-removed="false"></li>',
+      '<li data-sonner-toast data-visible="true" data-removed="true"></li>'
+    ].join('')
+    expect(document.querySelectorAll(DOCK_BLOCKING_POPPER_SELECTOR)).toHaveLength(3)
   })
 })

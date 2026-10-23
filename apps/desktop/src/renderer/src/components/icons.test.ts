@@ -75,7 +75,9 @@ describe('semantic icon registry', SOURCE_SCAN_TIMEOUT, () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+    // A real Vite build of the registry: 14.5 s alone on ogre, so it timed out
+    // at 15 s whenever the full suite ran beside it (2026-10-13).
+  }, 60_000)
 
   it('preserves semantic aliases, all weights and ordinary SVG props', () => {
     expect(CameraIcon).toBe(StudioIcon)

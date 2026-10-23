@@ -5,6 +5,7 @@ import type {
   OverlayRect
 } from '@/lib/backend'
 import { BUDDY_DEFAULT_PACK } from '@/lib/buddy-default-pack'
+import { canvasToBase64Png } from '@/lib/canvas-png'
 
 // The Buddy's comic bubble (plan 164 Phase C, D17), rasterized per output
 // canvas like the highlight card (`lib/comment-highlight.ts`). On stream the
@@ -421,18 +422,6 @@ function buddyCanvasMeasurer(): BuddyTextMeasurer | null {
     context.font = buddyCanvasFont(fontPx, weight)
     return context.measureText(text).width
   }
-}
-
-async function canvasToBase64Png(canvas: OffscreenCanvas): Promise<string> {
-  const blob = await canvas.convertToBlob({ type: 'image/png' })
-  const buffer = await blob.arrayBuffer()
-  let binary = ''
-  const view = new Uint8Array(buffer)
-  const chunkSize = 0x8000
-  for (let offset = 0; offset < view.length; offset += chunkSize) {
-    binary += String.fromCharCode(...view.subarray(offset, offset + chunkSize))
-  }
-  return btoa(binary)
 }
 
 /**

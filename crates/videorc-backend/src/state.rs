@@ -1058,6 +1058,21 @@ pub struct AppState {
     /// Defines one process-wide intake order while global fence/order metadata
     /// is attached to a command before it enters a per-socket queue.
     pub websocket_command_admission: Arc<StdMutex<()>>,
+    /// One import across all renderer connections, including queued work.
+    pub screen_import_capacity: Arc<tokio::sync::Semaphore>,
+    /// Serialize list snapshots with their events, never image preparation.
+    pub screen_list_publication: Arc<StdMutex<()>>,
+    /// The same for banners (plan 186): `banners.changed` snapshots leave in
+    /// order, never behind an import's decode.
+    pub banner_list_publication: Arc<StdMutex<()>>,
+    /// Wakes the banner timer task (plan 186 S10) after any banner change.
+    pub banner_timer_wake: Arc<tokio::sync::Notify>,
+    /// The same for sounds (plan 189): `sounds.changed` snapshots leave in
+    /// order, never behind an import's decode.
+    pub sound_list_publication: Arc<StdMutex<()>>,
+    /// The soundboard player (plan 189): the decoded library, the playing
+    /// voices and the session bus they go into.
+    pub soundboard: Arc<crate::sound_player::SoundPlayer>,
     /// Completion truth for layout/live-control mutations across reconnects.
     pub operator_command_fence: Arc<CommandCompletionFence>,
     /// Physical camera/screen transition completion, independent from the
@@ -1105,6 +1120,11 @@ pub struct AppState {
     /// Library, the quit path and the updater gate.
     pub recording_finalization: Arc<crate::recording_finalization::RecordingFinalizationRegistry>,
     pub performance_check: Arc<crate::performance_check::PerformanceCheckRuntime>,
+    /// Anonymous usage stats (Settings → General → Privacy): the switch and
+    /// the delivery queue's lock. Off until boot reads the setting.
+    pub usage_stats: Arc<crate::usage_stats::UsageStatsRuntime>,
+    /// Plan 187: the Discord go-live announcer's fact channel and settings lock.
+    pub discord_announce: Arc<crate::discord_announce::DiscordAnnounceRuntime>,
     /// Microphone kept open while Studio is visible (instant-record P5);
     /// `session.start` takes it instead of opening the device.
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
@@ -1155,6 +1175,9 @@ pub struct AppState {
     /// The Buddy's pet on stream (plan 168 Phase B): pre-scaled atlases per
     /// leg and the per-frame draw (std mutex: read from the render threads).
     pub buddy_sprite: crate::buddy_sprite::BuddySpriteSlot,
+    /// Prepared banner bitmaps and their off-lock worker (plan 186 S3; std
+    /// mutexes, read from the render threads).
+    pub banner_prepare: crate::banner_prepare::BannerPrepareService,
     /// Backend-owned acknowledgement/lifetime for the viewer-facing comment
     /// card. The image slot above and this state are mutated under this
     /// state-machine lock so stale expiry tasks cannot clear newer cards.
@@ -1336,6 +1359,12 @@ impl AppState {
             capture_recovery_smoke_fault: new_capture_recovery_smoke_fault_slot(),
             websocket_transport_metrics: Arc::new(WebSocketTransportMetrics::default()),
             websocket_command_admission: Arc::new(StdMutex::new(())),
+            screen_import_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
+            screen_list_publication: Arc::new(StdMutex::new(())),
+            banner_list_publication: Arc::new(StdMutex::new(())),
+            banner_timer_wake: Arc::new(tokio::sync::Notify::new()),
+            sound_list_publication: Arc::new(StdMutex::new(())),
+            soundboard: Arc::new(crate::sound_player::SoundPlayer::default()),
             operator_command_fence: Arc::new(CommandCompletionFence::default()),
             source_transition_fence: Arc::new(CommandCompletionFence::default()),
             live_control_command_order: Arc::new(CommandCompletionFence::default()),
@@ -1373,6 +1402,8 @@ impl AppState {
                 crate::recording_finalization::RecordingFinalizationRegistry::default(),
             ),
             performance_check: Arc::default(),
+            usage_stats: Arc::default(),
+            discord_announce: Arc::default(),
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),
@@ -1391,6 +1422,7 @@ impl AppState {
                 cohost_settings.persona.id.clone(),
             ),
             buddy_sprite,
+            banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
             comment_highlight_commit: Arc::new(tokio::sync::Mutex::new(())),
             cohost: crate::cohost::new_cohost_slot(cohost_settings),

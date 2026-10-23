@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
-  Shared property inspector for the three setting-backed Videorc actions
-  (scene-apply, takeover-toggle, window-front). No external dependencies:
+  Shared property inspector for the five setting-backed Videorc actions
+  (scene-apply, takeover-toggle, banner-toggle, sound-play, window-front). No external dependencies:
   it speaks the Stream Deck property-inspector WebSocket protocol directly
   and asks the plugin (sendToPlugin) for live options from Videorc's
   remote.describe projection.
@@ -70,6 +70,16 @@
           key: 'assetId',
           label: 'Takeover',
           hint: 'Your saved takeover screens (BRB, starting soon).'
+        },
+        'com.videorc.streamdeck.banner-toggle': {
+          key: 'bannerId',
+          label: 'Banner',
+          hint: 'Your banners from Assets → Banners in Videorc.'
+        },
+        'com.videorc.streamdeck.sound-play': {
+          key: 'soundId',
+          label: 'Sound',
+          hint: 'Your sounds from Assets → Sounds in Videorc.'
         },
         'com.videorc.streamdeck.window-front': {
           key: 'window',

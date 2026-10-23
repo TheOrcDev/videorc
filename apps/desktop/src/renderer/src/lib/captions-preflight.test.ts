@@ -4,6 +4,8 @@ import type { AiCapabilities } from '@/lib/backend'
 
 import {
   captionsEnabledForSession,
+  captionsPlatformUnavailableReason,
+  CAPTIONS_UNAVAILABLE_ON_LINUX,
   captionsSuppressedForSession,
   captionRuntimeStartBlocked,
   captionSessionOutputReadiness,
@@ -17,6 +19,33 @@ function capabilities(captions: AiCapabilities['captions']): AiCapabilities {
 }
 
 describe('decideGoLiveCaptionsReadiness', () => {
+  it('starts without captions on Linux and says why, instead of a refused session', () => {
+    expect(captionsPlatformUnavailableReason('linux')).toBe(CAPTIONS_UNAVAILABLE_ON_LINUX)
+    expect(captionsPlatformUnavailableReason('darwin')).toBeNull()
+    expect(captionsPlatformUnavailableReason('win32')).toBeNull()
+    const result = decideGoLiveCaptionsReadiness({
+      persistedEnabled: true,
+      suppressForSession: true,
+      capabilities: capabilities(undefined),
+      platformUnavailable: captionsPlatformUnavailableReason('linux')
+    })
+    expect(result).toMatchObject({
+      kind: 'skipped',
+      blocksStart: false,
+      title: 'Captions unavailable',
+      description: CAPTIONS_UNAVAILABLE_ON_LINUX,
+      transport: null
+    })
+    expect(
+      decideGoLiveCaptionsReadiness({
+        persistedEnabled: false,
+        suppressForSession: true,
+        capabilities: null,
+        platformUnavailable: CAPTIONS_UNAVAILABLE_ON_LINUX
+      }).kind
+    ).toBe('disabled')
+  })
+
   it('fails closed when an enabled client receives an older capabilities payload', () => {
     const result = decideGoLiveCaptionsReadiness({
       persistedEnabled: true,

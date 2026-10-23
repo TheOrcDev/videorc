@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { BuddyPetCreation, BuddyPetCreationSource } from '@/lib/backend'
+import { UNKNOWN_REASON } from '@/lib/user-error'
 import { BUDDY_PET_ATLAS_SHEETS } from '../../../shared/buddy-pet-creator'
 
 import {
@@ -273,6 +274,23 @@ describe('the creator controller (plan 168 S-F5)', () => {
     expect(backend.calls.at(-1)).toEqual(['cohost.pet.creation.cancel', { buildId: BUILD }])
     expect(controller.getState().creation).toBeNull()
     expect(controller.getState().pending).toBeNull()
+    controller.dispose()
+  })
+
+  it('maps a refused start to user copy and never the raw path', async () => {
+    const backend = fakeBackend(null)
+    const raw = 'Could not write pilot.png: Permission denied (os error 13) /Users/streamer/Buddy'
+    const controller = createBuddyPetCreatorController(backend.client)
+    await controller.refresh()
+    vi.mocked(backend.client.requestTyped).mockImplementationOnce(async () => {
+      throw Object.assign(new Error(raw), { code: 'cohost-pet-store-failed' })
+    })
+    await controller.readReference({ kind: 'persona-idle' })
+    const state = controller.getState()
+    expect(state.problem?.code).toBe('cohost-pet-store-failed')
+    expect(state.problem?.message).toBe(`Couldn't update Buddy's look. ${UNKNOWN_REASON}`)
+    expect(state.problem?.message).not.toContain(raw)
+    expect(state.problem?.message).not.toContain('/Users/streamer')
     controller.dispose()
   })
 

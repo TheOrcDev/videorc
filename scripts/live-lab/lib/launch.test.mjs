@@ -20,8 +20,10 @@ import {
   topLeftBounds
 } from './launch.mjs'
 
-// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
-const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
 
 const CONFIG = {
   client: { id: '123456-abcdef.apps.googleusercontent.com', secret: 'GOCSPX-super-secret-value' },
@@ -29,7 +31,7 @@ const CONFIG = {
   labDisplay: { name: 'Lab Dummy' }
 }
 
-test('lab profiles live under the work dir; local-sink runs get their own', macOnly, () => {
+test('lab profiles live under the work dir; local-sink runs get their own', posixOnly, () => {
   const youtube = labProfileDirs('/work', 'youtube')
   const local = labProfileDirs('/work', 'local-sink')
   assert.equal(youtube.root, '/work/profile')
@@ -42,12 +44,13 @@ test('lab profiles live under the work dir; local-sink runs get their own', macO
   )
 })
 
-test('the launch env turns on CDP, the journal and bounded logs, and turns auto-update off', () => {
+test('the launch env turns on CDP, the journal and bounded logs, and turns auto-update and usage stats off', () => {
   const dirs = labProfileDirs('/work', 'local-sink')
   const env = buildLaunchEnv({ dirs, config: CONFIG, scenario: { usesLabYoutubeClient: false } })
   assert.equal(env.VIDEORC_REMOTE_DEBUG_PORT, '0')
   assert.equal(env.VIDEORC_METRICS_JOURNAL, '1')
   assert.equal(env.VIDEORC_DISABLE_AUTO_UPDATE, '1')
+  assert.equal(env.VIDEORC_USAGE_STATS, '0')
   assert.equal(env.VIDEORC_BACKEND_LOG_MAX_BYTES, String(50 * 1024 * 1024))
   assert.equal(env.VIDEORC_BACKEND_LOG_MAX_FILES, '10')
   assert.equal(env.VIDEORC_USER_DATA_DIR, dirs.userDataDir)
@@ -94,7 +97,7 @@ test('the CDP endpoint is read from stderr or DevToolsActivePort', () => {
 
 test(
   'launchApp uses LaunchServices with the packaged executable and keeps the CDP url',
-  macOnly,
+  posixOnly,
   async () => {
     let options = null
     const dirs = labProfileDirs('/work', 'local-sink')

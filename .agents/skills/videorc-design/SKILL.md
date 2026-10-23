@@ -69,6 +69,13 @@ for the owner, not a design choice.
 - **A click on a live chat row puts the message on stream**, and a click on
   the live row takes it off (2026-10-10, D10; plans 055 and 151). There is no
   select-first step and no separate Show button.
+- **Chat stays on the newest message** (2026-10-21). Newest at the bottom,
+  and the list follows it. Only the streamer's own scroll up (wheel, touch,
+  keys, the scrollbar) stops it; nothing the app does moves it: Buddy's
+  "Talking about this" marks a row and never scrolls to it, and rows that
+  grow, highlights and removals keep it on the newest message
+  (`hooks/use-chat-follow.ts`). While it is stopped, one chip ("12 new", or
+  "Latest") goes back.
 - **Toasts are never tinted** (2026-09-29). A toast's type colours its icon
   only, never the panel, its rim or its text.
 - **No success toast for a scene, layout or source change** (2026-07-16):
@@ -692,8 +699,8 @@ confirming a routine interaction the user just watched succeed. The copy
   clicks, and source device switches.
 - **Type by meaning**, and the type colours the icon only (owner call):
   - error: it failed and needs you;
-  - warning: it can't happen now, or it is degraded. A refusal ("Takeovers
-    are locked while you're recording or live") is a warning, never an
+  - warning: it can't happen now, or it is degraded. A refusal ("Renaming takeovers
+    is locked while you're recording or live") is a warning, never an
     error;
   - info: neutral news, or a step to take in the browser;
   - success: async work that finishes out of view (recording saved, import

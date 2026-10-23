@@ -2,6 +2,9 @@ import { execFile } from 'node:child_process'
 import { createInterface } from 'node:readline/promises'
 import { promisify } from 'node:util'
 
+import { labSessionEnv } from './linux-desktop.mjs'
+import { isLinux } from './platform.mjs'
+
 const execFileAsync = promisify(execFile)
 
 export function hasTerminal() {
@@ -11,7 +14,7 @@ export function hasTerminal() {
 export function requireTerminal(what) {
   if (!hasTerminal()) {
     throw new Error(
-      `${what} needs a terminal for hidden input. Run it in Terminal.app, or use --from-clipboard / --client-json (they work from Claude Code's ! prompt).`
+      `${what} needs a terminal for hidden input. Run it in a real terminal (Terminal.app on macOS), or use --from-clipboard / --client-json (they work from Claude Code's ! prompt).`
     )
   }
 }
@@ -63,15 +66,42 @@ export function promptHidden(question) {
   })
 }
 
-export async function readClipboard() {
-  const { stdout } = await execFileAsync('pbpaste', [], { maxBuffer: 64 * 1024 })
+// Plan 179: on Linux the clipboard is Wayland's (wl-clipboard), else X11's
+// (xclip). Over SSH the session's variables come from labSessionEnv().
+export function clipboardCommands(platform = process.platform, sessionEnv = {}) {
+  if (!isLinux(platform)) {
+    return { read: ['pbpaste', []], clear: ['pbcopy', []] }
+  }
+  return sessionEnv.WAYLAND_DISPLAY
+    ? { read: ['wl-paste', ['--no-newline']], clear: ['wl-copy', ['--clear']] }
+    : {
+        read: ['xclip', ['-selection', 'clipboard', '-o']],
+        clear: ['xclip', ['-selection', 'clipboard', '-i']]
+      }
+}
+
+async function clipboardEnv(platform) {
+  if (!isLinux(platform)) return { commands: clipboardCommands(platform), env: process.env }
+  const sessionEnv = await labSessionEnv()
+  return {
+    commands: clipboardCommands(platform, sessionEnv),
+    env: { ...process.env, ...sessionEnv }
+  }
+}
+
+export async function readClipboard({ platform = process.platform } = {}) {
+  const { commands, env } = await clipboardEnv(platform)
+  const [command, args] = commands.read
+  const { stdout } = await execFileAsync(command, args, { maxBuffer: 64 * 1024, env })
   return stdout.trim()
 }
 
 // Called after a key is stored, so it does not linger on the clipboard.
-export function clearClipboard() {
+export async function clearClipboard({ platform = process.platform } = {}) {
+  const { commands, env } = await clipboardEnv(platform)
+  const [command, args] = commands.clear
   return new Promise((resolve, reject) => {
-    const child = execFile('pbcopy', [], (error) => (error ? reject(error) : resolve()))
+    const child = execFile(command, args, { env }, (error) => (error ? reject(error) : resolve()))
     child.stdin.end('')
   })
 }

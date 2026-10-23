@@ -38,6 +38,7 @@ import type {
   CohostWindowBuddy
 } from '@/lib/backend'
 import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import type { BuddyOutputNotice } from '@/lib/buddy-output-notice'
 import {
   BUDDY_HEADER_PREVIEW_PX,
   BUDDY_REACTION_CHIPS,
@@ -684,6 +685,7 @@ export function BuddySayFooter({
   sayPending = false,
   sayPostsToChat = false,
   sayChatCap = null,
+  offOutputsNotice = null,
   onSay,
   onShowOnStreamChange,
   onReact
@@ -698,6 +700,12 @@ export function BuddySayFooter({
   sayPostsToChat?: boolean
   /** The shortest chat cap a posted Say meets (X takes 140); null when unknown. */
   sayChatCap?: number | null
+  /**
+   * Buddy Live is on air with the Buddy on no output
+   * (`buddyOffOutputsNotice`): said in words above the Say box, with the
+   * on-stream switch's action one click away, at every width.
+   */
+  offOutputsNotice?: BuddyOutputNotice | null
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   onShowOnStreamChange?: (showOnStream: boolean) => void
   onReact?: (reaction: string) => void
@@ -722,6 +730,27 @@ export function BuddySayFooter({
       className="@container/buddy-header shrink-0 border-t border-border"
       data-slot="buddy-footer"
     >
+      {offOutputsNotice ? (
+        // Buddy Live is on air, the Buddy on no output: words, not a hidden
+        // switch label, and the way out in one click. Quiet, because it is
+        // the streamer's choice to make, not a failure.
+        <Alert data-testid="buddy-off-outputs" variant="quiet">
+          <AlertTitle>{offOutputsNotice.title}</AlertTitle>
+          <AlertDescription>{offOutputsNotice.detail}</AlertDescription>
+          {onShowOnStreamChange ? (
+            <AlertAction>
+              <Button
+                size="xs"
+                type="button"
+                variant="secondary"
+                onClick={() => onShowOnStreamChange(true)}
+              >
+                {offOutputsNotice.action}
+              </Button>
+            </AlertAction>
+          ) : null}
+        </Alert>
+      ) : null}
       <div className="flex flex-wrap items-center gap-1.5 px-3 py-2" data-slot="buddy-say">
         <div className="flex min-w-48 flex-1 items-center gap-1.5">
           <Input

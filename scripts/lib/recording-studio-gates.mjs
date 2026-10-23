@@ -64,6 +64,21 @@ export function buildRecordingStudioGateSteps({
       label: 'scene switch recording and stream pixel artifacts',
       command: 'pnpm',
       args: ['smoke:scene-switch-pixels']
+    },
+    {
+      label: 'separate source recordings fixture take',
+      command: 'pnpm',
+      args: ['smoke:separate-source-fixture']
+    },
+    {
+      label: 'soundboard fixture press',
+      command: 'pnpm',
+      args: ['smoke:soundboard-fixture']
+    },
+    {
+      label: 'separate source production session runtime',
+      command: 'pnpm',
+      args: ['smoke:separate-source-runtime']
     }
   ]
 
@@ -122,6 +137,13 @@ export function buildRecordingStudioGateSteps({
         label: 'imported screen image recording smoke',
         command: 'pnpm',
         args: ['smoke:screens']
+      },
+      {
+        // Plan 186: banners drawn, moved, routed per leg and blended in the
+        // recording and both stream orientations, above a takeover.
+        label: 'banners recording and stream smoke',
+        command: 'pnpm',
+        args: ['smoke:banners']
       },
       {
         // The reality gate: real capture config (no synthetic preview scene),

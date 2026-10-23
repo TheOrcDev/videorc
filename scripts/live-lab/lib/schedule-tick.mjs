@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 
 import { workDir as defaultWorkDir } from './config.mjs'
+import { isLinux } from './platform.mjs'
 import { loadPolicy } from './policy.mjs'
 import { processAlive } from './run-lock.mjs'
 import {
@@ -25,7 +27,8 @@ import {
 import { loadScheduleTable } from './schedule-table.mjs'
 import { localDate } from './schedule-time.mjs'
 
-// Plan 178 U11. One launchd tick (every 300 s and once at login). In order:
+// Plan 178 U11. One launchd tick (every 300 s and once at login; on Linux the
+// systemd user timer, every 300 s and 60 s after boot, plan 179). In order:
 // take the tick lock, close slots a dead tick left running, read the policy
 // (problems, enabled: false or schedule.enabled: false end the tick quietly
 // after recording why), read the table, run the post-boot doctor once per
@@ -37,8 +40,23 @@ const execFileAsync = promisify(execFile)
 const MAX_ITEMS_PER_TICK = 6
 const DAY_MS = 86_400_000
 
-export async function readBootTime({ exec = execFileAsync } = {}) {
+/**
+ * Plan 179. Pure: the boot time in epoch seconds from Linux's /proc/stat
+ * (`btime <seconds>`), or null; the same shape as parseBootTime's answer
+ * for macOS's kern.boottime.
+ */
+export function parseLinuxBootTime(text = '') {
+  const match = /^btime\s+(\d+)\s*$/m.exec(text)
+  return match ? Number(match[1]) : null
+}
+
+export async function readBootTime({
+  exec = execFileAsync,
+  platform = process.platform,
+  readFile: read = (path) => readFile(path, 'utf8')
+} = {}) {
   try {
+    if (isLinux(platform)) return parseLinuxBootTime(await read('/proc/stat'))
     const { stdout } = await exec('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeout: 5000 })
     return parseBootTime(stdout)
   } catch {

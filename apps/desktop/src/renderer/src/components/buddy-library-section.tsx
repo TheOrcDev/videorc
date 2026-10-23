@@ -43,6 +43,7 @@ import { useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look
 import { useStudioCore } from '@/hooks/use-studio'
 import type { BuddyLookPicture } from '@/lib/buddy-look-view'
 import {
+  BUDDY_LIBRARY_UNAVAILABLE,
   buddyAliveTagDistinguishes,
   buddyInvitationVisible,
   buddyLibraryBusyLine,
@@ -331,7 +332,9 @@ export function BuddyLibrarySection({
             ) : view.error ? null : (
               // Not listed and no failure: the library is off. Listing failed:
               // the Alert below says why, never that the library is empty.
-              <p className="text-xs text-subtle">{BUDDY_LIBRARY_COPY.emptyMine}</p>
+              <p className="text-xs text-muted-foreground" data-testid="buddy-library-unavailable">
+                {BUDDY_LIBRARY_UNAVAILABLE}
+              </p>
             )
           ) : view.mine.length === 0 ? (
             <p className="text-xs text-subtle" data-testid="buddy-library-empty">

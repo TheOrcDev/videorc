@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 
 import type { BackendClient } from '@/backendClient'
+import { inlineUserError } from '@/lib/user-error'
 import type {
   CohostLibraryUpdateParams,
   BuddyLibraryId,
@@ -48,7 +49,11 @@ function problemOf(error: unknown): BuddyLibraryProblem {
       : 'failed'
   return {
     code,
-    message: error instanceof Error ? error.message : 'Something went wrong. Try again.'
+    message: inlineUserError(
+      error,
+      { action: 'update', object: 'your Buddy library' },
+      'buddy-library'
+    )
   }
 }
 

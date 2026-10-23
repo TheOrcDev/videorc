@@ -1,6 +1,14 @@
 import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
+import { BANNER_ACTION_COPY, runBannerAction } from '@/lib/banners'
 import { layoutPresetLabel } from '@/lib/layout-labels'
+import { soundboard, type SoundboardSnapshot, type SoundboardStore } from '@/lib/soundboard-store'
+import { SOUND_ACTION_COPY, runSoundAction } from '@/lib/sounds'
 import { systemAudioTarget } from '@/lib/system-audio'
+import {
+  bannerSummaries,
+  type BannerRelayAction,
+  type BannerSummary
+} from '../../../shared/banner-commands'
 
 /** The state projection deck keys render. Minimal by design and the ONLY
  * payload remote sockets receive — never widen it with tokens/paths/URLs. */
@@ -36,7 +44,36 @@ export interface RemoteSurfaceDescribe {
    */
   layoutLabels: Readonly<Record<string, string>>
   takeovers: { id: string; name: string }[]
+  /**
+   * Plan 186 S7: every banner as `{id, name, shown}`, in Assets order. Ids
+   * are opaque, names are labels the streamer typed for graphics viewers
+   * see; never an image, a file name or a path. A banner key renders
+   * `shown` from here, so a client re-reads describe after `remote.state`.
+   */
+  banners: BannerSummary[]
+  /**
+   * Plan 189 S10: every sound as `{id, name, playing}`, in board order. Ids
+   * are opaque, names are labels the streamer typed for sounds they play to
+   * viewers; never a file, a path or any audio. A sound key renders
+   * `playing` from here, so a client re-reads describe after `remote.state`.
+   */
+  sounds: RemoteSoundSummary[]
   windows: readonly string[]
+}
+
+/** One sound as the remotes see it (plan 189 S10). */
+export interface RemoteSoundSummary {
+  id: string
+  name: string
+  playing: boolean
+}
+
+/** The board as the remotes see it: board order, without a sound waiting for its Undo. */
+export function remoteSoundSummaries(snapshot: SoundboardSnapshot): RemoteSoundSummary[] {
+  const playing = new Set(snapshot.voices.map((voice) => voice.soundId))
+  return (snapshot.board?.sounds ?? [])
+    .filter((sound) => !snapshot.hidden.has(sound.id))
+    .map(({ id, name }) => ({ id, name, playing: playing.has(id) }))
 }
 
 /** The phone's scene keys read the desktop's layout names (plan 174 I-14). */
@@ -68,10 +105,14 @@ export type RemoteSurfaceValues = readonly [
   layoutPresets: readonly LayoutPreset[],
   takeovers: { id: string; name: string }[],
   systemAudioStatus: DeviceStatus | undefined,
-  systemAudioShown: boolean
+  systemAudioShown: boolean,
+  banners: readonly BannerSummary[]
 ]
 
-function snapshotFromValues(values: RemoteSurfaceValues): RemoteSurfaceSnapshot {
+function snapshotFromValues(
+  values: RemoteSurfaceValues,
+  sounds: RemoteSoundSummary[]
+): RemoteSurfaceSnapshot {
   return {
     state: {
       sessionState: values[0],
@@ -89,6 +130,9 @@ function snapshotFromValues(values: RemoteSurfaceValues): RemoteSurfaceSnapshot 
       layoutPresets: values[10],
       layoutLabels: remoteLayoutLabels(values[10]),
       takeovers: values[11],
+      // Whitelisted here: Studio hands over its whole banner list.
+      banners: bannerSummaries(values[14]),
+      sounds,
       windows: ['notes', 'comments', 'preview']
     }
   }
@@ -137,6 +181,13 @@ export interface RemoteIntentContext {
   markClip: () => Promise<RemoteIntentOutcome>
   /** Plan 181: the ring holds frames right now. */
   replayOn: boolean
+  /** Plan 186 S7: the banner list the remotes are shown. `bannerShow` and
+   * `bannerHide` run the backend's own explicit RPCs; `bannerToggle` picks
+   * its verb from `shown` here. */
+  banners: readonly BannerSummary[]
+  /** Plan 189 S10: the board `soundPlay` and `soundStop` act on; the
+   * soundboard store's own when left out. */
+  sounds?: readonly { id: string }[]
 }
 
 export interface RemoteIntentOutcome {
@@ -163,13 +214,23 @@ export class RemoteSurfacePublisher {
   private client: RemoteSurfaceClient | null = null
   private connected = false
   private latest: RemoteSurfaceSnapshot | null = null
+  private latestValues: RemoteSurfaceValues | null = null
   private lastPublishedBody: string | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private retryAttempt = 0
+  private offSounds: (() => void) | null = null
+
+  /** Plan 189: the soundboard the remotes are shown, followed outside React. */
+  constructor(private readonly sounds: SoundboardStore = soundboard) {}
 
   attach(client: RemoteSurfaceClient): void {
     this.client = client
     this.connected = false
+    // A sound starting or stopping changes describe, not Studio's values.
+    this.offSounds?.()
+    this.offSounds = this.sounds.subscribe(() => {
+      if (this.latestValues) this.syncValues(this.latestValues)
+    })
   }
 
   /** The socket is live: the backend's surface slate is blank, so the last
@@ -182,6 +243,8 @@ export class RemoteSurfacePublisher {
   }
 
   detach(): void {
+    this.offSounds?.()
+    this.offSounds = null
     this.client = null
     this.connected = false
     this.lastPublishedBody = null
@@ -207,7 +270,8 @@ export class RemoteSurfacePublisher {
   }
 
   syncValues(values: RemoteSurfaceValues): void {
-    this.sync(snapshotFromValues(values))
+    this.latestValues = values
+    this.sync(snapshotFromValues(values, remoteSoundSummaries(this.sounds.getSnapshot())))
   }
 
   private schedule(delayMs: number): void {
@@ -262,6 +326,11 @@ export const REMOTE_INTENT_COPY = {
   takeoverMissing: "That takeover isn't available anymore.",
   takeoverShow: "Couldn't show the takeover.",
   takeoverHide: "Couldn't hide the takeover.",
+  bannerMissing: BANNER_ACTION_COPY.missing,
+  bannerShow: BANNER_ACTION_COPY.show,
+  bannerHide: BANNER_ACTION_COPY.hide,
+  bannersHide: BANNER_ACTION_COPY.hideAll,
+  soundMissing: SOUND_ACTION_COPY.missing,
   windowMissing: "That window isn't available.",
   messageMissing: 'Choose a message to put on stream.',
   clipsOff: "Clips are off, and you're not recording or live.",
@@ -389,6 +458,41 @@ export async function executeRemoteIntent(
           return void (await ack(false, REMOTE_INTENT_COPY.takeoverHide))
         }
         return void (await ack(true))
+      }
+      case 'bannerShow':
+      case 'bannerHide':
+      case 'bannerToggle': {
+        // Plan 186 S7: by id; without one, `bannerHide` hides them all.
+        const bannerId = typeof intent.bannerId === 'string' ? intent.bannerId : undefined
+        const banner = context.banners.find((candidate) => candidate.id === bannerId)
+        if (bannerId !== undefined ? !banner : intent.kind !== 'bannerHide') {
+          return void (await ack(false, REMOTE_INTENT_COPY.bannerMissing))
+        }
+        const action: BannerRelayAction = !banner
+          ? { action: 'hideAll' }
+          : intent.kind === 'bannerShow' || (intent.kind === 'bannerToggle' && !banner.shown)
+            ? { action: 'show', id: banner.id }
+            : { action: 'hide', id: banner.id }
+        const outcome = await runBannerAction(context.client, action, context.banners)
+        return void (await ack(outcome.ok, outcome.message))
+      }
+      case 'soundPlay':
+      case 'soundStop': {
+        // Plan 189 S10: `soundPlay` is a press (the backend applies the
+        // sound's mode, like a key); `soundStop` without an id stops them all.
+        const soundId = typeof intent.soundId === 'string' ? intent.soundId : undefined
+        const sounds = context.sounds ?? soundboard.getSnapshot().board?.sounds ?? []
+        if (soundId === undefined && intent.kind === 'soundPlay') {
+          return void (await ack(false, REMOTE_INTENT_COPY.soundMissing))
+        }
+        const outcome = await runSoundAction(
+          context.client,
+          soundId === undefined
+            ? { action: 'stopAll' }
+            : { action: intent.kind === 'soundPlay' ? 'press' : 'stop', id: soundId },
+          sounds
+        )
+        return void (await ack(outcome.ok, outcome.message))
       }
       case 'windowFront': {
         const windowName = intent.window as string | undefined

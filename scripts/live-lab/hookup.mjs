@@ -27,6 +27,8 @@ import {
   writeConfig
 } from './lib/config.mjs'
 import { validateWebhookUrl } from './lib/discord.mjs'
+import { labSessionEnv } from './lib/linux-desktop.mjs'
+import { isLinux } from './lib/platform.mjs'
 import {
   buildAuthUrl,
   createPkcePair,
@@ -56,7 +58,8 @@ the broadcaster and the viewer. Needs a terminal for the hidden prompts.
   --client                    Type the client id and (hidden) secret.
   --role <broadcaster|viewer> Run Google consent for one role.
   --handle <@handle>          The lab channel (default @VideorcApp).
-  --lab-display <name>        The virtual display Videorc captures, as macOS names it.
+  --lab-display <name>        The virtual display Videorc captures: as macOS names it, or the
+                              Hyprland output on Linux (e.g. videorc-lab).
   --discord-webhook           Store the P0 Discord webhook URL from the clipboard, then clear
                               the clipboard (live:publish pings it on a P0 incident).
   --show                      Print what is stored (fingerprints only).
@@ -234,7 +237,15 @@ async function authorize(role, config) {
   })
   console.log(`\n${role}: opening Google consent. In the browser, ${ROLE_HINT[role]}.`)
   console.log(`If no browser opens, visit:\n${url}\n`)
-  spawn('open', [url], { stdio: 'ignore', detached: true })
+  // Plan 179: xdg-open on Linux, inside the lab user's graphical session
+  // even when hookup runs over SSH (the consent page must open on the box,
+  // because the loopback port listens there).
+  const linux = isLinux()
+  spawn(linux ? 'xdg-open' : 'open', [url], {
+    stdio: 'ignore',
+    detached: true,
+    ...(linux ? { env: { ...process.env, ...(await labSessionEnv()) } } : {})
+  })
     .on('error', () => {})
     .unref()
 

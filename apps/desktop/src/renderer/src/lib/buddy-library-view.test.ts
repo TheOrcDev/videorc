@@ -8,6 +8,7 @@ import {
   buddyAliveTagDistinguishes,
   buddyCreateFailureLine,
   buddyInvitationVisible,
+  BUDDY_LIBRARY_UNAVAILABLE,
   buddyLibraryBusyLine,
   buddyLibraryIsFull,
   buddyLibrarySaveOffer,
@@ -214,6 +215,10 @@ describe('buddyLibraryView (plan 170 D16)', () => {
       buddyLibraryBusyLine(library({ busy: { kind: 'use', avatarId: MINE } }), 'Grum')
     ).toBeNull()
     expect(buddyLibraryBusyLine(null, 'Grum')).toBeNull()
+  })
+
+  it("names the quiet off state in the backend's words", () => {
+    expect(BUDDY_LIBRARY_UNAVAILABLE).toBe('The Buddy library is not available right now.')
   })
 
   it('offers Save to my library only for a Buddy made here, signed in, when the web keeps it', () => {

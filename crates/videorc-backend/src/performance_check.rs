@@ -323,10 +323,25 @@ impl Drop for RunningGuard<'_> {
 /// The crate stays at 0.9.0 across desktop releases, so hashing only that
 /// left Linux `belowFloor` poison sticky (ogre, 2026-09-28).
 pub(crate) fn desktop_app_version() -> String {
-    std::env::var(DESKTOP_APP_VERSION_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
+    app_version_or_crate(std::env::var(DESKTOP_APP_VERSION_ENV).ok().as_deref())
+}
+
+/// The `User-Agent` every backend HTTP client sends: the desktop app's own
+/// version, not the backend crate's (release test 146, plan 0008: every
+/// request said `Videorc-Desktop/0.9.0` on 0.9.146).
+pub(crate) fn desktop_user_agent() -> String {
+    desktop_user_agent_for(std::env::var(DESKTOP_APP_VERSION_ENV).ok().as_deref())
+}
+
+fn desktop_user_agent_for(app_version: Option<&str>) -> String {
+    format!("Videorc-Desktop/{}", app_version_or_crate(app_version))
+}
+
+fn app_version_or_crate(app_version: Option<&str>) -> String {
+    app_version
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_string)
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
@@ -642,6 +657,7 @@ fn benchmark_session_params(video: &VideoSettings, directory: &Path) -> StartSes
             output_directory: Some(directory.display().to_string()),
             ffmpeg_path: None,
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video: video.clone(),
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,
@@ -795,6 +811,25 @@ async fn discard_benchmark_sessions(state: &AppState, directory: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_user_agent_names_the_desktop_app_version_not_the_crate() {
+        assert_eq!(
+            desktop_user_agent_for(Some("0.9.146")),
+            "Videorc-Desktop/0.9.146"
+        );
+        assert_eq!(
+            desktop_user_agent_for(Some(" 0.9.146 ")),
+            "Videorc-Desktop/0.9.146"
+        );
+        let crate_fallback = format!("Videorc-Desktop/{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(desktop_user_agent_for(None), crate_fallback);
+        assert_eq!(desktop_user_agent_for(Some("  ")), crate_fallback);
+        assert!(
+            reqwest::header::HeaderValue::from_str(&desktop_user_agent_for(Some("0.9.146")))
+                .is_ok()
+        );
+    }
 
     fn healthy(target_fps: u32) -> RungMeasurement {
         RungMeasurement {

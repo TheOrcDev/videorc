@@ -1,0 +1,34 @@
+# Plan 179: starts videorc-live-lab.service, the live lab schedule tick, every
+# 300 s and once after boot; the twin of StartInterval 300 and RunAtLoad in
+# config/live-lab/com.videorc.live-lab.plist. `pnpm live:schedule
+# install-agent` installs it next to the service in ~/.config/systemd/user/
+# and enables it into timers.target.
+#
+# It is a user timer, so it runs only while the lab user's systemd manager
+# runs. With `sudo loginctl enable-linger videorc-lab` that manager starts at
+# boot and keeps running with nobody logged in; without linger the timer
+# stops at logout and the post-boot tick waits for a login (install-agent
+# warns when linger is off).
+#
+# A timer firing while the oneshot still runs does not start a second one:
+# the service is still activating, so the new start job merges into the one
+# in flight and nothing more happens until the tick exits. The tick also holds
+# ~/videorc-live-lab/schedule-tick.lock against a hand-typed
+# `live:schedule tick`.
+
+[Unit]
+Description=Videorc live lab schedule tick every 300 s (plan 179)
+
+[Timer]
+# The post-boot tick, which runs the doctor once per boot: 60 s after the
+# user manager starts (with linger, 60 s after boot).
+OnStartupSec=60
+# Then every 300 s, counted from the last start of the tick.
+OnUnitActiveSec=300
+# The default 1 min accuracy lets ticks wander; 10 s keeps them near the
+# 300 s beat at no real wake-up cost.
+AccuracySec=10s
+Unit=videorc-live-lab.service
+
+[Install]
+WantedBy=timers.target

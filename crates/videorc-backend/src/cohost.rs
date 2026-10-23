@@ -1175,7 +1175,9 @@ pub struct CohostDeadAirNudge {
 // --- Voice commands (plan 140 S3; contract part B) ------------------------------
 
 /// What a voice command asked for. `confirm` and `cancel` answer the open
-/// card, so they update that command instead of standing on their own.
+/// card, so they update that command instead of standing on their own. The
+/// banner kinds (plan 186 S11) finish at once: shown, hidden, not found or
+/// refused.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostCommandKind {
@@ -1185,6 +1187,13 @@ pub enum CohostCommandKind {
     Confirm,
     Cancel,
     Unknown,
+    ShowBanner,
+    HideBanner,
+    HideBanners,
+    /// "show up", "come on screen": the Buddy itself goes on the stream.
+    ShowBuddy,
+    /// "hide", "go away": the Buddy itself leaves the stream.
+    HideBuddy,
 }
 
 /// Where the latest voice command stands.
@@ -1413,6 +1422,13 @@ pub struct CohostState {
     /// backoff/quota window pushes both back.
     #[serde(default)]
     pub next_tick_at: Option<String>,
+    /// ISO-8601 instant of the next tick attempt after a failed one, present
+    /// only while `status` is `error` and the backoff is still climbing: the
+    /// renderer reads "Retrying" from it. Omitted once the backoff reached its
+    /// ceiling (Buddy reads as stopped, though the engine keeps trying) and on
+    /// every other status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
     /// Session total of chat messages noted to the engine (entered a delta).
     #[serde(default)]
     pub messages_seen: u64,
@@ -1500,6 +1516,7 @@ impl CohostState {
             tick_in_flight: false,
             pending_messages: 0,
             next_tick_at: None,
+            retry_at: None,
             messages_seen: 0,
             questions_total: 0,
             highlights: Vec::new(),
@@ -3008,6 +3025,17 @@ impl CohostSession {
         self.abandon_command(COMMAND_SIGNED_OUT, &chrono::Utc::now().to_rfc3339())
     }
 
+    /// The next attempt after a failed tick, while the backoff still climbs:
+    /// a transient failure reads as "Retrying", never as stopped. At the
+    /// ceiling (the fourth failure in a row and beyond) nothing is promised.
+    fn retry_at(&self, now: Instant) -> Option<String> {
+        if self.status != CohostStatus::Error || self.backoff_index >= BACKOFF_STEPS_SECS.len() - 1
+        {
+            return None;
+        }
+        self.next_attempt_at.map(|at| iso_after(now, at))
+    }
+
     fn snapshot_at(&self, now: Instant) -> CohostState {
         let next_tick_at = next_tick_due_at(
             self.cadence_pending(),
@@ -3031,6 +3059,7 @@ impl CohostSession {
             tick_in_flight: self.in_flight,
             pending_messages: u32::try_from(self.pending.len()).unwrap_or(u32::MAX),
             next_tick_at,
+            retry_at: self.retry_at(now),
             messages_seen: self.messages_seen,
             questions_total: self.questions_total,
             highlights: self.highlights.clone(),
@@ -4775,6 +4804,35 @@ impl CohostSession {
         Ok(effects)
     }
 
+    /// Plan 186 S11: the card of a banner command, after the banner was
+    /// shown, hidden, not found or refused outside the lock. Newest wins, as
+    /// for every command: the open card closes (a pending removal is
+    /// cancelled after the lock). A banner that was not found counts like a
+    /// comment that was not found.
+    /// A command that finished the moment it was heard (a banner, the
+    /// Buddy's presence): the card carries its outcome, nothing waits.
+    fn note_instant_command(
+        &mut self,
+        kind: CohostCommandKind,
+        heard: &str,
+        status: CohostCommandStatus,
+        message: String,
+        ctx: &CommandContext,
+    ) -> CommandEffects {
+        let mut effects = CommandEffects {
+            emit: true,
+            ..CommandEffects::default()
+        };
+        effects.cancel_superseded = self.supersede_command();
+        let mut record = CommandRecord::with(kind, None, heard, None, ctx);
+        record.finish(status, message, &ctx.now_iso());
+        if status == CohostCommandStatus::NotFound {
+            self.report.commands.not_found += 1;
+        }
+        self.command = Some(record);
+        effects
+    }
+
     /// Buddy was addressed and understood nothing: "Buddy didn't catch
     /// that: '…'". Never while a card is open: an unclear utterance must not
     /// close a card the streamer may still answer.
@@ -6248,6 +6306,14 @@ impl CohostEngine {
     /// generation (a consent change or a restart since makes it stale).
     fn command_session_mut(&mut self, scope: &CommandSession) -> Option<&mut CohostSession> {
         self.session.as_mut().filter(|session| {
+            session.session_id == scope.session_id && session.generation == scope.generation
+        })
+    }
+
+    /// Whether `scope` is still the running session (plan 186 S11: checked
+    /// before a banner moves for a voice command).
+    fn command_session_current(&self, scope: &CommandSession) -> bool {
+        self.session.as_ref().is_some_and(|session| {
             session.session_id == scope.session_id && session.generation == scope.generation
         })
     }
@@ -7807,6 +7873,12 @@ async fn run_detected_command(
                 }
             };
         }
+        CommandKind::ShowBanner | CommandKind::HideBanner | CommandKind::HideBanners => {
+            return run_banner_command(state, scope, command, premium).await;
+        }
+        CommandKind::ShowBuddy | CommandKind::HideBuddy => {
+            return run_buddy_presence_command(state, scope, command, premium).await;
+        }
         CommandKind::Highlight => CommandIntent::Highlight,
         CommandKind::Clear => CommandIntent::Clear,
         CommandKind::Remove => CommandIntent::Remove,
@@ -7829,8 +7901,320 @@ async fn run_detected_command(
     .await;
 }
 
+/// Plan 186 S11: a banner command ("show the sponsor banner", "take the
+/// banner down", "hide the banners"). The voice gates apply as to every
+/// command (the kill switch, Premium) and nothing else: Buddy is Premium, so
+/// banners need no gate of their own. The banner goes through the functions
+/// behind `banners.show` and `banners.hide`, outside the engine lock, so a
+/// refusal ("Four banners are showing. Hide one first.") lands on the card
+/// verbatim. The card then replaces an open one, as every new command does.
+async fn run_banner_command(
+    state: &AppState,
+    scope: &CommandSession,
+    command: DetectedCommand,
+    premium: bool,
+) {
+    let kind = match command.kind {
+        CommandKind::ShowBanner => CohostCommandKind::ShowBanner,
+        CommandKind::HideBanner => CohostCommandKind::HideBanner,
+        CommandKind::HideBanners => CohostCommandKind::HideBanners,
+        CommandKind::Highlight
+        | CommandKind::Clear
+        | CommandKind::Remove
+        | CommandKind::Confirm
+        | CommandKind::Cancel
+        | CommandKind::Choose(_)
+        | CommandKind::Unknown
+        | CommandKind::ShowBuddy
+        | CommandKind::HideBuddy => return,
+    };
+    let ctx = command_context(state, premium).await;
+    let (status, message) = match command_gate(&ctx, None) {
+        Some(message) => (CohostCommandStatus::Unavailable, message.to_string()),
+        None => {
+            // Only for the session that heard it: a banner never moves for a
+            // command whose Buddy session has stopped meanwhile.
+            if !state.cohost.lock().await.command_session_current(scope) {
+                tracing::info!("Buddy dropped a banner command: its session changed.");
+                return;
+            }
+            banner_command_outcome(state, &command).await
+        }
+    };
+    record_instant_command(state, scope, kind, &command.heard, status, message, &ctx).await;
+}
+
+/// "Buddy, show up" / "Buddy, go away": the Buddy itself goes on or off the
+/// stream, at once, through the one switch the Stream Manager's footer
+/// operates (`overlayLayout.buddy.showOnStream`). `overlays.layout.set`'s
+/// path does the rest: a live session swaps its compositor flags and warms
+/// the pet's atlases, and every window learns the layout. The card says what
+/// happened, like a banner command's.
+async fn run_buddy_presence_command(
+    state: &AppState,
+    scope: &CommandSession,
+    command: DetectedCommand,
+    premium: bool,
+) {
+    let (kind, show) = match command.kind {
+        CommandKind::ShowBuddy => (CohostCommandKind::ShowBuddy, true),
+        CommandKind::HideBuddy => (CohostCommandKind::HideBuddy, false),
+        _ => return,
+    };
+    let ctx = command_context(state, premium).await;
+    let (status, message) = match command_gate(&ctx, None) {
+        Some(message) => (CohostCommandStatus::Unavailable, message.to_string()),
+        None => {
+            if !state.cohost.lock().await.command_session_current(scope) {
+                tracing::info!("Buddy dropped a presence command: its session changed.");
+                return;
+            }
+            buddy_presence_outcome(state, show).await
+        }
+    };
+    record_instant_command(state, scope, kind, &command.heard, status, message, &ctx).await;
+}
+
+/// Flip `overlayLayout.buddy.showOnStream` and say so in the Buddy's name.
+async fn buddy_presence_outcome(state: &AppState, show: bool) -> (CohostCommandStatus, String) {
+    let name = get_cohost_settings(state).await.persona.name;
+    let name = match name.trim() {
+        "" => COHOST_DEFAULT_PERSONA_NAME,
+        name => name,
+    }
+    .to_string();
+    let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+    if layout.buddy.show_on_stream == show {
+        return (
+            CohostCommandStatus::Done,
+            if show {
+                format!("{name} is already on stream.")
+            } else {
+                format!("{name} is already off the stream.")
+            },
+        );
+    }
+    layout.buddy.show_on_stream = show;
+    match crate::overlay_layout::set_overlay_layout(state, layout).await {
+        Ok(_) => (
+            CohostCommandStatus::Done,
+            if show {
+                format!("{name} is on stream.")
+            } else {
+                format!("{name} is off the stream.")
+            },
+        ),
+        Err(error) => {
+            tracing::warn!(
+                "Buddy could not change the overlay layout for a voice command: {error:#}"
+            );
+            (
+                CohostCommandStatus::Refused,
+                format!("Buddy couldn't put {name} on stream: {error}."),
+            )
+        }
+    }
+}
+
+/// A command that finished the moment it was heard (a banner, the Buddy's
+/// presence): one card with its outcome, for the session that heard it.
+async fn record_instant_command(
+    state: &AppState,
+    scope: &CommandSession,
+    kind: CohostCommandKind,
+    heard: &str,
+    status: CohostCommandStatus,
+    message: String,
+    ctx: &CommandContext,
+) {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let (effects, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        engine.set_command_availability(ctx.availability());
+        let Some(session) = engine.command_session_mut(scope) else {
+            tracing::info!(
+                "Buddy dropped a {} command's card: its session changed.",
+                kind_label(kind)
+            );
+            return;
+        };
+        let effects = session.note_instant_command(kind, heard, status, message, ctx);
+        mirror_command_slot(state, &engine);
+        (effects, engine.snapshot())
+    };
+    emit_state(state, &snapshot, &lifecycle_delivery);
+    run_command_effects(state, scope, effects, false).await;
+}
+
+/// Plain words for a log line about a command kind.
+fn kind_label(kind: CohostCommandKind) -> &'static str {
+    match kind {
+        CohostCommandKind::Highlight => "highlight",
+        CohostCommandKind::Clear => "clear",
+        CohostCommandKind::Remove => "remove",
+        CohostCommandKind::Confirm => "confirm",
+        CohostCommandKind::Cancel => "cancel",
+        CohostCommandKind::Unknown => "unknown",
+        CohostCommandKind::ShowBanner | CohostCommandKind::HideBanner => "banner",
+        CohostCommandKind::HideBanners => "banners",
+        CohostCommandKind::ShowBuddy | CohostCommandKind::HideBuddy => "presence",
+    }
+}
+
+/// What a banner command did, and the sentence its card shows. A spoken
+/// name is matched against the banners that exist; without one, "the
+/// banner" is the only banner (a show) or the only one showing (a hide).
+async fn banner_command_outcome(
+    state: &AppState,
+    command: &DetectedCommand,
+) -> (CohostCommandStatus, String) {
+    use crate::banners::{BannerNameMatch, hide_banners_and_publish, show_banner_and_publish};
+    let banners = match state.database.list_banners() {
+        Ok(banners) => banners,
+        Err(error) => {
+            tracing::warn!("Buddy could not read the banners for a voice command: {error:#}");
+            return (
+                CohostCommandStatus::Refused,
+                "Buddy couldn't read your banners.".to_string(),
+            );
+        }
+    };
+    let spoken = match &command.target {
+        CommandTarget::Name(name) => Some(name.as_str()),
+        CommandTarget::Deixis | CommandTarget::Last | CommandTarget::None => None,
+    };
+    let showing: Vec<&crate::protocol::Banner> =
+        banners.iter().filter(|banner| banner.shown).collect();
+    let which = |names: Vec<String>| {
+        (
+            CohostCommandStatus::NotFound,
+            format!("Which banner? {}.", banner_names_sentence(&names)),
+        )
+    };
+    let resolve = |spoken: &str| match crate::banners::match_banner_name(&banners, spoken) {
+        BannerNameMatch::One(banner) => Ok(*banner),
+        BannerNameMatch::Several(names) => Err(which(names)),
+        BannerNameMatch::None => Err((
+            CohostCommandStatus::NotFound,
+            format!("Buddy couldn't find a banner named '{spoken}'."),
+        )),
+    };
+    match command.kind {
+        CommandKind::ShowBanner => {
+            let banner = match spoken {
+                Some(spoken) => resolve(spoken),
+                None => match banners.as_slice() {
+                    [] => Err((
+                        CohostCommandStatus::NotFound,
+                        "You have no banners yet.".to_string(),
+                    )),
+                    [only] => Ok(only.clone()),
+                    several => Err(which(
+                        several.iter().map(|banner| banner.name.clone()).collect(),
+                    )),
+                },
+            };
+            let banner = match banner {
+                Ok(banner) => banner,
+                Err(outcome) => return outcome,
+            };
+            if banner.shown {
+                return (
+                    CohostCommandStatus::Done,
+                    format!("The {} banner is already showing.", banner.name),
+                );
+            }
+            match show_banner_and_publish(state, &banner.id).await {
+                Ok(_) => (
+                    CohostCommandStatus::Done,
+                    format!("Showed the {} banner.", banner.name),
+                ),
+                Err(error) => (CohostCommandStatus::Refused, error.to_string()),
+            }
+        }
+        CommandKind::HideBanner => {
+            let banner = match spoken {
+                Some(spoken) => resolve(spoken),
+                None => match showing.as_slice() {
+                    [] => {
+                        return (
+                            CohostCommandStatus::Done,
+                            "No banner is showing.".to_string(),
+                        );
+                    }
+                    [only] => Ok((*only).clone()),
+                    several => Err(which(
+                        several.iter().map(|banner| banner.name.clone()).collect(),
+                    )),
+                },
+            };
+            let banner = match banner {
+                Ok(banner) => banner,
+                Err(outcome) => return outcome,
+            };
+            if !banner.shown {
+                return (
+                    CohostCommandStatus::Done,
+                    format!("The {} banner isn't showing.", banner.name),
+                );
+            }
+            match hide_banners_and_publish(state, Some(&banner.id)).await {
+                Ok(_) => (
+                    CohostCommandStatus::Done,
+                    format!("Hid the {} banner.", banner.name),
+                ),
+                Err(error) => (CohostCommandStatus::Refused, error.to_string()),
+            }
+        }
+        CommandKind::HideBanners => {
+            if showing.is_empty() {
+                return (
+                    CohostCommandStatus::Done,
+                    "No banner is showing.".to_string(),
+                );
+            }
+            match hide_banners_and_publish(state, None).await {
+                Ok(_) => (CohostCommandStatus::Done, "Hid all banners.".to_string()),
+                Err(error) => (CohostCommandStatus::Refused, error.to_string()),
+            }
+        }
+        CommandKind::Highlight
+        | CommandKind::Clear
+        | CommandKind::Remove
+        | CommandKind::Confirm
+        | CommandKind::Cancel
+        | CommandKind::Choose(_)
+        | CommandKind::Unknown
+        | CommandKind::ShowBuddy
+        | CommandKind::HideBuddy => (
+            CohostCommandStatus::NotFound,
+            "Buddy didn't catch that.".to_string(),
+        ),
+    }
+}
+
+/// "Sponsor, Follow me or Logo"; past four names, "and N more".
+fn banner_names_sentence(names: &[String]) -> String {
+    const LISTED: usize = 4;
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        _ if names.len() > LISTED => format!(
+            "{} and {} more",
+            names[..LISTED].join(", "),
+            names.len() - LISTED
+        ),
+        _ => format!(
+            "{} or {}",
+            names[..names.len() - 1].join(", "),
+            names[names.len() - 1]
+        ),
+    }
+}
+
 /// Plan 140 S8: every wake-word utterance the local grammar could not read
-/// is offered to the cloud command parser first, when the web enabled it
+/// (except one that names a banner, plan 186 S11) is offered to the cloud
+/// command parser first, when the web enabled it
 /// (`features.cohostCommandEnabled`), on Premium, with the voice kill switch
 /// on, a Buddy session for `scope` and its consent to process chat. One
 /// call at most, never retried, on this command's own task with no lock
@@ -7872,6 +8256,12 @@ where
     C: FnOnce(String, CohostCommandRequest) -> F,
     F: std::future::Future<Output = Result<CohostCommandResponse, CohostApiError>>,
 {
+    // Plan 186 S11: a banner sentence the banner grammar could not read is
+    // "didn't catch that". The cloud parser knows comments only, so it never
+    // gets the chance to make it a highlight.
+    if crate::cohost_command::heard_mentions_banner(heard) {
+        return UnknownCommandResolution::Unheard;
+    }
     let voice_enabled = crate::service_flags::buddy_voice_commands_enabled(state);
     let ready = {
         let engine = state.cohost.lock().await;
@@ -8040,10 +8430,17 @@ pub(crate) async fn execute_resolved_command(
         CommandKind::Highlight => CommandIntent::Highlight,
         CommandKind::Clear => CommandIntent::Clear,
         CommandKind::Remove => CommandIntent::Remove,
+        // The cloud parser knows comments only; it never picks a banner or
+        // the Buddy itself.
         CommandKind::Confirm
         | CommandKind::Cancel
         | CommandKind::Choose(_)
-        | CommandKind::Unknown => {
+        | CommandKind::Unknown
+        | CommandKind::ShowBanner
+        | CommandKind::HideBanner
+        | CommandKind::HideBanners
+        | CommandKind::ShowBuddy
+        | CommandKind::HideBuddy => {
             return;
         }
     };
@@ -18588,6 +18985,576 @@ mod tests {
         run_detected_command(&state, &scope, unclear(true), true).await;
         assert_eq!(state_command(&state).await, chooser);
         assert_eq!(state_counts(&state).await.not_found, 1);
+    }
+
+    // --- Banner commands (plan 186 S11) ---------------------------------------
+
+    fn insert_banner(state: &AppState, id: &str, name: &str) -> crate::protocol::Banner {
+        let (horizontal, vertical) = crate::banners::banner_default_places(2400, 400);
+        state
+            .database
+            .insert_banner(
+                crate::banners::NewBanner {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    width: 2400,
+                    height: 400,
+                    has_alpha: true,
+                    horizontal,
+                    vertical,
+                },
+                24,
+            )
+            .unwrap()
+    }
+
+    fn banner_command(kind: CommandKind, target: CommandTarget, heard: &str) -> DetectedCommand {
+        detected(kind, target, heard, None)
+    }
+
+    fn shown_banner_names(state: &AppState) -> Vec<String> {
+        crate::banners::shown_banners_for_compositor(&state.database)
+            .unwrap()
+            .into_iter()
+            .map(|banner| banner.name)
+            .collect()
+    }
+
+    /// "Buddy, show up" flips the one on-stream switch and tells every
+    /// window; "go away" flips it back; a repeat says so and moves nothing.
+    #[tokio::test]
+    async fn a_presence_command_puts_the_buddy_on_stream_and_takes_it_off() {
+        let (state, scope) = command_state(&[], None).await;
+        let mut events = state.events.subscribe();
+        let layout =
+            |state: &AppState| crate::overlay_layout::load_overlay_layout(&state.database).buddy;
+        assert!(!layout(&state).show_on_stream);
+        assert!(!layout(&state).show_in_recording);
+
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::ShowBuddy,
+                CommandTarget::None,
+                "buddy show up",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let shown = state_command(&state).await;
+        assert_eq!(
+            (shown.kind, shown.status, shown.message.as_str()),
+            (
+                CohostCommandKind::ShowBuddy,
+                CohostCommandStatus::Done,
+                "Buddy is on stream."
+            )
+        );
+        assert_eq!(shown.heard, "buddy show up");
+        assert!(layout(&state).show_on_stream);
+        // The recording switch is the streamer's own.
+        assert!(!layout(&state).show_in_recording);
+        // Every window learns the layout (`overlays.layout`).
+        let mut layouts = 0;
+        loop {
+            match events.try_recv() {
+                Ok(event) => {
+                    if event.event == crate::overlay_layout::OVERLAY_LAYOUT_EVENT {
+                        layouts += 1;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(layouts, 1);
+
+        // Again: already on, nothing moves and no layout is sent.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::ShowBuddy,
+                CommandTarget::None,
+                "buddy come on screen",
+                None,
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(
+            state_command(&state).await.message,
+            "Buddy is already on stream."
+        );
+        assert!(layout(&state).show_on_stream);
+
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::HideBuddy,
+                CommandTarget::None,
+                "buddy go away",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let hidden = state_command(&state).await;
+        assert_eq!(
+            (hidden.kind, hidden.status, hidden.message.as_str()),
+            (
+                CohostCommandKind::HideBuddy,
+                CohostCommandStatus::Done,
+                "Buddy is off the stream."
+            )
+        );
+        assert!(!layout(&state).show_on_stream);
+        assert_eq!(state_counts(&state).await.not_found, 0);
+    }
+
+    #[tokio::test]
+    async fn a_banner_command_shows_and_hides_by_name_and_refuses_like_the_rpc() {
+        let (state, scope) = command_state(&[], None).await;
+        insert_banner(&state, "b-sponsor", "Sponsor");
+        insert_banner(&state, "b-follow", "Follow me");
+        insert_banner(&state, "b-logo", "Logo banner");
+        insert_banner(&state, "b-sale", "Sale 50");
+        insert_banner(&state, "b-event", "Event");
+
+        // "show the sponsor banner": exact name, case-insensitive.
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::ShowBanner,
+                named("sponsor"),
+                "buddy show the sponsor banner",
+            ),
+            true,
+        )
+        .await;
+        let shown = state_command(&state).await;
+        assert_eq!(
+            (shown.kind, shown.status, shown.message.as_str()),
+            (
+                CohostCommandKind::ShowBanner,
+                CohostCommandStatus::Done,
+                "Showed the Sponsor banner."
+            )
+        );
+        assert_eq!(shown.heard, "buddy show the sponsor banner");
+        assert_eq!(shown.target, None);
+        assert_eq!(shown_banner_names(&state), vec!["Sponsor".to_string()]);
+        // Again: already showing, nothing moves.
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::ShowBanner,
+                named("sponsor"),
+                "buddy show sponsor banner",
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(
+            state_command(&state).await.message,
+            "The Sponsor banner is already showing."
+        );
+        // A unique prefix finds "Follow me"; the name's own "banner" is dropped
+        // for "Logo banner".
+        for (spoken, name) in [("follow", "Follow me"), ("logo", "Logo banner")] {
+            run_detected_command(
+                &state,
+                &scope,
+                banner_command(
+                    CommandKind::ShowBanner,
+                    named(spoken),
+                    &format!("buddy show the {spoken} banner"),
+                ),
+                true,
+            )
+            .await;
+            assert_eq!(
+                state_command(&state).await.message,
+                format!("Showed the {name} banner.")
+            );
+        }
+        // An ambiguous prefix is not understood as any one banner.
+        insert_banner(&state, "b-sponsor-2", "Sponsor Acme");
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::ShowBanner,
+                named("spo"),
+                "buddy show the spo banner",
+            ),
+            true,
+        )
+        .await;
+        let ambiguous = state_command(&state).await;
+        assert_eq!(
+            (ambiguous.status, ambiguous.message.as_str()),
+            (
+                CohostCommandStatus::NotFound,
+                "Which banner? Sponsor or Sponsor Acme."
+            )
+        );
+        assert_eq!(state_counts(&state).await.not_found, 1);
+        // An exact name still wins over a longer one that starts the same.
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::HideBanner,
+                named("sponsor"),
+                "buddy hide the sponsor banner",
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(
+            state_command(&state).await.message,
+            "Hid the Sponsor banner."
+        );
+        assert_eq!(
+            shown_banner_names(&state),
+            vec!["Follow me".to_string(), "Logo banner".to_string()]
+        );
+        // Unknown name.
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::ShowBanner,
+                named("rainbow"),
+                "buddy show the rainbow banner",
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(
+            state_command(&state).await.message,
+            "Buddy couldn't find a banner named 'rainbow'."
+        );
+        assert_eq!(state_counts(&state).await.not_found, 2);
+        // The cap of four: a fifth show is refused with the RPC's sentence.
+        for (spoken, name) in [("sale", "Sale 50"), ("event", "Event")] {
+            run_detected_command(
+                &state,
+                &scope,
+                banner_command(
+                    CommandKind::ShowBanner,
+                    named(spoken),
+                    &format!("buddy show the {spoken} banner"),
+                ),
+                true,
+            )
+            .await;
+            assert_eq!(
+                state_command(&state).await.message,
+                format!("Showed the {name} banner.")
+            );
+        }
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::ShowBanner,
+                named("sponsor"),
+                "buddy show the sponsor banner",
+            ),
+            true,
+        )
+        .await;
+        let refused = state_command(&state).await;
+        assert_eq!(
+            (refused.kind, refused.status, refused.message.as_str()),
+            (
+                CohostCommandKind::ShowBanner,
+                CohostCommandStatus::Refused,
+                crate::banners::REFUSAL_FOUR_SHOWING
+            )
+        );
+        assert_eq!(shown_banner_names(&state).len(), 4);
+        // "hide the banners" hides all; said again, nothing is showing.
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::HideBanners,
+                CommandTarget::None,
+                "buddy hide the banners",
+            ),
+            true,
+        )
+        .await;
+        let hidden = state_command(&state).await;
+        assert_eq!(
+            (hidden.kind, hidden.status, hidden.message.as_str()),
+            (
+                CohostCommandKind::HideBanners,
+                CohostCommandStatus::Done,
+                "Hid all banners."
+            )
+        );
+        assert!(shown_banner_names(&state).is_empty());
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::HideBanners,
+                CommandTarget::None,
+                "buddy hide the banners",
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(state_command(&state).await.message, "No banner is showing.");
+        // Only not-found was counted.
+        assert_eq!(state_counts(&state).await.not_found, 2);
+    }
+
+    #[tokio::test]
+    async fn take_the_banner_down_means_the_only_banner_showing() {
+        let (state, scope) = command_state(&[], None).await;
+        insert_banner(&state, "b-sponsor", "Sponsor");
+        insert_banner(&state, "b-follow", "Follow me");
+        let take_down = || {
+            banner_command(
+                CommandKind::HideBanner,
+                CommandTarget::None,
+                "buddy take the banner down",
+            )
+        };
+        run_detected_command(&state, &scope, take_down(), true).await;
+        assert_eq!(state_command(&state).await.message, "No banner is showing.");
+        crate::banners::show_banner_and_publish(&state, "b-sponsor")
+            .await
+            .unwrap();
+        run_detected_command(&state, &scope, take_down(), true).await;
+        let hid = state_command(&state).await;
+        assert_eq!(
+            (hid.kind, hid.status, hid.message.as_str()),
+            (
+                CohostCommandKind::HideBanner,
+                CohostCommandStatus::Done,
+                "Hid the Sponsor banner."
+            )
+        );
+        assert!(shown_banner_names(&state).is_empty());
+        // With two showing, "the banner" is a question back.
+        for id in ["b-sponsor", "b-follow"] {
+            crate::banners::show_banner_and_publish(&state, id)
+                .await
+                .unwrap();
+        }
+        run_detected_command(&state, &scope, take_down(), true).await;
+        let which = state_command(&state).await;
+        assert_eq!(
+            (which.status, which.message.as_str()),
+            (
+                CohostCommandStatus::NotFound,
+                "Which banner? Sponsor or Follow me."
+            )
+        );
+        assert_eq!(shown_banner_names(&state).len(), 2);
+        // A named hide of a banner that is not showing moves nothing.
+        crate::banners::hide_banners_and_publish(&state, Some("b-follow"))
+            .await
+            .unwrap();
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::HideBanner,
+                named("follow"),
+                "buddy hide the follow banner",
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(
+            state_command(&state).await.message,
+            "The Follow me banner isn't showing."
+        );
+        // "show the banner" with two banners asks which; with one, shows it.
+        run_detected_command(
+            &state,
+            &scope,
+            banner_command(
+                CommandKind::ShowBanner,
+                CommandTarget::None,
+                "buddy show the banner",
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(
+            state_command(&state).await.message,
+            "Which banner? Sponsor or Follow me."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_banner_command_passes_the_voice_gates_and_replaces_the_open_card() {
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
+            command_row(2, "coders_y", StreamPlatform::Twitch, "which editor?"),
+        ];
+        let (state, scope) = command_state(&rows, None).await;
+        insert_banner(&state, "b-sponsor", "Sponsor");
+        let show = || {
+            banner_command(
+                CommandKind::ShowBanner,
+                named("sponsor"),
+                "buddy show the sponsor banner",
+            )
+        };
+        // Basic: unavailable, and the banner stays hidden.
+        run_detected_command(&state, &scope, show(), false).await;
+        let basic = state_command(&state).await;
+        assert_eq!(
+            (basic.kind, basic.status, basic.message.as_str()),
+            (
+                CohostCommandKind::ShowBanner,
+                CohostCommandStatus::Unavailable,
+                crate::live_chat_moderation::PREMIUM_REQUIRED_MESSAGE
+            )
+        );
+        assert!(shown_banner_names(&state).is_empty());
+        // A chooser is open; a banner command is a new command and closes it.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Highlight,
+                named("coders"),
+                "highlight coders",
+                None,
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(
+            state_command(&state).await.status,
+            CohostCommandStatus::Ambiguous
+        );
+        run_detected_command(&state, &scope, show(), true).await;
+        let shown = state_command(&state).await;
+        assert_eq!(
+            (shown.status, shown.message.as_str()),
+            (CohostCommandStatus::Done, "Showed the Sponsor banner.")
+        );
+        assert!(shown.candidates.is_empty());
+        assert_eq!(shown_banner_names(&state), vec!["Sponsor".to_string()]);
+        // A stale scope moves nothing and leaves the card alone.
+        let stale = CommandSession {
+            session_id: scope.session_id.clone(),
+            generation: scope.generation + 1,
+        };
+        run_detected_command(
+            &state,
+            &stale,
+            banner_command(
+                CommandKind::HideBanners,
+                CommandTarget::None,
+                "buddy hide the banners",
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(state_command(&state).await, shown);
+        assert_eq!(shown_banner_names(&state), vec!["Sponsor".to_string()]);
+    }
+
+    #[test]
+    fn banner_names_read_as_one_sentence() {
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        assert_eq!(banner_names_sentence(&names(&["Sponsor"])), "Sponsor");
+        assert_eq!(
+            banner_names_sentence(&names(&["Sponsor", "Logo"])),
+            "Sponsor or Logo"
+        );
+        assert_eq!(
+            banner_names_sentence(&names(&["Sponsor", "Follow me", "Logo"])),
+            "Sponsor, Follow me or Logo"
+        );
+        assert_eq!(
+            banner_names_sentence(&names(&["A", "B", "C", "D", "E", "F"])),
+            "A, B, C, D and 2 more"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_banner_sentence_buddy_cannot_read_never_reaches_the_cloud_parser() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "banner?",
+        )];
+        let (state, scope) = command_state(&rows, None).await;
+        set_command_parser_capability(&state, true).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tokens = Arc::new(AtomicUsize::new(0));
+        let resolution = resolve_unknown_command_with(
+            &state,
+            &scope,
+            "buddy pin the banner",
+            true,
+            {
+                let tokens = tokens.clone();
+                move || -> Option<String> {
+                    tokens.fetch_add(1, Ordering::SeqCst);
+                    Some("bearer".to_string())
+                }
+            },
+            {
+                let calls = calls.clone();
+                move |_token: String, request: CohostCommandRequest| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let response = parse_answer(
+                        request.seq,
+                        "highlight",
+                        0.95,
+                        &[(request.candidates[0].id.as_str(), 0.95)],
+                    );
+                    async move { Ok::<CohostCommandResponse, CohostApiError>(response) }
+                }
+            },
+        )
+        .await;
+        assert_eq!(resolution, UnknownCommandResolution::Unheard);
+        assert_eq!(tokens.load(Ordering::SeqCst), 0, "no token read");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing sent");
+        // Through the engine it is "didn't catch that".
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Unknown,
+                CommandTarget::None,
+                "buddy pin the banner",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.kind, card.status, card.message.as_str()),
+            (
+                CohostCommandKind::Unknown,
+                CohostCommandStatus::NotFound,
+                "Buddy didn't catch that: 'buddy pin the banner'."
+            )
+        );
     }
 
     #[tokio::test]

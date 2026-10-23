@@ -65,6 +65,20 @@ export function systemAudioMeterInput(input: {
 }
 
 /**
+ * Plan 189: the soundboard's sounds as mixed, a reading only while a session's
+ * bus runs (between sessions the monitor plays them, and no meter reads it).
+ */
+export function soundsMeterInput(input: {
+  sessionActive: boolean
+  backendLevelsLive: boolean
+  source: FrameSource<MeterFrame>
+}): MeterInput {
+  return input.sessionActive && input.backendLevelsLive
+    ? { kind: 'source', source: input.source }
+    : NO_READING
+}
+
+/**
  * Plan 080 S3: the reason decides the words. This state is only reachable
  * once the OS has granted the mic, so only a real refusal may mention
  * permission. Since plan 093 it explains a microphone level with no live

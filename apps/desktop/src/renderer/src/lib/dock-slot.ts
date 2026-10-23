@@ -98,16 +98,47 @@ export function dockSlotReportChanged(
 
 // In-app overlays paint inside the main window's web contents, UNDER a native
 // surface floating above the window — so the docked preview yields while one
-// is up. Scrimmed overlays (dialogs) always block; popper content (popovers,
-// menus, selects) blocks only when it geometrically overlaps the slot.
-// Tooltips are deliberately exempt: they are transient and everywhere.
-export const DOCK_BLOCKING_SCRIM_SELECTOR = '[data-slot="dialog-overlay"][data-state="open"]'
+// is up. Nothing may open behind the preview (owner, 2026-10-21: the End
+// livestream question opened under it mid-stream, because only the plain
+// dialog's scrim was listed). Scrimmed overlays (dialogs, alert dialogs)
+// always block; floating content (popovers, menus, selects, hover cards,
+// toasts) blocks only when it geometrically overlaps the slot. Tooltips are
+// deliberately exempt: they are transient and everywhere, and hovering a
+// control beside the preview must not blink it. dock-slot.test.ts fails for
+// any portalled ui slot that is in none of these lists.
+export const DOCK_BLOCKING_SCRIM_SLOTS = ['dialog-overlay', 'alert-dialog-overlay'] as const
+
+export const DOCK_BLOCKING_POPPER_SLOTS = [
+  'popover-content',
+  'dropdown-menu-content',
+  'dropdown-menu-sub-content',
+  'select-content',
+  'context-menu-content',
+  'context-menu-sub-content',
+  'hover-card-content'
+] as const
+
+/** Portalled ui slots that never block the docked preview, and why. */
+export const DOCK_NON_BLOCKING_SLOTS: Readonly<Record<string, string>> = {
+  'tooltip-content': 'transient hint beside its trigger',
+  'dialog-content': 'its scrim blocks',
+  'alert-dialog-content': 'its scrim blocks'
+}
+
+function openSlotSelector(slots: readonly string[]): string {
+  return slots.map((slot) => `[data-slot="${slot}"][data-state="open"]`).join(', ')
+}
+
+export const DOCK_BLOCKING_SCRIM_SELECTOR = openSlotSelector(DOCK_BLOCKING_SCRIM_SLOTS)
+
+// Toasts (sonner) carry no data-slot. Stacked toasts past the visible count
+// are transparent, and a leaving toast is marked removed before it unmounts.
+export const DOCK_BLOCKING_TOAST_SELECTOR =
+  '[data-sonner-toast][data-visible="true"]:not([data-removed="true"])'
 
 export const DOCK_BLOCKING_POPPER_SELECTOR = [
-  '[data-slot="popover-content"][data-state="open"]',
-  '[data-slot="dropdown-menu-content"][data-state="open"]',
-  '[data-slot="dropdown-menu-sub-content"][data-state="open"]',
-  '[data-slot="select-content"][data-state="open"]'
+  openSlotSelector(DOCK_BLOCKING_POPPER_SLOTS),
+  DOCK_BLOCKING_TOAST_SELECTOR
 ].join(', ')
 
 export function rectsIntersect(a: SlotRect, b: SlotRect): boolean {

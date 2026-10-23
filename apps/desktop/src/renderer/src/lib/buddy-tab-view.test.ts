@@ -297,10 +297,14 @@ describe('Voice commands (plan 140, S6 part A)', () => {
       'Clear',
       'Remove',
       'Answer',
+      'Banners',
+      'On stream',
       'Marker'
     ])
     const phrases = BUDDY_VOICE_COMMANDS.flatMap((command) => command.phrases)
     for (const phrase of [
+      'Buddy, show up',
+      'Buddy, go away',
       'Buddy, highlight the comment from coders X',
       'Buddy, put this one up',
       'Buddy, take it down',
@@ -309,6 +313,9 @@ describe('Voice commands (plan 140, S6 part A)', () => {
       'Buddy, delete the comment from coders X',
       'Yes',
       'Never mind',
+      // Plan 186 S11: banner commands, as cohost_command.rs parses them.
+      'Buddy, show the sponsor banner',
+      'Buddy, hide the banners',
       // Plan 174 F-16: the marker command, as marker_voice.rs parses it.
       'Buddy, make a marker here for the Q&A'
     ]) {

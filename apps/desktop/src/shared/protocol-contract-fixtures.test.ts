@@ -33,6 +33,10 @@ import type {
   CohostSettingsPatch,
   CohostStartParams,
   CohostState,
+  Banner,
+  Sound,
+  SoundboardState,
+  SoundsPlayback,
   CompositorStatus,
   LayoutSettings,
   LiveChatMessage,
@@ -137,6 +141,17 @@ interface HighRiskContractFixtures {
   overlayLayout: {
     defaults: OverlayLayout
     placed: OverlayLayout
+  }
+  banner: {
+    minimal: Banner
+    withTimer: Banner
+  }
+  sound: {
+    minimal: Sound
+    starter: Sound
+    state: Omit<SoundboardState, 'sounds'>
+    playback: SoundsPlayback
+    pressStopped: { onAir: boolean }
   }
   buddyPets: {
     summary: BuddyPetSummary
@@ -738,6 +753,66 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
     expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
     expect(fixtures.overlayLayout.defaults.buddy.horizontal.x).toBeCloseTo(0.7975, 6)
+  })
+
+  it('keeps the banner wire shape identical across languages, timer off or on (plan 186)', () => {
+    const { minimal, withTimer } = fixtures.banner
+    for (const banner of [minimal, withTimer]) {
+      expect(validateBackendRpcResult('banners.show', banner)).toStrictEqual(banner)
+      expect(validateBackendRpcResult('banners.importImage', banner)).toStrictEqual(banner)
+      expect(validateBackendRpcResult('banners.update', banner)).toStrictEqual(banner)
+      expect(validateBackendRpcResult('banners.list', [banner])).toStrictEqual([banner])
+      expect(validateBackendEventPayload('banners.changed', [banner])).toStrictEqual([banner])
+    }
+    // The timer is omitted when off (skip_serializing_if), never null.
+    expect('hideAfterSec' in minimal).toBe(false)
+    expect('repeatEveryMin' in minimal).toBe(false)
+    expect(withTimer.hideAfterSec).toBe(30)
+    expect(withTimer.repeatEveryMin).toBe(15)
+    for (const field of ['hideAfterSec', 'repeatEveryMin'] as const) {
+      expect(() => validateBackendRpcResult('banners.show', { ...minimal, [field]: null })).toThrow(
+        field
+      )
+      expect(() =>
+        validateBackendEventPayload('banners.changed', [{ ...withTimer, [field]: null }])
+      ).toThrow(field)
+    }
+    expect(() => validateBackendRpcResult('banners.show', { ...minimal, extra: true })).toThrow()
+  })
+
+  it('keeps the soundboard wire shapes identical across languages (plan 189)', () => {
+    const { minimal, starter, state, playback, pressStopped } = fixtures.sound
+    for (const sound of [minimal, starter]) {
+      expect(validateBackendRpcResult('sounds.import', sound)).toStrictEqual(sound)
+      expect(validateBackendRpcResult('sounds.update', sound)).toStrictEqual(sound)
+      expect(validateBackendRpcResult('sounds.reorder', [sound])).toStrictEqual([sound])
+    }
+    const board = { ...state, sounds: [starter, minimal] }
+    expect(validateBackendRpcResult('sounds.list', board)).toStrictEqual(board)
+    expect(validateBackendEventPayload('sounds.changed', board)).toStrictEqual(board)
+    expect(validateBackendEventPayload('sounds.playback', playback)).toStrictEqual(playback)
+    expect(validateBackendRpcResult('sounds.stop', playback)).toStrictEqual(playback)
+    expect(validateBackendRpcResult('sounds.press', pressStopped)).toStrictEqual(pressStopped)
+    // Optional fields are omitted when absent (skip_serializing_if), never null.
+    expect('hotkey' in minimal).toBe(false)
+    expect('starter' in minimal).toBe(false)
+    expect('voiceId' in pressStopped).toBe(false)
+    for (const field of ['hotkey', 'starter'] as const) {
+      expect(() =>
+        validateBackendRpcResult('sounds.update', { ...starter, [field]: null })
+      ).toThrow(field)
+    }
+    expect(() => validateBackendRpcResult('sounds.press', { voiceId: null, onAir: true })).toThrow(
+      'voiceId'
+    )
+    expect(() => validateBackendRpcResult('sounds.update', { ...minimal, extra: true })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('sounds.update', { ...minimal, mode: 'one-shot' })
+    ).toThrow()
+    expect(() => validateBackendRpcResult('sounds.update', { ...minimal, hotkey: '0' })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('sounds.update', { ...minimal, file: '../x.wav' })
+    ).toThrow()
   })
 
   it('keeps the Buddy overlay wire shapes strict (plan 164 Phase C)', () => {

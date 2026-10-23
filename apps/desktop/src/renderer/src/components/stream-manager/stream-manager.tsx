@@ -116,6 +116,8 @@ import {
   type CommandAnswer
 } from '@/components/stream-manager/command-cards'
 import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
+import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import { buddyOffOutputsNotice } from '@/lib/buddy-output-notice'
 import {
   removalPaneView,
   removeFromChatAvailable,
@@ -123,6 +125,8 @@ import {
 } from '@/lib/chat-removal-view'
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
+import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
@@ -283,6 +287,23 @@ export interface StreamManagerProps {
   onMarkClip?: () => void
   /** `/clip` in the composer (plan 181 R4): the same action, answered with its words. */
   onClip?: () => Promise<string>
+  /**
+   * Banners (plan 186 S7): the list Studio pushed (null until it loads) and
+   * one show or hide, relayed to Studio. The status bar's Banners menu and
+   * the composer's `/banner` use them, on air or not: banners matter in
+   * recordings too. Resolves false when it didn't happen, already said.
+   */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => Promise<boolean>
+  /**
+   * Sounds (plan 189 S9): the board Studio pushed (null until it loads) and
+   * one pad, `/sound` or Stop all, relayed to Studio. The status bar's Sounds
+   * popover and the composer's `/sound` use them, on air or not: sounds
+   * matter in recordings too. Resolves false when it didn't happen, already
+   * said.
+   */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => Promise<boolean>
   onOpenPreview?: () => void
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
@@ -390,6 +411,10 @@ export function StreamManager({
   onClear,
   onMarkClip,
   onClip,
+  banners,
+  onBanner,
+  sounds,
+  onSound,
   markerContext,
   onMarker,
   onUndoMarker,
@@ -866,7 +891,11 @@ export function StreamManager({
   const activeAlerts = activeCohostAlerts(shownCohostState, nowMs).length
 
   const buddyPane = cohostPresent ? (
-    <div className="flex min-h-0 flex-1 flex-col" data-slot="buddy-pane">
+    // overflow-y-auto: when the window is shorter than header, chat controls
+    // and the Say footer together (a tiling window manager ignores the
+    // window's minimum size), the pane scrolls instead of painting the Say
+    // box and the on-stream switch under the status bar.
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-slot="buddy-pane">
       {/* One pane header (plan 174 S3.14c, F-8, H-9): identity first, then the
           one Alpha tag, listening, the status, and the Buddy Live switch. */}
       <div
@@ -913,6 +942,7 @@ export function StreamManager({
         <BuddyChatControls
           autoChat={cohostAutoChat}
           name={buddyName}
+          picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
           onModeChange={(mode) => onCohostAutoChatChange({ mode })}
           onOpenChatSettings={onCohostOpenChatSettings}
         />
@@ -1035,6 +1065,13 @@ export function StreamManager({
       {cohostBuddy ? (
         <BuddySayFooter
           buddy={cohostBuddy}
+          offOutputsNotice={buddyOffOutputsNotice({
+            enabled: cohostEnabled,
+            onAir,
+            showOnStream: cohostBuddy.showOnStream,
+            showInRecording: cohostBuddy.showInRecording,
+            name: buddyName
+          })}
           packReactions={buddyPackReactions}
           previewRef={buddyPreviewRef}
           sayChatCap={sendTargets.length > 0 ? chatDraftMaxChars(sendTargets) : null}
@@ -1194,6 +1231,10 @@ export function StreamManager({
             onMarker={inHistory ? undefined : onMarker}
             onClip={inHistory ? undefined : onClip}
             onUndoMarker={inHistory ? undefined : onUndoMarker}
+            banners={banners}
+            onBanner={inHistory ? undefined : onBanner}
+            sounds={sounds}
+            onSound={inHistory ? undefined : onSound}
             onSend={onSend}
           />
         </div>
@@ -1242,6 +1283,10 @@ export function StreamManager({
         onHighlightAnchorChange={inHistory ? undefined : onHighlightAnchorChange}
         clip={markerContext?.clip}
         onMarkClip={clipAvailable ? onMarkClip : undefined}
+        banners={banners}
+        onBanner={onBanner}
+        sounds={sounds}
+        onSound={onSound}
         onOpenPreview={onOpenPreview}
         onSearchChat={searchChat}
         onStatsLayoutChange={changeStatsLayout}

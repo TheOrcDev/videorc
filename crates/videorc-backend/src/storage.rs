@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::banners::{
+    BannerUpdate, NewBanner, REFUSAL_FOUR_SHOWING, REFUSAL_TOO_MANY, banner_image_file_name,
+    banner_thumbnail_file_name,
+};
 use crate::diagnostics::permission_pane_for_log;
 use crate::live_chat::{
     CommentsSendOperation, CommentsSendOperationPhase, LiveChatAuthorVerified,
@@ -21,16 +25,23 @@ use crate::live_chat::{
     MembershipKind, SubscriptionKind,
 };
 use crate::live_chat_moderation::{ModerationOperation, ModerationPhase};
+use crate::overlay_layout::OverlayRect;
 use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
-    AiArtifact, AiArtifactKind, AiArtifactStatus, CleanCutEdl, CleanCutJob, CleanCutJobState,
-    CleanCutMode, CohostReportChatPlatformCount, CohostSessionReport, DiagnosticStats, HealthEvent,
-    HealthLevel, LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings,
-    SessionAiArtifactsPage, SessionHealthEventsPage, SessionListItem, SessionListPage,
-    SessionLogEntry, SessionLogsPage, SessionStorageTotals, SessionSummary, SourceSelection,
+    AiArtifact, AiArtifactKind, AiArtifactStatus, Banner, CleanCutEdl, CleanCutJob,
+    CleanCutJobState, CleanCutMode, CohostReportChatPlatformCount, CohostSessionReport,
+    DiagnosticStats, HealthEvent, HealthLevel, LayoutSettings, NoiseCleanupJob,
+    NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage, SessionHealthEventsPage,
+    SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage, SessionStorageTotals,
+    SessionSummary, Sound, SoundMode, SoundboardSettingsParams, SoundboardState, SourceSelection,
     StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
+use crate::sound_store::{
+    NewSound, REFUSAL_SOUND_TOO_MANY, REFUSAL_SOUNDS_TOTAL_TOO_LONG, SOUND_MAX_COUNT,
+    SOUND_TOTAL_MAX_DURATION_MS, SoundSettings, SoundUpdate, lowest_free_hotkey, sound_file_name,
+    starter_hotkey,
+};
 use crate::streaming::{
     PlatformAccount, PlatformAccountStatus, StreamMetadataDraft, StreamPlatform,
     UpsertPlatformAccount, default_stream_metadata_draft, normalize_stream_metadata_draft,
@@ -678,7 +689,7 @@ pub struct SessionFileObjectIdentity {
     created_unix_nanos: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SessionFileBoundIdentity {
     pub content_identity: SessionFileIdentity,
     pub object_identity: SessionFileObjectIdentity,
@@ -1685,6 +1696,7 @@ impl Database {
                 output_directory: None,
                 ffmpeg_path: None,
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 video: crate::protocol::VideoSettings {
                     preset: crate::protocol::VideoPreset::StreamSafe1080p30,
                     width: 1920,
@@ -1753,7 +1765,8 @@ impl Database {
                      ELSE COALESCE(?4, mp4_path)
                  END,
                  duration_ms = COALESCE(?5, duration_ms),
-                 diagnostics_json = ?6,
+                 diagnostics_json = CASE WHEN recording_role IN ('screen', 'camera')
+                    THEN json_patch(COALESCE(diagnostics_json, '{}'), ?6) ELSE ?6 END,
                  finalization_state = COALESCE(?8, finalization_state),
                  finalization_error = CASE WHEN ?8 IS NULL THEN finalization_error ELSE ?9 END
              WHERE id = ?1",
@@ -2360,11 +2373,73 @@ impl Database {
     /// pipeline (F-014/F-017). Flip them to failed so the Library stops
     /// claiming a recording is in flight.
     pub fn reconcile_orphaned_sessions(&self) -> Result<usize> {
+        // A crashed capture is failed, but its partial media remains usable.
+        // Only a persisted private directory identity authorizes binding a
+        // growing capture file; never infer ownership from a filename suffix.
+        let captures = {
+            let conn = self.lock()?;
+            let mut statement = conn.prepare("SELECT id, output_path, output_json FROM sessions WHERE (status IN ('running', 'failed') OR finalization_state IN ('finalizing', 'failed')) AND recording_role IN ('screen', 'camera')")?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, path, json) in captures {
+            let recovery = (|| -> Result<()> {
+                let json: serde_json::Value = serde_json::from_str(&json)?;
+                let mut path = path.map(PathBuf::from);
+                if path.as_ref().is_some_and(|path| !path.exists())
+                    && let Some(destination) = json
+                        .get("sourceIsoPublicationPath")
+                        .and_then(serde_json::Value::as_str)
+                    && let Some(identity) = json.get("sourceIsoOwnership").cloned()
+                {
+                    let expected: SessionFileBoundIdentity = serde_json::from_value(identity)?;
+                    let destination = Path::new(destination);
+                    if capture_session_file_bound_identity(destination)?.as_ref() == Some(&expected)
+                    {
+                        self.set_source_iso_capture_path(&id, destination)?;
+                        path = Some(destination.to_path_buf());
+                    }
+                }
+                let directory = json
+                    .get("sourceIsoCaptureDirectory")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from);
+                let expected: Option<SessionFileObjectIdentity> = json
+                    .get("sourceIsoCaptureDirectoryIdentity")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?;
+                if let (Some(path), Some(directory), Some(expected)) = (path, directory, expected)
+                    && path.parent() == Some(directory.as_path())
+                    && capture_session_directory_object_identity(&directory)?.as_ref()
+                        == Some(&expected)
+                    && path.is_file()
+                    && json.get("sourceIsoOwnership").is_none()
+                {
+                    self.bind_source_iso_capture(&id, &path)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = recovery {
+                tracing::warn!(session_id = %id, %error, "Could not verify interrupted ISO capture; retaining failed reservation");
+            }
+        }
         let conn = self.lock()?;
         let updated = conn.execute(
             "UPDATE sessions
              SET status = 'failed',
-                 ended_at = COALESCE(ended_at, ?1)
+                 ended_at = COALESCE(ended_at, ?1),
+                 finalization_state = CASE WHEN recording_role IN ('screen', 'camera') THEN 'failed' ELSE finalization_state END,
+                 finalization_error = CASE WHEN recording_role IN ('screen', 'camera')
+                    THEN COALESCE(finalization_error, 'Recording was interrupted; partial media is available for recovery.')
+                    ELSE finalization_error END
              WHERE status = 'running'",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -2401,6 +2476,259 @@ impl Database {
             "UPDATE sessions SET finalization_state = ?2, finalization_error = ?3 WHERE id = ?1",
             params![session_id, state, error],
         )?;
+        Ok(())
+    }
+
+    /// Plan 157: tags a row as one file of a take.
+    pub fn set_session_take_role(
+        &self,
+        session_id: &str,
+        take_id: &str,
+        recording_role: &str,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE sessions SET take_id = ?2, recording_role = ?3 WHERE id = ?1",
+            params![session_id, take_id, recording_role],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn set_source_iso_capture_path(&self, session_id: &str, path: &Path) -> Result<()> {
+        let parent = path.parent().context("ISO capture directory")?;
+        let private_capture = parent
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".videorc-iso-"));
+        let identity = private_capture
+            .then(|| capture_session_directory_object_identity(parent))
+            .transpose()?
+            .flatten();
+        let updated = self.lock()?.execute(
+            "UPDATE sessions SET output_path = ?2, output_json = CASE WHEN ?3 IS NOT NULL
+                THEN json_set(output_json, '$.sourceIsoCaptureDirectory', ?3, '$.sourceIsoCaptureDirectoryIdentity', json(?4))
+                ELSE output_json END
+             WHERE id = ?1 AND recording_role IN ('screen', 'camera')",
+            params![session_id, path.display().to_string(), private_capture.then(|| parent.display().to_string()),
+                identity.map(|identity| serde_json::to_string(&identity)).transpose()?],
+        )?;
+        anyhow::ensure!(updated == 1, "Missing ISO reservation {session_id}");
+        Ok(())
+    }
+
+    pub(crate) fn bind_source_iso_capture(&self, session_id: &str, path: &Path) -> Result<()> {
+        let ownership =
+            capture_session_file_bound_identity(path)?.context("ISO capture file is missing")?;
+        self.lock()?.execute(
+            "UPDATE sessions SET output_json = json_set(output_json, '$.sourceIsoOwnership', json(?2)) WHERE id = ?1",
+            params![session_id, serde_json::to_string(&ownership)?],
+        )?;
+        Ok(())
+    }
+
+    /// `Some(None)` is an ISO lacking validated ownership, never permission to
+    /// adopt a file currently occupying its path. Non-ISO rows return `None`.
+    pub(crate) fn source_iso_recovery_ownership(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Option<SessionFileBoundIdentity>>> {
+        let row: Option<(Option<String>, String)> = self
+            .lock()?
+            .query_row(
+                "SELECT recording_role, output_json FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((Some(role), json)) if matches!(role.as_str(), "screen" | "camera") => {
+                let json: serde_json::Value = serde_json::from_str(&json)?;
+                Ok(Some(
+                    json.get("sourceIsoOwnership")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()?,
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn source_iso_recording_expectations(
+        &self,
+        session_id: &str,
+    ) -> Result<(Option<f64>, bool)> {
+        let (output, diagnostics): (String, String) = self.lock()?.query_row(
+            "SELECT output_json, COALESCE(diagnostics_json, '{}') FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let output: serde_json::Value = serde_json::from_str(&output)?;
+        let diagnostics: serde_json::Value = serde_json::from_str(&diagnostics)?;
+        Ok((
+            output
+                .get("video")
+                .and_then(|video| video.get("fps"))
+                .and_then(serde_json::Value::as_f64),
+            diagnostics
+                .get("sourceIsoExpectedAudio")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verify_source_iso_capture_ownership(
+        &self,
+        session_id: &str,
+        path: &Path,
+    ) -> Result<()> {
+        if let Some(expected) = self.source_iso_recovery_ownership(session_id)? {
+            anyhow::ensure!(
+                expected.is_some(),
+                "ISO capture has no verified ownership; recovery cannot adopt its current path"
+            );
+            anyhow::ensure!(
+                capture_session_file_bound_identity(path)? == expected,
+                "ISO capture was replaced; recovery cannot adopt its current path"
+            );
+        }
+        Ok(())
+    }
+
+    /// Reserve every take member atomically before any ISO muxer can write.
+    pub fn reserve_source_iso_sessions(
+        &self,
+        take_id: &str,
+        roles: &[(&str, &str, String)],
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let tagged = transaction.execute(
+            "UPDATE sessions SET take_id = ?1, recording_role = 'combined' WHERE id = ?1 AND status = 'running'",
+            params![take_id],
+        )?;
+        if tagged != 1 {
+            bail!("No running Combined session for take {take_id}");
+        }
+        for (role, suffix, output_path) in roles {
+            let id = format!("{take_id}-{role}");
+            transaction.execute(
+                "INSERT INTO sessions (id, title, started_at, status, mode, output_path, container,
+                 sources_json, layout_json, output_json, take_id, recording_role)
+                 SELECT ?2, title || ': ' || ?3, started_at, 'running', mode, NULL, 'mkv',
+                 sources_json, layout_json, json_set(output_json, '$.sourceIsoPublicationPath', ?4), ?1, ?5 FROM sessions WHERE id = ?1",
+                params![take_id, id, suffix, output_path, role],
+            )?;
+            transaction.execute(
+                "INSERT INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2)",
+                params![id, serde_json::to_string(&SessionChatTotals::empty(&id))?],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_uncommitted_source_iso_sessions(&self, take_id: &str) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        // Release test 146, plan 0003: a reservation that never bound a
+        // capture has no media to recover, so it must not list as a failed
+        // "MP4 failed" recording. Only those rows go; anything that opened a
+        // capture keeps today's recovery path.
+        let unbound =
+            "take_id = ?1 AND recording_role IN ('screen', 'camera') AND status = 'running'
+             AND output_path IS NULL
+             AND json_extract(output_json, '$.sourceIsoOwnership') IS NULL
+             AND json_extract(output_json, '$.sourceIsoCaptureDirectory') IS NULL";
+        transaction.execute(
+            &format!(
+                "DELETE FROM session_chat_totals WHERE session_id IN (SELECT id FROM sessions WHERE {unbound})"
+            ),
+            params![take_id],
+        )?;
+        transaction.execute(
+            &format!("DELETE FROM sessions WHERE {unbound}"),
+            params![take_id],
+        )?;
+        transaction.execute(
+            "UPDATE sessions SET status = 'failed', ended_at = ?2, finalization_state = 'failed',
+             finalization_error = 'Session startup did not commit; any partial media was retained for recovery.'
+             WHERE take_id = ?1 AND recording_role IN ('screen', 'camera') AND status = 'running'",
+            params![take_id, Utc::now().to_rfc3339()],
+        )?;
+        // With no role sibling left, the Combined row is an ordinary refused
+        // start, not a "combined take".
+        transaction.execute(
+            "UPDATE sessions SET take_id = NULL, recording_role = NULL
+             WHERE id = ?1 AND recording_role = 'combined'
+             AND NOT EXISTS (SELECT 1 FROM sessions WHERE take_id = ?1 AND recording_role IN ('screen', 'camera'))",
+            params![take_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Plan 157: inserts one ISO sibling row beside the Combined row, copying
+    /// the take's mode, sources, layout and output settings from it. The row
+    /// is born terminal (`completed`/`failed`) because its muxer has already
+    /// exited; the MP4 export then runs as an ordinary finalization job.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_source_iso_session(
+        &self,
+        combined_session_id: &str,
+        iso_session_id: &str,
+        recording_role: &str,
+        title_suffix: &str,
+        output_path: &str,
+        ended_at: &str,
+        duration_ms: Option<i64>,
+        status: &str,
+        finalization_state: &str,
+        finalization_error: Option<&str>,
+    ) -> Result<()> {
+        let file_size_bytes = std::fs::metadata(output_path)
+            .ok()
+            .map(|metadata| metadata.len() as i64);
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let inserted = transaction.execute(
+            "INSERT INTO sessions
+                (id, title, started_at, ended_at, status, mode, output_path, mp4_path,
+                 stream_preset, container, duration_ms, sources_json, layout_json, output_json,
+                 diagnostics_json, file_size_bytes, finalization_state, finalization_error,
+                 take_id, recording_role)
+             SELECT ?2, title || ': ' || ?4, started_at, ?6, ?8, mode, ?5, NULL,
+                    NULL, 'mkv', COALESCE(?7, duration_ms), sources_json, layout_json, output_json,
+                    NULL, ?11, ?9, ?10, ?1, ?3
+             FROM sessions WHERE id = ?1",
+            params![
+                combined_session_id,
+                iso_session_id,
+                recording_role,
+                title_suffix,
+                output_path,
+                ended_at,
+                duration_ms,
+                status,
+                finalization_state,
+                finalization_error,
+                file_size_bytes,
+            ],
+        )?;
+        if inserted != 1 {
+            bail!(
+                "Combined session {combined_session_id} was not found for its {recording_role} row"
+            );
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2)",
+            params![
+                iso_session_id,
+                serde_json::to_string(&SessionChatTotals::empty(iso_session_id))?
+            ],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -4332,7 +4660,13 @@ impl Database {
                 );
             }
             let layout: LayoutSettings = serde_json::from_str(&layout_json)?;
-            let scene_label = session_scene_label(&layout, stream_preset.as_deref(), &mode);
+            let recorded_sources = serde_json::from_str(&sources_json).ok();
+            let scene_label = session_scene_label(
+                &layout,
+                recorded_sources.as_ref(),
+                stream_preset.as_deref(),
+                &mode,
+            );
 
             sessions.push(SessionSummary {
                 file_size_bytes,
@@ -4400,7 +4734,8 @@ impl Database {
                     SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                            stream_preset, container, duration_ms, layout_json, file_size_bytes,
                            derived_from_session_id, source_title, processing_kind,
-                           finalization_state, finalization_error
+                           finalization_state, finalization_error, sources_json,
+                           take_id, recording_role
                     FROM sessions
                     WHERE library_hidden = 0
                       AND (
@@ -4552,7 +4887,9 @@ impl Database {
                     COALESCE(artifact_summaries.count, 0), artifact_summaries.ready_kinds,
                     COALESCE(comment_counts.count, 0),
                     page_sessions.finalization_state, page_sessions.finalization_error,
-                    clean_cut_outputs.source_session_id, clean_cut_outputs.mode
+                    clean_cut_outputs.source_session_id, clean_cut_outputs.mode,
+                    page_sessions.sources_json,
+                    page_sessions.take_id, page_sessions.recording_role
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -4600,7 +4937,14 @@ impl Database {
                     container: normalized_session_container(row.get(9)?),
                     duration_ms: row.get(10)?,
                     file_size_bytes: row.get(12)?,
-                    scene_label: session_scene_label(&layout, stream_preset.as_deref(), &mode),
+                    scene_label: session_scene_label(
+                        &layout,
+                        row.get::<_, Option<String>>(26)?
+                            .and_then(|json| serde_json::from_str(&json).ok())
+                            .as_ref(),
+                        stream_preset.as_deref(),
+                        &mode,
+                    ),
                     quality_status: quality_json
                         .as_deref()
                         .and_then(|value| serde_json::from_str(value).ok()),
@@ -4620,6 +4964,8 @@ impl Database {
                         ),
                     finalization_progress_percent: None,
                     finalization_error: row.get(23)?,
+                    take_id: row.get(27)?,
+                    recording_role: row.get(28)?,
                 })
             })?;
         let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -5174,6 +5520,7 @@ impl Database {
         for preparation in &mut preparations {
             let SessionDeletionPreparation::New {
                 operation_id,
+                session_id,
                 mp4_path,
                 output_path,
                 path_records,
@@ -5182,11 +5529,22 @@ impl Database {
             else {
                 continue;
             };
+            let expected_capture = self.source_iso_recovery_ownership(session_id)?;
             *path_records = distinct_nonempty_paths([mp4_path.clone(), output_path.clone()])
                 .into_iter()
                 .enumerate()
                 .map(|(index, path)| {
                     let ownership = capture_identity(Path::new(&path))?;
+                    if output_path.as_deref() == Some(path.as_str())
+                        && let Some(expected) = expected_capture.as_ref()
+                        && ownership.is_some()
+                    {
+                        anyhow::ensure!(
+                            expected.is_some() && &ownership == expected,
+                            "ISO capture was replaced; deletion cannot adopt its current path"
+                        );
+                    }
+
                     Ok(SessionDeletionPathRecord {
                         original_path: path.clone(),
                         quarantine_path: Some(
@@ -6436,6 +6794,471 @@ impl Database {
         self.list_stream_screens()
     }
 
+    // --- Banners (plan 186) ------------------------------------------------
+
+    /// Every banner in Assets order, which is also the drawing order.
+    pub(crate) fn list_banners(&self) -> Result<Vec<Banner>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {BANNER_COLUMNS} FROM banners ORDER BY sort_order ASC, created_at ASC"
+        ))?;
+        let rows = stmt.query_map([], banner_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn banner_by_id(&self, id: &str) -> Result<Banner> {
+        let conn = self.lock()?;
+        banner_by_id_locked(&conn, id)
+    }
+
+    pub(crate) fn count_banners(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM banners", [], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Inserts an imported banner last in Assets order: hidden, both
+    /// "Appears in" switches on, opacity 1.0, no timer. The count cap is
+    /// checked again inside the transaction so two imports can never exceed
+    /// it, and a refusal rolls back.
+    pub(crate) fn insert_banner(&self, new: NewBanner, max_count: usize) -> Result<Banner> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM banners", [], |row| row.get(0))?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= max_count {
+            bail!(REFUSAL_TOO_MANY);
+        }
+        let next_order: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM banners",
+            [],
+            |row| row.get(0),
+        )?;
+        let banner = Banner {
+            image_file: banner_image_file_name(&new.id),
+            thumbnail_file: banner_thumbnail_file_name(&new.id),
+            id: new.id,
+            name: new.name,
+            width: new.width,
+            height: new.height,
+            has_alpha: new.has_alpha,
+            sort_order: next_order,
+            shown: false,
+            horizontal: new.horizontal,
+            vertical: new.vertical,
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        transaction.execute(
+            "INSERT INTO banners (
+                id, name, image_file, thumbnail_file, width, height, has_alpha, sort_order,
+                shown, horizontal_json, vertical_json, show_on_stream, show_in_recording,
+                opacity, hide_after_sec, repeat_every_min, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                banner.id,
+                banner.name,
+                banner.image_file,
+                banner.thumbnail_file,
+                banner.width,
+                banner.height,
+                banner.has_alpha,
+                banner.sort_order,
+                banner.shown,
+                serde_json::to_string(&banner.horizontal)?,
+                serde_json::to_string(&banner.vertical)?,
+                banner.show_on_stream,
+                banner.show_in_recording,
+                banner.opacity,
+                banner.hide_after_sec,
+                banner.repeat_every_min,
+                banner.created_at,
+                banner.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    /// Applies a validated `banners.update`. A field left `None` keeps its
+    /// stored value; `Some(None)` on a timer turns that timer off.
+    pub(crate) fn update_banner(&self, id: &str, update: BannerUpdate) -> Result<Banner> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut banner = banner_by_id_locked(&transaction, id)?;
+        if let Some(name) = update.name {
+            banner.name = name;
+        }
+        if let Some(rect) = update.horizontal {
+            banner.horizontal = rect;
+        }
+        if let Some(rect) = update.vertical {
+            banner.vertical = rect;
+        }
+        if let Some(value) = update.show_on_stream {
+            banner.show_on_stream = value;
+        }
+        if let Some(value) = update.show_in_recording {
+            banner.show_in_recording = value;
+        }
+        if let Some(value) = update.opacity {
+            banner.opacity = value;
+        }
+        if let Some(value) = update.hide_after_sec {
+            banner.hide_after_sec = value;
+        }
+        if let Some(value) = update.repeat_every_min {
+            banner.repeat_every_min = value;
+        }
+        banner.updated_at = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE banners SET name = ?2, horizontal_json = ?3, vertical_json = ?4,
+                    show_on_stream = ?5, show_in_recording = ?6, opacity = ?7,
+                    hide_after_sec = ?8, repeat_every_min = ?9, updated_at = ?10
+             WHERE id = ?1",
+            params![
+                banner.id,
+                banner.name,
+                serde_json::to_string(&banner.horizontal)?,
+                serde_json::to_string(&banner.vertical)?,
+                banner.show_on_stream,
+                banner.show_in_recording,
+                banner.opacity,
+                banner.hide_after_sec,
+                banner.repeat_every_min,
+                banner.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    /// `ids` is the new Assets order and must name every banner exactly once.
+    pub(crate) fn reorder_banners(&self, ids: &[String]) -> Result<Vec<Banner>> {
+        let conn = self.lock()?;
+        let existing_ids = {
+            let mut stmt = conn.prepare("SELECT id FROM banners")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let existing = existing_ids.iter().collect::<HashSet<_>>();
+        let requested = ids.iter().collect::<HashSet<_>>();
+        if existing.len() != requested.len()
+            || existing_ids.len() != ids.len()
+            || existing != requested
+        {
+            bail!("Banner reorder must include every banner exactly once.");
+        }
+
+        let updated_at = Utc::now().to_rfc3339();
+        for (index, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE banners SET sort_order = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, index as i64, updated_at],
+            )?;
+        }
+
+        drop(conn);
+        self.list_banners()
+    }
+
+    /// The row only. `banners::delete_banner` owns the session refusal, the
+    /// path guard and the files, and calls this once SQLite may commit.
+    pub(crate) fn delete_banner_row(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute("DELETE FROM banners WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            bail!("Banner not found.");
+        }
+        Ok(())
+    }
+
+    /// Show a banner, idempotently, under the cap of `max_shown` showing at
+    /// once. The cap is enforced here, in the backend, not only in the UI.
+    pub(crate) fn show_banner(&self, id: &str, max_shown: usize) -> Result<Banner> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut banner = banner_by_id_locked(&transaction, id)?;
+        if banner.shown {
+            return Ok(banner);
+        }
+        let shown: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM banners WHERE shown = 1", [], |row| {
+                row.get(0)
+            })?;
+        if usize::try_from(shown).unwrap_or(usize::MAX) >= max_shown {
+            bail!(REFUSAL_FOUR_SHOWING);
+        }
+        banner.shown = true;
+        banner.updated_at = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE banners SET shown = 1, updated_at = ?2 WHERE id = ?1",
+            params![banner.id, banner.updated_at],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    pub(crate) fn hide_banner(&self, id: &str) -> Result<Banner> {
+        let conn = self.lock()?;
+        let mut banner = banner_by_id_locked(&conn, id)?;
+        if banner.shown {
+            banner.shown = false;
+            banner.updated_at = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE banners SET shown = 0, updated_at = ?2 WHERE id = ?1",
+                params![banner.id, banner.updated_at],
+            )?;
+        }
+        Ok(banner)
+    }
+
+    pub(crate) fn hide_all_banners(&self) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE banners SET shown = 0, updated_at = ?1 WHERE shown = 1",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    // --- Sounds (plan 189) ---------------------------------------------------
+
+    pub(crate) fn sound_by_id(&self, id: &str) -> Result<Sound> {
+        let conn = self.lock()?;
+        sound_by_id_locked(&conn, id)
+    }
+
+    /// The sound seeded from a starter slug, if the streamer still has it.
+    pub(crate) fn sound_by_starter(&self, slug: &str) -> Result<Option<Sound>> {
+        let conn = self.lock()?;
+        sound_by_starter_locked(&conn, slug)
+    }
+
+    pub(crate) fn count_sounds(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM sounds", [], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// Every sound's duration added up (D8: 5 minutes in all).
+    pub(crate) fn total_sound_duration_ms(&self) -> Result<u64> {
+        let conn = self.lock()?;
+        total_sound_duration_ms_locked(&conn)
+    }
+
+    /// Inserts an imported sound last in board order with its key: a user
+    /// import takes the lowest free key 1-9, a starter its manifest key when
+    /// free, else none. Both caps (D8) are checked again inside the
+    /// transaction so two imports can never exceed them. A starter whose slug
+    /// is already present returns the existing sound, so a rerun of the seed
+    /// never duplicates.
+    pub(crate) fn insert_sound(&self, new: NewSound) -> Result<Sound> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        if let Some(slug) = new.starter.as_deref()
+            && let Some(existing) = sound_by_starter_locked(&transaction, slug)?
+        {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        let count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM sounds", [], |row| row.get(0))?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= SOUND_MAX_COUNT {
+            bail!(REFUSAL_SOUND_TOO_MANY);
+        }
+        let total = total_sound_duration_ms_locked(&transaction)?;
+        if total.saturating_add(u64::from(new.duration_ms)) > SOUND_TOTAL_MAX_DURATION_MS {
+            bail!(REFUSAL_SOUNDS_TOTAL_TOO_LONG);
+        }
+        let next_order: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM sounds",
+            [],
+            |row| row.get(0),
+        )?;
+        let taken = {
+            let mut stmt =
+                transaction.prepare("SELECT hotkey FROM sounds WHERE hotkey IS NOT NULL")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let hotkey = if new.starter.is_some() {
+            starter_hotkey(new.hotkey.as_deref(), &taken)
+        } else {
+            lowest_free_hotkey(&taken)
+        };
+        let sound = Sound {
+            file: sound_file_name(&new.id),
+            id: new.id,
+            name: new.name,
+            duration_ms: new.duration_ms,
+            loudness_lufs: new.loudness_lufs,
+            level_db: new.level_db,
+            volume_db: 0,
+            mode: SoundMode::OneShot,
+            hotkey,
+            starter: new.starter,
+            sort_order: next_order,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        transaction.execute(
+            "INSERT INTO sounds (
+                id, name, file, duration_ms, loudness_lufs, level_db, volume_db, mode,
+                hotkey, starter, sort_order, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                sound.id,
+                sound.name,
+                sound.file,
+                sound.duration_ms,
+                sound.loudness_lufs,
+                sound.level_db,
+                sound.volume_db,
+                sound_mode_to_db(sound.mode),
+                sound.hotkey,
+                sound.starter,
+                sound.sort_order,
+                sound.created_at,
+                sound.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(sound)
+    }
+
+    /// Applies a validated `sounds.update`. A field left `None` keeps its
+    /// value; a key another sound holds moves to this one.
+    pub(crate) fn update_sound(&self, id: &str, update: SoundUpdate) -> Result<Sound> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut sound = sound_by_id_locked(&transaction, id)?;
+        if let Some(name) = update.name {
+            sound.name = name;
+        }
+        if let Some(volume_db) = update.volume_db {
+            sound.volume_db = volume_db;
+        }
+        if let Some(mode) = update.mode {
+            sound.mode = mode;
+        }
+        sound.updated_at = Utc::now().to_rfc3339();
+        if let Some(hotkey) = update.hotkey {
+            if let Some(key) = hotkey.as_deref() {
+                transaction.execute(
+                    "UPDATE sounds SET hotkey = NULL, updated_at = ?2 WHERE hotkey = ?1 AND id != ?3",
+                    params![key, sound.updated_at, sound.id],
+                )?;
+            }
+            sound.hotkey = hotkey;
+        }
+        transaction.execute(
+            "UPDATE sounds SET name = ?2, volume_db = ?3, mode = ?4, hotkey = ?5, updated_at = ?6
+             WHERE id = ?1",
+            params![
+                sound.id,
+                sound.name,
+                sound.volume_db,
+                sound_mode_to_db(sound.mode),
+                sound.hotkey,
+                sound.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(sound)
+    }
+
+    /// `ids` is the new board order and must name every sound exactly once.
+    pub(crate) fn reorder_sounds(&self, ids: &[String]) -> Result<Vec<Sound>> {
+        let conn = self.lock()?;
+        let existing_ids = {
+            let mut stmt = conn.prepare("SELECT id FROM sounds")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let existing = existing_ids.iter().collect::<HashSet<_>>();
+        let requested = ids.iter().collect::<HashSet<_>>();
+        if existing.len() != requested.len()
+            || existing_ids.len() != ids.len()
+            || existing != requested
+        {
+            bail!("Sound reorder must include every sound exactly once.");
+        }
+        let updated_at = Utc::now().to_rfc3339();
+        for (index, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE sounds SET sort_order = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, index as i64, updated_at],
+            )?;
+        }
+        list_sounds_locked(&conn)
+    }
+
+    /// The row only. `sound_store::delete_sound` owns the voices, the path
+    /// guard and the file, and calls this once SQLite may commit.
+    pub(crate) fn delete_sound_row(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute("DELETE FROM sounds WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            bail!("Sound not found.");
+        }
+        Ok(())
+    }
+
+    /// The one-row `sound_settings` table.
+    pub(crate) fn sound_settings(&self) -> Result<SoundSettings> {
+        let conn = self.lock()?;
+        sound_settings_locked(&conn)
+    }
+
+    /// Applies a validated `sounds.settings`: only the fields present change.
+    pub(crate) fn update_sound_settings(
+        &self,
+        params: &SoundboardSettingsParams,
+    ) -> Result<SoundSettings> {
+        let conn = self.lock()?;
+        let mut settings = sound_settings_locked(&conn)?;
+        if let Some(volume_db) = params.volume_db {
+            settings.volume_db = volume_db;
+        }
+        if let Some(monitor) = params.monitor {
+            settings.monitor = monitor;
+        }
+        if let Some(seeded) = params.starters_seeded {
+            settings.starters_seeded = seeded;
+        }
+        conn.execute(
+            "UPDATE sound_settings SET volume_db = ?1, monitor = ?2, starters_seeded = ?3
+             WHERE id = 1",
+            params![
+                settings.volume_db,
+                settings.monitor,
+                settings.starters_seeded
+            ],
+        )?;
+        Ok(settings)
+    }
+
+    /// `sounds.list` and `sounds.changed`: the sounds and the settings in one
+    /// read.
+    pub(crate) fn soundboard_state(&self) -> Result<SoundboardState> {
+        let conn = self.lock()?;
+        let settings = sound_settings_locked(&conn)?;
+        Ok(SoundboardState {
+            sounds: list_sounds_locked(&conn)?,
+            volume_db: settings.volume_db,
+            monitor: settings.monitor,
+            starters_seeded: settings.starters_seeded,
+        })
+    }
+
     pub(crate) fn active_stream_screen_selection(&self) -> Result<ActiveStreamScreenSelection> {
         let conn = self.lock()?;
         let Some(screen_id) = self.active_screen_id_locked(&conn)? else {
@@ -6724,7 +7547,7 @@ impl Database {
         Ok(())
     }
 
-    fn screen_assets_dir(&self) -> PathBuf {
+    pub(crate) fn screen_assets_dir(&self) -> PathBuf {
         if let Some(parent) = self
             .path
             .parent()
@@ -6734,6 +7557,37 @@ impl Database {
         }
 
         std::env::temp_dir().join("videorc-screens")
+    }
+
+    /// The managed `Banners` directory beside `Screens` (plan 186). Only
+    /// basenames reach the renderer; main's `videorc-asset://banner/<file>`
+    /// resolver and the compositor join them onto this root.
+    pub(crate) fn banner_assets_dir(&self) -> PathBuf {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return parent.join("Banners");
+        }
+
+        std::env::temp_dir().join("videorc-banners")
+    }
+
+    /// The managed `Sounds` directory beside `Screens` and `Banners` (plan
+    /// 189). Only basenames reach the renderer; main's
+    /// `videorc-asset://sound/<file>` resolver and the player join them onto
+    /// this root.
+    pub(crate) fn sound_assets_dir(&self) -> PathBuf {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return parent.join("Sounds");
+        }
+
+        std::env::temp_dir().join("videorc-sounds")
     }
 
     #[cfg(test)]
@@ -6898,6 +7752,55 @@ impl Database {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS banners (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                image_file TEXT NOT NULL,
+                thumbnail_file TEXT NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                has_alpha INTEGER NOT NULL,
+                sort_order INTEGER NOT NULL,
+                shown INTEGER NOT NULL,
+                horizontal_json TEXT NOT NULL,
+                vertical_json TEXT NOT NULL,
+                show_on_stream INTEGER NOT NULL,
+                show_in_recording INTEGER NOT NULL,
+                opacity REAL NOT NULL,
+                hide_after_sec INTEGER,
+                repeat_every_min INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sounds (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                file TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                loudness_lufs REAL NOT NULL,
+                level_db REAL NOT NULL,
+                volume_db INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                hotkey TEXT,
+                starter TEXT,
+                sort_order INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS sounds_hotkey
+                ON sounds(hotkey) WHERE hotkey IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS sounds_starter
+                ON sounds(starter) WHERE starter IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS sound_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                volume_db INTEGER NOT NULL,
+                monitor INTEGER NOT NULL,
+                starters_seeded INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO sound_settings (id, volume_db, monitor, starters_seeded)
+                VALUES (1, 0, 1, 0);
 
             CREATE TABLE IF NOT EXISTS platform_accounts (
                 id TEXT PRIMARY KEY,
@@ -7136,6 +8039,15 @@ impl Database {
             "sessions",
             "finalization_error",
             "finalization_error TEXT",
+        )?;
+        // Plan 157: separate source recordings. Every file of one take shares
+        // `take_id` (the Combined session's id); `recording_role` names the
+        // file (`combined`, `screen`, `camera`). Both NULL on ordinary rows.
+        ensure_column(&conn, "sessions", "take_id", "take_id TEXT")?;
+        ensure_column(&conn, "sessions", "recording_role", "recording_role TEXT")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_take_id ON sessions(take_id)",
+            [],
         )?;
         ensure_column(
             &conn,
@@ -7422,6 +8334,144 @@ fn stream_screen_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamScr
     })
 }
 
+/// The `banners` columns in `banner_from_row` order.
+const BANNER_COLUMNS: &str = "id, name, image_file, thumbnail_file, width, height, has_alpha, \
+     sort_order, shown, horizontal_json, vertical_json, show_on_stream, show_in_recording, \
+     opacity, hide_after_sec, repeat_every_min, created_at, updated_at";
+
+/// The `sounds` columns in `sound_from_row` order (plan 189).
+const SOUND_COLUMNS: &str = "id, name, file, duration_ms, loudness_lufs, level_db, volume_db, \
+     mode, hotkey, starter, sort_order, created_at, updated_at";
+
+/// The wire string of a mode (`oneShot`), the form the `mode` column holds.
+fn sound_mode_to_db(mode: SoundMode) -> String {
+    serde_json::to_value(mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "oneShot".to_string())
+}
+
+fn sound_mode_from_db(value: &str) -> SoundMode {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap_or_default()
+}
+
+fn list_sounds_locked(conn: &Connection) -> Result<Vec<Sound>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SOUND_COLUMNS} FROM sounds ORDER BY sort_order ASC, created_at ASC"
+    ))?;
+    let rows = stmt.query_map([], sound_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn sound_by_id_locked(conn: &Connection, id: &str) -> Result<Sound> {
+    conn.query_row(
+        &format!("SELECT {SOUND_COLUMNS} FROM sounds WHERE id = ?1"),
+        params![id],
+        sound_from_row,
+    )
+    .optional()?
+    .context("Sound not found.")
+}
+
+fn sound_by_starter_locked(conn: &Connection, slug: &str) -> Result<Option<Sound>> {
+    conn.query_row(
+        &format!("SELECT {SOUND_COLUMNS} FROM sounds WHERE starter = ?1"),
+        params![slug],
+        sound_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn total_sound_duration_ms_locked(conn: &Connection) -> Result<u64> {
+    let total: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(duration_ms), 0) FROM sounds",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(u64::try_from(total).unwrap_or(0))
+}
+
+fn sound_settings_locked(conn: &Connection) -> Result<SoundSettings> {
+    conn.query_row(
+        "SELECT volume_db, monitor, starters_seeded FROM sound_settings WHERE id = 1",
+        [],
+        |row| {
+            Ok(SoundSettings {
+                volume_db: row.get(0)?,
+                monitor: row.get(1)?,
+                starters_seeded: row.get(2)?,
+            })
+        },
+    )
+    .optional()?
+    .context("Sound settings row is missing.")
+}
+
+fn sound_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sound> {
+    let mode: String = row.get(7)?;
+    Ok(Sound {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        file: row.get(2)?,
+        duration_ms: row.get(3)?,
+        loudness_lufs: row.get(4)?,
+        level_db: row.get(5)?,
+        volume_db: row.get(6)?,
+        mode: sound_mode_from_db(&mode),
+        hotkey: row.get(8)?,
+        starter: row.get(9)?,
+        sort_order: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn banner_by_id_locked(conn: &Connection, id: &str) -> Result<Banner> {
+    conn.query_row(
+        &format!("SELECT {BANNER_COLUMNS} FROM banners WHERE id = ?1"),
+        params![id],
+        banner_from_row,
+    )
+    .optional()?
+    .context("Banner not found.")
+}
+
+fn banner_rect_from_json(json: &str, index: usize) -> rusqlite::Result<OverlayRect> {
+    serde_json::from_str(json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+fn banner_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Banner> {
+    let horizontal_json: String = row.get(9)?;
+    let vertical_json: String = row.get(10)?;
+    Ok(Banner {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        image_file: row.get(2)?,
+        thumbnail_file: row.get(3)?,
+        width: row.get(4)?,
+        height: row.get(5)?,
+        has_alpha: row.get(6)?,
+        sort_order: row.get(7)?,
+        shown: row.get(8)?,
+        horizontal: banner_rect_from_json(&horizontal_json, 9)?,
+        vertical: banner_rect_from_json(&vertical_json, 10)?,
+        show_on_stream: row.get(11)?,
+        show_in_recording: row.get(12)?,
+        opacity: row.get(13)?,
+        hide_after_sec: row.get(14)?,
+        repeat_every_min: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+    })
+}
+
 fn health_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HealthEvent> {
     let level_json: String = row.get(2)?;
     let permission_json: Option<String> = row.get(5)?;
@@ -7523,7 +8573,7 @@ fn resolve_managed_screen_image_path(root: &Path, screen_id: &str, path: &Path) 
     Ok(canonical)
 }
 
-fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -8219,18 +9269,51 @@ fn latest_quality_status_for_path_locked(
 }
 
 /// Human label for a session's composition (Library rewrite L1): the layout
-/// preset name, or the stream preset for stream-only sessions. Pure + tested.
+/// preset name, or the stream preset for stream-only sessions. A two-source
+/// preset recorded with one of its sources off says what was recorded (ogre
+/// 2026-10-13: camera Off, every take read "Screen + Camera"). Pure + tested.
 pub fn session_scene_label(
     layout: &LayoutSettings,
+    sources: Option<&crate::protocol::SourceSelection>,
     stream_preset: Option<&str>,
     mode: &str,
 ) -> Option<String> {
+    use crate::protocol::LayoutPreset;
     if mode == "streaming"
         && let Some(preset) = stream_preset
             .map(str::trim)
             .filter(|value| !value.is_empty())
     {
         return Some(preset.to_string());
+    }
+    if let Some(sources) = sources {
+        let has_camera = sources.camera_id.is_some();
+        let has_screen =
+            sources.screen_id.is_some() || sources.window_id.is_some() || sources.test_pattern;
+        let vertical = matches!(
+            layout.layout_preset,
+            LayoutPreset::VerticalCameraTop
+                | LayoutPreset::VerticalCameraBottom
+                | LayoutPreset::VerticalSplit
+                | LayoutPreset::VerticalScreenCamera
+        );
+        let both = vertical
+            || matches!(
+                layout.layout_preset,
+                LayoutPreset::ScreenCamera | LayoutPreset::SideBySide
+            );
+        if both && has_screen != has_camera {
+            let one = if has_screen {
+                "Screen only"
+            } else {
+                "Camera only"
+            };
+            return Some(if vertical {
+                format!("Vertical · {one}")
+            } else {
+                one.to_string()
+            });
+        }
     }
     Some(
         match layout.layout_preset {
@@ -8426,6 +9509,14 @@ fn optimize_screen_image(
         .arg("-loglevel")
         .arg("error")
         .arg("-y")
+        .args([
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
+        ])
         .arg("-i")
         .arg(source_path)
         .arg("-filter_complex")
@@ -8434,6 +9525,7 @@ fn optimize_screen_image(
         .arg("[out]")
         .arg("-frames:v")
         .arg("1")
+        .args(["-threads", "1"])
         .arg(destination_path);
     let output = output_owned_std_with_timeout(&mut command, SCREEN_IMAGE_OPTIMIZER_TIMEOUT)
         .with_context(|| {
@@ -9168,23 +10260,69 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = crate::protocol::LayoutPreset::ScreenCamera;
         assert_eq!(
-            session_scene_label(&layout, None, "recording").as_deref(),
+            session_scene_label(&layout, None, None, "recording").as_deref(),
             Some("Screen + Camera")
         );
         layout.layout_preset = crate::protocol::LayoutPreset::SideBySide;
         assert_eq!(
-            session_scene_label(&layout, None, "recording").as_deref(),
+            session_scene_label(&layout, None, None, "recording").as_deref(),
             Some("Side by side")
         );
         // Stream-only sessions prefer the stream preset name.
         assert_eq!(
-            session_scene_label(&layout, Some("1080p60"), "streaming").as_deref(),
+            session_scene_label(&layout, None, Some("1080p60"), "streaming").as_deref(),
             Some("1080p60")
         );
         // Blank stream presets fall through to the layout label.
         assert_eq!(
-            session_scene_label(&layout, Some("  "), "streaming").as_deref(),
+            session_scene_label(&layout, None, Some("  "), "streaming").as_deref(),
             Some("Side by side")
+        );
+    }
+
+    #[test]
+    fn scene_labels_say_what_was_recorded_when_a_source_was_off() {
+        use crate::protocol::{LayoutPreset, SourceSelection};
+        let sources = |screen: bool, window: bool, camera: bool| SourceSelection {
+            screen_id: screen.then(|| "screen:portal:monitor".to_string()),
+            window_id: window.then(|| "window:portal:window".to_string()),
+            camera_id: camera.then(|| "camera:1".to_string()),
+            microphone_id: None,
+            test_pattern: false,
+        };
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::ScreenCamera;
+        let label = |layout: &LayoutSettings, recorded: &SourceSelection| {
+            session_scene_label(layout, Some(recorded), None, "recording")
+        };
+        // ogre: Window source, camera Off, "Screen + Camera" chosen.
+        assert_eq!(
+            label(&layout, &sources(false, true, false)).as_deref(),
+            Some("Screen only")
+        );
+        assert_eq!(
+            label(&layout, &sources(false, false, true)).as_deref(),
+            Some("Camera only")
+        );
+        assert_eq!(
+            label(&layout, &sources(true, false, true)).as_deref(),
+            Some("Screen + Camera")
+        );
+        layout.layout_preset = LayoutPreset::SideBySide;
+        assert_eq!(
+            label(&layout, &sources(true, false, false)).as_deref(),
+            Some("Screen only")
+        );
+        layout.layout_preset = LayoutPreset::VerticalScreenCamera;
+        assert_eq!(
+            label(&layout, &sources(true, false, false)).as_deref(),
+            Some("Vertical · Screen only")
+        );
+        // Nothing recorded either way: the chosen layout stands.
+        layout.layout_preset = LayoutPreset::ScreenCamera;
+        assert_eq!(
+            label(&layout, &sources(false, false, false)).as_deref(),
+            Some("Screen + Camera")
         );
     }
 
@@ -9803,6 +10941,383 @@ mod tests {
         assert!(database.list_clip_marks("s-2").unwrap().is_empty());
     }
 
+    #[test]
+    fn source_iso_sibling_rows_copy_the_take_and_list_their_role() {
+        // Plan 157: the ISO rows are born beside the Combined row, inherit its
+        // sources/layout/output, and the page query surfaces take + role so
+        // the Library can group the three files.
+        let database = test_database();
+        database.create_session(&sample_session("take-1")).unwrap();
+        database
+            .set_session_take_role("take-1", "take-1", "combined")
+            .unwrap();
+        database
+            .create_source_iso_session(
+                "take-1",
+                "take-1-screen",
+                "screen",
+                "Screen",
+                "/tmp/videorc-test-screen.mkv",
+                "2026-05-31T00:10:00Z",
+                Some(600_000),
+                "completed",
+                "finalizing",
+                None,
+            )
+            .unwrap();
+        database
+            .create_source_iso_session(
+                "take-1",
+                "take-1-camera",
+                "camera",
+                "Camera",
+                "/tmp/videorc-test-camera.mkv",
+                "2026-05-31T00:10:00Z",
+                Some(600_000),
+                "failed",
+                "failed",
+                Some("muxer exited 1"),
+            )
+            .unwrap();
+        assert!(
+            database
+                .create_source_iso_session(
+                    "missing",
+                    "missing-screen",
+                    "screen",
+                    "Screen",
+                    "/tmp/none.mkv",
+                    "2026-05-31T00:10:00Z",
+                    None,
+                    "completed",
+                    "finalizing",
+                    None,
+                )
+                .is_err(),
+            "an ISO row without its Combined row is a bug, not a silent orphan"
+        );
+
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 3);
+        let by_id = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("{id} must list"))
+        };
+        let combined = by_id("take-1");
+        assert_eq!(combined.take_id.as_deref(), Some("take-1"));
+        assert_eq!(combined.recording_role.as_deref(), Some("combined"));
+        let screen = by_id("take-1-screen");
+        assert_eq!(screen.take_id.as_deref(), Some("take-1"));
+        assert_eq!(screen.recording_role.as_deref(), Some("screen"));
+        assert_eq!(screen.title, "Test session: Screen");
+        assert_eq!(screen.mode, combined.mode);
+        assert_eq!(screen.started_at, combined.started_at);
+        assert_eq!(screen.ended_at.as_deref(), Some("2026-05-31T00:10:00Z"));
+        assert_eq!(screen.duration_ms, Some(600_000));
+        assert_eq!(
+            screen.output_path.as_deref(),
+            Some("/tmp/videorc-test-screen.mkv")
+        );
+        assert_eq!(screen.container.as_deref(), Some("mkv"));
+        assert_eq!(screen.status, "completed");
+        let camera = by_id("take-1-camera");
+        assert_eq!(camera.recording_role.as_deref(), Some("camera"));
+        assert_eq!(camera.status, "failed");
+        assert_eq!(camera.finalization_error.as_deref(), Some("muxer exited 1"));
+        assert!(
+            database
+                .session_chat_totals("take-1-screen")
+                .unwrap()
+                .is_some(),
+            "every row owns a chat-totals record"
+        );
+    }
+
+    #[test]
+    fn a_take_refused_before_any_iso_media_leaves_one_ordinary_failed_row() {
+        // Release test 146, plan 0003: a Separate source take refused before
+        // its writers opened listed three failed rows ("combined take" plus
+        // two red "MP4 failed" with no file). Role reservations that never
+        // bound a capture go away; the Combined row is an ordinary refused
+        // start again.
+        let database = Database::open_in_memory_for_tests();
+        database
+            .create_session(&sample_session("take-refused"))
+            .unwrap();
+        database
+            .reserve_source_iso_sessions(
+                "take-refused",
+                &[
+                    ("screen", "Screen", "/tmp/take-refused-screen.mkv".into()),
+                    ("camera", "Camera", "/tmp/take-refused-camera.mkv".into()),
+                ],
+            )
+            .unwrap();
+        database
+            .fail_uncommitted_source_iso_sessions("take-refused")
+            .unwrap();
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["take-refused"]
+        );
+        assert_eq!(page.items[0].take_id, None);
+        assert_eq!(page.items[0].recording_role, None);
+        assert!(
+            database
+                .session_chat_totals("take-refused-screen")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_take_failed_after_an_iso_capture_opened_keeps_that_row_for_recovery() {
+        let dir = std::env::temp_dir().join(format!("videorc-iso-bound-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_file_for_tests(&dir.join("take.sqlite3"));
+        database
+            .create_session(&sample_session("take-bound"))
+            .unwrap();
+        database
+            .reserve_source_iso_sessions(
+                "take-bound",
+                &[
+                    (
+                        "screen",
+                        "Screen",
+                        dir.join("screen.mkv").display().to_string(),
+                    ),
+                    (
+                        "camera",
+                        "Camera",
+                        dir.join("camera.mkv").display().to_string(),
+                    ),
+                ],
+            )
+            .unwrap();
+        let capture = dir.join("screen.mkv");
+        std::fs::write(&capture, b"partial").unwrap();
+        database
+            .set_source_iso_capture_path("take-bound-screen", &capture)
+            .unwrap();
+        database
+            .fail_uncommitted_source_iso_sessions("take-bound")
+            .unwrap();
+        let page = database.list_session_items_page(None, 10).unwrap();
+        let mut ids = page
+            .items
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["take-bound", "take-bound-screen"]);
+        let screen = page
+            .items
+            .iter()
+            .find(|row| row.id == "take-bound-screen")
+            .unwrap();
+        assert_eq!(screen.status, "failed");
+        assert_eq!(screen.take_id.as_deref(), Some("take-bound"));
+        let combined = page
+            .items
+            .iter()
+            .find(|row| row.id == "take-bound")
+            .unwrap();
+        assert_eq!(combined.recording_role.as_deref(), Some("combined"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_iso_reservations_survive_restart_and_reconcile_once() {
+        let dir =
+            std::env::temp_dir().join(format!("videorc-iso-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("take.sqlite3");
+        {
+            let database = Database::open_file_for_tests(&path);
+            database
+                .create_session(&sample_session("take-restart"))
+                .unwrap();
+            database
+                .reserve_source_iso_sessions(
+                    "take-restart",
+                    &[
+                        (
+                            "screen",
+                            "Screen",
+                            dir.join("screen.mkv").display().to_string(),
+                        ),
+                        (
+                            "camera",
+                            "Camera",
+                            dir.join("camera.mkv").display().to_string(),
+                        ),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(
+                database
+                    .list_session_items_page(None, 10)
+                    .unwrap()
+                    .items
+                    .len(),
+                3
+            );
+        }
+        let database = Database::open_file_for_tests(&path);
+        assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 3);
+        assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 0);
+        let page = database.list_session_items_page(None, 10).unwrap();
+        for row in &page.items {
+            assert_eq!(row.take_id.as_deref(), Some("take-restart"));
+            if row.recording_role.as_deref() != Some("combined") {
+                assert_eq!(
+                    row.finalization_state,
+                    Some(crate::protocol::RecordingFinalizationState::Failed)
+                );
+                assert!(
+                    row.finalization_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("interrupted")
+                );
+            }
+        }
+        assert!(
+            database.sessions_pending_finalization().unwrap().is_empty(),
+            "interrupted captures must not silently export as success"
+        );
+    }
+
+    #[test]
+    fn source_iso_publication_recovery_preserves_identity_and_refuses_replacements() {
+        for (after_publish, already_failed) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let dir = std::env::temp_dir().join(format!("videorc-iso-publish-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let private = dir.join(".videorc-iso-owned");
+            std::fs::create_dir(&private).unwrap();
+            let capture = private.join("screen.mkv");
+            let public = dir.join("screen.mkv");
+            let database = Database::open_file_for_tests(&dir.join("test.sqlite"));
+            database
+                .create_session(&sample_session("take-publish"))
+                .unwrap();
+            database
+                .reserve_source_iso_sessions(
+                    "take-publish",
+                    &[("screen", "Screen", public.display().to_string())],
+                )
+                .unwrap();
+            assert!(
+                database
+                    .session_recording_path("take-publish-screen")
+                    .unwrap()
+                    .is_none()
+            );
+            database
+                .set_source_iso_capture_path("take-publish-screen", &capture)
+                .unwrap();
+            std::fs::write(&capture, b"owned growing capture").unwrap();
+            if after_publish {
+                database
+                    .bind_source_iso_capture("take-publish-screen", &capture)
+                    .unwrap();
+                let identity = capture_session_file_bound_identity(&capture)
+                    .unwrap()
+                    .unwrap();
+                crate::session_ops::publish_identity_bound_session_file(
+                    &capture, &public, &identity,
+                )
+                .unwrap();
+                // Crash immediately after rename, before the row's path update.
+                if already_failed {
+                    database.lock().unwrap().execute_batch("CREATE TRIGGER reject_iso_path BEFORE UPDATE OF output_path ON sessions BEGIN SELECT RAISE(ABORT, 'injected post-publication write failure'); END;").unwrap();
+                    assert!(
+                        database
+                            .set_source_iso_capture_path("take-publish-screen", &public)
+                            .is_err()
+                    );
+                    database
+                        .lock()
+                        .unwrap()
+                        .execute_batch("DROP TRIGGER reject_iso_path;")
+                        .unwrap();
+                }
+            }
+            if already_failed {
+                database
+                    .fail_uncommitted_source_iso_sessions("take-publish")
+                    .unwrap();
+            }
+            drop(database);
+            let database = Database::open_file_for_tests(&dir.join("test.sqlite"));
+            database.reconcile_orphaned_sessions().unwrap();
+            assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 0);
+            let recovered = if after_publish { &public } else { &capture };
+            assert_eq!(
+                database
+                    .session_recording_path("take-publish-screen")
+                    .unwrap()
+                    .as_deref(),
+                Some(recovered.to_str().unwrap())
+            );
+            database
+                .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                .unwrap();
+            std::fs::rename(recovered, dir.join("original.mkv")).unwrap();
+            std::fs::write(recovered, b"foreign replacement").unwrap();
+            assert!(
+                database
+                    .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                    .is_err()
+            );
+            assert!(
+                database
+                    .prepare_session_deletions(&["take-publish-screen".into()])
+                    .is_err()
+            );
+            database.reconcile_orphaned_sessions().unwrap();
+            assert!(
+                database
+                    .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(recovered).unwrap(), b"foreign replacement");
+            drop(database);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn source_iso_reservation_transaction_rolls_back_on_duplicate_role() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("take-rollback"))
+            .unwrap();
+        assert!(
+            database
+                .reserve_source_iso_sessions(
+                    "take-rollback",
+                    &[
+                        ("screen", "Screen", "/tmp/a.mkv".into()),
+                        ("screen", "Screen", "/tmp/b.mkv".into()),
+                    ]
+                )
+                .is_err()
+        );
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].take_id, None);
+    }
+
     fn sample_session(id: &str) -> NewSession {
         NewSession {
             id: id.to_string(),
@@ -9848,6 +11363,7 @@ mod tests {
             },
             output: OutputSettings {
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: None,
@@ -9988,6 +11504,7 @@ mod tests {
         };
         let output = OutputSettings {
             keep_original_mkv: false,
+            separate_source_recordings: None,
             record_enabled: true,
             stream_enabled: true,
             output_directory: None,

@@ -7,6 +7,7 @@ import {
 import {
   buildSimulcastParams,
   providerStreamOutputPlanOptions,
+  separateSourceRecordingsForSession,
   streamOutputVideosForTargets,
   type CaptureConfig,
   type SettingsState
@@ -20,6 +21,8 @@ export function buildStartSessionParams(input: {
   suppressCaptionsForSession?: boolean
   /** The replay buffer's switch is on (plan 181): the session carries the ring. */
   replayArmed?: boolean
+  /** `process.platform` from runtime info: Separate source recordings are macOS-only. */
+  platform?: string
 }): StartSessionParams {
   const {
     captureConfig,
@@ -58,6 +61,9 @@ export function buildStartSessionParams(input: {
       recordEnabled: captureConfig.recordEnabled,
       streamEnabled: captureConfig.streamEnabled,
       keepOriginalMkv: settings.keepOriginalRecording,
+      // Only sent when armed, so an ISO-off session's params stay byte-identical
+      // to pre-157 renderers.
+      separateSourceRecordings: separateSourceRecordingsForSession(captureConfig, input.platform),
       video: captureConfig.video,
       rtmp: {
         preset: captureConfig.rtmpPreset,

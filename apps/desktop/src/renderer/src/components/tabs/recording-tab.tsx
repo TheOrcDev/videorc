@@ -51,6 +51,9 @@ import {
   REPLAY_BUFFER_LENGTH_OPTIONS,
   layoutPresetOrientation,
   resolutionOptionsForOrientation,
+  separateSourceRecordingsIneligibility,
+  separateSourceRecordingsIneligibilityCopy,
+  separateSourceRecordingsSupported,
   videoProfileCompatibility,
   type LayoutOrientation
 } from '@/lib/capture'
@@ -216,7 +219,8 @@ function LocalRecordingSection(): ReactElement {
     performanceCheckProgress,
     runPerformanceCheck,
     encoderPreference,
-    setEncoderPreference
+    setEncoderPreference,
+    runtimeInfo
   } = useStudioCore()
   const { video } = captureConfig
   // One-click resolutions so nobody has to remember pixel counts; picking one
@@ -227,6 +231,16 @@ function LocalRecordingSection(): ReactElement {
   const resolutionPresets = resolutionOptionsForOrientation(orientation)
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
+  // Plan 157: the switch stays available; when the current selection cannot
+  // produce both files the copy says so and the session records Combined only.
+  // Release test 146, plan 0001: only macOS can write the Screen and Camera
+  // files, so elsewhere the switch is off, locked and says why.
+  const separateUnsupported = !separateSourceRecordingsSupported(runtimeInfo?.platform)
+  const separateIneligibility = separateUnsupported
+    ? 'unsupported-platform'
+    : captureConfig.separateSourceRecordings.enabled
+      ? separateSourceRecordingsIneligibility(captureConfig, runtimeInfo?.platform)
+      : null
   const profileGate = videoProfileEntitlementGate({ entitlements, kind: 'recording', video })
   const profileEntitlementMessage = profileGate.allowed ? null : profileGate.reason
   const checkLine = performanceCheckLine({
@@ -257,6 +271,50 @@ function LocalRecordingSection(): ReactElement {
             disabled={sessionLocked}
             onCheckedChange={(checked) =>
               setCaptureConfig((current) => ({ ...current, recordEnabled: checked }))
+            }
+          />
+        </SettingsRow>
+        {/* Plan 157: a Screen file and a Camera file beside the Combined one.
+            The switch stays available; when the current selection cannot
+            produce both files the row says why and the session records
+            Combined only. It is a property of the saved file, so it waits
+            for the Save switch like the quality fields (D-3). */}
+        <SettingsRow
+          data-testid="output-separate-source-recordings"
+          description={
+            <>
+              <span className="block">
+                Also saves a Screen file with the system audio track and a Camera file with the
+                microphone track beside the Combined recording, at this recording size. A source
+                that is off records as silence. Streams and preview stay composed.
+              </span>
+              {separateIneligibility ? (
+                // The tone rides on the icon; the words stay monochrome (plan 174 S1.8).
+                <span className="mt-1 flex items-center gap-1.5 text-foreground">
+                  <WarningIcon
+                    aria-hidden
+                    className="size-3.5 shrink-0 text-warning"
+                    weight="fill"
+                  />
+                  {separateSourceRecordingsIneligibilityCopy(separateIneligibility)}
+                </span>
+              ) : null}
+            </>
+          }
+          label="Separate source recordings"
+        >
+          <Switch
+            checked={!separateUnsupported && captureConfig.separateSourceRecordings.enabled}
+            disabled={qualityLocked || separateUnsupported}
+            id="separate-source-recordings"
+            onCheckedChange={(checked) =>
+              setCaptureConfig((current) => ({
+                ...current,
+                separateSourceRecordings: {
+                  ...current.separateSourceRecordings,
+                  enabled: checked
+                }
+              }))
             }
           />
         </SettingsRow>

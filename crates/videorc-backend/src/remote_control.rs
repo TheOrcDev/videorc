@@ -29,6 +29,9 @@ pub const REMOTE_ENABLED_SECRET: &str = "remote-control.enabled";
 /// Minimum spacing between accepted intents of the SAME kind. A deck key
 /// bounce must not double-toggle recording.
 pub const REMOTE_INTENT_DEBOUNCE: Duration = Duration::from_millis(150);
+/// The sound bucket's own window (plan 189): a fast drummer still gets every
+/// press, and a key bounce is far under it.
+pub const REMOTE_SOUND_INTENT_DEBOUNCE: Duration = Duration::from_millis(80);
 
 #[derive(Debug, Default)]
 pub struct RemoteControlRuntime {
@@ -77,6 +80,34 @@ pub enum RemoteIntent {
         asset_id: String,
     },
     TakeoverHide,
+    /// Banners (plan 186). Show and hide are explicit and idempotent; the
+    /// toggle is for a single deck key. `bannerHide` without a `bannerId`
+    /// hides every banner.
+    #[serde(rename_all = "camelCase")]
+    BannerShow {
+        banner_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    BannerHide {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        banner_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    BannerToggle {
+        banner_id: String,
+    },
+    /// Soundboard (plan 189). `soundPlay` has press semantics (the pad's
+    /// mode decides: restart, start or stop); `soundStop` without a
+    /// `soundId` stops every sound.
+    #[serde(rename_all = "camelCase")]
+    SoundPlay {
+        sound_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SoundStop {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sound_id: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     WindowFront {
         window: RemoteWindow,
@@ -118,9 +149,24 @@ impl RemoteIntent {
             Self::SystemAudioOn | Self::SystemAudioOff | Self::SystemAudioToggle => "system-audio",
             Self::SceneApply { .. } => "scene",
             Self::TakeoverShow { .. } | Self::TakeoverHide => "takeover",
+            // A banner key and a takeover key are two keys: a "Be right back"
+            // tap must not swallow the "Follow me" tap beside it.
+            Self::BannerShow { .. } | Self::BannerHide { .. } | Self::BannerToggle { .. } => {
+                "banner"
+            }
+            // Its own bucket and its own, shorter window (plan 189).
+            Self::SoundPlay { .. } | Self::SoundStop { .. } => "sound",
             Self::WindowFront { .. } => "window",
             Self::CommentHighlight { .. } | Self::CommentHighlightClear => "highlight",
             Self::ClipMark => "clip",
+        }
+    }
+
+    /// How long after an accepted intent the same bucket refuses another.
+    pub fn debounce_window(&self) -> Duration {
+        match self {
+            Self::SoundPlay { .. } | Self::SoundStop { .. } => REMOTE_SOUND_INTENT_DEBOUNCE,
+            _ => REMOTE_INTENT_DEBOUNCE,
         }
     }
 
@@ -137,6 +183,25 @@ impl RemoteIntent {
             }
             Self::TakeoverShow { asset_id } if asset_id.trim().is_empty() => {
                 Err("takeoverShow needs a non-empty assetId.".to_string())
+            }
+            Self::BannerShow { banner_id } if banner_id.trim().is_empty() => {
+                Err("bannerShow needs a non-empty bannerId.".to_string())
+            }
+            Self::BannerToggle { banner_id } if banner_id.trim().is_empty() => {
+                Err("bannerToggle needs a non-empty bannerId.".to_string())
+            }
+            Self::BannerHide {
+                banner_id: Some(banner_id),
+            } if banner_id.trim().is_empty() => {
+                Err("bannerHide needs a non-empty bannerId, or none to hide all.".to_string())
+            }
+            Self::SoundPlay { sound_id } if sound_id.trim().is_empty() => {
+                Err("soundPlay needs a non-empty soundId.".to_string())
+            }
+            Self::SoundStop {
+                sound_id: Some(sound_id),
+            } if sound_id.trim().is_empty() => {
+                Err("soundStop needs a non-empty soundId, or none to stop all.".to_string())
             }
             Self::CommentHighlight { message_id }
                 if message_id.trim().is_empty()
@@ -178,15 +243,16 @@ impl RemoteControlRuntime {
     /// are relayed to the renderer.
     pub fn admit_intent(&mut self, intent: &RemoteIntent, now: Instant) -> RemoteIntentTicket {
         let kind = intent.debounce_kind();
+        let window = intent.debounce_window();
         if let Some(last) = self.last_intent_at.get(kind)
-            && now.duration_since(*last) < REMOTE_INTENT_DEBOUNCE
+            && now.duration_since(*last) < window
         {
             return RemoteIntentTicket {
                 intent_id: String::new(),
                 accepted: false,
                 message: Some(format!(
                     "Debounced: another {kind} intent arrived less than {}ms ago.",
-                    REMOTE_INTENT_DEBOUNCE.as_millis()
+                    window.as_millis()
                 )),
             };
         }
@@ -431,6 +497,244 @@ mod tests {
             }
             .validate()
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn banner_intents_use_camel_case_wire_tags_and_one_banner_bucket() {
+        let show: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"bannerShow","bannerId":"b-1"}"#).unwrap();
+        assert_eq!(
+            show,
+            RemoteIntent::BannerShow {
+                banner_id: "b-1".to_string()
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&show).unwrap(),
+            serde_json::json!({ "kind": "bannerShow", "bannerId": "b-1" })
+        );
+        let toggle: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"bannerToggle","bannerId":"b-1"}"#).unwrap();
+        assert_eq!(
+            toggle,
+            RemoteIntent::BannerToggle {
+                banner_id: "b-1".to_string()
+            }
+        );
+        // Hide all: no bannerId on the wire, in either direction, never null.
+        let hide_all: RemoteIntent = serde_json::from_str(r#"{"kind":"bannerHide"}"#).unwrap();
+        assert_eq!(hide_all, RemoteIntent::BannerHide { banner_id: None });
+        assert_eq!(
+            serde_json::to_value(&hide_all).unwrap(),
+            serde_json::json!({ "kind": "bannerHide" })
+        );
+        let hide_one: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"bannerHide","bannerId":"b-2"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&hide_one).unwrap(),
+            serde_json::json!({ "kind": "bannerHide", "bannerId": "b-2" })
+        );
+        for intent in [&show, &toggle, &hide_all, &hide_one] {
+            assert!(intent.validate().is_ok());
+            assert_eq!(intent.debounce_kind(), "banner");
+        }
+        // Not the takeover bucket: a banner key beside a takeover key passes.
+        assert_ne!(
+            show.debounce_kind(),
+            RemoteIntent::TakeoverHide.debounce_kind()
+        );
+        assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"bannerShow"}"#).is_err());
+        assert!(
+            serde_json::from_str::<RemoteIntent>(r#"{"kind":"banner_show","bannerId":"b"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn banner_show_and_toggle_need_an_id_and_hide_refuses_an_empty_one() {
+        for blank in ["", "   "] {
+            assert!(
+                RemoteIntent::BannerShow {
+                    banner_id: blank.to_string()
+                }
+                .validate()
+                .is_err()
+            );
+            assert!(
+                RemoteIntent::BannerToggle {
+                    banner_id: blank.to_string()
+                }
+                .validate()
+                .is_err()
+            );
+            assert!(
+                RemoteIntent::BannerHide {
+                    banner_id: Some(blank.to_string())
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            RemoteIntent::BannerHide { banner_id: None }
+                .validate()
+                .is_ok()
+        );
+
+        let mut runtime = RemoteControlRuntime::default();
+        let start = Instant::now();
+        assert!(
+            runtime
+                .admit_intent(
+                    &RemoteIntent::BannerToggle {
+                        banner_id: "b-1".to_string()
+                    },
+                    start
+                )
+                .accepted
+        );
+        // A bounce within the window is debounced whichever banner form it is.
+        assert!(
+            !runtime
+                .admit_intent(
+                    &RemoteIntent::BannerHide { banner_id: None },
+                    start + Duration::from_millis(50)
+                )
+                .accepted
+        );
+        // A takeover key at the same moment passes: separate buckets.
+        assert!(
+            runtime
+                .admit_intent(
+                    &RemoteIntent::TakeoverHide,
+                    start + Duration::from_millis(50)
+                )
+                .accepted
+        );
+        assert!(
+            runtime
+                .admit_intent(
+                    &RemoteIntent::BannerShow {
+                        banner_id: "b-2".to_string()
+                    },
+                    start + REMOTE_INTENT_DEBOUNCE + Duration::from_millis(1)
+                )
+                .accepted
+        );
+    }
+
+    #[test]
+    fn sound_intents_use_camel_case_wire_tags_and_one_sound_bucket() {
+        let play: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"soundPlay","soundId":"s-1"}"#).unwrap();
+        assert_eq!(
+            play,
+            RemoteIntent::SoundPlay {
+                sound_id: "s-1".to_string()
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&play).unwrap(),
+            serde_json::json!({ "kind": "soundPlay", "soundId": "s-1" })
+        );
+        // Stop all: no soundId on the wire, in either direction, never null.
+        let stop_all: RemoteIntent = serde_json::from_str(r#"{"kind":"soundStop"}"#).unwrap();
+        assert_eq!(stop_all, RemoteIntent::SoundStop { sound_id: None });
+        assert_eq!(
+            serde_json::to_value(&stop_all).unwrap(),
+            serde_json::json!({ "kind": "soundStop" })
+        );
+        let stop_one: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"soundStop","soundId":"s-2"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&stop_one).unwrap(),
+            serde_json::json!({ "kind": "soundStop", "soundId": "s-2" })
+        );
+        for intent in [&play, &stop_all, &stop_one] {
+            assert!(intent.validate().is_ok());
+            assert_eq!(intent.debounce_kind(), "sound");
+            assert_eq!(intent.debounce_window(), REMOTE_SOUND_INTENT_DEBOUNCE);
+        }
+        // Not the banner or takeover bucket, and not their window.
+        assert_ne!(
+            play.debounce_kind(),
+            RemoteIntent::TakeoverHide.debounce_kind()
+        );
+        assert_ne!(
+            play.debounce_kind(),
+            RemoteIntent::BannerHide { banner_id: None }.debounce_kind()
+        );
+        assert_eq!(
+            RemoteIntent::RecordToggle.debounce_window(),
+            REMOTE_INTENT_DEBOUNCE
+        );
+        assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"soundPlay"}"#).is_err());
+        assert!(
+            serde_json::from_str::<RemoteIntent>(r#"{"kind":"sound_play","soundId":"s"}"#).is_err()
+        );
+        for blank in ["", "   "] {
+            assert!(
+                RemoteIntent::SoundPlay {
+                    sound_id: blank.to_string()
+                }
+                .validate()
+                .is_err()
+            );
+            assert!(
+                RemoteIntent::SoundStop {
+                    sound_id: Some(blank.to_string())
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn sound_presses_debounce_at_80ms_and_pass_beside_a_banner_key() {
+        let mut runtime = RemoteControlRuntime::default();
+        let start = Instant::now();
+        let play = RemoteIntent::SoundPlay {
+            sound_id: "s-1".to_string(),
+        };
+        assert!(runtime.admit_intent(&play, start).accepted);
+        // A bounce 50 ms later is refused, whichever sound form it is.
+        let bounce = runtime.admit_intent(
+            &RemoteIntent::SoundStop { sound_id: None },
+            start + Duration::from_millis(50),
+        );
+        assert!(!bounce.accepted);
+        assert!(bounce.message.unwrap().contains("80ms"));
+        // A banner key at the same moment passes: separate buckets.
+        assert!(
+            runtime
+                .admit_intent(
+                    &RemoteIntent::BannerHide { banner_id: None },
+                    start + Duration::from_millis(50)
+                )
+                .accepted
+        );
+        // A drummer's next press 81 ms on passes, where a banner would still
+        // be inside its 150 ms window.
+        assert!(
+            runtime
+                .admit_intent(
+                    &play,
+                    start + REMOTE_SOUND_INTENT_DEBOUNCE + Duration::from_millis(1)
+                )
+                .accepted
+        );
+        assert!(
+            !runtime
+                .admit_intent(
+                    &RemoteIntent::BannerHide { banner_id: None },
+                    start
+                        + Duration::from_millis(50)
+                        + REMOTE_SOUND_INTENT_DEBOUNCE
+                        + Duration::from_millis(1)
+                )
+                .accepted
         );
     }
 

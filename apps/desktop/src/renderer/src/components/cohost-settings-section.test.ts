@@ -6,6 +6,7 @@ import { transformWithEsbuild } from 'vite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostListening, CohostSettings } from '@/lib/backend'
+import { UNKNOWN_REASON } from '@/lib/user-error'
 
 import {
   COHOST_SHOW_ON_STREAM_PATCHES,
@@ -332,8 +333,10 @@ describe('grouped cards (plan 168 Phase 0)', () => {
     patchCohostSettings.mockRejectedValue(new Error('Could not reach the backend.'))
     await render(settings())
     await act(async () => (document.getElementById('cohost-listen') as HTMLButtonElement).click())
-    // The error shows under the listen card, never as an unpadded row in it.
-    expect(document.body.textContent).toContain('Could not reach the backend.')
+    // Plan 174 S2.4: mapped copy under the listen card, never the raw backend
+    // sentence and never an unpadded row in the card.
+    expect(document.body.textContent).toContain(`Couldn't save Buddy settings. ${UNKNOWN_REASON}`)
+    expect(document.body.textContent).not.toContain('Could not reach the backend.')
     const cards = [...document.querySelectorAll<HTMLElement>('[data-variant="grouped"]')]
     // Listen (Live tab), Replies and Moderation (Chat tab).
     expect(cards).toHaveLength(3)

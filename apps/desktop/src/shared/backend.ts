@@ -531,6 +531,15 @@ export interface SourceSelection {
   screenName?: string
   windowId?: string
   windowName?: string
+  /**
+   * The user chose no screen or window (release test 146, plan 0002), the
+   * capture twin of `cameraOff`: without it None reads as "never chosen" and
+   * any scene click or device refresh selects the first screen again, which on
+   * Linux asks the compositor for a share. Renderer intent only: the backend
+   * ignores it. Meaningless once a `screenId` or `windowId` is set, and
+   * reconcile drops it then.
+   */
+  captureOff?: boolean
   cameraId?: string
   cameraName?: string
   /**
@@ -1187,6 +1196,8 @@ export interface YouTubeBroadcastTransitionResult {
   broadcastId: string
   requestedStatus: YouTubeBroadcastTransitionStatus
   lifecycleStatus?: string
+  /** YouTube's own privacy for the broadcast (plan 187: only public is announced). */
+  privacyStatus?: StreamPrivacy
   message: string
 }
 
@@ -1574,9 +1585,25 @@ export interface OutputSettings {
   ffmpegPath?: string
   /** Keep the capture MKV (lossless audio) next to the exported MP4. */
   keepOriginalMkv?: boolean
+  /**
+   * Separate source recordings (Plan 157): write clean Screen (+ system audio)
+   * and Camera (+ microphone) takes beside the composed Combined recording.
+   * Absent/`enabled: false` keeps today's single-file recording.
+   */
+  separateSourceRecordings?: SeparateSourceRecordingsSettings
   video: VideoSettings
   rtmp: RtmpSettings
 }
+
+/** Opt-in ISO takes from one Record session. */
+export interface SeparateSourceRecordingsSettings {
+  enabled: boolean
+  /** Keep the composed Combined master too (default true). */
+  keepCombined: boolean
+}
+
+/** Which file of a take a Library row is. Absent = legacy single recording. */
+export type RecordingRole = 'combined' | 'screen' | 'camera'
 
 export interface StartSessionParams {
   sources: SourceSelection
@@ -1840,6 +1867,132 @@ export interface MetricsJournalState {
 }
 
 export interface MetricsJournalSetParams {
+  enabled: boolean
+}
+
+// --- Discord go-live announcement (plan 187) ---
+
+/** Who the Discord post pings. Edits and the test message never ping. */
+export type DiscordPing = 'none' | 'here' | 'everyone'
+
+/** "Post as": whose name and avatar the go-live post carries. */
+export type DiscordPostAs =
+  | { kind: 'automatic' }
+  | { kind: 'platform'; accountId: string }
+  | { kind: 'videorc' }
+  | { kind: 'webhook' }
+
+export interface DiscordPostAsIdentity {
+  postAs: DiscordPostAs
+  name: string
+  platform?: StreamPlatform
+  avatarUrl?: string
+}
+
+export type DiscordAnnounceErrorCode = 'webhook-deleted' | 'unreachable' | 'rejected'
+
+export interface DiscordAnnounceError {
+  code: DiscordAnnounceErrorCode
+  at: string
+}
+
+export interface DiscordLastPost {
+  at: string
+  /** Opens the message in Discord; absent when the server is unknown. */
+  messageUrl?: string
+  state: 'live' | 'ended'
+}
+
+/**
+ * `discord.announce.get` and the `discord.announce.changed` event. Never
+ * carries the webhook URL: only whether one is saved and its masked tail.
+ */
+export interface DiscordAnnounceSnapshot {
+  webhookPresent: boolean
+  webhookHint?: string
+  webhookName?: string
+  enabled: boolean
+  ping: DiscordPing
+  branding: boolean
+  postAs: DiscordPostAs
+  excludedTargetIds: string[]
+  /** Typed links by destination id. */
+  linkOverrides: Record<string, string>
+  identities: DiscordPostAsIdentity[]
+  lastPost?: DiscordLastPost
+  lastError?: DiscordAnnounceError
+}
+
+/** `discord.announce.update`. `linkOverride` without `link` removes it. */
+export interface DiscordAnnounceUpdateParams {
+  enabled?: boolean
+  ping?: DiscordPing
+  branding?: boolean
+  postAs?: DiscordPostAs
+  excludedTargetIds?: string[]
+  linkOverride?: { targetId: string; link?: string }
+}
+
+export interface DiscordWebhookSaveParams {
+  url: string
+}
+
+/** A configured destination, as `discord.links.preview` and the test read it. */
+export interface DiscordLinkTarget {
+  id: string
+  platform: StreamPlatform
+  label: string
+  authMode: StreamAuthMode
+  accountId?: string
+  outputOrientation?: StreamOutputOrientation
+  platformBroadcastId?: string
+}
+
+export interface DiscordTargetsParams {
+  targets: DiscordLinkTarget[]
+}
+
+/** Built from the account, typed by the streamer, made at Go Live, or none. */
+export type DiscordLinkKind = 'auto' | 'typed' | 'at-go-live' | 'none'
+
+export interface DiscordLinkPreview {
+  targetId: string
+  label: string
+  linkKind: DiscordLinkKind
+  link?: string
+  included: boolean
+}
+
+export interface DiscordSender {
+  name: string
+  avatarUrl?: string
+}
+
+export interface DiscordLinksPreview {
+  links: DiscordLinkPreview[]
+  /** Who the post would be sent as; absent = the webhook's own name. */
+  sender?: DiscordSender
+}
+
+export interface DiscordTestResult {
+  messageUrl?: string
+}
+
+// --- end Discord go-live announcement (plan 187) ---
+
+/**
+ * `usageStats.get` / `.set`: Settings → General → Privacy → "Share anonymous
+ * usage stats" (on by default). One event per recording or livestream start
+ * and stop to videorc.com; no stream keys, titles, chat or content.
+ */
+export interface UsageStatsState {
+  /** Events are being shared right now. */
+  enabled: boolean
+  /** `VIDEORC_USAGE_STATS=0` turned sharing off for this run. */
+  envDisabled: boolean
+}
+
+export interface UsageStatsSetParams {
   enabled: boolean
 }
 
@@ -2212,7 +2365,11 @@ export interface CompositorFrameReady {
   updatedAt: string
 }
 
-export type PreviewSurfaceSceneLayerKind = SceneSourceKind | 'screen-image' | 'background'
+export type PreviewSurfaceSceneLayerKind =
+  | SceneSourceKind
+  | 'screen-image'
+  | 'background'
+  | 'banner'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
@@ -2226,6 +2383,8 @@ export interface PreviewSurfaceSceneLayer {
   fit: PreviewSurfaceSceneLayerFit
   mirror: boolean
   shape?: CameraShape
+  /** 0..1; absent is fully opaque. Banners only (plan 186). */
+  opacity?: number
 }
 
 export interface PreviewSurfaceSceneState {
@@ -2237,6 +2396,12 @@ export interface PreviewSurfaceSceneState {
   activeScreenId?: string
   /** Normalized per-side inset derived from background visibilityPercent. */
   backgroundStageMargin?: number
+  /**
+   * The canvas in pixels the `banner` layers were placed against (plan 186).
+   * Banners are snapshot-level, not part of the scene revision, so the scene
+   * fingerprint ignores both this and the banner layers.
+   */
+  bannerCanvas?: { width: number; height: number }
   updatedAt: string
 }
 
@@ -2606,6 +2771,8 @@ export interface AudioLevelsEvent {
   sessionId?: string
   microphone?: AudioLevelReading
   systemAudio?: AudioLevelReading
+  /** Plan 189: the soundboard's sounds as mixed (after every gain). */
+  sounds?: AudioLevelReading
   /** The mix written to the recording and the stream. */
   master?: AudioLevelReading
   /** Samples the mix clipped since the previous event. */
@@ -3344,6 +3511,7 @@ export interface ClipMoment {
 
 /** Who placed a clip mark: a spoken "clip that" or the Mark clip control. */
 import type { MarkerContext, MarkerRelayCommand, MarkerRelayResult } from './session-markers'
+import type { BannerRelayCommand, BannerSummary } from './banner-commands'
 export type * from './session-markers'
 
 export type ClipMarkSource = 'voice' | 'manual'
@@ -3681,6 +3849,11 @@ export interface SessionListItem {
   /** Live export progress from the backend registry (only while finalizing). */
   finalizationProgressPercent?: number
   finalizationError?: string
+  /** Plan 157: every file of one separate-source take shares the Combined
+   * session's id here; absent on ordinary rows. */
+  takeId?: string
+  /** Which file of the take this row is (plan 157); absent on ordinary rows. */
+  recordingRole?: RecordingRole
 }
 
 /** Progress of a background recording finalization job (`recording.finalization`). */
@@ -4429,6 +4602,9 @@ export interface VideorcApi {
    */
   exitApp: (kind: AppExitKind) => Promise<void>
   pickScreenImage: () => Promise<ResourceSelection | null>
+  /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
+   * `input-file` capability for `banners.importImage`. */
+  pickBannerImage: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
   checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>
@@ -4508,6 +4684,17 @@ export interface VideorcApi {
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
   onClipMarkRequest: (callback: (command: ClipMarkCommand) => void) => () => void
   pushClipMarkResult: (resolution: CommentsCommandResolution<ClipMarkedEvent>) => Promise<boolean>
+  /** Banners in the Stream Manager (plan 186 S7): the Studio renderer pushes
+   * the read-only list (`{id, name, shown}`, null until it loads); the window
+   * seeds from main's copy and follows. */
+  getCommentsBanners: () => Promise<BannerSummary[] | null>
+  pushCommentsBanners: (banners: BannerSummary[] | null) => Promise<boolean>
+  onCommentsBanners: (callback: (banners: BannerSummary[] | null) => void) => () => void
+  /** Show or hide from the Stream Manager: relayed to the MAIN renderer, which
+   * owns the backend socket; a refusal comes back as the reply's error. */
+  bannerFromCommentsWindow: (command: BannerRelayCommand) => Promise<boolean>
+  onBannerRequest: (callback: (command: BannerRelayCommand) => void) => () => void
+  pushBannerResult: (resolution: CommentsCommandResolution<boolean>) => Promise<boolean>
   /** Show who followed from the Stream Manager (plan 071, S2): Electron main
    * starts the Twitch reconnect with the follow permission over its admin
    * socket and opens the browser, so the main window's eager bundle carries
@@ -5449,6 +5636,235 @@ export interface MigrateHighlightAnchorParams {
 }
 // --- end overlay layout (plan 164) ------------------------------------------
 
+// --- Banners (plan 186) -----------------------------------------------------
+// The streamer's own images placed anywhere on the picture. Backend-owned
+// (SQLite `banners`, images in the managed `Banners` dir beside `Screens`).
+// One set for every scene; `shown` survives a relaunch. Places reuse the
+// overlay model: a normalized `OverlayRect` per orientation and the two
+// "Appears in" switches. Pinned by `protocol-fixtures/high-risk-contracts.json`
+// → `banner`.
+
+/** At most this many banners in Assets (plan 186 D7). */
+export const BANNER_MAX_COUNT = 24
+/** At most this many banners showing at once (plan 186 D7). */
+export const BANNER_MAX_SHOWN = 4
+export const BANNER_OPACITY_MIN = 0.2
+export const BANNER_OPACITY_MAX = 1
+
+export interface Banner {
+  /** Stable UUID, used by remotes, the Stream Deck and `/banner`. */
+  id: string
+  name: string
+  /** Basename in the managed Banners dir, `<id>.png`. Never a path. */
+  imageFile: string
+  /** Basename of the ~480 px thumbnail, `<id>.thumb.png`. */
+  thumbnailFile: string
+  /** Pixel size of the stored image. */
+  width: number
+  height: number
+  hasAlpha: boolean
+  /** Assets order, also the drawing order: later is on top. */
+  sortOrder: number
+  /** Showing now. Persists across a relaunch. */
+  shown: boolean
+  horizontal: OverlayRect
+  vertical: OverlayRect
+  /** "Appears in: Stream". */
+  showOnStream: boolean
+  /** "Appears in: Recording". */
+  showInRecording: boolean
+  /** 0.2 to 1.0. */
+  opacity: number
+  /** Phase 2 timer: omitted when off, never `null`. */
+  hideAfterSec?: number
+  /** Phase 2 timer: omitted when off, never `null`. */
+  repeatEveryMin?: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** `banners.importImage`: a main-issued `input-file` capability. */
+export interface BannerImportImageParams {
+  sourceCapability: string
+}
+
+/** `banners.update`: only the fields to change. A timer of `0` turns it off. */
+export interface BannerUpdateParams {
+  id: string
+  name?: string
+  horizontal?: OverlayRect
+  vertical?: OverlayRect
+  showOnStream?: boolean
+  showInRecording?: boolean
+  opacity?: number
+  hideAfterSec?: number
+  repeatEveryMin?: number
+}
+
+/** `banners.reorder`: every banner id in the new Assets order. */
+export interface BannerReorderParams {
+  ids: string[]
+}
+
+/** `banners.delete` and `banners.show`. */
+export interface BannerIdParams {
+  id: string
+}
+
+/** `banners.hide`: one banner, or every banner when `id` is absent. */
+export interface BannerHideParams {
+  id?: string
+}
+// --- end banners (plan 186) -------------------------------------------------
+
+// --- Soundboard (plan 189) ---------------------------------------------------
+// Short sounds the streamer plays into the recording and every stream.
+// Backend-owned (SQLite `sounds` and `sound_settings`, files in the managed
+// `Sounds` dir as 48 kHz stereo s16 WAV, trimmed). The backend mixes a
+// playing sound into the session audio bus at the press instant; the main
+// window's monitor plays the same file to the streamer. Pinned by
+// `protocol-fixtures/high-risk-contracts.json` → `sound`.
+
+/** At most this many sounds (plan 189 D8). */
+export const SOUND_MAX_COUNT = 24
+/** The longest sound, after the trim (D8). */
+export const SOUND_MAX_DURATION_MS = 30_000
+/** All sounds together (D8): bounds the backend's resident PCM. */
+export const SOUND_TOTAL_MAX_DURATION_MS = 300_000
+/** At most this many sounds playing at once; a ninth stops the oldest. */
+export const SOUND_MAX_VOICES = 8
+/** A sound's own volume trim, whole dB. */
+export const SOUND_VOLUME_DB_MIN = -24
+export const SOUND_VOLUME_DB_MAX = 6
+/** The soundboard's level on Sources, whole dB. */
+export const SOUNDBOARD_VOLUME_DB_MIN = -24
+export const SOUNDBOARD_VOLUME_DB_MAX = 12
+/** The auto-level gain the import computes (D5): never more than +12 dB. */
+export const SOUND_LEVEL_DB_MIN = -60
+export const SOUND_LEVEL_DB_MAX = 12
+export const SOUND_NAME_MAX_CHARS = 64
+/** The keys a sound can take in Studio. */
+export const SOUND_HOTKEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const
+export type SoundHotkey = (typeof SOUND_HOTKEYS)[number]
+
+/**
+ * How a press plays the sound (the audiocn pad modes): Play once restarts on a
+ * second press (D7), Play/stop and Loop stop a playing sound, While held plays
+ * until release.
+ */
+export const SOUND_MODES = ['oneShot', 'toggle', 'loop', 'hold'] as const
+export type SoundMode = (typeof SOUND_MODES)[number]
+
+export interface Sound {
+  /** Stable UUID, used by remotes, the Stream Deck and `/sound`. */
+  id: string
+  name: string
+  /** Basename in the managed Sounds dir, `<id>.wav`. Never a path. */
+  file: string
+  /** After the trim, 1..30,000. */
+  durationMs: number
+  /** Integrated loudness measured at import (BS.1770). */
+  loudnessLufs: number
+  /** The auto-level gain from the import (D5), read-only. */
+  levelDb: number
+  /** The streamer's trim, whole dB, -24..+6. */
+  volumeDb: number
+  mode: SoundMode
+  /** Omitted when the sound has no key, never `null`. */
+  hotkey?: SoundHotkey
+  /** The starter slug; omitted for the streamer's own sounds. */
+  starter?: string
+  /** Board order. */
+  sortOrder: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SoundboardState {
+  sounds: Sound[]
+  /** The soundboard's level, whole dB, -24..+12. */
+  volumeDb: number
+  /** "Hear sounds yourself": the monitor plays while recording or live. */
+  monitor: boolean
+  /** The starter sounds were imported once for this profile. */
+  startersSeeded: boolean
+}
+
+/** A starter sound being imported (`sounds.import`). */
+export interface SoundStarterImport {
+  slug: string
+  name: string
+  hotkey?: SoundHotkey
+}
+
+/** `sounds.import`: a main-issued `input-file` capability. */
+export interface SoundImportParams {
+  sourceCapability: string
+  /** Set only while seeding or restoring the starters. */
+  starter?: SoundStarterImport
+}
+
+/** `sounds.update`: only the fields to change. `hotkey: ''` clears the key. */
+export interface SoundUpdateParams {
+  id: string
+  name?: string
+  volumeDb?: number
+  mode?: SoundMode
+  hotkey?: SoundHotkey | ''
+}
+
+/** `sounds.reorder`: every sound id in the new board order. */
+export interface SoundReorderParams {
+  ids: string[]
+}
+
+/** `sounds.delete`, `sounds.play` and `sounds.press`. */
+export interface SoundIdParams {
+  id: string
+}
+
+/** `sounds.stop`: one sound, or every sound when `id` is absent. */
+export interface SoundStopParams {
+  id?: string
+}
+
+/** `sounds.settings`: only the fields to change. */
+export interface SoundboardSettingsParams {
+  volumeDb?: number
+  monitor?: boolean
+  startersSeeded?: boolean
+}
+
+export interface SoundPlayResult {
+  voiceId: string
+  /** The sound went into a running session's mix. */
+  onAir: boolean
+}
+
+export interface SoundPressResult {
+  /** Omitted when the press stopped the sound. */
+  voiceId?: string
+  onAir: boolean
+}
+
+/** One playing sound. */
+export interface SoundVoice {
+  voiceId: string
+  soundId: string
+  /** Wall clock, epoch ms, when the press arrived. */
+  startedAtMs: number
+  durationMs: number
+  loop: boolean
+  /** In a running session's mix; false means only the monitor plays it. */
+  onAir: boolean
+}
+
+/** `sounds.playback` and `sounds.stop`: every playing sound, oldest first. */
+export interface SoundsPlayback {
+  voices: SoundVoice[]
+}
+// --- end soundboard (plan 189) -----------------------------------------------
+
 // --- Buddy overlay (plan 164) ---------------------------------------------
 // The Buddy on stream (Phase C): the backend owns which avatar state shows
 // and the bubble that is up; the renderer rasterizes the avatar per output
@@ -5796,9 +6212,24 @@ export interface CohostErrorDetail {
 
 /**
  * What a voice command asked for. `confirm` and `cancel` answer the open card,
- * so they update that command instead of standing on their own.
+ * so they update that command instead of standing on their own. The banner
+ * kinds (plan 186 S11: "show the sponsor banner", "hide the banners") finish
+ * at once: `done`, `not-found` or `refused`, with the sentence in `message`.
  */
-export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | 'cancel' | 'unknown'
+export type CohostCommandKind =
+  | 'highlight'
+  | 'clear'
+  | 'remove'
+  | 'confirm'
+  | 'cancel'
+  | 'unknown'
+  | 'show-banner'
+  | 'hide-banner'
+  | 'hide-banners'
+  // "Buddy, show up" / "Buddy, go away": the Buddy itself on or off the
+  // stream (`overlayLayout.buddy.showOnStream`), finished at once.
+  | 'show-buddy'
+  | 'hide-buddy'
 
 /**
  * Where the latest voice command stands:
@@ -5913,6 +6344,13 @@ export interface CohostState {
    * at anchor + 20 s, pushed back by a backoff/quota window).
    */
   nextTickAt?: string | null
+  /**
+   * ISO-8601 instant of the next tick attempt after a failed one; present only
+   * while `status` is `error` and the backoff is still climbing (the presence
+   * reads "Retrying"). Omitted at the backoff ceiling, where Buddy reads as
+   * stopped, and on every other status.
+   */
+  retryAt?: string | null
   /** Session total of chat messages the engine noted for ticks. */
   messagesSeen?: number
   /** Distinct question ids surfaced this session — lifetime, not open count. */
@@ -6336,6 +6774,9 @@ export interface CohostWindowBuddy {
   bubble: string | null
   /** `overlayLayout.buddy.showOnStream`. */
   showOnStream: boolean
+  /** `overlayLayout.buddy.showInRecording`; optional so a window seeded by
+   * an older Studio still renders (read as off). */
+  showInRecording?: boolean
 }
 
 /**

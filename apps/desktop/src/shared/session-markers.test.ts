@@ -31,6 +31,66 @@ describe('named marker trust boundaries', () => {
       text: 'docs /marker https://ui.shadcn.com'
     })
   })
+  it('turns /sound into a local press or Stop all, never chat (plan 189 S9)', () => {
+    const sounds = [
+      { id: 'airhorn', name: 'Airhorn', mode: 'oneShot' as const },
+      { id: 'applause', name: 'Applause', mode: 'toggle' as const }
+    ]
+    expect(classifyComposerDraft('/sound air', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'press', id: 'airhorn' }
+    })
+    expect(classifyComposerDraft(' /SOUND a ', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'press', id: 'airhorn' }
+    })
+    expect(classifyComposerDraft('/sound stop', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'stopAll' }
+    })
+    expect(classifyComposerDraft('/sound gong', [], sounds)).toEqual({
+      kind: 'error',
+      message: 'No sound called “gong”.'
+    })
+    expect(classifyComposerDraft('/soundx', [], sounds)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('//sound stop', [], sounds)).toEqual({
+      kind: 'chat',
+      text: '/sound stop'
+    })
+  })
+
+  it('turns /banner into a local show or hide, never chat (plan 186 S7)', () => {
+    const banners = [
+      { id: 'sponsor', name: 'Sponsor', shown: false },
+      { id: 'spring', name: 'Spring sale', shown: true }
+    ]
+    expect(classifyComposerDraft('/banner sponsor', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'show', id: 'sponsor' }
+    })
+    expect(classifyComposerDraft(' /BANNER spring ', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'hide', id: 'spring' }
+    })
+    expect(classifyComposerDraft('/banner off', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'hideAll' }
+    })
+    expect(classifyComposerDraft('/banner acme', banners)).toEqual({
+      kind: 'error',
+      message: 'No banner called “acme”.'
+    })
+    expect(classifyComposerDraft('/banner sp', banners)).toEqual({
+      kind: 'error',
+      message: '“sp” matches Sponsor and Spring sale.'
+    })
+    expect(classifyComposerDraft('/banner', banners)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('/bannerx', banners)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('//banner off', banners)).toEqual({
+      kind: 'chat',
+      text: '/banner off'
+    })
+  })
   it('validates Unicode code points without truncation or losing punctuation', () => {
     expect(markerLabel('  Shadcn / 新 Library  ')).toBe('Shadcn / 新 Library')
     expect(markerLabel('😀'.repeat(120))).toBe('😀'.repeat(120))

@@ -351,6 +351,8 @@ describe('BackendClient request lifetime', () => {
     expect(backendRequestTimeoutMs('liveChat.send')).toBe(12_000)
     expect(backendRequestTimeoutMs('health.ping')).toBe(30_000)
     expect(backendRequestTimeoutMs('screens.importImage')).toBe(45_000)
+    expect(backendRequestTimeoutMs('banners.importImage')).toBe(45_000)
+    expect(backendRequestTimeoutMs('sounds.import')).toBe(45_000)
     expect(backendRequestTimeoutMs('sessions.delete')).toBe(45_000)
     expect(backendRequestTimeoutMs('stream.output.topology.probe')).toBe(120_000)
     expect(backendRequestTimeoutMs('session.remux_mp4')).toBe(10 * 60_000)

@@ -35,8 +35,9 @@ import {
 } from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
 import { activeCohostAlerts, cohostAlertLabel } from '@/lib/cohost-view'
-import { formatVideoQuality } from '@/lib/format-video'
+import { providerStreamOutputPlanOptions, streamOutputVideosForTargets } from '@/lib/capture'
 import { liveDestinationsView, streamHealthFact } from '@/lib/live-session-view'
+import { sessionOutputSummary } from '@/lib/session-output-video'
 import { classifyStreamHealthAttribution } from '@/lib/stream-health-attribution'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
@@ -325,9 +326,23 @@ export function SessionPanel({
   onDismissStartFailure?: () => void
   onDismissRuntimeNotice?: () => void
 }): ReactElement {
-  const { captureConfig } = useStudioCore()
+  const { captureConfig, streamSharedEncodeFallbackVideo } = useStudioCore()
   const { openStudioPanel, setActive } = useWorkspaceNav()
-  const video = captureConfig.video
+  // Release test 146, plan 0004: on air this is what the session encodes, not
+  // the saved recording setting (a shared encode records at the stream's size).
+  const outputSummary = sessionOutputSummary({
+    live,
+    recordEnabled: captureConfig.recordEnabled,
+    saved: captureConfig.video,
+    sharedFallback: streamSharedEncodeFallbackVideo,
+    streamVideo: live
+      ? (streamOutputVideosForTargets(
+          captureConfig.video,
+          captureConfig.streaming,
+          providerStreamOutputPlanOptions(captureConfig)
+        )[0]?.video ?? null)
+      : null
+  })
 
   return (
     <PanelSection title="Session">
@@ -341,7 +356,7 @@ export function SessionPanel({
         <NavigableRow
           icon={FrameIcon}
           label="Output"
-          value={formatVideoQuality(video)}
+          value={outputSummary}
           onNavigate={() => openStudioPanel('recording')}
         />
         {/* The live dashboard (plan 174 S3.2, B-4): every destination and the
@@ -540,7 +555,14 @@ export function TakeoverSection(): ReactElement {
   const disconnected = disconnectedReason !== null
 
   return (
-    <PanelSection title="Takeover">
+    <PanelSection
+      title="Takeover"
+      action={
+        <Button variant="ghost" onClick={() => setActive('assets')}>
+          Open Assets
+        </Button>
+      }
+    >
       {ready.length === 0 ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <ImageIcon className="size-3.5 shrink-0" weight="duotone" />

@@ -16,6 +16,8 @@ import { CommandPalette } from './command-palette'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
+  banners: {} as Record<string, unknown>,
+  soundboard: {} as Record<string, unknown>,
   recording: { state: 'idle' } as Record<string, unknown>,
   replay: {
     state: { state: 'off', seconds: 30, bufferedSeconds: 0 },
@@ -28,9 +30,11 @@ const mocked = vi.hoisted(() => ({
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
+  useStudioBanners: () => mocked.banners,
   useStudioRecordingState: () => ({ recording: mocked.recording }),
   useStudioReplay: () => mocked.replay
 }))
+vi.mock('@/hooks/use-soundboard', () => ({ useSoundboard: () => mocked.soundboard }))
 vi.mock('next-themes', () => ({
   useTheme: () => ({ theme: mocked.theme, setTheme: mocked.setTheme })
 }))
@@ -51,6 +55,17 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   mocked.recording = { state: 'idle' }
+  mocked.banners = {
+    banners: [],
+    showBanner: vi.fn(async () => true),
+    hideBanner: vi.fn(async () => true)
+  }
+  mocked.soundboard = {
+    sounds: [],
+    voices: [],
+    play: vi.fn(async () => true),
+    stopAll: vi.fn(async () => true)
+  }
   mocked.core = {
     runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false, captionsWindowEnabled: false },
     savedScenes: [],
@@ -330,5 +345,84 @@ describe('CommandPalette Health door (plan 174 D9)', () => {
     await search('support bundle')
     expect(values()).toContain('Open Health')
     expect(values()).not.toContain('Open Library')
+  })
+})
+
+describe('CommandPalette banners (plan 186 S7)', () => {
+  it('names each banner by what selecting it does, then Hide all banners while any shows', async () => {
+    mocked.banners.banners = [
+      { id: 'sponsor', name: 'Sponsor', shown: false },
+      { id: 'logo', name: 'Logo', shown: true }
+    ]
+    mocked.core.savedScenes = [{ id: 's1', name: 'Talking head' }]
+    await render()
+    expect(headings()).toEqual([
+      'Session',
+      'Pages',
+      'Windows',
+      'Scenes',
+      'Banners',
+      'Buddy',
+      'Settings',
+      'Appearance'
+    ])
+    expect(groupValues('Banners')).toEqual([
+      'Show banner: Sponsor',
+      'Hide banner: Logo',
+      'Hide all banners'
+    ])
+    await act(async () => item('Show banner: Sponsor').click())
+    expect(mocked.banners.showBanner).toHaveBeenCalledExactlyOnceWith('sponsor')
+    await render()
+    await act(async () => item('Hide banner: Logo').click())
+    expect(mocked.banners.hideBanner).toHaveBeenCalledExactlyOnceWith('logo')
+    await render()
+    await act(async () => item('Hide all banners').click())
+    expect(mocked.banners.hideBanner).toHaveBeenLastCalledWith()
+  })
+
+  it('finds banners by the word, and leaves the group out with none, or none showing', async () => {
+    mocked.banners.banners = [{ id: 'sponsor', name: 'Sponsor', shown: false }]
+    await render()
+    expect(groupValues('Banners')).toEqual(['Show banner: Sponsor'])
+    await search('banner')
+    expect(values()).toContain('Show banner: Sponsor')
+    mocked.banners.banners = []
+    await render()
+    expect(headings()).not.toContain('Banners')
+  })
+})
+
+describe('CommandPalette sounds (plan 189 S10)', () => {
+  it('plays each sound by name with its Studio key, then Stop all sounds while any plays', async () => {
+    mocked.soundboard.sounds = [
+      { id: 'airhorn', name: 'Airhorn', hotkey: '1' },
+      { id: 'gong', name: 'Gong' }
+    ]
+    mocked.soundboard.voices = [{ soundId: 'gong' }]
+    await render()
+    expect(headings()).toContain('Sounds')
+    expect(groupValues('Sounds')).toEqual([
+      'Play sound: Airhorn',
+      'Play sound: Gong',
+      'Stop all sounds'
+    ])
+    expect(item('Play sound: Airhorn').querySelector('kbd')?.textContent).toBe('1')
+    await act(async () => item('Play sound: Airhorn').click())
+    expect(mocked.soundboard.play).toHaveBeenCalledExactlyOnceWith('airhorn')
+    await render()
+    await act(async () => item('Stop all sounds').click())
+    expect(mocked.soundboard.stopAll).toHaveBeenCalledOnce()
+  })
+
+  it('finds sounds by the word, and leaves Stop all out while nothing plays', async () => {
+    mocked.soundboard.sounds = [{ id: 'airhorn', name: 'Airhorn' }]
+    await render()
+    expect(groupValues('Sounds')).toEqual(['Play sound: Airhorn'])
+    await search('soundboard')
+    expect(values()).toContain('Play sound: Airhorn')
+    mocked.soundboard.sounds = []
+    await render()
+    expect(headings()).not.toContain('Sounds')
   })
 })

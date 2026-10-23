@@ -11,6 +11,9 @@ mod audience;
 mod audio;
 mod audio_capture_adapter;
 mod backend_authority;
+mod banner_prepare;
+mod banner_timers;
+mod banners;
 mod buddy_animator;
 mod buddy_motion;
 mod buddy_overlay;
@@ -39,6 +42,7 @@ mod compositor;
 mod compositor_synthetic;
 mod devices;
 mod diagnostics;
+mod discord_announce;
 mod echo_guard;
 mod editor_chrome;
 mod encoder_bridge;
@@ -116,6 +120,12 @@ mod session_markers;
 mod session_ops;
 mod session_token;
 mod seventv;
+mod sound_loudness;
+mod sound_mix;
+mod sound_player;
+mod sound_store;
+mod source_audio_tap;
+mod source_iso;
 mod source_mask;
 mod source_registry;
 mod source_status;
@@ -133,6 +143,7 @@ mod system_audio_session;
 mod transcript;
 mod twitch;
 mod twitch_chat;
+mod usage_stats;
 #[cfg(target_os = "macos")]
 mod video_toolbox_encoder;
 mod videorc_api;
@@ -560,6 +571,12 @@ async fn run_backend() -> Result<()> {
     state.oauth_callback_port = oauth_callback_port;
     // Plan 181: a crash leaves replay rings behind; nothing can reuse them.
     replay_buffer::clean_leftovers(&state);
+    // Plan 186 D3: a banner that was showing is showing again after a relaunch.
+    if let Err(error) = compositor::install_banner_set(&state).await {
+        tracing::warn!("Could not install the stored banners into the compositor: {error:#}");
+    }
+    // Plan 186 S10: "Hide after" and "Show every" for the whole process.
+    tokio::spawn(banner_timers::run_banner_timers(state.clone()));
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -652,6 +669,11 @@ async fn run_backend() -> Result<()> {
     // Plan 094 (S7): remote service flags at startup and every 30 minutes;
     // fails open to compiled defaults.
     tokio::spawn(service_flags::run_service_flags_refresher(state.clone()));
+    // Anonymous usage stats: one event per session start and stop, off the
+    // recording path; on unless Settings → General → Privacy turned it off.
+    usage_stats::spawn(&state);
+    // Plan 187: the Discord go-live announcement (free, off until a webhook is set).
+    discord_announce::spawn(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
@@ -966,6 +988,15 @@ fn backend_bootstrap(state: &AppState) -> BackendBootstrap {
         admin_token: state.admin_token.clone(),
         pid: std::process::id(),
         parent_pid: current_parent_pid(),
+        managed_asset_roots: managed_asset_roots(&state.database),
+    }
+}
+
+/// The folders behind `videorc-asset://screen|banner/<file>` (plan 0005).
+fn managed_asset_roots(database: &Database) -> backend_authority::ManagedAssetRoots {
+    backend_authority::ManagedAssetRoots {
+        screens: database.screen_assets_dir().to_string_lossy().into_owned(),
+        banners: database.banner_assets_dir().to_string_lossy().into_owned(),
     }
 }
 
@@ -4051,6 +4082,17 @@ async fn prepare_x_native_live(
     Ok(prepared)
 }
 
+/// Plan 187: maps a Discord RPC outcome to the wire, refusals by their code.
+fn discord_rpc<T: serde::Serialize>(
+    id: String,
+    result: Result<T, discord_announce::RpcError>,
+) -> ServerResponse {
+    match result {
+        Ok(value) => ServerResponse::ok(id, value),
+        Err(error) => ServerResponse::error(id, error.code, error.message),
+    }
+}
+
 async fn publish_x_native_live(
     state: &AppState,
     params: XPublishParams,
@@ -5524,6 +5566,18 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screens.reorder"
         | "screens.activate"
         | "screens.clear"
+        | "banners.update"
+        | "banners.reorder"
+        | "banners.delete"
+        | "banners.show"
+        | "banners.hide"
+        | "sounds.update"
+        | "sounds.reorder"
+        | "sounds.delete"
+        | "sounds.settings"
+        | "sounds.play"
+        | "sounds.press"
+        | "sounds.stop"
         | "preview.live.start"
         | "preview.live.stop" => Some(DEFAULT_MUTATION_POLICY),
 
@@ -5537,7 +5591,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             })
         }
 
-        "sessions.delete" | "sessions.delete.complete" | "screens.importImage" => Some(Mutation {
+        "sessions.delete"
+        | "sessions.delete.complete"
+        | "screens.importImage"
+        | "banners.importImage"
+        | "sounds.import" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
@@ -5605,7 +5663,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "performance.check.run"
         | "performance.check.cancel"
         | "encoder.preference.set"
-        | "diagnostics.metricsJournal.set" => Some(DEFAULT_MUTATION_POLICY),
+        | "diagnostics.metricsJournal.set"
+        | "usageStats.set"
+        | "discord.announce.update"
+        | "discord.webhook.save"
+        | "discord.webhook.remove"
+        | "discord.webhook.sendTest" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -5681,6 +5744,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.moderationOperations.list"
         | "liveChat.xCommentsReadiness"
         | "liveChat.emotes.get"
+        | "usageStats.get"
+        | "discord.announce.get"
+        | "discord.links.preview"
         | "streamTargets.metadata.get"
         | "streamTargets.metadata.validate"
         | "streamTargets.manualKey.inspect"
@@ -5691,6 +5757,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.kick.searchCategories"
         | "streamTargets.x.capability"
         | "screens.list"
+        | "banners.list"
+        | "sounds.list"
         | "repair.assess_file"
         | "noiseCleanup.list"
         | "cleanCut.get"
@@ -5723,6 +5791,7 @@ fn websocket_command_mutation_max_execution_age(text: &str) -> Option<Duration> 
 enum WebSocketIsolatedCommandLaneKind {
     Observation,
     AccountMaintenance,
+    AssetImport,
     DurableChat,
     LiveControl,
     Stop,
@@ -5731,6 +5800,11 @@ enum WebSocketIsolatedCommandLaneKind {
 fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
     let command = serde_json::from_str::<ClientCommand>(text).ok()?;
     match command.method.as_str() {
+        // Plan 186: one image import process-wide, takeovers and banners
+        // alike; plan 189: a sound decode shares the lane.
+        "screens.importImage" | "banners.importImage" | "sounds.import" => {
+            Some(WebSocketIsolatedCommandLaneKind::AssetImport)
+        }
         "account.refresh"
         | "account.windows_pilot_update_token"
         | "entitlements.refresh"
@@ -5747,6 +5821,11 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "screens.activate"
         | "screens.clear"
         | "screens.delete"
+        | "banners.show"
+        | "banners.hide"
+        | "sounds.play"
+        | "sounds.press"
+        | "sounds.stop"
         | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD
         | "capture.recovery.retry"
         | CAPTURE_RECOVERY_SMOKE_INJECT_METHOD
@@ -5798,6 +5877,11 @@ impl WebSocketIsolatedCommandLane {
 
     fn full_error(&self, command_id: String) -> ServerResponse {
         match self.kind {
+            WebSocketIsolatedCommandLaneKind::AssetImport => ServerResponse::error(
+                command_id,
+                "screen-import-busy",
+                "An image is already being imported. Wait for it to finish, then try again.",
+            ),
             WebSocketIsolatedCommandLaneKind::Observation => ServerResponse::error(
                 command_id,
                 "observation-lane-full",
@@ -5887,7 +5971,9 @@ fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAccepted
             Some(WebSocketIsolatedCommandLaneKind::Observation) => {
                 WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE
             }
-            None => WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
+            Some(WebSocketIsolatedCommandLaneKind::AssetImport) | None => {
+                WEBSOCKET_ORDERED_MAX_QUEUE_AGE
+            }
         }
     };
     // One short process-global critical section establishes receipt order and
@@ -5951,6 +6037,7 @@ struct WebSocketOrderedCommand {
 struct WebSocketIsolatedCommandLanes {
     observation: WebSocketIsolatedCommandLane,
     account: WebSocketIsolatedCommandLane,
+    asset_import: WebSocketIsolatedCommandLane,
     durable_chat: WebSocketIsolatedCommandLane,
     live_control: WebSocketIsolatedCommandLane,
     stop: WebSocketIsolatedCommandLane,
@@ -5959,13 +6046,24 @@ struct WebSocketIsolatedCommandLanes {
 struct WebSocketIsolatedCommandLaneReceivers {
     observation: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     account: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    asset_import: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     durable_chat: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     live_control: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     stop: mpsc::Receiver<WebSocketQueuedLaneCommand>,
 }
 
 impl WebSocketIsolatedCommandLanes {
-    fn new(transport: &WebSocketTransportMetrics) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
+    fn new(
+        transport: &WebSocketTransportMetrics,
+        import_capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
+        let (mut asset_import, asset_import_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::AssetImport,
+            1,
+            WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
+            transport.register_command_lane("assetImport"),
+        );
+        asset_import.capacity = import_capacity;
         let (observation, observation_rx) = WebSocketIsolatedCommandLane::new(
             WebSocketIsolatedCommandLaneKind::Observation,
             WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY,
@@ -6000,6 +6098,7 @@ impl WebSocketIsolatedCommandLanes {
             Self {
                 observation,
                 account,
+                asset_import,
                 durable_chat,
                 live_control,
                 stop,
@@ -6007,6 +6106,7 @@ impl WebSocketIsolatedCommandLanes {
             WebSocketIsolatedCommandLaneReceivers {
                 observation: observation_rx,
                 account: account_rx,
+                asset_import: asset_import_rx,
                 durable_chat: durable_chat_rx,
                 live_control: live_control_rx,
                 stop: stop_rx,
@@ -6018,6 +6118,7 @@ impl WebSocketIsolatedCommandLanes {
         match kind {
             WebSocketIsolatedCommandLaneKind::Observation => self.observation.clone(),
             WebSocketIsolatedCommandLaneKind::AccountMaintenance => self.account.clone(),
+            WebSocketIsolatedCommandLaneKind::AssetImport => self.asset_import.clone(),
             WebSocketIsolatedCommandLaneKind::DurableChat => self.durable_chat.clone(),
             WebSocketIsolatedCommandLaneKind::LiveControl => self.live_control.clone(),
             WebSocketIsolatedCommandLaneKind::Stop => self.stop.clone(),
@@ -6876,8 +6977,10 @@ async fn run_websocket_command_dispatcher(
         command_handler.clone(),
         running_stateful.clone(),
     ));
-    let (lanes, lane_receivers) =
-        WebSocketIsolatedCommandLanes::new(&state.websocket_transport_metrics);
+    let (lanes, lane_receivers) = WebSocketIsolatedCommandLanes::new(
+        &state.websocket_transport_metrics,
+        state.screen_import_capacity.clone(),
+    );
     let mut lane_workers = tokio::task::JoinSet::new();
     let lane_worker_context = WebSocketCommandLaneWorkerContext {
         state: state.clone(),
@@ -6919,6 +7022,14 @@ async fn run_websocket_command_dispatcher(
         lane_receivers.stop,
         1,
         lanes.stop.metrics.clone(),
+        &lane_worker_context,
+    );
+
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.asset_import,
+        1,
+        lanes.asset_import.metrics.clone(),
         &lane_worker_context,
     );
 
@@ -8369,6 +8480,27 @@ fn resolve_screen_import_resource(
     )
 }
 
+/// Plan 186: `banners.importImage` takes the same `sourceCapability` exchange
+/// as `screens.importImage` (main's picker issues an `input-file` capability;
+/// a raw `path` is accepted from the admin role only).
+fn resolve_banner_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    resolve_screen_import_resource(state, params, role)
+}
+
+/// Plan 189: `sounds.import` makes the same exchange; main's picker (and the
+/// starter seed) issue one single-use `input-file` capability per file.
+fn resolve_sound_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    resolve_screen_import_resource(state, params, role)
+}
+
 fn session_deletion_handle(
     operation: &storage::PendingSessionDeletion,
 ) -> protocol::SessionDeletionHandle {
@@ -8502,6 +8634,19 @@ fn resolve_renderer_managed_backgrounds(
 
 fn rpc_params_are_empty(params: &serde_json::Value) -> bool {
     params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+// Imports and idle management can now finish on different lanes. Keep each
+// authoritative list read and publication together so an older snapshot cannot
+// be emitted after a newer one. No optimizer or native transition holds this lock.
+fn publish_stream_screen_list(state: &AppState) -> anyhow::Result<Vec<protocol::StreamScreen>> {
+    let _publication = state
+        .screen_list_publication
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let screens = state.database.list_stream_screens()?;
+    state.emit_event("screens.changed", screens.clone());
+    Ok(screens)
 }
 
 // Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
@@ -10878,6 +11023,12 @@ async fn handle_text_message_with_role(
                     let attach_live_chat = session_attaches_live_chat(&params);
                     match start_session(state.clone(), params).await {
                         Ok(status) => {
+                            // Plan 187: a fact for the announcer; never waits.
+                            discord_announce::on_session_started(
+                                state,
+                                &status,
+                                streaming.as_ref(),
+                            );
                             if attach_live_chat
                                 && let Some(streaming) = streaming.as_ref()
                                 && let Some(session_id) = status.session_id.as_deref()
@@ -11426,6 +11577,74 @@ async fn handle_text_message_with_role(
         }
         "liveChat.diagnostics" => {
             ServerResponse::ok(command.id, live_chat::current_diagnostics(state).await)
+        }
+        // Settings → General → Privacy → "Share anonymous usage stats".
+        // Plan 187: the Discord go-live announcement. The webhook URL goes in
+        // through `discord.webhook.save` and never comes back out.
+        "discord.announce.get" => {
+            ServerResponse::ok(command.id, discord_announce::snapshot(state).await)
+        }
+        "discord.announce.update" => {
+            match serde_json::from_value::<discord_announce::UpdateParams>(command.params) {
+                Ok(params) => {
+                    discord_rpc(command.id, discord_announce::update(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "discord.webhook.save" => {
+            match serde_json::from_value::<discord_announce::SaveWebhookParams>(command.params) {
+                Ok(params) => discord_rpc(
+                    command.id,
+                    discord_announce::save_webhook(state, params).await,
+                ),
+                // Never echo the params: they hold the webhook URL.
+                Err(_) => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected { url }.".to_string(),
+                ),
+            }
+        }
+        "discord.webhook.remove" => {
+            discord_rpc(command.id, discord_announce::remove_webhook(state).await)
+        }
+        "discord.webhook.sendTest" => {
+            match serde_json::from_value::<discord_announce::TargetsParams>(command.params) {
+                Ok(params) => {
+                    discord_rpc(command.id, discord_announce::send_test(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "discord.links.preview" => {
+            match serde_json::from_value::<discord_announce::TargetsParams>(command.params) {
+                Ok(params) => discord_rpc(
+                    command.id,
+                    discord_announce::preview_links(state, params).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "usageStats.get" => ServerResponse::ok(command.id, usage_stats::current_state(state)),
+        "usageStats.set" => {
+            match serde_json::from_value::<usage_stats::UsageStatsSetParams>(command.params) {
+                Ok(params) => match usage_stats::set_enabled(state, params.enabled).await {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "settings-unavailable", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "liveChat.send" => {
             match serde_json::from_value::<live_chat::CommentsSendParams>(command.params) {
@@ -12007,7 +12226,18 @@ async fn handle_text_message_with_role(
                         _ => youtube::YouTubeFailureStep::TransitionLive,
                     };
                     match transition_youtube_stream_target(state, params).await {
-                        Ok(result) => ServerResponse::ok(command.id, result),
+                        Ok(result) => {
+                            if result.requested_status
+                                == youtube::YouTubeBroadcastTransitionStatus::Live
+                            {
+                                discord_announce::on_youtube_live(
+                                    state,
+                                    &result.broadcast_id,
+                                    result.privacy_status,
+                                );
+                            }
+                            ServerResponse::ok(command.id, result)
+                        }
                         Err(error) => {
                             tracing::warn!("[youtube-transition] failed: {error:#}");
                             let (code, message) = youtube::youtube_failure_response(&error, step);
@@ -12189,8 +12419,15 @@ async fn handle_text_message_with_role(
         }
         "streamTargets.x.publish" => {
             match serde_json::from_value::<XPublishParams>(command.params) {
-                Ok(params) => match publish_x_native_live(state, params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
+                Ok(params) => match publish_x_native_live(state, params.clone()).await {
+                    Ok(result) => {
+                        discord_announce::on_x_published(
+                            state,
+                            params.session_id.as_deref(),
+                            &result.share_url,
+                        );
+                        ServerResponse::ok(command.id, result)
+                    }
                     Err(error) => {
                         ServerResponse::error(command.id, "x-publish-failed", error.to_string())
                     }
@@ -12207,6 +12444,373 @@ async fn handle_text_message_with_role(
             },
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
+        // Plan 186: banners. Every mutation ends in `banners::on_banners_changed`,
+        // which republishes the list (and, from S3, installs the compositor set).
+        // Refusals come back as the verbatim sentences from the plan.
+        "banners.list" => match state.database.list_banners() {
+            Ok(banners) => ServerResponse::ok(command.id, banners),
+            Err(error) => {
+                ServerResponse::error(command.id, "banners-list-failed", error.to_string())
+            }
+        },
+        "banners.importImage" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_banner_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<protocol::ImportBannerImageParams>(params_value) {
+                Ok(params) => {
+                    let database = state.database.clone();
+                    // Decode, scale and encode off the async workers; the
+                    // AssetImport lane keeps admission until this finishes.
+                    let result = tokio::task::spawn_blocking(move || {
+                        banners::import_banner(&database, std::path::Path::new(&params.path))
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!("Image import worker failed: {error}"))
+                    });
+                    match result {
+                        Ok(banner) => {
+                            let _ = banners::on_banners_changed(state).await;
+                            ServerResponse::ok(command.id, banner)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-import-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.update" => {
+            match serde_json::from_value::<protocol::UpdateBannerParams>(command.params) {
+                Ok(params) => {
+                    let update = match banners::BannerUpdate::from_params(&params) {
+                        Ok(update) => update,
+                        Err(error) => {
+                            return ServerResponse::error(
+                                command.id,
+                                "banner-update-failed",
+                                error.to_string(),
+                            );
+                        }
+                    };
+                    match state.database.update_banner(&params.id, update) {
+                        Ok(banner) => {
+                            let _ = banners::on_banners_changed(state).await;
+                            ServerResponse::ok(command.id, banner)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-update-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.reorder" => {
+            match serde_json::from_value::<protocol::ReorderBannersParams>(command.params) {
+                Ok(params) => match state.database.reorder_banners(&params.ids) {
+                    Ok(banners) => {
+                        let _ = banners::on_banners_changed(state).await;
+                        ServerResponse::ok(command.id, banners)
+                    }
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "banner-reorder-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.delete" => {
+            match serde_json::from_value::<protocol::BannerIdParams>(command.params) {
+                Ok(params) => {
+                    // D9: a showing banner is burned into the running session;
+                    // deleting it is refused until it is hidden.
+                    let session_active = state.recording.lock().await.is_some();
+                    match banners::delete_banner(&state.database, &params.id, session_active) {
+                        Ok(()) => match banners::on_banners_changed(state).await {
+                            Ok(banners) => ServerResponse::ok(command.id, banners),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "banners-list-failed",
+                                error.to_string(),
+                            ),
+                        },
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-delete-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.show" => {
+            match serde_json::from_value::<protocol::BannerIdParams>(command.params) {
+                Ok(params) => match banners::show_banner(
+                    &state.database,
+                    &params.id,
+                    // The 160 MB prepared-bitmap budget is judged against the
+                    // canvases the compositor draws right now.
+                    &compositor::banner_prepare_canvases(state).await,
+                    // A session that cannot draw a banner added after its
+                    // start refuses a new one (plan 186 S4).
+                    recording::active_session_accepts_banners(state).await,
+                ) {
+                    Ok(banner) => {
+                        let _ = banners::on_banners_changed(state).await;
+                        ServerResponse::ok(command.id, banner)
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "banner-show-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.hide" => {
+            match serde_json::from_value::<protocol::HideBannerParams>(command.params) {
+                Ok(params) => {
+                    let hidden = match params.id.as_deref() {
+                        Some(id) => state.database.hide_banner(id).map(|_| ()),
+                        None => state.database.hide_all_banners(),
+                    };
+                    match hidden {
+                        Ok(()) => match banners::on_banners_changed(state).await {
+                            Ok(banners) => ServerResponse::ok(command.id, banners),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "banners-list-failed",
+                                error.to_string(),
+                            ),
+                        },
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-hide-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 189: the soundboard. Every store mutation ends in
+        // `sound_store::on_sounds_changed`, which republishes the board;
+        // every playback change ends in `sounds.playback` from the player.
+        // Refusals come back as the verbatim sentences from the plan.
+        "sounds.list" => match state.database.soundboard_state() {
+            Ok(board) => ServerResponse::ok(command.id, board),
+            Err(error) => {
+                ServerResponse::error(command.id, "sounds-list-failed", error.to_string())
+            }
+        },
+        "sounds.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_sound_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<protocol::ImportSoundParams>(params_value) {
+                Ok(params) => {
+                    let database = state.database.clone();
+                    // The import never takes a caller's binary: the bundled
+                    // FFmpeg, or the default, decodes every sound.
+                    let ffmpeg_path = ffmpeg::resolve_ffmpeg_path(None);
+                    // Decode, trim and measure off the async workers; the
+                    // AssetImport lane keeps admission until this finishes.
+                    let result = tokio::task::spawn_blocking(move || {
+                        sound_store::import_sound(
+                            &database,
+                            std::path::Path::new(&params.path),
+                            params.starter,
+                            &ffmpeg_path,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!("Sound import worker failed: {error}"))
+                    });
+                    match result {
+                        Ok(sound) => {
+                            let _ = sound_store::on_sounds_changed(state);
+                            ServerResponse::ok(command.id, sound)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-import-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.update" => {
+            match serde_json::from_value::<protocol::UpdateSoundParams>(command.params) {
+                Ok(params) => {
+                    let update = match sound_store::SoundUpdate::from_params(&params) {
+                        Ok(update) => update,
+                        Err(error) => {
+                            return ServerResponse::error(
+                                command.id,
+                                "sound-update-failed",
+                                error.to_string(),
+                            );
+                        }
+                    };
+                    match state.database.update_sound(&params.id, update) {
+                        Ok(sound) => {
+                            let _ = sound_store::on_sounds_changed(state);
+                            ServerResponse::ok(command.id, sound)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-update-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.reorder" => {
+            match serde_json::from_value::<protocol::ReorderSoundsParams>(command.params) {
+                Ok(params) => match state.database.reorder_sounds(&params.ids) {
+                    Ok(sounds) => {
+                        let _ = sound_store::on_sounds_changed(state);
+                        ServerResponse::ok(command.id, sounds)
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "sound-reorder-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.delete" => {
+            match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+                Ok(params) => {
+                    // Its voices stop first, so a deleted sound never plays on.
+                    state.soundboard.evict(state, &params.id);
+                    match sound_store::delete_sound(&state.database, &params.id) {
+                        Ok(()) => match sound_store::on_sounds_changed(state) {
+                            Ok(board) => ServerResponse::ok(command.id, board.sounds),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "sounds-list-failed",
+                                error.to_string(),
+                            ),
+                        },
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-delete-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.settings" => {
+            match serde_json::from_value::<protocol::SoundboardSettingsParams>(command.params) {
+                Ok(params) => {
+                    if let Err(error) = sound_store::validate_soundboard_settings(&params) {
+                        return ServerResponse::error(
+                            command.id,
+                            "sound-settings-failed",
+                            error.to_string(),
+                        );
+                    }
+                    match state.database.update_sound_settings(&params) {
+                        Ok(settings) => {
+                            // The running bus follows the fader at once.
+                            state.soundboard.set_board_volume_db(settings.volume_db);
+                            match sound_store::on_sounds_changed(state) {
+                                Ok(board) => ServerResponse::ok(command.id, board),
+                                Err(error) => ServerResponse::error(
+                                    command.id,
+                                    "sounds-list-failed",
+                                    error.to_string(),
+                                ),
+                            }
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-settings-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.play" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+            Ok(params) => match state.soundboard.play(state, &params.id).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "sounds.press" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+            Ok(params) => match state.soundboard.press(state, &params.id).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "sounds.stop" => {
+            match serde_json::from_value::<protocol::StopSoundParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    state.soundboard.stop(state, params.id.as_deref()),
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "screens.list" => match state.database.list_stream_screens() {
             Ok(screens) => ServerResponse::ok(command.id, screens),
             Err(error) => {
@@ -12231,14 +12835,20 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::ImportScreenImageParams>(params_value) {
                 Ok(params) => {
                     let ffmpeg_path = resolve_ffmpeg_path_ref(params.ffmpeg_path.as_deref());
-                    match state
-                        .database
-                        .import_screen_image(&params.path, &ffmpeg_path)
-                    {
+                    let database = state.database.clone();
+                    // Keep image decoding/FFmpeg waits off async mutation workers.
+                    // The watched handler retains lane admission until this owned
+                    // blocking job completes, even if its caller disconnects.
+                    let result = tokio::task::spawn_blocking(move || {
+                        database.import_screen_image(&params.path, &ffmpeg_path)
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!("Image import worker failed: {error}"))
+                    });
+                    match result {
                         Ok(screen) => {
-                            if let Ok(screens) = state.database.list_stream_screens() {
-                                state.emit_event("screens.changed", screens);
-                            }
+                            let _ = publish_stream_screen_list(state);
                             ServerResponse::ok(command.id, screen)
                         }
                         Err(error) => ServerResponse::error(
@@ -12260,9 +12870,7 @@ async fn handle_text_message_with_role(
                     .rename_stream_screen(&params.screen_id, &params.name)
                 {
                     Ok(screen) => {
-                        if let Ok(screens) = state.database.list_stream_screens() {
-                            state.emit_event("screens.changed", screens);
-                        }
+                        let _ = publish_stream_screen_list(state);
                         if let Ok(active) = state.database.active_stream_screen()
                             && active.as_ref().map(|active| &active.id) == Some(&screen.id)
                         {
@@ -12285,9 +12893,8 @@ async fn handle_text_message_with_role(
                     let delete_result =
                         delete_stream_screen_transition(state, &params.screen_id).await;
                     match delete_result {
-                        Ok(()) => match state.database.list_stream_screens() {
+                        Ok(()) => match publish_stream_screen_list(state) {
                             Ok(screens) => {
-                                state.emit_event("screens.changed", screens.clone());
                                 if let Ok(active) = state.database.active_stream_screen() {
                                     state.emit_event("screens.active.changed", active);
                                 }
@@ -12315,7 +12922,7 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::ReorderScreensParams>(command.params) {
                 Ok(params) => match state.database.reorder_stream_screens(&params.screen_ids) {
                     Ok(screens) => {
-                        state.emit_event("screens.changed", screens.clone());
+                        let _ = publish_stream_screen_list(state);
                         ServerResponse::ok(command.id, screens)
                     }
                     Err(error) => ServerResponse::error(
@@ -13244,6 +13851,29 @@ async fn ffmpeg_status(ffmpeg_path: &str) -> ToolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_names_the_screens_and_banners_folders_beside_the_database() {
+        // Release test 146, plan 0005: main serves videorc-asset://screen and
+        // ://banner from these roots, so they must be the backend's own.
+        let directory =
+            std::env::temp_dir().join(format!("videorc-asset-roots-{}", Uuid::new_v4()));
+        let database = Database::open_file_for_tests(&directory.join("videorc.sqlite3"));
+        let roots = managed_asset_roots(&database);
+        assert_eq!(
+            std::path::PathBuf::from(&roots.screens),
+            directory.join("Screens")
+        );
+        assert_eq!(
+            std::path::PathBuf::from(&roots.banners),
+            directory.join("Banners")
+        );
+        assert_eq!(
+            serde_json::to_value(&roots).unwrap(),
+            json!({ "screens": roots.screens, "banners": roots.banners })
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
     use serde_json::json;
     use std::time::Instant;
     use tokio::sync::broadcast;
@@ -15391,6 +16021,8 @@ mod tests {
             "liveChat.moderationOperations.list",
             "sessions.comments.totals",
             "screens.list",
+            "banners.list",
+            "sounds.list",
             "recording.status",
             "capture.recovery.status",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
@@ -15428,6 +16060,11 @@ mod tests {
             "screens.activate",
             "screens.clear",
             "screens.delete",
+            "banners.show",
+            "banners.hide",
+            "sounds.play",
+            "sounds.press",
+            "sounds.stop",
             "captions.start",
             "captions.stop",
             "captions.style.set",
@@ -15602,6 +16239,8 @@ mod tests {
 
         for method in [
             "screens.importImage",
+            "banners.importImage",
+            "sounds.import",
             "sessions.delete",
             "sessions.delete.complete",
         ] {
@@ -16208,6 +16847,440 @@ mod tests {
         release_account.add_permits(1);
         drop(command_tx);
         dispatcher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_asset_import_is_single_flight_without_blocking_live_commands() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let entered = entered.clone();
+            let release = release.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let entered = entered.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "screens.importImage" {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let mut clients = Vec::new();
+        let mut dispatchers = Vec::new();
+        for _ in 0..2 {
+            let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+            let connection = transport.register_connection();
+            let (tx, rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+            let (out_tx, out_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+            let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+            dispatchers.push(tokio::spawn(run_websocket_command_dispatcher(
+                state.clone(),
+                rx,
+                connection.incoming_command_queue.clone(),
+                out_tx,
+                connection.reliable_response_queue.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler.clone(),
+            )));
+            clients.push((tx, out_rx, connection));
+        }
+        send_test_websocket_command(
+            &state,
+            &clients[0].0,
+            &clients[0].2.incoming_command_queue,
+            json!({"id":"import", "method":"screens.importImage", "params":{}}).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(2), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        // Every request below must reply BEFORE the optimizer is released.
+        // Includes the same socket's ordered controls and another socket.
+        let result = async {
+            for (tx, rx, metrics) in &mut clients {
+                for method in [
+                    "screens.importImage",
+                    "health.ping",
+                    "screens.activate",
+                    "screens.clear",
+                    "audio.processing.update",
+                    "scene.layout.apply_live",
+                    "session.start",
+                    "session.stop",
+                ] {
+                    send_test_websocket_command(
+                        &state,
+                        tx,
+                        &metrics.incoming_command_queue,
+                        json!({"id":method, "method":method, "params":{}}).to_string(),
+                    )
+                    .await;
+                    let Message::Text(text) = timeout(Duration::from_secs(2), rx.recv())
+                        .await
+                        .map_err(|_| format!("{method} waited for import"))?
+                        .unwrap()
+                    else {
+                        panic!("response")
+                    };
+                    metrics.reliable_response_queue.record_dequeue_oldest();
+                    let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(response["id"], method);
+                    if method == "screens.importImage" {
+                        assert_eq!(response["error"]["code"], "screen-import-busy");
+                    } else {
+                        assert_eq!(response["ok"], true, "{response}");
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        release.add_permits(1);
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        result.unwrap();
+        assert_eq!(
+            entered.available_permits(),
+            0,
+            "duplicate import never entered handler"
+        );
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    /// Plan 186 S1 (the plan 182 rule): a banner import decoding on the
+    /// AssetImport lane never blocks `banners.show`/`banners.hide` on the
+    /// LiveControl lane, nor Stop, on the same socket or another one.
+    #[tokio::test]
+    async fn websocket_banner_import_is_single_flight_without_blocking_banner_show() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let entered = entered.clone();
+            let release = release.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let entered = entered.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "banners.importImage" {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let mut clients = Vec::new();
+        let mut dispatchers = Vec::new();
+        for _ in 0..2 {
+            let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+            let connection = transport.register_connection();
+            let (tx, rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+            let (out_tx, out_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+            let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+            dispatchers.push(tokio::spawn(run_websocket_command_dispatcher(
+                state.clone(),
+                rx,
+                connection.incoming_command_queue.clone(),
+                out_tx,
+                connection.reliable_response_queue.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler.clone(),
+            )));
+            clients.push((tx, out_rx, connection));
+        }
+        send_test_websocket_command(
+            &state,
+            &clients[0].0,
+            &clients[0].2.incoming_command_queue,
+            json!({"id":"import", "method":"banners.importImage", "params":{}}).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(2), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        // Every request below must reply BEFORE the decode is released. A
+        // second import of either kind shares the one import slot and is
+        // refused at once instead of queueing behind it.
+        let result = async {
+            for (tx, rx, metrics) in &mut clients {
+                for method in [
+                    "banners.importImage",
+                    "screens.importImage",
+                    "health.ping",
+                    "banners.show",
+                    "banners.hide",
+                    "banners.update",
+                    "screens.activate",
+                    "session.stop",
+                ] {
+                    send_test_websocket_command(
+                        &state,
+                        tx,
+                        &metrics.incoming_command_queue,
+                        json!({"id":method, "method":method, "params":{}}).to_string(),
+                    )
+                    .await;
+                    let Message::Text(text) = timeout(Duration::from_secs(2), rx.recv())
+                        .await
+                        .map_err(|_| format!("{method} waited for the banner import"))?
+                        .unwrap()
+                    else {
+                        panic!("response")
+                    };
+                    metrics.reliable_response_queue.record_dequeue_oldest();
+                    let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(response["id"], method);
+                    if method.ends_with(".importImage") {
+                        assert_eq!(response["error"]["code"], "screen-import-busy");
+                    } else {
+                        assert_eq!(response["ok"], true, "{response}");
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        release.add_permits(1);
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        result.unwrap();
+        assert_eq!(entered.available_permits(), 0);
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    fn banner_test_state() -> (
+        AppState,
+        broadcast::Receiver<ServerEvent>,
+        std::path::PathBuf,
+    ) {
+        let dir = std::env::temp_dir().join(format!("videorc-banner-rpc-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, receiver) = broadcast::channel(256);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
+        );
+        (state, receiver, dir)
+    }
+
+    fn write_banner_png(dir: &std::path::Path, name: &str) -> String {
+        let path = dir.join(name);
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 40, 40, 255]))
+            .save(&path)
+            .unwrap();
+        path.display().to_string()
+    }
+
+    async fn banner_rpc(
+        state: &AppState,
+        method: &str,
+        params: serde_json::Value,
+    ) -> ServerResponse {
+        handle_text_message(
+            state,
+            &json!({ "id": method, "method": method, "params": params }).to_string(),
+        )
+        .await
+    }
+
+    fn rpc_error_message(response: &ServerResponse) -> String {
+        assert!(!response.ok, "{response:?}");
+        response
+            .error
+            .as_ref()
+            .map(|error| error.message.clone())
+            .unwrap_or_default()
+    }
+
+    /// Plan 186 S1: the RPC surface end to end against a real file-backed
+    /// database. The business rules live in the backend, not only in the UI.
+    #[tokio::test]
+    async fn banners_rpcs_enforce_the_showing_cap_and_the_session_delete_refusal() {
+        let (state, mut events, dir) = banner_test_state();
+        let mut ids = Vec::new();
+        for index in 0..5 {
+            let path = write_banner_png(&dir, &format!("sponsor-{index}.png"));
+            let response = banner_rpc(&state, "banners.importImage", json!({ "path": path })).await;
+            assert!(response.ok, "{response:?}");
+            let banner: protocol::Banner =
+                serde_json::from_value(response.payload.clone().unwrap()).unwrap();
+            assert_eq!(banner.name, format!("sponsor-{index}"));
+            assert!(!banner.shown);
+            ids.push(banner.id);
+        }
+        // Every import republished the full list, with no null anywhere.
+        let mut changed = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "banners.changed" {
+                changed += 1;
+                let text = serde_json::to_string(&event.payload).unwrap();
+                assert!(!text.contains("null"), "{text}");
+                assert!(event.payload.as_array().is_some());
+            }
+        }
+        assert_eq!(changed, 5);
+
+        let listed = banner_rpc(&state, "banners.list", json!({})).await;
+        assert!(listed.ok);
+        assert_eq!(listed.payload.unwrap().as_array().unwrap().len(), 5);
+
+        for id in &ids[..4] {
+            let response = banner_rpc(&state, "banners.show", json!({ "id": id })).await;
+            assert!(response.ok, "{response:?}");
+        }
+        let fifth = banner_rpc(&state, "banners.show", json!({ "id": ids[4] })).await;
+        assert_eq!(
+            fifth.error.as_ref().map(|error| error.code.as_str()),
+            Some("banner-show-failed")
+        );
+        assert_eq!(
+            rpc_error_message(&fifth),
+            "Four banners are showing. Hide one first."
+        );
+
+        let hidden = banner_rpc(&state, "banners.hide", json!({ "id": ids[0] })).await;
+        assert!(hidden.ok);
+        let shown_now = banners::shown_banners_for_compositor(&state.database).unwrap();
+        assert_eq!(shown_now.len(), 3);
+        assert!(
+            banner_rpc(&state, "banners.show", json!({ "id": ids[4] }))
+                .await
+                .ok
+        );
+
+        // A recording is running: a showing banner cannot be deleted.
+        *state.recording.lock().await = Some(recording::test_active_recording_stub(
+            "banner-delete-session",
+        ));
+        let refused = banner_rpc(&state, "banners.delete", json!({ "id": ids[4] })).await;
+        assert_eq!(
+            rpc_error_message(&refused),
+            "Hide this banner before you delete it."
+        );
+        assert_eq!(state.database.list_banners().unwrap().len(), 5);
+        // Hidden, it goes, even mid-session; the reply is the remaining list.
+        assert!(
+            banner_rpc(&state, "banners.hide", json!({ "id": ids[4] }))
+                .await
+                .ok
+        );
+        let deleted = banner_rpc(&state, "banners.delete", json!({ "id": ids[4] })).await;
+        assert!(deleted.ok, "{deleted:?}");
+        assert_eq!(deleted.payload.unwrap().as_array().unwrap().len(), 4);
+        drop(state.recording.lock().await.take());
+
+        // Update validates in the backend; a good update returns the banner.
+        let bad = banner_rpc(
+            &state,
+            "banners.update",
+            json!({ "id": ids[1], "opacity": 2.0 }),
+        )
+        .await;
+        assert_eq!(
+            rpc_error_message(&bad),
+            "Banner opacity must be between 0.2 and 1.0."
+        );
+        let good = banner_rpc(
+            &state,
+            "banners.update",
+            json!({
+                "id": ids[1],
+                "name": " Sponsor ",
+                "opacity": 0.5,
+                "showInRecording": false,
+                "horizontal": { "x": 0.1, "y": 0.1, "w": 0.4, "h": 0.1 },
+                "hideAfterSec": 30,
+                "repeatEveryMin": 0
+            }),
+        )
+        .await;
+        assert!(good.ok, "{good:?}");
+        let banner: protocol::Banner = serde_json::from_value(good.payload.unwrap()).unwrap();
+        assert_eq!(banner.name, "Sponsor");
+        assert_eq!(banner.opacity, 0.5);
+        assert!(!banner.show_in_recording);
+        assert_eq!(banner.hide_after_sec, Some(30));
+        assert_eq!(banner.repeat_every_min, None);
+
+        // Reorder is the drawing order and must name every banner once.
+        let partial = banner_rpc(&state, "banners.reorder", json!({ "ids": [ids[0]] })).await;
+        assert!(!partial.ok);
+        let reordered = banner_rpc(
+            &state,
+            "banners.reorder",
+            json!({ "ids": [ids[3], ids[2], ids[1], ids[0]] }),
+        )
+        .await;
+        assert!(reordered.ok, "{reordered:?}");
+        let order: Vec<protocol::Banner> =
+            serde_json::from_value(reordered.payload.unwrap()).unwrap();
+        assert_eq!(order[0].id, ids[3]);
+        assert_eq!(order[0].sort_order, 0);
+
+        // `banners.hide` with no id hides them all.
+        let all = banner_rpc(&state, "banners.hide", json!({})).await;
+        assert!(all.ok);
+        assert!(
+            banners::shown_banners_for_compositor(&state.database)
+                .unwrap()
+                .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn banners_import_refusals_are_the_verbatim_sentences() {
+        let (state, _events, dir) = banner_test_state();
+        let text = dir.join("notes.png");
+        std::fs::write(&text, b"just some text").unwrap();
+        let refused = banner_rpc(
+            &state,
+            "banners.importImage",
+            json!({ "path": text.display().to_string() }),
+        )
+        .await;
+        assert_eq!(
+            refused.error.as_ref().map(|error| error.code.as_str()),
+            Some("banner-import-failed")
+        );
+        assert_eq!(
+            rpc_error_message(&refused),
+            "This file isn't a PNG, JPEG or WebP image."
+        );
+        assert!(state.database.list_banners().unwrap().is_empty());
+        assert!(
+            !state.database.banner_assets_dir().exists()
+                || std::fs::read_dir(state.database.banner_assets_dir())
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "a refused import publishes nothing"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -19659,6 +20732,7 @@ mod tests {
                 height: 36,
                 frame_consumer: compositor::CompositorFrameConsumer::NativePreview,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,

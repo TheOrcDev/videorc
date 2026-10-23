@@ -2044,5 +2044,97 @@
       "reason": "probe",
       "message": "The replay could not be checked after it was written."
     }
+  },
+  "banner": {
+    "minimal": {
+      "id": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b",
+      "name": "Sponsor",
+      "imageFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.png",
+      "thumbnailFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.thumb.png",
+      "width": 2400,
+      "height": 400,
+      "hasAlpha": true,
+      "sortOrder": 0,
+      "shown": true,
+      "horizontal": { "x": 0.2, "y": 0.782222, "w": 0.6, "h": 0.177778 },
+      "vertical": { "x": 0.071111, "y": 0.699583, "w": 0.857778, "h": 0.080417 },
+      "showOnStream": true,
+      "showInRecording": false,
+      "opacity": 0.85,
+      "createdAt": "2026-10-20T18:00:00Z",
+      "updatedAt": "2026-10-20T18:05:00Z"
+    },
+    "withTimer": {
+      "id": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b",
+      "name": "Sponsor",
+      "imageFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.png",
+      "thumbnailFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.thumb.png",
+      "width": 2400,
+      "height": 400,
+      "hasAlpha": true,
+      "sortOrder": 0,
+      "shown": true,
+      "horizontal": { "x": 0.2, "y": 0.782222, "w": 0.6, "h": 0.177778 },
+      "vertical": { "x": 0.071111, "y": 0.699583, "w": 0.857778, "h": 0.080417 },
+      "showOnStream": true,
+      "showInRecording": false,
+      "opacity": 0.85,
+      "hideAfterSec": 30,
+      "repeatEveryMin": 15,
+      "createdAt": "2026-10-20T18:00:00Z",
+      "updatedAt": "2026-10-20T18:05:00Z"
+    }
+  },
+  "sound": {
+    "minimal": {
+      "id": "0b7f3c2e-91d4-4a6b-8e25-6c1d9a0f4b37",
+      "name": "Gong",
+      "file": "0b7f3c2e-91d4-4a6b-8e25-6c1d9a0f4b37.wav",
+      "durationMs": 2850,
+      "loudnessLufs": -24.6,
+      "levelDb": 6.6,
+      "volumeDb": -3,
+      "mode": "toggle",
+      "sortOrder": 12,
+      "createdAt": "2026-10-23T09:00:00Z",
+      "updatedAt": "2026-10-23T09:05:00Z"
+    },
+    "starter": {
+      "id": "7d2a9e41-3c58-4f0b-b6a1-58e3c0d7f912",
+      "name": "Airhorn",
+      "file": "7d2a9e41-3c58-4f0b-b6a1-58e3c0d7f912.wav",
+      "durationMs": 1610,
+      "loudnessLufs": -15.3,
+      "levelDb": -2.7,
+      "volumeDb": 0,
+      "mode": "oneShot",
+      "hotkey": "1",
+      "starter": "airhorn",
+      "sortOrder": 0,
+      "createdAt": "2026-10-23T09:00:00Z",
+      "updatedAt": "2026-10-23T09:00:00Z"
+    },
+    "state": { "volumeDb": 0, "monitor": true, "startersSeeded": true },
+    "playback": {
+      "voices": [
+        {
+          "voiceId": "v-1",
+          "soundId": "7d2a9e41-3c58-4f0b-b6a1-58e3c0d7f912",
+          "startedAtMs": 1792746000123,
+          "durationMs": 1610,
+          "loop": false,
+          "onAir": true
+        },
+        {
+          "voiceId": "v-2",
+          "soundId": "0b7f3c2e-91d4-4a6b-8e25-6c1d9a0f4b37",
+          "startedAtMs": 1792746000456,
+          "durationMs": 2850,
+          "loop": true,
+          "onAir": false
+        }
+      ]
+    },
+    "pressStopped": { "onAir": true }
   }
 }

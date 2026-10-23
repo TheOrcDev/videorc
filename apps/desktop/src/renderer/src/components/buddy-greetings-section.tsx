@@ -42,6 +42,7 @@ import {
   newGreetingTemplate,
   resolveGreetingPreview
 } from '@/lib/buddy-auto-chat-view'
+import { inlineUserError } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
 
 /** A greeting's editor adds a variant from the keyboard too (G-23). */
@@ -70,7 +71,9 @@ export function BuddyGreetingsSection(): ReactElement | null {
   const save = (next: CohostAutoChat): void => {
     setError(null)
     void patchCohostSettings({ autoChat: next }).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : "Couldn't save the greetings.")
+      setError(
+        inlineUserError(failure, { action: 'save', object: 'the greetings' }, 'buddy-greetings')
+      )
     )
   }
   const saveTemplates = (next: CohostGreetingTemplate[]): void =>

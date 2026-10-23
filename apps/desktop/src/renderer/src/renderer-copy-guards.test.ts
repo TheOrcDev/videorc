@@ -244,6 +244,8 @@ const CAPITALIZED_NAMES = new Set([
   'TikTok',
   'Instagram',
   'Facebook',
+  // Plan 187: "View in Discord".
+  'Discord',
   'Google',
   'OBS',
   'Finder',

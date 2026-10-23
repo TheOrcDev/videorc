@@ -109,6 +109,44 @@ fn windows_d3d11_bubble_layer_geometry(
     )
 }
 
+/// A banner's draw rect (canvas pixels from `banners::banner_draw_rect`, the
+/// oracle the CPU and Metal paths draw at) as the layer's normalized
+/// transform (plan 186 S4). The prepared bitmap is the rect's exact size, so
+/// the layer needs no crop; a stale bitmap (a re-prepare in flight) is
+/// scaled into the rect like Metal does.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_banner_layer_transform(
+    draw_rect: (usize, usize, usize, usize),
+    output_size: (u32, u32),
+) -> crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform {
+    let (x, y, width, height) = draw_rect;
+    let output_width = output_size.0.max(1) as f32;
+    let output_height = output_size.1.max(1) as f32;
+    crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform {
+        x: x as f32 / output_width,
+        y: y as f32 / output_height,
+        width: width as f32 / output_width,
+        height: height as f32 / output_height,
+    }
+}
+
+/// Banner stacking on D3D11 (plan 186 D5): above the scene and the takeover
+/// (z 0 and the source order), below captions (z 10). Later banners draw on
+/// top; past the fourth they share z 9 and keep their input order (the scene
+/// planner sorts by z, then input order).
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_D3D11_BANNER_Z_INDEX_BASE: i32 = 6;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_D3D11_BANNER_Z_INDEX_TOP: i32 = 9;
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_banner_z_index(index: usize) -> i32 {
+    let index = i32::try_from(index).unwrap_or(i32::MAX);
+    WINDOWS_D3D11_BANNER_Z_INDEX_BASE
+        .saturating_add(index)
+        .min(WINDOWS_D3D11_BANNER_Z_INDEX_TOP)
+}
+
 /// The pump's Buddy clock (plan 168 S-C4): `output_sequence / fps`, the
 /// pump's own deterministic time, the first animation clock on this path.
 /// Both legs of a tick read the same value, so the animator steps once per
@@ -208,15 +246,15 @@ fn windows_scene_sources_live<'a>(
     })
 }
 
-/// Screen-camera composition keeps one more full-frame layer in flight and
-/// stretches NV12/BGRA lease residency past the screen-only envelope. Size the
-/// capture and primary render pools so transient fence lag cannot starve a CFR
-/// tick into a silent single-frame skip (5 slots stays inside the per-format
-/// pool ceiling of 8 even for split screen-camera sessions).
+/// Capture and primary render pool depth for every session shape. Size it so
+/// transient fence lag cannot starve a CFR tick into a silent single-frame
+/// skip. Screen-camera composition keeps one more full-frame layer in flight,
+/// but screen-only sessions need the same depth too: at 60 fps on an i5-8400
+/// with a GTX 1650 Super, three slots showed texture pool pressure and cadence
+/// loss, while five showed none (#280). Five stays inside the per-format pool
+/// ceiling of 8.
 #[cfg(any(target_os = "windows", test))]
-const fn windows_d3d11_render_pool_slots(camera_required: bool) -> usize {
-    if camera_required { 5 } else { 3 }
-}
+const WINDOWS_D3D11_RENDER_POOL_SLOTS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsD3d11MediaMode {
@@ -741,6 +779,17 @@ mod runtime {
     const BUDDY_SPRITE_Z_INDEX: i32 = 11;
     const BUDDY_Z_INDEX: i32 = 12;
     const HIGHLIGHT_Z_INDEX: i32 = 13;
+    /// Banners per leg (plan 186 S4): `banners::BANNER_MAX_SHOWN` plus room
+    /// for the ones still fading out. Ids 40.. are the primary leg's, 48.. the
+    /// auxiliary's; z 6 to 9 sits under the captions.
+    const BANNER_LAYERS_PER_LEG: usize = 8;
+    const BANNER_PRIMARY_SOURCE_ID_BASE: u64 = 40;
+    const BANNER_AUXILIARY_SOURCE_ID_BASE: u64 = 48;
+    const _: () = assert!(super::WINDOWS_D3D11_BANNER_Z_INDEX_TOP < CAPTION_Z_INDEX);
+    const _: () = assert!(
+        BANNER_PRIMARY_SOURCE_ID_BASE + BANNER_LAYERS_PER_LEG as u64
+            <= BANNER_AUXILIARY_SOURCE_ID_BASE
+    );
 
     /// Shared committed authority only; no recording/pump back-reference.
     pub(crate) struct WindowsLiveSources {
@@ -764,6 +813,9 @@ mod runtime {
         takeover: Option<crate::compositor::WindowsSceneImage>,
         takeover_active: bool,
         backgrounds: Vec<Option<crate::compositor::WindowsSceneImage>>,
+        /// The banner set (plan 186 S4), swapped as one `Arc` by the
+        /// compositor; each leg's draws are derived per tick.
+        banners: Arc<crate::banners::BannerSet>,
     }
     impl WindowsLiveSources {
         pub(crate) fn new(state: &crate::state::AppState, session_id: &str) -> Self {
@@ -845,6 +897,7 @@ mod runtime {
                 takeover,
                 takeover_active: compositor.windows_takeover_active(),
                 backgrounds,
+                banners: compositor.windows_banner_set(),
                 camera,
                 capture,
                 confirmed: confirmed.confirmed,
@@ -915,6 +968,23 @@ mod runtime {
         pub(crate) highlight_on_auxiliary: bool,
         pub(crate) buddy_on_primary: bool,
         pub(crate) buddy_on_auxiliary: bool,
+        /// The banners' leg plan shape (plan 186 S4): each banner's switches
+        /// pick its legs through `banners::banner_leg_carries`, live, so a
+        /// switch change mid-session moves it on the next tick.
+        pub(crate) banner_shape: crate::overlay_layout::OverlaySessionShape,
+        /// The shared prepare service: the bitmaps are prepared once per
+        /// (banner, canvas, rect, opacity) off this thread and shared here.
+        pub(crate) banner_prepare: crate::banner_prepare::BannerPrepareService,
+    }
+
+    /// One banner on one leg for one tick (plan 186 S4).
+    #[derive(Clone)]
+    struct WindowsD3d11BannerFrame {
+        source_id: u64,
+        draw: crate::compositor::BannerDraw,
+        output_targets: WindowsD3d11SceneOutputTargets,
+        output_dimensions: WindowsD3d11OutputDimensions,
+        z_index: i32,
     }
 
     #[derive(Clone)]
@@ -1356,13 +1426,13 @@ mod runtime {
             let pool = WindowsD3d11TexturePoolConfig::dimension_keyed(
                 WindowsD3d11BgraTextureDescriptor::new(plan.source_width, plan.source_height)
                     .map_err(|error| error.to_string())?,
-                super::windows_d3d11_render_pool_slots(plan.camera_required),
+                super::WINDOWS_D3D11_RENDER_POOL_SLOTS,
                 WindowsD3d11BgraTextureDescriptor::new(plan.primary.width, plan.primary.height)
                     .map_err(|error| error.to_string())?,
                 3,
                 WindowsD3d11Nv12TextureDescriptor::new(plan.primary.width, plan.primary.height)
                     .map_err(|error| error.to_string())?,
-                super::windows_d3d11_render_pool_slots(plan.camera_required),
+                super::WINDOWS_D3D11_RENDER_POOL_SLOTS,
                 plan.auxiliary
                     .map(|auxiliary| {
                         Ok((
@@ -1825,6 +1895,65 @@ mod runtime {
         Ok(frames)
     }
 
+    /// The banners each leg carries this tick (plan 186 S4), bottom to top:
+    /// the same `banner_draws_for_leg` the Metal and CPU paths draw (leg
+    /// plan, fade, prepared bitmap), with the leg's output targets as the
+    /// Buddy's pet has them. No draft: drafts only exist while idle.
+    fn current_banner_frames(
+        plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
+        set: &crate::banners::BannerSet,
+        now: Instant,
+    ) -> Result<Vec<WindowsD3d11BannerFrame>, String> {
+        if set.layers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let primary_targets = if plan.auxiliary.is_none() {
+            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
+        } else {
+            WindowsD3d11SceneOutputTargets::PRIMARY
+        };
+        let mut legs = vec![(
+            crate::banners::BannerLeg::Primary,
+            (plan.primary.width, plan.primary.height),
+            primary_targets,
+            BANNER_PRIMARY_SOURCE_ID_BASE,
+        )];
+        if let Some(video) = plan.auxiliary {
+            legs.push((
+                crate::banners::BannerLeg::Auxiliary,
+                (video.width, video.height),
+                WindowsD3d11SceneOutputTargets::AUXILIARY
+                    .union(WindowsD3d11SceneOutputTargets::PREVIEW),
+                BANNER_AUXILIARY_SOURCE_ID_BASE,
+            ));
+        }
+        let mut frames = Vec::new();
+        for (leg, canvas, output_targets, source_id_base) in legs {
+            let output_dimensions = WindowsD3d11OutputDimensions::new(canvas.0, canvas.1)
+                .map_err(|error| error.to_string())?;
+            let draws = crate::compositor::banner_draws_for_leg(
+                set,
+                Some(input.banner_shape),
+                leg,
+                canvas,
+                now,
+                None,
+                &input.banner_prepare,
+            );
+            for (index, draw) in draws.into_iter().take(BANNER_LAYERS_PER_LEG).enumerate() {
+                frames.push(WindowsD3d11BannerFrame {
+                    source_id: source_id_base + index as u64,
+                    draw,
+                    output_targets,
+                    output_dimensions,
+                    z_index: super::windows_d3d11_banner_z_index(index),
+                });
+            }
+        }
+        Ok(frames)
+    }
+
     fn current_overlay_frames(
         plan: &WindowsD3d11SessionPlan,
         input: &WindowsD3d11OverlayInput,
@@ -2272,6 +2401,25 @@ mod runtime {
                     break;
                 }
             };
+            // Plan 186 S4: the banners each leg carries, from the committed
+            // snapshot's set; fades read the wall clock like the compositor's.
+            let banner_frames = match committed.as_ref() {
+                Some(committed) => {
+                    match current_banner_frames(
+                        &plan,
+                        &overlays,
+                        &committed.banners,
+                        Instant::now(),
+                    ) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            finish_with_error(&snapshot, &mut startup_tx, error);
+                            break;
+                        }
+                    }
+                }
+                None => Vec::new(),
+            };
             let scene = match build_scene_plan(
                 &plan,
                 tick.output_sequence,
@@ -2282,6 +2430,7 @@ mod runtime {
                 camera.as_ref().map(|input| &input.layout),
                 &overlay_frames,
                 &sprite_frames,
+                &banner_frames,
                 committed.as_ref(),
                 if retained_capture_ticket.is_some() {
                     Some((plan.source_width, plan.source_height))
@@ -2396,9 +2545,10 @@ mod runtime {
             }
             // The pet's atlas uploads once per revision (immutable, keyed
             // by source id and revision); then the bubbles and cards.
-            let overlay_sources = sprite_frames
+            let overlay_sources = banner_frames
                 .iter()
-                .map(sprite_upload_source)
+                .map(banner_upload_source)
+                .chain(sprite_frames.iter().map(sprite_upload_source))
                 .chain(overlay_frames.iter().map(overlay_upload_source))
                 .collect::<Result<Vec<_>, _>>();
             match overlay_sources {
@@ -2620,6 +2770,30 @@ mod runtime {
         })
     }
 
+    /// A banner's prepared bitmap (plan 186 S4): immutable, keyed by the
+    /// prepare's revision, so it uploads once per prepare and never per tick.
+    fn banner_upload_source(
+        frame: &WindowsD3d11BannerFrame,
+    ) -> Result<WindowsD3d11CompositionSource, String> {
+        let bitmap = &frame.draw.bitmap;
+        let row_pitch = bitmap.width.checked_mul(4).ok_or_else(|| {
+            format!(
+                "D3D11 banner revision {} has an overflowing row pitch",
+                bitmap.revision
+            )
+        })?;
+        Ok(WindowsD3d11CompositionSource::BgraUpload {
+            source_id: frame.source_id,
+            pixels: Arc::clone(&bitmap.bgra),
+            dimensions: WindowsD3d11OutputDimensions::new(bitmap.width, bitmap.height)
+                .map_err(|error| error.to_string())?,
+            row_pitch,
+            pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
+            content_revision: bitmap.revision,
+            immutable: true,
+        })
+    }
+
     fn pace_render_tick(started_at: Instant, frame_interval: Duration) {
         if let Some(remaining) = frame_interval.checked_sub(started_at.elapsed()) {
             thread::sleep(remaining);
@@ -2708,6 +2882,7 @@ mod runtime {
         camera_layout: Option<&LayoutSettings>,
         overlays: &[WindowsD3d11OverlayFrame],
         sprites: &[WindowsD3d11SpriteFrame],
+        banners: &[WindowsD3d11BannerFrame],
         committed: Option<&WindowsLiveSnapshot>,
         capture_dimensions: Option<(u32, u32)>,
     ) -> Result<crate::windows_d3d11_compositor::WindowsD3d11ScenePlan, String> {
@@ -2949,6 +3124,35 @@ mod runtime {
                 sprite.z_index,
             )?);
         }
+        // Plan 186 S4: each banner at the shared oracle's pixels, opacity
+        // baked into its bitmap and the fade as the layer's opacity.
+        for banner in banners {
+            let output = (
+                banner.output_dimensions.width,
+                banner.output_dimensions.height,
+            );
+            let bitmap = &banner.draw.bitmap;
+            layers.push(WindowsD3d11SceneLayerInput {
+                source_id: banner.source_id,
+                source_kind: WindowsD3d11SceneSourceKind::Image,
+                source_dimensions: WindowsD3d11OutputDimensions::new(bitmap.width, bitmap.height)
+                    .map_err(|error| error.to_string())?,
+                transform: super::windows_d3d11_banner_layer_transform(
+                    banner.draw.draw_rect(output.0, output.1),
+                    output,
+                ),
+                crop: WindowsD3d11Crop::none(),
+                fit: WindowsD3d11SceneFit::Contain,
+                mirror_x: false,
+                mask: WindowsD3d11SceneMask::None,
+                effects: WindowsD3d11LayerEffects {
+                    opacity: banner.draw.opacity.clamp(0.0, 1.0),
+                    ..Default::default()
+                },
+                z_index: banner.z_index,
+                output_targets: banner.output_targets,
+            });
+        }
         for overlay in overlays {
             let (transform, crop) = match overlay.bubble_anchor {
                 Some(anchor) => super::windows_d3d11_bubble_layer_geometry(
@@ -3048,27 +3252,30 @@ mod runtime {
         });
         let mut layout = crate::protocol::default_layout_settings();
         layout.camera_fit = crate::protocol::CameraFit::Fill;
+        let confirmed = SourceSelection {
+            screen_id: None,
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
         let edit = crate::compositor::CompositorSourceEdit::test_from_scenes(
             scene.clone(),
             Some(scene),
             layout.clone(),
+            confirmed.clone(),
         );
         let mut current = WindowsLiveSnapshot {
             render_edit: edit.clone(),
             edit,
             camera: None,
             capture: None,
-            confirmed: SourceSelection {
-                screen_id: None,
-                window_id: None,
-                camera_id: None,
-                microphone_id: None,
-                test_pattern: false,
-            },
+            confirmed,
             source_revision: 1,
             takeover: None,
             takeover_active: false,
             backgrounds: vec![None, None],
+            banners: Arc::new(crate::banners::BannerSet::default()),
         };
         let primary = super::WindowsD3d11VideoPlan {
             width: 1280,
@@ -3096,6 +3303,7 @@ mod runtime {
                 4,
                 camera,
                 Some(&layout),
+                &[],
                 &[],
                 &[],
                 Some(current),
@@ -3212,6 +3420,12 @@ mod runtime {
             highlight_on_auxiliary: false,
             buddy_on_primary: true,
             buddy_on_auxiliary: true,
+            banner_shape: crate::overlay_layout::OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: true,
+                aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
+            },
+            banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
         };
         input
             .buddy_sprite
@@ -3304,6 +3518,12 @@ mod runtime {
             highlight_on_auxiliary: true,
             buddy_on_primary: true,
             buddy_on_auxiliary: true,
+            banner_shape: crate::overlay_layout::OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: true,
+                aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
+            },
+            banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
         };
         crate::captions::install_caption_overlays(
             &input.captions,
@@ -3409,6 +3629,7 @@ mod runtime {
             None,
             None,
             &frames,
+            &[],
             &[],
             None,
             Some((1920, 1080)),
@@ -3752,6 +3973,38 @@ pub(crate) use runtime::{
 mod tests {
     use super::*;
 
+    /// Plan 186 S4: a banner layer on D3D11 lands on the same pixels the CPU
+    /// and Metal paths draw (the shared `banner_draw_rect` oracle, pinned by
+    /// `protocol-fixtures/banner-geometry.json`), and banners stack above the
+    /// scene and the takeover and below captions.
+    #[test]
+    fn windows_banner_layers_sit_between_scene_and_captions() {
+        // The fixture's "wide default 1080p" case: a 2400 x 400 banner in the
+        // default wide place lands at (384, 845) as 1152 x 192.
+        let rect = crate::overlay_layout::OverlayRect::new(0.2, 0.782222, 0.6, 0.177778);
+        let draw_rect = crate::banners::banner_draw_rect(2400, 400, 1920, 1080, rect);
+        assert_eq!(draw_rect, (384, 845, 1152, 192));
+        let transform = windows_d3d11_banner_layer_transform(draw_rect, (1920, 1080));
+        assert_eq!(transform.x, 384.0 / 1920.0);
+        assert_eq!(transform.y, 845.0 / 1080.0);
+        assert_eq!(transform.width, 1152.0 / 1920.0);
+        assert_eq!(transform.height, 192.0 / 1080.0);
+        // Back to pixels the transform is exactly the draw rect.
+        assert_eq!((transform.x * 1920.0).round(), 384.0);
+        assert_eq!((transform.height * 1080.0).round(), 192.0);
+
+        // Stacking: z 6 to 9 in Assets order, above the takeover and the
+        // scene sources (z 0 and their order) and below captions (z 10).
+        let zs: Vec<i32> = (0..6).map(windows_d3d11_banner_z_index).collect();
+        assert_eq!(zs, vec![6, 7, 8, 9, 9, 9]);
+        assert!(zs.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0);
+        assert!(
+            WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
+            "captions draw at z 10"
+        );
+    }
+
     #[test]
     fn the_buddy_clock_is_the_output_sequence_over_the_fps() {
         assert_eq!(windows_d3d11_buddy_clock_seconds(0, 30), 0.0);
@@ -3924,9 +4177,9 @@ mod tests {
     }
 
     #[test]
-    fn windows_d3d11_screen_camera_sessions_size_deeper_render_pools() {
-        assert_eq!(windows_d3d11_render_pool_slots(false), 3);
-        assert_eq!(windows_d3d11_render_pool_slots(true), 5);
+    fn windows_d3d11_sessions_size_deep_render_pools() {
+        // Screen-only sessions get the same depth as screen-camera ones (#280).
+        assert_eq!(WINDOWS_D3D11_RENDER_POOL_SLOTS, 5);
     }
 
     #[test]

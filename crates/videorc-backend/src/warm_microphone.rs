@@ -396,6 +396,7 @@ fn standby_levels_event(stats: &AudioCaptureStats, gain_db: f32) -> AudioLevelsE
         session_id: None,
         microphone: Some(AudioLevelReading::from_window(peak * gain, rms * rms)),
         system_audio: None,
+        sounds: None,
         master: None,
         master_clipped_samples: 0,
     }

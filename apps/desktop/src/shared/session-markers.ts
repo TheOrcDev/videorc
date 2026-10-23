@@ -13,6 +13,12 @@ import {
   RuntimeSchemaError
 } from './runtime-schema'
 import { formatTimecode } from './timecode'
+import {
+  classifyBannerCommand,
+  type BannerRelayAction,
+  type BannerSummary
+} from './banner-commands'
+import { classifySoundCommand, type SoundRelayAction, type SoundSummary } from './sound-commands'
 
 export interface SessionMarker {
   id: string
@@ -236,10 +242,22 @@ export type ComposerCommand =
   | { kind: 'marker'; label?: string }
   /** Plan 181 R4: save the last seconds as a clip (the Clip button's action). */
   | { kind: 'clip' }
+  /** Plan 186: show or hide a banner; never posts to chat. */
+  | { kind: 'banner'; action: BannerRelayAction }
+  /** Plan 189: press a sound or stop them all; never posts to chat. */
+  | { kind: 'sound'; action: SoundRelayAction }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
-/** Leading slash commands never reach a provider. Double slash escapes once. */
-export function classifyComposerDraft(raw: string): ComposerCommand {
+/**
+ * Leading slash commands never reach a provider. Double slash escapes once.
+ * `banners` and `sounds` are what the window knows (plans 186, 189):
+ * `/banner <name>` and `/sound <name>` resolve against them.
+ */
+export function classifyComposerDraft(
+  raw: string,
+  banners: readonly BannerSummary[] = [],
+  sounds: readonly SoundSummary[] = []
+): ComposerCommand {
   const text = raw.trim()
   if (!text.startsWith('/')) return { kind: 'chat', text }
   if (text.startsWith('//')) return { kind: 'chat', text: text.slice(1) }
@@ -253,10 +271,14 @@ export function classifyComposerDraft(raw: string): ComposerCommand {
       return { kind: 'error', message: (error as Error).message }
     }
   }
+  const banner = /^\/banner(?:\s+([\s\S]*))?$/i.exec(text)
+  if (banner) return classifyBannerCommand(banner[1] ?? '', banners)
+  const sound = /^\/sound(?:\s+([\s\S]*))?$/i.exec(text)
+  if (sound) return classifySoundCommand(sound[1] ?? '', sounds)
   return {
     kind: 'error',
     message:
-      'Unknown command. Use /marker [title], /clip or /help. To send a literal slash, start with //.'
+      'Unknown command. Use /marker [title], /clip, /banner [name], /sound [name], or /help. To send a literal slash, start with //.'
   }
 }
 /** A marker's place in the recording as the one timecode: "2:05", "1:02:05" (plan 174 S1.4). */

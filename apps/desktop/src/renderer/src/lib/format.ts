@@ -28,6 +28,15 @@ export function dayLabel(timestamp: string): string {
 }
 
 /**
+ * The backend names an unnamed session after its start, "Session 2026-10-02
+ * 14:55" (`session_title` in recording.rs), in the time zone it was recorded
+ * in. A list that already shows when it ran should not repeat that clock.
+ */
+export function isAutoSessionTitle(title: string): boolean {
+  return /^Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(title.trim())
+}
+
+/**
  * A recording's length as the one timecode (plan 174 S1.4, E-20): "12:34",
  * "1:12:00", never "1 hour and 12 minutes". Unknown is the placeholder.
  */

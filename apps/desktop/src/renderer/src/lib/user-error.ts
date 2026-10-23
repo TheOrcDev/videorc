@@ -24,9 +24,20 @@ export class VideorcOfflineError extends Error {
   }
 }
 
-/** A renderer-written reason that already reads as copy; shown as is. */
+/**
+ * A reason that already reads as copy; shown as is. A refusal ("can't now",
+ * like a backend sentence the renderer recognized) passes `warning`: it is
+ * never an error (plan 174 S2.4).
+ */
 export class UserFacingError extends Error {
   readonly name = 'UserFacingError'
+
+  constructor(
+    message: string,
+    readonly tone: 'error' | 'warning' = 'error'
+  ) {
+    super(message)
+  }
 }
 
 /** The rejection for a call made while Videorc's engine is down. */
@@ -54,6 +65,8 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
     "Videorc didn't hear back in time. Check whether it worked before you try again.",
   'command-expired-before-dispatch': BUSY_REASON,
   'command-lane-full': BUSY_REASON,
+  'screen-import-busy':
+    'An image is already being imported. Wait for it to finish, then try again.',
   'command-not-applied': BUSY_REASON,
   'clean-cut-mutation-blocked':
     'Clean cut is still working on this recording. Try again when it finishes.',
@@ -65,6 +78,7 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
 const WARNING_CODES = new Set([
   'command-expired-before-dispatch',
   'command-lane-full',
+  'screen-import-busy',
   'command-not-applied',
   'clean-cut-mutation-blocked',
   'noise-cleanup-mutation-blocked'
@@ -131,7 +145,9 @@ export function userErrorMessage(error: unknown, context?: UserErrorContext): Us
   if (name === 'VideorcOfflineError' || OFFLINE_RAW.some((pattern) => pattern.test(raw))) {
     return shape('offline', OFFLINE_REASON, 'warning', true)
   }
-  if (name === 'UserFacingError' && raw) return shape('known', raw, 'error')
+  if (name === 'UserFacingError' && raw) {
+    return shape('known', raw, (error as UserFacingError).tone === 'warning' ? 'warning' : 'error')
+  }
   if (code && KNOWN_CODES[code]) {
     return shape('known', KNOWN_CODES[code], WARNING_CODES.has(code) ? 'warning' : 'error')
   }
@@ -162,6 +178,23 @@ export function toastUserError(
   const show = copy.tone === 'warning' ? toast.warning : toast.error
   show(copy.title, { ...options, description: copy.description })
   return copy
+}
+
+/**
+ * The same copy as a toast, for an inline FieldError or Alert: one line,
+ * raw text only in the console. A cancel still returns its sentence so a
+ * caller that already caught it can show it.
+ */
+export function inlineUserError(
+  error: unknown,
+  context?: UserErrorContext,
+  tag = 'user-error'
+): string {
+  const copy = userErrorMessage(error, context)
+  if (copy.kind !== 'canceled') {
+    console.warn(`[${tag}] ${copy.title}:`, copy.raw || error)
+  }
+  return copy.text
 }
 
 /** One toast id for "Videorc is reconnecting", so it never stacks. */

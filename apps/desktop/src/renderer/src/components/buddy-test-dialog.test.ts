@@ -268,6 +268,14 @@ describe('Test your Buddy (plan 169 D14)', () => {
     expect(byTestId('buddy-test-note').textContent).toBe('')
   })
 
+  it('keeps the stage its full height in a short window, so the dialog scrolls instead', async () => {
+    await render()
+    await openTest()
+    // The dialog is a flex column with a max height: a shrinkable stage was
+    // squeezed to ~295 px in a 631 px window, cutting off the head and the bubble.
+    expect(byTestId('buddy-test-stage').className.split(' ')).toContain('shrink-0')
+  })
+
   it('picks states with 1 to 4', async () => {
     await render()
     await openTest()
